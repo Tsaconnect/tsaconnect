@@ -192,8 +192,9 @@ type PaycrestOrderRecord struct {
 	DestinationAddress string `gorm:"size:128" json:"destinationAddress,omitempty"`
 	MarkupBps          int    `gorm:"default:0" json:"markupBps,omitempty"`
 	// QuotedAmount is T: what she is owed, in the SOURCE (settlement leg's)
-	// base units. Computed from Paycrest's own delivered amount, never from
-	// the venue's quote — see QuotedFromOrder.
+	// base units. Computed from Paycrest's own delivered amount less
+	// MarkupBps (the route's cost B′), never from the venue's quote — see
+	// services.ConversionOwed.
 	QuotedAmount string `gorm:"size:80" json:"quotedAmount,omitempty"`
 	// EstimatedAmount is what the route was expected to deliver, in the
 	// DESTINATION token's base units. An estimate shown to the user, never a

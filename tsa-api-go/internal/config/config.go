@@ -375,11 +375,6 @@ type Config struct {
 	// key with any other hot signer turns a single compromise into one that
 	// drains customer money. Asserted at boot (assertDistinctKey).
 	RampConversionBuyEnabled bool
-	// RampRoundTripBudgetBps is B: the part of the user-facing markup F
-	// (PAYCREST_SENDER_FEE_PERCENT) that pays a conversion's round trip —
-	// LiFi's cost plus the gas we pay. Converted orders send Paycrest F − B;
-	// a route costing more than B is not offered; the unspent rest is ours.
-	RampRoundTripBudgetBps int
 	// Ramp router (docs/specs/2026-10-02-ramp-router-design.md §5).
 	RampPriceToleranceBps  int
 	RampPriceGuard         string // "log" (default) | "enforce"
@@ -440,13 +435,14 @@ type Config struct {
 	// it wasn't told about.
 	RampConversionMinUSD        float64
 	RampConversionMinUSDByChain map[string]float64
-	// RampConvertedFeeMaxBps/RampConvertedFeeMaxBpsByChain cap the TOTAL fee
-	// a converted buy or swapped sell may charge. A route costing more than B
-	// raises its own budget, and the user's fee with it (our F − B is
-	// unchanged), up to the cap of the chain involved — a buy's destination,
-	// a sell's source; past it the route is not offered. ByChain holds every
-	// chain a buy can deliver to or a sell can start from. 0 means raising is
-	// off; a value outside 1..MaxConvertedFeeBps is loaded as 0.
+	// RampConvertedFeeMaxBps/RampConvertedFeeMaxBpsByChain cap the round trip
+	// a converted buy or swapped sell may pass on at cost (LiFi's cost plus
+	// the gas we pay; a buy adds 10 bps headroom) — on top of the company
+	// take, which is never in it — for the chain involved: a buy's
+	// destination, a sell's source; past it the route is not offered. ByChain
+	// holds every chain a buy can deliver to or a sell can start from. A TSA
+	// Pay payout keeps its own split under the same cap (TSAPayFeePercent). 0
+	// offers no route; a value outside 1..MaxConvertedFeeBps is loaded as 0.
 	RampConvertedFeeMaxBps        int
 	RampConvertedFeeMaxBpsByChain map[string]int
 	// RampConversionStallWindow/RampConversionLegCeiling/
@@ -483,8 +479,8 @@ type Config struct {
 	// that leaves it unset keeps behaving exactly as before.
 	RampConversionSellEnabled bool
 	// RampSellSponsoredGasUSD is the EIP-3009 relay on Base we pay to move
-	// her USDC into the offramp, in USD. It is part of g, the gas half of the
-	// round-trip budget B (design §3.2).
+	// her USDC into the offramp, in USD. It is part of g, the gas we pay,
+	// passed on at cost (design §3.2).
 	RampSellSponsoredGasUSD float64
 
 	// ── TSA Pay (merchant payments) ──
@@ -494,6 +490,14 @@ type Config struct {
 	TSAPayLiveEnabled      bool
 	TSAPayWebhookMasterKey string
 	TSAPayCheckoutBaseURL  string
+	// TSAPayFeePercent is F, TSA Pay's platform fee: what a payment is split
+	// by and the Paycrest sender fee on its direct payout (KeepSurplus may
+	// raise it). TSAPayRoundTripBudgetBps is B, the slice of F a converted
+	// payment's swap may spend — its payout is sent F − B and the unspent rest
+	// is our LiFi fee. Both are TSA Pay's own, carried over unchanged when the
+	// ramp moved to the company take (owner ruling 2026-10-07).
+	TSAPayFeePercent         string
+	TSAPayRoundTripBudgetBps int
 
 	// ITOperatorPrivateKey is the IT (Instant Transfer) operator EOA key (hex, no
 	// 0x) that signs creditPremium/debitPremium/settleDebit/reverseDebit. Dev
@@ -968,7 +972,6 @@ func Load() *Config {
 	cfg.MarketplaceEscrowGasPerOrder = uint64(max(getEnvInt64("MARKETPLACE_ESCROW_GAS_PER_ORDER", 400_000), 0))
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
-	cfg.RampRoundTripBudgetBps = int(getEnvInt64("RAMP_ROUND_TRIP_BUDGET_BPS", 50))
 	cfg.RampPriceToleranceBps = int(getEnvInt64("RAMP_PRICE_TOLERANCE_BPS", 50))
 	cfg.RampPriceGuard = strings.ToLower(strings.TrimSpace(getEnv("RAMP_PRICE_GUARD", "log")))
 	if g := cfg.RampPriceGuard; g != "" && g != "log" && g != "enforce" {
@@ -1128,6 +1131,13 @@ func Load() *Config {
 		checkoutBaseURL = "https://tsaconnectworld.com/pay"
 	}
 	cfg.TSAPayCheckoutBaseURL = checkoutBaseURL
+	// Defaults are production's values on 2026-10-07, so TSA Pay prices
+	// exactly as it did before the ramp moved to the company take.
+	cfg.TSAPayFeePercent = strings.TrimSpace(getEnv("TSA_PAY_FEE_PERCENT", ""))
+	if cfg.TSAPayFeePercent == "" {
+		cfg.TSAPayFeePercent = "1"
+	}
+	cfg.TSAPayRoundTripBudgetBps = int(getEnvInt64("TSA_PAY_ROUND_TRIP_BUDGET_BPS", 50))
 
 	// IT (Instant Transfer) operator EOA key (an on-chain `operators[]` member).
 	// Dev/staging only — prod MUST use KMS. UNSET keeps /api/it routes dormant.

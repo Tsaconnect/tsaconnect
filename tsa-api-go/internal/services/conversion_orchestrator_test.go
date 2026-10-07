@@ -295,10 +295,6 @@ func (r *conversionRig) newOrchestrator(legs rampLegStore) *ConversionOrchestrat
 		NewLiFiStatusClient(r.status.srv.URL, ""),
 		map[string]ERC20TransferVerifier{"base": r.transfers, "polygon": r.dstTransfers},
 		r.chains, 30*time.Minute, 0, 0, 0, func() time.Time { return r.clock })
-	// B, the round-trip budget the wiring pushes in from config. Set on every
-	// orchestrator the rig builds, not only r.svc, so a test that swaps the
-	// leg store still prices routes the way production does.
-	svc.SetRoundTripBudgetBps(50)
 	return svc
 }
 

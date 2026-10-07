@@ -42,12 +42,12 @@ func fundingChainRegistry() *BlockchainService {
 }
 
 // newDeliveryQuoter is the marketplace's own quoter: no Paycrest quote
-// service, no B of its own — exactly what buildMarketplaceFunding wires when
+// service, no offramp pricing — exactly what buildMarketplaceFunding wires when
 // Paycrest is off.
 func newDeliveryQuoter(t *testing.T, routes ...*LiFiRoute) (*RampSellQuoter, *fakeLiFiQuoter) {
 	t.Helper()
 	lifi := &fakeLiFiQuoter{routes: routes}
-	q := NewRampSellQuoter(signedBodyLiFi{lifi}, nil, fundingChainRegistry(), 0, "", 0)
+	q := NewRampSellQuoter(signedBodyLiFi{lifi}, nil, fundingChainRegistry(), "", 0)
 	q.SetRouterAllowlist(map[int64][]common.Address{56: {common.HexToAddress(sellTestDiamond)}})
 	return q, lifi
 }

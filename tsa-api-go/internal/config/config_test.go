@@ -467,14 +467,18 @@ func TestLoad_RampTreasuryRoutersOverride(t *testing.T) {
 	}
 }
 
-func TestLoad_RampRoundTripBudgetBps(t *testing.T) {
-	t.Setenv("RAMP_ROUND_TRIP_BUDGET_BPS", "")
-	if got := Load().RampRoundTripBudgetBps; got != 50 {
-		t.Fatalf("default budget = %d, want 50", got)
+// TSA Pay keeps the split it priced on before the ramp moved to the company
+// take: F = 1%, B = 50 bps unless set.
+func TestLoad_TSAPayFeeSplit(t *testing.T) {
+	t.Setenv("TSA_PAY_FEE_PERCENT", "")
+	t.Setenv("TSA_PAY_ROUND_TRIP_BUDGET_BPS", "")
+	if c := Load(); c.TSAPayFeePercent != "1" || c.TSAPayRoundTripBudgetBps != 50 {
+		t.Fatalf("defaults = %q / %d, want 1 / 50", c.TSAPayFeePercent, c.TSAPayRoundTripBudgetBps)
 	}
-	t.Setenv("RAMP_ROUND_TRIP_BUDGET_BPS", "35")
-	if got := Load().RampRoundTripBudgetBps; got != 35 {
-		t.Fatalf("budget = %d, want 35", got)
+	t.Setenv("TSA_PAY_FEE_PERCENT", " 0.75 ")
+	t.Setenv("TSA_PAY_ROUND_TRIP_BUDGET_BPS", "35")
+	if c := Load(); c.TSAPayFeePercent != "0.75" || c.TSAPayRoundTripBudgetBps != 35 {
+		t.Fatalf("set = %q / %d, want 0.75 / 35", c.TSAPayFeePercent, c.TSAPayRoundTripBudgetBps)
 	}
 }
 

@@ -19,12 +19,18 @@ import (
 // USDC on Base, in HER OWN wallet — nothing is ever held by us — and then
 // offramp that USDC at the Paycrest sell rate.
 //
-// The whole price is one number she never sees the parts of. F (the sender
-// fee) is what she pays all-in; B is the slice of F a round trip may spend.
-// Admission is l + g ≤ B, where l is LiFi's own cost and g is the gas we
-// sponsor. Whatever is left, B − l − g, is charged as our LiFi integrator fee
-// on the executable quote, so her all-in stays F however cheap the route was.
-// Nothing here moves funds, signs anything or writes a row: it is a price.
+// She pays the company take — the Paycrest sender fee, inside the rate she is
+// shown — plus the round trip at cost (owner ruling 2026-10-07): l, LiFi's own
+// cost, inside the route, and g, the gas we sponsor, recovered as our LiFi
+// integrator fee and nothing more. Admission is l + g ≤ the source chain's
+// RAMP_CONVERTED_FEE_MAX_BPS. The quote states the round trip as its
+// "Conversion (LiFi)" fee line.
+//
+// A TSA Pay payment's converted payout (SellQuoteInput.TSAPay) keeps its own
+// split instead (PayFeeSplit): its F is all-in, B is the slice of F a round
+// trip may spend, admission is l + g ≤ B, and B − l − g is charged as our LiFi
+// integrator fee. Nothing here moves funds, signs anything or writes a row: it
+// is a price.
 
 // rampSettlementChainID / rampSettlementToken are where a swapped sell lands
 // before the offramp: USDC on Base, the one leg Paycrest fills reliably and
@@ -34,9 +40,9 @@ const (
 	rampSettlementToken         = "USDC"
 )
 
-// ErrSellRouteTooCostly: the round trip costs more than B, so selling this
-// token would eat into the rate she was quoted. Refused rather than quoted at
-// a loss (design §3.2).
+// ErrSellRouteTooCostly: the round trip costs more than the sale may pass on
+// (its chain's cap, or a TSA Pay payment's B and cap). Refused rather than
+// quoted (design §3.2).
 var ErrSellRouteTooCostly = errors.New("this token costs too much to sell for naira right now")
 
 // ErrSellRouteUnpriced: LiFi gave the route no USD value, so its cost cannot
@@ -86,12 +92,16 @@ func (q *RampSellQuoter) RefuseSource(chainID int64, token string) error {
 type SellSwapQuote struct {
 	Route     *LiFiRoute      `json:"-"`
 	LiFiQuote json.RawMessage `json:"lifiQuote"`
-	// CostBps (l), GasBps (g) and FeeBps (B − l − g) are the budget split.
-	// They are shown to nobody, but they are what an operator reads when a
-	// sell prices differently from what a user reports.
+	// CostBps (l), GasBps (g) and FeeBps (our LiFi integrator fee: g at
+	// cost, or B − l − g on a TSA Pay payout) are the budget split. They are
+	// what an operator reads when a sell prices differently from what a user
+	// reports.
 	CostBps int `json:"costBps"`
 	GasBps  int `json:"gasBps"`
 	FeeBps  int `json:"feeBps"`
+	// PassThrough: FeeBps only recovers gas we pay for her — it is not ours.
+	// Every ramp sale and every delivery priced at cost carries it.
+	PassThrough bool `json:"-"`
 	// GasTopUp: this quote budgeted a source-chain gas top-up into GasBps,
 	// for THIS route. The app asks for a top-up exactly when this is set and
 	// never re-derives the threshold itself — the server's answer is the one
@@ -105,7 +115,13 @@ type SellSwapQuote struct {
 	// USDCAmount is what lands on Base after our fee, in major units.
 	USDCAmount   string `json:"usdcAmount"`
 	FiatEstimate string `json:"fiatEstimate"`
-	Rate         string `json:"rate"`
+	// Rate is the Paycrest sell rate with only the company take in it.
+	Rate string `json:"rate"`
+	// EffectiveRate is FiatEstimate ÷ the USDC the route would have landed at
+	// no cost, and Fees the round trip at cost as "Conversion (LiFi)" (spec
+	// §14) — on a ramp sale only.
+	EffectiveRate string     `json:"effectiveRate,omitempty"`
+	Fees          []VenueFee `json:"fees,omitempty"`
 }
 
 // SellQuoteInput names the sell. FromAddress is her address on the SOURCE
@@ -124,10 +140,10 @@ type SellQuoteInput struct {
 	// ToChainID, ToToken, ToAddress and BudgetBps re-aim the sale at a
 	// DELIVERY instead of an offramp: TSA Pay's crypto route, where the token
 	// must reach a merchant's wallet. Zero values keep the sale's own — Base,
-	// USDC, WalletAddress and the quoter's B. A target that is not Base USDC in
-	// her own wallet has no Paycrest leg: no naira estimate, no Base relay in g,
-	// and BudgetBps (the whole fee, not a slice of it) is what l + g is
-	// admitted against.
+	// USDC and WalletAddress. A target that is not Base USDC in her own wallet
+	// has no Paycrest leg: no naira estimate, no Base relay in g, and BudgetBps
+	// (the whole fee) is what l + g is admitted against. A ramp sale's offramp
+	// is given no BudgetBps: its budget is the quoter's own.
 	ToChainID int64
 	ToToken   string
 	ToAddress string
@@ -146,6 +162,10 @@ type SellQuoteInput struct {
 	// need — priced by the caller, who knows how much the wallet lacks. It is
 	// part of g, so it counts against the budget like any gas we sponsor.
 	DestGasUSD float64
+	// TSAPay prices an offramp as a TSA Pay payment's converted payout, on
+	// the payment's own split (PayFeeSplit) rather than the ramp's take. A
+	// delivery ignores it.
+	TSAPay bool
 }
 
 // deliveryTarget is where a quoted route must deliver, and what it may spend.
@@ -157,6 +177,11 @@ type deliveryTarget struct {
 	// offramp: the route lands USDC on Base in HER wallet for the Paycrest
 	// leg. Only then is there a Base relay to sponsor and a naira figure to show.
 	offramp bool
+	// senderFee is the Paycrest sender fee an offramp's naira is priced at:
+	// the take, or a TSA Pay payout's F − B. atCost marks a ramp sale, whose
+	// round trip is passed on at cost under budgetBps, its chain's cap.
+	senderFee string
+	atCost    bool
 }
 
 // targetFor resolves in's delivery target, defaulting each zero field to the
@@ -172,9 +197,6 @@ func (q *RampSellQuoter) targetFor(in SellQuoteInput, usdc string) deliveryTarge
 	}
 	if t.address == "" {
 		t.address = in.WalletAddress
-	}
-	if t.budgetBps == 0 {
-		t.budgetBps = q.budgetBps
 	}
 	// A delivery is never an offramp, even one that happens to name Base USDC in
 	// the payer's own wallet (a merchant paying themselves): it must get no Base
@@ -216,12 +238,13 @@ type RampSellQuoter struct {
 	lifi   lifiQuoter
 	quotes *PaycrestQuoteService
 	chains *BlockchainService
-	// budgetBps is B.
-	budgetBps int
-	// converted is the Paycrest sender fee a converted order is sent at
-	// (F − B), as a percent string — the same value PaycrestOrderService
-	// sends, so the estimate and the order cannot drift.
-	converted string
+	// take is the company take as the sender fee a ramp sale's offramp is
+	// sent at — PaycrestOrderService.TakePercent, so the estimate and the
+	// order cannot drift.
+	take string
+	// pay is TSA Pay's own split, for a payment's converted payout — the one
+	// PaycrestOrderService opens that payout at (SetPayFeeSplit).
+	pay PayFeeSplit
 	// sponsoredGasUSD is the EIP-3009 relay we pay on Base to move her USDC
 	// into the offramp.
 	sponsoredGasUSD float64
@@ -232,12 +255,15 @@ type RampSellQuoter struct {
 	routers map[int64][]common.Address
 }
 
-func NewRampSellQuoter(lifi lifiQuoter, quotes *PaycrestQuoteService, chains *BlockchainService, budgetBps int, convertedFeePercent string, sponsoredGasUSD float64) *RampSellQuoter {
+func NewRampSellQuoter(lifi lifiQuoter, quotes *PaycrestQuoteService, chains *BlockchainService, takePercent string, sponsoredGasUSD float64) *RampSellQuoter {
 	return &RampSellQuoter{
 		lifi: lifi, quotes: quotes, chains: chains,
-		budgetBps: budgetBps, converted: convertedFeePercent, sponsoredGasUSD: sponsoredGasUSD,
+		take: takePercent, sponsoredGasUSD: sponsoredGasUSD,
 	}
 }
+
+// SetPayFeeSplit wires TSA Pay's split, for SellQuoteInput.TSAPay offramps.
+func (q *RampSellQuoter) SetPayFeeSplit(p PayFeeSplit) { q.pay = p }
 
 // SetNativeBalanceReader wires the source-chain gas check. Unset, no top-up
 // is ever priced in — the shape a chain with no sponsor lane should have,
@@ -253,8 +279,8 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	if q == nil || q.lifi == nil || q.chains == nil || in.BudgetBps < 0 || in.DestGasUSD < 0 || math.IsNaN(in.DestGasUSD) {
 		return nil, ErrSellUnavailable
 	}
-	// Pass-through is a delivery's pricing only: an offramp's fee is F - B by
-	// design and has no at-cost form.
+	// Pass-through as an input is a delivery's: an offramp's pricing is the
+	// quoter's own (at cost for a ramp sale, the split for a TSA Pay payout).
 	if in.PassThrough && (!in.Delivery || in.BudgetBps <= 0) {
 		return nil, ErrSellUnavailable
 	}
@@ -280,10 +306,14 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 	// not one on that chain (or on a chain nothing can decode a receiver for)
 	// never reaches LiFi.
 	target := q.targetFor(in, usdc)
-	// Only an offramp needs Paycrest's quote service and the quoter's own B; a
-	// delivery names its token and is given its whole budget by the caller, so a
-	// quoter wired without Paycrest (the marketplace's) still prices one.
-	if target.token == "" || target.budgetBps <= 0 || (target.offramp && (q.quotes == nil || q.budgetBps <= 0)) {
+	// Only an offramp needs Paycrest's quote service and a budget of the
+	// quoter's own; a delivery names its token and is given its whole budget by
+	// the caller, so a quoter wired without Paycrest (the marketplace's) still
+	// prices one.
+	if target.offramp && !q.priceOfframp(in, &target) {
+		return nil, ErrSellUnavailable
+	}
+	if target.token == "" || target.budgetBps <= 0 {
 		return nil, ErrSellUnavailable
 	}
 	if err := validateAddressForChain(target.chainID, target.address, nil); err != nil {
@@ -319,15 +349,15 @@ func (q *RampSellQuoter) Quote(ctx context.Context, in SellQuoteInput) (*SellSwa
 		return nil, ErrSellRouteUnpriced
 	}
 	gas := q.gasFor(ctx, in, first, target.offramp)
-	if in.PassThrough {
+	if in.PassThrough || target.atCost {
 		return q.passThrough(ctx, req, in, usdc, target, first, l, gas)
 	}
 
 	route := first
 	fee := target.budgetBps - l - gas.bps
-	// raisedLimit > 0 marks a sale dearer than B that is still offered at a
-	// higher fee: the most LiFi's route (her swap cost plus our fee) may take
-	// on top of Paycrest's F − B share.
+	// raisedLimit > 0 marks a TSA Pay payout dearer than B that is still
+	// offered at a higher fee: the most LiFi's route (her swap cost plus our
+	// fee) may take on top of Paycrest's F − B share.
 	raisedLimit := 0
 	if fee < 0 {
 		limit, ok := q.raisedCostLimit(in, target)
@@ -402,14 +432,66 @@ func (q *RampSellQuoter) finish(ctx context.Context, route *LiFiRoute, in SellQu
 		return out, nil
 	}
 	out.USDCAmount = BaseUnitsToDecimal(route.ToAmount, 6)
-	if err := q.priceInFiat(ctx, in.FiatCode, route.ToAmount, out); err != nil {
+	if err := q.priceInFiat(ctx, in.FiatCode, target.senderFee, route.ToAmount, out); err != nil {
 		return nil, err
+	}
+	if target.atCost {
+		sellFeeLines(out, route.ToAmount)
 	}
 	return out, nil
 }
 
-// passThrough prices a delivery at cost (in.PassThrough). first is the fee-free
-// route and l, gas its cost and gas. She pays LiFi's cost plus the gas we pay
+// priceOfframp gives an offramp its budget and sender fee, or false when it
+// cannot be priced: a ramp sale passes its round trip on at cost under the
+// source chain's cap and is sent at the take (a budget the caller names is
+// refused); a TSA Pay payout keeps its split.
+func (q *RampSellQuoter) priceOfframp(in SellQuoteInput, t *deliveryTarget) bool {
+	if q.quotes == nil {
+		return false
+	}
+	if in.TSAPay {
+		// As before the ruling: a budget the caller names is used as given
+		// and never raised (raisedCostLimit); otherwise the split's B.
+		if t.budgetBps == 0 {
+			t.budgetBps = q.pay.BudgetBps
+		}
+		t.senderFee = q.pay.SenderFee(true)
+		return t.senderFee != ""
+	}
+	if _, ok := parseSenderFeePercent(q.take); !ok || in.BudgetBps != 0 {
+		return false
+	}
+	chainKey, _ := q.chains.ChainNameForID(in.FromChainID)
+	t.senderFee, t.budgetBps, t.atCost = q.take, q.quotes.convertedFeeMaxBps(chainKey), true
+	return true
+}
+
+// sellFeeLines states a ramp sale's round trip at cost (spec §14): what LiFi
+// took and the gas we recover — CostBps + FeeBps of what would have landed at
+// no cost — as one "Conversion (LiFi)" line in USDC at the display rate, and
+// the all-in rate on that no-cost amount (rounded down: never flattering).
+// Gross − the line = what lands, exactly.
+func sellFeeLines(out *SellSwapQuote, landed *big.Int) {
+	total := out.CostBps + out.FeeBps
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(out.Rate))
+	fiat, okF := new(big.Rat).SetString(strings.TrimSpace(out.FiatEstimate))
+	if total <= 0 || total >= 10_000 || landed == nil || landed.Sign() <= 0 || !ok || !okF {
+		return
+	}
+	gross := new(big.Int).Mul(landed, big.NewInt(10_000))
+	gross.Quo(gross, big.NewInt(int64(10_000-total)))
+	cost := new(big.Int).Sub(gross, landed)
+	if cost.Sign() <= 0 {
+		return
+	}
+	out.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionLiFiLabel, FeeProviderLiFi, cost, 6, rate)}
+	eff := new(big.Rat).Quo(fiat, usdcRat(gross))
+	kobo := new(big.Int).Quo(new(big.Int).Mul(eff.Num(), big.NewInt(100)), eff.Denom())
+	out.EffectiveRate = FormatMinor(kobo.String())
+}
+
+// passThrough prices at cost — a delivery given in.PassThrough, and every ramp
+// sale's offramp. first is the fee-free route and l, gas its cost and gas. She pays LiFi's cost plus the gas we pay
 // for her, and nothing else: the integrator fee is exactly g — recovering gas,
 // never a margin — and absent when g is 0. Admission is l + g <= the budget;
 // the unspent rest of the budget is simply not charged.
@@ -423,7 +505,7 @@ func (q *RampSellQuoter) passThrough(ctx context.Context, req LiFiQuoteRequest, 
 		return nil, ErrSellRouteTooCostly
 	}
 	if gas.bps == 0 {
-		return q.finish(ctx, first, in, usdc, target, l, gas, 0)
+		return passedThrough(q.finish(ctx, first, in, usdc, target, l, gas, 0))
 	}
 	fee := gas.bps
 	req.FeeBps = fee
@@ -450,10 +532,18 @@ func (q *RampSellQuoter) passThrough(ctx context.Context, req LiFiQuoteRequest, 
 		log.Printf("[ramp-sell] pass-through gas under-recovered by %d bps chain=%d tool=%s", gas2.bps-fee, in.FromChainID, route.Tool)
 	}
 	// CostBps reports LiFi's own cost, without the gas recovery inside l2.
-	return q.finish(ctx, route, in, usdc, target, max(l2-fee, 0), gas2, fee)
+	return passedThrough(q.finish(ctx, route, in, usdc, target, max(l2-fee, 0), gas2, fee))
 }
 
-// raisedCostLimit is, for an ordinary sale dearer than B, the most LiFi's
+// passedThrough marks a pass-through quote: its fee recovers gas, not ours.
+func passedThrough(out *SellSwapQuote, err error) (*SellSwapQuote, error) {
+	if out != nil {
+		out.PassThrough = true
+	}
+	return out, err
+}
+
+// raisedCostLimit is, for a TSA Pay payout dearer than B, the most LiFi's
 // route may take — her swap cost plus our fee — so that with Paycrest's F − B
 // her all-in fee fits the source chain's cap. ok is false when the sale may
 // not be raised: a delivery was given its whole fee by the caller.
@@ -461,7 +551,7 @@ func (q *RampSellQuoter) raisedCostLimit(in SellQuoteInput, target deliveryTarge
 	if !target.offramp || in.BudgetBps != 0 {
 		return 0, false
 	}
-	paycrestBps, ok := feePercentToBps(q.converted)
+	paycrestBps, ok := feePercentToBps(target.senderFee)
 	if !ok {
 		return 0, false
 	}
@@ -680,10 +770,10 @@ func (q *RampSellQuoter) needsTopUp(ctx context.Context, in SellQuoteInput, rout
 	return have.Cmp(need) < 0
 }
 
-// priceInFiat turns the landed USDC into naira at the rate the offramp will
-// actually be opened at (F − B), binding to a live provider quote rather than
-// the cached book.
-func (q *RampSellQuoter) priceInFiat(ctx context.Context, fiat string, usdc *big.Int, out *SellSwapQuote) error {
+// priceInFiat turns the landed USDC into naira at the sender fee the offramp
+// will actually be opened at (the take, or a TSA Pay payout's F − B), binding
+// to a live provider quote rather than the cached book.
+func (q *RampSellQuoter) priceInFiat(ctx context.Context, fiat, senderFee string, usdc *big.Int, out *SellSwapQuote) error {
 	if strings.TrimSpace(fiat) == "" {
 		fiat = "NGN"
 	}
@@ -695,7 +785,7 @@ func (q *RampSellQuoter) priceInFiat(ctx context.Context, fiat string, usdc *big
 	// right one. The mid rate is only used to land in the right tier; the
 	// rate that binds is whatever comes back.
 	guess := new(big.Rat).Mul(usdcRat(usdc), new(big.Rat).SetFloat64(market))
-	pct, ok := parseSenderFeePercent(q.converted)
+	pct, ok := parseSenderFeePercent(senderFee)
 	if !ok {
 		return ErrSellUnavailable
 	}

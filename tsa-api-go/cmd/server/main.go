@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1681,23 +1680,22 @@ func main() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes = services.NewPaycrestQuoteService(paycrestClient, nil, nil)
 		treasuryRates = wireTreasuryMarketRate(itService, paycrestQuotes, cfg.RampTreasuryRateTolBps)
-		// Also sets the fee on paycrestQuotes, so quotes price in what orders send.
+		// Owner ruling 2026-10-07: every Paycrest ramp order is sent the
+		// company take as its sender fee — our only margin there — and third-
+		// party costs pass on at cost. Also sets the fee on paycrestQuotes, so
+		// quotes price in what orders send.
 		paycrestOrders := services.NewPaycrestOrderService(
 			config.DB, paycrestClient, paycrestQuotes, paycrestDir,
-			os.Getenv("PAYCREST_SENDER_FEE_PERCENT"), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
+			services.SenderFeePercentFromBps(cfg.RampCompanyTakeBps), os.Getenv("PAYCREST_SENDER_FEE_ADDRESS"))
 		if paycrestOrders != nil {
-			paycrestOrders.SetRoundTripBudgetBps(cfg.RampRoundTripBudgetBps)
-			// The cap on a dear route's raised fee — shared by converted buys
-			// and swapped sells, which both price through paycrestQuotes.
+			// TSA Pay's payouts keep their own split, unchanged.
+			paycrestOrders.SetPayFeeSplit(services.PayFeeSplit{FeePercent: cfg.TSAPayFeePercent, BudgetBps: cfg.TSAPayRoundTripBudgetBps})
+			// The cap on what a converted buy or swapped sell may pass on —
+			// both price through paycrestQuotes.
 			paycrestQuotes.SetConvertedFeeCaps(cfg.RampConvertedFeeMaxBpsByChain, cfg.RampConvertedFeeMaxBps)
-			if pct, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("PAYCREST_SENDER_FEE_PERCENT")), 64); err == nil &&
-				cfg.RampConvertedFeeMaxBps > 0 && float64(cfg.RampConvertedFeeMaxBps) < pct*100 {
-				log.Printf("[paycrest] RAMP_CONVERTED_FEE_MAX_BPS=%d is below the %s%% sender fee: no dear route will ever be offered",
-					cfg.RampConvertedFeeMaxBps, os.Getenv("PAYCREST_SENDER_FEE_PERCENT"))
-			}
 			if !paycrestOrders.ConversionPriced() {
-				log.Printf("[paycrest] conversion unpriced: RAMP_ROUND_TRIP_BUDGET_BPS=%d must be > 0 and below PAYCREST_SENDER_FEE_PERCENT (in bps); converted buys and swapped sells stay off",
-					cfg.RampRoundTripBudgetBps)
+				log.Printf("[paycrest] conversion unpriced: RAMP_COMPANY_TAKE_BPS=%d is not a usable sender fee (1..500); converted buys and swapped sells stay off",
+					cfg.RampCompanyTakeBps)
 			}
 			// Server-side kill switch: an operator can now stop the rail for a
 			// currency by flipping its ramp_provider column, not just change

@@ -93,7 +93,7 @@ type CreateSellIntentInput struct {
 	// ConfirmDelivery proves on-chain; ToAmount is that owed amount padded for
 	// slippage, so the route's own minimum still covers it. BudgetBps is the
 	// whole fee the round trip may spend (there is no Paycrest leg to share it
-	// with); zero keeps the quoter's own B.
+	// with); an offramp leaves it zero and is priced by the quoter.
 	DestChainID                               int64
 	DestTokenAddress, DestAddress, DestAmount string
 	BudgetBps                                 int
@@ -280,6 +280,9 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 		ToChainID: in.DestChainID, ToToken: strings.TrimSpace(in.DestTokenAddress),
 		ToAddress: strings.TrimSpace(in.DestAddress), BudgetBps: in.BudgetBps, Delivery: delivery,
 		PassThrough: in.PassThrough, DestGasUSD: in.DestGasUSD,
+		// A TSA Pay payment's payout keeps the payment's own split; every
+		// other sale is a ramp sale, priced at the take plus cost.
+		TSAPay: in.PayPaymentID != nil,
 	}
 	sourceAmount := strings.TrimSpace(in.SourceAmount)
 	exactOutput := asked != nil
@@ -319,7 +322,7 @@ func (s *SellIntentService) Create(ctx context.Context, user *models.User, in Cr
 	}
 
 	feeBps, gasRecoveryBps := q.FeeBps, 0
-	if in.PassThrough {
+	if in.PassThrough || q.PassThrough {
 		// At cost: what the route carries recovers gas we pay, and is not ours.
 		feeBps, gasRecoveryBps = 0, q.FeeBps
 	}
@@ -603,7 +606,7 @@ func (s *SellIntentService) OpenOrder(ctx context.Context, user *models.User, id
 		sellReq.FiatAmount = in.PayoutFiat
 		order, err = s.orders.CreateSellForFiat(ctx, sellReq, true, payCap)
 	} else {
-		order, err = s.orders.CreateSellForToken(ctx, sellReq, BaseUnitsToDecimal(landed, 6), true)
+		order, err = s.orders.CreateSellForToken(ctx, sellReq, BaseUnitsToDecimal(landed, 6))
 	}
 	if err != nil {
 		if errors.Is(err, ErrSellAttemptMayExist) || s.payOrderIsOpen(ctx, in, err) {

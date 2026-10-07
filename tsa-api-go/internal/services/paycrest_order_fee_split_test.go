@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-
-	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 func TestFeePercentBpsRoundTrip(t *testing.T) {
@@ -23,54 +21,50 @@ func TestFeePercentBpsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSenderFeeFor(t *testing.T) {
-	s := &PaycrestOrderService{senderFeePercent: "1", roundTripBudgetBps: 50}
-	if got := s.senderFeeFor(false); got != "1" {
+// The take is the one sender fee a ramp order sends; conversion is priced
+// whenever it is usable.
+func TestConversionPriced_FollowsTheTake(t *testing.T) {
+	if got := SenderFeePercentFromBps(50); got != "0.5" {
+		t.Fatalf("50 bps = %q, want 0.5", got)
+	}
+	if got := SenderFeePercentFromBps(0); got != "" {
+		t.Fatalf("0 bps = %q, want no take", got)
+	}
+	s := &PaycrestOrderService{senderFeePercent: "0.5"}
+	if !s.ConversionPriced() || s.TakePercent() != "0.5" {
+		t.Fatal("a usable take must price conversion")
+	}
+	s.senderFeePercent = ""
+	if s.ConversionPriced() {
+		t.Fatal("no take: Paycrest would charge its dashboard default, so conversion stays off")
+	}
+}
+
+// TSA Pay's split is the pre-ruling F / F − B, untouched by the take.
+func TestPayFeeSplit_SenderFee(t *testing.T) {
+	p := PayFeeSplit{FeePercent: "1", BudgetBps: 50}
+	if got := p.SenderFee(false); got != "1" {
 		t.Fatalf("direct = %q, want 1", got)
 	}
-	if got := s.senderFeeFor(true); got != "0.5" {
+	if got := p.SenderFee(true); got != "0.5" {
 		t.Fatalf("converted = %q, want 0.5", got)
 	}
-	if !s.ConversionPriced() {
-		t.Fatal("0 < B < F must price conversion")
+	p.BudgetBps = 100
+	if got := p.SenderFee(true); got != "" {
+		t.Fatalf("F <= B: fee %q; nothing may be left for Paycrest", got)
 	}
-	s.roundTripBudgetBps = 100
-	if got := s.senderFeeFor(true); got != "" || s.ConversionPriced() {
-		t.Fatalf("F <= B: fee %q priced %v; nothing may be left for Paycrest", got, s.ConversionPriced())
+	p.BudgetBps = 0
+	if got := p.SenderFee(true); got != "" {
+		t.Fatalf("B = 0: fee %q; no budget for the round trip", got)
 	}
-	s.roundTripBudgetBps = 0
-	if s.ConversionPriced() {
-		t.Fatal("B = 0 leaves no budget for the round trip")
-	}
-}
-
-func TestCreateBuy_SenderFeeIsFMinusBOnConvertedOrders(t *testing.T) {
-	r := newOrderServiceWithFakes(t)
-	r.svc.senderFeePercent = "1"
-	r.svc.SetRoundTripBudgetBps(50)
-	r.svc.SetConversionEnabled(true)
-	r.svc.SetTreasury("0xTreasury")
-	user := seedVerifiedUser(t, r.db)
-
-	row, err := r.svc.CreateBuy(context.Background(), r.buyRequest(user, "base", "USDC", "optimism", "USDT"))
-	if err != nil {
-		t.Fatalf("CreateBuy: %v", err)
-	}
-	if r.client.lastCreate.SenderFeePercent != "0.5" {
-		t.Fatalf("sender fee sent = %q, want 0.5", r.client.lastCreate.SenderFeePercent)
-	}
-	if row.SenderFeePercent != "0.5" {
-		t.Fatalf("row fee = %q, want the order's own 0.5 (not the global F)", row.SenderFeePercent)
-	}
-	if row.RouteKind != models.RouteKindConverted {
-		t.Fatalf("routeKind = %s", row.RouteKind)
+	if got := (PayFeeSplit{FeePercent: " 0.50 "}).SenderFee(false); got != "0.5" {
+		t.Fatalf("direct = %q, want the canonical 0.5", got)
 	}
 }
 
-func TestCreateBuy_RefusesConversionWhenBudgetEatsTheWholeFee(t *testing.T) {
+func TestCreateBuy_RefusesConversionWithoutAUsableTake(t *testing.T) {
 	r := newOrderServiceWithFakes(t)
-	r.svc.senderFeePercent = "0.5"
-	r.svc.SetRoundTripBudgetBps(50)
+	r.svc.senderFeePercent = ""
 	r.svc.SetConversionEnabled(true)
 	r.svc.SetTreasury("0xTreasury")
 	user := seedVerifiedUser(t, r.db)
@@ -81,7 +75,7 @@ func TestCreateBuy_RefusesConversionWhenBudgetEatsTheWholeFee(t *testing.T) {
 }
 
 func TestChargedFeePercent_ComparesAgainstTheOrdersOwnFee(t *testing.T) {
-	s := &PaycrestOrderService{senderFeePercent: "1"}
+	s := &PaycrestOrderService{senderFeePercent: "0.5"}
 	if got := s.chargedFeePercent(&PaycrestOrder{SenderFeePercent: "0.5"}, "ref", "0.5"); got != "0.5" {
 		t.Fatalf("charged = %q, want 0.5", got)
 	}

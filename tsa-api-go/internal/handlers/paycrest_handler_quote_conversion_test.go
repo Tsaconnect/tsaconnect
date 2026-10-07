@@ -130,7 +130,6 @@ func newConvertibleQuoteService(t *testing.T) (*services.PaycrestQuoteService, *
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testConversionChainRegistry())
 	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "optimism": true}})
-	svc.SetRoundTripBudgetBps(50)
 	return svc, lifi
 }
 

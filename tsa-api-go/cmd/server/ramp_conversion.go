@@ -35,7 +35,7 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		return nil, nil
 	}
 	if orders != nil && !orders.ConversionPriced() {
-		log.Printf("[ramp-conversion] dormant: conversion is not priced (need 0 < B < F)")
+		log.Printf("[ramp-conversion] dormant: conversion is not priced (RAMP_COMPANY_TAKE_BPS is not a usable sender fee)")
 		return nil, nil
 	}
 	if cfg.RampTreasuryPrivateKey == "" {
@@ -128,11 +128,6 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		cfg.RampConversionMaxShortfallUSD, nil,
 	)
 	wireSolanaDestinations(reg, orchestrator, quotes)
-
-	// The same B the quote and order services are priced on (pushed there by
-	// SetRoundTripBudgetBps in main.go): a route is executed against exactly
-	// the budget the order was quoted on, never a second copy of the number.
-	orchestrator.SetRoundTripBudgetBps(cfg.RampRoundTripBudgetBps)
 
 	if quotes != nil {
 		quotes.SetLiFiQuoter(lifiQuoteClient)
@@ -383,15 +378,15 @@ func wireSolanaDestinations(reg *chainreg.Registry, orch *services.ConversionOrc
 // returns nil — dormant, route never registered — with a line saying why.
 //
 // It needs no treasury: a swapped sell runs entirely in the user's own
-// wallet, and the only money we spend is gas. What it does need is the same
-// budget B the buy is priced from, so an unpriced conversion leaves it off.
+// wallet, and the only money we spend is gas. What it does need is the take
+// the orders are sent at, so an unpriced conversion leaves it off.
 func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService, orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService) *services.RampSellQuoter {
 	if !cfg.RampConversionSellEnabled {
 		log.Printf("[ramp-sell] dormant: RAMP_CONVERSION_SELL is off")
 		return nil
 	}
 	if orders == nil || !orders.ConversionPriced() {
-		log.Printf("[ramp-sell] dormant: conversion is not priced (need 0 < B < F)")
+		log.Printf("[ramp-sell] dormant: conversion is not priced (RAMP_COMPANY_TAKE_BPS is not a usable sender fee)")
 		return nil
 	}
 	if chains == nil || quotes == nil {
@@ -400,10 +395,14 @@ func buildRampSellQuoter(cfg *config.Config, chains *services.BlockchainService,
 	}
 	q := services.NewRampSellQuoter(
 		services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID),
-		quotes, chains, cfg.RampRoundTripBudgetBps, orders.ConvertedFeePercent(), cfg.RampSellSponsoredGasUSD)
+		quotes, chains, orders.TakePercent(), cfg.RampSellSponsoredGasUSD)
+	// TSA Pay's converted payouts price on its own split, the one the orders
+	// service opens them at.
+	pay := services.PayFeeSplit{FeePercent: cfg.TSAPayFeePercent, BudgetBps: cfg.TSAPayRoundTripBudgetBps}
+	q.SetPayFeeSplit(pay)
 	configureRampQuoter(q, cfg, chains)
-	log.Printf("[ramp-sell] swapped sells enabled (B=%d bps, sponsored relay $%.4f, offramp fee %s%%)",
-		cfg.RampRoundTripBudgetBps, cfg.RampSellSponsoredGasUSD, orders.ConvertedFeePercent())
+	log.Printf("[ramp-sell] swapped sells enabled (take %s%% + round trip at cost, sponsored relay $%.4f; TSA Pay payouts F=%s%% B=%d bps)",
+		orders.TakePercent(), cfg.RampSellSponsoredGasUSD, pay.FeePercent, pay.BudgetBps)
 	return q
 }
 

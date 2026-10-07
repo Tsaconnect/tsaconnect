@@ -158,9 +158,10 @@ func TestQuote_ConvertedVenueIsOfferedOnlyWhenTheRouteCoversThePromise(t *testin
 		t.Fatalf("venues = %+v, err = %v", venues, err)
 	}
 	v := venues[0]
-	// The markup IS the round-trip budget, and a stablecoin promise is T less
-	// the fixed stable headroom — neither is a function of the route's price.
-	if v.Kind != models.RouteKindConverted || v.MarkupBps != 50 || v.PromisedAmount != "99700000" {
+	// The markup is the route's own cost — l 20 + g 0 + 10 headroom = 30, no
+	// floor — so T = 100 × (1 − 0.3%) = 99.7, and a stablecoin promise is T
+	// less the fixed stable headroom: 99.7 × 0.997 = 99.4009.
+	if v.Kind != models.RouteKindConverted || v.MarkupBps != 30 || v.PromisedAmount != "99400900" {
 		t.Fatalf("venue = %+v", v)
 	}
 	if v.ViaChain != "base" || v.ViaToken != "USDC" {
@@ -177,14 +178,26 @@ func TestQuote_ConvertedVenueIsOfferedOnlyWhenTheRouteCoversThePromise(t *testin
 	}
 }
 
-func TestQuote_CostlyRouteIsNotOffered(t *testing.T) {
+// There is no fixed round-trip budget any more (owner ruling 2026-10-07): a
+// costly route is passed on at cost — B′ = l 100 + 10 headroom = 110 bps,
+// T = 100 × (1 − 1.1%) = 98.9, shown as its own fee line — up to the cap.
+func TestQuote_CostlyRouteIsPassedOnAtCost(t *testing.T) {
 	s := priceRig(t)
 	s.lifi.route = &LiFiRoute{ToAmount: big.NewInt(99_000000), ToAmountMin: big.NewInt(98_900000),
 		FromAmountUSD: 100, ToAmountUSD: 99, GasLimit: 1_000_000, Tool: "across",
 		Data: testBridgeCalldata(t, sponsorTestUser, 59144, false)} // 100 bps of LiFi cost
 	venues, err := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "linea", Token: "USDC"}})
-	if err != nil || len(venues) != 0 {
-		t.Fatalf("venues = %+v; a route costing more than the round-trip budget must not be offered", venues)
+	if err != nil || len(venues) != 1 {
+		t.Fatalf("venues = %+v err = %v; a 110 bps route is under the 200 bps cap", venues, err)
+	}
+	v := venues[0]
+	if v.MarkupBps != 110 || v.TokenAmountBaseUnits != "98900000" || v.PromisedAmount != "98603300" ||
+		len(v.Fees) != 1 || v.Fees[0].Token != "1.1" || v.Fees[0].Ngn != "1650.00" {
+		t.Fatalf("venue = %+v, want B′ 110, T 98.9 and a 1.1 USDC (₦1,650) conversion line", v)
+	}
+	s.svc.SetConvertedFeeCaps(map[string]int{"linea": 100}, 200)
+	if venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "linea", Token: "USDC"}}); len(venues) != 0 {
+		t.Fatalf("venues = %+v; a 110 bps route over linea's 100 bps cap must not be offered", venues)
 	}
 }
 
@@ -242,8 +255,8 @@ func TestQuote_ConvertedVenue_SixToEighteenDecimals(t *testing.T) {
 		t.Fatalf("venues = %+v, err = %v", venues, err)
 	}
 	v := venues[0]
-	wantPromise := new(big.Int).Mul(big.NewInt(997), pow10(17)).String() // 99.7 * 1e18
-	if v.MarkupBps != 50 || v.PromisedAmount != wantPromise {
+	wantPromise := new(big.Int).Mul(big.NewInt(994009), pow10(14)).String() // T 99.7 × 0.997 = 99.4009, at 18dp
+	if v.MarkupBps != 30 || v.PromisedAmount != wantPromise {
 		t.Fatalf("venue = %+v, want promisedAmount %s (18dp, not the 6dp settlement figure)", v, wantPromise)
 	}
 	if v.ViaChain != "base" || v.ViaToken != "USDC" || v.RequestedChain != "bsc" || v.RequestedToken != "USDT" {
@@ -271,15 +284,14 @@ func TestQuote_ConvertedVenue_EighteenToSixDecimals(t *testing.T) {
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testChainRegistry())
 	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"bsc": true, "optimism": true}})
-	svc.SetRoundTripBudgetBps(50)
 
 	venues, err := svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000", []RequestedAsset{{Chain: "optimism", Token: "USDT"}})
 	if err != nil || len(venues) != 1 {
 		t.Fatalf("venues = %+v, err = %v", venues, err)
 	}
 	v := venues[0]
-	if v.MarkupBps != 50 || v.PromisedAmount != "99700000" {
-		t.Fatalf("venue = %+v, want promisedAmount 99700000 (6dp, not the 18dp settlement figure)", v)
+	if v.MarkupBps != 30 || v.PromisedAmount != "99400900" {
+		t.Fatalf("venue = %+v, want promisedAmount 99400900 (6dp, not the 18dp settlement figure)", v)
 	}
 	if v.ViaChain != "bsc" || v.ViaToken != "USDC" || v.RequestedChain != "optimism" || v.RequestedToken != "USDT" {
 		t.Fatalf("venue must record both legs: %+v", v)
@@ -399,9 +411,7 @@ func TestQuote_RefusesEveryVenueWhenTreasuryLanesWasNeverWired(t *testing.T) {
 
 func priceRig(t *testing.T) *quoteServiceRig {
 	t.Helper()
-	s := newQuoteServiceWithFakes(t)
-	s.svc.SetRoundTripBudgetBps(50)
-	return s
+	return newQuoteServiceWithFakes(t)
 }
 
 func bnbRoute(t *testing.T) *LiFiRoute {
@@ -431,18 +441,19 @@ func TestConvertedVenues_BuysANativeCoinByAddress(t *testing.T) {
 	if v.CostBps != 20 || v.EstimatedAmount != bnbRoute(t).ToAmount.String() {
 		t.Fatalf("cost = %d estimate = %s", v.CostBps, v.EstimatedAmount)
 	}
-	// Second call prices what the treasury bridges: T/(1 − l) = 100000000 × 10000/9980 = 100200400.
+	// B′ = l 20 + g 2 + 10 headroom = 32, so T = 100 × (1 − 0.32%) = 99.68,
+	// and the second call prices what the treasury bridges: T/(1 − l) =
+	// 99680000 × 10000/9980 = 99879759.
 	req := s.lifi.lastRequest()
-	if req.ToToken != evmNativeAddress || req.ToChainID != 56 || req.FromAmount != "100200400" || req.Slippage != 0.005 {
+	if req.ToToken != evmNativeAddress || req.ToChainID != 56 || req.FromAmount != "99879759" || req.Slippage != 0.005 {
 		t.Fatalf("LiFi request = %+v", req)
 	}
 }
 
-// A round trip dearer than the 50 bps floor raises this route's own budget
-// to cover it, and the fee she pays rises with it: our 0.5% never shrinks.
-// l = 100 bps, g = 11 bps, plus 10 bps headroom → B′ = 121, so the user's
-// fee is F + (B′ − B) = 100 + 71 = 171 bps and the rate 1500 × 1.0171.
-func TestConvertedVenues_RaisesTheBudgetToCoverADearerRoute(t *testing.T) {
+// A dearer round trip is passed on at its own cost, on top of the take: l =
+// 100 bps, g = 11 bps, plus 10 bps headroom → B′ = 121. The rate keeps the 1%
+// take only (1515.00); D = 99.0099 and she is owed T = D × (1 − 1.21%).
+func TestConvertedVenues_PassesADearerRouteOnAtItsOwnCost(t *testing.T) {
 	s := priceRig(t)
 	s.svc.SetSenderFeePercent("1")
 	r := bnbRoute(t)
@@ -457,34 +468,34 @@ func TestConvertedVenues_RaisesTheBudgetToCoverADearerRoute(t *testing.T) {
 	if v.MarkupBps != 121 {
 		t.Fatalf("markup = %d, want 121 (l 100 + g 11 + 10 headroom)", v.MarkupBps)
 	}
-	if v.Rate != "1525.65" || v.TokenAmountBaseUnits != "98318749" {
-		t.Fatalf("rate = %s amount = %s, want the venue repriced at a 1.71%% fee", v.Rate, v.TokenAmountBaseUnits)
+	if v.Rate != "1515.00" || v.TokenAmountBaseUnits != "97811880" || len(v.Fees) != 1 || v.Fees[0].Token != "1.19802" {
+		t.Fatalf("rate = %s amount = %s fees = %+v, want the take-only rate and T = 99009900 × 0.9879", v.Rate, v.TokenAmountBaseUnits, v.Fees)
 	}
-	// The treasury bridges the smaller T′: 98318749 × 10000/9900.
-	if req := s.lifi.lastRequest(); req.FromAmount != "99311867" {
-		t.Fatalf("bridge amount = %s, want 99311867", req.FromAmount)
+	// The treasury bridges T/(1 − l): 97811880 × 10000/9900.
+	if req := s.lifi.lastRequest(); req.FromAmount != "98799878" {
+		t.Fatalf("bridge amount = %s, want 98799878", req.FromAmount)
 	}
 }
 
-// The raised fee has a ceiling per destination chain; a route that needs
-// more than that is not offered.
+// What a route may pass on has a ceiling per destination chain, on its own
+// cost (the take is never in it); a route that needs more is not offered.
 func TestConvertedVenues_RefusesARouteOverItsChainsFeeCap(t *testing.T) {
 	s := priceRig(t)
 	s.svc.SetSenderFeePercent("1")
-	s.svc.SetConvertedFeeCaps(map[string]int{"bsc": 150}, 200)
+	s.svc.SetConvertedFeeCaps(map[string]int{"bsc": 120}, 200)
 	r := bnbRoute(t)
-	r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10 // needs a 171 bps fee
+	r.ToAmountUSD, r.GasCostUSD = 99.0, 0.10 // needs B′ = 121 bps
 	s.lifi.route = r
 	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
 		[]RequestedAsset{{ChainID: 56, Address: evmNativeAddress}})
 	if len(venues) != 0 {
-		t.Fatalf("a route needing a 1.71%% fee was offered under a 1.5%% bsc cap: %+v", venues)
+		t.Fatalf("a route needing 1.21%% was offered under a 1.2%% bsc cap: %+v", venues)
 	}
 }
 
-// A cap of 0 — or anything past the bound — turns raising off: a dear route
-// is refused, never priced at the 2% default.
-func TestConvertedVenues_AZeroOrUnboundedCapRaisesNothing(t *testing.T) {
+// A cap of 0 — or anything past the bound — offers nothing: a dear route is
+// refused, never priced at the 2% default.
+func TestConvertedVenues_AZeroOrUnboundedCapOffersNothing(t *testing.T) {
 	for _, limit := range []int{0, 9_999} {
 		s := priceRig(t)
 		s.svc.SetSenderFeePercent("1")
@@ -500,8 +511,8 @@ func TestConvertedVenues_AZeroOrUnboundedCapRaisesNothing(t *testing.T) {
 	}
 }
 
-// A route inside B but within the headroom of it is raised too, so the
-// execution-time re-check is not run against a budget it barely fits.
+// Every route's budget carries the headroom, so the execution-time re-check
+// is not run against a budget it barely fits.
 // l = 45 (99.55), g = 2 ($0.0108 on $100, rounded up) -> B′ = 45 + 2 + 10 = 57.
 func TestConvertedVenues_ARouteNearTheBudgetGetsHeadroom(t *testing.T) {
 	s := priceRig(t)
@@ -559,8 +570,9 @@ func TestConvertedVenues_StableDestinationKeepsAPromise(t *testing.T) {
 	usdtOP := testChainRegistry().TokenAddressForChainID(10, "USDT")
 	venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
 		[]RequestedAsset{{ChainID: 10, Address: usdtOP}})
-	if len(venues) != 1 || venues[0].PromisedAmount != "99700000" || venues[0].MarkupBps != 50 {
-		t.Fatalf("venues = %+v, want promise 99700000 (T less 30 bps) and markup = B", venues)
+	// B′ = l 20 + g 2 + 10 = 32: T = 99.68, the promise T less 30 bps.
+	if len(venues) != 1 || venues[0].PromisedAmount != "99380960" || venues[0].MarkupBps != 32 {
+		t.Fatalf("venues = %+v, want promise 99380960 (T 99.68 less 30 bps) and markup 32", venues)
 	}
 	if req := s.lifi.lastRequest(); req.Slippage != 0.001 {
 		t.Fatalf("stable slippage = %v, want 0.001", req.Slippage)
@@ -573,7 +585,7 @@ func TestConvertedVenues_RefusesAStableRouteBelowThePromise(t *testing.T) {
 	s := priceRig(t)
 	r := bnbRoute(t)
 	r.Data = testBridgeCalldata(t, sponsorTestUser, 10, false)
-	r.ToAmount, r.ToAmountMin = big.NewInt(99_600000), big.NewInt(99_500000)
+	r.ToAmount, r.ToAmountMin = big.NewInt(99_400000), big.NewInt(99_300000) // under the 99380960 promise
 	s.lifi.route = r
 	usdtOP := testChainRegistry().TokenAddressForChainID(10, "USDT")
 	if venues, _ := s.svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",
@@ -735,7 +747,6 @@ func rigWithTwoSettlementChains(t *testing.T) *quoteServiceRig {
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testChainRegistry())
 	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "bsc": true}})
-	svc.SetRoundTripBudgetBps(50)
 	return &quoteServiceRig{svc: svc, pc: pc, lifi: lifi}
 }
 
@@ -765,7 +776,6 @@ func TestConvertedVenues_FallsBackToAnotherChainWhenBaseHasNoDirectListing(t *te
 	svc.SetTreasuryAddress("0xTreasuryAddress0000000000000000000001")
 	svc.SetChainRegistry(testChainRegistry())
 	svc.SetTreasuryLanes(&fakeTreasuryLaneChecker{laned: map[string]bool{"base": true, "bsc": true}})
-	svc.SetRoundTripBudgetBps(50)
 	lifi.route = bnbRoute(t)
 
 	venues, err := svc.ConvertedVenues(context.Background(), "buy", "NGN", "150000",

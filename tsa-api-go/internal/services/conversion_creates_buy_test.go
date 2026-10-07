@@ -105,7 +105,6 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 		lifiQuoter, NewLiFiStatusClient("http://unused.invalid", ""),
 		map[string]ERC20TransferVerifier{"base": transfers}, chains,
 		30*time.Minute, 0, 0, 0, func() time.Time { return clock })
-	orch.SetRoundTripBudgetBps(50)
 
 	// ── Step 1: takeCustody ──────────────────────────────────────────────
 	//
@@ -151,13 +150,14 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 		t.Fatalf("leg kind = %s, want bridge", legs[0].Kind)
 	}
 	// 99 USDC landed (99000000 base units at 6dp, read from the human-decimal
-	// TokenAmount). What she is owed was scaled to that same 99/100 at custody,
-	// and the bridge sends T/(1 − l) of it — 98707314 at LiFi's 20 bps — so the
-	// rest stays behind as USDC. The figure that matters to this regression is
-	// that it is derived from 99, not 100: a leg sized off the full order
-	// amount would be over 99700000 and could not be funded.
-	if legs[0].Amount != "98707314" {
-		t.Fatalf("leg amount = %q, want 98707314 — T/(1 − l) of the SHORT-delivered 99 USDC, "+
+	// TokenAmount). What she is owed — T = 100 × (1 − B′ 30 bps) = 99.7 — was
+	// scaled to that same 99/100 at custody (98.703), and the bridge sends
+	// T/(1 − l) of it — 98900801 at LiFi's 20 bps — so the rest stays behind as
+	// USDC. The figure that matters to this regression is that it is derived
+	// from 99, not 100: a leg sized off the full order amount would need
+	// 99899799, more than the 99000000 that landed, and could not be funded.
+	if legs[0].Amount != "98900801" {
+		t.Fatalf("leg amount = %q, want 98900801 — T/(1 − l) of the SHORT-delivered 99 USDC, "+
 			"correctly converted from the human-decimal TokenAmount", legs[0].Amount)
 	}
 	// Two: the probe that prices l, then the route actually executed.

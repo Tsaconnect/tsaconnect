@@ -20,13 +20,16 @@ import (
 
 // ramp_sell_quote_test.go — Task 12: pricing a sell that needs a swap.
 //
-// The price model (design §3.2) is the whole of this file. She pays F all-in
-// whether or not a swap was needed: B is the slice of F a round trip may
-// spend, admission is l + g ≤ B, and whatever is left (B − l − g) is charged
-// as our own LiFi integrator fee. These tests pin the four things that can
-// silently cost money if they drift: what counts towards B, that a fee we
-// cannot collect is never advertised, that the fee-carrying re-quote is
-// re-admitted, and that the naira estimate is priced at F − B.
+// The price model (design §3.2) of a TSA Pay payment's converted payout is the
+// whole of this file — it is the one sale that keeps it (owner ruling
+// 2026-10-07; a ramp sale is the take plus the round trip at cost, pinned in
+// paycrest_take_pricing_test.go). She pays F all-in whether or not a swap was
+// needed: B is the slice of F a round trip may spend, admission is l + g ≤ B,
+// and whatever is left (B − l − g) is charged as our own LiFi integrator fee.
+// These tests pin the four things that can silently cost money if they drift:
+// what counts towards B, that a fee we cannot collect is never advertised,
+// that the fee-carrying re-quote is re-admitted, and that the naira estimate
+// is priced at F − B.
 
 func newSellQuoterWithFakes(t *testing.T, routes ...*LiFiRoute) (*RampSellQuoter, *fakeLiFiQuoter) {
 	t.Helper()
@@ -35,7 +38,8 @@ func newSellQuoterWithFakes(t *testing.T, routes ...*LiFiRoute) (*RampSellQuoter
 	quotes.SetSenderFeePercent("1")
 	quotes.SetChainRegistry(testChainRegistry())
 	lifi := &fakeLiFiQuoter{routes: routes}
-	q := NewRampSellQuoter(signedBodyLiFi{lifi}, quotes, testChainRegistry(), 50, "0.5", 0.02)
+	q := NewRampSellQuoter(signedBodyLiFi{lifi}, quotes, testChainRegistry(), "0.5", 0.02)
+	q.SetPayFeeSplit(PayFeeSplit{FeePercent: "1", BudgetBps: 50})
 	q.SetRouterAllowlist(map[int64][]common.Address{56: {common.HexToAddress(sellTestDiamond)}})
 	return q, lifi
 }
@@ -152,8 +156,12 @@ const sellTestAddress = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A"
 // pays the wrong person.
 const sellOtherAddress = "0x000000000000000000000000000000000000dEaD"
 
+// sellIn is a TSA Pay payment's converted payout, which keeps the F/B split
+// this file pins (F = 1%, B = 50 bps, the payout sent F − B). A ramp sale —
+// the take plus the round trip at cost — is pinned in
+// paycrest_take_pricing_test.go.
 var sellIn = SellQuoteInput{FromChainID: 56, FromToken: evmNativeAddress, FromAmount: "16000000000000000",
-	FromAddress: sellTestAddress, WalletAddress: sellTestAddress, FiatCode: "NGN"}
+	FromAddress: sellTestAddress, WalletAddress: sellTestAddress, FiatCode: "NGN", TSAPay: true}
 
 func TestRampSellQuote_ChargesTheUnspentBudgetAsOurFee(t *testing.T) {
 	q, lifi := newSellQuoterWithFakes(t, sellRoute(t, 9.98), sellRoute(t, 9.97))
@@ -919,7 +927,7 @@ func TestRampSellQuote_NamingBaseUSDCToHerWalletIsTheOrdinarySale(t *testing.T) 
 // USDC. (Naming the default target on an ordinary sale stays that sale: see
 // TestRampSellQuote_NamingBaseUSDCToHerWalletIsTheOrdinarySale.)
 func TestRampSellQuote_AnExplicitDeliveryTargetIsNeverAnOfframp(t *testing.T) {
-	q := &RampSellQuoter{budgetBps: 50}
+	q := &RampSellQuoter{}
 	own := SellQuoteInput{WalletAddress: sellTestAddress}
 	if !q.targetFor(own, sellUSDC).offramp {
 		t.Fatal("an ordinary sale is an offramp")

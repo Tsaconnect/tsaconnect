@@ -374,14 +374,13 @@ func TestOpenConvertedBuys_RefuseABudgetOverTheFeeCap(t *testing.T) {
 	}
 }
 
-// M8 with the quote service's own caps: the requested chain's cap applies,
-// and the base budget B is always allowed (the pricer only caps a raise).
+// M8 with the quote service's own caps: B′ is allowed up to the requested
+// chain's cap.
 func TestOpenConvertedBuys_UseTheQuoteServicesFeeCaps(t *testing.T) {
 	ctx := context.Background()
 	s, userID := newConvertedTreasuryService(t, 50_000_000)
 	caps := &PaycrestQuoteService{}
 	caps.SetConvertedFeeCaps(map[string]int{"optimism": 100}, 200)
-	caps.SetRoundTripBudgetBps(50)
 	s.SetConvertedBuys(ConvertedBuys{TreasuryAddress: testConversionTreasury,
 		Treasury: &fakeConvertedTreasury{laned: map[string]bool{"base": true}}, FeeCaps: caps})
 	q := treasuryTestQuote(t, s)
@@ -399,9 +398,11 @@ func TestOpenConvertedBuys_UseTheQuoteServicesFeeCaps(t *testing.T) {
 	if !caps.ConvertedBudgetAllowed("optimism", 50) || caps.ConvertedBudgetAllowed("optimism", 101) || !caps.ConvertedBudgetAllowed("arbitrum", 200) {
 		t.Fatal("ConvertedBudgetAllowed disagrees with the pricer's caps")
 	}
-	caps.SetConvertedFeeCaps(map[string]int{}, 0) // raising off: B still opens
-	if !caps.ConvertedBudgetAllowed("optimism", 50) || caps.ConvertedBudgetAllowed("optimism", 51) {
-		t.Fatal("raising off must still allow the base budget, and only it")
+	// No fixed budget any more (owner ruling 2026-10-07): a cap of 0 opens no
+	// conversion at all.
+	caps.SetConvertedFeeCaps(map[string]int{}, 0)
+	if caps.ConvertedBudgetAllowed("optimism", 1) {
+		t.Fatal("a zero cap must allow no conversion budget")
 	}
 }
 

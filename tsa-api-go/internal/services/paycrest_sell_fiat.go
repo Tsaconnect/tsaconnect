@@ -86,9 +86,10 @@ func init() {
 	assertSellRateHeadroomSound(sellRateHeadroom, sellRateRounding)
 }
 
-// SellDepositFor is the deposit, in the token's base units, that a sell paying
-// exactly fiatAmount needs at the sender fee for converted (F − B, or F). It is
-// the same VenueForFee call CreateSellForFiat sizes with; nothing is created.
+// SellDepositFor is the deposit, in the token's base units, that a TSA Pay
+// payout paying exactly fiatAmount needs at the payment's own sender fee
+// (PayFeeSplit: F − B converted, F direct). It is the same VenueForFee call
+// CreateSellForFiat sizes with; nothing is created.
 //
 // It is sized at the venue's rate less sellRateHeadroom and rounded UP to the
 // base unit, so the payout at Paycrest's unrounded rate covers the naira — see
@@ -98,7 +99,7 @@ func (s *PaycrestOrderService) SellDepositFor(ctx context.Context, fiatCode, fia
 	if s == nil {
 		return nil, ErrPaycrestDisabled
 	}
-	feeVal, ok := parseSenderFeePercent(s.senderFeeFor(converted))
+	feeVal, ok := parseSenderFeePercent(s.pay.SenderFee(converted))
 	if !ok {
 		return nil, ErrConversionUnavailable
 	}
@@ -141,10 +142,11 @@ func (s *PaycrestOrderService) sellTokenDecimals(chainKey, token string) int {
 	return tokenDecimalsFor(s.quotes.chainID(chainKey), token)
 }
 
-// CreateSellForFiat opens an offramp that pays req.FiatAmount EXACTLY, funded
-// by at most maxTokenBaseUnits of token (nil = no cap). It is the mirror of
-// CreateSellForToken: there the tokens are the fact and the naira follows; here
-// the naira is the fact and the deposit follows.
+// CreateSellForFiat opens a TSA Pay payout that pays req.FiatAmount EXACTLY,
+// funded by at most maxTokenBaseUnits of token (nil = no cap), at the
+// payment's own sender fee (PayFeeSplit), never the ramp's take. It is the
+// mirror of CreateSellForToken: there the tokens are the fact and the naira
+// follows; here the naira is the fact and the deposit follows.
 //
 // A cap the deposit exceeds is a SellShortfallError before Paycrest hears of
 // it. An order whose payout comes back short of the naira — the provider's rate
@@ -161,7 +163,8 @@ func (s *PaycrestOrderService) CreateSellForFiat(ctx context.Context, req Paycre
 	if maxTokenBaseUnits != nil && dep.Cmp(maxTokenBaseUnits) > 0 {
 		return nil, &SellShortfallError{MissingBaseUnits: new(big.Int).Sub(dep, maxTokenBaseUnits)}
 	}
-	row, err := s.CreateSellForToken(ctx, req, BaseUnitsToDecimal(dep, s.sellTokenDecimals(req.ChainKey, req.Token)), converted)
+	row, err := s.sellForToken(ctx, req, BaseUnitsToDecimal(dep, s.sellTokenDecimals(req.ChainKey, req.Token)),
+		s.pay.SenderFee(converted), req.KeepSurplus && !converted)
 	if err != nil {
 		return nil, err
 	}

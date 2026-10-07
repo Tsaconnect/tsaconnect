@@ -100,8 +100,10 @@ type PaycrestVenue struct {
 	// requested token's own base units. An estimate, not a promise — a
 	// volatile destination has no PromisedAmount at all.
 	EstimatedAmount string `json:"estimatedAmount,omitempty"`
-	// MarkupBps is B, the round-trip budget: the slice of the sender fee this
-	// order keeps back to pay for its own conversion.
+	// MarkupBps is B′, the route's priced cost: LiFi's own cost plus the gas
+	// the treasury pays, plus routeBudgetHeadroomBps. Charged to her at cost
+	// on top of the company take — T = D·(1 − B′) — and shown as the
+	// "Conversion (LiFi)" fee line, never folded into the rate.
 	MarkupBps int `json:"markupBps,omitempty"`
 	// CostBps is what the priced route actually costs (LiFi's own cost, gas
 	// excluded), so a venue can be compared against the budget it was offered
@@ -116,6 +118,33 @@ type PaycrestVenue struct {
 	PromisedAmount string `json:"promisedAmount,omitempty"`
 	// ETASeconds is the LiFi route's estimated execution time.
 	ETASeconds int `json:"etaSeconds,omitempty"`
+	// EffectiveRate and Fees are the spec §14 display on a venue that passes
+	// a third-party cost on (a converted one): Rate stays the leg's rate with
+	// only the company take in it, Fees states each pass-through cost, and
+	// EffectiveRate is fiat ÷ TokenAmount, all in. Empty on a direct venue,
+	// whose only charge is the take inside Rate.
+	EffectiveRate string     `json:"effectiveRate,omitempty"`
+	Fees          []VenueFee `json:"fees,omitempty"`
+}
+
+// VenueFee is one third-party cost inside a venue (spec §14): Token is the fee
+// in tokens and Ngn its naira value at the display rate, both decimal strings.
+// One shape for every provider; ramp.VenueFee is this type.
+type VenueFee struct {
+	Kind     string `json:"kind"` // "funding" | "conversion" | "network"
+	Label    string `json:"label"`
+	Provider string `json:"provider"` // display name for the tag (Decision D39)
+	Token    string `json:"token"`
+	Ngn      string `json:"ngn"`
+}
+
+// tokenFeeLine is a fee of `units` (decimals dp) valued at rate, naira per
+// whole token, rounded down to the kobo.
+func tokenFeeLine(kind, label, provider string, units *big.Int, decimals int, rate *big.Rat) VenueFee {
+	ngn := new(big.Rat).Mul(new(big.Rat).SetFrac(units, pow10(decimals)), rate)
+	kobo := new(big.Int).Quo(new(big.Int).Mul(ngn.Num(), big.NewInt(100)), ngn.Denom())
+	return VenueFee{Kind: kind, Label: label, Provider: provider,
+		Token: BaseUnitsToDecimal(units, decimals), Ngn: FormatMinor(kobo.String())}
 }
 
 // PaycrestQuoteResult is the answer to "what can this user actually do with
@@ -178,17 +207,15 @@ type PaycrestQuoteService struct {
 	tokens []string
 	// chainKeys we will offer, in OUR vocabulary.
 	chainKeys []string
-	// senderFeePercent is our margin, priced into every rate we quote. Zero
-	// quotes provider rates verbatim.
+	// senderFeePercent is the company take (RAMP_COMPANY_TAKE_BPS, as a
+	// percent): the Paycrest sender fee on every ramp order and our only
+	// margin on Paycrest, priced into every rate we quote. Zero quotes
+	// provider rates verbatim.
 	senderFeePercent float64
-	// roundTripBudgetBps is B, pushed here by
-	// PaycrestOrderService.SetRoundTripBudgetBps the same way SetSenderFeePercent
-	// pushes F, so the two services can never disagree on it.
-	roundTripBudgetBps int
-	// convertedFeeMaxByChain/convertedFeeMaxDefault cap the TOTAL fee a
-	// converted buy or swapped sell may charge once a dear route raises its
-	// budget above B. Unset (convertedFeeCapsSet false) applies
-	// defaultConvertedFeeMaxBps. See SetConvertedFeeCaps.
+	// convertedFeeMaxByChain/convertedFeeMaxDefault cap the third-party cost
+	// (B′: LiFi plus our gas) a converted buy or swapped sell may pass on.
+	// Unset (convertedFeeCapsSet false) applies defaultConvertedFeeMaxBps.
+	// See SetConvertedFeeCaps.
 	convertedFeeMaxByChain map[string]int
 	convertedFeeMaxDefault int
 	convertedFeeCapsSet    bool
@@ -232,41 +259,38 @@ type PaycrestQuoteService struct {
 	solanaValidator solanaAddressValidator
 }
 
-// SetSenderFeePercent prices our sender fee into every quoted rate, so the
-// rate the user sees is the rate they get. NewPaycrestOrderService calls this
-// with the fee it sends on orders, so the two cannot drift; anything
-// unusable means no fee.
+// SetSenderFeePercent prices the company take, our sender fee, into every
+// quoted rate, so the rate the user sees is the rate they get.
+// NewPaycrestOrderService calls this with the fee it sends on orders, so the
+// two cannot drift; anything unusable means no fee.
 func (s *PaycrestQuoteService) SetSenderFeePercent(pct string) {
 	s.senderFeePercent, _ = parseSenderFeePercent(pct)
 }
 
-// SetRoundTripBudgetBps sets B, pushed here by
-// PaycrestOrderService.SetRoundTripBudgetBps.
-func (s *PaycrestQuoteService) SetRoundTripBudgetBps(bps int) { s.roundTripBudgetBps = bps }
-
-// defaultConvertedFeeMaxBps caps the fee a converted buy or swapped sell may
-// charge (2%) on a service that was never given caps, so a dear route is
-// refused rather than priced without limit.
+// defaultConvertedFeeMaxBps caps the third-party cost a converted buy or
+// swapped sell may pass on (2%) on a service that was never given caps, so a
+// dear route is refused rather than priced without limit.
 const defaultConvertedFeeMaxBps = 200
 
-// routeBudgetHeadroomBps is added on top of a route's measured cost when its
-// budget is raised: the bridge is re-priced on a slightly different amount,
-// and again at execution, so a budget set exactly at the probe's cost would
-// refuse the route it was raised for.
+// routeBudgetHeadroomBps is added on top of a converted buy's measured route
+// cost: the bridge is re-priced on a slightly different amount, and again at
+// execution, so a budget set exactly at the probe's cost would refuse the
+// route it was priced for.
 const routeBudgetHeadroomBps = 10
 
-// SetConvertedFeeCaps sets the most a converted buy or swapped sell may
-// charge in total, in bps of the order, per chain (a buy's destination, a
-// sell's source); def applies to any other chain. 0 turns raising off.
+// SetConvertedFeeCaps sets the most third-party cost (B′) a converted buy or
+// swapped sell may pass on, in bps of the order, per chain (a buy's
+// destination, a sell's source); def applies to any other chain. 0 offers no
+// converted route at all.
 func (s *PaycrestQuoteService) SetConvertedFeeCaps(byChain map[string]int, def int) {
 	s.convertedFeeMaxByChain = byChain
 	s.convertedFeeMaxDefault = def
 	s.convertedFeeCapsSet = true
 }
 
-// convertedFeeMaxBps is the fee cap for a chain. Anything outside
-// 0..MaxConvertedFeeBps reads as 0 — raising off — so a bad value can only
-// make it stricter.
+// convertedFeeMaxBps is the cost cap for a chain. Anything outside
+// 0..MaxConvertedFeeBps reads as 0 — nothing offered — so a bad value can
+// only make it stricter.
 func (s *PaycrestQuoteService) convertedFeeMaxBps(chainKey string) int {
 	if !s.convertedFeeCapsSet {
 		return defaultConvertedFeeMaxBps
@@ -283,13 +307,12 @@ func (s *PaycrestQuoteService) convertedFeeMaxBps(chainKey string) int {
 
 // ConvertedBudgetAllowed is the pricer's cap rule for a conversion budget B′
 // on a delivered leg, for an open to re-check (it must not rely on its
-// caller): the base budget B always, a raised one only up to the requested
-// chain's cap.
+// caller): B′ up to the requested chain's cap.
 func (s *PaycrestQuoteService) ConvertedBudgetAllowed(requestedChain string, budgetBps int) bool {
 	if s == nil {
 		return budgetBps <= defaultConvertedFeeMaxBps
 	}
-	return budgetBps <= s.roundTripBudgetBps || budgetBps <= s.convertedFeeMaxBps(requestedChain)
+	return budgetBps <= s.convertedFeeMaxBps(requestedChain)
 }
 
 // maxSenderFeePercent bounds what we accept from config. Well above any fee we
@@ -763,10 +786,10 @@ func (s *PaycrestQuoteService) VenueFor(ctx context.Context, side, fiatCode, fia
 	return s.VenueForFee(ctx, side, fiatCode, fiatAmount, chainKey, token, s.senderFeePercent)
 }
 
-// VenueForFee is VenueFor priced at a fee OTHER than the configured one. A
-// converted sell is sent to Paycrest at F − B, not F, so the naira estimate
-// it shows has to be the F − B one: quoting the user at F and ordering at
-// F − B would understate what she receives by the whole budget.
+// VenueForFee is VenueFor priced at a fee OTHER than the configured take. A
+// TSA Pay payment's payout is sent at its own fee (PayFeeSplit), and
+// ProviderRate asks for none, so the rate each one shows has to be the one
+// its order is opened at.
 func (s *PaycrestQuoteService) VenueForFee(ctx context.Context, side, fiatCode, fiatAmount, chainKey, token string, feePercent float64) (*PaycrestVenue, error) {
 	res, err := s.Quote(ctx, side, fiatCode, fiatAmount)
 	if err != nil {
@@ -893,12 +916,12 @@ type RequestedAsset struct {
 // because offering a route we then refuse to execute takes the user's naira
 // into an order that can only wait for a human:
 //
-//   - PRICE. The whole round trip — LiFi's own cost plus the gas the treasury
-//     pays, including one approve — must fit inside B, the round-trip budget
-//     held back out of the sender fee. There is no separate markup ladder any
-//     more: the order is sent to Paycrest at F − B, so B is exactly what is
-//     available to spend and the markup shown IS B.
-//   - EXECUTABILITY. The route is priced twice: once on T to learn LiFi's
+//   - PRICE. Paycrest is sent the company take, like every ramp order, and
+//     delivers D. The round trip — LiFi's own cost plus the gas the treasury
+//     pays, including one approve, plus headroom — is B′, passed on at cost:
+//     she is owed T = D·(1 − B′), shown as the "Conversion (LiFi)" line. A
+//     route whose B′ is over the requested chain's cap is not offered.
+//   - EXECUTABILITY. The route is priced twice: once on D to learn LiFi's
 //     cost l, then again on T/(1 − l), which is what the treasury will really
 //     bridge. That second route is the one checked — its gas against the
 //     settlement lane, its calldata against the layouts we can decode, its
@@ -975,7 +998,12 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 			// Not a refusal — the direct venue wins, on purpose. No skip log.
 			continue
 		}
-		if v, ok := s.convertedVenue(ctx, s.paycrestLeg(*src, fiatAmount, base.MarketRate), req, asset, skip); ok {
+		leg, ok := s.paycrestLeg(*src, fiatAmount, base.MarketRate)
+		if !ok {
+			skip("settlement leg amount %q could not be resolved", src.TokenAmountBaseUnits)
+			continue
+		}
+		if v, ok := s.convertedVenue(ctx, leg, req, asset, skip); ok {
 			out = append(out, *v)
 		}
 	}
@@ -1037,72 +1065,95 @@ func (s *PaycrestQuoteService) PriceConvertedLeg(ctx context.Context, leg Settle
 }
 
 // settlementLeg is one way to deliver a converted buy's settlement token to
-// the treasury: venue at the round-trip budget B, at(b) for a raised budget,
-// and feeBps(b), the fee the converted-fee cap is checked against.
+// the treasury: venue is the leg itself — D, nothing held back — and at(b) is
+// what she is owed once a route budget of b bps is held back, T = D·(1 − b).
+// The cap limits b alone: the company take is inside the leg's rate, and any
+// third-party fee of the leg's own is its own line.
 type settlementLeg struct {
-	venue  PaycrestVenue
-	at     func(budgetBps int) (PaycrestVenue, bool)
-	feeBps func(budgetBps int) int
+	venue PaycrestVenue
+	at    func(budgetBps int) (PaycrestVenue, bool)
 }
 
-// paycrestLeg is Paycrest's leg: Paycrest is sent F − B, so a raised budget B′
-// re-prices it at F − B + B′, and that whole fee is what the cap limits.
-func (s *PaycrestQuoteService) paycrestLeg(src PaycrestVenue, fiatAmount string, marketRate float64) *settlementLeg {
-	fee := func(b int) int { return s.senderFeeBps() - s.roundTripBudgetBps + b }
-	return &settlementLeg{
-		venue: src,
-		at: func(b int) (PaycrestVenue, bool) {
-			if b == s.roundTripBudgetBps {
-				return src, true
-			}
-			return s.repricedAtFee(src, fiatAmount, marketRate, fee(b))
-		},
-		feeBps: fee,
-	}
-}
-
-// deliveredLeg prices a leg whose D is known: at budget b she is owed
-// T = D·(1 − b), and the cap limits b alone (D29) — the company take and the
-// in-house providers' third-party fees are their own lines. Only a 6-dp
-// token is accepted, so D, T and the intent share one precision (Decision C3).
-func (s *PaycrestQuoteService) deliveredLeg(chain, token string, leg SettlementLeg) (*settlementLeg, bool) {
-	id := s.chainID(chain)
-	if id == 0 || s.tokenAddress(chain, token) == "" || tokenDecimalsFor(id, token) != StableAssetDecimals ||
-		leg.Delivered == nil || leg.Delivered.Sign() <= 0 {
+// paycrestLeg is Paycrest's leg: the direct venue, sent at the company take,
+// delivering D = its TokenAmountBaseUnits.
+func (s *PaycrestQuoteService) paycrestLeg(src PaycrestVenue, fiatAmount string, marketRate float64) (*settlementLeg, bool) {
+	d, ok := new(big.Int).SetString(src.TokenAmountBaseUnits, 10)
+	if !ok {
 		return nil, false
 	}
-	fiat, ok := parsePositiveDecimal(leg.FiatAmount)
-	if !ok {
+	return owedLeg(src, d, tokenDecimalsFor(s.chainID(src.ChainKey), src.Token), fiatAmount, marketRate)
+}
+
+// deliveredLeg prices a leg whose D is known — the company wallet's sale or
+// Flutterwave's send. Only a 6-dp token is accepted, so D, T and the intent
+// share one precision (Decision C3).
+func (s *PaycrestQuoteService) deliveredLeg(chain, token string, leg SettlementLeg) (*settlementLeg, bool) {
+	id := s.chainID(chain)
+	if id == 0 || s.tokenAddress(chain, token) == "" || tokenDecimalsFor(id, token) != StableAssetDecimals {
+		return nil, false
+	}
+	base := PaycrestVenue{ChainKey: chain, Network: chain, Token: token, Rate: leg.Rate, Kind: models.RouteKindDirect}
+	return owedLeg(base, leg.Delivered, StableAssetDecimals, leg.FiatAmount, leg.MarketRate)
+}
+
+// owedLeg is the one pricing of a settlement leg that delivers `delivered`
+// (decimals dp) for fiatAmount at base.Rate (the leg's rate, take included):
+// at budget b she is owed ConversionOwed(D, b), the venue's all-in rate is
+// fiat ÷ T, and D − T is its "Conversion (LiFi)" line at base.Rate — so
+// fiat ÷ Rate − fees = T to within a base unit (spec §14).
+func owedLeg(base PaycrestVenue, delivered *big.Int, decimals int, fiatAmount string, marketRate float64) (*settlementLeg, bool) {
+	if _, ok := parsePositiveDecimal(fiatAmount); !ok || delivered == nil || delivered.Sign() <= 0 || decimals <= 0 {
+		return nil, false
+	}
+	fiat, _ := new(big.Rat).SetString(strings.TrimSpace(fiatAmount))
+	rate, ok := new(big.Rat).SetString(strings.TrimSpace(base.Rate))
+	if _, plain := parsePositiveDecimal(base.Rate); !ok || !plain {
 		return nil, false
 	}
 	at := func(b int) (PaycrestVenue, bool) {
 		if b < 0 || b >= 10_000 {
 			return PaycrestVenue{}, false
 		}
-		owed := ConversionOwed(leg.Delivered, b)
-		amount := StableFromBaseUnits(owed)
-		if owed.Sign() <= 0 || amount <= 0 {
+		owed := ConversionOwed(delivered, b)
+		if owed.Sign() <= 0 {
 			return PaycrestVenue{}, false
 		}
-		v := PaycrestVenue{ChainKey: chain, Network: chain, Token: token, Rate: leg.Rate,
-			TokenAmount: amount, TokenAmountBaseUnits: owed.String(), Kind: models.RouteKindDirect}
-		if leg.MarketRate > 0 {
-			v.SpreadPercent = (fiat/amount/leg.MarketRate - 1) * 100
+		v := base
+		v.TokenAmountBaseUnits = owed.String()
+		v.TokenAmount, _ = new(big.Rat).SetFrac(owed, pow10(decimals)).Float64()
+		v.EffectiveRate = allInRate(fiat, owed, decimals)
+		v.Fees = nil
+		if cost := new(big.Int).Sub(delivered, owed); cost.Sign() > 0 {
+			v.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionLiFiLabel, FeeProviderLiFi, cost, decimals, rate)}
+		}
+		if marketRate > 0 {
+			eff, _ := new(big.Rat).Quo(fiat, new(big.Rat).SetFrac(owed, pow10(decimals))).Float64()
+			v.SpreadPercent = (eff/marketRate - 1) * 100
 		}
 		return v, true
 	}
-	v, ok := at(s.roundTripBudgetBps)
+	v, ok := at(0)
 	if !ok {
 		return nil, false
 	}
-	return &settlementLeg{venue: v, at: at, feeBps: func(b int) int { return b }}, true
+	return &settlementLeg{venue: v, at: at}, true
 }
 
-// convertedVenue prices one requested asset from one settlement leg — the
-// body of the old ConvertedVenues loop, unchanged but for where the leg's
-// budget re-price and fee come from. false means "not on offer"; the reason
-// has already been logged through skip (or, for a promise the route cannot
-// meet, is silent as it always was).
+// allInRate is fiat ÷ units in naira per whole token, rounded UP to the kobo:
+// an all-in rate never flatters the venue it ranks.
+func allInRate(fiat *big.Rat, units *big.Int, decimals int) string {
+	num := new(big.Int).Mul(fiat.Num(), new(big.Int).Mul(pow10(decimals), big.NewInt(100)))
+	den := new(big.Int).Mul(fiat.Denom(), units)
+	kobo, rem := new(big.Int).QuoRem(num, den, new(big.Int))
+	if rem.Sign() > 0 {
+		kobo.Add(kobo, big.NewInt(1))
+	}
+	return FormatMinor(kobo.String())
+}
+
+// convertedVenue prices one requested asset from one settlement leg. false
+// means "not on offer"; the reason has already been logged through skip (or,
+// for a promise the route cannot meet, is silent as it always was).
 func (s *PaycrestQuoteService) convertedVenue(ctx context.Context, leg *settlementLeg, req RequestedAsset, asset resolvedAsset, skip func(string, ...any)) (*PaycrestVenue, bool) {
 	src := &leg.venue
 	routeAmount, ok := new(big.Int).SetString(src.TokenAmountBaseUnits, 10)
@@ -1143,7 +1194,7 @@ func (s *PaycrestQuoteService) convertedVenue(ctx context.Context, leg *settleme
 		// same order or it could see a different cost than was admitted.
 		Order: "CHEAPEST",
 	}
-	// First pass on T to learn l; then price what the treasury will actually bridge.
+	// First pass on D to learn l; then price what the treasury will actually bridge.
 	probe, perr := s.lifi.Quote(ctx, lreq)
 	if perr != nil {
 		skip("LiFi probe quote failed: %v", perr)
@@ -1154,30 +1205,25 @@ func (s *PaycrestQuoteService) convertedVenue(ctx context.Context, leg *settleme
 		skip("LiFi probe's cost is unreadable or at/above 100%%")
 		return nil, false
 	}
-	// This route's own budget B′: at least B, raised to cover a dearer
-	// round trip (plus headroom for the re-price below and at execution).
-	// Raising it raises HER fee by the same amount — Paycrest is still
-	// sent F − B, so our share never shrinks — up to the destination
-	// chain's cap. The leg says what "her fee" is: F − B + B′ on Paycrest's,
-	// B′ alone on a delivered leg (D29).
-	budget := s.roundTripBudgetBps
-	if need := l1 + TreasuryGasBps(probe, treasuryERC20Gas) + routeBudgetHeadroomBps; need > budget {
-		budget = need
-		feeBps := leg.feeBps(budget)
-		if limit := s.convertedFeeMaxBps(asset.ChainKey); feeBps > limit {
-			skip("route needs a %dbps fee, over the %s cap of %dbps", feeBps, asset.ChainKey, limit)
-			return nil, false
-		}
-		priced, ok := leg.at(budget)
-		if !ok {
-			skip("settlement leg could not be repriced at a %dbps fee", feeBps)
-			return nil, false
-		}
-		src = &priced
-		if routeAmount, ok = new(big.Int).SetString(src.TokenAmountBaseUnits, 10); !ok || routeAmount.Sign() <= 0 {
-			skip("repriced settlement amount %q could not be resolved", src.TokenAmountBaseUnits)
-			return nil, false
-		}
+	// This route's budget B′ is what the round trip really costs — LiFi's
+	// own cost plus the gas the treasury pays — plus headroom for the
+	// re-price below and at execution. It is passed on at cost (owner ruling
+	// 2026-10-07): she is owed T = D·(1 − B′), never less to fill a fixed
+	// budget, and a route over the destination chain's cap is not offered.
+	budget := l1 + TreasuryGasBps(probe, treasuryERC20Gas) + routeBudgetHeadroomBps
+	if limit := s.convertedFeeMaxBps(asset.ChainKey); budget > limit {
+		skip("route needs a %dbps budget, over the %s cap of %dbps", budget, asset.ChainKey, limit)
+		return nil, false
+	}
+	priced, ok := leg.at(budget)
+	if !ok {
+		skip("settlement leg could not be priced at a %dbps budget", budget)
+		return nil, false
+	}
+	src = &priced
+	if routeAmount, ok = new(big.Int).SetString(src.TokenAmountBaseUnits, 10); !ok || routeAmount.Sign() <= 0 {
+		skip("owed settlement amount %q could not be resolved", src.TokenAmountBaseUnits)
+		return nil, false
 	}
 	bridge := new(big.Int).Mul(routeAmount, big.NewInt(10_000))
 	bridge.Quo(bridge, big.NewInt(int64(10_000-l1)))
@@ -1267,6 +1313,9 @@ func (s *PaycrestQuoteService) convertedVenue(ctx context.Context, leg *settleme
 		MarkupBps: budget, CostBps: l,
 		EstimatedAmount: route.ToAmount.String(), ETASeconds: route.ETASeconds,
 	}
+	// The §14 display priced on the leg at B′: the take inside Rate, the
+	// route's cost as its own line, the all-in rate on T.
+	v.EffectiveRate, v.Fees, v.SpreadPercent = src.EffectiveRate, src.Fees, src.SpreadPercent
 	if asset.Stable {
 		promise := StablePromise(routeAmount, tokenDecimalsFor(s.chainID(src.ChainKey), src.Token), decimals)
 		if route.ToAmountMin == nil || route.ToAmountMin.Cmp(promise) < 0 {
@@ -1275,31 +1324,6 @@ func (s *PaycrestQuoteService) convertedVenue(ctx context.Context, leg *settleme
 		v.PromisedAmount = promise.String()
 	}
 	return &v, true
-}
-
-// senderFeeBps is F, the fee every quoted rate is priced at, in bps.
-func (s *PaycrestQuoteService) senderFeeBps() int {
-	return int(math.Round(s.senderFeePercent * 100))
-}
-
-// repricedAtFee is a buy venue re-quoted at feeBps instead of F: the same
-// provider rate, the same fiat, fewer tokens.
-func (s *PaycrestQuoteService) repricedAtFee(v PaycrestVenue, fiatAmount string, marketRate float64, feeBps int) (PaycrestVenue, bool) {
-	amt, ok := parsePositiveDecimal(fiatAmount)
-	if !ok {
-		return v, false
-	}
-	rateStr, rate, err := quotedRate(models.PaycrestDirectionBuy, v.RawRate, float64(feeBps)/100)
-	if err != nil {
-		return v, false
-	}
-	v.Rate = rateStr
-	v.TokenAmount = amt / rate
-	v.TokenAmountBaseUnits = s.baseUnitsFor(v.ChainKey, v.Token, fiatAmount, rateStr)
-	if marketRate > 0 {
-		v.SpreadPercent = (rate/marketRate - 1) * 100
-	}
-	return v, v.TokenAmountBaseUnits != ""
 }
 
 // directVenueFor finds a direct (already-fillable) venue for a requested

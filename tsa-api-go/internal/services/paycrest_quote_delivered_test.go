@@ -47,9 +47,10 @@ func TestPriceConvertedLeg_OwesDTimesOneMinusTheBudget(t *testing.T) {
 	if err != nil || v == nil {
 		t.Fatalf("venue = %+v err = %v", v, err)
 	}
-	// T = 96 × (1 − 0.005) = 95.52 at B = 50 bps.
+	// T = 96 × (1 − 0.003) = 95.712 at B′ = 30 bps (l 20 + 10 headroom): the
+	// route's own cost, with no budget floor.
 	if v.Kind != models.RouteKindConverted || v.ChainKey != "base" || v.Token != "USDC" || v.ViaChain != "base" ||
-		v.TokenAmountBaseUnits != "95520000" || v.MarkupBps != 50 || v.Rate != "1382.57" ||
+		v.TokenAmountBaseUnits != "95712000" || v.MarkupBps != 30 || v.Rate != "1382.57" ||
 		v.RequestedChain != "optimism" || v.RequestedToken != "USDT" || v.PromisedAmount == "" {
 		t.Fatalf("venue = %+v", v)
 	}

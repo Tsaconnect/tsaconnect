@@ -589,7 +589,7 @@ func TestPaycrestCreateSellForToken_OneLiveSellPerUser(t *testing.T) {
 	_, err := r.svc.orders.CreateSellForToken(context.Background(), PaycrestSellRequest{
 		UserID: r.user.ID, WalletAddress: r.user.WalletAddress, FiatCode: "NGN",
 		ChainKey: rampSettlementChainKey, Token: rampSettlementToken,
-		BankCode: "044", AccountNo: "0123456789"}, "9.975", true)
+		BankCode: "044", AccountNo: "0123456789"}, "9.975")
 	if !errors.Is(err, ErrPaycrestOrderOpen) || r.client.offrampCalls != 0 {
 		t.Fatalf("err = %v, calls %d; want ErrPaycrestOrderOpen and no Paycrest call", err, r.client.offrampCalls)
 	}
@@ -603,7 +603,7 @@ func TestPaycrestCreateSellForToken_OwesTheKoboHerQuoteShowed(t *testing.T) {
 	order, err := r.svc.orders.CreateSellForToken(context.Background(), PaycrestSellRequest{
 		UserID: r.user.ID, WalletAddress: r.user.WalletAddress, FiatCode: "NGN",
 		ChainKey: rampSettlementChainKey, Token: rampSettlementToken,
-		BankCode: "044", AccountNo: "0123456789"}, "1.01", true)
+		BankCode: "044", AccountNo: "0123456789"}, "1.01")
 	if err != nil {
 		t.Fatal(err)
 	}

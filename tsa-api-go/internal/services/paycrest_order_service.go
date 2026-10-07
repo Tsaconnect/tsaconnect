@@ -107,14 +107,16 @@ type PaycrestOrderService struct {
 	// see SetCurrencyRegistry.
 	currencies *CurrencyRegistry
 
-	// senderFeePercent is our margin. Empty defers to the dashboard profile
-	// default, which is what produced the 0.5% observed on live orders.
+	// senderFeePercent is the company take (RAMP_COMPANY_TAKE_BPS, as a
+	// percent) — the sender fee on every ramp order, direct, converted or
+	// swapped, and our only margin on Paycrest (owner ruling 2026-10-07).
+	// Empty defers to the dashboard profile default, which is what produced
+	// the 0.5% observed on live orders.
 	senderFeePercent string
 	senderFeeAddress string
-	// roundTripBudgetBps is B: the slice of senderFeePercent (F) that pays a
-	// converted order's round trip. Set via SetRoundTripBudgetBps, which also
-	// pushes it onto quotes so the two never disagree.
-	roundTripBudgetBps int
+	// pay is TSA Pay's own split, which a payment's payout is priced on —
+	// see PayFeeSplit. Zero leaves TSA Pay's payouts unpriced (refused).
+	pay PayFeeSplit
 
 	// ── Conversion (Phase 2, Task 9). Both dormant by default: conversionEnabled
 	// false and treasuryAddr "" together mean every buy is created exactly as
@@ -174,37 +176,59 @@ func feePercentToBps(pct string) (int, bool) { return feePercentToSteps(pct, 100
 // bpsToFeePercent writes integer bps back in the percent form Paycrest takes.
 func bpsToFeePercent(bps int) string { return stepsToFeePercent(bps, 100) }
 
-// SetRoundTripBudgetBps sets B here and on the quote service, the same way
-// the constructor pushes F: one source for both, so they cannot drift.
-func (s *PaycrestOrderService) SetRoundTripBudgetBps(bps int) {
-	s.roundTripBudgetBps = bps
-	if s.quotes != nil {
-		s.quotes.SetRoundTripBudgetBps(bps)
-	}
-}
-
-// ConversionPriced reports whether 0 < B < F: a round-trip budget exists and
-// something is still left for Paycrest's sender fee.
-func (s *PaycrestOrderService) ConversionPriced() bool {
-	f, ok := feePercentToBps(s.senderFeePercent)
-	return ok && s.roundTripBudgetBps > 0 && s.roundTripBudgetBps < f
-}
-
-// senderFeeFor is the Paycrest sender fee for one order: F on a direct
-// order, F − B on a converted one. "" when conversion is not priced.
-func (s *PaycrestOrderService) senderFeeFor(converted bool) string {
-	if !converted {
-		return s.senderFeePercent
-	}
-	if !s.ConversionPriced() {
+// SenderFeePercentFromBps writes RAMP_COMPANY_TAKE_BPS in the percent form
+// Paycrest's sender fee takes ("" for no take, which the constructor reads
+// as unset).
+func SenderFeePercentFromBps(bps int64) string {
+	if bps <= 0 || bps > math.MaxInt32 {
 		return ""
 	}
-	f, _ := feePercentToBps(s.senderFeePercent)
-	return bpsToFeePercent(f - s.roundTripBudgetBps)
+	return bpsToFeePercent(int(bps))
 }
 
-// ConvertedFeePercent is the sender fee a converted buy or swapped sell sends.
-func (s *PaycrestOrderService) ConvertedFeePercent() string { return s.senderFeeFor(true) }
+// ConversionPriced reports whether the company take is a usable sender fee,
+// so a converted buy or swapped sell knows what Paycrest is sent. Unset or
+// refused, Paycrest would apply its dashboard default instead — a fee nobody
+// quoted — so conversion stays off.
+func (s *PaycrestOrderService) ConversionPriced() bool {
+	_, ok := parseSenderFeePercent(s.senderFeePercent)
+	return ok
+}
+
+// TakePercent is the company take as the sender fee every ramp order sends.
+func (s *PaycrestOrderService) TakePercent() string { return s.senderFeePercent }
+
+// PayFeeSplit is TSA Pay's own Paycrest pricing, kept exactly as it was before
+// the ramp moved to the company take (owner ruling 2026-10-07: merchant payout
+// economics do not change). FeePercent is F (TSA_PAY_FEE_PERCENT): the
+// platform fee a payment is split by and the sender fee on its direct payout,
+// which KeepSurplus may raise to take the deposit's cushion. A converted
+// payment's swap may spend BudgetBps of it (TSA_PAY_ROUND_TRIP_BUDGET_BPS,
+// unspent rest as our LiFi fee), so its payout is sent F − B.
+type PayFeeSplit struct {
+	FeePercent string
+	BudgetBps  int
+}
+
+// SenderFee is the payout's sender fee: F direct, F − B converted. "" when F
+// is unusable or, converted, when 0 < B < F does not hold.
+func (p PayFeeSplit) SenderFee(converted bool) string {
+	pct, ok := parseSenderFeePercent(p.FeePercent)
+	if !ok {
+		return ""
+	}
+	if !converted {
+		return strconv.FormatFloat(pct, 'f', -1, 64)
+	}
+	f, _ := feePercentToBps(p.FeePercent)
+	if p.BudgetBps <= 0 || p.BudgetBps >= f {
+		return ""
+	}
+	return bpsToFeePercent(f - p.BudgetBps)
+}
+
+// SetPayFeeSplit wires TSA Pay's split (see PayFeeSplit).
+func (s *PaycrestOrderService) SetPayFeeSplit(p PayFeeSplit) { s.pay = p }
 
 // ErrConversionUnavailable refuses a converted buy: the feature is off, no
 // treasury is configured (or its lanes disagree on an address), or the
@@ -347,7 +371,8 @@ func (s *PaycrestOrderService) explainMissingVenue(ctx context.Context, side, fi
 }
 
 // NewPaycrestOrderService returns nil unless everything it needs is wired, so
-// routes can be gated the same way the rest of the package is.
+// routes can be gated the same way the rest of the package is. feePercent is
+// the company take as a sender-fee percent (SenderFeePercentFromBps).
 func NewPaycrestOrderService(db *gorm.DB, pc PaycrestOrderer, quotes *PaycrestQuoteService, dir *PaycrestDirectory, feePercent, feeAddress string) *PaycrestOrderService {
 	if db == nil || pc == nil || quotes == nil {
 		return nil
@@ -358,7 +383,7 @@ func NewPaycrestOrderService(db *gorm.DB, pc PaycrestOrderer, quotes *PaycrestQu
 			// Canonical form, so "0.50" compares equal to Paycrest's "0.5".
 			feePercent = strconv.FormatFloat(pct, 'f', -1, 64)
 		} else {
-			log.Printf("[paycrest] ALARM PAYCREST_SENDER_FEE_PERCENT=%q refused (want 0 < p <= %d); orders fall back to the dashboard fee and quotes show none",
+			log.Printf("[paycrest] ALARM RAMP_COMPANY_TAKE_BPS as a sender fee (%q%%) refused (want 0 < p <= %d%%); orders fall back to the dashboard fee and quotes show none",
 				feePercent, maxSenderFeePercent)
 			feePercent = ""
 		}
@@ -443,8 +468,8 @@ type PaycrestBuyRequest struct {
 	// ignored on every EVM destination. A refund still goes to WalletAddress:
 	// this names where the ASSET lands, never where money comes back to.
 	DestinationAddress string
-	// QuotedMarkupBps is the round-trip budget (the venue's markupBps) of the
-	// converted quote she accepted. The order refuses a fee risen more than
+	// QuotedMarkupBps is the route cost B′ (the venue's markupBps) of the
+	// converted quote she accepted. The order refuses a cost risen more than
 	// quotedFeeToleranceBps past it; zero (an older app) skips the check.
 	QuotedMarkupBps int
 	// RefundAccount is where naira returns if the order fails. Defaults to the
@@ -466,8 +491,8 @@ type PaycrestBuyRequest struct {
 // typed and receives correspondingly less token. Same margin, one number.
 //
 // Returns the requested amount unchanged when the fee percent is unknown —
-// which is the case when PAYCREST_SENDER_FEE_PERCENT is unset and the value
-// comes from the dashboard profile instead. Guessing it would put the user's
+// which is the case when the take is unset or refused and the value comes
+// from the dashboard profile instead. Guessing it would put the user's
 // transfer a few kobo off the amount the provider is waiting for, and an
 // inexact transfer is exactly what strands a payment.
 func grossDownForSenderFee(requested, feePercent string) (string, bool) {
@@ -483,13 +508,8 @@ func grossDownForSenderFee(requested, feePercent string) (string, bool) {
 }
 
 // userRate is the rate stored on the order and shown to the user: the
-// provider's rate with the fee Paycrest charged priced in.
-//
-// On a DIRECT order the provider's own rate stays recoverable from the row's
-// SenderFeePercent. That no longer holds for a converted row: it stores the
-// F-priced rate the user was quoted, while the order itself was sent at
-// F − B, so the provider's rate there is Paycrest's own order.Rate and
-// nothing on the row reconstructs it.
+// provider's rate with the fee Paycrest charged priced in, so the provider's
+// own rate stays recoverable from the row's SenderFeePercent.
 func userRate(side, providerRate, feePercent string) string {
 	pct, _ := parseSenderFeePercent(feePercent)
 	rate, _, err := quotedRate(side, providerRate, pct)
@@ -500,14 +520,14 @@ func userRate(side, providerRate, feePercent string) string {
 }
 
 // chargedFeePercent is the fee Paycrest reports on the order, falling back to
-// want (the fee this order was actually sent with — F direct, F − B
-// converted) when it reports none.
+// want (the fee this order was actually sent with — the take, or a TSA Pay
+// payout's own) when it reports none.
 //
 // A mismatch is an operator alarm, not a rounding note: the quote priced in
 // want, so a different charge means the user was shown one amount and paid or
-// received another. It happens when PAYCREST_SENDER_FEE_PERCENT is unset or
-// refused — the request then omits the fee and the dashboard default applies
-// — or when the dashboard changes under a set env var.
+// received another. It happens when the take is unset or refused — the
+// request then omits the fee and the dashboard default applies — or when the
+// dashboard changes under a set env var.
 func (s *PaycrestOrderService) chargedFeePercent(order *PaycrestOrder, ref, want string) string {
 	reported := strings.TrimSpace(order.SenderFeePercent)
 	if reported == "" {
@@ -627,9 +647,11 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		return nil, cerr
 	}
 
-	feeForOrder := s.senderFeeFor(converting)
-	if converting && feeForOrder == "" {
-		return nil, fmt.Errorf("%w: the round-trip budget leaves no Paycrest fee", ErrConversionUnavailable)
+	// The company take is the sender fee, direct or converted: a converted
+	// order's route cost is passed on at cost in T, never carved out of it.
+	feeForOrder := s.senderFeePercent
+	if converting && !s.ConversionPriced() {
+		return nil, fmt.Errorf("%w: the company take is not a usable Paycrest fee", ErrConversionUnavailable)
 	}
 
 	var venue *PaycrestVenue
@@ -756,10 +778,9 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		// opened pointing somewhere the route does not pay. Empty on every EVM
 		// destination, where the user's own wallet is the recipient.
 		row.DestinationAddress = firstNonEmpty(venue.RequestedDestination, req.WalletAddress)
-		// T, what she is owed, comes from PAYCREST'S OWN delivered amount —
-		// not from the venue's quote. The order was sent at F − B, so the
-		// amount Paycrest will deliver is already B bigger than a direct
-		// order's; restating it at F is exactly what that B has to cover.
+		// T, what she is owed, comes from PAYCREST'S OWN delivered amount D —
+		// not from the venue's quote — less the route's cost B′, the one
+		// formula the quote priced her on (ConversionOwed).
 		orderAmountBaseUnits, perr := DecimalToBaseUnits(order.Amount, tokenDecimalsFor(s.quotes.chainID(venue.ChainKey), venue.Token))
 		if perr != nil {
 			// An unreadable amount cannot be silently left empty: an empty
@@ -774,17 +795,9 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 			row.Fault = models.FaultPlatform
 			row.FailureReason = "Paycrest reported an amount we could not read, so what the buyer is owed could not be computed. Needs manual settlement."
 		} else {
-			// Restated at the fee SHE pays on this route — F − B + B′, where
-			// B′ is the venue's own budget (B unless a dear route raised it).
-			fBps, _ := feePercentToBps(s.senderFeePercent)
-			budget := s.roundTripBudgetBps
-			if venue.MarkupBps > 0 {
-				budget = venue.MarkupBps
-			}
-			row.QuotedAmount = QuotedFromOrder(orderAmountBaseUnits, fBps-s.roundTripBudgetBps+budget, budget).String()
+			row.QuotedAmount = ConversionOwed(orderAmountBaseUnits, venue.MarkupBps).String()
 		}
 		row.EstimatedAmount = venue.EstimatedAmount
-		row.Rate = venue.Rate // the F-priced rate she was shown, not Paycrest's F − B one
 		row.MarkupBps = venue.MarkupBps
 		row.PromisedAmount = venue.PromisedAmount
 		// Paycrest holds the money until it delivers to the treasury — see
@@ -925,13 +938,21 @@ func (s *PaycrestOrderService) CreateSell(ctx context.Context, req PaycrestSellR
 // CreateSellForToken opens an offramp for an EXACT token amount she already
 // holds — the swapped sell (design §5.3), where the USDC on Base is a fact on
 // chain and the naira follows from it, rather than a naira figure she typed
-// that the token amount is derived from.
-//
-// converted picks the sender fee: F − B, because the round-trip budget was
-// already spent getting her token into USDC. It shares openOfframp with
-// CreateSell rather than repeating it — one place opens an offramp and writes
-// its row, whichever direction sized it.
-func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req PaycrestSellRequest, tokenAmount string, converted bool) (*models.PaycrestOrderRecord, error) {
+// that the token amount is derived from. It is sent at the company take, like
+// every ramp order: the swap's cost was passed on at cost in her LiFi route.
+func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req PaycrestSellRequest, tokenAmount string) (*models.PaycrestOrderRecord, error) {
+	if s == nil {
+		return nil, ErrPaycrestDisabled
+	}
+	return s.sellForToken(ctx, req, tokenAmount, s.senderFeePercent, false)
+}
+
+// sellForToken is CreateSellForToken at an explicit sender fee: the take for
+// a ramp sale, a TSA Pay payout's own for CreateSellForFiat. keepSurplus opens
+// a KeepSurplus order with fee as its base (a TSA Pay direct payout). It
+// shares openOfframp with CreateSell rather than repeating it — one place
+// opens an offramp and writes its row, whichever direction sized it.
+func (s *PaycrestOrderService) sellForToken(ctx context.Context, req PaycrestSellRequest, tokenAmount, fee string, keepSurplus bool) (*models.PaycrestOrderRecord, error) {
 	if s == nil {
 		return nil, ErrPaycrestDisabled
 	}
@@ -950,11 +971,10 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 	if !ok {
 		return nil, fmt.Errorf("paycrest: unusable sell amount %q", tokenAmount)
 	}
-	fee := s.senderFeeFor(converted)
 	feeVal, ok := parseSenderFeePercent(fee)
 	if !ok {
-		// A converted sell with no priced F − B would be sent at Paycrest's
-		// dashboard default, which is not the fee she was quoted.
+		// Sent with no usable fee, Paycrest would apply its dashboard default,
+		// which is not the fee she was quoted.
 		return nil, ErrConversionUnavailable
 	}
 
@@ -1002,7 +1022,7 @@ func (s *PaycrestOrderService) CreateSellForToken(ctx context.Context, req Paycr
 		// that figure, not whatever tokens × rate rounds to; CreateSellForFiat
 		// then proves the order's payout actually covers it.
 		fiatAmount = stated
-		if owed, ok := new(big.Rat).SetString(stated); ok && req.KeepSurplus && !converted {
+		if owed, ok := new(big.Rat).SetString(stated); ok && keepSurplus {
 			return s.openKeepSurplusOfframp(ctx, req, venue, tokens, tokenAmount, fiatAmount, payoutInst, fee, owed)
 		}
 	}

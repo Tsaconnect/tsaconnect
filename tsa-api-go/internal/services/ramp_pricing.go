@@ -225,15 +225,6 @@ func StablePromise(entitled *big.Int, srcDecimals, dstDecimals int) *big.Int {
 	return rescaleUnits(bpsShare(entitled, 10_000-stableHeadroomBps), srcDecimals, dstDecimals)
 }
 
-// QuotedFromOrder is T from Paycrest's own order amount: what a direct order
-// at F would have delivered, given this order was sent at F − B. Using the
-// order's amount (not the venue's quote) keeps T consistent with what the
-// treasury actually receives even if the provider's rate moved.
-func QuotedFromOrder(orderAmount *big.Int, feeBps, budgetBps int) *big.Int {
-	out := new(big.Int).Mul(orderAmount, big.NewInt(int64(10_000+feeBps-budgetBps)))
-	return out.Quo(out, big.NewInt(int64(10_000+feeBps)))
-}
-
 // EntitledAmount is what she is owed from a delivery: the quoted amount, cut
 // in proportion when Paycrest delivered less than the order expected.
 func EntitledAmount(quoted, expected, received *big.Int) *big.Int {
@@ -245,8 +236,9 @@ func EntitledAmount(quoted, expected, received *big.Int) *big.Int {
 }
 
 // ConversionOwed is T, what a converted buy owes in the settlement token once
-// the round-trip budget B′ is held back: D × (10 000 − B′) ÷ 10 000, floored
-// (spec §15.7). The pricer, the open and the handoff all use it.
+// the route's cost B′ is held back: D × (10 000 − B′) ÷ 10 000, floored (spec
+// §15.7). The pricer, every open (Paycrest's from its own delivered amount)
+// and the handoff all use it.
 func ConversionOwed(delivered *big.Int, markupBps int) *big.Int {
 	return PromisedAmount(delivered, markupBps) // one formula: D less the budget
 }

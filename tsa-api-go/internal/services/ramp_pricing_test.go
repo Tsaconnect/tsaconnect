@@ -111,14 +111,6 @@ func TestStablePromise(t *testing.T) {
 	}
 }
 
-func TestQuotedFromOrder(t *testing.T) {
-	// Paycrest delivers 100.5 at F − B = 0.5%; a direct order at F = 1% would
-	// have delivered 100.5 × 10050/10100 = 100.00247… -> 100002475.
-	if got := QuotedFromOrder(big.NewInt(100_500000), 100, 50); got.String() != "100002475" {
-		t.Fatalf("quoted = %v, want 100002475", got)
-	}
-}
-
 func TestEntitledAmount(t *testing.T) {
 	q, e := big.NewInt(100_000000), big.NewInt(100_500000)
 	if got := EntitledAmount(q, e, big.NewInt(100_500000)); got.Cmp(q) != 0 {

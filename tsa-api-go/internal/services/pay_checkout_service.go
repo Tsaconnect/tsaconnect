@@ -162,7 +162,7 @@ func (s *PayCheckoutService) Quote(ctx context.Context, user *models.User, id uu
 	}
 	q, err := s.quoter.Quote(ctx, SellQuoteInput{
 		FromChainID: in.SourceChainID, FromToken: in.SourceToken, FromAddress: in.SourceAddress,
-		WalletAddress: user.WalletAddress, FiatCode: "NGN", ToAmount: target.String(),
+		WalletAddress: user.WalletAddress, FiatCode: "NGN", ToAmount: target.String(), TSAPay: true,
 	})
 	if err != nil {
 		return nil, err

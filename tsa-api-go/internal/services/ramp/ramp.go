@@ -93,15 +93,9 @@ func (v Venue) Target() VenueKey {
 	return VenueKey{ChainKey: strings.ToLower(v.ChainKey), Token: strings.ToUpper(v.Token)}
 }
 
-// VenueFee is one provider fee inside a venue (spec §14): Token is the fee in
-// tokens and Ngn its naira value at the display rate, both decimal strings.
-type VenueFee struct {
-	Kind     string `json:"kind"` // "conversion" | "network"
-	Label    string `json:"label"`
-	Provider string `json:"provider"` // display name for the tag (Decision D39)
-	Token    string `json:"token"`
-	Ngn      string `json:"ngn"`
-}
+// VenueFee is one third-party cost inside a venue (spec §14) — the services
+// type, so a Paycrest venue's fee lines and the router's are one shape.
+type VenueFee = services.VenueFee
 
 // RankRate is the rate a venue is ranked and price-guarded on: the all-in
 // rate, or the rate itself when the provider gives no separate one (D40).

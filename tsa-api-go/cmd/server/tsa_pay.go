@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/hex"
 	"log"
-	"os"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -52,9 +51,9 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 		return nil
 	}
 
-	feeBps, ok := services.PayFeeBps(os.Getenv("PAYCREST_SENDER_FEE_PERCENT"))
+	feeBps, ok := services.PayFeeBps(cfg.TSAPayFeePercent)
 	if !ok {
-		log.Printf("[tsa-pay] dormant: PAYCREST_SENDER_FEE_PERCENT is unset or unparsable — TSA Pay prices off the same platform fee as the ramp")
+		log.Printf("[tsa-pay] dormant: TSA_PAY_FEE_PERCENT is unset or unparsable — TSA Pay has no platform fee to price on")
 		return nil
 	}
 

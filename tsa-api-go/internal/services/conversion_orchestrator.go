@@ -94,21 +94,8 @@ type ConversionOrchestrator struct {
 	// legCeiling is the outer bound on ANY pending leg, liveness included.
 	// See defaultLegCeiling.
 	legCeiling time.Duration
-	// budgetBps is B: the slice of the user-facing markup that pays for one
-	// converted order's round trip (LiFi's own cost plus the treasury's gas).
-	// Pushed in by the wiring via SetRoundTripBudgetBps, from the same config
-	// value the quote and order services are given, so a route can never be
-	// executed against a budget the order was not priced on.
-	budgetBps int
-	now       func() time.Time
+	now        func() time.Time
 }
-
-// SetRoundTripBudgetBps sets B, the same way PaycrestOrderService takes it.
-// buildRampConversion only ever reaches this point once ConversionPriced()
-// has established 0 < B < F, so a zero here means nobody wired it — and a
-// zero budget refuses every non-legacy route, which is the fail-closed
-// direction.
-func (o *ConversionOrchestrator) SetRoundTripBudgetBps(bps int) { o.budgetBps = bps }
 
 // SetSolanaLanding wires the chain client that proves a Solana delivery. Left
 // unset (no Solana chain configured) a Solana landing never settles — the same
@@ -809,16 +796,13 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 			return err
 		}
 		// The whole round trip — LiFi's own cost plus the gas the treasury
-		// pays — has to fit inside B, the slice of the user-facing markup this
-		// conversion was priced on. Over it, the attempt is freed rather than
-		// executed at a loss; the retry window is already running from attempt
-		// 1, so a route that never comes back into budget refunds on its own.
-		// The order's own budget B′ when it was priced on a raised one;
-		// otherwise (and on rows from before budgets were per order) B.
-		budget := o.budgetBps
-		if order.MarkupBps > 0 {
-			budget = order.MarkupBps
-		}
+		// pays — has to fit inside B′, the route cost this order was priced
+		// and charged on (MarkupBps, stamped on every order that records a
+		// quoted amount). Over it, the attempt is freed rather than executed
+		// at a loss; the retry window is already running from attempt 1, so a
+		// route that never comes back into budget refunds on its own. A row
+		// with no budget refuses every route: the fail-closed direction.
+		budget := order.MarkupBps
 		if l2, ok := LiFiCostBps(route); !ok || l2+TreasuryGasBps(route, treasuryERC20Gas) > budget {
 			return o.failLeg(detached(ctx), leg.ID,
 				fmt.Sprintf("round trip over the %d bps budget", budget))

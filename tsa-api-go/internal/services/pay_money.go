@@ -39,5 +39,5 @@ func PayAmounts(amountKobo int64, feeBps, customerSharePct int) (PaySplit, error
 	return PaySplit{CustomerTotalKobo: c, MerchantNetKobo: n, FeeKobo: c - n}, nil
 }
 
-// PayFeeBps reads PAYCREST_SENDER_FEE_PERCENT the way every order does.
+// PayFeeBps reads TSA_PAY_FEE_PERCENT the way a payment's payout order does.
 func PayFeeBps(pct string) (int, bool) { return feePercentToBps(pct) }

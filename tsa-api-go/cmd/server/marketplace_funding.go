@@ -55,11 +55,11 @@ func buildMarketplaceFunding(cfg *config.Config, chains *services.BlockchainServ
 		return nil
 	}
 	if quoter == nil {
-		// Delivery-only: no Paycrest quote service and no B of its own — every
-		// funding names its token and is given its whole budget.
+		// Delivery-only: no Paycrest quote service and no offramp pricing —
+		// every funding names its token and is given its whole budget.
 		quoter = services.NewRampSellQuoter(
 			services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID),
-			nil, chains, 0, "", 0)
+			nil, chains, "", 0)
 		configureRampQuoter(quoter, cfg, chains)
 	}
 	if intents == nil {

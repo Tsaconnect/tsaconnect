@@ -675,7 +675,7 @@ func TestCreateSellForFiat_CancelsAnOrderWhosePayoutCameInShort(t *testing.T) {
 func TestCreateSellForToken_HonoursAStatedFiatAmount(t *testing.T) {
 	r := newOrderServiceWithFakes(t)
 	req := payoutReq(t, r)
-	order, err := r.svc.CreateSellForToken(context.Background(), req, "34", true)
+	order, err := r.svc.CreateSellForToken(context.Background(), req, "34")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -124,7 +124,7 @@ type PayPaymentService struct {
 }
 
 // NewPayPaymentService constructs a PayPaymentService. feeBps is the
-// platform fee (PAYCREST_SENDER_FEE_PERCENT, as bps); checkoutBase is the
+// platform fee (TSA_PAY_FEE_PERCENT, as bps); checkoutBase is the
 // public checkout page a merchant's customer is sent to.
 func NewPayPaymentService(db *gorm.DB, merchants *PayMerchantService, feeBps int, checkoutBase string, now func() time.Time) *PayPaymentService {
 	return &PayPaymentService{db: db, merchants: merchants, feeBps: feeBps, checkoutBase: checkoutBase, now: now}

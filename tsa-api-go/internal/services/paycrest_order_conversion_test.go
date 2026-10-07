@@ -51,7 +51,7 @@ type fakePaycrestConversionClient struct {
 	lastOfframp  PaycrestOfframpRequest
 	offrampErr   error
 	// offrampRate is the provider's own rate on the order it answers with;
-	// empty is the book's 1500, which the F − B fee then prices at 1492.50.
+	// empty is the book's 1500, which a 0.5% fee then prices at 1492.50.
 	offrampRate string
 	// offrampSenderFee is the fee amount Paycrest reports on the order; empty reports none.
 	offrampSenderFee string
@@ -185,12 +185,13 @@ func newOrderServiceWithFakes(t *testing.T) *orderConversionRig {
 	if svc == nil {
 		t.Fatal("NewPaycrestOrderService returned nil")
 	}
-	// A converted order needs an explicit F to split into F − B — default it
-	// here (config's own default B=50bps against a plausible F=1%) so tests
-	// that only care about conversion routing don't each have to set it; a
-	// test that cares about the split itself overrides these directly.
-	svc.senderFeePercent = "1"
-	svc.SetRoundTripBudgetBps(50)
+	// Orders are sent the company take (config's default 50 bps) — set here
+	// on the order side only, so the quote side keeps pricing at the
+	// provider's own rate and tests that only care about conversion routing
+	// don't each have to set it; takeRig sets it on both. TSA Pay's payouts
+	// keep their own split (production's F = 1%, B = 50 bps).
+	svc.senderFeePercent = "0.5"
+	svc.SetPayFeeSplit(PayFeeSplit{FeePercent: "1", BudgetBps: 50})
 	svc.dir = NewPaycrestDirectory(
 		&stubInstitutions{rows: []PaycrestInstitution{{Name: "Access Bank", Code: "ABNGNGLA"}}},
 		&stubBankDir{rows: []NombaBank{{Name: "Access Bank", Code: "044"}}},
@@ -429,20 +430,20 @@ func TestCreateBuy_StoresTheRequestedAssetAndWhatSheIsOwed(t *testing.T) {
 		t.Fatalf("row = %+v", row)
 	}
 	orderAmount, _ := DecimalToBaseUnits(row.TokenAmount, 6)
-	if want := QuotedFromOrder(orderAmount, 100, 50).String(); row.QuotedAmount != want {
-		t.Fatalf("quoted = %q, want %q (Paycrest's amount at F−B, restated at F)", row.QuotedAmount, want)
+	if want := ConversionOwed(orderAmount, 30).String(); row.MarkupBps != 30 || row.QuotedAmount != want {
+		t.Fatalf("budget %d, quoted = %q, want 30 and %q (Paycrest's own amount less the route's 30 bps)", row.MarkupBps, row.QuotedAmount, want)
 	}
 	if row.EstimatedAmount == "" || row.PromisedAmount != "" {
 		t.Fatalf("estimate/promise = %q/%q", row.EstimatedAmount, row.PromisedAmount)
 	}
 }
 
-// A route dearer than the floor raises the user's fee, not ours: Paycrest is
-// still sent F − B, and what she is owed is restated at F − B + B′ using the
-// order's own budget B′ (l 100 + g 0 + 10 headroom = 110).
+// A dearer route raises what she pays by its own cost, never our take:
+// Paycrest is still sent the take, and she is owed Paycrest's own amount less
+// the order's budget B′ (l 100 + g 0 + 10 headroom = 110).
 func TestCreateBuy_ADearerRouteOwesAgainstItsOwnBudget(t *testing.T) {
 	r := newOrderServiceWithFakes(t)
-	r.quotes.SetSenderFeePercent("1")
+	r.quotes.SetSenderFeePercent("0.5")
 	r.svc.SetConversionEnabled(true)
 	r.svc.SetTreasury("0xTreasury")
 	r.lifi.route.Data = testBridgeCalldata(t, orderTestUserWallet, 56, false)
@@ -464,8 +465,8 @@ func TestCreateBuy_ADearerRouteOwesAgainstItsOwnBudget(t *testing.T) {
 		t.Fatalf("fee sent = %q markup = %d, want 0.5 and 110", r.client.lastCreate.SenderFeePercent, row.MarkupBps)
 	}
 	orderAmount, _ := DecimalToBaseUnits(row.TokenAmount, 6)
-	if want := QuotedFromOrder(orderAmount, 160, 110).String(); row.QuotedAmount != want {
-		t.Fatalf("quoted = %q, want %q (Paycrest's amount at 0.5%%, restated at 1.6%%)", row.QuotedAmount, want)
+	if want := ConversionOwed(orderAmount, 110).String(); row.QuotedAmount != want {
+		t.Fatalf("quoted = %q, want %q (Paycrest's amount less the route's 1.1%%)", row.QuotedAmount, want)
 	}
 	// And what she is owed is what the quote showed her, to within rounding.
 	venues, _ := r.quotes.ConvertedVenues(context.Background(), "buy", "NGN", req.FiatAmount, []RequestedAsset{{
