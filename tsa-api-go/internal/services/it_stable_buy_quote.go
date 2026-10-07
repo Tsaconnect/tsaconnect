@@ -42,7 +42,10 @@ type StableBuyQuote struct {
 	// SendFeeUnits is Flutterwave's external-send fee inside AssetUnits. Nil
 	// for every other quote.
 	SendFeeUnits *big.Int
-	ExpiresAt    time.Time
+	// PayIn is the channel whose funding fee is in Fees (an in-house buy's
+	// quote); "" when the quote carries no funding line.
+	PayIn     PayInChannel
+	ExpiresAt time.Time
 }
 
 // QuoteStableBuy prices `fiatMinor` of `currency` into `asset`.

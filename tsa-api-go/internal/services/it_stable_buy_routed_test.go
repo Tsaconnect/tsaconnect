@@ -22,7 +22,20 @@ func newRoutedQuoteService(t *testing.T) *ITService {
 		t.Fatal(err)
 	}
 	wireStableBuyPrereqs(s)
+	// The pricing fixtures below were all worked at the central account's
+	// 1.40% funding fee; this rig has no central account (VA mode), so the VA
+	// fee is pinned to the same figure. Channel pricing itself — 1.40% central,
+	// 2.15% VA — is pinned in it_stable_buy_funding_channel_test.go.
+	pinFundingFee(t, s)
 	return s
+}
+
+// pinFundingFee prices both pay-in channels at the central account's fee.
+func pinFundingFee(t *testing.T, s *ITService) {
+	t.Helper()
+	if err := s.SetRampBuyTerms(RampBuyTerms{VAFundingFeeBps: DefaultRampFundingFeeBps}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func wantUnits(t *testing.T, name string, got *big.Int, want int64) {
@@ -195,7 +208,7 @@ func TestInHouseFees_ReconcileExactlyForBothProviders(t *testing.T) {
 	s := newRoutedQuoteService(t)
 	for _, rate := range []*big.Rat{routedFWRate, big.NewRat(180137, 100), big.NewRat(1499, 1), big.NewRat(138751, 100)} {
 		for naira := int64(30_000); naira <= 3_000_000; naira += 7_919 {
-			q, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(naira*100), rate, false)
+			q, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(naira*100), rate, false, PayInCentral)
 			if err != nil {
 				t.Fatalf("₦%d at %s: %v", naira, rate.FloatString(2), err)
 			}
@@ -204,7 +217,7 @@ func TestInHouseFees_ReconcileExactlyForBothProviders(t *testing.T) {
 	}
 	for _, market := range []*big.Rat{treasuryMarket, big.NewRat(139733, 100), big.NewRat(1501, 1)} {
 		for naira := int64(100); naira <= 270_000; naira += 1_237 {
-			q, err := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(naira*100), market, false)
+			q, err := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(naira*100), market, false, PayInCentral)
 			if err != nil {
 				t.Fatalf("₦%d at %s: %v", naira, market.FloatString(2), err)
 			}
@@ -328,10 +341,10 @@ func TestSendFeeMode_DefaultsToWalletAndRefusesTypos(t *testing.T) {
 // Owner 2026-10-04 #1: Flutterwave live pricing has a minimum but no maximum.
 func TestRoutedQuoteAt_LivePricingHasNoMaximum(t *testing.T) {
 	s := newRoutedQuoteService(t)
-	if _, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(400_000_000), routedFWRate, true); !errors.Is(err, ErrStableBuyAboveMaximum) {
+	if _, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(400_000_000), routedFWRate, true, PayInCentral); !errors.Is(err, ErrStableBuyAboveMaximum) {
 		t.Fatalf("quote: %v, want the maximum", err)
 	}
-	if q, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(400_000_000), routedFWRate, false); err != nil || q.AssetUnits.Sign() <= 0 {
+	if q, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(400_000_000), routedFWRate, false, PayInCentral); err != nil || q.AssetUnits.Sign() <= 0 {
 		t.Fatalf("live: %v %v, want priced", q, err)
 	}
 }
@@ -355,7 +368,7 @@ func TestStableBuyFiatPerUnit_GatesAndPlausibility(t *testing.T) {
 }
 
 func TestQuoteRoutedLive_PricesAtTheLiveRateOnRoutedTerms(t *testing.T) {
-	q, err := newRoutedQuoteService(t).quoteRoutedLive(context.Background(), "USDC", big.NewInt(16_502_500), "NGN")
+	q, err := newRoutedQuoteService(t).quoteRoutedLive(context.Background(), "USDC", big.NewInt(16_502_500), "NGN", PayInCentral)
 	if err != nil || q.AssetUnits.Cmp(big.NewInt(95_137_885)) != 0 {
 		t.Fatalf("q = %+v err = %v", q, err)
 	}
@@ -385,7 +398,7 @@ func TestQuoteTreasuryBuy_TakeMinimumMaximum(t *testing.T) {
 	if _, err := s.QuoteTreasuryBuy("USDC", "276554", "NGN", treasuryMarket); !errors.Is(err, ErrStableBuyAboveMaximum) {
 		t.Fatalf("over $200: %v", err)
 	}
-	if _, err := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(27_655_400), treasuryMarket, false); err != nil {
+	if _, err := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(27_655_400), treasuryMarket, false, PayInCentral); err != nil {
 		t.Fatalf("operator waiver: %v, want priced", err)
 	}
 	if got := s.TreasuryMinOrderUnits(treasuryMarket); got.Cmp(big.NewInt(72_781)) != 0 {

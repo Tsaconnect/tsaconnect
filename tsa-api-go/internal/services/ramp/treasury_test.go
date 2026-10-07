@@ -48,7 +48,14 @@ type fakeTreasuryIT struct {
 
 func newFakeTreasuryIT(t *testing.T) *fakeTreasuryIT {
 	t.Helper()
-	return &fakeTreasuryIT{ITService: services.NewITService(nil, nil, nil),
+	it := services.NewITService(nil, nil, nil)
+	// Fixtures are worked at the central account's 1.40% funding fee; this
+	// service is in VA mode, so the VA fee is pinned to it (channel pricing is
+	// pinned in the services package).
+	if err := it.SetRampBuyTerms(services.RampBuyTerms{VAFundingFeeBps: services.DefaultRampFundingFeeBps}); err != nil {
+		t.Fatal(err)
+	}
+	return &fakeTreasuryIT{ITService: it,
 		free: map[string]*big.Int{"base|USDC": big.NewInt(150_000_000)}, gasOK: true,
 		intent: &models.ITIntent{ID: uuid.New(), Provider: models.ITProviderTreasury}}
 }

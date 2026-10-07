@@ -45,7 +45,11 @@ func (s *ITService) repriceTreasuryParked(ctx context.Context, intent *models.IT
 	if !ok || paid.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: no received amount to price", ErrITBadState)
 	}
-	q, err := s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, !waiveMax)
+	ch, err := s.paidThrough(ctx, intent)
+	if err != nil {
+		return nil, err
+	}
+	q, err := s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, !waiveMax, ch)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -391,11 +392,15 @@ type Config struct {
 	RampFlutterwaveSendFeeMode      string
 	RampDailyAbandonCap             int
 	RampHonourGrace                 time.Duration
-	// Owner ruling 2026-10-07: both in-house providers price at the base rate
-	// plus RampCompanyTakeBps (our only margin) and pass third-party costs on
-	// at cost; RampFundingFeeBps is the measured central-account funding fee.
+	// Owner ruling 2026-10-07: every ramp provider prices at its base rate
+	// plus RampCompanyTakeBps (our only margin; resolved ONCE here to
+	// 1..MaxCompanyTakeBps, so every provider reads the same value) and passes
+	// third-party costs on at cost. The funding fee is the cost of the channel
+	// her naira arrives through: RampFundingFeeBps for the central account,
+	// RampVAFundingFeeBps for her virtual account.
 	RampCompanyTakeBps          int64
 	RampFundingFeeBps           int64
+	RampVAFundingFeeBps         int64
 	RampTreasuryMinNGN          string
 	RampTreasuryDailyUserMaxUSD string
 	RampTreasuryLowBalanceUSD   float64
@@ -988,8 +993,10 @@ func Load() *Config {
 	cfg.RampFlutterwaveSendFeeMode = strings.ToLower(strings.TrimSpace(getEnv("RAMP_FLUTTERWAVE_SEND_FEE_MODE", "wallet")))
 	cfg.RampDailyAbandonCap = int(getEnvInt64("RAMP_DAILY_ABANDON_CAP", 5))
 	cfg.RampHonourGrace = time.Duration(getEnvInt64("RAMP_HONOUR_GRACE_SECONDS", 600)) * time.Second
-	cfg.RampCompanyTakeBps = getEnvInt64("RAMP_COMPANY_TAKE_BPS", 50)
+	cfg.RampCompanyTakeBps = companyTakeFromEnv()
 	cfg.RampFundingFeeBps = getEnvInt64("RAMP_FUNDING_FEE_BPS", 140)
+	cfg.RampVAFundingFeeBps = getEnvInt64("RAMP_VA_FUNDING_FEE_BPS", 215)
+	warnRemovedPricingKeys()
 	cfg.RampTreasuryMinNGN = strings.TrimSpace(getEnv("RAMP_TREASURY_MIN_NGN", "100"))
 	cfg.RampTreasuryDailyUserMaxUSD = strings.TrimSpace(getEnv("RAMP_TREASURY_DAILY_USER_MAX_USD", "500"))
 	cfg.RampTreasuryLowBalanceUSD = getEnvFloat64("RAMP_TREASURY_LOW_BALANCE_USD", 50)
@@ -1715,14 +1722,66 @@ func getEnvFloat64(key string, fallback float64) float64 {
 	return fallback
 }
 
+// MaxCompanyTakeBps and DefaultCompanyTakeBps are RAMP_COMPANY_TAKE_BPS's one
+// rule: 1..500 bps (Paycrest takes a sender fee of at most 5%), else 50.
+const (
+	MaxCompanyTakeBps     = 500
+	DefaultCompanyTakeBps = 50
+)
+
+// ValidCompanyTakeBps is that rule, for any code that is handed a take.
+func ValidCompanyTakeBps(bps int64) bool { return bps >= 1 && bps <= MaxCompanyTakeBps }
+
+// companyTakeFromEnv resolves RAMP_COMPANY_TAKE_BPS once for every provider.
+// Unset is the default; anything outside 1..500 (0, negative, too large, not
+// a number) is the default too, loudly — a quote and an order must never
+// read two different takes, nor Paycrest fall back to its dashboard fee.
+func companyTakeFromEnv() int64 {
+	raw, ok := os.LookupEnv("RAMP_COMPANY_TAKE_BPS")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return DefaultCompanyTakeBps
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || !ValidCompanyTakeBps(v) {
+		log.Printf("[config] ALERT ramp_company_take_invalid=1 RAMP_COMPANY_TAKE_BPS=%q is not a take in 1..%d bps: the default %d bps is in force for every provider",
+			raw, MaxCompanyTakeBps, DefaultCompanyTakeBps)
+		return DefaultCompanyTakeBps
+	}
+	return v
+}
+
+// removedPricingKeys are settings the 2026-10-07 pricing change retired. Left
+// in an environment they do nothing, so an operator who edits one expecting a
+// price to move is told at boot.
+var removedPricingKeys = map[string]string{
+	"PAYCREST_SENDER_FEE_PERCENT": "Paycrest orders send RAMP_COMPANY_TAKE_BPS; TSA Pay now reads TSA_PAY_FEE_PERCENT",
+	"RAMP_ROUND_TRIP_BUDGET_BPS":  "conversions pass their route cost on at cost; TSA Pay now reads TSA_PAY_ROUND_TRIP_BUDGET_BPS",
+	"RAMP_TREASURY_MARGIN_BPS":    "the company wallet prices at RAMP_COMPANY_TAKE_BPS",
+	"RAMP_FLUTTERWAVE_SPREAD_BPS": "Flutterwave buys price at RAMP_COMPANY_TAKE_BPS",
+}
+
+func warnRemovedPricingKeys() {
+	keys := make([]string, 0, len(removedPricingKeys))
+	for k := range removedPricingKeys {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if _, set := os.LookupEnv(k); set {
+			log.Printf("[config] WARNING %s is set but no longer read and is ignored: %s. Remove it.", k, removedPricingKeys[k])
+		}
+	}
+}
+
 // MaxConvertedFeeBps bounds a converted fee cap from config: well above any
 // fee we mean to charge, low enough that a typo ("2000" for "200") is refused
 // rather than charged.
 const MaxConvertedFeeBps = 500
 
 // convertedFeeCapFromEnv reads a converted-fee cap. Unset keeps fallback; a
-// value that is not a whole number in 1..MaxConvertedFeeBps turns raising off
-// (0) rather than falling back to something more permissive than was asked.
+// value that is not a whole number in 1..MaxConvertedFeeBps (0 included) is 0:
+// no converted buy or swapped sell on that chain, rather than a fallback more
+// permissive than was asked.
 func convertedFeeCapFromEnv(key string, fallback int) int {
 	raw, ok := os.LookupEnv(key)
 	if !ok || strings.TrimSpace(raw) == "" {
@@ -1730,7 +1789,11 @@ func convertedFeeCapFromEnv(key string, fallback int) int {
 	}
 	v, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || v <= 0 || v > MaxConvertedFeeBps {
-		log.Printf("[config] %s=%q is not a fee cap in 1..%d bps: raising a dear route's fee is off", key, raw, MaxConvertedFeeBps)
+		where := "on chains without their own cap"
+		if chain := strings.TrimPrefix(key, "RAMP_CONVERTED_FEE_MAX_BPS_"); chain != key {
+			where = "on " + strings.ToLower(chain)
+		}
+		log.Printf("[config] %s=%q is not a fee cap in 1..%d bps: converted buys and swapped sells %s are off", key, raw, MaxConvertedFeeBps, where)
 		return 0
 	}
 	return v

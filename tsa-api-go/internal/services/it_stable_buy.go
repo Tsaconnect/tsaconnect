@@ -302,9 +302,15 @@ func (s *ITService) openStableBuy(
 
 	// Where she pays, resolved before anything is written. Central mode never
 	// touches the virtual-account table (see payIntoForStableBuy).
-	payInto, fiatMinor, err := s.payIntoForStableBuy(ctx, userID, q.Currency, q.FiatMinor)
+	payInto, fiatMinor, ch, err := s.payIntoForStableBuy(ctx, userID, q.Currency, q.FiatMinor)
 	if err != nil {
 		return nil, nil, err
+	}
+	// The funding line she was quoted is the cost of one channel; the order
+	// must be paid through that same channel, or her price is not the cost.
+	if q.PayIn != "" && q.PayIn != ch {
+		return nil, nil, fmt.Errorf("%w: how this purchase is paid changed since the quote (%s, quoted %s) — get a new quote",
+			ErrStableQuoteUnavailable, ch, q.PayIn)
 	}
 	// Retire abandoned purchases before looking for an open one.
 	if err := s.expireStaleStableBuys(ctx, userID); err != nil {
@@ -423,7 +429,7 @@ func (s *ITService) payIntoForStableBuy(
 	userID uuid.UUID,
 	currency string,
 	fiatMinor *big.Int,
-) (*StableBuyInstructions, *big.Int, error) {
+) (*StableBuyInstructions, *big.Int, PayInChannel, error) {
 	if central, ok := s.ActiveCentralAccount(); ok {
 		// wholeNairaKobo, not a rounding of our own. It is the SAME function the
 		// matcher rounds the incoming credit with, so the ask and the credit it
@@ -437,7 +443,7 @@ func (s *ITService) payIntoForStableBuy(
 			// Rounding took the ask to nothing. Only reachable for an amount
 			// under half a naira, which the delivery minimum already refuses —
 			// but "pay ₦0 into this account" must never render.
-			return nil, nil, fmt.Errorf("%w: amount rounds to zero at whole-naira granularity",
+			return nil, nil, "", fmt.Errorf("%w: amount rounds to zero at whole-naira granularity",
 				ErrStableBuyBelowMinimum)
 		}
 		return &StableBuyInstructions{
@@ -448,7 +454,7 @@ func (s *ITService) payIntoForStableBuy(
 			// company account. The name and the amount ARE the reference.
 			AmountNGN:        minorToMajor(asked.Int64(), 2),
 			PayerInstruction: central.PayerInstruction(VerifiedLegalNameOf(ctx, s.db, userID)),
-		}, asked, nil
+		}, asked, PayInCentral, nil
 	}
 
 	var va models.FiatVirtualAccount
@@ -459,16 +465,16 @@ func (s *ITService) payIntoForStableBuy(
 			userID, currency, models.FiatVAStatusActive).
 		First(&va).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil, ErrStableBuyNoVA
+		return nil, nil, "", ErrStableBuyNoVA
 	} else if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	return &StableBuyInstructions{
 		AccountNumber: va.AccountNumber,
 		BankName:      va.BankName,
 		AccountName:   va.AccountName,
 		Reference:     va.Reference,
-	}, fiatMinor, nil
+	}, fiatMinor, PayInVA, nil
 }
 
 // stableBuyExpiredReason marks the rows expireStaleStableBuys retired.

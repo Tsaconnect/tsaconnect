@@ -2,8 +2,11 @@ package services
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"testing"
+
+	"github.com/ojimcy/tsa-api-go/internal/config"
 )
 
 // paycrest_take_pricing_test.go — owner ruling 2026-10-07: every Paycrest ramp
@@ -244,5 +247,37 @@ func TestPaycrestTake_TSAPayPayoutIsUnchanged(t *testing.T) {
 	}
 	if res.FeeBps != 10 || res.PassThrough || lifi.lastRequest().FeeBps != 10 || res.Rate != "1492.50" || len(res.Fees) != 0 {
 		t.Fatalf("TSA Pay quote = %+v; want the pre-ruling B − l − g = 10 bps fee at F − B's 1492.50", res)
+	}
+}
+
+// I-1: one RAMP_COMPANY_TAKE_BPS, one rule. Whatever the environment says,
+// the company wallet and Flutterwave (ITService) and Paycrest (orders and
+// quotes) read the same resolved take — so no quote and order can disagree,
+// and Paycrest never falls back to its dashboard fee.
+func TestCompanyTake_EveryProviderSeesTheSameResolvedTake(t *testing.T) {
+	for raw, want := range map[string]int{"0": 50, "-5": 50, "501": 50, "abc": 50, "": 50, "120": 120, "500": 500} {
+		t.Setenv("RAMP_COMPANY_TAKE_BPS", raw)
+		cfg := config.Load()
+
+		it := NewITService(nil, nil, nil)
+		if err := it.SetRampBuyTerms(RampBuyTerms{CompanyTakeBps: cfg.RampCompanyTakeBps}); err != nil {
+			t.Fatalf("%q: in-house refused the resolved take %d: %v", raw, cfg.RampCompanyTakeBps, err)
+		}
+		base, _ := newPaycrestOrderTestService(t)
+		quotes := NewPaycrestQuoteService(&stubQuoter{market: 1500}, []string{"USDC"}, []string{"base"})
+		orders := NewPaycrestOrderService(base.db, stubPaycrestOrderer{}, quotes, base.dir,
+			SenderFeePercentFromBps(cfg.RampCompanyTakeBps), "")
+		paycrest, ok := feePercentToBps(orders.TakePercent())
+		if !ok || !orders.ConversionPriced() {
+			t.Fatalf("%q: Paycrest has no usable take (%q)", raw, orders.TakePercent())
+		}
+		quoted := int(math.Round(quotes.senderFeePercent * 100))
+		if got := int(it.rampTerms().takeBps); got != want || paycrest != want || quoted != want {
+			t.Fatalf("%q: in-house %d, Paycrest orders %d, Paycrest quotes %d; want all %d", raw, got, paycrest, quoted, want)
+		}
+	}
+	// And the in-house setter holds the same rule if handed a take directly.
+	if err := NewITService(nil, nil, nil).SetRampBuyTerms(RampBuyTerms{CompanyTakeBps: 501}); err == nil {
+		t.Fatal("in-house accepted a 501 bps take that Paycrest cannot send")
 	}
 }

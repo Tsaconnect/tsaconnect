@@ -181,7 +181,7 @@ func (s *ITStableClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 	// by hand before the buyer sees anything at all.
 	// D33: the honour window is measured when the money ARRIVED.
 	claimed, err := s.it.claimAndPriceStableBuy(ctx, &intent, ref, fmt.Sprintf("%d", gross),
-		creditArrival(credit, time.Now()), false)
+		creditArrival(credit, time.Now()), false, PayInCentral)
 	if err != nil {
 		return err
 	}

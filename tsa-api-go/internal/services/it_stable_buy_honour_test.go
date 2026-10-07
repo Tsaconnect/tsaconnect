@@ -82,7 +82,7 @@ func TestRoutedBuy_OffAmountInsideTheWindowIsPricedLive(t *testing.T) {
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_half", "8251250"); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
-	want, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(8_251_250), big.NewRat(1800, 1), false)
+	want, err := s.routedQuoteAt("USDC", "NGN", big.NewInt(8_251_250), big.NewRat(1800, 1), false, PayInCentral)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestRoutedBuy_LatePaymentIsRepricedAndTheUserIsTold(t *testing.T) {
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_late", "16502500"); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
-	want, _ := s.routedQuoteAt("USDC", "NGN", big.NewInt(16_502_500), big.NewRat(1800, 1), false)
+	want, _ := s.routedQuoteAt("USDC", "NGN", big.NewInt(16_502_500), big.NewRat(1800, 1), false, PayInCentral)
 	got := reloadIntent(t, s, intent.ID)
 	if got.AssetAmount != want.AssetUnits.String() || !StableBuyRateUpdated(&got) ||
 		!strings.Contains(logs.String(), "ramp_fw_repriced intent="+intent.ID.String()) {
@@ -256,7 +256,9 @@ func TestRoutedBuy_WebhookRedeliveryOfAnHonouredChargeDoesNotReprice(t *testing.
 	if replayed, claimed, err := s.finishStableBuyReplay(ctx, "chg_va_honour", false); err != nil || !replayed || !claimed {
 		t.Fatalf("poller replay: replayed=%v claimed=%v err=%v", replayed, claimed, err)
 	}
-	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "95137885" || got.Repriced {
+	// Paid into her virtual account, so quoted and honoured at the VA's 2.15%
+	// funding fee (the central account's 1.40% gave 95137885).
+	if got := reloadIntent(t, s, intent.ID); got.Status != models.ITStatusPaymentReceived || got.AssetAmount != "94402809" || got.Repriced {
 		t.Fatalf("status=%s asset=%s repriced=%v", got.Status, got.AssetAmount, got.Repriced)
 	}
 }

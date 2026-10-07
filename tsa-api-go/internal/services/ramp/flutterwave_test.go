@@ -45,7 +45,14 @@ type fakeFWIT struct {
 
 func newFakeFWIT(t *testing.T) *fakeFWIT {
 	t.Helper()
-	return &fakeFWIT{ITService: services.NewITService(nil, nil, nil), rate: big.NewRat(165025, 100)}
+	it := services.NewITService(nil, nil, nil)
+	// Fixtures are worked at the central account's 1.40% funding fee; this
+	// service is in VA mode, so the VA fee is pinned to it (channel pricing is
+	// pinned in the services package).
+	if err := it.SetRampBuyTerms(services.RampBuyTerms{VAFundingFeeBps: services.DefaultRampFundingFeeBps}); err != nil {
+		t.Fatal(err)
+	}
+	return &fakeFWIT{ITService: it, rate: big.NewRat(165025, 100)}
 }
 
 func (f *fakeFWIT) HasStableBuy() bool { return true }

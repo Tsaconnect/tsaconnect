@@ -63,7 +63,7 @@ func TestTreasurySettle_OffAmountIsPricedLiveAtMarketPlusMargin(t *testing.T) {
 	if _, err := s.settleStableBuyFromCharge(context.Background(), userID, "chg_t_off", "900000"); err != nil {
 		t.Fatal(err)
 	}
-	want, _ := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(900_000), treasuryMarket, true)
+	want, _ := s.treasuryQuoteAt("USDC", "NGN", big.NewInt(900_000), treasuryMarket, true, PayInCentral)
 	got := reloadIntent(t, s, intent.ID)
 	if got.Status != models.ITStatusPaymentReceived || got.AssetAmount != want.AssetUnits.String() || !got.Repriced {
 		t.Fatalf("status=%s asset=%s, want %s live", got.Status, got.AssetAmount, want.AssetUnits)

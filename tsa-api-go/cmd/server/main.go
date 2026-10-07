@@ -1121,8 +1121,9 @@ func main() {
 			DailyAbandonCap: cfg.RampDailyAbandonCap, HonourGrace: cfg.RampHonourGrace,
 			FlutterwaveHashWait: cfg.RampFlutterwaveHashWait,
 			CompanyTakeBps:      cfg.RampCompanyTakeBps, FundingFeeBps: cfg.RampFundingFeeBps,
+			VAFundingFeeBps: cfg.RampVAFundingFeeBps,
 		}); err != nil {
-			log.Printf("[ramp] WARNING: RAMP_DAILY_ABANDON_CAP / RAMP_HONOUR_GRACE_SECONDS / RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES / RAMP_COMPANY_TAKE_BPS / RAMP_FUNDING_FEE_BPS invalid (%v) — defaults in force", err)
+			log.Printf("[ramp] WARNING: RAMP_DAILY_ABANDON_CAP / RAMP_HONOUR_GRACE_SECONDS / RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES / RAMP_COMPANY_TAKE_BPS / RAMP_FUNDING_FEE_BPS / RAMP_VA_FUNDING_FEE_BPS invalid (%v) — defaults in force", err)
 		}
 		if err := itService.SetRoutedStableBuyLimits(services.RoutedStableBuyLimits{
 			MinTokens: cfg.RampFlutterwaveMinTokens, MaxUSD: cfg.RampFlutterwaveMaxUSD, SendFeeUSD: cfg.RampFlutterwaveSendFeeUSD,
@@ -1693,8 +1694,8 @@ func main() {
 			// The cap on what a converted buy or swapped sell may pass on —
 			// both price through paycrestQuotes.
 			paycrestQuotes.SetConvertedFeeCaps(cfg.RampConvertedFeeMaxBpsByChain, cfg.RampConvertedFeeMaxBps)
-			if !paycrestOrders.ConversionPriced() {
-				log.Printf("[paycrest] conversion unpriced: RAMP_COMPANY_TAKE_BPS=%d is not a usable sender fee (1..500); converted buys and swapped sells stay off",
+			if !paycrestOrders.ConversionPriced() { // unreachable: config resolves the take to 1..500
+				log.Printf("[paycrest] ALERT conversion unpriced: RAMP_COMPANY_TAKE_BPS=%d is not a usable sender fee; converted buys and swapped sells stay off",
 					cfg.RampCompanyTakeBps)
 			}
 			// Server-side kill switch: an operator can now stop the rail for a

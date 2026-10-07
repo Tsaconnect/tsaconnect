@@ -72,7 +72,7 @@ func (s *ITService) settleStableBuyFromCharge(ctx context.Context, userID uuid.U
 
 	// The VA webhook carries no charge time and arrives within seconds, so
 	// processing time stands in for arrival (D33).
-	return s.claimAndPriceStableBuy(ctx, &candidate, chargeID, amountMinor, time.Now(), true)
+	return s.claimAndPriceStableBuy(ctx, &candidate, chargeID, amountMinor, time.Now(), true, PayInVA)
 }
 
 // finishStableBuyReplay handles money we have already seen.
@@ -156,12 +156,14 @@ func (s *ITService) finishStableBuyReplay(ctx context.Context, paymentRef string
 //	                  manual operator recovery for no gain.
 //
 // arrivedAt is when the money arrived (D33); a routed buy is honoured or priced live from it.
+// ch is the channel it came through, whose funding fee a live price passes on.
 func (s *ITService) claimAndPriceStableBuy(
 	ctx context.Context,
 	candidate *models.ITIntent,
 	paymentRef, amountMinor string,
 	arrivedAt time.Time,
 	parkOnBadRate bool,
+	ch PayInChannel,
 ) (bool, error) {
 	// Price BEFORE claiming, so that claiming and pricing are ONE write: a
 	// window between them left the creation-time asset_amount in place.
@@ -178,7 +180,7 @@ func (s *ITService) claimAndPriceStableBuy(
 		qErr    error
 	)
 	if routed {
-		arrival, qErr = s.priceRoutedArrival(ctx, candidate, amountMinor, arrivedAt)
+		arrival, qErr = s.priceRoutedArrival(ctx, candidate, amountMinor, arrivedAt, ch)
 	} else {
 		q, qErr = s.QuoteStableBuy(ctx, candidate.Asset, amountMinor, candidate.Currency)
 	}
@@ -306,7 +308,7 @@ func (s *ITService) claimAndPriceStableBuy(
 	case routed && arrival.honoured:
 		log.Printf("[it stable buy] payment=%s funded %s %s for user=%s (quote honoured)",
 			chargeID, arrival.units, candidate.Asset, candidate.UserID)
-		s.logHonoured(ctx, candidate, amountMinor, arrival.units, arrival.rate)
+		s.logHonoured(ctx, candidate, amountMinor, arrival.units, arrival.rate, ch)
 	case routed:
 		log.Printf("[it stable buy] METRIC ramp_%s_repriced intent=%s quoted_rate=%s live_rate=%s",
 			routedMetric(candidate), candidate.ID, candidate.LockedRate, arrival.rate)

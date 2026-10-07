@@ -25,6 +25,11 @@ func newRoutedBuyService(t *testing.T) (*ITService, uuid.UUID) {
 		t.Fatalf("migrate: %v", err)
 	}
 	acceptITAgreement(t, s, userID)
+	// The pricing fixtures below were all worked at the central account's
+	// 1.40% funding fee; this rig has no central account (VA mode), so the VA
+	// fee is pinned to the same figure. Channel pricing itself — 1.40% central,
+	// 2.15% VA — is pinned in it_stable_buy_funding_channel_test.go.
+	pinFundingFee(t, s)
 	return s, userID
 }
 

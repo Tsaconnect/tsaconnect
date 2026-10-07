@@ -148,7 +148,7 @@ func TestClaimLivePricedTreasuryBuy_WaitsOnTheStockLock_Postgres(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// ₦9,000 against a ₦10,000 quote: priced live, so it needs the stock.
-		claimed, err := s.claimAndPriceStableBuy(context.Background(), candidate, "chg_pg_live", "900000", time.Now(), true)
+		claimed, err := s.claimAndPriceStableBuy(context.Background(), candidate, "chg_pg_live", "900000", time.Now(), true, PayInVA)
 		if err == nil && !claimed {
 			err = errors.New("the claim was lost")
 		}

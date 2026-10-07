@@ -622,3 +622,69 @@ func TestLoad_FlutterwavePolygonUSDCAndHashWait(t *testing.T) {
 		t.Fatalf("log = %q", buf.String())
 	}
 }
+
+// RAMP_COMPANY_TAKE_BPS has one rule, resolved here for every provider: 1..500
+// bps, anything else is the 50 bps default with a boot ALERT.
+func TestLoad_CompanyTakeHasOneRule(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	for raw, want := range map[string]int64{"": 50, "1": 1, "120": 120, "500": 500} {
+		t.Setenv("RAMP_COMPANY_TAKE_BPS", raw)
+		if got := Load().RampCompanyTakeBps; got != want {
+			t.Fatalf("%q: take = %d, want %d", raw, got, want)
+		}
+	}
+	if strings.Contains(logs.String(), "ramp_company_take_invalid") {
+		t.Fatalf("a valid take alerted: %s", logs.String())
+	}
+	for _, raw := range []string{"0", "-5", "501", "9999", "0.5", "abc"} {
+		logs.Reset()
+		t.Setenv("RAMP_COMPANY_TAKE_BPS", raw)
+		if got := Load().RampCompanyTakeBps; got != DefaultCompanyTakeBps {
+			t.Fatalf("%q: take = %d, want the default %d", raw, got, DefaultCompanyTakeBps)
+		}
+		if !strings.Contains(logs.String(), "ALERT ramp_company_take_invalid=1") {
+			t.Fatalf("%q: no ALERT, logs %q", raw, logs.String())
+		}
+	}
+}
+
+// A retired pricing key left in the environment is named at boot, with what
+// reads it now.
+func TestLoad_WarnsOnRemovedPricingKeys(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Setenv("PAYCREST_SENDER_FEE_PERCENT", "1")
+	t.Setenv("RAMP_ROUND_TRIP_BUDGET_BPS", "50")
+	Load()
+	for _, want := range []string{
+		"WARNING PAYCREST_SENDER_FEE_PERCENT is set but no longer read and is ignored", "TSA_PAY_FEE_PERCENT",
+		"WARNING RAMP_ROUND_TRIP_BUDGET_BPS is set but no longer read and is ignored", "TSA_PAY_ROUND_TRIP_BUDGET_BPS",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs %q lack %q", logs.String(), want)
+		}
+	}
+}
+
+// A cap of 0 turns the chain's converted routes off, and the boot line says so.
+func TestConvertedFeeCapFromEnv_ZeroSaysTheRoutesAreOff(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Setenv("RAMP_CONVERTED_FEE_MAX_BPS_BSC", "0")
+	if got := convertedFeeCapFromEnv("RAMP_CONVERTED_FEE_MAX_BPS_BSC", 200); got != 0 {
+		t.Fatalf("cap = %d, want 0", got)
+	}
+	if !strings.Contains(logs.String(), "converted buys and swapped sells on bsc are off") {
+		t.Fatalf("logs %q do not say bsc's routes are off", logs.String())
+	}
+	t.Setenv("RAMP_CONVERTED_FEE_MAX_BPS", "0")
+	logs.Reset()
+	convertedFeeCapFromEnv("RAMP_CONVERTED_FEE_MAX_BPS", 200)
+	if !strings.Contains(logs.String(), "converted buys and swapped sells on chains without their own cap are off") {
+		t.Fatalf("logs %q do not say the default chains' routes are off", logs.String())
+	}
+}

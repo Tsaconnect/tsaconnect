@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
@@ -32,12 +33,15 @@ const (
 	DefaultRoutedConversionFeeBps int64 = 150
 
 	// Owner ruling 2026-10-07: she pays the base rate grossed up by the
-	// company take (RAMP_COMPANY_TAKE_BPS, both in-house providers) plus each
-	// third-party cost at cost. The central-account funding fee is measured
-	// (Flutterwave wallet funding, 1.40%), so it is a default, not a setting
-	// an operator has to make (RAMP_FUNDING_FEE_BPS overrides it).
-	DefaultRampCompanyTakeBps int64 = 50
-	DefaultRampFundingFeeBps  int64 = 140
+	// company take (RAMP_COMPANY_TAKE_BPS, every provider) plus each
+	// third-party cost at cost. The funding fee is the measured cost of the
+	// channel her naira arrives through — Flutterwave wallet funding into the
+	// central account 1.40%, a virtual-account collection 2.15% (2.00% + VAT,
+	// measured 2026-09-02) — so they are defaults, not settings an operator
+	// has to make (RAMP_FUNDING_FEE_BPS / RAMP_VA_FUNDING_FEE_BPS override).
+	DefaultRampCompanyTakeBps  int64 = config.DefaultCompanyTakeBps
+	DefaultRampFundingFeeBps   int64 = 140
+	DefaultRampVAFundingFeeBps int64 = 215
 
 	DefaultRampDailyAbandonCap = 5
 	DefaultRampHonourGrace     = 10 * time.Minute
@@ -103,16 +107,27 @@ type RampBuyTerms struct {
 	DailyAbandonCap     int           // cancelled routed buys per user per 24h
 	HonourGrace         time.Duration // processing grace past RateExpiresAt
 	FlutterwaveHashWait time.Duration // RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES
-	CompanyTakeBps      int64         // RAMP_COMPANY_TAKE_BPS: our only margin
+	CompanyTakeBps      int64         // RAMP_COMPANY_TAKE_BPS: our only margin (config resolves it)
 	FundingFeeBps       int64         // RAMP_FUNDING_FEE_BPS: central-account funding, at cost
+	VAFundingFeeBps     int64         // RAMP_VA_FUNDING_FEE_BPS: virtual-account collection, at cost
 }
 
 type rampBuyTerms struct {
-	abandonCap             int
-	honourGrace            time.Duration
-	fwHashWait             time.Duration
-	takeBps, fundingFeeBps int64
+	abandonCap                              int
+	honourGrace                             time.Duration
+	fwHashWait                              time.Duration
+	takeBps, fundingFeeBps, vaFundingFeeBps int64
 }
+
+// PayInChannel is the way her naira reaches us, which decides the funding
+// fee she is passed: the central account (wallet funding) or her own virtual
+// account (a collection). "" on a quote that carries no funding line.
+type PayInChannel string
+
+const (
+	PayInCentral PayInChannel = "central"
+	PayInVA      PayInChannel = "va"
+)
 
 // TreasuryBuyLimits configures the company wallet's buys. "" or 0 keeps a value.
 type TreasuryBuyLimits struct {
@@ -150,7 +165,8 @@ func (s *ITService) rampTerms() rampBuyTerms {
 	}
 	return rampBuyTerms{abandonCap: DefaultRampDailyAbandonCap, honourGrace: DefaultRampHonourGrace,
 		fwHashWait: DefaultRampFlutterwaveHashWait,
-		takeBps:    DefaultRampCompanyTakeBps, fundingFeeBps: DefaultRampFundingFeeBps}
+		takeBps:    DefaultRampCompanyTakeBps, fundingFeeBps: DefaultRampFundingFeeBps,
+		vaFundingFeeBps: DefaultRampVAFundingFeeBps}
 }
 
 func (s *ITService) treasuryLimits() treasuryBuyLimits {
@@ -249,8 +265,16 @@ func (s *ITService) SetRampBuyTerms(t RampBuyTerms) error {
 	case t.FlutterwaveHashWait < 0:
 		errs = append(errs, fmt.Errorf("RAMP_FLUTTERWAVE_HASH_WAIT_MINUTES=%s must not be negative", t.FlutterwaveHashWait))
 	}
-	bpsSetting("RAMP_COMPANY_TAKE_BPS", t.CompanyTakeBps, &next.takeBps, &errs)
+	// The take's rule is config's, shared with Paycrest: one value everywhere.
+	switch {
+	case t.CompanyTakeBps == 0:
+	case config.ValidCompanyTakeBps(t.CompanyTakeBps):
+		next.takeBps = t.CompanyTakeBps
+	default:
+		errs = append(errs, fmt.Errorf("RAMP_COMPANY_TAKE_BPS=%d must be between 1 and %d", t.CompanyTakeBps, config.MaxCompanyTakeBps))
+	}
 	bpsSetting("RAMP_FUNDING_FEE_BPS", t.FundingFeeBps, &next.fundingFeeBps, &errs)
+	bpsSetting("RAMP_VA_FUNDING_FEE_BPS", t.VAFundingFeeBps, &next.vaFundingFeeBps, &errs)
 	s.rampTerm = &next
 	return errors.Join(errs...)
 }
@@ -412,26 +436,69 @@ func priceInHouseBuy(fiatMinor *big.Int, baseRate *big.Rat, takeBps int64, costs
 	return p
 }
 
-// fundingCost is the central-account funding fee: all naira for an in-house
-// buy lands in the Flutterwave-held central account, which charges it.
-func (s *ITService) fundingCost() passThroughCost {
-	bps := s.rampTerms().fundingFeeBps
+// fundingCost is what the channel her naira arrives through costs: the
+// central account's wallet-funding fee, or her virtual account's collection
+// fee. Both are Flutterwave's, passed on at cost.
+// An unknown or empty channel has no known cost, so it is refused rather than
+// priced at either one.
+func (s *ITService) fundingCost(ch PayInChannel) (passThroughCost, error) {
+	var bps int64
+	switch ch {
+	case PayInCentral:
+		bps = s.rampTerms().fundingFeeBps
+	case PayInVA:
+		bps = s.rampTerms().vaFundingFeeBps
+	default:
+		return passThroughCost{}, fmt.Errorf("%w: no funding cost for pay-in channel %q", ErrStableQuoteUnavailable, ch)
+	}
 	return passThroughCost{kind: FeeKindFunding, provider: FeeProviderFlutterwave, bps: bps,
-		label: fmt.Sprintf("Funding fee (%s%%)", formatBps(bps))}
+		label: fmt.Sprintf("Funding fee (%s%%)", formatBps(bps))}, nil
+}
+
+// payInChannelNow is the channel a buy opened now is paid through — the same
+// switch payIntoForStableBuy takes, so a quote and its order agree.
+func (s *ITService) payInChannelNow() PayInChannel {
+	if _, ok := s.ActiveCentralAccount(); ok {
+		return PayInCentral
+	}
+	return PayInVA
+}
+
+// paidThrough is the channel intent's naira actually came through: central
+// when its payment is a central-account credit (payment_ref is the credit's
+// NIBSS session id), a virtual account otherwise. Before any payment it is
+// the channel she would pay through now.
+func (s *ITService) paidThrough(ctx context.Context, intent *models.ITIntent) (PayInChannel, error) {
+	ref := strings.TrimSpace(intent.PaymentRef)
+	if ref == "" {
+		return s.payInChannelNow(), nil
+	}
+	var n int64
+	if err := s.db.WithContext(ctx).Model(&models.InboundCredit{}).Where("provider_ref = ?", ref).Count(&n).Error; err != nil {
+		return "", fmt.Errorf("it stable buy: which channel paid intent %s: %w", intent.ID, err)
+	}
+	if n > 0 {
+		return PayInCentral, nil
+	}
+	return PayInVA, nil
 }
 
 // ── Flutterwave ────────────────────────────────────────────────────────────
 
 // routedPrice is Flutterwave's price: its rate plus the take, less funding,
 // its conversion fee and its send fee.
-func (s *ITService) routedPrice(fiatMinor *big.Int, fiatPerUnit *big.Rat) inHousePrice {
+func (s *ITService) routedPrice(fiatMinor *big.Int, fiatPerUnit *big.Rat, ch PayInChannel) (inHousePrice, error) {
 	lim := s.routedLimits()
+	funding, err := s.fundingCost(ch)
+	if err != nil {
+		return inHousePrice{}, err
+	}
 	return priceInHouseBuy(fiatMinor, fiatPerUnit, s.rampTerms().takeBps, []passThroughCost{
-		s.fundingCost(),
+		funding,
 		{kind: FeeKindConversion, provider: FeeProviderFlutterwave, bps: lim.conversionFeeBps,
 			label: fmt.Sprintf("Flutterwave conversion fee (%s%%)", formatBps(lim.conversionFeeBps))},
 		{kind: FeeKindNetwork, provider: FeeProviderFlutterwave, label: "Network fee", flat: lim.sendFeeUnits},
-	})
+	}), nil
 }
 
 // QuoteRoutedStableBuy prices fiatMajor naira at Flutterwave's fiatPerUnit
@@ -449,15 +516,18 @@ func (s *ITService) QuoteRoutedStableBuy(asset, fiatMajor, currency string, fiat
 	if err != nil || fiat.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount must be positive with at most 2 decimals", ErrStableBuyBelowMinimum)
 	}
-	return s.routedQuoteAt(asset, currency, fiat, fiatPerUnit, true)
+	return s.routedQuoteAt(asset, currency, fiat, fiatPerUnit, true, s.payInChannelNow())
 }
 
-// routedQuoteAt prices on Flutterwave's routed terms. enforceMax is true for
-// a quote she is shown, false for live pricing of money already received
-// (owner 2026-10-04 #1: a minimum, never a maximum).
-func (s *ITService) routedQuoteAt(asset, currency string, fiatMinor *big.Int, fiatPerUnit *big.Rat, enforceMax bool) (*StableBuyQuote, error) {
+// routedQuoteAt prices on Flutterwave's routed terms, for naira paid through
+// ch. enforceMax is true for a quote she is shown, false for live pricing of
+// money already received (owner 2026-10-04 #1: a minimum, never a maximum).
+func (s *ITService) routedQuoteAt(asset, currency string, fiatMinor *big.Int, fiatPerUnit *big.Rat, enforceMax bool, ch PayInChannel) (*StableBuyQuote, error) {
 	lim := s.routedLimits()
-	p := s.routedPrice(fiatMinor, fiatPerUnit)
+	p, err := s.routedPrice(fiatMinor, fiatPerUnit, ch)
+	if err != nil {
+		return nil, err
+	}
 	if p.net.Cmp(lim.minUnits) < 0 {
 		return nil, fmt.Errorf("%w: minimum delivery is %g %s after fees",
 			ErrStableBuyBelowMinimum, StableFromBaseUnits(lim.minUnits), asset)
@@ -474,18 +544,20 @@ func (s *ITService) routedQuoteAt(asset, currency string, fiatMinor *big.Int, fi
 		RatePerUnitMinor: ratePerDeliveredUnit(fiatMinor, p.net),
 		DisplayRateMinor: p.displayRate,
 		Fees:             p.fees,
+		PayIn:            ch,
 		ExpiresAt:        time.Now().Add(s.stableLockTTL()),
 	}, nil
 }
 
-// quoteRoutedLive prices fiatMinor at Flutterwave's live rate on routed terms
-// (Decision D3). Never applies the maximum: the money has already arrived.
-func (s *ITService) quoteRoutedLive(ctx context.Context, asset string, fiatMinor *big.Int, currency string) (*StableBuyQuote, error) {
+// quoteRoutedLive prices fiatMinor, paid through ch, at Flutterwave's live
+// rate on routed terms (Decision D3). Never applies the maximum: the money
+// has already arrived.
+func (s *ITService) quoteRoutedLive(ctx context.Context, asset string, fiatMinor *big.Int, currency string, ch PayInChannel) (*StableBuyQuote, error) {
 	rate, err := s.StableBuyFiatPerUnit(ctx, currency, asset)
 	if err != nil {
 		return nil, err
 	}
-	return s.routedQuoteAt(strings.ToUpper(asset), strings.ToUpper(currency), fiatMinor, rate, false)
+	return s.routedQuoteAt(strings.ToUpper(asset), strings.ToUpper(currency), fiatMinor, rate, false, ch)
 }
 
 // ── company wallet ─────────────────────────────────────────────────────────
@@ -505,17 +577,20 @@ func (s *ITService) QuoteTreasuryBuy(asset, fiatMajor, currency string, marketRa
 	if err != nil || fiat.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount must be positive with at most 2 decimals", ErrStableBuyBelowMinimum)
 	}
-	return s.treasuryQuoteAt(asset, currency, fiat, marketRate, true)
+	return s.treasuryQuoteAt(asset, currency, fiat, marketRate, true, s.payInChannelNow())
 }
 
-// treasuryQuoteAt prices on company-wallet terms. enforceMax is false only for
-// an operator's "deliver anyway" (§13 Q9).
-func (s *ITService) treasuryQuoteAt(asset, currency string, fiatMinor *big.Int, marketRate *big.Rat, enforceMax bool) (*StableBuyQuote, error) {
+// treasuryQuoteAt prices on company-wallet terms, for naira paid through ch.
+// enforceMax is false only for an operator's "deliver anyway" (§13 Q9).
+func (s *ITService) treasuryQuoteAt(asset, currency string, fiatMinor *big.Int, marketRate *big.Rat, enforceMax bool, ch PayInChannel) (*StableBuyQuote, error) {
 	lim := s.treasuryLimits()
 	if fiatMinor.Cmp(lim.minKobo) < 0 {
 		return nil, fmt.Errorf("%w: minimum is %s %s", ErrStableBuyBelowMinimum, FormatMinor(lim.minKobo.String()), currency)
 	}
-	p := s.treasuryPrice(fiatMinor, marketRate)
+	p, err := s.treasuryPrice(fiatMinor, marketRate, ch)
+	if err != nil {
+		return nil, err
+	}
 	if p.net.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: amount buys nothing", ErrStableBuyBelowMinimum)
 	}
@@ -526,15 +601,19 @@ func (s *ITService) treasuryQuoteAt(asset, currency string, fiatMinor *big.Int, 
 		Asset: asset, Currency: currency,
 		FiatMinor: new(big.Int).Set(fiatMinor), GrossAssetUnits: p.gross, AssetUnits: p.net,
 		RatePerUnitMinor: ratePerDeliveredUnit(fiatMinor, p.net), // Decision D42
-		DisplayRateMinor: p.displayRate, Fees: p.fees,
+		DisplayRateMinor: p.displayRate, Fees: p.fees, PayIn: ch,
 		ExpiresAt: time.Now().Add(s.stableLockTTL()),
 	}, nil
 }
 
 // treasuryPrice is the company wallet's price: the market plus the take, less
-// the funding fee.
-func (s *ITService) treasuryPrice(fiatMinor *big.Int, marketRate *big.Rat) inHousePrice {
-	return priceInHouseBuy(fiatMinor, marketRate, s.rampTerms().takeBps, []passThroughCost{s.fundingCost()})
+// the funding fee of the channel ch.
+func (s *ITService) treasuryPrice(fiatMinor *big.Int, marketRate *big.Rat, ch PayInChannel) (inHousePrice, error) {
+	funding, err := s.fundingCost(ch)
+	if err != nil {
+		return inHousePrice{}, err
+	}
+	return priceInHouseBuy(fiatMinor, marketRate, s.rampTerms().takeBps, []passThroughCost{funding}), nil
 }
 
 // TreasuryMinOrderUnits is what the company wallet's minimum naira buys at
@@ -545,8 +624,8 @@ func (s *ITService) TreasuryMinOrderUnits(marketRate *big.Rat) *big.Int {
 	if marketRate == nil || marketRate.Sign() <= 0 {
 		return new(big.Int)
 	}
-	if net := s.treasuryPrice(lim.minKobo, marketRate).net; net.Sign() > 0 {
-		return net
+	if p, err := s.treasuryPrice(lim.minKobo, marketRate, s.payInChannelNow()); err == nil && p.net.Sign() > 0 {
+		return p.net
 	}
 	return new(big.Int)
 }
@@ -724,7 +803,7 @@ func (s *ITService) StableBuyPayInto(ctx context.Context, intent *models.ITInten
 	if !ok || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("it stable buy: intent %s has no amount", intent.ID)
 	}
-	payInto, _, err := s.payIntoForStableBuy(ctx, intent.UserID, intent.Currency, amount)
+	payInto, _, _, err := s.payIntoForStableBuy(ctx, intent.UserID, intent.Currency, amount)
 	return payInto, err
 }
 
@@ -787,7 +866,7 @@ func parkClaim(claim map[string]any, reason string) {
 // priceRoutedArrival applies D33: only the exact naira, arrived inside the
 // window and processed inside the grace, is honoured. Everything else is
 // priced live on the intent's own provider terms (D3).
-func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITIntent, amountMinor string, arrivedAt time.Time) (*routedArrival, error) {
+func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITIntent, amountMinor string, arrivedAt time.Time, ch PayInChannel) (*routedArrival, error) {
 	paid, ok := new(big.Int).SetString(strings.TrimSpace(amountMinor), 10)
 	if !ok || paid.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, amountMinor)
@@ -803,7 +882,7 @@ func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITInt
 		}
 		return &routedArrival{units: units, rate: locked, honoured: true}, nil
 	}
-	q, err := s.quoteRoutedLiveFor(ctx, intent, paid)
+	q, err := s.quoteRoutedLiveFor(ctx, intent, paid, ch)
 	if err != nil {
 		return nil, err
 	}
@@ -816,19 +895,19 @@ func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITInt
 	}, nil
 }
 
-// quoteRoutedLiveFor prices paid live on the intent's provider terms: the
-// company wallet always within its maximum. The one exception, an operator's
-// "deliver anyway", calls quoteTreasuryLive itself.
-func (s *ITService) quoteRoutedLiveFor(ctx context.Context, intent *models.ITIntent, paid *big.Int) (*StableBuyQuote, error) {
+// quoteRoutedLiveFor prices paid, which came through ch, live on the intent's
+// provider terms: the company wallet always within its maximum. The one
+// exception, an operator's "deliver anyway", calls quoteTreasuryLive itself.
+func (s *ITService) quoteRoutedLiveFor(ctx context.Context, intent *models.ITIntent, paid *big.Int, ch PayInChannel) (*StableBuyQuote, error) {
 	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
-		return s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, true)
+		return s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, true, ch)
 	}
-	return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency)
+	return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency, ch)
 }
 
-// quoteTreasuryLive prices fiatMinor at the company wallet's current market
-// rate on its in-house terms (take plus funding fee).
-func (s *ITService) quoteTreasuryLive(ctx context.Context, asset string, fiatMinor *big.Int, currency string, enforceMax bool) (*StableBuyQuote, error) {
+// quoteTreasuryLive prices fiatMinor, paid through ch, at the company
+// wallet's current market rate on its in-house terms (take plus funding fee).
+func (s *ITService) quoteTreasuryLive(ctx context.Context, asset string, fiatMinor *big.Int, currency string, enforceMax bool, ch PayInChannel) (*StableBuyQuote, error) {
 	if s.treasuryRates == nil {
 		return nil, fmt.Errorf("%w: no company-wallet market rate", ErrStableQuoteUnavailable)
 	}
@@ -836,7 +915,7 @@ func (s *ITService) quoteTreasuryLive(ctx context.Context, asset string, fiatMin
 	if err != nil {
 		return nil, err
 	}
-	return s.treasuryQuoteAt(strings.ToUpper(asset), strings.ToUpper(currency), fiatMinor, market, enforceMax)
+	return s.treasuryQuoteAt(strings.ToUpper(asset), strings.ToUpper(currency), fiatMinor, market, enforceMax, ch)
 }
 
 // creditArrival is when a central-account credit ARRIVED (D33): the statement's
@@ -913,7 +992,11 @@ func (s *ITService) quoteForIntent(ctx context.Context, intent *models.ITIntent,
 	if !ok || paid.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, fiatMinor)
 	}
-	q, err := s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency)
+	ch, err := s.paidThrough(ctx, intent)
+	if err != nil {
+		return nil, err
+	}
+	q, err := s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency, ch)
 	if err != nil {
 		return nil, err
 	}
@@ -941,12 +1024,12 @@ func (s *ITService) routedDeliveryAmounts(intent *models.ITIntent, units *big.In
 // logHonoured records what honouring cost: drift_bps > 0 means the live rate
 // would have delivered less; for Flutterwave, shortfall_units is how much less
 // (what the float covers). Best effort, after the claim.
-func (s *ITService) logHonoured(ctx context.Context, intent *models.ITIntent, paidMinor string, honoured, locked *big.Int) {
+func (s *ITService) logHonoured(ctx context.Context, intent *models.ITIntent, paidMinor string, honoured, locked *big.Int, ch PayInChannel) {
 	drift, shortfall := "unknown", "unknown"
 	if paid, ok := new(big.Int).SetString(strings.TrimSpace(paidMinor), 10); ok && locked.Sign() > 0 {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if q, err := s.quoteRoutedLiveFor(rctx, intent, paid); err == nil && q.AssetUnits.Sign() > 0 {
+		if q, err := s.quoteRoutedLiveFor(rctx, intent, paid, ch); err == nil && q.AssetUnits.Sign() > 0 {
 			diff := new(big.Int).Sub(q.RatePerUnitMinor, locked)
 			drift = diff.Mul(diff, big.NewInt(10000)).Quo(diff, locked).String()
 			short := new(big.Int).Sub(honoured, q.AssetUnits)
