@@ -42,6 +42,11 @@ type PayPaymentView struct {
 	AppURL        string     `json:"appUrl"`
 	CheckoutURL   string     `json:"checkoutUrl"`
 	CreatedAt     time.Time  `json:"createdAt"`
+	// RefundedAmount is what the merchant has refunded (confirmed refunds, USD
+	// as a decimal string), and RefundStatus whether that is none, part or all
+	// of what can be. The payment's status stays succeeded either way.
+	RefundedAmount string `json:"refundedAmount"`
+	RefundStatus   string `json:"refundStatus"`
 }
 
 // PayCheckoutView is what the app's checkout screen reads: the payment plus
@@ -129,7 +134,8 @@ func payCancelled(p *models.PayPayment) bool {
 
 // Views is View for each of ps, with each open-link payment's LinkLabel filled
 // in (one query) — its description is the customer's note, often empty, so the
-// label is what says what it was for.
+// label is what says what it was for — and, with refunds wired, each payment's
+// refund totals (one more query).
 func (s *PayPaymentService) Views(ctx context.Context, ps []models.PayPayment) ([]PayPaymentView, error) {
 	var ids []uuid.UUID
 	for i := range ps {
@@ -148,6 +154,20 @@ func (s *PayPaymentService) Views(ctx context.Context, ps []models.PayPayment) (
 			views[i].LinkLabel = labels[*ps[i].OpenLinkID]
 		}
 	}
+	// Every page's refund totals in one grouped query, not one per row.
+	if s.refundAgg != nil && len(ps) > 0 {
+		ids := make([]uuid.UUID, len(ps))
+		for i := range ps {
+			ids[i] = ps[i].ID
+		}
+		aggs, err := s.refundAgg.AggregateByPayment(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range ps {
+			views[i].withRefunds(aggs[ps[i].ID])
+		}
+	}
 	return views, nil
 }
 
@@ -159,34 +179,56 @@ func (s *PayPaymentService) CheckoutURL(id uuid.UUID) string {
 // View builds the merchant-facing read shape for p from the row alone, so it
 // leaves LinkLabel empty: that needs the open link. Views fills it in for a
 // page of payments with one query; a caller already holding the link sets it
-// itself. The webhook payload is a View.
+// itself. It reads no refunds either, so it says "never refunded": Views and
+// the webhook payload (webhookData) add the refund totals.
 func (s *PayPaymentService) View(p *models.PayPayment) PayPaymentView {
 	return PayPaymentView{
-		ID:            p.ID,
-		Reference:     p.Reference,
-		PayCode:       formatStoredPayCode(p.PayCode),
-		Mode:          p.Mode,
-		Status:        p.Status,
-		Cancelled:     payCancelled(p),
-		Source:        p.Source,
-		Amount:        p.AmountKobo,
-		CustomerTotal: p.CustomerTotalKobo,
-		MerchantNet:   p.MerchantNetKobo,
-		Fee:           p.CustomerTotalKobo - p.MerchantNetKobo,
-		Currency:      p.Currency,
-		Description:   p.Description,
-		CustomerName:  p.CustomerName,
-		OpenLinkID:    p.OpenLinkID,
-		ReturnURL:     p.ReturnURL,
-		ExpiresAt:     p.ExpiresAt,
-		SettlementRef: p.SettlementRef,
-		FailureReason: p.FailureReason,
-		SucceededAt:   p.SucceededAt,
-		AppURL:        "tsaconnect://pay?id=" + p.ID.String(),
-		CheckoutURL:   s.CheckoutURL(p.ID),
-		CreatedAt:     p.CreatedAt,
+		ID:             p.ID,
+		Reference:      p.Reference,
+		PayCode:        formatStoredPayCode(p.PayCode),
+		Mode:           p.Mode,
+		Status:         p.Status,
+		Cancelled:      payCancelled(p),
+		Source:         p.Source,
+		Amount:         p.AmountKobo,
+		CustomerTotal:  p.CustomerTotalKobo,
+		MerchantNet:    p.MerchantNetKobo,
+		Fee:            p.CustomerTotalKobo - p.MerchantNetKobo,
+		Currency:       p.Currency,
+		Description:    p.Description,
+		CustomerName:   p.CustomerName,
+		OpenLinkID:     p.OpenLinkID,
+		ReturnURL:      p.ReturnURL,
+		ExpiresAt:      p.ExpiresAt,
+		SettlementRef:  p.SettlementRef,
+		FailureReason:  p.FailureReason,
+		SucceededAt:    p.SucceededAt,
+		AppURL:         "tsaconnect://pay?id=" + p.ID.String(),
+		CheckoutURL:    s.CheckoutURL(p.ID),
+		CreatedAt:      p.CreatedAt,
+		RefundedAmount: FormatMicroUSD(0),
+		RefundStatus:   PayRefundStatusNone,
 	}
 }
+
+// withRefunds sets v's refund fields from agg (zero agg: never refunded).
+func (v *PayPaymentView) withRefunds(agg PayRefundAgg) {
+	v.RefundedAmount = FormatMicroUSD(agg.RefundedMicroUSD)
+	if agg.Status != "" {
+		v.RefundStatus = agg.Status
+	}
+}
+
+// ViewWithRefunds is View with p's refund totals, read by the caller (Views
+// for a page, a webhook inside its own transaction).
+func (s *PayPaymentService) ViewWithRefunds(p *models.PayPayment, agg PayRefundAgg) PayPaymentView {
+	v := s.View(p)
+	v.withRefunds(agg)
+	return v
+}
+
+// RefundsWired reports whether refunds exist on this server (an aggregator is set).
+func (s *PayPaymentService) RefundsWired() bool { return s.refundAgg != nil }
 
 // CheckoutView builds the app checkout screen's read shape for id: the
 // payment, plus whether THIS user may pay it right now. It never changes a

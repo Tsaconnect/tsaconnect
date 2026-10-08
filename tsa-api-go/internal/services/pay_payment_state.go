@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"regexp"
 	"strings"
@@ -678,6 +679,12 @@ func (s *PayPaymentService) transitionIn(tx *gorm.DB, id uuid.UUID, g payGuard, 
 // mode is not queued at all — WebhookURLFor returns "" — and nor is an
 // open-link payment nobody started paying.
 func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, event string) error {
+	return s.enqueueWebhookWith(tx, p, event, nil)
+}
+
+// enqueueWebhookWith is enqueueWebhook with extra top-level keys on the body,
+// beside data — payment.refunded's `refund` (contract ruling: a top-level key).
+func (s *PayPaymentService) enqueueWebhookWith(tx *gorm.DB, p *models.PayPayment, event string, extra map[string]any) error {
 	// An untried open-link payment is one visitor entering an amount; its
 	// merchant is not told when it lapses. (One that succeeds was always tried.)
 	if p.Untried() {
@@ -688,7 +695,7 @@ func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, ev
 	} else if err != nil {
 		return err
 	}
-	delivery, err := s.webhookDelivery(p, event)
+	delivery, err := s.webhookDelivery(tx, p, event, extra)
 	if err != nil {
 		return err
 	}
@@ -708,19 +715,31 @@ func requirePayWebhookURL(tx *gorm.DB, merchantID uuid.UUID, mode string) error 
 	return nil
 }
 
-// webhookDelivery is one event about p, as p stands now, under a fresh
-// delivery id: the id merchants dedupe on is also the body's "id". Every
-// webhook body is built here.
-func (s *PayPaymentService) webhookDelivery(p *models.PayPayment, event string) (models.PayWebhookDelivery, error) {
+// webhookDelivery is one event about p, as p stands now in tx, under a fresh
+// delivery id: the id merchants dedupe on is also the body's "id". extra is
+// top-level keys beside data (nil for none). Every webhook body is built here.
+func (s *PayPaymentService) webhookDelivery(tx *gorm.DB, p *models.PayPayment, event string, extra map[string]any) (models.PayWebhookDelivery, error) {
 	now := s.now()
 	deliveryID := uuid.New()
-	payload, err := json.Marshal(map[string]any{
+	data, err := s.webhookData(tx, p)
+	if err != nil {
+		return models.PayWebhookDelivery{}, err
+	}
+	body := map[string]any{
 		"id":       deliveryID,
 		"type":     event,
 		"livemode": p.Mode == models.PayModeLive,
 		"created":  now.Unix(),
-		"data":     s.View(p),
-	})
+		"data":     data,
+	}
+	// Extra top-level keys beside data — payment.refunded's `refund`. The
+	// envelope's own keys are never overwritten.
+	for k, v := range extra {
+		if _, taken := body[k]; !taken {
+			body[k] = v
+		}
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return models.PayWebhookDelivery{}, err
 	}
@@ -733,6 +752,21 @@ func (s *PayPaymentService) webhookDelivery(p *models.PayPayment, event string) 
 		Payload:       string(payload),
 		NextAttemptAt: &now,
 	}, nil
+}
+
+// webhookData is a webhook's data: the payment view with its refund totals as
+// they stand in tx (so a refund confirmed in the same transaction counts).
+// Without refunds wired nothing reads pay_refunds.
+func (s *PayPaymentService) webhookData(tx *gorm.DB, p *models.PayPayment) (PayPaymentView, error) {
+	view := s.View(p)
+	if s.refundAgg != nil {
+		aggs, err := payRefundAggregates(tx, []uuid.UUID{p.ID})
+		if err != nil {
+			return PayPaymentView{}, err
+		}
+		view.withRefunds(aggs[p.ID])
+	}
+	return view, nil
 }
 
 // redeliver queues d's event again as a new delivery of its payment as it is
@@ -754,7 +788,11 @@ func (s *PayPaymentService) redeliver(ctx context.Context, d *models.PayWebhookD
 		if err := requirePayWebhookURL(tx, p.MerchantID, p.Mode); err != nil {
 			return err
 		}
-		row, err := s.webhookDelivery(&p, d.Event)
+		extra, err := redeliveryExtra(d)
+		if err != nil {
+			return err
+		}
+		row, err := s.webhookDelivery(tx, &p, d.Event, extra)
 		if err != nil {
 			return err
 		}
@@ -762,4 +800,23 @@ func (s *PayPaymentService) redeliver(ctx context.Context, d *models.PayWebhookD
 		return tx.Create(&out).Error
 	})
 	return out, err
+}
+
+// redeliveryExtra is the top-level keys a resend of d must carry again beside
+// data. A payment.refunded body's `refund` is copied from d's own payload: a
+// confirmed refund never changes, so the copy is exact, and a receiver keyed on
+// refund.id still finds it. Every other event has none.
+func redeliveryExtra(d *models.PayWebhookDelivery) (map[string]any, error) {
+	if d.Event != models.PayEventRefunded {
+		return nil, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(d.Payload), &raw); err != nil {
+		return nil, fmt.Errorf("resend %s: read the original payload: %w", d.ID, err)
+	}
+	refund, ok := raw["refund"]
+	if !ok {
+		return nil, nil
+	}
+	return map[string]any{"refund": refund}, nil
 }

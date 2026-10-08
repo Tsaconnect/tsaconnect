@@ -498,6 +498,13 @@ func (h *PayHandler) AdminListPayments(c *gin.Context) {
 		return
 	}
 
+	payViews, err := h.payments.Views(c.Request.Context(), rows)
+	if err != nil {
+		log.Printf("[tsa-pay] admin list payments failed: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list payments")
+		return
+	}
+
 	// Merchant names are looked up once per distinct merchant id in the
 	// page, not once per row — a page is at most `limit` (<=100) rows, so
 	// this stays cheap without needing a join in the service layer.
@@ -512,7 +519,7 @@ func (h *PayHandler) AdminListPayments(c *gin.Context) {
 			}
 			names[p.MerchantID] = name
 		}
-		views[i] = payAdminPaymentView{PayPaymentView: h.payments.View(p), MerchantName: name}
+		views[i] = payAdminPaymentView{PayPaymentView: payViews[i], MerchantName: name}
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payments", gin.H{
 		"payments": views,
@@ -627,7 +634,7 @@ func (h *PayHandler) CreatePayment(c *gin.Context) {
 		utils.SuccessResponse(c, http.StatusCreated, "Payment created", h.payments.View(p))
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+	h.respondPayment(c, p)
 }
 
 // GET /api/pay/v1/payments/:id — a merchant reads only its own payments,
@@ -649,7 +656,18 @@ func (h *PayHandler) GetPayment(c *gin.Context) {
 		payPaymentFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+	h.respondPayment(c, p)
+}
+
+// respondPayment answers one existing payment as its merchant reads it —
+// through Views, so its refund totals are there.
+func (h *PayHandler) respondPayment(c *gin.Context, p *models.PayPayment) {
+	views, err := h.payments.Views(c.Request.Context(), []models.PayPayment{*p})
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", views[0])
 }
 
 // GET /api/pay/v1/payments?reference= — the payment with exactly this
@@ -672,7 +690,7 @@ func (h *PayHandler) FindPaymentByReference(c *gin.Context) {
 		payPaymentFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+	h.respondPayment(c, p)
 }
 
 // payPaymentFail maps a PayPaymentService error to the wire response: not

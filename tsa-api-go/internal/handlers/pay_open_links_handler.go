@@ -76,9 +76,12 @@ func (h *PayHandler) OwnerOpenLink(c *gin.Context) {
 		return
 	}
 	// Their link is this one: its label is already here.
-	payments := make([]services.PayPaymentView, len(ps))
-	for i := range ps {
-		payments[i] = h.payments.View(&ps[i])
+	payments, err := h.payments.Views(c.Request.Context(), ps)
+	if err != nil {
+		payOwnerFail(c, err)
+		return
+	}
+	for i := range payments {
 		payments[i].LinkLabel = l.Label
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment link", gin.H{"openLink": view, "payments": payments})
