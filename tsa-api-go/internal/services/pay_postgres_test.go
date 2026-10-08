@@ -218,3 +218,20 @@ func TestPayReconciliation_SummaryAndExportRunOnPostgres(t *testing.T) {
 		t.Fatalf("rows %q", rows)
 	}
 }
+
+// The same collision on Postgres, whose unique-violation message names the
+// index rather than the column.
+func TestPayCode_ACollisionIsRetriedOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPostgresRig(t)
+	stubPayCodes(t, "7K2QFM9XWD", "7K2QFM9XWD", "AB12CD34EF")
+	if _, _, err := s.Create(ctx, m, models.PayModeLive, payIn()); err != nil {
+		t.Fatal(err)
+	}
+	in := payIn()
+	in.Reference = "PNR-OTHER"
+	second, created, err := s.Create(ctx, m, models.PayModeLive, in)
+	if err != nil || !created || *second.PayCode != "AB12CD34EF" {
+		t.Fatalf("second: %+v created %v err %v", second, created, err)
+	}
+}

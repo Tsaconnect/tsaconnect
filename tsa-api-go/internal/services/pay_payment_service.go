@@ -293,25 +293,33 @@ func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, m
 	return s.createOrExisting(ctx, p, in)
 }
 
-// createOrExisting inserts p outside any transaction. If another request won
-// an insert-race for the same (merchant, mode, reference) between create's
-// pre-check and this insert, the unique index refuses the row; we re-read
-// the winner and give the same answer create's pre-check would have, rather
-// than surfacing an error for a request that in fact succeeded.
+// createOrExisting inserts p outside any transaction, with a fresh payment code
+// — the one place a payment is inserted, so every kind of payment gets a code
+// and a collision is retried in one place. A code another payment already has
+// is drawn again; that is checked first, so it is never mistaken for the
+// reference race below. If another request won an insert-race for the same
+// (merchant, mode, reference) between create's pre-check and this insert, the
+// unique index refuses the row; we re-read the winner and give the same answer
+// create's pre-check would have, rather than surfacing an error for a request
+// that in fact succeeded.
 func (s *PayPaymentService) createOrExisting(ctx context.Context, p *models.PayPayment, in CreatePayPaymentInput) (*models.PayPayment, bool, error) {
-	if err := s.db.WithContext(ctx).Create(p).Error; err != nil {
-		if !isUniqueViolation(err) {
-			return nil, false, err
-		}
-		var existing models.PayPayment
-		if reErr := s.db.WithContext(ctx).
-			Where("merchant_id = ? AND mode = ? AND reference = ?", p.MerchantID, p.Mode, p.Reference).
-			First(&existing).Error; reErr != nil {
-			return nil, false, reErr
-		}
-		return payReferenceReused(&existing, p.Source, p.AmountKobo, p.Currency, p.Description, p.ReturnURL)
+	err := payTryFresh(payCodeNext, func(code string) error {
+		p.PayCode = &code
+		return s.db.WithContext(ctx).Create(p).Error
+	}, payCodeTaken)
+	if err == nil {
+		return p, true, nil
 	}
-	return p, true, nil
+	if payCodeTaken(err) || !isUniqueViolation(err) {
+		return nil, false, err
+	}
+	var existing models.PayPayment
+	if reErr := s.db.WithContext(ctx).
+		Where("merchant_id = ? AND mode = ? AND reference = ?", p.MerchantID, p.Mode, p.Reference).
+		First(&existing).Error; reErr != nil {
+		return nil, false, reErr
+	}
+	return payReferenceReused(&existing, p.Source, p.AmountKobo, p.Currency, p.Description, p.ReturnURL)
 }
 
 // payReferenceReused answers a request whose (merchant, mode, reference)
