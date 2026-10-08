@@ -93,7 +93,8 @@ export type Delivery = {
 
 export type Page<T> = { items: T[]; total: number; page: number; limit: number };
 export type PaymentPage = Page<Payment>;
-export type PaymentFilter = { status?: string; q?: string; page?: number; limit?: number };
+/** `from`/`to`: YYYY-MM-DD days in WAT, the end included; sent only as a pair. */
+export type PaymentFilter = { status?: string; q?: string; page?: number; limit?: number; from?: string; to?: string };
 
 // Reads take TanStack Query's signal, so a query it drops is cancelled on the wire.
 export const getMerchant = (signal?: AbortSignal) => api<OwnMerchant>('/pay/merchant', { signal });
@@ -102,6 +103,7 @@ const pageQuery = (mode: Mode, p: PaymentFilter) => new URLSearchParams({
   mode,
   ...(p.status ? { status: p.status } : {}),
   ...(p.q ? { q: p.q } : {}),
+  ...(p.from && p.to ? { from: p.from, to: p.to } : {}),
   page: String(p.page ?? 1),
   ...(p.limit ? { limit: String(p.limit) } : {}),
 });

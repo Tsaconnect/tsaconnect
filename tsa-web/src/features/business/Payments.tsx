@@ -33,6 +33,7 @@ function PaymentsBody() {
         statuses={STATUSES}
         load={listPayments}
         searchPlaceholder="Reference, description or ID"
+        dateFilter
         empty={<NoPaymentsYet mode={mode} />}
       />
       <Outlet />
