@@ -738,3 +738,30 @@ func TestPayOwner_AllowedIPsAreShownAndAnnounced(t *testing.T) {
 		t.Fatalf("events %+v", seen)
 	}
 }
+
+func TestPayOwner_PaymentsFilterByTheDayTheyWereMadeInWAT(t *testing.T) {
+	o := newOwnerRig(t)
+	ctx := context.Background()
+	in := services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-OCT", Description: "LOS-ABV"}
+	oct, _, err := o.payments.Create(ctx, o.m, models.PayModeLive, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Reference = "PNR-SEP"
+	sep, _, err := o.payments.Create(ctx, o.m, models.PayModeLive, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.db.Model(&models.PayPayment{}).Where("id = ?", oct.ID).Update("created_at", time.Date(2026, 9, 30, 23, 0, 0, 0, time.UTC))   // 1 Oct 00:00 WAT
+	o.db.Model(&models.PayPayment{}).Where("id = ?", sep.ID).Update("created_at", time.Date(2026, 9, 30, 22, 59, 59, 0, time.UTC)) // 30 Sep, WAT
+
+	res := o.do(http.MethodGet, "/api/pay/merchant/payments?mode=live&from=2026-10-01&to=2026-10-31", nil)
+	if res.status != http.StatusOK || !strings.Contains(res.raw, `"total":1`) || !strings.Contains(res.raw, oct.ID.String()) || strings.Contains(res.raw, sep.ID.String()) {
+		t.Fatalf("status %d body %s", res.status, res.raw)
+	}
+	for _, q := range []string{"from=2026-10-01", "to=2026-10-31", "from=2026-10-31&to=2026-10-01", "from=01-10-2026&to=31-10-2026"} {
+		if res := o.do(http.MethodGet, "/api/pay/merchant/payments?mode=live&"+q, nil); res.status != http.StatusBadRequest || res.Code != "date_range" {
+			t.Fatalf("%s: status %d code %q", q, res.status, res.Code)
+		}
+	}
+}

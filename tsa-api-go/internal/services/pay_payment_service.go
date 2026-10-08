@@ -411,10 +411,12 @@ const PayListCancelled = "cancelled"
 // PayListCancelled. Query matches the reference, description or customer name
 // (case-insensitive substring) or an id prefix. HideUntriedOpen leaves out
 // untried open-link payments (PayPayment.Untried) — scan noise to an owner.
+// From/To bound created_at to [From, To) (ParsePayDateRange); zero is open.
 type PayListFilter struct {
 	MerchantID                  *uuid.UUID
 	Mode, Status, Source, Query string
 	HideUntriedOpen             bool
+	From, To                    time.Time
 	Page, Limit                 int
 }
 
@@ -451,6 +453,7 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 		if f.HideUntriedOpen {
 			q = payHideUntriedOpen(q)
 		}
+		q = payBetween(q, "created_at", f.From, f.To)
 		if term := strings.ToLower(strings.TrimSpace(f.Query)); term != "" {
 			// What she typed is matched literally: % and _ are not wildcards.
 			esc := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(term)

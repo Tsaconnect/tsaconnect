@@ -374,7 +374,7 @@ func payOwnerMode(c *gin.Context) (string, bool) {
 	return mode, true
 }
 
-// GET /api/pay/merchant/payments?mode&status&source&q&page&limit — the owner's
+// GET /api/pay/merchant/payments?mode&status&source&q&from&to&page&limit — the owner's
 // payments in one mode, newest first: all of them, or only those their server
 // made (source=api), they sent as one-time links (source=link), or customers
 // started through their open links (source=open). status=cancelled is
@@ -402,9 +402,14 @@ func (h *PayHandler) ownerPaymentList(c *gin.Context, source string) {
 	if !ok {
 		return
 	}
+	start, end, ok := payOwnerDateRange(c)
+	if !ok {
+		return
+	}
 	page, limit := payOwnerPage(c)
 	rows, total, err := h.payments.List(c.Request.Context(), services.PayListFilter{MerchantID: &m.ID, Mode: mode,
-		Status: strings.TrimSpace(c.Query("status")), HideUntriedOpen: true, Source: source, Query: c.Query("q"), Page: page, Limit: limit})
+		Status: strings.TrimSpace(c.Query("status")), HideUntriedOpen: true, Source: source, Query: c.Query("q"),
+		From: start, To: end, Page: page, Limit: limit})
 	if err != nil {
 		payOwnerFail(c, err)
 		return
