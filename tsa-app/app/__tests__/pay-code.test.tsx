@@ -115,3 +115,18 @@ it('typing TSA-7K2QF-M9XWD key by key ends with the code and Continue enabled', 
   expect(host('code').props.value).toBe('7K2QF-M9XWD');
   expect(host('button:Continue').props.onPress).toBeDefined();
 });
+
+// Two taps (or tap + submitEditing) in the same frame fire one lookup.
+it('two submits in the same frame look the code up once', async () => {
+  let resolve: (id: string) => void = () => {};
+  jest.mocked(lookupPayCode).mockReturnValue(new Promise<string>((r) => { resolve = r; }));
+  await mount();
+  await type('7K2QFM9XW0');
+  await act(async () => {
+    const submit = host('button:Continue').props.onPress;
+    void submit();
+    void submit();
+  });
+  expect(lookupPayCode).toHaveBeenCalledTimes(1);
+  await act(async () => { resolve(ID); });
+});

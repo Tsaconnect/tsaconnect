@@ -16,6 +16,8 @@ export type PayStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'exp
 
 export type PayCheckout = {
   id: string;
+  /** The payment's code, "TSA-XXXXX-XXXXX" — what a payer types in Wallet → TSA Pay, and the receipt's number. Absent on an older server or an older payment. */
+  payCode?: string;
   merchantName: string;
   mode: 'live' | 'test';
   status: PayStatus;
@@ -38,6 +40,10 @@ export type PayCheckout = {
   settleTokenAddress?: string;
   settleChainId?: number;
   returnUrl?: string;
+  /** When it was paid — set once it has succeeded. */
+  succeededAt?: string;
+  /** The public page that verifies this receipt (tsaconnectworld.com/r/<code>) — live payments only, once succeeded. */
+  receiptUrl?: string;
   payable: boolean;
   notPayableWhy?: string;
   /** Set when she can clear the block herself — a KYC refusal code (utils/kycRefusal.ts). Branch on this, never the words. */
@@ -70,6 +76,7 @@ export { isPaymentId };
 /** One of her own payments, as her activity lists it (GET /pay/history). */
 export type PayHistoryItem = {
   id: string;
+  payCode?: string;
   merchantName: string;
   description?: string;
   /** A payment's status — or `refunded`, for a past attempt of hers whose money came back. */

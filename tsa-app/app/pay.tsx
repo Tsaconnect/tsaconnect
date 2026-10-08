@@ -44,6 +44,8 @@ import { PayBlockedNotice } from '@/components/pay/PayBlockedNotice';
 import { DisputeSection } from '@/components/disputes/DisputeSection';
 import { isDisputableOrder } from '@/services/paycrestStatus';
 import { formatKobo } from '@/utils/stableSellQuote';
+import { PayLinkShare } from '@/components/pay/PayLinkShare';
+import { formatLinkTime, payReceiptShareMessage, safeReceiptUrl } from '@/utils/payLinks';
 
 /** The server writes reasons for her in lower case ("support is reviewing it"); a line of its own starts with a capital. */
 const sentence = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
@@ -183,6 +185,16 @@ export default function PayScreen() {
     }
   };
 
+  // The receipt's own page prints and saves as a PDF in the browser: no native print module.
+  const openReceipt = async (url: string) => {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      toast.error('Could not open the receipt');
+    }
+  };
+  const receiptUrl = safeReceiptUrl(checkout?.receiptUrl);
+
   if (!isHydrated) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
@@ -242,6 +254,7 @@ export default function PayScreen() {
               <Card>
                 <SummaryCard>
                   <SummaryRow label="Paying" value={state.checkout.merchantName} />
+                  {state.checkout.payCode ? <SummaryRow label="Code" value={state.checkout.payCode} /> : null}
                   {/* Through a reusable link, what it's for is the link's name; the
                       description is only the payer's own note, and is labelled as that. */}
                   {state.checkout.source === 'open' ? (
@@ -321,8 +334,27 @@ export default function PayScreen() {
                     value={state.checkout.merchantName}
                   />
                   <SummaryRow label="Amount" value={formatKobo(String(state.checkout.customerTotal))} />
+                  {state.checkout.status === 'succeeded' && state.checkout.payCode ? (
+                    <SummaryRow label="Code" value={state.checkout.payCode} />
+                  ) : null}
+                  {state.checkout.status === 'succeeded' && state.checkout.succeededAt ? (
+                    <SummaryRow label="Paid on" value={formatLinkTime(state.checkout.succeededAt)} />
+                  ) : null}
                 </SummaryCard>
               </Card>
+              {/* A live payment's receipt: the server sends receiptUrl only once
+                  it has succeeded, and never for a test payment. */}
+              {state.checkout.status === 'succeeded' && receiptUrl ? (
+                <View style={{ width: '100%' }}>
+                  <PayLinkShare
+                    url={receiptUrl}
+                    message={payReceiptShareMessage({ ...state.checkout, receiptUrl })}
+                    qrSize={160}
+                    shareTitle="Share receipt"
+                    secondary={{ title: 'Print / Save PDF', icon: 'print', onPress: () => void openReceipt(receiptUrl) }}
+                  />
+                </View>
+              ) : null}
               {/* Her payment is over, but it may still need chasing — failed with
                   her money in it, or "the merchant says it never arrived". The
                   report is filed on the order behind it; she never opens that

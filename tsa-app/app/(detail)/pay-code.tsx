@@ -5,7 +5,7 @@
 // (/pay?id=…), which handles every status. Reached from the wallet's TSA Pay
 // tile. The field has no maxLength on purpose: a pasted "TSA-…" code is
 // fifteen characters and must arrive whole to be read.
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { ScrollView } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { router } from 'expo-router';
@@ -20,6 +20,8 @@ export default function PayCodeScreen() {
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   const code = normalizePayCode(text);
+  // `busy` is state, so two calls in one frame both see it false: this ref is the real guard.
+  const inFlight = useRef(false);
 
   const edit = (value: string) => {
     setText(payCodeFieldText(dropTypedPrefix(value)));
@@ -35,7 +37,8 @@ export default function PayCodeScreen() {
   };
 
   const submit = async () => {
-    if (!code || busy) return;
+    if (!code || inFlight.current) return;
+    inFlight.current = true;
     setBusy(true);
     setError(undefined);
     try {
@@ -44,6 +47,7 @@ export default function PayCodeScreen() {
     } catch (err) {
       setError(payCodeLookupError(err));
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };

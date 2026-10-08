@@ -24,6 +24,24 @@ export function payLinkShareMessage(businessName: string, link: Pick<PayLink, 'c
 export const openLinkShareMessage = (businessName: string, link: Pick<OpenLink, 'label' | 'url'>): string =>
   `Pay ${businessName} — ${link.label}: ${link.url}`;
 
+/** What "Share receipt" sends: who was paid, how much, the code, and the page that verifies it. */
+export function payReceiptShareMessage(p: { merchantName: string; customerTotal: number; payCode?: string; receiptUrl?: string }): string {
+  const code = p.payCode ? ` · ${p.payCode}` : '';
+  return `Receipt: ${formatKobo(String(p.customerTotal))} paid to ${p.merchantName}${code}. Verify it: ${p.receiptUrl ?? ''}`;
+}
+
+/** A receipt link is ours or it is nothing: https, tsaconnectworld.com, under /r/ — a tampered response must not open elsewhere. */
+export function safeReceiptUrl(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    const ours = u.protocol === 'https:' && u.hostname === 'tsaconnectworld.com' && !u.username && !u.password && !u.port;
+    return ours && u.pathname.startsWith('/r/') && u.pathname.length > 3 ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * What a customer may pay through a reusable link, in words — the effective
  * range, worked out as the server does: the link's own range narrowed by the
