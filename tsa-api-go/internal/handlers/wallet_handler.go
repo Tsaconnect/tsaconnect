@@ -14,10 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -753,8 +752,8 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		return
 	}
 
-	signedTxBytes, err := hexutil.Decode(req.SignedTx)
-	if err != nil {
+	parsedTx, signerAddr, decodeErr := blockchain.DecodeSignedTx(req.SignedTx)
+	if errors.Is(decodeErr, blockchain.ErrSignedTxHex) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction format")
 		return
 	}
@@ -776,13 +775,11 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 	if expectedSigner == "" {
 		expectedSigner = user.WalletAddress
 	}
-	var parsedTx types.Transaction
-	if err := parsedTx.UnmarshalBinary(signedTxBytes); err != nil {
+	switch {
+	case errors.Is(decodeErr, blockchain.ErrSignedTxEncoding):
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction encoding")
 		return
-	}
-	signerAddr, err := types.Sender(types.LatestSignerForChainID(parsedTx.ChainId()), &parsedTx)
-	if err != nil {
+	case decodeErr != nil:
 		utils.ErrorResponse(c, http.StatusBadRequest, "Could not verify the transaction signature")
 		return
 	}
@@ -793,6 +790,13 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		return
 	}
 
+	// The canonical encoding of what was decoded: byte-identical to what the
+	// client sent, since only a canonical encoding decodes.
+	signedTxBytes, err := parsedTx.MarshalBinary()
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction encoding")
+		return
+	}
 	txHash, err := client.SendRawTransaction(signedTxBytes)
 	if err != nil {
 		log.Printf("Failed to submit tx to %s: %v", chainName, err)
