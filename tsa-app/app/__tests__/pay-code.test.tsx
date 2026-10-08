@@ -116,6 +116,18 @@ it('typing TSA-7K2QF-M9XWD key by key ends with the code and Continue enabled', 
   expect(host('button:Continue').props.onPress).toBeDefined();
 });
 
+// Typed with no separator, TSA + the code runs past ten characters: the TSA was the prefix.
+it('typing TSA7K2QFM9XWD key by key, no dash, ends with the code', async () => {
+  await mount();
+  let value = '';
+  for (const ch of 'TSA7K2QFM9XWD') {
+    await type(value + ch);
+    value = host('code').props.value;
+  }
+  expect(host('code').props.value).toBe('7K2QF-M9XWD');
+  expect(host('button:Continue').props.onPress).toBeDefined();
+});
+
 // Two taps (or tap + submitEditing) in the same frame fire one lookup.
 it('two submits in the same frame look the code up once', async () => {
   let resolve: (id: string) => void = () => {};

@@ -70,10 +70,14 @@ export function dropTypedPrefix(input: string): string {
 /**
  * What the field shows while she types or pastes: at most ten code characters
  * as "XXXXX-XXXXX" (the "TSA-" is drawn beside the field, never in it, so it
- * can't be typed twice).
+ * can't be typed twice). A leading TSA is dropped once what she typed runs past
+ * ten characters — typed with no dash, TSA + the code fills the field before
+ * the code is done, and the TSA was the prefix.
  */
 export function payCodeFieldText(input: string): string {
-  const code = forgive(input.replace(/[^0-9A-Za-z]/g, ''))
+  let typed = input.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+  if (typed.length > CODE_LENGTH && typed.startsWith(PREFIX)) typed = typed.slice(PREFIX.length);
+  const code = forgive(typed)
     .split('')
     .filter((ch) => ALPHABET.includes(ch))
     .join('')

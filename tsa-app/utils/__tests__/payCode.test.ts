@@ -39,6 +39,11 @@ describe('payCodeFieldText', () => {
   it('keeps a bare code that starts with TSA whole', () => {
     expect(payCodeFieldText('TSA12345XY')).toBe('TSA12-345XY');
   });
+  it('drops a leading TSA once what she typed runs past ten characters', () => {
+    expect(payCodeFieldText('TSA7K-2QFM9X')).toBe('7K2QF-M9X');
+    expect(payCodeFieldText('tsa7k2qfm9xwd')).toBe('7K2QF-M9XWD');
+    expect(payCodeFieldText('TSATSA12345XY')).toBe('TSA12-345XY');
+  });
   it('stops at ten characters', () => {
     expect(payCodeFieldText('7K2QFM9XWDQQ')).toBe('7K2QF-M9XWD');
   });
