@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -152,4 +154,153 @@ func (s *PayPaymentService) Summary(ctx context.Context, merchantID uuid.UUID, m
 		out.Refunds = refunds
 	}
 	return out, nil
+}
+
+// payExportMaxDays bounds an export's range (a leap year).
+const payExportMaxDays = 366
+
+var (
+	// payExportMaxRows bounds one export; payExportChunk is how many rows are
+	// read, written and flushed at a time. Vars so tests can shrink them.
+	payExportMaxRows int64 = 10_000
+	payExportChunk         = 500
+)
+
+// ErrPayExportTooLarge: more payments were paid in the range than one export holds.
+var ErrPayExportTooLarge = errors.New("more than 10,000 payments in this range — narrow the date range")
+
+// payExportHeader is the export's columns, in order.
+var payExportHeader = []string{"paid_at", "created_at", "code", "reference", "description", "customer_name", "status",
+	"amount_ngn", "customer_total_ngn", "merchant_net_ngn", "fee_ngn", "settlement_ref", "refunded_usd", "refund_status",
+	"source", "payment_id"}
+
+// ExportCSV writes, as CSV, every payment of merchantID in mode paid in
+// [start, end), oldest first. The range is required and at most
+// payExportMaxDays long (ErrPayDateRange). The rows are counted first: more
+// than payExportMaxRows is ErrPayExportTooLarge. Both refusals come before a
+// single byte is written, so a caller can still answer with an error.
+//
+// A UTF-8 BOM comes first, so spreadsheet apps read names right. Rows are
+// read in keyset chunks of payExportChunk, never all at once and never through
+// a cursor held open across the refund lookups, and each chunk is flushed to w
+// (and to the network when w can Flush). Refund columns come from the refund
+// aggregator, one call per chunk.
+func (s *PayPaymentService) ExportCSV(ctx context.Context, w io.Writer, merchantID uuid.UUID, mode string, start, end time.Time) error {
+	if start.IsZero() || end.IsZero() || end.Sub(start) > payExportMaxDays*24*time.Hour {
+		return ErrPayDateRange
+	}
+	paid := func() *gorm.DB {
+		q := s.db.WithContext(ctx).Model(&models.PayPayment{}).
+			Where("merchant_id = ? AND mode = ? AND status = ?", merchantID, mode, models.PayStatusSucceeded)
+		return payBetween(q, "succeeded_at", start, end)
+	}
+	var n int64
+	if err := paid().Count(&n).Error; err != nil {
+		return err
+	}
+	if n > payExportMaxRows {
+		return ErrPayExportTooLarge
+	}
+
+	if _, err := io.WriteString(w, "\uFEFF"); err != nil {
+		return err
+	}
+	cw := csv.NewWriter(w)
+	if err := cw.Write(payExportHeader); err != nil {
+		return err
+	}
+	var after *models.PayPayment
+	for {
+		q := paid().Order("succeeded_at ASC, id ASC").Limit(payExportChunk)
+		if after != nil {
+			at := after.SucceededAt.UTC()
+			q = q.Where("(succeeded_at > ? OR (succeeded_at = ? AND id > ?))", at, at, after.ID)
+		}
+		var chunk []models.PayPayment
+		if err := q.Find(&chunk).Error; err != nil {
+			return err
+		}
+		if len(chunk) == 0 {
+			break
+		}
+		refunds, err := s.exportRefunds(ctx, chunk)
+		if err != nil {
+			return err
+		}
+		for i := range chunk {
+			if err := cw.Write(payExportRow(&chunk[i], refunds[chunk[i].ID])); err != nil {
+				return err
+			}
+		}
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			return err
+		}
+		if f, ok := w.(interface{ Flush() }); ok {
+			f.Flush()
+		}
+		if len(chunk) < payExportChunk {
+			break
+		}
+		after = &chunk[len(chunk)-1]
+	}
+	cw.Flush()
+	return cw.Error()
+}
+
+// exportRefunds is what was refunded on each payment of a chunk; nil (nothing
+// refunded) without an aggregator.
+func (s *PayPaymentService) exportRefunds(ctx context.Context, chunk []models.PayPayment) (map[uuid.UUID]PayRefundAgg, error) {
+	if s.refundAgg == nil {
+		return nil, nil
+	}
+	ids := make([]uuid.UUID, len(chunk))
+	for i := range chunk {
+		ids[i] = chunk[i].ID
+	}
+	return s.refundAgg.AggregateByPayment(ctx, ids)
+}
+
+// payExportRow is one payment as an export row, in payExportHeader's order.
+// The code column stays empty until payments carry a payment code.
+func payExportRow(p *models.PayPayment, r PayRefundAgg) []string {
+	refundStatus := r.Status
+	if refundStatus == "" {
+		refundStatus = "none"
+	}
+	return []string{
+		payExportTime(p.SucceededAt),
+		p.CreatedAt.In(payWAT).Format(time.RFC3339),
+		"",
+		payCSVSafe(p.Reference),
+		payCSVSafe(p.Description),
+		payCSVSafe(p.CustomerName),
+		p.Status,
+		payFiatAmount(p.AmountKobo),
+		payFiatAmount(p.CustomerTotalKobo),
+		payFiatAmount(p.MerchantNetKobo),
+		payFiatAmount(p.CustomerTotalKobo - p.MerchantNetKobo),
+		p.SettlementRef,
+		FormatMicroUSD(r.RefundedMicroUSD),
+		refundStatus,
+		p.Source,
+		p.ID.String(),
+	}
+}
+
+func payExportTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.In(payWAT).Format(time.RFC3339)
+}
+
+// payCSVSafe keeps a merchant's or customer's own text from running as a
+// spreadsheet formula: a cell starting with = + - @, a tab or a carriage
+// return gets a leading single quote.
+func payCSVSafe(s string) string {
+	if s != "" && strings.ContainsAny(s[:1], "=+-@\t\r") {
+		return "'" + s
+	}
+	return s
 }

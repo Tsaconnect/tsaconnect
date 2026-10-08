@@ -514,3 +514,22 @@ func TestPayRoutes_SummaryIsItsOwnRoute(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestPayRoutes_ExportIsItsOwnRouteAndLimitedTenAMinute(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	u, _ := payRoutesOwner(t, db)
+	tok := payRoutesToken(t, cfg.JWTSecret, u.ID)
+	path := "/api/pay/merchant/payments/export?mode=live&from=2026-10-01&to=2026-10-31"
+	w := payRoutesDo(r, http.MethodGet, path, tok, nil)
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/csv; charset=utf-8" || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("%d %v", w.Code, w.Header())
+	}
+	for i := 2; i <= 10; i++ {
+		if w := payRoutesDo(r, http.MethodGet, path, tok, nil); w.Code == http.StatusTooManyRequests {
+			t.Fatalf("export %d in a minute refused", i)
+		}
+	}
+	if w := payRoutesDo(r, http.MethodGet, path, tok, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("the 11th export in a minute: %d", w.Code)
+	}
+}

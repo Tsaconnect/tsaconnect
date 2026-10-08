@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -47,3 +50,59 @@ func (h *PayHandler) OwnerPaymentSummary(c *gin.Context) {
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Summary", sum)
 }
+
+// GET /api/pay/merchant/payments/export?mode&from&to — every payment paid in
+// the range as a CSV download (services.ExportCSV). Refusals come before the
+// first byte, as JSON. Once the file has started, a failure can only cut it
+// short, and is logged.
+func (h *PayHandler) OwnerExportPayments(c *gin.Context) {
+	_, m, ok := h.payOwnerMerchant(c)
+	if !ok {
+		return
+	}
+	mode, ok := payOwnerMode(c)
+	if !ok {
+		return
+	}
+	start, end, ok := payOwnerDateRange(c)
+	if !ok {
+		return
+	}
+	file := &payCSVDownload{c: c, name: fmt.Sprintf("tsa-pay-%s-%s-%s.csv", mode,
+		start.Format("2006-01-02"), end.AddDate(0, 0, -1).Format("2006-01-02"))}
+	err := h.payments.ExportCSV(c.Request.Context(), file, m.ID, mode, start, end)
+	switch {
+	case err == nil:
+	case file.started:
+		log.Printf("[tsa-pay] export for merchant %s stopped part-way: %v", m.ID, err)
+	case errors.Is(err, services.ErrPayDateRange):
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Choose a date range of at most 366 days", "date_range")
+	case errors.Is(err, services.ErrPayExportTooLarge):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "That's more than 10,000 payments. Narrow the date range.", "export_too_large")
+	default:
+		payOwnerFail(c, err)
+	}
+}
+
+// payCSVDownload is an export's response body. The download headers go out
+// with its first byte, so a refusal before then can still answer JSON.
+type payCSVDownload struct {
+	c       *gin.Context
+	name    string
+	started bool
+}
+
+func (d *payCSVDownload) Write(b []byte) (int, error) {
+	if !d.started {
+		d.started = true
+		h := d.c.Writer.Header()
+		h.Set("Content-Type", "text/csv; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="`+d.name+`"`)
+		h.Set("X-Content-Type-Options", "nosniff")
+		d.c.Status(http.StatusOK)
+	}
+	return d.c.Writer.Write(b)
+}
+
+// Flush sends what has been written so far, so a long export streams.
+func (d *payCSVDownload) Flush() { d.c.Writer.Flush() }

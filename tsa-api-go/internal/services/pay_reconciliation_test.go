@@ -1,9 +1,12 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -180,5 +183,126 @@ func TestPayPayment_PaidDayReadsHaveTheirIndex(t *testing.T) {
 	}
 	if !strings.Contains(strings.ReplaceAll(ddl, "`", ""), "(merchant_id,mode,succeeded_at)") {
 		t.Fatalf("index columns: %q", ddl)
+	}
+}
+
+func readExport(t *testing.T, raw string) [][]string {
+	t.Helper()
+	if !strings.HasPrefix(raw, "\uFEFF") {
+		t.Fatalf("no UTF-8 BOM at the start: %q", raw[:min(len(raw), 24)])
+	}
+	rows, err := csv.NewReader(strings.NewReader(strings.TrimPrefix(raw, "\uFEFF"))).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+func TestPayReconciliation_ExportIsThePaymentsPaidInTheRangeOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	live := models.PayModeLive
+	a := reconPayment(t, s, m, live, "PNR-A", reconTime("2026-09-30T12:00:00Z"), reconAt("2026-09-30T23:30:00Z")) // paid 00:30 WAT, 1 Oct
+	b := reconPayment(t, s, m, live, "PNR-B", reconTime("2026-10-02T09:00:00Z"), reconAt("2026-10-02T10:00:00Z"))
+	s.db.Model(&models.PayPayment{}).Where("id = ?", b.ID).Updates(map[string]any{
+		"reference": "+SUM(A1)", "description": `=HYPERLINK("https://x")`, "customer_name": "@Tolu"})
+	c := reconPayment(t, s, m, live, "PNR-C", reconTime("2026-10-03T09:00:00Z"), reconAt("2026-10-03T10:00:00Z"))
+	s.db.Model(&models.PayPayment{}).Where("id = ?", c.ID).Updates(map[string]any{
+		"reference": "-100", "description": "Seat 4A, \"window\"\nsecond line", "customer_name": "\tAda"})
+	reconPayment(t, s, m, live, "PNR-NOV", reconTime("2026-10-31T20:00:00Z"), reconAt("2026-10-31T23:00:00Z")) // paid 00:00 WAT, 1 Nov
+	reconPayment(t, s, m, live, "PNR-WAITING", reconTime("2026-10-05T09:00:00Z"), nil)
+	reconPayment(t, s, m, models.PayModeTest, "PNR-TEST", reconTime("2026-10-05T09:00:00Z"), reconAt("2026-10-05T09:01:00Z"))
+	start, end, _ := ParsePayDateRange("2026-10-01", "2026-10-31")
+
+	var buf bytes.Buffer
+	if err := s.ExportCSV(ctx, &buf, m.ID, live, start, end); err != nil {
+		t.Fatal(err)
+	}
+	rows := readExport(t, buf.String())
+	if len(rows) != 4 || strings.Join(rows[0], ",") != strings.Join(payExportHeader, ",") {
+		t.Fatalf("rows %q", rows)
+	}
+	want := []string{"2026-10-01T00:30:00+01:00", "2026-09-30T13:00:00+01:00", "", "PNR-A", "LOS-ABV 12 Oct", "", "succeeded",
+		"50000.00", "50505.06", "50000.00", "505.06", "ord_PNR-A", "0.00", "none", "api", a.ID.String()}
+	if strings.Join(rows[1], "|") != strings.Join(want, "|") {
+		t.Fatalf("row A:\n got %q\nwant %q", rows[1], want)
+	}
+	if rows[2][15] != b.ID.String() || rows[2][3] != "'+SUM(A1)" || rows[2][4] != `'=HYPERLINK("https://x")` || rows[2][5] != "'@Tolu" {
+		t.Fatalf("row B must have its formula-looking text quoted: %q", rows[2])
+	}
+	if rows[3][15] != c.ID.String() || rows[3][3] != "'-100" || rows[3][4] != "Seat 4A, \"window\"\nsecond line" || rows[3][5] != "'\tAda" {
+		t.Fatalf("row C: commas, quotes and newlines stay one cell; a leading - or tab is quoted: %q", rows[3])
+	}
+}
+
+func TestPayReconciliation_ExportRefusesTooManyRowsBeforeWritingAByte(t *testing.T) {
+	prev := payExportMaxRows
+	payExportMaxRows = 1
+	t.Cleanup(func() { payExportMaxRows = prev })
+	s, m := newPayPaymentRig(t)
+	reconPayment(t, s, m, models.PayModeLive, "ONE", reconTime("2026-10-02T09:00:00Z"), reconAt("2026-10-02T10:00:00Z"))
+	reconPayment(t, s, m, models.PayModeLive, "TWO", reconTime("2026-10-03T09:00:00Z"), reconAt("2026-10-03T10:00:00Z"))
+	start, end, _ := ParsePayDateRange("2026-10-01", "2026-10-31")
+	var buf bytes.Buffer
+	if err := s.ExportCSV(context.Background(), &buf, m.ID, models.PayModeLive, start, end); !errors.Is(err, ErrPayExportTooLarge) || buf.Len() != 0 {
+		t.Fatalf("err %v, %d bytes written", err, buf.Len())
+	}
+}
+
+func TestPayReconciliation_ExportNeedsARangeOfAtMost366Days(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	var buf bytes.Buffer
+	if err := s.ExportCSV(ctx, &buf, m.ID, models.PayModeLive, time.Time{}, time.Time{}); !errors.Is(err, ErrPayDateRange) || buf.Len() != 0 {
+		t.Fatalf("no range: err %v, %d bytes", err, buf.Len())
+	}
+	start, end, _ := ParsePayDateRange("2024-01-01", "2024-12-31") // 366 days: a leap year
+	if err := s.ExportCSV(ctx, &buf, m.ID, models.PayModeLive, start, end); err != nil {
+		t.Fatalf("366 days: %v", err)
+	}
+	buf.Reset()
+	start, end, _ = ParsePayDateRange("2024-01-01", "2025-01-01") // 367 days
+	if err := s.ExportCSV(ctx, &buf, m.ID, models.PayModeLive, start, end); !errors.Is(err, ErrPayDateRange) || buf.Len() != 0 {
+		t.Fatalf("367 days: err %v, %d bytes", err, buf.Len())
+	}
+}
+
+func TestPayReconciliation_ExportWalksChunksWithoutLosingTiesAndAsksRefundsPerChunk(t *testing.T) {
+	prev := payExportChunk
+	payExportChunk = 2
+	t.Cleanup(func() { payExportChunk = prev })
+	s, m := newPayPaymentRig(t)
+	agg := &fakeRefundAgg{byPayment: map[uuid.UUID]PayRefundAgg{}}
+	s.SetRefundAggregator(agg)
+	var ids []uuid.UUID
+	for i, paid := range []string{"2026-10-02T10:00:00Z", "2026-10-02T10:00:00Z", "2026-10-02T10:00:00Z", "2026-10-01T08:00:00Z", "2026-10-03T08:00:00Z"} {
+		p := reconPayment(t, s, m, models.PayModeLive, fmt.Sprintf("TIE-%d", i), reconTime("2026-10-01T07:00:00Z"), reconAt(paid))
+		ids = append(ids, p.ID)
+	}
+	agg.byPayment[ids[1]] = PayRefundAgg{RefundedMicroUSD: 2_500_000, CapMicroUSD: 50_505_060, Status: "partial"}
+	start, end, _ := ParsePayDateRange("2026-10-01", "2026-10-31")
+	var buf bytes.Buffer
+	if err := s.ExportCSV(context.Background(), &buf, m.ID, models.PayModeLive, start, end); err != nil {
+		t.Fatal(err)
+	}
+	rows := readExport(t, buf.String())[1:]
+	if len(rows) != 5 {
+		t.Fatalf("%d rows, want 5", len(rows))
+	}
+	seen := map[string]bool{}
+	for i, r := range rows {
+		if seen[r[15]] {
+			t.Fatalf("payment %s exported twice", r[15])
+		}
+		seen[r[15]] = true
+		if i > 0 && r[0] < rows[i-1][0] {
+			t.Fatalf("not oldest first: %q after %q", r[0], rows[i-1][0])
+		}
+		if r[15] == ids[1].String() && (r[12] != "2.50" || r[13] != "partial") {
+			t.Fatalf("refund columns: %q", r)
+		}
+	}
+	if len(agg.calls) != 3 || len(agg.calls[0]) != 2 || len(agg.calls[1]) != 2 || len(agg.calls[2]) != 1 {
+		t.Fatalf("refund lookups per chunk: %v", agg.calls)
 	}
 }

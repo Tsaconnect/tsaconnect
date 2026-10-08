@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -40,6 +41,7 @@ type payPaymentAPI interface {
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
 	Summary(ctx context.Context, merchantID uuid.UUID, mode string, start, end time.Time) (services.PaySummary, error)
+	ExportCSV(ctx context.Context, w io.Writer, merchantID uuid.UUID, mode string, start, end time.Time) error
 	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
 	Payer(ctx context.Context, p *models.PayPayment) (*services.PayPayerView, error)
 }

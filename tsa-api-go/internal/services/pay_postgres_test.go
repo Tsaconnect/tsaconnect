@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -185,5 +186,35 @@ func TestPayWebhook_ConcurrentDeliveryOnPostgresDeliversEachOnce(t *testing.T) {
 	s.db.Model(&models.PayWebhookDelivery{}).Where("delivered_at IS NULL").Count(&pending)
 	if pending != 0 {
 		t.Fatalf("%d deliveries left undelivered", pending)
+	}
+}
+
+// The grouped summary (CASE + GROUP BY alias, SUM cast) and the export's keyset
+// walk are Postgres-dialect sensitive.
+func TestPayReconciliation_SummaryAndExportRunOnPostgres(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPostgresRig(t)
+	live := models.PayModeLive
+	reconPayment(t, s, m, live, "PG-1", reconTime("2026-10-02T10:00:00Z"), reconAt("2026-10-02T10:05:00Z"))
+	reconPayment(t, s, m, live, "PG-2", reconTime("2026-10-03T10:00:00Z"), reconAt("2026-10-02T10:05:00Z")) // same paid instant
+	reconPayment(t, s, m, live, "PG-3", reconTime("2026-10-04T10:00:00Z"), nil)
+	called := reconPayment(t, s, m, live, "PG-4", reconTime("2026-10-05T10:00:00Z"), nil)
+	s.db.Model(&models.PayPayment{}).Where("id = ?", called.ID).Updates(map[string]any{"status": models.PayStatusExpired, "failure_reason": PayReasonMerchantCancelled})
+	start, end, _ := ParsePayDateRange("2026-10-01", "2026-10-31")
+
+	sum, err := s.Summary(ctx, m.ID, live, start, end)
+	if err != nil || sum.Succeeded.Count != 2 || sum.Succeeded.CustomerTotalKobo != 2*5_050_506 ||
+		sum.ByStatus["succeeded"] != 2 || sum.ByStatus["pending"] != 1 || sum.ByStatus["cancelled"] != 1 {
+		t.Fatalf("summary %+v err %v", sum, err)
+	}
+	prev := payExportChunk
+	payExportChunk = 1
+	t.Cleanup(func() { payExportChunk = prev })
+	var buf bytes.Buffer
+	if err := s.ExportCSV(ctx, &buf, m.ID, live, start, end); err != nil {
+		t.Fatal(err)
+	}
+	if rows := readExport(t, buf.String()); len(rows) != 3 || rows[1][15] == rows[2][15] {
+		t.Fatalf("rows %q", rows)
 	}
 }

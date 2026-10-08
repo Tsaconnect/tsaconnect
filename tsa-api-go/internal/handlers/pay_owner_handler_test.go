@@ -127,6 +127,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	r.GET("/api/pay/merchant/payments", h.OwnerPayments)
 	r.GET("/api/pay/merchant/payments/:id", h.OwnerPayment)
 	r.GET("/api/pay/merchant/payments/summary", h.OwnerPaymentSummary)
+	r.GET("/api/pay/merchant/payments/export", h.OwnerExportPayments)
 	r.POST("/api/pay/merchant/keys", h.OwnerRequestKeys)
 	r.PUT("/api/pay/merchant/endpoints", h.OwnerRequestEndpoints)
 	r.PUT("/api/pay/merchant/business-name", h.OwnerRequestBusinessName)
@@ -795,5 +796,32 @@ func TestPayOwner_SummaryIsTheirOwnModeAndPeriod(t *testing.T) {
 	}
 	if res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=live&from=2026-10-01", nil); res.status != http.StatusBadRequest || res.Code != "date_range" {
 		t.Fatalf("half a range: %d %q", res.status, res.Code)
+	}
+}
+
+func TestPayOwner_ExportIsACSVDownloadAndRefusalsAreJSON(t *testing.T) {
+	o := newOwnerRig(t)
+	p, _, err := o.payments.Create(context.Background(), o.m, models.PayModeLive, services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-CSV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paidAt := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	o.db.Model(&models.PayPayment{}).Where("id = ?", p.ID).Updates(map[string]any{"status": models.PayStatusSucceeded, "succeeded_at": paidAt, "created_at": paidAt})
+
+	w := payDo(o.r, http.MethodGet, "/api/pay/merchant/payments/export?mode=live&from=2026-10-01&to=2026-10-31", nil, nil)
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/csv; charset=utf-8" ||
+		w.Header().Get("Content-Disposition") != `attachment; filename="tsa-pay-live-2026-10-01-2026-10-31.csv"` ||
+		!strings.HasPrefix(w.Body.String(), "\uFEFFpaid_at,created_at,code,") || !strings.Contains(w.Body.String(), p.ID.String()) {
+		t.Fatalf("%d %v %q", w.Code, w.Header(), w.Body.String())
+	}
+	w = payDo(o.r, http.MethodGet, "/api/pay/merchant/payments/export?mode=test&from=2026-10-01&to=2026-10-31", nil, nil)
+	if w.Code != http.StatusOK || strings.Count(w.Body.String(), "\n") != 1 {
+		t.Fatalf("test mode is only the header: %q", w.Body.String())
+	}
+	for _, q := range []string{"", "&from=2026-10-01", "&from=2025-01-01&to=2026-10-31"} {
+		res := o.do(http.MethodGet, "/api/pay/merchant/payments/export?mode=live"+q, nil)
+		if res.status != http.StatusBadRequest || res.Code != "date_range" || !strings.HasPrefix(res.raw, "{") {
+			t.Fatalf("%q: %d %s", q, res.status, res.raw)
+		}
 	}
 }
