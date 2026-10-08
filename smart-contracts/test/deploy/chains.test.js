@@ -26,4 +26,14 @@ describe("deploy/chains config", () => {
   it("uses canonical Permit2 on BSC", () => {
     expect(chains.bscMainnet.permit2).to.equal(CANONICAL_PERMIT2);
   });
+
+  it("BSC entries carry a pool block (USDT, 60-minute window); mainnet requires an owner wallet", () => {
+    for (const n of ["bscMainnet", "bscTestnet"]) {
+      expect(chains[n].pool.tokens).to.deep.equal(["USDT"]);
+      expect(chains[n].pool.paymentWindowSec).to.equal(3600);
+    }
+    expect(chains.bscMainnet.pool.requireOwner).to.equal(true);
+    expect(chains.bscTestnet.pool.requireOwner).to.equal(false);
+    expect(chains.sonicMainnet.pool).to.equal(undefined);
+  });
 });

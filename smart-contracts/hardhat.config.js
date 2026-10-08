@@ -47,6 +47,9 @@ module.exports = {
           hardfork: "cancun",
           chains: {
             146: { hardforkHistory: { shanghai: 0, cancun: 1 } },
+            // BSC mainnet fork rehearsal (TSA Liquidity §24.4.2): BSC is not in
+            // Hardhat's hardfork history either.
+            56: { hardforkHistory: { cancun: 0 } },
           },
         }
       : {},
