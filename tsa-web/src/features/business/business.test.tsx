@@ -297,17 +297,17 @@ describe('business area', () => {
     const drawer = await screen.findByRole('dialog');
     const row = (event: string) => within(drawer).getByText(event).closest('li')!;
 
-    await userEvent.click(within(await waitFor(() => row('payment.failed'))).getByRole('button', { name: 'Resend' }));
+    await userEvent.click(within(await waitFor(() => row('payment.failed'))).getByRole('button', { name: 'Resend payment.failed' }));
     expect(await screen.findByText('Queued to send again — it goes out within a minute')).toBeInTheDocument();
     const call = f.mock.calls.find(([u]) => String(u).startsWith('/api/pay/merchant/deliveries/d1/resend'))!;
     expect(call[0]).toBe('/api/pay/merchant/deliveries/d1/resend?mode=live');
     expect(call[1].method).toBe('POST');
     await waitFor(() => expect(reads).toBe(2));
 
-    await userEvent.click(within(row('payment.succeeded')).getByRole('button', { name: 'Resend' }));
+    await userEvent.click(within(row('payment.succeeded')).getByRole('button', { name: 'Resend payment.succeeded' }));
     expect(await screen.findByText('Sent again as a new delivery — it goes out within a minute')).toBeInTheDocument();
 
-    await userEvent.click(within(row('payment.expired')).getByRole('button', { name: 'Resend' }));
+    await userEvent.click(within(row('payment.expired')).getByRole('button', { name: 'Resend payment.expired' }));
     expect(await screen.findByText('Add a webhook URL for this mode under API keys & webhooks first')).toBeInTheDocument();
   });
 });

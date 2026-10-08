@@ -59,7 +59,7 @@ function ResendButton({ delivery, mode, paymentId }: { delivery: Delivery; mode:
     onSettled: () => void queryClient.invalidateQueries({ queryKey: queryKeys.payment(mode, paymentId) }),
   });
   return (
-    <Button variant="secondary" size="sm" className="shrink-0" loading={resend.isPending} onClick={() => resend.mutate()}>
+    <Button variant="secondary" size="sm" className="shrink-0" aria-label={`Resend ${delivery.event}`} loading={resend.isPending} onClick={() => resend.mutate()}>
       Resend
     </Button>
   );
