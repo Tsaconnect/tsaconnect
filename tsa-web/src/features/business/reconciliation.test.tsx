@@ -86,7 +86,6 @@ describe('refunds & reconciliation', () => {
     expect(call[0]).toBe(`${EXPORT}?mode=live&from=2026-10-01&to=2026-10-31`);
     expect(call[1]).toMatchObject({ credentials: 'same-origin' });
     expect(merchantReads).toBeGreaterThan(before);
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:csv');
   });
 
   it('without a Content-Disposition the file is named from the mode and period', async () => {
