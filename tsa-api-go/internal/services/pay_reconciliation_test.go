@@ -121,12 +121,15 @@ func TestPayReconciliation_SummaryCountsMoneyByPaidDayAndStatusesByMadeDay(t *te
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
 	live := models.PayModeLive
-	reconPayment(t, s, m, live, "MADE-SEP-PAID-OCT", reconTime("2026-09-30T12:00:00Z"), reconAt("2026-09-30T23:30:00Z")) // paid 00:30 WAT 1 Oct
+	sepMade := reconPayment(t, s, m, live, "MADE-SEP-PAID-OCT", reconTime("2026-09-30T12:00:00Z"), reconAt("2026-09-30T23:30:00Z")) // paid 00:30 WAT 1 Oct
 	reconPayment(t, s, m, live, "MADE-PAID-OCT", reconTime("2026-10-05T10:00:00Z"), reconAt("2026-10-05T10:05:00Z"))
 	reconPayment(t, s, m, live, "WAITING", reconTime("2026-10-20T10:00:00Z"), nil)
 	called := reconPayment(t, s, m, live, "CALLED-OFF", reconTime("2026-10-21T10:00:00Z"), nil)
 	s.db.Model(&models.PayPayment{}).Where("id = ?", called.ID).Updates(map[string]any{"status": models.PayStatusExpired, "failure_reason": PayReasonMerchantCancelled})
-	reconPayment(t, s, m, live, "MADE-OCT-PAID-NOV", reconTime("2026-10-22T10:00:00Z"), reconAt("2026-10-31T23:30:00Z")) // paid 00:30 WAT 1 Nov
+	octMade := reconPayment(t, s, m, live, "MADE-OCT-PAID-NOV", reconTime("2026-10-22T10:00:00Z"), reconAt("2026-10-31T23:30:00Z")) // paid 00:30 WAT 1 Nov
+	// Distinct amounts, so the money sum says which date it was filtered on.
+	s.db.Model(&models.PayPayment{}).Where("id = ?", sepMade.ID).Updates(map[string]any{"customer_total_kobo": 1_111_111, "merchant_net_kobo": 1_000_000})
+	s.db.Model(&models.PayPayment{}).Where("id = ?", octMade.ID).Updates(map[string]any{"customer_total_kobo": 7_777_777, "merchant_net_kobo": 7_000_000})
 	scan := reconPayment(t, s, m, live, "UNTRIED-SCAN", reconTime("2026-10-23T10:00:00Z"), nil)
 	s.db.Model(&models.PayPayment{}).Where("id = ?", scan.ID).Update("source", models.PaySourceOpen)
 	reconPayment(t, s, m, models.PayModeTest, "TEST", reconTime("2026-10-05T10:00:00Z"), reconAt("2026-10-05T10:05:00Z"))
@@ -137,7 +140,7 @@ func TestPayReconciliation_SummaryCountsMoneyByPaidDayAndStatusesByMadeDay(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum.Succeeded != (PaySummarySucceeded{Count: 2, CustomerTotalKobo: 2 * 5_050_506, MerchantNetKobo: 2 * 5_000_000}) {
+	if sum.Succeeded != (PaySummarySucceeded{Count: 2, CustomerTotalKobo: 5_050_506 + 1_111_111, MerchantNetKobo: 5_000_000 + 1_000_000}) {
 		t.Fatalf("succeeded %+v: the two paid 1–31 Oct Lagos time, whenever they were made", sum.Succeeded)
 	}
 	want := map[string]int64{"succeeded": 2, "pending": 1, "cancelled": 1}
@@ -151,7 +154,7 @@ func TestPayReconciliation_SummaryCountsMoneyByPaidDayAndStatusesByMadeDay(t *te
 	}
 	raw, _ := json.Marshal(sum)
 	if !strings.Contains(string(raw), `"refunds":{"count":0,"amount":"0.00"}`) ||
-		!strings.Contains(string(raw), `"succeeded":{"count":2,"customerTotal":10101012,"merchantNet":10000000}`) {
+		!strings.Contains(string(raw), `"succeeded":{"count":2,"customerTotal":6161617,"merchantNet":6000000}`) {
 		t.Fatalf("json %s", raw)
 	}
 
