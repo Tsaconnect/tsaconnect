@@ -169,6 +169,7 @@ function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Paymen
         <Row label={p.status === 'succeeded' ? 'Paid by' : 'Payer'}><PaidBy payer={payer} status={p.status} /></Row>
         {p.customerName && <Row label="Requested for">{p.customerName}</Row>}
         <Row label="Your reference"><span className="font-mono text-[13px]">{p.reference}</span></Row>
+        {p.payCode && <Row label="Payment code"><span className="font-mono text-[13px]">{p.payCode}</span></Row>}
         {forWhat.what && <Row label="For">{forWhat.what}</Row>}
         {forWhat.note && <Row label="Customer's note">{forWhat.note}</Row>}
         {p.source === 'open' && p.openLinkId && (

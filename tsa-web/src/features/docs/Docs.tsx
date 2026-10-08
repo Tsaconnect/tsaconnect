@@ -179,6 +179,7 @@ export function Docs() {
               rows={[
                 [<C>id</C>, 'string (UUID)', 'Our id for the payment.'],
                 [<C>reference</C>, 'string', 'Your reference.'],
+                [<C>payCode</C>, 'string, optional', <>The code your customer sees, like <C>TSA-7K2QF-M9XWD</C>. They can type it in the TSA Connect app (Wallet → TSA Pay) to pay, and it is the number on their receipt. Unique; matched in any case, with or without dashes.</>],
                 [<C>mode</C>, 'string', <><C>live</C> or <C>test</C>.</>],
                 [<C>status</C>, 'string', <><C>pending</C>, <C>processing</C>, <C>succeeded</C>, <C>failed</C> or <C>expired</C>.</>],
                 [<C>amount</C>, 'integer', 'Your price, in kobo.'],

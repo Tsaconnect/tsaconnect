@@ -310,4 +310,30 @@ describe('business area', () => {
     await userEvent.click(within(row('payment.expired')).getByRole('button', { name: 'Resend payment.expired' }));
     expect(await screen.findByText('Add a webhook URL for this mode under API keys & webhooks first')).toBeInTheDocument();
   });
+
+  it('a payment shows its code in the list and in the detail', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 20 }),
+      [`/api/pay/merchant/payments/${payment.id}`]: ok({ payment, payer: null, deliveries: [] }),
+    });
+    mountAt('/business/live/payments');
+    const row = (await screen.findByText(payment.reference)).closest('tr')!;
+    expect(within(row).getByText('TSA-7K2QF-M9XWD')).toBeInTheDocument();
+    await userEvent.click(within(row).getByText(payment.reference));
+    const drawer = await screen.findByRole('dialog');
+    expect(within(drawer).getByText('Payment code').nextElementSibling).toHaveTextContent('TSA-7K2QF-M9XWD');
+  });
+
+  it('a payment from before codes shows no code line', async () => {
+    const older = { ...payment, payCode: undefined }; // dropped by JSON, as an older payment's view omits it
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [older], total: 1, page: 1, limit: 20 }),
+      [`/api/pay/merchant/payments/${payment.id}`]: ok({ payment: older, payer: null, deliveries: [] }),
+    });
+    mountAt(`/business/live/payments/${payment.id}`);
+    const drawer = await screen.findByRole('dialog');
+    expect(within(drawer).queryByText('Payment code')).not.toBeInTheDocument();
+  });
 });

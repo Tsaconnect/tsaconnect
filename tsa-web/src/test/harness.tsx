@@ -47,6 +47,7 @@ export const merchant: OwnMerchant = {
 export const payment: Payment = {
   id: '3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f',
   reference: 'PNR-K8Q2ZL',
+  payCode: 'TSA-7K2QF-M9XWD',
   mode: 'live',
   status: 'succeeded',
   amount: 8_450_000,
@@ -68,6 +69,7 @@ export const link: Payment = {
   ...payment,
   id: '8e4d2c1b-6a5f-4e3d-9c2b-7a1f0e9d8c7b',
   reference: 'link_k3m9x2p7q4wz',
+  payCode: 'TSA-4HN8R-2PQ6V',
   status: 'pending',
   amount: 500_000,
   customerTotal: 505_051,

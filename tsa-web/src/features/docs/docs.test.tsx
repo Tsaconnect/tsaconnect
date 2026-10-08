@@ -2,6 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { Docs } from './Docs';
+import { createResponse, webhookBody } from './samples';
 
 function mount() {
   return render(
@@ -107,5 +108,14 @@ describe('developer docs', () => {
     expect(within(create).getByText(/exactly like/).textContent).toContain('GET /payments/:id');
     const sample = screen.getByRole('figure', { name: 'Find by reference with curl' });
     expect(sample.textContent).toContain('--data-urlencode "reference=PNR-K8Q2ZL"');
+  });
+
+  it('documents the payment code on the payment object and in the samples', () => {
+    mount();
+    const object = screen.getByRole('heading', { level: 2, name: 'The payment object' }).closest('section')!;
+    expect(within(object).getByText('payCode')).toBeInTheDocument();
+    expect(within(object).getByText(/Wallet → TSA Pay/)).toBeInTheDocument();
+    expect(createResponse).toContain('"payCode": "TSA-7K2QF-M9XWD"');
+    expect(webhookBody).toContain('"payCode": "TSA-7K2QF-M9XWD"');
   });
 });

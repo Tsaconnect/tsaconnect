@@ -52,6 +52,8 @@ export type PaymentSource = 'api' | 'link' | 'open';
 export type Payment = {
   id: string;
   reference: string;
+  /** The customer's code, "TSA-XXXXX-XXXXX": shown on their checkout and receipt, typed in the app to pay. Absent on payments from before codes. */
+  payCode?: string;
   mode: Mode;
   status: PaymentStatus;
   amount: number;

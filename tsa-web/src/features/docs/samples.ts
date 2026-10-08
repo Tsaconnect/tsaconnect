@@ -47,6 +47,7 @@ export const createResponse = `{
   "data": {
     "id": "3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
     "reference": "PNR-K8Q2ZL",
+    "payCode": "TSA-7K2QF-M9XWD",
     "mode": "live",
     "status": "pending",
     "amount": 8450000,
@@ -77,6 +78,7 @@ export const webhookBody = `{
   "data": {
     "id": "3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
     "reference": "PNR-K8Q2ZL",
+    "payCode": "TSA-7K2QF-M9XWD",
     "mode": "live",
     "status": "succeeded",
     "amount": 8450000,
