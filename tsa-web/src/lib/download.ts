@@ -7,7 +7,7 @@ function dispositionName(header: string | null): string | undefined {
   const raw = /filename="?([^";]+)"?/i.exec(header ?? '')?.[1];
   // eslint-disable-next-line no-control-regex
   const name = raw?.split(/[/\\]/).pop()?.replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, '').trim();
-  return name && /\.csv$/i.test(name) ? name : undefined;
+  return name && /.\.csv$/i.test(name) ? name : undefined;
 }
 
 /**
