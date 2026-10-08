@@ -1349,39 +1349,9 @@ func main() {
 		return u.Name, nil
 	}
 
-	var releaseSigner services.ChainSender
-	switch cfg.PMReleaseSigner {
-	case "kms":
-		log.Printf("[pm] KMS signer not yet implemented; PM release disabled")
-	default:
-		if !rawSignerKeyAllowed(cfg) && cfg.PMReleasePrivateKey != "" {
-			// Same rule as the IT operator, relayer and ramp sponsor keys: a raw
-			// key out of the environment is a dev/staging convenience, refused in
-			// production unless ALLOW_RAW_SIGNER_KEYS opts back in. PM release
-			// stays disabled — automation/webhook/admin PM routes surface "not
-			// configured" rather than signing with a key that shouldn't be here.
-			log.Printf("[pm] PM release disabled: raw PM_RELEASE_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
-		} else if cfg.PMReleasePrivateKey != "" && sonicClient != nil {
-			keyHex := strings.TrimPrefix(cfg.PMReleasePrivateKey, "0x")
-			key, kerr := crypto.HexToECDSA(keyHex)
-			if kerr != nil {
-				log.Printf("[pm] invalid PM_RELEASE_PRIVATE_KEY; PM release disabled: %v", kerr)
-			} else {
-				alertRawSignerKeyInProduction(cfg, "PM_RELEASE_PRIVATE_KEY")
-				releaseSigner = services.NewChainReleaseSigner(key, map[int64]services.ReleaseBroadcaster{cfg.SonicChainID: sonicClient})
-				log.Printf("[pm] local release signer ready (admin EOA %s)", releaseSigner.Address())
-				// Catch a signer/admin-EOA misconfig at boot rather than at the
-				// first release: if the derived signer address doesn't match the
-				// configured PM_ADMIN_EOA_ADDRESS, adminRelease will revert
-				// on-chain because the key isn't a registered admin.
-				if cfg.PMAdminEOAAddress != "" && !strings.EqualFold(releaseSigner.Address(), cfg.PMAdminEOAAddress) {
-					log.Printf("[pm] WARNING: release signer address %s does not match configured PM_ADMIN_EOA_ADDRESS %s — adminRelease will revert on-chain until the key matches a registered admin", releaseSigner.Address(), cfg.PMAdminEOAAddress)
-				}
-			}
-		} else {
-			log.Printf("[pm] PM release disabled: PM_RELEASE_PRIVATE_KEY unset or sonic client unavailable")
-		}
-	}
+	// One release key, one lock per P2P chain (spec S8/S39); refuses a key
+	// shared with any other signer (review I8).
+	releaseSigner := buildReleaseSigner(cfg, blockchainService)
 
 	var (
 		pmAuto *services.PMAutomationService
@@ -1833,6 +1803,16 @@ func main() {
 	} else {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
 	}
+
+	// TSA Liquidity (spec 2026-10-08): the pool chain's treasury lane and boot
+	// gates. Dormant unless a preset row carries a pool escrow; independent of
+	// Paycrest (review I6). Both run before scheduler.Start: poolTreasuryFor may
+	// set EscrowCalls on the shared conversion lane in place, and the gates are
+	// checked once here. poolGates and poolTreasury are consumed by Plan B (LP
+	// endpoints) and Plan C1 (pool provider).
+	poolTreasury := poolTreasuryFor(cfg, blockchainService, rampTreasury)
+	poolGates := buildPoolChain(cfg, blockchainService, p2pEscrowRegistry, releaseSigner, poolTreasury)
+	registerPoolJobs(scheduler, poolGates)
 
 	if treasuryRates == nil { // Paycrest off: Flutterwave mid against the FX feed
 		treasuryRates = wireTreasuryMarketRate(itService, nil, cfg.RampTreasuryRateTolBps)
