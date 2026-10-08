@@ -1,10 +1,14 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { downloadFile } from '@/lib/download';
 import { fail, merchant, mountAt, ok, stubFetch } from '@/test/harness';
 import { monthToDate } from './period';
 
-vi.mock('@/lib/download', () => ({ downloadFile: vi.fn() }));
+const EXPORT = '/api/pay/merchant/payments/export';
+const csv = (disposition?: string) =>
+  new Response('reference\nPNR-1\n', { status: 200, headers: { 'Content-Type': 'text/csv', ...(disposition ? { 'Content-Disposition': disposition } : {}) } });
+const createObjectURL = vi.fn(() => 'blob:csv');
+const revokeObjectURL = vi.fn();
+let saved: string[] = [];
 
 const summary = (count = 2) => ok({
   succeeded: { count, customerTotal: 10_101_012, merchantNet: 10_000_000 },
@@ -16,9 +20,16 @@ const summaryCalls = (f: ReturnType<typeof stubFetch>) =>
   f.mock.calls.map(([u]) => String(u)).filter((u) => u.startsWith('/api/pay/merchant/payments/summary'));
 
 describe('refunds & reconciliation', () => {
+  beforeEach(() => {
+    saved = [];
+    createObjectURL.mockClear();
+    revokeObjectURL.mockClear();
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { saved.push(`${this.download}|${this.href}`); });
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.mocked(downloadFile).mockClear();
+    vi.restoreAllMocks();
   });
 
   it('totals the period: paid, received, refunded and how payments ended', async () => {
@@ -59,31 +70,57 @@ describe('refunds & reconciliation', () => {
     expect(summaryCalls(f)).toHaveLength(0);
   });
 
-  it('Export renews the session, then downloads the period as a CSV', async () => {
+  it('Export renews the session, then saves the period as a CSV named by the API', async () => {
     let merchantReads = 0;
-    stubFetch({
+    const f = stubFetch({
       '/api/pay/merchant': () => { merchantReads += 1; return ok(merchant); },
       '/api/pay/merchant/payments/summary': summary(),
+      [EXPORT]: csv('attachment; filename="tsa-pay-payments-live-2026-10-01-2026-10-31.csv"'),
     });
     mountAt(OCTOBER);
     await screen.findByText('₦101,010.12');
     const before = merchantReads;
     await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }));
-    await waitFor(() => expect(downloadFile).toHaveBeenCalledWith('/api/pay/merchant/payments/export?mode=live&from=2026-10-01&to=2026-10-31'));
+    await waitFor(() => expect(saved).toEqual(['tsa-pay-payments-live-2026-10-01-2026-10-31.csv|blob:csv']));
+    const call = (f.mock.calls as unknown as [string, RequestInit][]).find(([u]) => u.startsWith(EXPORT))!;
+    expect(call[0]).toBe(`${EXPORT}?mode=live&from=2026-10-01&to=2026-10-31`);
+    expect(call[1]).toMatchObject({ credentials: 'same-origin' });
     expect(merchantReads).toBeGreaterThan(before);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:csv');
   });
+
+  it('without a Content-Disposition the file is named from the mode and period', async () => {
+    stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/payments/summary': summary(), [EXPORT]: csv() });
+    mountAt(OCTOBER);
+    await screen.findByText('₦101,010.12');
+    await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }));
+    await waitFor(() => expect(saved).toEqual(['tsa-pay-live-2026-10-01-2026-10-31.csv|blob:csv']));
+  });
+
+  it.each([[422, 'Choose a shorter period.'], [429, 'Too many exports. Try again in a minute.']])(
+    'a %i refusal shows the API message and saves nothing', async (status, message) => {
+      stubFetch({ '/api/pay/merchant': ok(merchant), '/api/pay/merchant/payments/summary': summary(), [EXPORT]: fail(status, message) });
+      mountAt(OCTOBER);
+      await screen.findByText('₦101,010.12');
+      await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }));
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(createObjectURL).not.toHaveBeenCalled();
+      expect(saved).toEqual([]);
+    });
 
   it('a failed session check says so and downloads nothing', async () => {
     let merchantReads = 0;
-    stubFetch({
+    const f = stubFetch({
       '/api/pay/merchant': () => (++merchantReads === 1 ? ok(merchant) : fail(503, 'TSA Connect is busy — try again')),
       '/api/pay/merchant/payments/summary': summary(),
+      [EXPORT]: csv(),
     });
     mountAt(OCTOBER);
     await screen.findByText('₦101,010.12');
     await userEvent.click(screen.getByRole('button', { name: 'Export CSV' }));
     expect(await screen.findByText('TSA Connect is busy — try again')).toBeInTheDocument();
-    expect(downloadFile).not.toHaveBeenCalled();
+    expect(f.mock.calls.some(([u]) => String(u).startsWith(EXPORT))).toBe(false);
+    expect(saved).toEqual([]);
   });
 
   it('Export is off when nothing was paid', async () => {

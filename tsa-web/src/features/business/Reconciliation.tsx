@@ -108,7 +108,7 @@ function ExportCard({ mode, from, to, paid }: { mode: Mode; from: string; to: st
     try {
       // The download is a plain link, outside api()'s refresh, so renew an idle session first.
       await getMerchant();
-      downloadFile(paymentsExportUrl(mode, from, to));
+      await downloadFile(paymentsExportUrl(mode, from, to), `tsa-pay-${mode}-${from}-${to}.csv`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
     } finally {
