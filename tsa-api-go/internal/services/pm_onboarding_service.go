@@ -34,6 +34,20 @@ type NombaProvisioner interface {
 // BVN/NIN. The handler validates shape up front; this is the service-side guard.
 var ErrPMKYCRequired = errors.New("a BVN or NIN is required to activate the payment merchant")
 
+// ErrPMKindConflict: the user already has a payment_merchants row of the other
+// kind (decision 11: never both a merchant and an LP).
+var ErrPMKindConflict = errors.New("payment merchant: this account already has a profile of the other kind")
+
+// ErrLiquidityUnavailable: no pool chain is configured (or the pool is closed
+// for activation), so an LP cannot be approved or activated.
+var ErrLiquidityUnavailable = errors.New("liquidity: providing liquidity is not available right now")
+
+// AccountNameResolver re-resolves a settlement account's name (S34).
+// BankDirectory satisfies it.
+type AccountNameResolver interface {
+	Resolve(ctx context.Context, bankCode, accountNumber string) (NombaLookupResult, error)
+}
+
 // PMOnboardingService provisions a Nomba virtual account (VA) for a new
 // corporate Payment-Merchant and activates the payment_merchants row.
 //
@@ -53,6 +67,12 @@ type PMOnboardingService struct {
 	// account. Activation then mints no virtual account, because nothing would
 	// ever send a buyer to it, and so needs no BVN/NIN.
 	virtualAccountsRetired bool
+
+	// TSA Liquidity (spec §8). poolChainID is set at boot only when the
+	// registry has a pool chain; zero leaves LP approval and activation off.
+	poolChainID int64
+	accounts    AccountNameResolver
+	poolGate    PoolOpener
 }
 
 // NewPMOnboardingService returns a PMOnboardingService.
@@ -67,6 +87,19 @@ func NewPMOnboardingService(db *gorm.DB, provisioner NombaProvisioner) *PMOnboar
 // that routes P2P buyers to the company account, so the two cannot disagree.
 func (s *PMOnboardingService) SetVirtualAccountsRetired(retired bool) {
 	s.virtualAccountsRetired = retired
+}
+
+// SetLiquidity enables LP onboarding on poolChainID. Called once at boot.
+func (s *PMOnboardingService) SetLiquidity(poolChainID int64, accounts AccountNameResolver, gate PoolOpener) {
+	s.poolChainID, s.accounts, s.poolGate = poolChainID, accounts, gate
+}
+
+// LiquidityChainID is the pool chain new LPs are approved onto, if any.
+func (s *PMOnboardingService) LiquidityChainID() (int64, bool) {
+	if s == nil || s.poolChainID == 0 {
+		return 0, false
+	}
+	return s.poolChainID, true
 }
 
 // NeedsIdentity reports whether activation asks the merchant for a BVN/NIN.
@@ -90,18 +123,40 @@ func pmAccountRef(userID uuid.UUID) string { return "pm-" + userID.String() }
 // Idempotent: re-running on an already-approved/active row copies the same
 // fields without downgrading an active PM's status.
 func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
-	pm, err := s.upsertPendingRow(ctx, req)
+	kind, ok := models.PaymentMerchantKindFor(req.BusinessType)
+	if !ok {
+		return nil, fmt.Errorf("pm_onboarding: %s does not make a payment merchant", req.BusinessType)
+	}
+	var poolChainID *int64
+	if kind == models.PaymentMerchantKindLP {
+		id, ok := s.LiquidityChainID()
+		if !ok {
+			return nil, ErrLiquidityUnavailable
+		}
+		poolChainID = &id
+	}
+	pm, err := s.upsertPendingRow(ctx, req, kind, poolChainID)
 	if err != nil {
 		return nil, fmt.Errorf("pm_onboarding: upsert: %w", err)
 	}
+	if kindOf(pm) != kind {
+		return nil, ErrPMKindConflict
+	}
 
+	perTrade, daily := req.RequestedPerTradeCapUSD, req.RequestedDailyCapUSD
+	if kind == models.PaymentMerchantKindLP {
+		perTrade, daily = 0, 0 // LP limits are on stake (spec §8.3), never per-trade caps
+	}
 	fields := map[string]interface{}{
 		"settlement_bank_code":      req.SettlementBankCode,
 		"settlement_account_number": req.SettlementAccountNumber,
 		"settlement_account_name":   req.SettlementAccountName,
 		"operator_wallet_address":   req.MakerWalletAddress,
-		"per_trade_cap_usd":         req.RequestedPerTradeCapUSD,
-		"daily_cap_usd":             req.RequestedDailyCapUSD,
+		"per_trade_cap_usd":         perTrade,
+		"daily_cap_usd":             daily,
+	}
+	if poolChainID != nil {
+		fields["pool_chain_id"] = *poolChainID
 	}
 	// Only advance pending → approved; never downgrade an already-active PM.
 	if pm.Status == models.PaymentMerchantStatusPending {
@@ -117,10 +172,21 @@ func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *model
 	pm.SettlementAccountNumber = req.SettlementAccountNumber
 	pm.SettlementAccountName = req.SettlementAccountName
 	pm.OperatorWalletAddress = req.MakerWalletAddress
-	pm.PerTradeCapUSD = req.RequestedPerTradeCapUSD
-	pm.DailyCapUSD = req.RequestedDailyCapUSD
+	pm.PerTradeCapUSD = perTrade
+	pm.DailyCapUSD = daily
+	if poolChainID != nil {
+		pm.PoolChainID = poolChainID
+	}
 
 	return pm, nil
+}
+
+// kindOf reads a row's kind; anything but lp is a merchant.
+func kindOf(pm *models.PaymentMerchant) string {
+	if pm.IsLP() {
+		return models.PaymentMerchantKindLP
+	}
+	return models.PaymentMerchantKindMerchant
 }
 
 // ApprovePM approves an existing PENDING payment_merchants row by id (admin-driven
@@ -249,20 +315,40 @@ func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID 
 	return &pm, nil
 }
 
-// upsertPendingRow finds or creates a payment_merchants row for req.UserID.
-// If a row already exists (from a prior failed attempt), it is reloaded so the
-// caller can skip already-completed provisioning steps.
-func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
+// upsertPendingRow finds or creates a payment_merchants row of kind for
+// req.UserID. If a row already exists (from a prior failed attempt), it is
+// reloaded so the caller can skip already-completed provisioning steps; the
+// caller compares its kind, since the row may be of the other kind.
+//
+// A rejected LP re-applying as an LP is reset to pending in one guarded
+// statement so the approval can advance it (plan B P18); merchant rows are
+// reused exactly as they are.
+func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, req *models.MerchantRequest, kind string, poolChainID *int64) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
 
 	// Try to find an existing row for this user (from a prior attempt).
 	err := s.db.WithContext(ctx).Where("user_id = ?", req.UserID).First(&pm).Error
 	if err == nil {
-		// Row already exists — re-use it (resume from wherever it got to).
+		if kind == models.PaymentMerchantKindLP && pm.IsLP() && pm.Status == models.PaymentMerchantStatusRejected {
+			res := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+				Where("id = ? AND status = ?", pm.ID, models.PaymentMerchantStatusRejected).
+				Updates(map[string]interface{}{"status": models.PaymentMerchantStatusPending, "review_note": ""})
+			if res.Error != nil {
+				return nil, res.Error
+			}
+			if res.RowsAffected == 1 {
+				pm.Status, pm.ReviewNote = models.PaymentMerchantStatusPending, ""
+			}
+		}
 		return &pm, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
+	}
+
+	perTrade, daily := req.RequestedPerTradeCapUSD, req.RequestedDailyCapUSD
+	if kind == models.PaymentMerchantKindLP {
+		perTrade, daily = 0, 0
 	}
 
 	// No existing row — create one in pending state.
@@ -271,13 +357,15 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, req *models.
 		UserID:                  req.UserID,
 		Name:                    req.BusinessName,
 		Status:                  models.PaymentMerchantStatusPending,
+		Kind:                    kind,
+		PoolChainID:             poolChainID,
 		ProvisioningStatus:      models.PMProvisioningPending,
 		SettlementBankCode:      req.SettlementBankCode,
 		SettlementAccountNumber: req.SettlementAccountNumber,
 		SettlementAccountName:   req.SettlementAccountName,
 		OperatorWalletAddress:   req.MakerWalletAddress,
-		PerTradeCapUSD:          req.RequestedPerTradeCapUSD,
-		DailyCapUSD:             req.RequestedDailyCapUSD,
+		PerTradeCapUSD:          perTrade,
+		DailyCapUSD:             daily,
 	}
 
 	// Use OnConflict DoNothing + Clauses so that a concurrent duplicate insert

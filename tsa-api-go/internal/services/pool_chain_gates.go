@@ -46,6 +46,10 @@ type PoolGateStatus struct {
 	CheckedAt time.Time `json:"checkedAt"`
 }
 
+// PoolOpener is the one question LP onboarding and the LP route ask of the
+// pool (plan B P14): is it open? A nil PoolOpener reads closed.
+type PoolOpener interface{ Open() bool }
+
 // PoolGate is the pool's gate surface as boot hands it out (Plans B/C1 hold
 // it). Boot returns a nil PoolGate, never a typed-nil *PoolChainGates, when no
 // pool row exists; *PoolChainGates is nil-receiver safe and reads closed.

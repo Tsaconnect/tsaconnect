@@ -148,6 +148,12 @@ func verifiedIdentity(ctx context.Context, db *gorm.DB, userID uuid.UUID) (verif
 	return true, strings.TrimSpace(row.VerifiedLegalName.String), nil
 }
 
+// KYCIdentity exposes verifiedIdentity to handlers that need the legal name a
+// verification captured (an LP's business name, spec §8.1).
+func KYCIdentity(ctx context.Context, db *gorm.DB, userID uuid.UUID) (verified bool, legalName string, err error) {
+	return verifiedIdentity(ctx, db, userID)
+}
+
 // IsKYCVerified reports whether a user's identity verification has passed,
 // through the one read of it (verifiedIdentity). It asks only about the status:
 // a gate that is not about attributing a payer's money — applying for TSA Pay —
