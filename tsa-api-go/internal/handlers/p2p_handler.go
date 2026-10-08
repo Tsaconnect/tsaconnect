@@ -192,6 +192,7 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrDisputeAlreadyOpen),
 		errors.Is(err, services.ErrActiveTradeExists),
 		errors.Is(err, services.ErrSellerPoolInsufficient),
+		errors.Is(err, services.ErrPoolStockAdExists),
 		// The asset was delisted from P2P after this ad/pool existed. Creating
 		// an ad in it also carries ErrInvalidParams and maps to 400 above.
 		errors.Is(err, services.ErrAssetNotTradeable):
@@ -723,22 +724,24 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 	if !ok {
 		return
 	}
+	var req createAdRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 	// Only merchants (and admin tiers, who are implicitly trusted) may
 	// publish ads. The pool-model rewrite makes ad creation cheap (off-chain
 	// voucher signing, no per-ad gas), but we still want a verified
 	// counterparty behind every ad to keep the marketplace clean of spam /
 	// unverified sellers. Buyer-side actions (open trade, mark paid, dispute)
-	// stay open to all authenticated users.
-	if user.Role != models.RoleMerchant && !hasAdminPrivilege(c, user) {
+	// stay open to all authenticated users. An active LP is admitted only on
+	// the pool chain, for its stock ad; never for an ordinary ad (plan B I1).
+	lpOnPool := h.trade.IsPoolChain(req.ChainID) && h.trade.IsActiveLP(c.Request.Context(), user.ID)
+	if user.Role != models.RoleMerchant && !hasAdminPrivilege(c, user) && !lpOnPool {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Merchant account required to publish P2P ads.",
 		})
-		return
-	}
-	var req createAdRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
 	// Validate side up-front so a typo doesn't silently fall through to the

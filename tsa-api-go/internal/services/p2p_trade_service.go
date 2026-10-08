@@ -590,6 +590,16 @@ const defaultVoucherTTL = 30 * 24 * time.Hour
 // The seller must call SignAd next, presenting their signature over the
 // returned typed data. Until then the ad is invisible to buyers.
 func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sellerAddress string, params CreateAdParams) (*CreateAdResult, error) {
+	// The pool chain takes only LP stock ads (spec S5, §8.4). The caller's own
+	// LP row decides; nothing in the request can.
+	if s.IsPoolChain(params.ChainID) {
+		lp, err := s.openableFor(ctx, sellerID, params.ChainID, params.Token)
+		if err != nil {
+			return nil, err
+		}
+		return s.createPoolAd(ctx, lp, sellerID, sellerAddress, params)
+	}
+
 	// Buy-ads (merchant offers to BUY crypto from users) take a wholly
 	// separate path: no on-chain pool, no voucher, no signature. The user
 	// deposits crypto JIT at trade-open instead. Branch before the sell-ad's
@@ -931,9 +941,14 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	if ad.Status != models.P2PAdStatusPending {
 		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
 	}
-	// An ad drafted before its asset was delisted must not go live after.
-	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
+	// An ad drafted before its asset was delisted must not go live after; on
+	// the pool chain only the active LP may sign, from its registered wallet.
+	lp, err := s.openableFor(ctx, sellerID, ad.ChainID, ad.Token)
+	if err != nil {
 		return nil, err
+	}
+	if lp != nil && common.HexToAddress(sellerAddress) != common.HexToAddress(lp.OperatorWalletAddress) {
+		return nil, fmt.Errorf("%w: sign with your registered liquidity wallet", ErrInvalidParams)
 	}
 
 	voucher, err := s.adVoucher(&ad, sellerAddress)
@@ -989,6 +1004,9 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	}
 	ad.Status = models.P2PAdStatusActive
 	ad.VoucherSignature = sigHex
+	if lp != nil {
+		s.closeSupersededStockAds(ctx, &ad)
+	}
 
 	s.audit(ctx, models.P2PAuditAdSigned, &sellerID, &ad.ID, nil, map[string]any{
 		"voucherHash": ad.VoucherHash,
@@ -1172,11 +1190,12 @@ func (s *P2PTradeService) PauseAd(ctx context.Context, adID, sellerID uuid.UUID)
 }
 
 // ResumeAd puts a paused ad back on the market, so it counts as new activity:
-// an ad whose asset has since been delisted stays paused.
+// an ad whose asset has since been delisted stays paused, and a stock ad
+// resumes only for its active LP while the pool is open (openableFor).
 func (s *P2PTradeService) ResumeAd(ctx context.Context, adID, sellerID uuid.UUID) error {
 	return s.flipAdStatus(ctx, adID, sellerID, models.P2PAdStatusPaused, models.P2PAdStatusActive,
 		models.P2PAuditAdResumed, events.P2PAdResumed,
-		func(ad *models.P2PAd) error { return s.requireOpenable(ad.ChainID, ad.Token) })
+		func(ad *models.P2PAd) error { _, err := s.openableFor(ctx, sellerID, ad.ChainID, ad.Token); return err })
 }
 
 func (s *P2PTradeService) flipAdStatus(ctx context.Context, adID, sellerID uuid.UUID, from, to, action, event string, guard func(*models.P2PAd) error) error {
