@@ -31,6 +31,11 @@ func DecodeSignedTx(raw string) (*types.Transaction, common.Address, error) {
 	if err := tx.UnmarshalBinary(b); err != nil {
 		return nil, common.Address{}, fmt.Errorf("%w: %v", ErrSignedTxEncoding, err)
 	}
+	// A pre-EIP-155 legacy tx carries no chain id, and LatestSignerForChainID
+	// panics on one; no chain here accepts it, so refuse it as unrecoverable.
+	if tx.ChainId().Sign() <= 0 {
+		return nil, common.Address{}, fmt.Errorf("%w: no chain id (pre-EIP-155)", ErrSignedTxSignature)
+	}
 	signer, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
 	if err != nil {
 		return nil, common.Address{}, fmt.Errorf("%w: %v", ErrSignedTxSignature, err)

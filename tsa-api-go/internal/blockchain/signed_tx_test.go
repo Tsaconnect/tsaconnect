@@ -58,3 +58,23 @@ func TestERC20TransferData_IsTheTransferSelectorAndTwoWords(t *testing.T) {
 		t.Fatalf("data %x err %v", data, err)
 	}
 }
+
+func TestDecodeSignedTx_RefusesAPreEIP155TxInsteadOfPanicking(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned := types.NewTx(&types.LegacyTx{Nonce: 1, GasPrice: big.NewInt(1), Gas: 21000, To: &common.Address{1}})
+	signed, err := types.SignTx(unsigned, types.HomesteadSigner{}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := signed.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = DecodeSignedTx(hexutil.Encode(b))
+	if !errors.Is(err, ErrSignedTxSignature) {
+		t.Fatalf("got %v, want ErrSignedTxSignature", err)
+	}
+}
