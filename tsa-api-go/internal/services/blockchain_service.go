@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/big"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
@@ -209,6 +210,27 @@ func (bs *BlockchainService) TokenAddressForNetwork(network, chain, symbol strin
 		return net.TokenAddresses[chain+":"+symbol]
 	}
 	return ""
+}
+
+// IsNativeCurrency reports whether symbol is the native coin of chain on
+// network (POL on Polygon, ETH on Base, ...) — a native transfer, not an
+// ERC-20 one. BNB and tBNB are the same coin, whichever BSC network is live.
+func (bs *BlockchainService) IsNativeCurrency(network, chain, symbol string) bool {
+	if bs.cfg == nil {
+		return false
+	}
+	native := bs.cfg.Networks[network].Chains[chain].NativeCurrency
+	if native == "" {
+		return false
+	}
+	normalize := func(s string) string {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s == "TBNB" {
+			return "BNB"
+		}
+		return s
+	}
+	return normalize(symbol) == normalize(native)
 }
 
 // IsWalletMCGP reports whether token on chainID is the plain wallet MCGP —

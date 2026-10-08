@@ -652,7 +652,10 @@ func (h *Handlers) PrepareSendTransaction(c *gin.Context) {
 	var txBytes []byte
 	var err error
 
-	if tokenUpper == "S" || tokenUpper == "TBNB" || tokenUpper == "BNB" {
+	// An explicit contract address is always a token send: a discovered token
+	// whose symbol mimics the native coin must never move the real one.
+	explicitToken := strings.TrimSpace(req.TokenAddress) != ""
+	if !explicitToken && h.BlockchainService.IsNativeCurrency(network, chainName, tokenUpper) {
 		amountWei, ok := parseTokenAmount(req.Amount, 18)
 		if !ok {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid amount format")

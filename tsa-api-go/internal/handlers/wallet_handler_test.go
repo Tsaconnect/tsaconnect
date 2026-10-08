@@ -976,3 +976,123 @@ func TestWalletBalanceRows_OnlyTheNativeRowIsNative(t *testing.T) {
 		t.Fatalf("contract row must not carry a native field: %s", body)
 	}
 }
+
+// Every chain's own native coin is a native transfer, not an ERC-20 lookup:
+// POL on Polygon and ETH on Base used to fail with "Token POL not configured
+// on polygon" because only S/BNB were recognised. The RPC is unreachable, so
+// reaching the transfer builder (500) rather than the token lookup (400)
+// proves the native path was taken.
+func TestPrepareTx_NativeCoinOfEveryChain(t *testing.T) {
+	cases := []struct {
+		symbol, rpcEnv string
+		chainID        int64
+	}{
+		{"POL", "POLYGON_MAINNET_RPC_URL", 137},
+		{"pol", "POLYGON_TESTNET_RPC_URL", 80002},
+		{"ETH", "BASE_MAINNET_RPC_URL", 8453},
+		{"ETH", "ETHEREUM_MAINNET_RPC_URL", 1},
+		{"AVAX", "AVALANCHE_MAINNET_RPC_URL", 43114},
+		{"BNB", "BSC_TESTNET_RPC_URL", 97},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s_%d", tc.symbol, tc.chainID), func(t *testing.T) {
+			t.Setenv(tc.rpcEnv, "http://127.0.0.1:1")
+
+			db := setupTestDB(t)
+			h := setupTestHandlers(t)
+			user := createTestUser(t, db)
+			setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Set("user", user)
+
+			body, _ := json.Marshal(map[string]interface{}{
+				"tokenSymbol": tc.symbol,
+				"toAddress":   "0x0000000000000000000000000000000000000002",
+				"amount":      "1.5",
+				"chainId":     tc.chainID,
+			})
+			c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			h.PrepareSendTransaction(c)
+
+			if bytes.Contains(w.Body.Bytes(), []byte("not configured")) {
+				t.Fatalf("native %s was looked up as an ERC-20: %s", tc.symbol, w.Body.String())
+			}
+			if w.Code != http.StatusInternalServerError {
+				t.Errorf("expected the native transfer builder to fail on the dead RPC (%d), got %d: %s",
+					http.StatusInternalServerError, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// A token that is not the chain's native coin still goes through the
+// configured-token lookup — ETH on Polygon is not native there.
+func TestPrepareTx_ForeignNativeSymbolIsNotNative(t *testing.T) {
+	t.Setenv("POLYGON_MAINNET_RPC_URL", "http://127.0.0.1:1")
+
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tokenSymbol": "S",
+		"toAddress":   "0x0000000000000000000000000000000000000002",
+		"amount":      "1",
+		"chainId":     137,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PrepareSendTransaction(c)
+
+	if w.Code != http.StatusBadRequest || !bytes.Contains(w.Body.Bytes(), []byte("not configured")) {
+		t.Errorf("expected S on Polygon to be refused as unconfigured (400), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// An explicit contract address is a token send, whatever its symbol says:
+// a discovered (often airdropped spam) token on Base named "ETH" must not
+// become a transfer of the user's real ETH. With the RPC dead, the token path
+// fails reading decimals (503); the native path would fail building the
+// transfer (500).
+func TestPrepareTx_TokenAddressWinsOverNativeSymbol(t *testing.T) {
+	t.Setenv("BASE_MAINNET_RPC_URL", "http://127.0.0.1:1")
+
+	db := setupTestDB(t)
+	h := setupTestHandlers(t)
+	user := createTestUser(t, db)
+	setUserWallet(t, db, user, "0x0000000000000000000000000000000000000001")
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"tokenSymbol":  "ETH",
+		"tokenAddress": "0x00000000000000000000000000000000000000E7",
+		"toAddress":    "0x0000000000000000000000000000000000000002",
+		"amount":       "1",
+		"chainId":      8453,
+	})
+	c.Request, _ = http.NewRequest("POST", "/", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PrepareSendTransaction(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected the token path (decimals read fails, %d), got %d: %s",
+			http.StatusServiceUnavailable, w.Code, w.Body.String())
+	}
+}

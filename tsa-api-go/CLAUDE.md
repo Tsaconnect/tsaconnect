@@ -69,7 +69,7 @@ internal/
 - **EVMClient** (`blockchain/client.go`): Chain-agnostic Ethereum RPC wrapper. Constructor: `NewEVMClient(rpcURL, chainID)`.
 - **BlockchainService** (`services/blockchain_service.go`): Registry of `map[string]*EVMClient` keyed by chain name. Methods: `ClientForChain(name)`, `ClientForChainID(id)`, `TokenAddress(chain, symbol)`.
 - **ChainConfig** (`config/config.go`): `Name`, `RPCURL`, `ChainID`, `NativeCurrency`. Stored in `Config.Chains` map.
-- **Token addresses**: Keyed as `"chain:symbol"` (e.g., `"sonic:MCGP"`). Native tokens (S, tBNB) use `PrepareNativeTransfer`; ERC-20 tokens use `PrepareERC20Transfer`.
+- **Token addresses**: Keyed as `"chain:symbol"` (e.g., `"sonic:MCGP"`). Each chain's own native coin (`ChainConfig.NativeCurrency`: S, BNB, POL, ETH, AVAX — see `BlockchainService.IsNativeCurrency`) uses `PrepareNativeTransfer`; ERC-20 tokens use `PrepareERC20Transfer`.
 - **Supported tokens**: DB-driven via `SupportedToken` model. Auto-seeded from hardcoded defaults if table is empty.
 
 ## API Routes

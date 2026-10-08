@@ -60,6 +60,52 @@ func TestTokenAddressForChainID(t *testing.T) {
 	}
 }
 
+// TestIsNativeCurrency pins which symbol is a chain's own coin: the send
+// path builds a native transfer for it and an ERC-20 transfer for anything else.
+func TestIsNativeCurrency(t *testing.T) {
+	cfg := &config.Config{
+		Networks: map[string]config.NetworkConfig{
+			"mainnet": {Chains: map[string]config.ChainConfig{
+				"polygon": {ChainID: 137, NativeCurrency: "POL"},
+				"base":    {ChainID: 8453, NativeCurrency: "ETH"},
+				"bsc":     {ChainID: 56, NativeCurrency: "BNB"},
+			}},
+			"testnet": {Chains: map[string]config.ChainConfig{
+				"bsc":  {ChainID: 97, NativeCurrency: "tBNB"},
+				"bare": {ChainID: 1234},
+			}},
+		},
+	}
+	bs := &BlockchainService{cfg: cfg}
+
+	cases := []struct {
+		network, chain, symbol string
+		want                   bool
+	}{
+		{"mainnet", "polygon", "POL", true},
+		{"mainnet", "polygon", " pol ", true},
+		{"mainnet", "base", "ETH", true},
+		{"mainnet", "polygon", "ETH", false},
+		{"mainnet", "polygon", "S", false},
+		{"mainnet", "base", "WETH", false},
+		{"mainnet", "bsc", "tBNB", true},
+		{"testnet", "bsc", "BNB", true},
+		{"testnet", "bsc", "TBNB", true},
+		{"testnet", "bare", "", false},
+		{"mainnet", "solana", "SOL", false},
+		{"devnet", "polygon", "POL", false},
+	}
+	for _, tc := range cases {
+		if got := bs.IsNativeCurrency(tc.network, tc.chain, tc.symbol); got != tc.want {
+			t.Errorf("IsNativeCurrency(%q, %q, %q) = %v, want %v", tc.network, tc.chain, tc.symbol, got, tc.want)
+		}
+	}
+
+	if (&BlockchainService{}).IsNativeCurrency("mainnet", "polygon", "POL") {
+		t.Error("nil cfg: want false")
+	}
+}
+
 // TestChainNameForID pins the mirror of ChainIDForName: the server must
 // never trust a client-supplied chain name, so it derives one from a chain
 // ID (e.g. a LiFi route's own chainId) instead.
