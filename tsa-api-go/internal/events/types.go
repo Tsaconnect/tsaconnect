@@ -127,6 +127,9 @@ const (
 	// Pool-model capital movement.
 	P2PDepositConfirmed  = "p2p.deposit.confirmed"
 	P2PWithdrawConfirmed = "p2p.withdraw.confirmed"
+	// LiquidityVoucherExpiring: an LP's stock-ad voucher needs renewing (TSA
+	// Liquidity spec §8.4 step 6, §19). Data: "adId".
+	LiquidityVoucherExpiring = "liquidity.voucher_expiring"
 
 	// TP reward events — fired by the payout-computation engine
 	// (services.RewardService, fee/TP overhaul SP5). The notification dispatcher

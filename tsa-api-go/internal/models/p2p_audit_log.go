@@ -60,4 +60,7 @@ const (
 	P2PAuditAdSigned             = "ad.signed"
 	P2PAuditTradeDisputeConfirmed = "trade.dispute.confirmed"
 	P2PAuditTradeResolvePrepared = "trade.resolve.prepared"
+	// P2PAuditAdRenewalDue: an LP stock ad's voucher is due for renewal and the
+	// LP was told (TSA Liquidity S28); it also spaces the notices.
+	P2PAuditAdRenewalDue = "ad.renewal_due"
 )

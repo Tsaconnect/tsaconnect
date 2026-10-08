@@ -75,31 +75,37 @@ func (s *P2PTradeService) LatestStockAd(ctx context.Context, lp *models.PaymentM
 	return nil, nil
 }
 
+// endedTradeStatuses are the trade states that no longer hold stock on an ad.
+var endedTradeStatuses = []string{models.P2PTradeStatusReleased, models.P2PTradeStatusCancelled, models.P2PTradeStatusResolved}
+
 // liveTradeCount counts the ad's trades that have not ended (a Plan C1 slice is
 // such a trade).
 func (s *P2PTradeService) liveTradeCount(ctx context.Context, adID uuid.UUID) (int64, error) {
 	var n int64
 	err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("ad_id = ? AND status NOT IN ?", adID,
-			[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusCancelled, models.P2PTradeStatusResolved}).
+		Where("ad_id = ? AND status NOT IN ?", adID, endedTradeStatuses).
 		Count(&n).Error
 	return n, err
 }
 
-// closeStockAd retires a stock ad off-chain (status cancelled, audit ad.closed).
-// Its voucher simply expires on-chain (spec §8.4 step 6); the allocator never
-// picks a closed ad.
-func (s *P2PTradeService) closeStockAd(ctx context.Context, ad *models.P2PAd, reason string) error {
+// closeStockAd retires a stock ad off-chain (status cancelled, audit ad.closed)
+// and reports whether it did. Its voucher simply expires on-chain (spec §8.4
+// step 6); the allocator never picks a closed ad. The update re-checks for a
+// live trade itself, so a trade opened after a caller's liveTradeCount still
+// keeps the ad live.
+func (s *P2PTradeService) closeStockAd(ctx context.Context, ad *models.P2PAd, reason string) (bool, error) {
 	res := s.db.WithContext(ctx).Model(&models.P2PAd{}).
 		Where("id = ? AND status IN ?", ad.ID, liveStockAdStatuses).
+		Where("NOT EXISTS (SELECT 1 FROM p2p_trades t WHERE t.ad_id = p2p_ads.id AND t.status NOT IN ?)", endedTradeStatuses).
 		Updates(map[string]any{"status": models.P2PAdStatusCancelled, "updated_at": s.clock.Now()})
 	if res.Error != nil {
-		return res.Error
+		return false, res.Error
 	}
-	if res.RowsAffected > 0 {
-		s.audit(ctx, models.P2PAuditAdClosed, nil, &ad.ID, nil, map[string]any{"reason": reason, "pool": true})
+	if res.RowsAffected == 0 {
+		return false, nil
 	}
-	return nil
+	s.audit(ctx, models.P2PAuditAdClosed, nil, &ad.ID, nil, map[string]any{"reason": reason, "pool": true})
+	return true, nil
 }
 
 // createPoolAd is CreateAd's LP branch (spec §8.4, plan B P8): a sell ad on the
@@ -173,7 +179,7 @@ func (s *P2PTradeService) createPoolAd(ctx context.Context, lp *models.PaymentMe
 	// A never-signed draft is replaced, so at most one draft waits to be signed.
 	for i := range live {
 		if live[i].Status == models.P2PAdStatusPending {
-			if err := s.closeStockAd(ctx, &live[i], "draft_replaced"); err != nil {
+			if _, err := s.closeStockAd(ctx, &live[i], "draft_replaced"); err != nil {
 				return nil, err
 			}
 		}
@@ -213,7 +219,7 @@ func (s *P2PTradeService) closeSupersededStockAds(ctx context.Context, fresh *mo
 		if n > 0 {
 			continue
 		}
-		if err := s.closeStockAd(ctx, &ads[i], "superseded"); err != nil {
+		if _, err := s.closeStockAd(ctx, &ads[i], "superseded"); err != nil {
 			log.Printf("[p2p pool] superseded stock ad %s not closed: %v", ads[i].ID, err)
 		}
 	}

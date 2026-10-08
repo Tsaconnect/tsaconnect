@@ -69,6 +69,9 @@ var emailEvents = map[string]bool{
 	// TP reward (fee/TP overhaul SP8 §7): a level-up unlocks real claimable MCGP,
 	// so notify the user by email too (the generic "both"-channel composer).
 	events.TPLevelUp: true,
+	// A lapsed stock-ad voucher drops the LP out of the pool silently, so the
+	// renewal prompt reaches them out of the app too.
+	events.LiquidityVoucherExpiring: true,
 }
 
 // pushEvents is the curated allowlist of event types that also fire an Expo
@@ -132,6 +135,7 @@ var pushEvents = map[string]bool{
 	"p2p.message.new":                   true, // raw string in p2p_message_service.go (not a const)
 	events.P2PDepositConfirmed:          true,
 	events.P2PWithdrawConfirmed:         true,
+	events.LiquidityVoucherExpiring:     true,
 	// TP reward level-up (fee/TP overhaul SP8 §7 + task #27): out-of-app Expo push
 	// so the user learns they crossed a level and have MCGP to claim. TPPrizeDue is
 	// intentionally excluded — it's an ADMIN-ops notify for manual fulfilment, not
