@@ -1406,6 +1406,8 @@ func TestGetAd_PMFields(t *testing.T) {
 		Status: models.P2PAdStatusActive}).Error; err != nil {
 		t.Fatalf("seed pm ad: %v", err)
 	}
+	// As in production: without a PM service a tagged ad hides as LP stock (S29).
+	r.trade.SetPMService(services.NewPMService(r.db))
 	rec := doJSON(t, r, http.MethodGet, "/api/p2p/ads/"+adID.String(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())

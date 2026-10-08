@@ -832,7 +832,7 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	if !ok {
 		return
 	}
-	ad, err := h.trade.GetAd(c.Request.Context(), id)
+	ad, pool, err := h.trade.GetAdForViewer(c.Request.Context(), id, user.ID)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -854,8 +854,9 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	}
 	// PM enrichment: if this ad is backed by a payment merchant, attach its
 	// static Nomba inbound account so the buy screen can show the pay-to card.
-	// Best-effort — a lookup error leaves IsPm=false / PmPayTo=nil.
-	if ad.PMID != nil {
+	// Best-effort — a lookup error leaves IsPm=false / PmPayTo=nil. An LP stock
+	// ad has no pay-to: only its owner sees it, and nobody pays into it.
+	if ad.PMID != nil && !pool {
 		var pm struct {
 			InboundAccountNumber string
 			InboundBank          string
@@ -1070,6 +1071,7 @@ func (h *P2PHandler) ListMyAds(c *gin.Context) {
 	offset, _ := strconv.Atoi(c.Query("offset"))
 	rows, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{
 		SellerID: user.ID,
+		ViewerID: user.ID,
 		Status:   c.Query("status"),
 		Limit:    limit,
 		Offset:   offset,

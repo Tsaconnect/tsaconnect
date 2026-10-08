@@ -40,7 +40,14 @@ func TestListAds_PMFilter(t *testing.T) {
 	mk(&pmID) // PM ad
 	mk(nil)   // normal ad
 
-	svc := &P2PTradeService{db: db}
+	// The PM service is wired as in production: without one, a tagged ad
+	// cannot be proven not to be an LP stock ad and hides (S29).
+	createPaymentMerchantsTable(t, db)
+	if err := db.Exec(`INSERT INTO payment_merchants (id, user_id, name, status) VALUES (?,?,?,?)`,
+		pmID.String(), uuid.New().String(), "TSA Connect", models.PaymentMerchantStatusActive).Error; err != nil {
+		t.Fatalf("seed payment_merchant: %v", err)
+	}
+	svc := &P2PTradeService{db: db, pm: NewPMService(db)}
 	yes := true
 	pmOnly, err := svc.ListAds(context.Background(), AdFilter{Status: models.P2PAdStatusActive, PM: &yes})
 	if err != nil {

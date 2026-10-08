@@ -1238,6 +1238,13 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		}
 		return nil, nil, err
 	}
+	// An LP stock ad is opened only by the pool's own order path (Plan C1),
+	// never by a buyer at another price (spec §9.4).
+	if pool, err := s.isPoolAd(ctx, &ad); err != nil {
+		return nil, nil, err
+	} else if pool {
+		return nil, nil, ErrAdNotActive
+	}
 	if ad.Status != models.P2PAdStatusActive {
 		return nil, nil, ErrAdNotActive
 	}
@@ -3307,6 +3314,10 @@ type AdFilter struct {
 	// from); leave it off for the owner's own list, where they must still see
 	// such an ad to cancel it and withdraw the pool behind it.
 	ExcludeDelisted bool
+	// ViewerID is the caller. LP stock ads (S29) are listed only on the
+	// caller's own list (SellerID == ViewerID, ListMyAds); every other read
+	// hides them whatever the other filters say.
+	ViewerID uuid.UUID
 }
 
 func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2PAd, error) {
@@ -3350,6 +3361,12 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 	if f.ExcludeDelisted {
 		if clause, args := s.delistedAdsClause(); clause != "" {
 			q = q.Where(clause, args...)
+		}
+	}
+	if ownList := f.SellerID != uuid.Nil && f.SellerID == f.ViewerID; !ownList {
+		var err error
+		if q, err = s.excludePoolAds(ctx, q); err != nil {
+			return nil, err
 		}
 	}
 	limit := f.Limit

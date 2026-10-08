@@ -96,6 +96,8 @@ func seedPMAd(t *testing.T, r *rig) uuid.UUID {
 		Status: models.P2PAdStatusActive}).Error; err != nil {
 		t.Fatalf("seed pm ad: %v", err)
 	}
+	// As in production: without a PM service a tagged ad hides as LP stock (S29).
+	r.trade.SetPMService(services.NewPMService(r.db))
 	return adID
 }
 

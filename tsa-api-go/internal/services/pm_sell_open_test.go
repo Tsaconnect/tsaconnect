@@ -12,10 +12,18 @@ import (
 
 // markAdAsPM stamps pm_id onto an existing buy-ad row so the open path treats
 // it as a Payment-Merchant buy-ad (PM automation pays the user). Mirrors how a
-// PM-published buy-ad carries a non-nil pm_id.
+// PM-published buy-ad carries a non-nil pm_id. The PM row is a funded
+// marketplace merchant and the PM service is wired, as in production: a tagged
+// ad with no PM service to check it is treated as an LP stock ad (S29).
 func markAdAsPM(t *testing.T, svc *P2PTradeService, adID uuid.UUID) {
 	t.Helper()
 	pmID := uuid.New()
+	createPaymentMerchantsTable(t, svc.db)
+	if err := svc.db.Exec(`INSERT INTO payment_merchants (id, user_id, name, status, kind, available_ngn) VALUES (?,?,?,?,?,?)`,
+		pmID.String(), uuid.New().String(), "TSA Connect", models.PaymentMerchantStatusActive, models.PaymentMerchantKindMerchant, "100000000").Error; err != nil {
+		t.Fatalf("seed payment_merchant: %v", err)
+	}
+	svc.SetPMService(NewPMService(svc.db))
 	if err := svc.db.Model(&models.P2PAd{}).
 		Where("id = ?", adID).
 		Update("pm_id", pmID).Error; err != nil {
