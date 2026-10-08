@@ -151,6 +151,20 @@ func mapServiceError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
 	}
+	// An LP deposit outside the pool limits: the app shows the headroom, so it
+	// is sent both as a decimal string and in exact base units (18 dp on BSC).
+	var lim *services.LiquidityLimitError
+	if errors.As(err, &lim) {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
+			"success": false, "message": err.Error(), "code": lim.Code,
+			"data": gin.H{
+				"headroom":      services.BaseUnitsToDecimal(lim.Headroom, lim.Decimals),
+				"headroomUnits": lim.Headroom.String(),
+				"decimals":      lim.Decimals,
+			},
+		})
+		return true
+	}
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, services.ErrAdNotFound), errors.Is(err, services.ErrTradeNotFound),
@@ -189,7 +203,8 @@ func mapServiceError(c *gin.Context, err error) bool {
 		// The message carries the underlying revert reason.
 		status = http.StatusUnprocessableEntity
 	case errors.Is(err, services.ErrRateStale),
-		errors.Is(err, services.ErrChainUnavailable):
+		errors.Is(err, services.ErrChainUnavailable),
+		errors.Is(err, services.ErrPoolClosed):
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, services.ErrPhase2Migration):
 		// Legacy lock-on-publish surface invoked by a stale caller. Map to
@@ -202,6 +217,9 @@ func mapServiceError(c *gin.Context, err error) bool {
 	// displaying, so it carries the same machine code as the IT legs.
 	if code := services.KYCRefusalCode(err); code != "" {
 		body["code"] = code
+	}
+	if errors.Is(err, services.ErrPoolClosed) {
+		body["code"] = "liquidity_pool_closed"
 	}
 	c.AbortWithStatusJSON(status, body)
 	return true
@@ -227,14 +245,17 @@ func unsignedTxJSON(raw []byte) any {
 
 // ─── Chains ────────────────────────────────────────────────────────────────
 
-// GetChains returns the P2P-enabled chains + their tradeable assets.
+// GetChains returns the P2P-enabled chains + their tradeable assets, plus the
+// pool chain for an active liquidity provider.
 func (h *P2PHandler) GetChains(c *gin.Context) {
-	if _, ok := h.require(c); !ok {
+	user, ok := h.require(c)
+	if !ok {
 		return
 	}
 	chains := []services.P2PChainInfo{}
 	if h.trade != nil {
-		if cs := h.trade.EnabledChains(); cs != nil {
+		// The pool chain is added for an active LP only (plan B P10).
+		if cs := h.trade.ChainsFor(c.Request.Context(), user.ID); cs != nil {
 			chains = cs
 		}
 	}

@@ -196,6 +196,10 @@ type P2PTradeService struct {
 	// ledger inside the open transaction; on cancel it is released. nil pm → no
 	// NGN reservation (non-PM ads, or PM feature dormant).
 	pm *PMService
+
+	// poolGate answers "is the TSA Liquidity pool open?" for the LP route
+	// (plan B P6, P14). Nil reads closed.
+	poolGate PoolOpener
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -3860,7 +3864,8 @@ func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID
 	}
 	// Approve exists only to fund a deposit or a JIT trade open — both new
 	// activity. No exit path (release, cancel, withdraw) needs an allowance.
-	if err := s.requireOpenable(chainID, tokenSymbol); err != nil {
+	// On the pool chain only an active LP passes (plan B P6).
+	if _, err := s.openableFor(ctx, sellerID, chainID, tokenSymbol); err != nil {
 		return nil, err
 	}
 	return escrow.PrepareApprove(sellerAddress, tokenAddr, amt)
@@ -3914,11 +3919,18 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	// New money into the pool. ConfirmDeposit is deliberately NOT gated: a
-	// deposit already broadcast has moved the funds, and refusing to record it
-	// would only hide them. Withdraw is never gated.
-	if err := s.requireOpenable(chainID, tokenSymbol); err != nil {
+	// New money into the pool. On the pool chain only an active LP passes, and
+	// its limits apply on a fresh read (plan B P6, P7). ConfirmDeposit is
+	// deliberately NOT gated: a deposit already broadcast has moved the funds,
+	// and refusing to record it would only hide them. Withdraw is never gated.
+	lp, err := s.openableFor(ctx, sellerID, chainID, tokenSymbol)
+	if err != nil {
 		return nil, err
+	}
+	if lp != nil {
+		if err := s.checkLPDeposit(ctx, lp, escrow, sellerAddress, tokenAddr, s.TokenDecimals(chainID, tokenSymbol), amt); err != nil {
+			return nil, err
+		}
 	}
 	s.audit(ctx, models.P2PAuditDepositPrepared, &sellerID, nil, nil, map[string]any{
 		"token":  strings.ToUpper(tokenSymbol),
@@ -3962,9 +3974,10 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 			ErrInvalidParams, ev.Amount, expected)
 	}
 	s.audit(ctx, models.P2PAuditDepositConfirmed, &sellerID, nil, nil, map[string]any{
-		"token":  strings.ToUpper(tokenSymbol),
-		"amount": ev.Amount.String(),
-		"txHash": txHash,
+		"token":   strings.ToUpper(tokenSymbol),
+		"amount":  ev.Amount.String(),
+		"txHash":  txHash,
+		"chainId": chainID,
 	})
 	s.emit(events.P2PDepositConfirmed, sellerID, "Deposit confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
@@ -4040,9 +4053,10 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 			ErrInvalidParams, ev.Amount, expected)
 	}
 	s.audit(ctx, models.P2PAuditWithdrawConfirmed, &sellerID, nil, nil, map[string]any{
-		"token":  strings.ToUpper(tokenSymbol),
-		"amount": ev.Amount.String(),
-		"txHash": txHash,
+		"token":   strings.ToUpper(tokenSymbol),
+		"amount":  ev.Amount.String(),
+		"txHash":  txHash,
+		"chainId": chainID,
 	})
 	s.emit(events.P2PWithdrawConfirmed, sellerID, "Withdrawal confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
