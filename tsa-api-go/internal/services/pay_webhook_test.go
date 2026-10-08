@@ -793,3 +793,22 @@ func TestPayWebhook_ResendForMerchantOfAnUndeliveredEventNeedsAWebhookURL(t *tes
 		t.Fatalf("the refused delivery was requeued: %+v", kept)
 	}
 }
+
+// A delivered event whose payment is gone can't be rebuilt: not found, not a
+// bare database error.
+func TestPayWebhook_ResendForMerchantOfAMissingPaymentIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	d := queuedDelivery(t, s, m, "https://skyair.ng/h")
+	deliveredAt := payTestNow
+	s.db.Model(d).Updates(map[string]any{"delivered_at": &deliveredAt, "next_attempt_at": nil, "attempts": 1, "last_status_code": 200})
+	if err := s.db.Exec("DELETE FROM pay_payments WHERE id = ?", d.PaymentID).Error; err != nil {
+		t.Fatal(err)
+	}
+	sender := NewPayWebhookSender(s.db, s.merchants, &http.Client{Transport: failingTransport{t}}, func() time.Time { return payTestNow })
+	sender.SetPayments(s)
+
+	if _, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID); !errors.Is(err, ErrPayDeliveryNotFound) {
+		t.Fatalf("err %v, want ErrPayDeliveryNotFound", err)
+	}
+}

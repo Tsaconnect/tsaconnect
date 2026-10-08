@@ -689,12 +689,17 @@ func (s *PayPaymentService) webhookDelivery(p *models.PayPayment, event string) 
 // redeliver queues d's event again as a new delivery of its payment as it is
 // now, leaving d (already delivered) as it was. A receiver deduping on
 // X-TSA-Delivery still processes it. ErrPayWebhookNoURL when the merchant has
-// no webhook URL for the mode any more.
+// no webhook URL for the mode any more; ErrPayDeliveryNotFound when its payment
+// is gone.
 func (s *PayPaymentService) redeliver(ctx context.Context, d *models.PayWebhookDelivery) (models.PayWebhookDelivery, error) {
 	var out models.PayWebhookDelivery
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var p models.PayPayment
-		if err := tx.First(&p, "id = ?", d.PaymentID).Error; err != nil {
+		err := tx.First(&p, "id = ?", d.PaymentID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrPayDeliveryNotFound
+		}
+		if err != nil {
 			return err
 		}
 		if err := requirePayWebhookURL(tx, p.MerchantID, p.Mode); err != nil {
