@@ -29,6 +29,12 @@ const (
 	PayEventFailed    = "payment.failed"
 	PayEventExpired   = "payment.expired"
 
+	// PayEventRefunded: a refund the merchant sent on a succeeded payment was
+	// confirmed on-chain. The payment stays succeeded; `data` is the payment
+	// with its refund totals; the refund itself is the top-level `refund`
+	// beside `data`.
+	PayEventRefunded = "payment.refunded"
+
 	// PaySourceAPI is a payment a merchant's own server created with its API
 	// key; PaySourceLink is a one-time payment link the owner made by hand in
 	// the app or on the web, for one customer; PaySourceOpen is a payment a
