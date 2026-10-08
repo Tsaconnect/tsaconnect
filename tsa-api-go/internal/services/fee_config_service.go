@@ -166,6 +166,13 @@ func NewFeeConfigService(db *gorm.DB) *FeeConfigService {
 // closed: refuse to boot rather than charge wrong rates invisibly.
 func InitFeeConfigService(db *gorm.DB) *FeeConfigService {
 	Fees = NewFeeConfigService(db)
+	// TSA Liquidity rows are ensured at boot only, so NewFeeConfigService (and
+	// every seed-count test) is unchanged (plan B P5).
+	if err := Fees.ensurePoolSettingRows(); err != nil {
+		log.Printf("[FeeConfig] ALERT liquidity_pool_settings_not_ensured err=%v — defaults apply", err)
+	} else if err := Fees.Load(); err != nil {
+		log.Printf("[FeeConfig] reload after ensuring pool rows failed: %v", err)
+	}
 	if db != nil && !Fees.ready() {
 		log.Fatalf("[FeeConfig] FATAL: fee-config replica is empty after seed+load — refusing to boot (RateFor would silently serve stale seed defaults). Check DATABASE connectivity and the fee_configs table.")
 	}

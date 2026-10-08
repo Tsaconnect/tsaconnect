@@ -83,6 +83,10 @@ func (h *FeeAdminHandler) CreateIntent(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "feature and token are required")
 		return
 	}
+	if models.IsPoolSetting(feature) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "TSA Liquidity settings are off-chain: edit them with the pencil, not Author")
+		return
+	}
 	// Clamp/validate bps against the backend mirror of the on-chain MAX_BPS.
 	if int(req.Default.BPS) > services.MaxFeeBPS {
 		utils.ErrorResponse(c, http.StatusBadRequest, "default bps exceeds MAX_BPS")

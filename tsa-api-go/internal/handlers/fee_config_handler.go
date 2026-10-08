@@ -98,6 +98,20 @@ func (h *FeeConfigHandler) UpdateFeeConfig(c *gin.Context) {
 		return
 	}
 
+	if models.IsPoolSetting(row.Feature) {
+		bps, flat := row.BPS, row.FlatAmountUSD
+		if req.BPS != nil {
+			bps = *req.BPS
+		}
+		if req.FlatAmountUSD != nil {
+			flat = *req.FlatAmountUSD
+		}
+		if err := services.ValidatePoolSetting(h.DB, row.Feature, bps, flat); err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	updates := map[string]interface{}{}
 	if req.BPS != nil {
 		if *req.BPS < 0 || *req.BPS > 10000 {

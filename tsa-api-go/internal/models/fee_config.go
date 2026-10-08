@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,17 @@ const (
 	// or TP, so it carries its own split row.
 	FeatureGas = "gas"
 )
+
+// TSA Liquidity settings (spec §16.1, S25): off-chain fee_configs rows
+// (token '*', chain and direction NULL), never authored on-chain and never in
+// OnChainFeeFeatures. Plan B owns the LP limits; Plan C1 adds the rest.
+const (
+	FeaturePoolLPMin = "pool_lp_min" // flat USD: minimum first deposit (decision 10)
+	FeaturePoolLPMax = "pool_lp_max" // flat USD: stake ceiling (decision 10)
+)
+
+// IsPoolSetting reports whether feature is a TSA Liquidity setting row.
+func IsPoolSetting(feature string) bool { return strings.HasPrefix(feature, "pool_") }
 
 // OnChainFeeFeatures are the features a deployed contract reads from
 // FeeManager at transaction time (ProductEscrowV2: product_merchant, product;
