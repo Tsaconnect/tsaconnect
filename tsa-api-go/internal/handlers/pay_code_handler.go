@@ -24,9 +24,15 @@ func PayCodeGuard(c *gin.Context) {
 }
 
 // GET /api/pay/code/:code — the payment a code names, for the app's TSA Pay
-// screen, which then opens the ordinary checkout by id.
+// screen, which then opens the ordinary checkout by id. A payment no longer
+// payable answers only its own payer (receipt codes are shared publicly).
 func (h *PayHandler) CodeLookup(c *gin.Context) {
-	id, err := h.payments.IDByCode(c.Request.Context(), c.Param("code"))
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	id, err := h.payments.IDByCode(c.Request.Context(), c.Param("code"), user)
 	if err != nil {
 		payCodeFail(c, err)
 		return

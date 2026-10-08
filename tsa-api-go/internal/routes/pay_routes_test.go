@@ -618,6 +618,28 @@ func TestPayRoutes_CodeLookup(t *testing.T) {
 	}
 }
 
+// A receipt's code is shared publicly: once a payment has succeeded, only its
+// payer gets the id back; anyone else gets the unknown-code 404, byte for byte.
+func TestPayRoutes_CodeLookupHidesAPaidPaymentFromAllButItsPayer(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	p := seedRoutesPayment(t, db, models.PayModeLive, models.PayStatusSucceeded, "7K2QFM9XWD")
+	payer, other := payRoutesUser(t, db, models.RoleUser), payRoutesUser(t, db, models.RoleUser)
+	if err := db.Model(p).Update("payer_user_id", payer.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	w := payRoutesDo(r, "GET", "/api/pay/code/TSA-7K2QF-M9XWD", payRoutesToken(t, cfg.JWTSecret, payer.ID), nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+p.ID.String()+`"`) {
+		t.Fatalf("payer: %d %s", w.Code, w.Body.String())
+	}
+	otherTok := payRoutesToken(t, cfg.JWTSecret, other.ID)
+	hidden := payRoutesDo(r, "GET", "/api/pay/code/TSA-7K2QF-M9XWD", otherTok, nil)
+	unknown := payRoutesDo(r, "GET", "/api/pay/code/TSA-AAAAA-AAAAA", otherTok, nil)
+	if hidden.Code != http.StatusNotFound || hidden.Body.String() != unknown.Body.String() {
+		t.Fatalf("other user: %d %s / unknown %d %s", hidden.Code, hidden.Body.String(), unknown.Code, unknown.Body.String())
+	}
+}
+
 // 20 a minute per user, 60 a minute per address (the IP limiter runs first,
 // so it counts every request, the per-user refusals included).
 func TestPayRoutes_CodeLookupIsLimitedPerUserAndPerAddress(t *testing.T) {

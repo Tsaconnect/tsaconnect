@@ -34,7 +34,7 @@ type payPaymentAPI interface {
 	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
 	PayerHistory(ctx context.Context, userID uuid.UUID) ([]services.PayHistoryItem, error)
 	PublicView(ctx context.Context, id uuid.UUID, liveEnabled bool) (*services.PayPublicView, error)
-	IDByCode(ctx context.Context, code string) (uuid.UUID, error)
+	IDByCode(ctx context.Context, code string, user *models.User) (uuid.UUID, error)
 	PublicReceipt(ctx context.Context, code string) (services.PayReceiptView, error)
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error

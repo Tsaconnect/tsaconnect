@@ -30,21 +30,28 @@ type PayReceiptView struct {
 }
 
 // IDByCode is the payment a code names, for the app's TSA Pay screen, which
-// then opens the ordinary checkout by id (spec D10). Any payment with the code
-// answers — an untried open-link payment too: its id is already the visitor's.
-// A code that could not be one is answered exactly as an unknown one.
-func (s *PayPaymentService) IDByCode(ctx context.Context, code string) (uuid.UUID, error) {
+// then opens the ordinary checkout by id (spec D10, amended). A receipt's code
+// is shared publicly, and the id is the bearer of the full checkout view, so
+// the code answers only while the payment is payable (pending — an untried
+// open-link payment too: its id is already the visitor's) or to its own payer.
+// Anything else — and a code that could not be one — is answered exactly as an
+// unknown code.
+func (s *PayPaymentService) IDByCode(ctx context.Context, code string, user *models.User) (uuid.UUID, error) {
 	bare, ok := NormalizePayCode(code)
 	if !ok {
 		return uuid.Nil, ErrPayCodeNotFound
 	}
 	var p models.PayPayment
-	err := s.db.WithContext(ctx).Select("id").Where("pay_code = ?", bare).Take(&p).Error
+	err := s.db.WithContext(ctx).Select("id", "status", "payer_user_id").Where("pay_code = ?", bare).Take(&p).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return uuid.Nil, ErrPayCodeNotFound
 	}
 	if err != nil {
 		return uuid.Nil, err
+	}
+	isPayer := user != nil && p.PayerUserID != nil && *p.PayerUserID == user.ID
+	if p.Status != models.PayStatusPending && !isPayer {
+		return uuid.Nil, ErrPayCodeNotFound
 	}
 	return p.ID, nil
 }

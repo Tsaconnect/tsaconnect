@@ -37,9 +37,10 @@ func paid(t *testing.T, s *PayPaymentService, p *models.PayPayment, payer *model
 	return got
 }
 
-// D10: any payment with the code — an untried open-link payment included, whose
-// id its visitor already has — however the code is typed.
-func TestPayReceipt_IDByCodeAnswersAnyPaymentWithThatCode(t *testing.T) {
+// D10 as amended: a payable (pending) payment answers anyone holding its code —
+// an untried open-link payment included, whose id its visitor already has —
+// however the code is typed.
+func TestPayReceipt_IDByCodeAnswersAPendingPaymentForAnyone(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayReceiptRig(t)
 	stubPayCodes(t, "7K2QFM9XWD", "AB12CD34EF")
@@ -49,14 +50,45 @@ func TestPayReceipt_IDByCodeAnswersAnyPaymentWithThatCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	anyone := payUser(t, s, false)
 	for code, want := range map[string]uuid.UUID{"TSA-7K2QF-M9XWD": api.ID, "tsa ab12c d34ef": untried.ID} {
-		if got, err := s.IDByCode(ctx, code); err != nil || got != want {
+		if got, err := s.IDByCode(ctx, code, anyone); err != nil || got != want {
 			t.Fatalf("IDByCode(%q) = %v, %v", code, got, err)
 		}
 	}
 	for _, code := range []string{"TSA-AAAAA-AAAAA", "hello", ""} {
-		if _, err := s.IDByCode(ctx, code); !errors.Is(err, ErrPayCodeNotFound) {
+		if _, err := s.IDByCode(ctx, code, anyone); !errors.Is(err, ErrPayCodeNotFound) {
 			t.Fatalf("IDByCode(%q) err = %v", code, err)
+		}
+	}
+}
+
+// A receipt's code is shared publicly, so once a payment is no longer payable
+// only its payer can turn the code into the id (the bearer of the checkout
+// view); to anyone else it is exactly an unknown code.
+func TestPayReceipt_IDByCodeAnswersAnUnpayablePaymentOnlyToItsPayer(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayReceiptRig(t)
+	stubPayCodes(t, "7K2QFM9XWD", "AB12CD34EF", "QQ77RR66SS")
+	payer, other := payUser(t, s, true), payUser(t, s, true)
+	in := func(ref string) CreatePayPaymentInput { i := payIn(); i.Reference = ref; return i }
+
+	succeeded, _, _ := s.Create(ctx, m, models.PayModeLive, in("PAID"))
+	paid(t, s, succeeded, payer) // 7K2QF…
+	processing, _, _ := s.Create(ctx, m, models.PayModeLive, in("LOCKED"))
+	if _, _, err := s.Lock(ctx, payer, processing.ID, true); err != nil { // AB12C…
+		t.Fatal(err)
+	}
+	failed, _, _ := s.Create(ctx, m, models.PayModeLive, in("FAILED"))
+	s.Lock(ctx, payer, failed.ID, true)
+	s.Fail(ctx, failed.ID, "declined") // QQ77R…
+
+	for code, want := range map[string]uuid.UUID{"TSA-7K2QF-M9XWD": succeeded.ID, "TSA-AB12C-D34EF": processing.ID, "TSA-QQ77R-R66SS": failed.ID} {
+		if got, err := s.IDByCode(ctx, code, payer); err != nil || got != want {
+			t.Fatalf("payer IDByCode(%q) = %v, %v", code, got, err)
+		}
+		if got, err := s.IDByCode(ctx, code, other); !errors.Is(err, ErrPayCodeNotFound) || got != uuid.Nil {
+			t.Fatalf("other IDByCode(%q) = %v, %v", code, got, err)
 		}
 	}
 }
