@@ -45,7 +45,7 @@ get() { local kv v=""; for kv in ${SERVER_ENV[@]+"${SERVER_ENV[@]}"}; do [ "${kv
 [ "$(get BSC_NETWORK)" = testnet ] || fail "BSC_NETWORK must be testnet"
 case "$(get RAMP_CONVERSION_BUY)" in ""|false|0) ;; *) fail "RAMP_CONVERSION_BUY must be off";; esac
 DB=$(get DATABASE_URL)
-[[ "$DB" =~ ^postgres(ql)?://[^@/]*@(localhost|127\.0\.0\.1)(:[0-9]+)?/tsa_liq_[a-z0-9_]+(\?.*)?$ ]] \
+[[ "$DB" =~ ^postgres(ql)?://[^@/]*@(localhost|127\.0\.0\.1)(:[0-9]+)?/tsa_liq_[a-z0-9_]+(\?sslmode=disable)?$ ]] \
   || fail "DATABASE_URL must be a local throwaway database named tsa_liq_*"
 
 BIN="$(mktemp -d)/liq-api"; RUN="$(mktemp -d)"; LOG="$RUN/boot.log"
