@@ -139,3 +139,8 @@ export const errorBody = `{
   "message": "invalid API key",
   "code": "invalid_key"
 }`;
+
+// GET /payments?reference= — the lookup by the merchant's own reference (FindPaymentByReference).
+export const findByReferenceCurl = `curl -G ${BASE_URL}/payments \\
+  --data-urlencode "reference=PNR-K8Q2ZL" \\
+  -H "Authorization: Bearer $TSA_PAY_KEY"`;

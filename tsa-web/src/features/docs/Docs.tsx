@@ -7,7 +7,7 @@ import { Note } from '@/components/ui/note';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 import { CodeBlock } from './CodeBlock';
 import {
-  BASE_URL, createCurl, createNode, createResponse, errorBody, expressNode, retrieveCurl, verifyNode, webhookBody,
+  BASE_URL, createCurl, createNode, createResponse, errorBody, expressNode, findByReferenceCurl, retrieveCurl, verifyNode, webhookBody,
 } from './samples';
 
 // The public TSA Pay developer docs. Every field, header, event, limit and error
@@ -163,6 +163,14 @@ export function Docs() {
               <C>payment.expired</C> webhook; any other status answers <C>409</C>.
             </P>
             <CodeBlock title="Read and cancel with curl" code={retrieveCurl} />
+
+            <H3>Find a payment by your reference</H3>
+            <P>
+              <C>GET /payments?reference=&lt;your reference&gt;</C> returns the payment with exactly that reference in your key's mode,
+              as <C>data</C>, exactly like <C>GET /payments/:id</C>. The match is exact and case-sensitive; no match answers <C>404</C>. Use it to reconcile by your
+              own order id. URL-encode the reference.
+            </P>
+            <CodeBlock title="Find by reference with curl" code={findByReferenceCurl} />
           </Section>
 
           <Section id="the-payment-object" lead="Returned by every endpoint and sent as the data of every webhook. Empty optional fields are omitted.">

@@ -97,4 +97,15 @@ describe('developer docs', () => {
     expect(sample.indexOf("res.headers.get('content-type')")).toBeLessThan(sample.indexOf('res.json()'));
     expect(sample).toContain('!res.ok || !body.success');
   });
+
+  it('documents the lookup by your own reference: exact, in the key\'s mode, as data, like GET /payments/:id', () => {
+    mount();
+    const create = screen.getByRole('heading', { level: 2, name: 'Create a payment' }).closest('section')!;
+    expect(within(create).getByRole('heading', { level: 3, name: 'Find a payment by your reference' })).toBeInTheDocument();
+    expect(within(create).getByText('GET /payments?reference=<your reference>')).toBeInTheDocument();
+    expect(within(create).getAllByText('GET /payments/:id').length).toBeGreaterThan(0);
+    expect(within(create).getByText(/exactly like/).textContent).toContain('GET /payments/:id');
+    const sample = screen.getByRole('figure', { name: 'Find by reference with curl' });
+    expect(sample.textContent).toContain('--data-urlencode "reference=PNR-K8Q2ZL"');
+  });
 });
