@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -32,6 +33,12 @@ type chainEscrow struct {
 	// An empty slice means "allow all" (used by NewP2PEscrowRegistryFromMap so
 	// tests and ops maps stay permissive). An unconfigured chain returns false.
 	assets []string
+	// purpose is config.P2PPurposeP2P or P2PPurposePool (spec S5): a pool
+	// chain never takes new ordinary P2P activity.
+	purpose string
+	// decimals holds each asset's decimals() as read on-chain at boot (S6);
+	// a symbol missing here falls back to tokenDecimalsFor.
+	decimals map[string]int
 }
 
 // P2PEscrowRegistry holds one escrow adapter per P2P-enabled chain, keyed by
@@ -115,19 +122,32 @@ func (r *P2PEscrowRegistry) ChainIDs() []int64 {
 
 // P2PChainInfo is the public shape of an enabled P2P chain.
 type P2PChainInfo struct {
-	ChainID int64    `json:"chainId"`
-	Assets  []string `json:"assets"`
+	ChainID  int64          `json:"chainId"`
+	Assets   []string       `json:"assets"`
+	Purpose  string         `json:"purpose"`
+	Decimals map[string]int `json:"decimals,omitempty"`
 }
 
-// Chains lists the enabled P2P chains (chainID + tradeable assets), sorted by
-// chainID for stable output.
+// Chains lists the chains open to ordinary P2P (chainID + tradeable assets),
+// sorted by chainID for stable output. The pool chain is omitted (spec S5 /
+// plan P8): ordinary P2P never opens on it.
 func (r *P2PEscrowRegistry) Chains() []P2PChainInfo {
 	if r == nil {
 		return nil
 	}
 	out := make([]P2PChainInfo, 0, len(r.byChain))
 	for id, e := range r.byChain {
-		out = append(out, P2PChainInfo{ChainID: id, Assets: e.assets})
+		if e.purpose == config.P2PPurposePool {
+			continue
+		}
+		var decimals map[string]int
+		if len(e.decimals) > 0 {
+			decimals = make(map[string]int, len(e.decimals))
+			for sym, d := range e.decimals {
+				decimals[sym] = d
+			}
+		}
+		out = append(out, P2PChainInfo{ChainID: id, Assets: e.assets, Purpose: r.Purpose(id), Decimals: decimals})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ChainID < out[j].ChainID })
 	return out
@@ -201,6 +221,9 @@ func (r *P2PEscrowRegistry) AssetAllowed(chainID int64, symbol string) bool {
 	if !ok {
 		return false
 	}
+	if e.purpose == config.P2PPurposePool {
+		return false // spec S5 / plan P8: ordinary P2P never opens on the pool chain (Plan B adds the LP route)
+	}
 	if len(e.assets) == 0 {
 		return true
 	}
@@ -253,16 +276,89 @@ func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config) *P2PEscrowR
 			log.Printf("[config] WARNING: P2P chain %d (%s) has no RPC client — skipping (P2P unavailable on this chain)", chainID, cc.ChainKey)
 			continue
 		}
+		assets, decimals := resolveAssetDecimals(chainID, cc.ChainKey, cc.Purpose, cc.Assets,
+			func(sym string) string { return bs.TokenAddressForChainID(chainID, sym) }, client)
 		reg.byChain[chainID] = &chainEscrow{
 			service:       NewP2PEscrowServiceForChain(client, cfg, cc.EscrowAddress),
 			chainKey:      cc.ChainKey,
 			eip712Version: cc.EIP712Version,
 			domainChainID: verifyP2PChainAtBoot(client, chainID, cc),
-			assets:        cc.Assets,
+			assets:        assets,
+			purpose:       cc.Purpose,
+			decimals:      decimals,
 		}
 	}
 	log.Printf("[config] P2P escrow registry: %d chain(s) enabled: %v", len(reg.byChain), reg.ChainIDs())
 	return reg
+}
+
+type tokenDecimalsReader interface {
+	GetTokenDecimals(tokenAddress string) (int, error)
+}
+
+// resolveAssetDecimals reads each asset's decimals on-chain (spec S6, plan P7).
+// A pool asset that cannot be read is dropped (the pool's decimals gate then
+// keeps it closed). An ordinary chain keeps the asset on the table value, so a
+// flaky RPC at boot cannot take that chain's P2P down.
+func resolveAssetDecimals(chainID int64, chainKey, purpose string, assets []string, addressOf func(string) string, r tokenDecimalsReader) ([]string, map[string]int) {
+	var kept []string
+	decimals := map[string]int{}
+	for _, sym := range assets {
+		var d int
+		var err error
+		if addr := addressOf(sym); addr == "" {
+			err = errors.New("no token address configured")
+		} else {
+			d, err = r.GetTokenDecimals(addr)
+		}
+		if err != nil {
+			if purpose == config.P2PPurposePool {
+				log.Printf("[config] ALERT p2p_asset_decimals_unreadable chain=%s(%d) asset=%s err=%s — dropped from the pool",
+					chainKey, chainID, sym, RedactAlertText(err.Error()))
+				continue
+			}
+			log.Printf("[config] ALERT p2p_asset_decimals_unreadable chain=%s(%d) asset=%s err=%s — keeping the table value %d",
+				chainKey, chainID, sym, RedactAlertText(err.Error()), tokenDecimalsFor(chainID, sym))
+			kept = append(kept, sym)
+			continue
+		}
+		if table := tokenDecimalsFor(chainID, sym); table != d {
+			log.Printf("[config] ALERT p2p_asset_decimals_mismatch chain=%s(%d) asset=%s chain_decimals=%d table=%d — using the chain",
+				chainKey, chainID, sym, d, table)
+		}
+		decimals[strings.ToUpper(sym)] = d
+		kept = append(kept, sym)
+	}
+	return kept, decimals
+}
+
+// TokenDecimals is symbol's decimals on chainID as read on-chain at boot.
+// ok=false: not read (unconfigured chain, a test registry, or an ordinary
+// asset whose read failed) — the caller uses tokenDecimalsFor.
+func (r *P2PEscrowRegistry) TokenDecimals(chainID int64, symbol string) (int, bool) {
+	if r == nil || r.byChain == nil {
+		return 0, false
+	}
+	e, ok := r.byChain[chainID]
+	if !ok || e.decimals == nil {
+		return 0, false
+	}
+	d, ok := e.decimals[strings.ToUpper(symbol)]
+	return d, ok
+}
+
+// Purpose is the chain's preset purpose ("" for an unconfigured chain).
+func (r *P2PEscrowRegistry) Purpose(chainID int64) string {
+	if r == nil || r.byChain == nil {
+		return ""
+	}
+	if e, ok := r.byChain[chainID]; ok {
+		if e.purpose == "" {
+			return config.P2PPurposeP2P
+		}
+		return e.purpose
+	}
+	return ""
 }
 
 // verifyP2PChainAtBoot warns (does not abort) when the escrow address has no

@@ -433,7 +433,7 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 	platformFee := new(big.Int).Mul(amount, big.NewInt(int64(platformBps)))
 	platformFee.Quo(platformFee, big.NewInt(10000))
 
-	feeUSD := baseUnitsToUSD(platformFee, tokenDecimalsFor(trade.ChainID, trade.Token))
+	feeUSD := baseUnitsToUSD(platformFee, s.TokenDecimals(trade.ChainID, trade.Token))
 	if feeUSD <= 0 {
 		return
 	}
@@ -1250,7 +1250,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return nil, nil, err
 	}
 
-	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.ChainID, ad.Token))
+	tokenAmount, fiatAmount, err := computeTokenFromFiat(params.FiatAmount, effectiveRate, s.TokenDecimals(ad.ChainID, ad.Token))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1455,9 +1455,9 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	// caller only supplies fiat (keeps the path usable fiat-first).
 	var tokenAmount, fiatAmount *big.Int
 	if strings.TrimSpace(params.TokenAmount) != "" {
-		tokenAmount, fiatAmount, err = computeFiatFromToken(params.TokenAmount, effectiveRate, tokenDecimalsFor(ad.ChainID, ad.Token))
+		tokenAmount, fiatAmount, err = computeFiatFromToken(params.TokenAmount, effectiveRate, s.TokenDecimals(ad.ChainID, ad.Token))
 	} else {
-		tokenAmount, fiatAmount, err = computeTokenFromFiat(params.FiatAmount, effectiveRate, tokenDecimalsFor(ad.ChainID, ad.Token))
+		tokenAmount, fiatAmount, err = computeTokenFromFiat(params.FiatAmount, effectiveRate, s.TokenDecimals(ad.ChainID, ad.Token))
 	}
 	if err != nil {
 		return nil, nil, err
@@ -3383,7 +3383,7 @@ func (s *P2PTradeService) ExpressMatch(ctx context.Context, p ExpressMatchParams
 		if !okR || rem.Cmp(amount) < 0 {
 			continue // not enough capacity
 		}
-		_, fiat, err := computeFiatFromToken(p.Amount, ad.Rate, tokenDecimalsFor(ad.ChainID, ad.Token))
+		_, fiat, err := computeFiatFromToken(p.Amount, ad.Rate, s.TokenDecimals(ad.ChainID, ad.Token))
 		if err != nil {
 			continue
 		}
@@ -4241,6 +4241,15 @@ func stringifyUUIDs(ids []uuid.UUID) datatypes.JSONSlice[string] {
 		out[i] = id.String()
 	}
 	return datatypes.JSONSlice[string](out)
+}
+
+// TokenDecimals is a P2P token's decimals: as read on-chain by the registry,
+// else the table (spec S6, M5). Non-P2P callers keep tokenDecimalsFor.
+func (s *P2PTradeService) TokenDecimals(chainID int64, symbol string) int {
+	if d, ok := s.escrows.TokenDecimals(chainID, symbol); ok {
+		return d
+	}
+	return tokenDecimalsFor(chainID, symbol)
 }
 
 // tokenDecimalsFor returns the on-chain ERC-20 decimals for a token on a given
