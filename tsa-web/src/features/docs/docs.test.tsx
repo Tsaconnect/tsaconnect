@@ -115,6 +115,10 @@ describe('developer docs', () => {
     const object = screen.getByRole('heading', { level: 2, name: 'The payment object' }).closest('section')!;
     expect(within(object).getByText('payCode')).toBeInTheDocument();
     expect(within(object).getByText(/Wallet → TSA Pay/)).toBeInTheDocument();
+    // There is no API lookup by code: the dashboard search is where it is matched.
+    const payCodeRow = within(object).getByText(/Wallet → TSA Pay/).textContent!;
+    expect(payCodeRow).toContain('search for it in your dashboard');
+    expect(payCodeRow).toContain('no API lookup by code');
     expect(createResponse).toContain('"payCode": "TSA-7K2QF-M9XWD"');
     expect(webhookBody).toContain('"payCode": "TSA-7K2QF-M9XWD"');
   });
