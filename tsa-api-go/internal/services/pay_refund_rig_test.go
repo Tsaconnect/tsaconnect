@@ -211,8 +211,16 @@ func (r *refundRig) paid(t *testing.T, mode, ref string, updates map[string]any)
 // USDT on BSC from the funding wallet, with returned coming back.
 func (r *refundRig) paidDirect(t *testing.T, ref, tokenAmount, returned string) *models.PayPayment {
 	t.Helper()
+	return r.paidByOrder(t, ref, "bsc", "USDT", tokenAmount, returned)
+}
+
+// paidByOrder is a live naira payment whose settled Paycrest order took
+// tokenAmount of token on chainKey from the funding wallet: USDT on BSC for a
+// direct payment, the swap's Base-USDC deposit for a converted one.
+func (r *refundRig) paidByOrder(t *testing.T, ref, chainKey, token, tokenAmount, returned string) *models.PayPayment {
+	t.Helper()
 	order := models.PaycrestOrderRecord{ID: uuid.New(), UserID: r.payer, Direction: "sell", Status: models.PaycrestStatusSettled,
-		Reference: "order-" + ref, FiatCode: "NGN", FiatAmount: "50500", Token: "USDT", ChainKey: "bsc", Network: "bnb-smart-chain",
+		Reference: "order-" + ref, FiatCode: "NGN", FiatAmount: "50500", Token: token, ChainKey: chainKey, Network: chainKey,
 		TokenAmount: tokenAmount, AmountReturned: returned, WalletAddress: refundFundingWallet}
 	if err := r.db.Create(&order).Error; err != nil {
 		t.Fatal(err)

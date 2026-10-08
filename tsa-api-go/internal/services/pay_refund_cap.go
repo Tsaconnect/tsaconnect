@@ -117,7 +117,7 @@ func (s *PayRefundService) source(ctx context.Context, p *models.PayPayment) (*p
 }
 
 // orderSource: the cap is the payer's deposit into the order (the sender fee
-// is inside it) less anything returned. On the converted route the order is
+// is inside it, rounded down) less anything returned (rounded up). On the converted route the order is
 // the Base-USDC deposit the swap made, handed over to the payment.
 func (s *PayRefundService) orderSource(ctx context.Context, p *models.PayPayment) (*payRefundSource, error) {
 	var o models.PaycrestOrderRecord
@@ -140,7 +140,7 @@ func (s *PayRefundService) orderSource(ctx context.Context, p *models.PayPayment
 		log.Printf("[tsa-pay] refund: payment %s order %s token amount %q: %v", p.ID, o.ID, o.TokenAmount, err)
 		return nil, ErrPayRefundNotRefundable
 	}
-	returned, err := microUSDFloor(o.AmountReturned)
+	returned, err := microUSDCeil(o.AmountReturned)
 	if err != nil {
 		log.Printf("[tsa-pay] refund: payment %s order %s amount returned %q: %v", p.ID, o.ID, o.AmountReturned, err)
 		return nil, ErrPayRefundNotRefundable
@@ -175,7 +175,9 @@ func (s *PayRefundService) cryptoSource(ctx context.Context, p *models.PayPaymen
 	if p.SellIntentID != nil {
 		err = q.First(&in, "id = ?", *p.SellIntentID).Error
 	} else {
-		err = q.Where("pay_payment_id = ?", p.ID).Order("created_at DESC").First(&in).Error
+		// Only a delivered sale paid the merchant: a failed attempt beside it
+		// delivered nothing and must not size the refund.
+		err = q.Where("pay_payment_id = ? AND status = ?", p.ID, models.SellIntentDelivered).Order("created_at DESC").First(&in).Error
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		log.Printf("[tsa-pay] refund: crypto payment %s has no intent to size a refund on", p.ID)
@@ -243,7 +245,13 @@ func payTestRefundCap(customerTotalKobo int64) (int64, error) {
 // microUSDFloor reads a human stablecoin amount ("34.1234567") as micro-USD,
 // rounded DOWN: a cap must never exceed what moved. "" is 0 (AmountReturned is
 // usually unset on a settled order).
-func microUSDFloor(amount string) (int64, error) {
+func microUSDFloor(amount string) (int64, error) { return microUSDRounded(amount, false) }
+
+// microUSDCeil is microUSDFloor rounded UP: what came back is never counted as
+// less than it was, so the cap it is taken from never rises above the floor.
+func microUSDCeil(amount string) (int64, error) { return microUSDRounded(amount, true) }
+
+func microUSDRounded(amount string, up bool) (int64, error) {
 	amount = strings.TrimSpace(amount)
 	if amount == "" {
 		return 0, nil
@@ -254,8 +262,9 @@ func microUSDFloor(amount string) (int64, error) {
 		return 0, fmt.Errorf("not a plain decimal: %q", amount)
 	}
 	whole, frac, _ := strings.Cut(amount, ".")
+	cutOff := ""
 	if len(frac) > usdMicrosDecimals {
-		frac = frac[:usdMicrosDecimals]
+		frac, cutOff = frac[:usdMicrosDecimals], frac[usdMicrosDecimals:]
 	}
 	trimmed := whole
 	if frac != "" {
@@ -270,6 +279,9 @@ func microUSDFloor(amount string) (int64, error) {
 	if v.Sign() < 0 {
 		return 0, fmt.Errorf("amount %q is negative", amount)
 	}
+	if up && strings.Trim(cutOff, "0") != "" {
+		v.Add(v, big.NewInt(1))
+	}
 	if !v.IsInt64() {
 		return 0, fmt.Errorf("amount %q is out of range", amount)
 	}
@@ -277,10 +289,17 @@ func microUSDFloor(amount string) (int64, error) {
 }
 
 // usdMicrosFloor is base units of a $1 stablecoin with decimals as micro-USD,
-// rounded down — what a transfer credited, for the record.
-func usdMicrosFloor(base *big.Int, decimals int) int64 {
+// rounded down — what a transfer credited, for the record. An amount past
+// int64 is an error, never a wrapped number.
+func usdMicrosFloor(base *big.Int, decimals int) (int64, error) {
+	v := new(big.Int)
 	if decimals >= usdMicrosDecimals {
-		return new(big.Int).Quo(base, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals-usdMicrosDecimals)), nil)).Int64()
+		v.Quo(base, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals-usdMicrosDecimals)), nil))
+	} else {
+		v.Mul(base, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(usdMicrosDecimals-decimals)), nil))
 	}
-	return new(big.Int).Mul(base, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(usdMicrosDecimals-decimals)), nil)).Int64()
+	if !v.IsInt64() {
+		return 0, fmt.Errorf("%s base units at %d decimals is out of range", base, decimals)
+	}
+	return v.Int64(), nil
 }

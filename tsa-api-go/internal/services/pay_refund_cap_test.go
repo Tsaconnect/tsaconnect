@@ -6,8 +6,10 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -24,6 +26,8 @@ func TestPayRefundCap_DirectIsTheDepositLessWhatCameBackRoundedDown(t *testing.T
 	}{
 		"CAP-1": {"34.1234567", "", 34_123_456},
 		"CAP-2": {"34.1234567", "1.5", 32_623_456},
+		// What came back is rounded UP: the cap never exceeds the exact floor.
+		"CAP-17": {"34.1234567", "1.0000001", 33_123_455},
 	} {
 		p := r.paidDirect(t, ref, tc.deposit, tc.returned)
 		src, err := r.s.source(ctx, p)
@@ -99,16 +103,35 @@ func TestPayRefundMoney_FloorsToMicroUSD(t *testing.T) {
 			t.Errorf("microUSDFloor(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"1e5", "-1", "34.", ".5"} {
-		if _, err := microUSDFloor(bad); err == nil {
-			t.Errorf("%q must be refused: a negative AmountReturned would raise the cap", bad)
+	for in, want := range map[string]int64{"": 0, "0": 0, "1.5": 1_500_000, "1.0000001": 1_000_001, "1.0000000": 1_000_000, "0.0000009": 1} {
+		if got, err := microUSDCeil(in); err != nil || got != want {
+			t.Errorf("microUSDCeil(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	if got := usdMicrosFloor(new(big.Int).Add(bscAmountForTest(12_500_000), big.NewInt(1)), 18); got != 12_500_000 {
-		t.Errorf("18 dp: %d", got)
+	for _, bad := range []string{"1e5", "-1", "34.", ".5"} {
+		if _, err := microUSDFloor(bad); err == nil {
+			t.Errorf("microUSDFloor(%q) must be refused: only a plain non-negative decimal is an amount", bad)
+		}
+		if _, err := microUSDCeil(bad); err == nil {
+			t.Errorf("microUSDCeil(%q) must be refused: only a plain non-negative decimal is an amount", bad)
+		}
 	}
-	if got := usdMicrosFloor(big.NewInt(1234), 2); got != 12_340_000 {
-		t.Errorf("2 dp: %d", got)
+	if _, err := microUSDCeil("9223372036854.775807999"); err == nil {
+		t.Error("rounding up past int64 must be refused, not wrapped")
+	}
+	if got, err := usdMicrosFloor(new(big.Int).Add(bscAmountForTest(12_500_000), big.NewInt(1)), 18); err != nil || got != 12_500_000 {
+		t.Errorf("18 dp: %d %v", got, err)
+	}
+	if got, err := usdMicrosFloor(big.NewInt(1234), 2); err != nil || got != 12_340_000 {
+		t.Errorf("2 dp: %d %v", got, err)
+	}
+	// 10^19 micro-USD is past int64: an error, never a silently wrapped amount.
+	huge := new(big.Int).Exp(big.NewInt(10), big.NewInt(19), nil)
+	if got, err := usdMicrosFloor(huge, 6); err == nil {
+		t.Errorf("6 dp overflow: %d", got)
+	}
+	if got, err := usdMicrosFloor(huge, 2); err == nil {
+		t.Errorf("2 dp overflow: %d", got)
 	}
 }
 
@@ -193,5 +216,74 @@ func TestPayRefundCap_CryptoDecimalsErrorIsRedacted(t *testing.T) {
 	_, err := r.s.source(context.Background(), p)
 	if !errors.Is(err, ErrPayRefundUnavailable) || strings.Contains(err.Error(), "sk_live_abc123secret") {
 		t.Fatalf("%v", err)
+	}
+}
+
+// Converted: the swap's Base-USDC deposit (6 dp) into the order handed over to
+// the payment sizes the refund, and is where it defaults.
+func TestPayRefundCap_ConvertedIsTheBaseUSDCDeposit(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paidByOrder(t, "CAP-18", "base", "USDC", "33.123456", "")
+	src, err := r.s.source(context.Background(), p)
+	if err != nil || src.capMicroUSD != 33_123_456 || src.fundingWallet != refundFundingWallet || src.depositChainID != 8453 || src.depositSymbol != "USDC" {
+		t.Fatalf("%+v %v", src, err)
+	}
+}
+
+// No settled order — none at all, or only one still open — sizes nothing.
+func TestPayRefundCap_DirectWithoutASettledOrderIsNotRefundable(t *testing.T) {
+	ctx := context.Background()
+	r := newRefundRig(t)
+	none := r.paid(t, models.PayModeLive, "CAP-19", nil)
+	if _, err := r.s.source(ctx, none); !errors.Is(err, ErrPayRefundNotRefundable) {
+		t.Fatalf("no order: %v", err)
+	}
+	open := r.paidDirect(t, "CAP-20", "20", "")
+	r.db.Model(&models.PayPayment{}).Where("id = ?", open.ID).Update("paycrest_order_id", nil)
+	r.db.Model(&models.PaycrestOrderRecord{}).Where("pay_payment_id = ?", open.ID).Update("status", models.PaycrestStatusPending)
+	open.PaycrestOrderID = nil
+	if _, err := r.s.source(ctx, open); !errors.Is(err, ErrPayRefundNotRefundable) {
+		t.Fatalf("only an open order: %v", err)
+	}
+}
+
+func TestPayRefundCap_CryptoWithoutAnIntentIsNotRefundable(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paid(t, models.PayModeLive, "CAP-21", map[string]any{"settlement_mode": models.PaySettlementCrypto,
+		"settle_chain_id": int64(8453), "settle_token_address": refundBaseUSDC, "settle_token_symbol": "USDC",
+		"customer_total_kobo": int64(5_050_000), "merchant_net_kobo": int64(5_000_000)})
+	if _, err := r.s.source(context.Background(), p); !errors.Is(err, ErrPayRefundNotRefundable) {
+		t.Fatalf("%v", err)
+	}
+}
+
+// Without a direct link the intent is found by its reverse link — and only a
+// delivered one counts: a newer attempt that failed delivered nothing.
+func TestPayRefundCap_CryptoFindsTheDeliveredIntentByItsReverseLink(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paidCrypto(t, "CAP-22", 8453, refundBaseUSDC, "USDC", "33000000")
+	if err := r.db.Model(&models.RampSellIntent{}).Where("id = ?", *p.SellIntentID).Update("pay_payment_id", p.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	failed := models.RampSellIntent{ID: uuid.New(), UserID: r.payer, SourceAddress: refundFundingWallet, WalletAddress: refundFundingWallet,
+		SourceChainID: 8453, SourceTokenAddress: refundBaseUSDC, SourceAmount: "1", FiatCode: "NGN", Status: models.SellIntentFailed,
+		DestChainID: 8453, DestTokenAddress: refundBaseUSDC, DestAddress: "0x2222222222222222222222222222222222222222", DestAmount: "99000000",
+		PayPaymentID: &p.ID, CreatedAt: time.Now().Add(time.Hour)}
+	if err := r.db.Create(&failed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.Model(&models.PayPayment{}).Where("id = ?", p.ID).Update("sell_intent_id", nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	p.SellIntentID = nil
+	src, err := r.s.source(context.Background(), p)
+	if err != nil || src.capMicroUSD != 33_330_000 {
+		t.Fatalf("%+v %v", src, err)
+	}
+	if err := r.db.Model(&models.RampSellIntent{}).Where("id <> ?", failed.ID).Update("status", models.SellIntentFailed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.s.source(context.Background(), p); !errors.Is(err, ErrPayRefundNotRefundable) {
+		t.Fatalf("only failed intents: %v", err)
 	}
 }
