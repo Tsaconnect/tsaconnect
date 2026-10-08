@@ -2,9 +2,9 @@
 //
 // A TSA Pay link, ready to hand to a customer: its QR code, the link itself,
 // and Share / Copy link. The caller writes the share message (utils/payLinks —
-// the same words the web app sends). The payer's receipt (app/pay.tsx) uses it
-// too, with Share receipt and Print / Save PDF. Shown by the new-link success step, a
-// link's detail screen and the store QR screen (bigger QR, with a heading).
+// the same words the web app sends). Shown by the new-link success step, a
+// link's detail screen and the store QR screen (bigger QR, with a heading), and
+// by the payer's receipt (app/pay.tsx) as Share receipt and Print / Save PDF.
 import React from 'react';
 import { Share, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';

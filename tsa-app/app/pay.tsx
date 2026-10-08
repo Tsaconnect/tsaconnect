@@ -344,7 +344,7 @@ export default function PayScreen() {
               </Card>
               {/* A live payment's receipt: the server sends receiptUrl only once
                   it has succeeded, and never for a test payment. */}
-              {state.checkout.status === 'succeeded' && receiptUrl ? (
+              {state.checkout.status === 'succeeded' && state.checkout.mode === 'live' && receiptUrl ? (
                 <View style={{ width: '100%' }}>
                   <PayLinkShare
                     url={receiptUrl}

@@ -158,10 +158,19 @@ it.each([
   ['http', 'http://tsaconnectworld.com/r/TSA-7K2QF-M9XWD'],
   ['another path', 'https://tsaconnectworld.com/login'],
   ['a lookalike host', 'https://tsaconnectworld.com.evil.example/r/TSA-7K2QF-M9XWD'],
+  ['a fragment that fakes the host', 'https://evil.com#@tsaconnectworld.com/r/TSA-7K2QF-M9XWD'],
+  ['a backslash that fakes the host', 'https://evil.com\\@tsaconnectworld.com/r/TSA-7K2QF-M9XWD'],
   ['credentials in the url', 'https://tsaconnectworld.com@evil.example/r/TSA-7K2QF-M9XWD'],
 ])('a receiptUrl on %s shows no receipt block', async (_name, url) => {
   await show({ ...paidLive, receiptUrl: url });
   expect(text()).toContain('Payment complete');
+  expect(text()).not.toContain('Share receipt');
+  expect(text()).not.toContain('Print / Save PDF');
+});
+
+it('a test payment shows no receipt block even with a valid receiptUrl', async () => {
+  await show({ ...paidLive, mode: 'test' });
+  expect(text()).not.toContain('qr:');
   expect(text()).not.toContain('Share receipt');
   expect(text()).not.toContain('Print / Save PDF');
 });
