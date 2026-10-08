@@ -1988,8 +1988,9 @@ func (s *P2PTradeService) SystemMarkPaid(ctx context.Context, tradeID uuid.UUID,
 
 // AutoRelease settles a PM trade via the platform admin EOA: flip → releasing
 // (system-driven), build the unsigned adminRelease tx, sign+broadcast through
-// the ReleaseSigner, verify the on-chain event, and confirm via confirmReleaseCore.
-func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, signer ReleaseSigner) (*models.P2PTrade, error) {
+// the signer's per-chain lock (ChainSender.Send), verify the on-chain event, and
+// confirm via confirmReleaseCore.
+func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, signer ChainSender) (*models.P2PTrade, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -2045,12 +2046,11 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 				Update("status", priorStatus)
 		}
 	}
-	unsignedTx, err := escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
-	if err != nil {
-		rollback()
-		return nil, fmt.Errorf("prepare admin release: %w", err)
-	}
-	txHash, err := signer.SignAndBroadcast(ctx, unsignedTx)
+	// Spec S8/S39: the nonce read in PrepareAdminRelease and the broadcast run
+	// under this chain's release-key lock, shared with every other release-key job.
+	txHash, err := signer.Send(ctx, trade.ChainID, func() ([]byte, error) {
+		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
+	})
 	if err != nil {
 		rollback()
 		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)

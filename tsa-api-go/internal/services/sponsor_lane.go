@@ -95,13 +95,23 @@ type SponsorLane struct {
 // the sender cannot pay): that tx provably never left, so it is reported as
 // not attempted.
 func (l *SponsorLane) send(ctx context.Context, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
-	l.sendMu.Lock()
-	defer l.sendMu.Unlock()
+	return sendLocked(ctx, &l.sendMu, l.Signer, build)
+}
+
+// sendLocked builds and broadcasts one tx while holding mu from build (its
+// nonce read) to broadcast. Shared by every key that must never hand two
+// concurrent builds the same nonce: a sponsor lane, and each chain of the
+// release signer (spec S8). broadcastAttempted separates a build failure
+// (nothing left this process) from a broadcast failure, which is not proof of
+// rejection; a refusal the signer marks ErrTxNotBroadcast is "not attempted".
+func sendLocked(ctx context.Context, mu *sync.Mutex, signer ReleaseSigner, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
+	mu.Lock()
+	defer mu.Unlock()
 	unsigned, err := build()
 	if err != nil {
 		return "", false, err
 	}
-	txHash, err = l.Signer.SignAndBroadcast(ctx, unsigned)
+	txHash, err = signer.SignAndBroadcast(ctx, unsigned)
 	if errors.Is(err, ErrTxNotBroadcast) {
 		return "", false, err
 	}

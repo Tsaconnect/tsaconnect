@@ -1349,7 +1349,7 @@ func main() {
 		return u.Name, nil
 	}
 
-	var releaseSigner services.ReleaseSigner
+	var releaseSigner services.ChainSender
 	switch cfg.PMReleaseSigner {
 	case "kms":
 		log.Printf("[pm] KMS signer not yet implemented; PM release disabled")
@@ -1368,7 +1368,7 @@ func main() {
 				log.Printf("[pm] invalid PM_RELEASE_PRIVATE_KEY; PM release disabled: %v", kerr)
 			} else {
 				alertRawSignerKeyInProduction(cfg, "PM_RELEASE_PRIVATE_KEY")
-				releaseSigner = services.NewLocalKeyReleaseSigner(key, sonicClient)
+				releaseSigner = services.NewChainReleaseSigner(key, map[int64]services.ReleaseBroadcaster{cfg.SonicChainID: sonicClient})
 				log.Printf("[pm] local release signer ready (admin EOA %s)", releaseSigner.Address())
 				// Catch a signer/admin-EOA misconfig at boot rather than at the
 				// first release: if the derived signer address doesn't match the
