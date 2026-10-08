@@ -53,6 +53,12 @@ type TreasuryLane struct {
 	// would sign anything.
 	Routers []common.Address
 
+	// EscrowCalls is the allowlist of escrow contracts this lane may call
+	// (spec 2026-10-08 S21): the TSA Liquidity pool escrow on its chain,
+	// derived from config at boot. Separate from Routers on purpose — a LiFi
+	// route must never be able to call the escrow.
+	EscrowCalls []common.Address
+
 	// convertCh is a capacity-1 channel used as a context-aware lock that
 	// serialises the whole allowance-read -> approve -> route sequence for
 	// THIS lane. It is deliberately separate from SponsorLane.sendMu, which
@@ -172,6 +178,23 @@ func (t *Treasury) Address() string { return t.address }
 
 func (t *Treasury) Lane(chainKey string) *TreasuryLane {
 	return t.lanes[strings.ToLower(strings.TrimSpace(chainKey))]
+}
+
+// TokenDecimals is token's decimals on chainKey's lane, read on-chain (cached
+// forever by the client): what a converted leg is priced in (spec S23).
+func (t *Treasury) TokenDecimals(chainKey, token string) (int, error) {
+	lane := t.Lane(chainKey)
+	if lane == nil || lane.SponsorLane == nil {
+		return 0, fmt.Errorf("treasury: no lane on %s", chainKey)
+	}
+	addr := lane.tokenAddress(token)
+	if addr == "" {
+		return 0, fmt.Errorf("treasury: no %s on %s", token, chainKey)
+	}
+	if lane.Native == nil {
+		return 0, fmt.Errorf("treasury: %s lane has no chain client", chainKey)
+	}
+	return lane.Native.GetTokenDecimals(addr)
 }
 
 // ChainKeys is every chain the treasury has a lane on, sorted — for a caller

@@ -48,26 +48,39 @@ func assertDistinctKey(name string, key *ecdsa.PrivateKey, others map[string]str
 	return nil
 }
 
-// rampLaneTokens resolves the stablecoin addresses configured for chain —
-// the only tokens either a sponsor lane or a treasury lane ever moves.
+// rampLaneTokens resolves the mainnet stablecoin addresses configured for
+// chain — the only tokens either a sponsor lane or a treasury lane ever moves.
 func rampLaneTokens(chains *services.BlockchainService, chain string) map[string]string {
+	return rampLaneTokensOn(chains, "mainnet", chain)
+}
+
+// rampLaneTokensOn is rampLaneTokens on a named network (the pool chain may
+// run on testnet).
+func rampLaneTokensOn(chains *services.BlockchainService, network, chain string) map[string]string {
 	tokens := map[string]string{}
 	for _, symbol := range []string{"USDC", "USDT"} {
-		if addr := chains.TokenAddress(chain, symbol); addr != "" {
+		if addr := chains.TokenAddressForNetwork(network, chain, symbol); addr != "" {
 			tokens[symbol] = addr
 		}
 	}
 	return tokens
 }
 
-// buildSponsorLane builds one SponsorLane for chain — the shape both the gas
-// sponsor and the ramp treasury need (chain client, EVMRelayChain,
-// EVMRelayTxBuilder, NewLocalKeyReleaseSigner, NewSponsorGuard). Returns nil
-// when chain has no configured RPC client. guardName namespaces the guard's
-// own kill switch/daily counter (e.g. "ramp_sponsor_base" vs
-// "ramp_treasury_base") so the two lane types never share one.
+// buildSponsorLane is buildSponsorLaneOn on mainnet, where every sponsor lane
+// and the conversion treasury's lanes live.
 func buildSponsorLane(chains *services.BlockchainService, chain string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
-	client := chains.ClientForChain(chain)
+	return buildSponsorLaneOn(chains, "mainnet", chain, key, guardName, limits, topUpMaxWei)
+}
+
+// buildSponsorLaneOn builds one SponsorLane for chain on network — the shape
+// both the gas sponsor and the ramp treasury need (chain client,
+// EVMRelayChain, EVMRelayTxBuilder, NewLocalKeyReleaseSigner,
+// NewSponsorGuard). Returns nil when chain has no configured RPC client on
+// that network. guardName namespaces the guard's own kill switch/daily
+// counter (e.g. "ramp_sponsor_base" vs "ramp_treasury_base") so the two lane
+// types never share one.
+func buildSponsorLaneOn(chains *services.BlockchainService, network, chain string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
+	client := chains.ClientForNetwork(network, chain)
 	if client == nil {
 		return nil
 	}
@@ -82,7 +95,7 @@ func buildSponsorLane(chains *services.BlockchainService, chain string, key *ecd
 		Native:      client,
 		Signer:      services.NewLocalKeyReleaseSigner(key, client),
 		Guard:       services.NewSponsorGuard(guardName, limits, nil),
-		Tokens:      rampLaneTokens(chains, chain),
+		Tokens:      rampLaneTokensOn(chains, network, chain),
 		TopUpMaxWei: topUpMaxWei,
 	}
 }
