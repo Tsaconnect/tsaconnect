@@ -39,4 +39,32 @@ describe("deploy/p2p-escrow", () => {
     expect(await esc.systemWallet()).to.equal(chain.systemWallet); // wiring succeeded (deployer owned it)
     expect(await esc.acceptedTokens(chain.tokens.USDC)).to.equal(true);
   });
+
+  it("DeployModules_DefaultsUnchanged: every cfg token accepted, cfg admins, owner transferred", async () => {
+    const [deployer, second] = await hre.ethers.getSigners();
+    const chain = await testChain({ owner: second.address, admins: [deployer.address] });
+    const { proxy } = await deploy(hre, { chain });
+    const esc = await hre.ethers.getContractAt("P2PEscrowV3", proxy);
+    expect(await esc.owner()).to.equal(second.address);
+    expect(await esc.admins(deployer.address)).to.equal(true);
+    for (const addr of Object.values(chain.tokens)) expect(await esc.acceptedTokens(addr)).to.equal(true);
+  });
+
+  it("options override admins, tokens and systemWallet and defer ownership", async () => {
+    const [deployer, second, admin, sys] = await hre.ethers.getSigners();
+    const chain = await testChain({ owner: second.address });
+    const { proxy } = await deploy(hre, {
+      chain, deferOwnership: true, admins: [admin.address],
+      tokens: { USDT: chain.tokens.USDT }, systemWallet: sys.address,
+    });
+    const esc = await hre.ethers.getContractAt("P2PEscrowV3", proxy);
+    expect(await esc.owner()).to.equal(deployer.address);
+    expect(await esc.admins(admin.address)).to.equal(true);
+    expect(await esc.admins(deployer.address)).to.equal(false);
+    expect(await esc.acceptedTokens(chain.tokens.USDT)).to.equal(true);
+    expect(await esc.acceptedTokens(chain.tokens.USDC)).to.equal(false);
+    expect(await esc.acceptedTokens(chain.tokens.MCGP)).to.equal(false);
+    expect(await esc.mcgpToken()).to.equal(hre.ethers.ZeroAddress);
+    expect(await esc.systemWallet()).to.equal(sys.address);
+  });
 });
