@@ -8,3 +8,4 @@ coverage.json
 scripts/.pm-e2e-state.json
 deployments/*.json
 verification/
+.pool-rehearsal-*.json

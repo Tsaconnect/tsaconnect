@@ -1458,7 +1458,7 @@ func Load() *Config {
 	if addr := getEnv("TESTNET_USDC_ADDRESS", testnetSonic.usdcAddress); addr != "" {
 		testnetTokens["sonic:USDC"] = addr
 	}
-	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "")); addr != "" {
+	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7")); addr != "" {
 		testnetTokens["bsc:USDT"] = addr
 	}
 	if addr := getEnv("BSC_TESTNET_USDC_ADDRESS", getEnv("BSC_USDC_ADDRESS", "")); addr != "" {
