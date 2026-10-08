@@ -54,8 +54,10 @@ func (h *PayHandler) OwnerPaymentSummary(c *gin.Context) {
 
 // GET /api/pay/merchant/payments/export?mode&from&to — every payment paid in
 // the range as a CSV download (services.ExportCSV). Refusals come before the
-// first byte, as JSON. Once the file has started, a failure can only cut it
-// short, and is logged.
+// first byte, as JSON, and so does a failure reading the first chunk. Once the
+// file has started, a failure is logged and the connection aborted
+// (http.ErrAbortHandler, passed on by middleware.Recover): the download then
+// fails, rather than ending cleanly as a short file that looks complete.
 func (h *PayHandler) OwnerExportPayments(c *gin.Context) {
 	_, m, ok := h.payOwnerMerchant(c)
 	if !ok {
@@ -75,7 +77,8 @@ func (h *PayHandler) OwnerExportPayments(c *gin.Context) {
 	switch {
 	case err == nil:
 	case file.started:
-		log.Printf("[tsa-pay] export for merchant %s stopped part-way: %v", m.ID, err)
+		log.Printf("[tsa-pay] export for merchant %s stopped part-way, aborting: %v", m.ID, err)
+		panic(http.ErrAbortHandler)
 	case errors.Is(err, services.ErrPayDateRange):
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Choose a date range of at most 366 days", "date_range")
 	case errors.Is(err, services.ErrPayExportTooLarge):

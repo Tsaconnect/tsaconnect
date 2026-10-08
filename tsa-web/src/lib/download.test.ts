@@ -51,6 +51,26 @@ describe('downloadFile', () => {
     expect(createObjectURL).not.toHaveBeenCalled();
   });
 
+  it('a body cut off part-way (the API aborted the export) says it could not export', async () => {
+    const cut = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('\uFEFFpaid_at\n'));
+        controller.error(new TypeError('network error'));
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(cut, { status: 200 })));
+    await expect(downloadFile('/x', 'f.csv')).rejects.toThrow("Couldn't export. Try again.");
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(saved).toEqual([]);
+  });
+
+  it('a file the browser cannot hold says it could not export', async () => {
+    answer();
+    createObjectURL.mockImplementationOnce(() => { throw new Error('out of memory'); });
+    await expect(downloadFile('/x', 'f.csv')).rejects.toThrow("Couldn't export. Try again.");
+    expect(saved).toEqual([]);
+  });
+
   it('a click that throws still frees the object URL at once', async () => {
     answer();
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => { throw new Error('blocked'); });

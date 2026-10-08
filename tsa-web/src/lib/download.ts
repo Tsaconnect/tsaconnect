@@ -28,7 +28,14 @@ export async function downloadFile(url: string, fallbackName: string): Promise<v
     const body = (await res.json().catch(() => null)) as { message?: unknown } | null;
     throw new Error(typeof body?.message === 'string' && body.message ? body.message : GENERIC);
   }
-  const href = URL.createObjectURL(await res.blob());
+  // A body the API cut off part-way (it aborts an export that fails after the
+  // file has started) rejects here: say so, never save the short file.
+  let href: string;
+  try {
+    href = URL.createObjectURL(await res.blob());
+  } catch {
+    throw new Error(GENERIC);
+  }
   const a = document.createElement('a');
   try {
     a.href = href;

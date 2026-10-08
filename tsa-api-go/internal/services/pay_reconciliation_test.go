@@ -102,10 +102,16 @@ type fakeRefundAgg struct {
 	totals           PaySummaryRefunds
 	gotStart, gotEnd time.Time
 	calls            [][]uuid.UUID
+	failCall         int // the 1-based AggregateByPayment call that errors; 0 never
 }
+
+var errFakeRefundAgg = errors.New("refund lookup failed")
 
 func (f *fakeRefundAgg) AggregateByPayment(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]PayRefundAgg, error) {
 	f.calls = append(f.calls, append([]uuid.UUID(nil), ids...))
+	if len(f.calls) == f.failCall {
+		return nil, errFakeRefundAgg
+	}
 	out := map[uuid.UUID]PayRefundAgg{}
 	for _, id := range ids {
 		if a, ok := f.byPayment[id]; ok {
@@ -304,5 +310,31 @@ func TestPayReconciliation_ExportWalksChunksWithoutLosingTiesAndAsksRefundsPerCh
 	}
 	if len(agg.calls) != 3 || len(agg.calls[0]) != 2 || len(agg.calls[1]) != 2 || len(agg.calls[2]) != 1 {
 		t.Fatalf("refund lookups per chunk: %v", agg.calls)
+	}
+}
+
+// A failure reading the first chunk (or its refunds) must leave the response
+// unwritten, so the caller still answers JSON; a later one is returned after
+// the file has started.
+func TestPayReconciliation_ExportReadsTheFirstChunkBeforeWritingAByte(t *testing.T) {
+	prev := payExportChunk
+	payExportChunk = 2
+	t.Cleanup(func() { payExportChunk = prev })
+	s, m := newPayPaymentRig(t)
+	for i, paid := range []string{"2026-10-02T10:00:00Z", "2026-10-03T10:00:00Z", "2026-10-04T10:00:00Z"} {
+		reconPayment(t, s, m, models.PayModeLive, fmt.Sprintf("CHUNK-%d", i), reconTime("2026-10-01T07:00:00Z"), reconAt(paid))
+	}
+	start, end, _ := ParsePayDateRange("2026-10-01", "2026-10-31")
+
+	s.SetRefundAggregator(&fakeRefundAgg{failCall: 1})
+	var buf bytes.Buffer
+	if err := s.ExportCSV(context.Background(), &buf, m.ID, models.PayModeLive, start, end); !errors.Is(err, errFakeRefundAgg) || buf.Len() != 0 {
+		t.Fatalf("first chunk: err %v, %d bytes written; want the error and nothing written", err, buf.Len())
+	}
+
+	s.SetRefundAggregator(&fakeRefundAgg{failCall: 2})
+	buf.Reset()
+	if err := s.ExportCSV(context.Background(), &buf, m.ID, models.PayModeLive, start, end); !errors.Is(err, errFakeRefundAgg) || buf.Len() == 0 {
+		t.Fatalf("second chunk: err %v, %d bytes written; want the error after the file started", err, buf.Len())
 	}
 }

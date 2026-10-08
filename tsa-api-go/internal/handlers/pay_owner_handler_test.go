@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -826,6 +827,40 @@ func TestPayOwner_ExportIsACSVDownloadAndRefusalsAreJSON(t *testing.T) {
 		if res.status != http.StatusBadRequest || res.Code != "date_range" || !strings.HasPrefix(res.raw, "{") {
 			t.Fatalf("%q: %d %s", q, res.status, res.raw)
 		}
+	}
+}
+
+// failingExport is the payments service with an export that fails after
+// writing written (nothing, or the start of the file).
+type failingExport struct {
+	payPaymentAPI
+	written string
+}
+
+func (f failingExport) ExportCSV(_ context.Context, w io.Writer, _ uuid.UUID, _ string, _, _ time.Time) error {
+	if f.written != "" {
+		io.WriteString(w, f.written)
+	}
+	return errors.New("chunk read failed")
+}
+
+func TestPayOwner_AnExportThatFailsPartWayIsAbortedNotEndedCleanly(t *testing.T) {
+	o := newOwnerRig(t)
+	const path = "/api/pay/merchant/payments/export?mode=live&from=2026-10-01&to=2026-10-31"
+
+	o.h.payments = failingExport{payPaymentAPI: o.payments}
+	if res := o.do(http.MethodGet, path, nil); res.status != http.StatusInternalServerError || !strings.HasPrefix(res.raw, "{") {
+		t.Fatalf("before the first byte: %d %q, want a JSON 500", res.status, res.raw)
+	}
+
+	o.h.payments = failingExport{payPaymentAPI: o.payments, written: "\uFEFFpaid_at\n"}
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		payDo(o.r, http.MethodGet, path, nil, nil)
+	}()
+	if got != http.ErrAbortHandler {
+		t.Fatalf("after the first byte: recovered %v, want http.ErrAbortHandler so the connection is cut", got)
 	}
 }
 

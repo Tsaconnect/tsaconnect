@@ -177,8 +177,10 @@ var payExportHeader = []string{"paid_at", "created_at", "code", "reference", "de
 // ExportCSV writes, as CSV, every payment of merchantID in mode paid in
 // [start, end), oldest first. The range is required and at most
 // payExportMaxDays long (ErrPayDateRange). The rows are counted first: more
-// than payExportMaxRows is ErrPayExportTooLarge. Both refusals come before a
-// single byte is written, so a caller can still answer with an error.
+// than payExportMaxRows is ErrPayExportTooLarge. Both refusals, and any failure
+// reading the first chunk or its refunds, come before a single byte is
+// written, so a caller can still answer with an error. A later failure is
+// returned after the file has started: the caller must not let it end cleanly.
 //
 // A UTF-8 BOM comes first, so spreadsheet apps read names right. Rows are
 // read in keyset chunks of payExportChunk, never all at once and never through
@@ -202,13 +204,9 @@ func (s *PayPaymentService) ExportCSV(ctx context.Context, w io.Writer, merchant
 		return ErrPayExportTooLarge
 	}
 
-	if _, err := io.WriteString(w, "\uFEFF"); err != nil {
-		return err
-	}
-	cw := csv.NewWriter(w)
-	if err := cw.Write(payExportHeader); err != nil {
-		return err
-	}
+	// The first chunk and its refunds are read before the BOM, so a failure
+	// there still leaves the response unwritten.
+	var cw *csv.Writer
 	var after *models.PayPayment
 	for {
 		q := paid().Order("succeeded_at ASC, id ASC").Limit(payExportChunk)
@@ -220,12 +218,24 @@ func (s *PayPaymentService) ExportCSV(ctx context.Context, w io.Writer, merchant
 		if err := q.Find(&chunk).Error; err != nil {
 			return err
 		}
+		var refunds map[uuid.UUID]PayRefundAgg
+		if len(chunk) > 0 {
+			var err error
+			if refunds, err = s.exportRefunds(ctx, chunk); err != nil {
+				return err
+			}
+		}
+		if cw == nil {
+			if _, err := io.WriteString(w, "\uFEFF"); err != nil {
+				return err
+			}
+			cw = csv.NewWriter(w)
+			if err := cw.Write(payExportHeader); err != nil {
+				return err
+			}
+		}
 		if len(chunk) == 0 {
 			break
-		}
-		refunds, err := s.exportRefunds(ctx, chunk)
-		if err != nil {
-			return err
 		}
 		for i := range chunk {
 			if err := cw.Write(payExportRow(&chunk[i], refunds[chunk[i].ID])); err != nil {
