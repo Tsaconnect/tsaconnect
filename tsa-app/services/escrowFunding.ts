@@ -46,6 +46,14 @@ export interface EnsureFundingParams {
   onStage?: (label: string) => void;
   /** Called with a single human-readable string when the wallet lacks gas. */
   onGasAlert?: (msg: string) => void;
+  /**
+   * When set, the deposit must be exactly this many base units (a TSA Liquidity
+   * top-up: the LP's typed amount). If this read's shortfall differs — the
+   * balance moved since the caller read it, or this read failed — we stop with
+   * `aborted: 'balance-changed'` before any gas check or broadcast, rather than
+   * deposit more or less than the LP asked for.
+   */
+  exactDepositBaseUnits?: string;
 }
 
 export type EnsureFundingResult =
@@ -83,7 +91,7 @@ async function waitMined(chainId: number, txHash: string): Promise<void> {
  * math is BigInt over base-unit strings.
  */
 export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<EnsureFundingResult> {
-  const { token, chainId, amountBaseUnits, walletAddress, onStage, onGasAlert } = p;
+  const { token, chainId, amountBaseUnits, walletAddress, onStage, onGasAlert, exactDepositBaseUnits } = p;
 
   // Never broadcast on an unresolved/defaulted chain — a silent Sonic fallback
   // would fund the wrong chain and desync the voucher domain.
@@ -104,6 +112,13 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   // voucher only. No gas, no tx (spec edge case: repeat ads / post-refund).
   if (shortfall === 0n) {
     return { status: 'already-funded' };
+  }
+
+  if (
+    exactDepositBaseUnits !== undefined &&
+    (!balRes.success || !balRes.data || shortfall !== BigInt(exactDepositBaseUnits))
+  ) {
+    return { status: 'aborted', reason: 'balance-changed' };
   }
 
   const chainKey = p2pChainKey(chainId);

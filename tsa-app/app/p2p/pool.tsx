@@ -26,7 +26,7 @@
 // idempotent server-side (same txHash → same result). The store is a LIST keyed
 // by txHash so a second stranded withdraw can't orphan a prior one.
 
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -88,7 +88,12 @@ const SONIC_CHAIN_IDS = [146, 14601];
 const P2PPoolScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
   const kbHeight = useKeyboardHeight();
-  const [token, setToken] = useState<Token>('USDT');
+  // `?chainId=&token=` opens the screen on a given escrow — the TSA Liquidity
+  // dashboard's Withdraw sends the pool chain, which only listAll() returns.
+  const { chainId: chainParam, token: tokenParam } = useLocalSearchParams<{ chainId?: string; token?: string }>();
+  const [token, setToken] = useState<Token>(() =>
+    TOKENS.find((t) => t === tokenParam?.toUpperCase()) ?? 'USDT',
+  );
   const [amountInput, setAmountInput] = useState('');
   const [available, setAvailable] = useState<string>('0');
   const [locked, setLocked] = useState<string>('0');
@@ -115,7 +120,9 @@ const P2PPoolScreen: React.FC = () => {
   // chain 146"). `/p2p/chains` may still refine this once it loads. Threaded
   // through every poolApi call and the broadcast/gas-guard so funds route to
   // the picked chain.
-  const [selectedChainId, setSelectedChainId] = useState<number>(getChain('sonic').chainId);
+  const [selectedChainId, setSelectedChainId] = useState<number>(
+    () => Number(chainParam) || getChain('sonic').chainId,
+  );
 
   const decimals = p2pTokenDecimals(selectedChainId, token);
 
@@ -128,7 +135,9 @@ const P2PPoolScreen: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const res = await chainsApi.list();
+      // listAll keeps the pool chain (sent only to an active LP) so an LP can
+      // reclaim there; it also records each chain's token decimals.
+      const res = await chainsApi.listAll();
       if (cancelled || !res.success || !res.data || res.data.length === 0) return;
       const list = res.data;
       setChains(list);

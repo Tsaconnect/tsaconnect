@@ -34,6 +34,7 @@ export const PROTECTED_ROUTES = [
   'category',
   'delete-account',
   'kyc/callback',
+  'liquidity/index',
   'lock',
   'merchants',
   'order',

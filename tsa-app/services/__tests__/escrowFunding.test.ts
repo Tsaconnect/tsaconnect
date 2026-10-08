@@ -309,3 +309,43 @@ describe('ensureEscrowFunding — prepare failures surface as throws (funds-safe
     expect(mockAddPending).not.toHaveBeenCalled();
   });
 });
+
+// TSA Liquidity (review I4): an LP deposit must move EXACTLY the typed amount.
+// With exactDepositBaseUnits set, a shortfall that differs (the balance moved
+// since the caller read it, or this read failed) stops before any gas check,
+// approve or broadcast.
+describe('ensureEscrowFunding — exactDepositBaseUnits', () => {
+  it('deposits the shortfall when it equals the exact amount', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '40', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockConfirmDeposit.mockResolvedValue({ success: true });
+
+    const res = await ensureEscrowFunding(params({ amountBaseUnits: '100', exactDepositBaseUnits: '60' }));
+
+    expect(res).toEqual({ status: 'funded', deposited: '60' });
+    expect(mockPrepareDeposit).toHaveBeenCalledWith(TOKEN, '60', WALLET, CHAIN_ID);
+  });
+
+  it('aborts with no broadcast when the balance moved since the caller read it', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '30', locked: '0' } });
+    arrangeHappyChain();
+
+    const res = await ensureEscrowFunding(params({ amountBaseUnits: '100', exactDepositBaseUnits: '60' }));
+
+    expect(res).toEqual({ status: 'aborted', reason: 'balance-changed' });
+    expect(mockEnsureGas).not.toHaveBeenCalled();
+    expect(mockPrepareApprove).not.toHaveBeenCalled();
+    expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+
+  it('aborts instead of assuming 0 when the balance read fails', async () => {
+    mockBalance.mockResolvedValue({ success: false });
+    arrangeHappyChain();
+
+    const res = await ensureEscrowFunding(params({ amountBaseUnits: '100', exactDepositBaseUnits: '60' }));
+
+    expect(res).toEqual({ status: 'aborted', reason: 'balance-changed' });
+    expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+});
