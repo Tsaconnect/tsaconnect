@@ -17,7 +17,7 @@ case "$(basename "$ENV_FILE")" in .env|.env.*) fail "pass a testnet-only file, n
 # Allow-list (review M5): only the keys the rehearsal needs reach the server.
 # Anything else — a provider credential, another signer key, a future secret —
 # is refused by name, without being listed here.
-ALLOWED=(ENV SONIC_NETWORK BSC_NETWORK DATABASE_URL JWT_SECRET PORT
+ALLOWED=(ENV MIGRATE_ON_BOOT SONIC_NETWORK BSC_NETWORK DATABASE_URL JWT_SECRET PORT
   SONIC_TESTNET_RPC_URL BSC_TESTNET_RPC_URL BSC_TESTNET_USDT_ADDRESS
   PM_RELEASE_PRIVATE_KEY PM_ADMIN_EOA_ADDRESS IT_PM_ID RAMP_CONVERSION_BUY
   RAMP_TREASURY_PRIVATE_KEY RAMP_TREASURY_CHAINS RAMP_TREASURY_NATIVE_FLOOR_WEI_BSC
