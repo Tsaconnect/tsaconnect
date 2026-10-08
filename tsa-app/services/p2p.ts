@@ -306,7 +306,7 @@ interface RequestOptions {
   query?: Record<string, string | number | undefined>;
 }
 
-async function request<T>(
+export async function request<T>(
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   path: string,
   body?: unknown,
@@ -351,10 +351,36 @@ async function request<T>(
 export interface P2PChainInfo {
   chainId: number;
   assets: string[];
+  /** 'pool' is the TSA Liquidity chain, sent only to an active LP. */
+  purpose?: 'p2p' | 'pool';
+  /** Each asset's decimals as the API read them on-chain (spec S6). */
+  decimals?: Record<string, number>;
+}
+
+// Decimals the API reported, by `${chainId}:${SYMBOL}`. They win over the
+// symbol table below (the 2026-09-14 BSC send lesson).
+const apiDecimals = new Map<string, number>();
+
+export function rememberChainDecimals(chains: P2PChainInfo[]): void {
+  for (const c of chains) {
+    for (const [sym, d] of Object.entries(c.decimals ?? {})) apiDecimals.set(`${c.chainId}:${sym.toUpperCase()}`, d);
+  }
+}
+
+async function fetchChains() {
+  const res = await request<P2PChainInfo[]>('GET', '/p2p/chains');
+  if (res.success && res.data) rememberChainDecimals(res.data);
+  return res;
 }
 
 export const chainsApi = {
-  list: () => request<P2PChainInfo[]>('GET', '/p2p/chains'),
+  /** Chains open to ordinary P2P. The pool chain is never a marketplace filter. */
+  list: async () => {
+    const res = await fetchChains();
+    return res.success && res.data ? { ...res, data: res.data.filter((c) => c.purpose !== 'pool') } : res;
+  },
+  /** Every chain the caller may act on, the pool chain included (reclaim). */
+  listAll: fetchChains,
 };
 
 // ─── Nigerian banks (Nomba-backed) ──────────────────────────────────────────
@@ -777,6 +803,14 @@ export interface MyPmStatus {
    * than the field, or unreachable — the form it implies is the safe one.
    */
   activationNeedsId: boolean;
+  /** 'merchant' | 'lp' — absent when the API omits it. */
+  kind?: string;
+  /** Chain of the TSA Liquidity pool, when the caller is an LP. */
+  poolChainId?: number;
+  /** Whether activation must match the settlement account to the KYC name. */
+  activationNeedsSettlementMatch?: boolean;
+  /** Whether TSA Liquidity is configured and open for applications. */
+  liquidityAvailable?: boolean;
 }
 
 const NO_PM: MyPmStatus = { isPm: false, status: '', activationNeedsId: true };
@@ -791,7 +825,15 @@ const NO_PM: MyPmStatus = { isPm: false, status: '', activationNeedsId: true };
  */
 export async function getMyPmStatus(): Promise<MyPmStatus> {
   try {
-    const res = await request<{ isPm: boolean; status: string; activationNeedsId?: boolean }>(
+    const res = await request<{
+      isPm: boolean;
+      status: string;
+      activationNeedsId?: boolean;
+      kind?: string;
+      poolChainId?: number;
+      activationNeedsSettlementMatch?: boolean;
+      liquidityAvailable?: boolean;
+    }>(
       'GET',
       '/p2p/pm/me'
     );
@@ -800,6 +842,10 @@ export async function getMyPmStatus(): Promise<MyPmStatus> {
         isPm: !!res.data.isPm,
         status: res.data.status ?? '',
         activationNeedsId: res.data.activationNeedsId !== false,
+        kind: res.data.kind,
+        poolChainId: res.data.poolChainId,
+        activationNeedsSettlementMatch: res.data.activationNeedsSettlementMatch,
+        liquidityAvailable: res.data.liquidityAvailable,
       };
     }
     return NO_PM;
@@ -973,6 +1019,8 @@ export const TOKEN_DECIMALS: Record<string, number> = {
  *  Sonic (146/14601) USDT/USDC are 6; MCGP is 18. */
 export function p2pTokenDecimals(chainId: number | undefined, symbol: string): number {
   const sym = (symbol || '').toUpperCase();
+  const known = apiDecimals.get(`${chainId}:${sym}`);
+  if (known !== undefined) return known;
   if (chainId === 56 || chainId === 97) {
     if (sym === 'USDT' || sym === 'USDC') return 18;
   }
