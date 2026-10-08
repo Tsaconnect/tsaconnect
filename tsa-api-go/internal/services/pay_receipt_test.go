@@ -187,6 +187,23 @@ func TestPayReceipt_PurposeFollowsThePublicPageRule(t *testing.T) {
 			t.Fatalf("%s: %+v err %v; want %+v", code, v, err, want)
 		}
 	}
+
+	// The public status page follows the same rule; it names the open link in
+	// its own field rather than as the description.
+	for _, c := range []struct {
+		p           *models.PayPayment
+		desc, label string
+	}{
+		{api, "", ""},
+		{link, "Wedding cake deposit", ""},
+		{note, "see [link removed] now", "Shop 12"},
+		{bare, "", "Shop 12"},
+	} {
+		pv, err := s.PublicView(ctx, c.p.ID, true)
+		if err != nil || pv.Description != c.desc || pv.LinkLabel != c.label {
+			t.Fatalf("public view of %s: %q / %q err %v; want %q / %q", c.p.Source, pv.Description, pv.LinkLabel, err, c.desc, c.label)
+		}
+	}
 }
 
 func TestPayReceipt_RefundFieldsComeFromTheRefundHook(t *testing.T) {

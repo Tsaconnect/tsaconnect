@@ -110,7 +110,7 @@ type PayPublicView struct {
 	Amount        int64      `json:"amount"`
 	CustomerTotal int64      `json:"customerTotal"`
 	Currency      string     `json:"currency"`
-	Description   string     `json:"description,omitempty"`  // links and open links only
+	Description   string     `json:"description,omitempty"`  // payPublicPurpose: links and open links only
 	CustomerName  string     `json:"customerName,omitempty"` // links only
 	LinkLabel     string     `json:"linkLabel,omitempty"`    // open links only: the link it was paid through
 	OpenLinkURL   string     `json:"openLinkUrl,omitempty"`  // open links only, while that link takes payments
@@ -334,11 +334,17 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID, liveEn
 		SucceededAt:   p.SucceededAt,
 		AppURL:        "tsaconnect://pay?id=" + p.ID.String(),
 	}
+	description, kind, err := s.payPublicPurpose(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if kind != payPurposeLinkLabel { // the open link is named in LinkLabel instead
+		v.Description = description
+	}
 	switch p.Source {
 	case models.PaySourceLink:
-		v.Description, v.CustomerName = p.Description, p.CustomerName
+		v.CustomerName = p.CustomerName
 	case models.PaySourceOpen:
-		v.Description = p.Description // the customer's own note, if any
 		if p.OpenLinkID != nil {
 			var l models.PayOpenLink
 			if err := s.db.WithContext(ctx).First(&l, "id = ?", *p.OpenLinkID).Error; err != nil {

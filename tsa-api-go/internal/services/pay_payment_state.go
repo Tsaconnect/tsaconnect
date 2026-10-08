@@ -306,7 +306,8 @@ const (
 )
 
 // payPurpose is what a payment was for, and whose words they are — the one
-// rule behind the merchant's "received" alert and the public receipt.
+// rule behind the merchant's "received" alert and (as payPublicPurpose) the
+// public status page and receipt.
 func (s *PayPaymentService) payPurpose(ctx context.Context, p *models.PayPayment) (string, payPurposeKind, error) {
 	switch {
 	case p.Source == models.PaySourceOpen && p.Description != "":
@@ -321,6 +322,16 @@ func (s *PayPaymentService) payPurpose(ctx context.Context, p *models.PayPayment
 		return labels[*p.OpenLinkID], payPurposeLinkLabel, nil
 	}
 	return "", payPurposeNone, nil
+}
+
+// payPublicPurpose is payPurpose as anyone holding the payment's id or code
+// sees it — the public status page and the receipt: never an API payment's
+// description, which is the merchant's own (booking codes, order details).
+func (s *PayPaymentService) payPublicPurpose(ctx context.Context, p *models.PayPayment) (string, payPurposeKind, error) {
+	if p.Source == models.PaySourceAPI {
+		return "", payPurposeNone, nil
+	}
+	return s.payPurpose(ctx, p)
 }
 
 // payNameEnds is the first and last words of a name; last is empty for a

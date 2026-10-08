@@ -87,14 +87,9 @@ func (s *PayPaymentService) PublicReceipt(ctx context.Context, code string) (Pay
 	if payer != nil && payer.Name != payerDeletedName {
 		initials = payInitials(payer.Name)
 	}
-	// The public page's rule: never an API payment's description, which is the
-	// merchant's own (booking codes, order details).
-	description, kind, err := s.payPurpose(ctx, &p)
+	description, kind, err := s.payPublicPurpose(ctx, &p)
 	if err != nil {
 		return PayReceiptView{}, err
-	}
-	if p.Source == models.PaySourceAPI {
-		description, kind = "", payPurposeNone
 	}
 	paidAt := p.UpdatedAt
 	if p.SucceededAt != nil {
