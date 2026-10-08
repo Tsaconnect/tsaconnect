@@ -184,7 +184,8 @@ func payRefundAggregates(db *gorm.DB, ids []uuid.UUID) (map[uuid.UUID]PayRefundA
 		CapMicroUSD int64
 	}
 	err := db.Model(&models.PayRefund{}).
-		Select("payment_id, COALESCE(SUM(CASE WHEN status = ? THEN amount_micro_usd ELSE 0 END), 0) AS refunded, MAX(cap_micro_usd) AS cap_micro_usd",
+		// SUM of a bigint is numeric on Postgres: cast back to the int64 it scans into.
+		Select("payment_id, CAST(COALESCE(SUM(CASE WHEN status = ? THEN amount_micro_usd ELSE 0 END), 0) AS BIGINT) AS refunded, MAX(cap_micro_usd) AS cap_micro_usd",
 			models.PayRefundConfirmed).
 		Where("payment_id IN ?", ids).Group("payment_id").Scan(&rows).Error
 	if err != nil {
@@ -211,6 +212,6 @@ func (s *PayRefundService) TotalsConfirmed(ctx context.Context, merchantID uuid.
 		Amount int64
 	}
 	err := payBetween(q, "confirmed_at", start, end).
-		Select("COUNT(*) AS count, COALESCE(SUM(amount_micro_usd), 0) AS amount").Scan(&row).Error
+		Select("COUNT(*) AS count, CAST(COALESCE(SUM(amount_micro_usd), 0) AS BIGINT) AS amount").Scan(&row).Error
 	return PaySummaryRefunds{Count: row.Count, AmountMicroUSD: row.Amount}, err
 }

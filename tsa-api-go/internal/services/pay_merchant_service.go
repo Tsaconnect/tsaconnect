@@ -679,12 +679,19 @@ func (s *PayMerchantService) listedStablecoin(chainID int64, token string) (stri
 	if s.chains == nil {
 		return "", fmt.Errorf("%w: no chain registry configured for crypto settlement", ErrPayMerchantInvalid)
 	}
-	chain, ok := s.chains.MainnetChainNameForID(chainID)
+	return payListedStablecoin(s.chains, chainID, token)
+}
+
+// payListedStablecoin is the symbol of token when it is one of
+// payOwnerSettlementTokens as listed on chainID — what an owner may be paid in,
+// and what a refund may be sized in and paid with.
+func payListedStablecoin(chains payChainRegistry, chainID int64, token string) (string, error) {
+	chain, ok := chains.MainnetChainNameForID(chainID)
 	if !ok {
 		return "", fmt.Errorf("%w: chain id %d is not a supported settlement chain", ErrPayMerchantInvalid, chainID)
 	}
 	for _, symbol := range payOwnerSettlementTokens {
-		if listed := s.chains.TokenAddress(chain, symbol); listed != "" && sameTokenAddress(listed, token) {
+		if listed := chains.TokenAddress(chain, symbol); listed != "" && sameTokenAddress(listed, token) {
 			return symbol, nil
 		}
 	}

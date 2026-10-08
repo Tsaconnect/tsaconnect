@@ -18,7 +18,7 @@ import (
 
 func newPayPostgresRig(t *testing.T) (*PayPaymentService, *models.PayMerchant) {
 	t.Helper()
-	db := newITPostgresDB(t, &models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{})
+	db := newITPostgresDB(t, &models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}, &models.PayRefund{})
 	now := func() time.Time { return payTestNow }
 	merchants := NewPayMerchantService(db, nil, nil, []byte(strings.Repeat("k", 32)), now)
 	return NewPayPaymentService(db, merchants, 100, "https://tsaconnectworld.com/pay", now), seedPayMerchant(t, db)
@@ -189,13 +189,19 @@ func TestPayWebhook_ConcurrentDeliveryOnPostgresDeliversEachOnce(t *testing.T) {
 	}
 }
 
-// The grouped summary (CASE + GROUP BY alias, SUM cast) and the export's keyset
-// walk are Postgres-dialect sensitive.
+// The grouped summary (CASE + GROUP BY alias, SUM cast), the refund
+// aggregates' SUMs and the export's keyset walk are Postgres-dialect sensitive.
 func TestPayReconciliation_SummaryAndExportRunOnPostgres(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPostgresRig(t)
+	s.SetRefundAggregator(NewPayRefundService(s.db, s, s.merchants, nil, nil, 5, s.now))
 	live := models.PayModeLive
-	reconPayment(t, s, m, live, "PG-1", reconTime("2026-10-02T10:00:00Z"), reconAt("2026-10-02T10:05:00Z"))
+	refunded := reconPayment(t, s, m, live, "PG-1", reconTime("2026-10-02T10:00:00Z"), reconAt("2026-10-02T10:05:00Z"))
+	if err := s.db.Create(&models.PayRefund{PaymentID: refunded.ID, MerchantID: m.ID, Mode: live, AmountMicroUSD: 1_500_000,
+		CapMicroUSD: 33_000_000, CreditedMicroUSD: 1_500_000, ToAddress: refundPayerWallet, Status: models.PayRefundConfirmed,
+		RequestedVia: models.PayRefundViaWeb, CreatedAt: payTestNow, ConfirmedAt: reconAt("2026-10-03T09:00:00Z")}).Error; err != nil {
+		t.Fatal(err)
+	}
 	reconPayment(t, s, m, live, "PG-2", reconTime("2026-10-03T10:00:00Z"), reconAt("2026-10-02T10:05:00Z")) // same paid instant
 	reconPayment(t, s, m, live, "PG-3", reconTime("2026-10-04T10:00:00Z"), nil)
 	called := reconPayment(t, s, m, live, "PG-4", reconTime("2026-10-05T10:00:00Z"), nil)
@@ -204,7 +210,8 @@ func TestPayReconciliation_SummaryAndExportRunOnPostgres(t *testing.T) {
 
 	sum, err := s.Summary(ctx, m.ID, live, start, end)
 	if err != nil || sum.Succeeded.Count != 2 || sum.Succeeded.CustomerTotalKobo != 2*5_050_506 ||
-		sum.ByStatus["succeeded"] != 2 || sum.ByStatus["pending"] != 1 || sum.ByStatus["cancelled"] != 1 {
+		sum.ByStatus["succeeded"] != 2 || sum.ByStatus["pending"] != 1 || sum.ByStatus["cancelled"] != 1 ||
+		sum.Refunds.Count != 1 || sum.Refunds.AmountMicroUSD != 1_500_000 {
 		t.Fatalf("summary %+v err %v", sum, err)
 	}
 	prev := payExportChunk
@@ -214,8 +221,18 @@ func TestPayReconciliation_SummaryAndExportRunOnPostgres(t *testing.T) {
 	if err := s.ExportCSV(ctx, &buf, m.ID, live, start, end); err != nil {
 		t.Fatal(err)
 	}
-	if rows := readExport(t, buf.String()); len(rows) != 3 || rows[1][15] == rows[2][15] {
+	rows := readExport(t, buf.String())
+	if len(rows) != 3 || rows[1][15] == rows[2][15] {
 		t.Fatalf("rows %q", rows)
+	}
+	for _, row := range rows[1:] {
+		want := []string{"0.00", "none"}
+		if row[15] == refunded.ID.String() {
+			want = []string{"1.50", "partial"}
+		}
+		if row[12] != want[0] || row[13] != want[1] {
+			t.Errorf("%s refunded %q status %q, want %q", row[3], row[12], row[13], want)
+		}
 	}
 }
 
