@@ -911,7 +911,9 @@ func TestPayOwner_ResendIsTheirOwnAndKeepsADeliveredRecord(t *testing.T) {
 		}
 	}
 	o.db.Model(o.m).Update("webhook_url", "")
-	if res := resend(delivered.ID.String(), "live"); res.status != http.StatusUnprocessableEntity || res.Code != "no_webhook_url" {
-		t.Fatalf("no URL: %d %s", res.status, res.raw)
+	for _, id := range []uuid.UUID{delivered.ID, failed.ID} {
+		if res := resend(id.String(), "live"); res.status != http.StatusUnprocessableEntity || res.Code != "no_webhook_url" {
+			t.Fatalf("no URL, %s: %d %s", id, res.status, res.raw)
+		}
 	}
 }

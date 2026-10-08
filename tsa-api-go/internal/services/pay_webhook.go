@@ -81,8 +81,8 @@ var ErrPayWebhookDeliveryNotFound = errors.New("webhook delivery not found")
 // other mode, and one that doesn't exist alike.
 var ErrPayDeliveryNotFound = ErrPayWebhookDeliveryNotFound
 
-// ErrPayWebhookNoURL: a delivered event can't be sent anew because the
-// merchant has no webhook URL for its mode.
+// ErrPayWebhookNoURL: an owner's webhook can't be sent again (retried or sent
+// anew) because the merchant has no webhook URL for its mode.
 var ErrPayWebhookNoURL = errors.New("no webhook URL is set for this mode")
 
 // PayWebhookSender delivers TSA Pay webhook events on a schedule, signing
@@ -531,6 +531,9 @@ func (s *PayWebhookSender) ResendForMerchant(ctx context.Context, merchantID uui
 		return models.PayWebhookDelivery{}, err
 	}
 	if d.DeliveredAt == nil {
+		if err := requirePayWebhookURL(s.db.WithContext(ctx), d.MerchantID, d.Mode); err != nil {
+			return models.PayWebhookDelivery{}, err
+		}
 		// Only while it is still undelivered: the worker can deliver it between
 		// the read above and this update, and a delivered record is never
 		// changed. Delivered meanwhile, it is sent anew below.

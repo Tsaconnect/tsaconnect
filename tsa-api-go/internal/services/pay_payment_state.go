@@ -634,7 +634,7 @@ func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, ev
 	if p.Untried() {
 		return nil
 	}
-	if err := requirePayWebhookURL(tx, p); errors.Is(err, ErrPayWebhookNoURL) {
+	if err := requirePayWebhookURL(tx, p.MerchantID, p.Mode); errors.Is(err, ErrPayWebhookNoURL) {
 		return nil
 	} else if err != nil {
 		return err
@@ -646,14 +646,14 @@ func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, ev
 	return tx.Create(&delivery).Error
 }
 
-// requirePayWebhookURL loads p's merchant and returns ErrPayWebhookNoURL when
-// it has no webhook URL for p's mode: nothing is to be queued for it.
-func requirePayWebhookURL(tx *gorm.DB, p *models.PayPayment) error {
+// requirePayWebhookURL loads the merchant and returns ErrPayWebhookNoURL when
+// it has no webhook URL for mode: nothing is to be queued for it.
+func requirePayWebhookURL(tx *gorm.DB, merchantID uuid.UUID, mode string) error {
 	var m models.PayMerchant
-	if err := tx.First(&m, "id = ?", p.MerchantID).Error; err != nil {
+	if err := tx.First(&m, "id = ?", merchantID).Error; err != nil {
 		return err
 	}
-	if m.WebhookURLFor(p.Mode) == "" {
+	if m.WebhookURLFor(mode) == "" {
 		return ErrPayWebhookNoURL
 	}
 	return nil
@@ -697,7 +697,7 @@ func (s *PayPaymentService) redeliver(ctx context.Context, d *models.PayWebhookD
 		if err := tx.First(&p, "id = ?", d.PaymentID).Error; err != nil {
 			return err
 		}
-		if err := requirePayWebhookURL(tx, &p); err != nil {
+		if err := requirePayWebhookURL(tx, p.MerchantID, p.Mode); err != nil {
 			return err
 		}
 		row, err := s.webhookDelivery(&p, d.Event)

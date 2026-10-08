@@ -771,3 +771,25 @@ func TestPayWebhook_ResendForMerchantNeverClearsARowDeliveredMeanwhile(t *testin
 		t.Fatalf("want the event sent anew as a new delivery: %+v", got)
 	}
 }
+
+// Retrying an undelivered event needs a webhook URL too, as sending a
+// delivered one anew does: otherwise the worker would only give up on it.
+func TestPayWebhook_ResendForMerchantOfAnUndeliveredEventNeedsAWebhookURL(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	d := queuedDelivery(t, s, m, "https://skyair.ng/h")
+	failedAt := payTestNow
+	s.db.Model(d).Updates(map[string]any{"failed_at": &failedAt, "next_attempt_at": nil, "attempts": 7})
+	s.db.Model(m).Update("test_webhook_url", "")
+	sender := NewPayWebhookSender(s.db, s.merchants, &http.Client{Transport: failingTransport{t}}, func() time.Time { return payTestNow })
+	sender.SetPayments(s)
+
+	if _, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID); !errors.Is(err, ErrPayWebhookNoURL) {
+		t.Fatalf("err %v, want ErrPayWebhookNoURL", err)
+	}
+	var kept models.PayWebhookDelivery
+	s.db.First(&kept, "id = ?", d.ID)
+	if kept.FailedAt == nil || kept.Attempts != 7 || kept.NextAttemptAt != nil {
+		t.Fatalf("the refused delivery was requeued: %+v", kept)
+	}
+}
