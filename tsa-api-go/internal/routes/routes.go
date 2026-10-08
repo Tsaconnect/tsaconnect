@@ -1375,6 +1375,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			middleware.RateLimiterBy(120, time.Minute, middleware.PayMerchantRateKey))
 		{
 			merchantAPI.POST("/payments", payh.CreatePayment)
+			merchantAPI.GET("/payments", payh.FindPaymentByReference) // ?reference= exact
 			merchantAPI.GET("/payments/:id", payh.GetPayment)
 			merchantAPI.POST("/payments/:id/cancel", payh.CancelPayment)
 		}

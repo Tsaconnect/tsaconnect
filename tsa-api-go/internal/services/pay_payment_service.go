@@ -357,6 +357,26 @@ func (s *PayPaymentService) GetForMerchant(ctx context.Context, merchantID uuid.
 	return &p, nil
 }
 
+// GetByReference returns merchantID's payment in mode whose reference is
+// exactly reference: trimmed as Create stored it, case-sensitive, no
+// wildcards. A reference no payment could have (empty, a NUL, too long) is
+// not found without a query.
+func (s *PayPaymentService) GetByReference(ctx context.Context, merchantID uuid.UUID, mode, reference string) (*models.PayPayment, error) {
+	reference = strings.TrimSpace(reference)
+	if reference == "" || strings.ContainsRune(reference, 0) || utf8.RuneCountInString(reference) > payMaxReferenceLen {
+		return nil, ErrPayPaymentNotFound
+	}
+	var p models.PayPayment
+	err := s.db.WithContext(ctx).Where("merchant_id = ? AND mode = ? AND reference = ?", merchantID, mode, reference).First(&p).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPayPaymentNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 // Get returns one payment by id regardless of merchant/mode, for admin and
 // internal (webhook/checkout) callers that already know it's the right one.
 func (s *PayPaymentService) Get(ctx context.Context, id uuid.UUID) (*models.PayPayment, error) {

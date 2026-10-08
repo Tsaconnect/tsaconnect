@@ -28,6 +28,7 @@ type payPaymentAPI interface {
 	Create(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayPaymentInput) (*models.PayPayment, bool, error)
 	CreateLink(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayLinkInput) (*models.PayPayment, error)
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
+	GetByReference(ctx context.Context, merchantID uuid.UUID, mode, reference string) (*models.PayPayment, error)
 	View(p *models.PayPayment) services.PayPaymentView
 	Views(ctx context.Context, ps []models.PayPayment) ([]services.PayPaymentView, error)
 	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
@@ -642,6 +643,29 @@ func (h *PayHandler) GetPayment(c *gin.Context) {
 	}
 
 	p, err := h.payments.GetForMerchant(c.Request.Context(), m.ID, mode, id)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+}
+
+// GET /api/pay/v1/payments?reference= — the payment with exactly this
+// reference, in the key's own merchant and mode, as data (same shape as
+// GET /payments/:id), so a merchant reconciles by their own order id.
+// No match is 404.
+func (h *PayHandler) FindPaymentByReference(c *gin.Context) {
+	m, mode, ok := payMerchantFromContext(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+		return
+	}
+	reference := c.Query("reference")
+	if strings.TrimSpace(reference) == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "reference is required")
+		return
+	}
+	p, err := h.payments.GetByReference(c.Request.Context(), m.ID, mode, reference)
 	if err != nil {
 		payPaymentFail(c, err)
 		return

@@ -551,3 +551,25 @@ func TestPayRoutes_ResendIsAuthedAndLimitedTenAMinute(t *testing.T) {
 		t.Fatalf("the 11th resend in a minute: %d", w.Code)
 	}
 }
+
+func TestPayRoutes_ReferenceLookupNeedsTheMerchantKey(t *testing.T) {
+	r, _, db, payh := newPayRoutesRig(t)
+	if w := payRoutesDo(r, http.MethodGet, "/api/pay/v1/payments?reference=R1", "", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no key: %d", w.Code)
+	}
+	_, m := payRoutesOwner(t, db)
+	keys, err := payh.MerchantService().IssueKeys(context.Background(), uuid.New(), m.ID, services.PayKeysTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := payRoutesDo(r, http.MethodPost, "/api/pay/v1/payments", keys.TestKey, map[string]any{"amount": 500_000, "reference": "R1"}); w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	w := payRoutesDo(r, http.MethodGet, "/api/pay/v1/payments?reference=R1", keys.TestKey, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"data":{`) || !strings.Contains(w.Body.String(), `"reference":"R1"`) {
+		t.Fatalf("lookup: %d %s", w.Code, w.Body.String())
+	}
+	if w := payRoutesDo(r, http.MethodGet, "/api/pay/v1/payments?reference=R2", keys.TestKey, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown reference: %d", w.Code)
+	}
+}
