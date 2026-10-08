@@ -156,9 +156,17 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 			}
 			return err
 		}
-		provider = models.ITIntentProvider(&intent)
+		// P5: an unknown provider (ErrUnknownITProvider) has zero terms, so it
+		// gets neither the company wallet's gate nor Flutterwave's hashless
+		// branch — only its park (buy_awaiting_rate) is refundable. Safe: every
+		// provider-specific path refused it, so nothing was sent or converted.
+		terms, termsErr := providerTerms(&intent)
+		if termsErr != nil && !errors.Is(termsErr, ErrUnknownITProvider) {
+			return termsErr
+		}
+		provider = models.ITIntentProvider(&intent) // the audit row names the raw value
 		refundable := []string{models.ITStatusBuyAwaitingRate}
-		if provider == models.ITProviderTreasury {
+		if terms.companyWallet {
 			// Review N1 / C2: never refund while any sale can still pay her —
 			// the one gate every second-payment path shares.
 			reason, err := s.secondPaymentGate(ctx, tx, intentID, uuid.Nil)
@@ -178,7 +186,7 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 		// a compare-and-set, so an attach-hash and a refund never both win.
 		// Any other settled buy stays refused.
 		hashlessPark := false
-		if provider == models.ITProviderFlutterwave && intent.Status == models.ITStatusSettled {
+		if terms.flutterwaveFulfils && intent.Status == models.ITStatusSettled {
 			rec, err := conversionRecordOn(ctx, tx, intentID)
 			if err != nil {
 				return err
