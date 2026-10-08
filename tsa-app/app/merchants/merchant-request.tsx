@@ -50,6 +50,7 @@ const BUSINESS_TYPES = [
   { label: 'Payment Merchant (PM)', value: 'p2p_merchant' },
   { label: 'Service Provider', value: 'service_provider' },
   { label: 'Accept payments (TSA Pay)', value: 'payment_acceptance' },
+  { label: 'Liquidity provider', value: 'liquidity_provider' },
 ];
 
 // ─── EVM address validation ──────────────────────────────────────────────────
@@ -101,8 +102,10 @@ export function validatePmFields(fields: PmFields): PmValidationErrors {
  * When `type === 'p2p_merchant'` the form opens in locked PM mode; all other
  * values (including absent) default to `'general_products'`.
  */
+const LOCKABLE_TYPES = ['p2p_merchant', 'payment_acceptance', 'liquidity_provider'];
+
 export function initBusinessType(type: string | undefined): string {
-  return type === 'p2p_merchant' || type === 'payment_acceptance' ? type : 'general_products';
+  return type && LOCKABLE_TYPES.includes(type) ? type : 'general_products';
 }
 
 /**
@@ -113,7 +116,22 @@ export function initBusinessType(type: string | undefined): string {
  * or a "not now, something else" prompt), so we prevent switching away.
  */
 export function isPickerLocked(type: string | undefined): boolean {
-  return type === 'p2p_merchant' || type === 'payment_acceptance';
+  return !!type && LOCKABLE_TYPES.includes(type);
+}
+
+/** Approved request types that grant the marketplace merchant role server-side. */
+export function cachesMerchantRole(businessType?: string): boolean {
+  return businessType !== 'payment_acceptance' && businessType !== 'liquidity_provider';
+}
+
+/** An LP application's settlement fields (spec §8.1): the app wallet is the maker wallet; no caps. */
+export function lpSettlementPayload(f: PmFields) {
+  return {
+    settlementBankCode: f.settlementBankCode,
+    settlementAccountNumber: f.settlementAccountNumber.trim(),
+    settlementAccountName: f.settlementAccountName.trim(),
+    makerWalletAddress: f.makerWalletAddress.trim(),
+  };
 }
 
 // ─── Existing-request gate (exported for tests) ──────────────────────────────
@@ -157,8 +175,8 @@ function hasPmProvisioningData(r: ExistingRequestLike): boolean {
 export type MerchantGate =
   | { screen: 'form' }
   | { screen: 'verify' }
-  | { screen: 'pending'; pm: boolean }
-  | { screen: 'approved'; pm: boolean; payFlow: boolean }
+  | { screen: 'pending'; pm: boolean; lp?: true }
+  | { screen: 'approved'; pm: boolean; payFlow: boolean; lp?: true }
   | { screen: 'provisioning' }
   | { screen: 'rejected' };
 
@@ -168,7 +186,7 @@ export type MerchantGate =
 // deliberate "no role guard — a marketplace merchant, or anyone else, may
 // apply" in merchant_request_handler.go). Every OTHER business type keeps the
 // original rule: in the normal flow, any existing request blocks a new one.
-const ADD_ON_BUSINESS_TYPES = ['p2p_merchant', 'payment_acceptance'];
+const ADD_ON_BUSINESS_TYPES = ['p2p_merchant', 'payment_acceptance', 'liquidity_provider'];
 
 // A TSA Pay application needs a verified identity (the server refuses it with
 // the money-in code, kyc_verification_required), so an unverified applicant is sent to verification instead of
@@ -182,7 +200,7 @@ export function resolveMerchantGate(args: {
   kycVerified?: boolean;
 }): MerchantGate {
   const gate = resolveRequestGate(args);
-  if (gate.screen === 'form' && args.formType === 'payment_acceptance' && args.kycVerified === false) {
+  if (gate.screen === 'form' && (args.formType === 'payment_acceptance' || args.formType === 'liquidity_provider') && args.kycVerified === false) {
     return { screen: 'verify' };
   }
   return gate;
@@ -202,6 +220,7 @@ function resolveRequestGate(args: {
   // RoleMerchant (Task 4) — the marketplace-merchant "Go to Merchant
   // Dashboard" success screen is wrong for it and its API calls would 403.
   const existingIsPay = existingType === 'payment_acceptance';
+  const existingIsLp = existingType === 'liquidity_provider';
 
   // Upgrade mode (?type=p2p_merchant or ?type=payment_acceptance): a prior
   // request of a DIFFERENT type must NOT short-circuit this one — an existing
@@ -214,7 +233,7 @@ function resolveRequestGate(args: {
 
   switch (existingRequest.status) {
     case 'pending':
-      return { screen: 'pending', pm: existingIsPm };
+      return existingIsLp ? { screen: 'pending', pm: false, lp: true } : { screen: 'pending', pm: existingIsPm };
     case 'approved':
       // An approved PM request only means "you're a Payment Merchant" once the
       // PM is actually active. Otherwise the activation is still pending/failed.
@@ -227,7 +246,10 @@ function resolveRequestGate(args: {
           ? { screen: 'provisioning' }
           : { screen: 'form' };
       }
-      return { screen: 'approved', pm: existingIsPm, payFlow: existingIsPay };
+      // An LP's activation lives on its dashboard, so no provisioning screen.
+      return existingIsLp
+        ? { screen: 'approved', pm: false, payFlow: false, lp: true }
+        : { screen: 'approved', pm: existingIsPm, payFlow: existingIsPay };
     case 'rejected':
       return { screen: 'rejected' };
     default:
@@ -248,6 +270,7 @@ export default function MerchantRequestScreen() {
   // Actual Payment Merchant status (GET /p2p/pm/me) — distinct from an approved
   // PM *request*. Used to gate the "You're a Payment Merchant!" success screen.
   const [pmActive, setPmActive] = useState(false);
+  const [lpAvailable, setLpAvailable] = useState(false);
   // The applicant's KYC status: AuthContext's copy, replaced by a fresh read
   // each time the screen gains focus (she may have just verified). If the read
   // fails, the cached copy stands. kycChecked holds the TSA Pay screen on its
@@ -302,6 +325,8 @@ export default function MerchantRequestScreen() {
 
   const isPm = businessType === 'p2p_merchant';
   const isPay = businessType === 'payment_acceptance';
+  const isLp = businessType === 'liquidity_provider';
+  const needsBanks = isPm || isLp;
 
   useEffect(() => {
     fetchExistingRequest();
@@ -309,7 +334,7 @@ export default function MerchantRequestScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (!isPay) return;
+      if (!isPay && !isLp) return;
       let cancelled = false;
       api.getKYCStatus()
         .then((res) => {
@@ -320,12 +345,12 @@ export default function MerchantRequestScreen() {
         .catch(() => { /* keep the cached status; the server still gates the submit */ })
         .finally(() => { if (!cancelled) setKycChecked(true); });
       return () => { cancelled = true; };
-    }, [isPay]),
+    }, [isPay, isLp]),
   );
 
   // Load bank list when PM type is selected (lazy)
   useEffect(() => {
-    if (!isPm || banks.length > 0) return;
+    if (!needsBanks || banks.length > 0) return;
     let cancelled = false;
     setBanksLoading(true);
     getNigerianBanks().then((list) => {
@@ -338,11 +363,22 @@ export default function MerchantRequestScreen() {
     // banks.length is intentionally omitted: we only want to load once when the
     // PM section is first shown. The banks array is stable after initial fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPm]);
+  }, [needsBanks]);
+
+  // The maker wallet is the app wallet; the API replaces the name with the verified legal name.
+  useEffect(() => {
+    if (!isLp) return;
+    import('@/services/wallet')
+      .then(({ getActiveWallet }) => getActiveWallet())
+      .then((w) => w && setMakerWalletAddress(w))
+      .catch(() => { /* the server refuses a missing wallet */ });
+    setBusinessName((prev: string) => prev || (currentUser?.name ?? 'Liquidity provider'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLp]);
 
   // Debounced NUBAN name resolution for settlement account
   useEffect(() => {
-    if (!isPm || !settlementBank || settlementAccountNumber.length !== 10) {
+    if (!needsBanks || !settlementBank || settlementAccountNumber.length !== 10) {
       setSettleResolving(false);
       setSettleResolved(false);
       setSettleResolveError(null);
@@ -371,7 +407,7 @@ export default function MerchantRequestScreen() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [isPm, settlementBank, settlementAccountNumber]);
+  }, [needsBanks, settlementBank, settlementAccountNumber]);
 
   // Live-revalidate PM fields after first submit attempt
   useEffect(() => {
@@ -411,6 +447,7 @@ export default function MerchantRequestScreen() {
       // is dormant-safe (returns {isPm:false} on any error), so it never blocks.
       const [res, pmStatus] = await Promise.all([getMyMerchantRequest(), getMyPmStatus()]);
       setPmActive(pmStatus.isPm);
+      setLpAvailable(!!pmStatus.liquidityAvailable);
       if (res.success && res.data) {
         setExistingRequest(res.data);
         // TSA Pay (payment_acceptance) approvals never grant the marketplace
@@ -418,7 +455,7 @@ export default function MerchantRequestScreen() {
         // role='merchant' here would show the "Go to Merchant Dashboard" gate
         // for a capability the user doesn't have, whose API calls would 403.
         const approvedType = res.data.businessType ?? res.data.business_type;
-        if (res.data.status === 'approved' && approvedType !== 'payment_acceptance') {
+        if (res.data.status === 'approved' && cachesMerchantRole(approvedType)) {
           await AsyncStorage.setItem('role', 'merchant');
         }
         // Pre-fill the shared business fields from the existing request. This
@@ -451,7 +488,7 @@ export default function MerchantRequestScreen() {
     }
 
     // Validate PM-specific fields before submitting
-    if (isPm) {
+    if (isPm || isLp) {
       const errors = validatePmFields({
         settlementBankCode: settlementBank?.code ?? '',
         settlementAccountNumber,
@@ -486,6 +523,12 @@ export default function MerchantRequestScreen() {
         requestedPerTradeCapUsd: perTradeCap ? parseFloat(perTradeCap) : 0,
         requestedDailyCapUsd: dailyCap ? parseFloat(dailyCap) : 0,
       } : {}),
+      ...(isLp ? lpSettlementPayload({
+        settlementBankCode: settlementBank!.code,
+        settlementAccountNumber,
+        settlementAccountName,
+        makerWalletAddress,
+      }) : {}),
     });
 
     setSubmitting(false);
@@ -506,7 +549,7 @@ export default function MerchantRequestScreen() {
     }
   };
 
-  if (loading || (isPay && !kycChecked)) {
+  if (loading || ((isPay || isLp) && !kycChecked)) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
         <Stack.Screen options={{ title: 'Merchant Application' }} />
@@ -527,6 +570,22 @@ export default function MerchantRequestScreen() {
     kycVerified: kycStatus === 'verified' && !kycRefused,
   });
 
+  // O-B5: no applications until the pool chain is configured.
+  if (isLp && gate.screen === 'form' && !lpAvailable) {
+    return (
+      <StatusScreen
+        icon="clock"
+        tone={colors.warning}
+        toneBg={colors.warningBg}
+        title="Not available yet"
+        body="Providing liquidity isn't available right now. Please check back later."
+        actionTitle="Go Back"
+        actionVariant="secondary"
+        onAction={() => router.back()}
+      />
+    );
+  }
+
   if (gate.screen === 'verify') {
     return (
       <StatusScreen
@@ -534,7 +593,7 @@ export default function MerchantRequestScreen() {
         tone={colors.warning}
         toneBg={colors.warningBg}
         title="Verify your identity first"
-        body="TSA Pay is for verified businesses. Verify your identity, then come back here to apply."
+        body={isLp ? "Providing liquidity needs a verified identity. Verify your identity, then come back here to apply." : "TSA Pay is for verified businesses. Verify your identity, then come back here to apply."}
         actionTitle="Verify identity"
         actionVariant="primary"
         onAction={() => router.push(KYC_ROUTE as never)}
@@ -549,7 +608,7 @@ export default function MerchantRequestScreen() {
         tone={colors.warning}
         toneBg={colors.warningBg}
         title={gate.pm ? 'Payment Merchant Application Under Review' : 'Application Under Review'}
-        body={`Your ${gate.pm ? 'Payment Merchant' : 'merchant'} application for "${existingRequest.businessName}" is being reviewed. We'll update your status soon.`}
+        body={gate.lp ? "We're reviewing your application to provide liquidity." : `Your ${gate.pm ? 'Payment Merchant' : 'merchant'} application for "${existingRequest.businessName}" is being reviewed. We'll update your status soon.`}
         actionTitle="Go Back"
         actionVariant="secondary"
         onAction={() => router.back()}
@@ -578,17 +637,19 @@ export default function MerchantRequestScreen() {
         icon="checkCircle"
         tone={colors.success}
         toneBg={colors.successBg}
-        title={gate.payFlow ? 'Your TSA Pay application was approved' : gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
+        title={gate.lp ? "You're approved" : gate.payFlow ? 'Your TSA Pay application was approved' : gate.pm ? "You're a Payment Merchant!" : "You're a Merchant!"}
         body={
-          gate.payFlow
+          gate.lp
+            ? 'Your application to provide liquidity is approved. Activate it from your liquidity dashboard.'
+            : gate.payFlow
             ? 'Your TSA Pay application has been approved. Choose where you want to be paid — a bank account in your business or verified name, or a crypto wallet.'
             : gate.pm
             ? 'Your Payment Merchant application is approved — you can publish PM ads and settle trades via bank transfer.'
             : 'Your application has been approved. You now have access to the merchant portal.'
         }
-        actionTitle={gate.payFlow ? 'Payment Settings' : 'Go to Merchant Dashboard'}
+        actionTitle={gate.lp ? 'Open my liquidity' : gate.payFlow ? 'Payment Settings' : 'Go to Merchant Dashboard'}
         actionVariant="success"
-        onAction={() => router.push(gate.payFlow ? '/merchants/pay-settings' : '/merchants/dashboard')}
+        onAction={() => (gate.lp ? router.replace('/liquidity' as never) : router.push(gate.payFlow ? '/merchants/pay-settings' : '/merchants/dashboard'))}
       >
         {gate.payFlow && <SetUpOnWebCard />}
       </StatusScreen>
@@ -672,6 +733,7 @@ export default function MerchantRequestScreen() {
             </View>
           )}
 
+          {!isLp && (
           <Field
             ref={businessNameRef}
             label="Business Name *"
@@ -681,6 +743,7 @@ export default function MerchantRequestScreen() {
             returnKeyType="next"
             onSubmitEditing={() => descriptionRef.current?.focus()}
           />
+          )}
 
           <Field
             ref={descriptionRef}
@@ -733,6 +796,7 @@ export default function MerchantRequestScreen() {
             onSubmitEditing={() => regNumberRef.current?.focus()}
           />
 
+          {!isLp && (
           <Field
             ref={regNumberRef}
             label="Registration Number (optional)"
@@ -748,6 +812,7 @@ export default function MerchantRequestScreen() {
                 : handleSubmit
             }
           />
+          )}
 
           {/* ─── TSA Pay setup (payment_acceptance only) ─────────────────── */}
           {isPay && (
@@ -766,7 +831,7 @@ export default function MerchantRequestScreen() {
           )}
 
           {/* ─── Payment Merchant setup (p2p_merchant only) ──────────────── */}
-          {isPm && (
+          {(isPm || isLp) && (
             <View
               style={{
                 marginTop: spacing.xl,
@@ -776,10 +841,12 @@ export default function MerchantRequestScreen() {
               }}
             >
               <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.xs }}>
-                Payment Merchant setup
+                {isLp ? 'Where we pay you' : 'Payment Merchant setup'}
               </Text>
               <Text variant="caption" color="textSecondary" style={{ marginBottom: spacing.lg }}>
-                These details are required for your corporate P2P Merchant account.
+                {isLp
+                  ? 'We pay your naira into this bank account when your USDT sells. It must be in your verified name.'
+                  : 'These details are required for your corporate P2P Merchant account.'}
               </Text>
 
               {/* Settlement bank picker */}
@@ -882,6 +949,8 @@ export default function MerchantRequestScreen() {
                 )}
               </View>
 
+              {isPm && (
+              <>
               {/* Maker wallet address */}
               <Field
                 ref={makerWalletRef}
@@ -919,6 +988,8 @@ export default function MerchantRequestScreen() {
                 returnKeyType="done"
                 onSubmitEditing={handleSubmit}
               />
+              </>
+              )}
             </View>
           )}
 

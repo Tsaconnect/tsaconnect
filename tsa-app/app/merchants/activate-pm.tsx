@@ -42,34 +42,60 @@ export function isValidPmIdNumber(v: string): boolean {
 
 type ActivationResult = Awaited<ReturnType<typeof activatePmAccount>>;
 
-/** Shared outcome handling for both activation forms. */
-function reportActivation(res: ActivationResult) {
+type Outcome =
+  | { kind: 'success'; title: string; message: string; route: string }
+  | { kind: 'kyc' }
+  | { kind: 'error'; title: string; message: string };
+
+const LP_ERRORS: Record<string, string> = {
+  settlement_name_mismatch:
+    "The name on your settlement account doesn't match your verified name. Apply again with a bank account in your own name.",
+  settlement_account_unresolved: "We couldn't check your bank account right now. Try again in a few minutes.",
+  liquidity_unavailable: "Providing liquidity isn't available right now. Try again later.",
+};
+
+/** Pure: what the screen does with an activation response (spec §8.2, S34). */
+export function activationOutcome(res: { success: boolean; code?: string; message?: string }, kind?: string): Outcome {
+  const lp = kind === 'lp';
   if (res.success) {
-    Alert.alert(
-      'Payment Merchant activated',
-      'Your account is now live. You can start offering instant P2P buy & sell.',
-      [{ text: 'Done', onPress: () => router.replace('/merchants/dashboard' as any) }]
-    );
+    return lp
+      ? { kind: 'success', title: 'Liquidity activated', message: 'Add USDT from your liquidity dashboard to join the pool.', route: '/liquidity' }
+      : { kind: 'success', title: 'Payment Merchant activated', message: 'Your account is now live. You can start offering instant P2P buy & sell.', route: '/merchants/dashboard' };
+  }
+  if (res.code === 'kyc_verification_required' || res.code === 'kyc_legal_name_missing') return { kind: 'kyc' };
+  if (lp && res.code && LP_ERRORS[res.code]) return { kind: 'error', title: 'Activation failed', message: LP_ERRORS[res.code] };
+  return { kind: 'error', title: 'Activation failed', message: res.message || 'Please try again.' };
+}
+
+/** Shared outcome handling for both activation forms. */
+function reportActivation(res: ActivationResult, kind?: string) {
+  const o = activationOutcome(res, kind);
+  if (o.kind === 'kyc') {
+    promptKycRefusal(res.code, res.message);
     return;
   }
-  if (promptKycRefusal(res.code, res.message)) return;
-  Alert.alert('Activation failed', res.message || 'Please try again.');
+  if (o.kind === 'success') {
+    Alert.alert(o.title, o.message, [{ text: 'Done', onPress: () => router.replace(o.route as any) }]);
+    return;
+  }
+  Alert.alert(o.title, o.message);
 }
 
 export default function ActivatePmScreen() {
   const { colors } = useTheme();
-  const { activationNeedsId, loading } = useIsPaymentMerchant();
+  const { activationNeedsId, kind, loading } = useIsPaymentMerchant();
+  const isLp = kind === 'lp';
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
-      <Stack.Screen options={{ title: 'Activate Payment Merchant' }} />
-      {loading ? <Spinner /> : activationNeedsId ? <IdActivationForm /> : <CentralActivation />}
+      <Stack.Screen options={{ title: isLp ? 'Activate liquidity provider' : 'Activate Payment Merchant' }} />
+      {loading ? <Spinner /> : isLp || !activationNeedsId ? <CentralActivation kind={kind} /> : <IdActivationForm />}
     </SafeAreaView>
   );
 }
 
 /** Central inbound: nothing to mint, so activation is a single confirm. */
-function CentralActivation() {
+function CentralActivation({ kind }: { kind?: string }) {
   const { spacing } = useTheme();
   const [submitting, setSubmitting] = useState(false);
 
@@ -77,14 +103,15 @@ function CentralActivation() {
     setSubmitting(true);
     const res = await activatePmAccount();
     setSubmitting(false);
-    reportActivation(res);
+    reportActivation(res, kind);
   };
 
   return (
     <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
       <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
-        Your application was approved. Buyers pay into TSA Connect&apos;s account, and we send
-        your naira to your settlement bank account as each trade settles.
+        {kind === 'lp'
+          ? "Your application was approved. We'll check that your bank account is in your verified name, then you can add USDT."
+          : "Your application was approved. Buyers pay into TSA Connect's account, and we send your naira to your settlement bank account as each trade settles."}
       </Text>
       <Button
         title="Activate"

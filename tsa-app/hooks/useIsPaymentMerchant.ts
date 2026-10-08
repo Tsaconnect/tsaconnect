@@ -4,9 +4,12 @@
 // Wraps getMyPmStatus() (services/p2p.ts) which calls GET /p2p/pm/me.
 //
 // Contract:
-//   - While loading: { isPm: false, status: '', activationNeedsId: true, loading: true }
-//   - On success:    { isPm, status, activationNeedsId } from the server, loading: false
-//   - On any error:  { isPm: false, status: '', activationNeedsId: true, loading: false } (fail-open)
+//   - While loading: { isPm: false, status: '', activationNeedsId: true, liquidityAvailable: false, loading: true }
+//   - On success:    { isPm, status, activationNeedsId, kind, poolChainId, liquidityAvailable } from the server, loading: false
+//   - On any error:  the loading defaults with loading: false (fail-open)
+//
+// `kind` is the caller's marketplace standing ('lp' | 'merchant' | ...); `liquidityAvailable`
+// is false until the pool chain is configured (the LP CTA stays hidden).
 //
 // `status` is the raw PM status ('' | 'pending' | 'approved' | 'active' | ...).
 // `isPm` is true only for a live (active) PM; callers use status === 'approved'
@@ -24,6 +27,9 @@ export interface IsPaymentMerchantState {
   isPm: boolean;
   status: string;
   activationNeedsId: boolean;
+  kind?: string;
+  poolChainId?: number;
+  liquidityAvailable: boolean;
   loading: boolean;
   reload: () => void;
 }
@@ -32,6 +38,9 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
   const [isPm, setIsPm] = useState(false);
   const [status, setStatus] = useState('');
   const [activationNeedsId, setActivationNeedsId] = useState(true);
+  const [kind, setKind] = useState<string | undefined>(undefined);
+  const [poolChainId, setPoolChainId] = useState<number | undefined>(undefined);
+  const [liquidityAvailable, setLiquidityAvailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
 
@@ -46,6 +55,9 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
           setIsPm(s.isPm);
           setStatus(s.status);
           setActivationNeedsId(s.activationNeedsId);
+          setKind(s.kind);
+          setPoolChainId(s.poolChainId);
+          setLiquidityAvailable(!!s.liquidityAvailable);
         }
       })
       .catch(() => {
@@ -55,6 +67,9 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
           setIsPm(false);
           setStatus('');
           setActivationNeedsId(true);
+          setKind(undefined);
+          setPoolChainId(undefined);
+          setLiquidityAvailable(false);
         }
       })
       .finally(() => {
@@ -65,5 +80,5 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
     };
   }, [nonce]);
 
-  return { isPm, status, activationNeedsId, loading, reload };
+  return { isPm, status, activationNeedsId, kind, poolChainId, liquidityAvailable, loading, reload };
 }

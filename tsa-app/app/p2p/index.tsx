@@ -21,6 +21,7 @@ import { getChainByChainId } from '../../constants/chains';
 import { useUserRole } from '../../hooks/useUserRole';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
+import { lpCta } from '@/utils/lpCta';
 import { RAILS, railLabel } from '../../constants/rails';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
@@ -75,7 +76,7 @@ const P2PMarketScreen: React.FC = () => {
   const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
   const { isMerchant, loading: roleLoading } = useUserRole();
-  const { isPm, loading: pmLoading } = useIsPaymentMerchant();
+  const { isPm, kind, liquidityAvailable, loading: pmLoading } = useIsPaymentMerchant();
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
   // Minimum trade amount (fiat, in the selected currency). Shows ads whose
@@ -268,7 +269,7 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        {shouldShowPmCta({ isPmView, isPm, loading: pmLoading }) && (
+        {shouldShowPmCta({ isPmView, isPm: isPm || kind === 'lp', loading: pmLoading }) && (
           <PressableScale onPress={() => router.push(PM_MERCHANT_REQUEST_ROUTE as never)} style={{ marginBottom: spacing.lg }}>
             <AccentCard padding="md">
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
@@ -286,6 +287,24 @@ const P2PMarketScreen: React.FC = () => {
             </AccentCard>
           </PressableScale>
         )}
+
+        {(() => {
+          const cta = lpCta({ isPm, kind, liquidityAvailable, loading: pmLoading });
+          return cta ? (
+            <PressableScale onPress={() => router.push(cta.route as never)} style={{ marginBottom: spacing.lg }}>
+              <AccentCard padding="md">
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                  <Icon name="wallet" size={24} color={colors.accent} />
+                  <View style={{ flex: 1 }}>
+                    <Text variant="bodyMed" weight="700">{cta.title}</Text>
+                    <Text variant="caption" color="textSecondary">{cta.subtitle}</Text>
+                  </View>
+                  <Icon name="chevronRight" size={20} color={colors.textMuted} />
+                </View>
+              </AccentCard>
+            </PressableScale>
+          ) : null;
+        })()}
 
         {/* Filter row — Token always; Chain (when >1 chain offers the token);
             Amount + Payment once ads load. One horizontally-scrollable line. */}
