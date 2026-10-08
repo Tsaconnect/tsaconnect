@@ -95,6 +95,28 @@ func NewP2PEscrowRegistryFromMap(m map[int64]P2PEscrowAdapter, version string) *
 	return reg
 }
 
+// P2PRegistryEntry seeds NewP2PEscrowRegistryFromEntries, the test/ops
+// constructor for a registry whose chains carry a purpose and decimals (a pool
+// chain). Production uses NewP2PEscrowRegistry.
+type P2PRegistryEntry struct {
+	Escrow   P2PEscrowAdapter
+	ChainKey string
+	Purpose  string
+	Assets   []string
+	Decimals map[string]int
+}
+
+func NewP2PEscrowRegistryFromEntries(m map[int64]P2PRegistryEntry, version string) *P2PEscrowRegistry {
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{}}
+	for chainID, e := range m {
+		reg.byChain[chainID] = &chainEscrow{
+			service: e.Escrow, eip712Version: version, domainChainID: chainID, chainKey: e.ChainKey,
+			assets: e.Assets, purpose: e.Purpose, decimals: e.Decimals,
+		}
+	}
+	return reg
+}
+
 // EIP712VersionFor returns the EIP-712 domain version for chainID, or an error
 // if the chain is not P2P-enabled. Fail-loud, like For.
 func (r *P2PEscrowRegistry) EIP712VersionFor(chainID int64) (string, error) {
@@ -361,6 +383,44 @@ func (r *P2PEscrowRegistry) Purpose(chainID int64) string {
 		return e.purpose
 	}
 	return ""
+}
+
+// PoolChainInfo is the one pool chain (spec S36), for LP flows only: ordinary
+// P2P never sees it (Chains() omits it, plan A P8).
+type PoolChainInfo struct {
+	ChainID  int64
+	ChainKey string
+	Assets   []string       // the pool tokens
+	Decimals map[string]int // read on-chain at boot (S6)
+}
+
+// HasAsset reports whether symbol is a pool token.
+func (p PoolChainInfo) HasAsset(symbol string) bool {
+	for _, a := range p.Assets {
+		if strings.EqualFold(a, symbol) {
+			return true
+		}
+	}
+	return false
+}
+
+// PoolChain is the registered chain whose purpose is pool. ok=false when the
+// preset row is dormant or its chain could not be dialled at boot.
+func (r *P2PEscrowRegistry) PoolChain() (PoolChainInfo, bool) {
+	if r == nil {
+		return PoolChainInfo{}, false
+	}
+	for id, e := range r.byChain {
+		if e.purpose != config.P2PPurposePool {
+			continue
+		}
+		dec := make(map[string]int, len(e.decimals))
+		for k, v := range e.decimals {
+			dec[k] = v
+		}
+		return PoolChainInfo{ChainID: id, ChainKey: e.chainKey, Assets: append([]string(nil), e.assets...), Decimals: dec}, true
+	}
+	return PoolChainInfo{}, false
 }
 
 // verifyP2PChainAtBoot warns (does not abort) when the escrow address has no

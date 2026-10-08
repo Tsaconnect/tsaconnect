@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -175,10 +174,9 @@ type CompanyWallet struct {
 	conversionTreasury string
 
 	mu         sync.Mutex
-	stock      map[string]stockReading
+	stock      *cachedReader[*big.Int]
 	free       map[string]stockReading // the 5s free-stock cache (TreasuryFreeUnits)
 	receiptsOK map[string]bool
-	flight     singleflight.Group
 }
 
 // NewCompanyWallet returns nil unless some lane offers some token.
@@ -209,7 +207,7 @@ func NewCompanyWallet(c CompanyWalletConfig) *CompanyWallet {
 	}
 	return &CompanyWallet{
 		treasury: c.Treasury, decimals: decimals, verifiers: lowerChainKeys(c.Verifiers), probes: lowerChainKeys(c.Probes),
-		now: time.Now, stock: map[string]stockReading{}, free: map[string]stockReading{},
+		now: time.Now, stock: newCachedReader[*big.Int](companyWalletStockTTL, companyWalletStockFailTTL), free: map[string]stockReading{},
 		receiptRPCs: lowerChainKeys(c.ReceiptRPCs), receiptsOK: receiptsVerdict(decimals, lowerChainKeys(c.ReceiptsOK)),
 		conversionTreasury: strings.TrimSpace(c.ConversionTreasury),
 	}
@@ -394,24 +392,11 @@ func (w *CompanyWallet) Balance(ctx context.Context, chain, token string, fresh 
 	if fresh {
 		return w.read(ctx, chain, token)
 	}
-	key := chain + "|" + token
-	w.mu.Lock()
-	r, ok := w.stock[key]
-	w.mu.Unlock()
-	if ok {
-		age := w.now().Sub(r.at)
-		if r.err == nil && age < companyWalletStockTTL {
-			return new(big.Int).Set(r.units), nil
-		}
-		if r.err != nil && age < companyWalletStockFailTTL {
-			return nil, r.err
-		}
-	}
-	v, err, _ := w.flight.Do(key, func() (any, error) { return w.read(ctx, chain, token) })
+	v, err := w.stock.Get(chain+"|"+token, w.now(), func() (*big.Int, error) { return w.read(ctx, chain, token) })
 	if err != nil {
 		return nil, err
 	}
-	return new(big.Int).Set(v.(*big.Int)), nil
+	return new(big.Int).Set(v), nil
 }
 
 // read asks the chain, bounded by companyWalletReadTimeout, and refreshes the
@@ -450,9 +435,7 @@ func (w *CompanyWallet) read(ctx context.Context, chain, token string) (*big.Int
 		// in the console.
 		r.err = fmt.Errorf("%w: %s on %s: %s", ErrTreasuryStockUnreadable, token, chain, RedactAlertText(r.err.Error()))
 	}
-	w.mu.Lock()
-	w.stock[chain+"|"+token] = stockReading{units: r.units, err: r.err, at: w.now()}
-	w.mu.Unlock()
+	w.stock.Put(chain+"|"+token, w.now(), r.units, r.err)
 	if r.err != nil {
 		return nil, r.err
 	}
