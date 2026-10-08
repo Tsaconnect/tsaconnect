@@ -33,7 +33,7 @@ export function DateRangeFields({ value, onChange, legend, caption, fromLabel = 
       {clearLabel && (from || to) && (
         <Button variant="ghost" size="sm" onClick={() => onChange({ from: '', to: '' })}>{clearLabel}</Button>
       )}
-      {problem && <p className="basis-full text-caption text-danger-strong">{problem}</p>}
+      {problem && <p role="alert" className="basis-full text-caption text-danger-strong">{problem}</p>}
     </fieldset>
   );
 }

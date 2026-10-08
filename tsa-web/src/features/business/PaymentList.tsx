@@ -127,7 +127,7 @@ export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, sta
         filtered ? (
           <EmptyState
             title={`No ${noun} match`}
-            body="Try another status, or search for a different reference."
+            body="Try another status, date range, or search."
             action={<Button variant="secondary" size="sm" onClick={() => update({ status: '', q: '', from: '', to: '', page: '' })}>Clear filters</Button>}
           />
         ) : (

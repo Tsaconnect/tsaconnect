@@ -30,6 +30,7 @@ describe('app shell', () => {
     expect(within(nav).getByRole('link', { name: 'Overview' })).toHaveAttribute('href', '/business/test/overview');
     expect(within(nav).getByRole('link', { name: 'Payment links' })).toHaveAttribute('href', '/business/test/links');
     expect(within(nav).getByRole('link', { name: 'Payouts' })).toHaveAttribute('href', '/business/test/payouts');
+    expect(within(nav).getByRole('link', { name: 'Refunds & reconciliation' })).toHaveAttribute('href', '/business/test/reconciliation');
     expect(within(nav).getByRole('link', { name: 'API keys & webhooks' })).toHaveAttribute('href', '/business/test/developers');
     expect(within(nav).getByRole('link', { name: 'Docs' })).toHaveAttribute('href', '/docs');
     expect(within(nav).getByRole('link', { name: 'Payments' })).toHaveAttribute('aria-current', 'page');

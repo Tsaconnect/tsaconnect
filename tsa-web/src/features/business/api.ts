@@ -258,3 +258,26 @@ export const updateOpenLink = (mode: Mode, id: string, change: OpenLinkChange) =
 /** A new address for the same link (same id); the old one, and every poster of it, stops taking payments. */
 export const replaceOpenLink = (mode: Mode, id: string) =>
   api<OpenLink>(`/pay/merchant/open-links/${encodeURIComponent(id)}/replace?mode=${mode}`, { method: 'POST' });
+
+/**
+ * A period's totals (GET /payments/summary). `succeeded` is the payments paid in
+ * it, by the day they were paid, in kobo. `byStatus` is the payments made in it,
+ * by how they ended ('cancelled' apart from 'expired'). `refunds` is the refunds
+ * confirmed in it; its amount is a decimal USD string ("12.50").
+ */
+export type PaymentSummary = {
+  succeeded: { count: number; customerTotal: number; merchantNet: number };
+  byStatus: Record<string, number>;
+  refunds: { count: number; amount: string };
+};
+
+export const getPaymentSummary = (mode: Mode, from: string, to: string, signal?: AbortSignal) =>
+  api<PaymentSummary>(`/pay/merchant/payments/summary?${new URLSearchParams({ mode, from, to })}`, { signal });
+
+/** Most rows, and days, one export holds: the API refuses more. */
+export const EXPORT_MAX_ROWS = 10_000;
+export const EXPORT_MAX_DAYS = 366;
+
+/** The CSV of payments paid from `from` to `to`. It is a plain download, so it carries the session cookie itself. */
+export const paymentsExportUrl = (mode: Mode, from: string, to: string) =>
+  `/api/pay/merchant/payments/export?${new URLSearchParams({ mode, from, to })}`;

@@ -1,4 +1,4 @@
-import { naira, dateTime, relative, initials, parseNaira } from './format';
+import { naira, dateTime, relative, initials, parseNaira, usd } from './format';
 
 it('naira formats kobo with two decimals and grouping', () => {
   expect(naira(8_450_000)).toBe('₦84,500.00');
@@ -39,4 +39,9 @@ it('parseNaira reads what a merchant types as naira, in kobo', () => {
 // A decimal comma, or commas anywhere but between thousands, is refused — never read as a bigger amount.
 it('parseNaira accepts commas only as thousands separators', () => {
   for (const bad of ['5000,50', '5,00', '50,000,0', ',5000', '5000,', '1,,000', '12,3456', '5,000,50']) expect(parseNaira(bad)).toBeNull();
+});
+
+it('usd puts a dollar sign on the API\'s decimal USD string', () => {
+  expect(usd('12.50')).toBe('$12.50');
+  expect(usd('0.000001')).toBe('$0.000001');
 });
