@@ -45,6 +45,10 @@ const p2pEscrowABI = `[
 	{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"systemWallet","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"}],"name":"hashVoucher","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"feeBps","outputs":[{"type":"uint16"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"paymentWindow","outputs":[{"type":"uint40"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Deposited","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Withdrawn","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"voucherHash","type":"bytes32"},{"indexed":true,"name":"seller","type":"address"}],"name":"VoucherCancelled","type":"event"},
@@ -584,30 +588,38 @@ func (s *P2PEscrowService) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
 // stays a no-op until V3 is deployed and a trade carries a non-zero snapshot.
 // found=false means the read failed (RPC/decode) — the caller treats it as 0.
 func (s *P2PEscrowService) ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool) {
+	p, _, ok := s.ReadTradeFeeSnapshot(tradeId)
+	return p, ok
+}
+
+// decodeTradeFeeSnapshot reads the V3 trades(bytes32) getter's platform and
+// gas snapshots (indexes 9 and 10; see TestTradesGetter_DecodesV3SnapshotLayout).
+func decodeTradeFeeSnapshot(out []byte) (platformBps, gasBps uint16, ok bool) {
+	vals, err := parsedP2PEscrowABI.Unpack("trades", out)
+	if err != nil || len(vals) != 12 {
+		return 0, 0, false
+	}
+	p, okP := vals[9].(uint16)
+	g, okG := vals[10].(uint16)
+	return p, g, okP && okG
+}
+
+// ReadTradeFeeSnapshot is a trade's snapshotted platform and gas fee bps
+// (spec §6.2: a pool slice must snapshot (0, 0)). found=false: the read or
+// decode failed, or the escrow predates V3.
+func (s *P2PEscrowService) ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, gasBps uint16, found bool) {
 	if err := s.requireConfigured(); err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	data, err := parsedP2PEscrowABI.Pack("trades", tradeId)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	out, err := s.callContract(data)
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	vals, err := parsedP2PEscrowABI.Unpack("trades", out)
-	if err != nil || len(vals) != 12 {
-		// Pre-V3 escrow: the trades getter returns a different arity → no snapshot.
-		return 0, false
-	}
-	// V3 struct getter order: seller, buyer, token, amount, createdAt,
-	// autoReleaseAt, status, funding, feeBps, platformFeeBpsSnapshot,
-	// gasFeeBpsSnapshot, voucherHash. Index 9 is the platform snapshot.
-	bps, ok := vals[9].(uint16)
-	if !ok {
-		return 0, false
-	}
-	return bps, true
+	return decodeTradeFeeSnapshot(out)
 }
 
 // HashVoucher delegates to the contract's `hashVoucher` view to compute the
