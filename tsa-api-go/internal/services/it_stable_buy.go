@@ -584,10 +584,11 @@ func (s *ITService) ConvertStableBuy(ctx context.Context, intentID uuid.UUID) er
 	if err != nil {
 		return err
 	}
-	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
-		// Spec §5.4: the company wallet delivers from its own stock. Converting
-		// here would buy a second time at Flutterwave with the user's naira.
-		return fmt.Errorf("%w: a company-wallet buy is never converted at Flutterwave", ErrITBadState)
+	// Spec §5.4 / S45: only a buy Flutterwave fulfils is converted here. The
+	// company wallet (and any provider without terms) would otherwise be
+	// bought a second time at Flutterwave with the user's naira.
+	if err := requireFlutterwaveFulfils(intent, "converted at"); err != nil {
+		return err
 	}
 	switch intent.Status {
 	case models.ITStatusConverting, models.ITStatusDelivering, models.ITStatusSettled:
@@ -720,6 +721,9 @@ func (s *ITService) FinalizeBuyConversion(ctx context.Context, intentID uuid.UUI
 	if err != nil {
 		return err
 	}
+	if err := requireFlutterwaveFulfils(intent, "converted at"); err != nil {
+		return err
+	}
 	switch intent.Status {
 	case models.ITStatusDelivering, models.ITStatusSettled:
 		return nil
@@ -848,10 +852,8 @@ func (s *ITService) DeliverStableBuy(ctx context.Context, intentID uuid.UUID) er
 	if err != nil {
 		return err
 	}
-	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
-		// Spec §5.4: the company wallet delivers from its own stock. Converting
-		// here would buy a second time at Flutterwave with the user's naira.
-		return fmt.Errorf("%w: a company-wallet buy is never sent by Flutterwave", ErrITBadState)
+	if err := requireFlutterwaveFulfils(intent, "sent by"); err != nil {
+		return err
 	}
 	if intent.Status == models.ITStatusSettled {
 		return nil
@@ -956,6 +958,9 @@ func (s *ITService) FinalizeBuyDelivery(ctx context.Context, intentID uuid.UUID)
 	if err != nil {
 		return err
 	}
+	if err := requireFlutterwaveFulfils(intent, "sent by"); err != nil {
+		return err
+	}
 	if intent.Status == models.ITStatusSettled {
 		return nil
 	}
@@ -1031,8 +1036,9 @@ func (s *ITService) PendingStableBuys(ctx context.Context) (received, awaiting, 
 				models.ITStatusConverting,
 				models.ITStatusDelivering,
 			}).
-		// The company wallet has its own branch (PendingTreasuryBuys, Task 9).
-		Where("provider <> ?", models.ITProviderTreasury).
+		// Only providers Flutterwave fulfils (spec S45); the company wallet and
+		// every other provider have their own watcher branch.
+		Where("provider IN ?", flutterwaveFulfilledProviders()).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, nil, nil, nil, err
