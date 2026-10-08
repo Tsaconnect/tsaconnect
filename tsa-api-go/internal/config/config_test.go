@@ -68,51 +68,43 @@ func TestLoad_SonicAlways_BSCDormantByDefault(t *testing.T) {
 	}
 }
 
-// BSC joins the registry once its escrow address is configured.
-func TestLoad_BSCEnabledWhenEscrowConfigured(t *testing.T) {
-	t.Setenv("BSC_NETWORK", "testnet")
-	t.Setenv("P2P_ESCROW_ADDRESS_BSC", "0x00000000000000000000000000000000000bsc01")
-
+// The BSC row is the liquidity pool (purpose pool). Its default network is
+// mainnet, and with an empty mainnet escrow it is dormant — prod after Plan A.
+func TestLoad_BSCDefaultsToMainnetAndStaysDormantWithAnEmptyRow(t *testing.T) {
+	t.Setenv("BSC_NETWORK", "")
 	cfg := Load()
-
-	bsc, ok := cfg.P2PChains[97]
-	if !ok {
-		t.Fatalf("expected BSC testnet (97) in P2PChains, got %+v", cfg.P2PChains)
+	if _, ok := cfg.P2PChains[56]; ok {
+		t.Fatal("BSC mainnet has no pool escrow yet: it must be dormant")
 	}
-	if bsc.ChainKey != "bsc" || bsc.EIP712Version != "2" {
-		t.Errorf("bsc entry = %+v, want chainKey=bsc version=2", bsc)
+	if _, ok := cfg.P2PChains[97]; ok {
+		t.Fatal("BSC must never fall back to testnet")
 	}
-	if bsc.EscrowAddress != "0x00000000000000000000000000000000000bsc01" {
-		t.Errorf("bsc escrow = %q, want the env override", bsc.EscrowAddress)
-	}
-	if !reflect.DeepEqual(bsc.Assets, []string{"USDT", "USDC"}) {
-		t.Errorf("bsc assets = %v, want [USDT USDC]", bsc.Assets)
+	if _, ok := cfg.PoolChain(); ok {
+		t.Fatal("no pool chain in the default config")
 	}
 }
 
-func TestLoad_BSCUnknownNetworkFallsBackToTestnet(t *testing.T) {
+func TestLoad_BSCUnknownNetworkFallsBackToMainnet(t *testing.T) {
 	t.Setenv("BSC_NETWORK", "garbage")
-	t.Setenv("P2P_ESCROW_ADDRESS_BSC", "0x00000000000000000000000000000000000bsc01")
-	cfg := Load()
-	if _, ok := cfg.P2PChains[97]; !ok {
-		t.Fatalf("expected BSC testnet (97) after unknown-network fallback, got %+v", cfg.P2PChains)
-	}
-	if _, mainnet := cfg.P2PChains[56]; mainnet {
-		t.Errorf("unknown BSC_NETWORK must not select mainnet (56)")
+	if got := p2pNetwork("bsc", bscPresets); got != "mainnet" {
+		t.Fatalf("network = %q, want mainnet", got)
 	}
 }
 
-func TestLoad_BSCVersionEnvOverride(t *testing.T) {
-	t.Setenv("BSC_NETWORK", "testnet")
-	t.Setenv("P2P_ESCROW_ADDRESS_BSC", "0x00000000000000000000000000000000000bsc01")
-	t.Setenv("P2P_ESCROW_EIP712_VERSION_BSC", "7")
+// Review Focus 1: the refactor leaves Sonic exactly as it was.
+func TestLoad_SonicRowByteIdentical(t *testing.T) {
+	t.Setenv("SONIC_NETWORK", "mainnet")
 	cfg := Load()
-	bsc, ok := cfg.P2PChains[97]
-	if !ok {
-		t.Fatalf("expected BSC testnet (97), got %+v", cfg.P2PChains)
+	want := P2PChainConfig{ChainID: 146, ChainKey: "sonic", EscrowAddress: "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324",
+		EIP712Version: "2", Assets: []string{"USDT", "USDC"}, Purpose: P2PPurposeP2P, Network: "mainnet"}
+	if got := cfg.P2PChains[146]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("sonic = %+v\nwant %+v", got, want)
 	}
-	if bsc.EIP712Version != "7" {
-		t.Errorf("bsc EIP712Version = %q, want 7 (env override)", bsc.EIP712Version)
+	t.Setenv("SONIC_NETWORK", "testnet")
+	t.Setenv("P2P_ESCROW_ADDRESS", "0x00000000000000000000000000000000005071C0")
+	cfg = Load()
+	if got := cfg.P2PChains[14601]; got.EscrowAddress != "0x00000000000000000000000000000000005071C0" || got.Network != "testnet" {
+		t.Fatalf("the P2P_ESCROW_ADDRESS alias must still apply to Sonic: %+v", got)
 	}
 }
 
