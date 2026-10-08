@@ -205,6 +205,11 @@ func (s *PMOnboardingService) ApprovePM(ctx context.Context, pmID, adminID uuid.
 		}
 		return nil, err
 	}
+	if pm.IsLP() {
+		// An LP is admitted only from its application (ApproveFromRequest via the
+		// merchant-request approval), which checks the pool, KYC and wallet.
+		return nil, ErrInvalidPMTransition
+	}
 	if pm.Status != models.PaymentMerchantStatusPending {
 		return nil, ErrInvalidPMTransition
 	}
@@ -261,6 +266,10 @@ func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID 
 	if pm.UserID != userID {
 		// Do not leak existence of another user's PM.
 		return nil, ErrPMNotFound
+	}
+	if pm.IsLP() {
+		// LPs activate through their own path, which adds the S34 name match.
+		return nil, ErrInvalidPMTransition
 	}
 	if pm.Status == models.PaymentMerchantStatusActive {
 		return &pm, nil // already activated — idempotent success

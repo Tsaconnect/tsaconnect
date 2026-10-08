@@ -280,3 +280,28 @@ func TestApproveLPRequest_DormantPoolIs503(t *testing.T) {
 		t.Fatalf("status=%s rows=%d: a refused approval changed state", mr.Status, n)
 	}
 }
+
+// Security review of 6b250c31: deciding an LP application is P2P-admin work
+// (S35) whichever way it goes. AdminAuth alone admits support and every
+// marketplace merchant, who must not be able to turn LP applicants away.
+func TestRejectLPRequest_NeedsP2PAdmin(t *testing.T) {
+	for _, role := range []string{"support", "merchant", "admin"} {
+		t.Run(role, func(t *testing.T) {
+			db := setupMerchantTestDB(t)
+			h := lpHandler(t, db, true)
+			id := lpRequestID(t, db, h, createMerchantTestUser(t, db, "user"))
+			w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+id+"/reject", map[string]any{"note": "no"}, createMerchantTestUser(t, db, role))
+			c.Params = gin.Params{{Key: "id", Value: id}}
+			h.RejectMerchantRequest(c)
+			var mr models.MerchantRequest
+			db.First(&mr, "id = ?", id)
+			want, wantStatus := http.StatusForbidden, models.MerchantRequestStatusPending
+			if role == "admin" {
+				want, wantStatus = http.StatusOK, models.MerchantRequestStatusRejected
+			}
+			if w.Code != want || mr.Status != wantStatus {
+				t.Fatalf("%s reject = %d (request %s), want %d (%s)", role, w.Code, mr.Status, want, wantStatus)
+			}
+		})
+	}
+}

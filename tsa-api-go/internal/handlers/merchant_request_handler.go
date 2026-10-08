@@ -780,6 +780,13 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 		return
 	}
 
+	// Deciding an LP application is P2P-admin work either way (S35): AdminAuth
+	// alone admits support and marketplace merchants.
+	if req.BusinessType == models.BusinessTypeLiquidityProvider && !hasAdminPrivilege(c, admin) {
+		utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to reject a liquidity provider")
+		return
+	}
+
 	if req.Status != models.MerchantRequestStatusPending {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Request is not in pending status")
 		return
