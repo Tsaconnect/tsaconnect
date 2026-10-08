@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 type failingTransport struct{ t *testing.T }
@@ -725,5 +726,48 @@ func TestPayWebhook_ResendForMerchantOfADeliveredEventIsANewDeliveryOfThePayment
 	s.db.Model(m).Update("test_webhook_url", "")
 	if _, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID); !errors.Is(err, ErrPayWebhookNoURL) {
 		t.Fatalf("no webhook URL for the mode: err %v", err)
+	}
+}
+
+// The worker can deliver a retried event between ResendForMerchant's read and
+// its update. The delivered record must then be left as it is, and the event
+// sent anew as its own delivery, as for any delivered one.
+func TestPayWebhook_ResendForMerchantNeverClearsARowDeliveredMeanwhile(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	d := queuedDelivery(t, s, m, "https://skyair.ng/h")
+	failedAt := payTestNow
+	s.db.Model(d).Updates(map[string]any{"failed_at": &failedAt, "next_attempt_at": nil, "attempts": 7})
+	sender := NewPayWebhookSender(s.db, s.merchants, &http.Client{Transport: failingTransport{t}}, func() time.Time { return payTestNow })
+	sender.SetPayments(s)
+
+	// Just before the resend's update runs, the worker records the delivery.
+	deliveredAt := payTestNow.Add(time.Second)
+	raced := false
+	if err := s.db.Callback().Update().Before("gorm:update").Register("test:deliver_meanwhile", func(db *gorm.DB) {
+		if raced || db.Statement.Table != "pay_webhook_deliveries" {
+			return
+		}
+		raced = true
+		if _, err := db.Statement.ConnPool.ExecContext(db.Statement.Context,
+			"UPDATE pay_webhook_deliveries SET delivered_at = ?, failed_at = NULL, attempts = 8, last_status_code = 200 WHERE id = ?",
+			deliveredAt, d.ID); err != nil {
+			t.Fatal(err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID)
+	if err != nil || !raced {
+		t.Fatalf("err %v raced %v", err, raced)
+	}
+	var original models.PayWebhookDelivery
+	s.db.First(&original, "id = ?", d.ID)
+	if original.DeliveredAt == nil || original.Attempts != 8 || original.LastStatusCode != 200 {
+		t.Fatalf("the record delivered meanwhile was changed: %+v", original)
+	}
+	if got.ID == d.ID || got.Event != d.Event || got.DeliveredAt != nil || got.NextAttemptAt == nil {
+		t.Fatalf("want the event sent anew as a new delivery: %+v", got)
 	}
 }
