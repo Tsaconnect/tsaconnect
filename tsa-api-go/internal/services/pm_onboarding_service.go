@@ -142,6 +142,11 @@ func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *model
 	if kindOf(pm) != kind {
 		return nil, ErrPMKindConflict
 	}
+	if kind == models.PaymentMerchantKindLP && (pm.Status == models.PaymentMerchantStatusActive || pm.Status == models.PaymentMerchantStatusPaused) {
+		// A live LP's settlement name is the bank's, verified at activation
+		// (S34); re-copying the request would replace it with the typed one.
+		return nil, ErrInvalidPMTransition
+	}
 
 	perTrade, daily := req.RequestedPerTradeCapUSD, req.RequestedDailyCapUSD
 	if kind == models.PaymentMerchantKindLP {
@@ -401,4 +406,95 @@ func (s *PMOnboardingService) persistFields(ctx context.Context, pm *models.Paym
 	return s.db.WithContext(ctx).
 		Model(pm).
 		Updates(fields).Error
+}
+
+// ErrSettlementNameMismatch: the bank's name for the settlement account is not
+// the LP's verified legal name (S34).
+var ErrSettlementNameMismatch = errors.New("liquidity: the settlement account name does not match your verified name")
+
+// ErrSettlementAccountUnresolved: the bank directory could not resolve the
+// settlement account right now.
+var ErrSettlementAccountUnresolved = errors.New("liquidity: the settlement account could not be verified with the bank")
+
+// ActivateLP takes an approved LP live (spec §8.2 step 2, plan B P4). No BVN/NIN
+// and no virtual account in either inbound mode: LP naira is forwarded from the
+// company account. It requires the pool open, a Didit-verified legal name, and
+// the settlement account re-resolved with the bank, whose name must match the
+// legal name (S34). The bank's name is what is stored.
+//
+// provisioning_status=active is load-bearing: it closes the merchant-request
+// retry path (isPMRetry), which would otherwise re-run ApproveFromRequest and
+// overwrite the verified settlement name with the applicant-typed one.
+func (s *PMOnboardingService) ActivateLP(ctx context.Context, pmID, userID uuid.UUID) (*models.PaymentMerchant, error) {
+	var pm models.PaymentMerchant
+	if err := s.db.WithContext(ctx).First(&pm, "id = ?", pmID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrPMNotFound
+		}
+		return nil, err
+	}
+	if pm.UserID != userID {
+		return nil, ErrPMNotFound
+	}
+	if !pm.IsLP() {
+		return nil, ErrInvalidPMTransition
+	}
+	if pm.Status == models.PaymentMerchantStatusActive {
+		return &pm, nil
+	}
+	if pm.Status != models.PaymentMerchantStatusApproved {
+		return nil, ErrInvalidPMTransition
+	}
+	chainID, ok := s.LiquidityChainID()
+	if !ok || pm.PoolChainID == nil || *pm.PoolChainID != chainID || s.poolGate == nil || !s.poolGate.Open() || s.accounts == nil {
+		return nil, ErrLiquidityUnavailable
+	}
+	verified, legal, err := verifiedIdentity(ctx, s.db, userID)
+	if err != nil {
+		return nil, fmt.Errorf("pm_onboarding: check verification: %w", err)
+	}
+	if !verified {
+		return nil, ErrKYCVerificationRequired
+	}
+	if legal == "" {
+		return nil, ErrKYCLegalNameMissing
+	}
+	res, err := s.accounts.Resolve(ctx, pm.SettlementBankCode, pm.SettlementAccountNumber)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrSettlementAccountUnresolved, RedactAlertText(err.Error()))
+	}
+	bankName := strings.TrimSpace(res.AccountName)
+	if bankName == "" {
+		return nil, ErrSettlementAccountUnresolved
+	}
+	if !MatchAccountName(legal, bankName).IsMatch() {
+		return nil, ErrSettlementNameMismatch
+	}
+
+	// Guarded on the row still being the approved one whose account was just
+	// resolved: a concurrent pause, reject or re-approval must not be overwritten
+	// by an activation, nor the bank's name stored against another account.
+	upd := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+		Where("id = ? AND user_id = ? AND kind = ? AND status = ? AND settlement_bank_code = ? AND settlement_account_number = ?",
+			pm.ID, userID, models.PaymentMerchantKindLP, models.PaymentMerchantStatusApproved, pm.SettlementBankCode, pm.SettlementAccountNumber).
+		Updates(map[string]interface{}{
+			"settlement_account_name": bankName,
+			"provisioning_status":     models.PMProvisioningActive,
+			"status":                  models.PaymentMerchantStatusActive,
+		})
+	if upd.Error != nil {
+		return nil, fmt.Errorf("pm_onboarding: activate LP: %w", upd.Error)
+	}
+	if upd.RowsAffected != 1 {
+		var current models.PaymentMerchant
+		if err := s.db.WithContext(ctx).First(&current, "id = ?", pm.ID).Error; err == nil &&
+			current.Status == models.PaymentMerchantStatusActive && current.SettlementAccountName == bankName {
+			return &current, nil // a concurrent activation of the same account won
+		}
+		return nil, ErrInvalidPMTransition
+	}
+	pm.SettlementAccountName = bankName
+	pm.ProvisioningStatus = models.PMProvisioningActive
+	pm.Status = models.PaymentMerchantStatusActive
+	return &pm, nil
 }

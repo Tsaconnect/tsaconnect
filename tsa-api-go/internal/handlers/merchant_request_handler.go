@@ -601,8 +601,12 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			// No PM row at all — resume by provisioning from scratch.
 			isPMRetry = true
-		case err == nil && pmRow.ProvisioningStatus != models.PMProvisioningActive:
-			// Partially-provisioned row — resume where it left off.
+		case err == nil && pmRow.ProvisioningStatus != models.PMProvisioningActive &&
+			pmRow.Status != models.PaymentMerchantStatusActive && pmRow.Status != models.PaymentMerchantStatusPaused:
+			// Partially-provisioned row — resume where it left off. A live
+			// (active or paused) row is never a retry, whatever its
+			// provisioning_status: re-running the approval would overwrite an
+			// LP's bank-verified settlement name (S34).
 			isPMRetry = true
 		}
 	}
@@ -695,6 +699,8 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 				utils.ErrorResponseWithCode(c, http.StatusConflict, "One account cannot be both a payment merchant and a liquidity provider", "pm_kind_conflict")
 			case errors.Is(err, services.ErrLiquidityUnavailable):
 				utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
+			case errors.Is(err, services.ErrInvalidPMTransition):
+				utils.ErrorResponse(c, http.StatusConflict, "This liquidity provider is already live")
 			default:
 				log.Printf("ApproveMerchantRequest: PM approval failed for request %s: %v", req.ID, err)
 				utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but PM setup failed — retry the approval to resume")
