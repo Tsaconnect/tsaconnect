@@ -37,24 +37,26 @@ func TestPriceRoutedArrival_KnownProvidersUnchanged(t *testing.T) {
 func TestClaim_UnknownProviderParksForOperator_Central(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPendingPayment)
+	logs := captureLog(t)
 	claimed, err := s.claimAndPriceStableBuy(context.Background(), intent, "chg_unknown_central", intent.AmountMinor, time.Now(), false, PayInCentral)
 	if err != nil || !claimed {
 		t.Fatalf("claimed = %v err = %v, want the money claimed into a park", claimed, err)
 	}
-	assertUnknownProviderPark(t, s, intent, "chg_unknown_central")
+	assertUnknownProviderPark(t, s, intent, "chg_unknown_central", logs.String())
 }
 
 func TestClaim_UnknownProviderParksForOperator_VA(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPendingPayment)
+	logs := captureLog(t)
 	claimed, err := s.claimAndPriceStableBuy(context.Background(), intent, "chg_unknown_va", intent.AmountMinor, time.Now(), true, PayInVA)
 	if err != nil || !claimed {
 		t.Fatalf("claimed = %v err = %v", claimed, err)
 	}
-	assertUnknownProviderPark(t, s, intent, "chg_unknown_va")
+	assertUnknownProviderPark(t, s, intent, "chg_unknown_va", logs.String())
 }
 
-func assertUnknownProviderPark(t *testing.T, s *ITService, intent *models.ITIntent, ref string) {
+func assertUnknownProviderPark(t *testing.T, s *ITService, intent *models.ITIntent, ref, logs string) {
 	t.Helper()
 	var got models.ITIntent
 	s.db.First(&got, "id = ?", intent.ID)
@@ -62,6 +64,11 @@ func assertUnknownProviderPark(t *testing.T, s *ITService, intent *models.ITInte
 		!strings.Contains(got.FailureReason, "has no terms") || got.AssetAmount != intent.AssetAmount {
 		t.Fatalf("intent = status %s ref %q reason %q asset %s; want a park holding the money, quote untouched",
 			got.Status, got.PaymentRef, got.FailureReason, got.AssetAmount)
+	}
+	// Review M5: an operator is paged, not just a row parked.
+	if !strings.Contains(logs, "ALERT it_stable_buy_parked_unpriceable intent="+intent.ID.String()+" payment="+ref) ||
+		!strings.Contains(logs, "METRIC ramp_unknown_parked") {
+		t.Fatalf("park must emit its ALERT and metric; logs:\n%s", logs)
 	}
 	if parkReasonOf(ErrUnknownITProvider) != "unknown_provider" || !isDeterministicPricingError(ErrUnknownITProvider) {
 		t.Fatal("an unknown provider must be a deterministic pricing error with its own park reason")

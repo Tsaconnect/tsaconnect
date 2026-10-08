@@ -91,9 +91,17 @@ func (h *ITHandler) AdminDeliverTreasuryBuy(c *gin.Context) {
 	h.companyWalletAction(c, h.cwAdmin.DeliverParkedTreasuryBuy)
 }
 
-// POST …/orders/:id/refund — record that the naira went back (§5.2).
+// POST …/orders/:id/refund and POST /api/it/admin/stable/buy/:id/refund —
+// record that the naira went back (§5.2). The IT route exists without the
+// company wallet (review I1), so it falls back to the IT service; in
+// production the console admin IS that service, so both routes run the same
+// guards.
 func (h *ITHandler) AdminRefundStableBuy(c *gin.Context) {
-	h.companyWalletAction(c, h.cwAdmin.MarkStableBuyRefunded)
+	refund := h.it.MarkStableBuyRefunded
+	if h.cwAdmin != nil {
+		refund = h.cwAdmin.MarkStableBuyRefunded
+	}
+	h.companyWalletAction(c, refund)
 }
 
 // POST …/orders/:id/resend — re-send after the dropped-transaction check (§5.4).

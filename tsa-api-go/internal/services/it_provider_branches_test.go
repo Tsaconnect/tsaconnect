@@ -255,15 +255,21 @@ func isProviderField(obj types.Object) bool {
 	return false
 }
 
-// isProviderConst: a models.ITProvider* constant.
-func (l *providerLint) isProviderConst(e ast.Expr) bool {
+// providerConst: the models.ITProvider* constant e names, or "".
+func (l *providerLint) providerConst(e ast.Expr) string {
 	sel, ok := ast.Unparen(e).(*ast.SelectorExpr)
 	if !ok {
-		return false
+		return ""
 	}
 	c, ok := l.info.Uses[sel.Sel].(*types.Const)
-	return ok && c.Pkg() != nil && c.Pkg().Path() == lintModelsPath && strings.HasPrefix(c.Name(), "ITProvider")
+	if !ok || c.Pkg() == nil || c.Pkg().Path() != lintModelsPath || !strings.HasPrefix(c.Name(), "ITProvider") {
+		return ""
+	}
+	return c.Name()
 }
+
+// isProviderConst: a models.ITProvider* constant.
+func (l *providerLint) isProviderConst(e ast.Expr) bool { return l.providerConst(e) != "" }
 
 func (l *providerLint) callee(call *ast.CallExpr) *types.Func {
 	switch f := ast.Unparen(call.Fun).(type) {
@@ -443,9 +449,10 @@ func (l *providerLint) mentionsITIntent(body ast.Node) bool {
 }
 
 // boundProviderFindings checks a query on it_intents whose provider is bound
-// to a placeholder: equality only with a models.ITProvider* constant (a
-// positive match never selects an unknown provider), IN only with the list
-// providerTerms derives.
+// to a placeholder: equality only with models.ITProviderTreasury (a positive
+// company-wallet match never selects an unknown provider, and treasury has no
+// legacy alias), IN only with the list providerTerms derives. Equality with
+// Flutterwave is refused: it would silently drop the legacy empty-provider rows (review I2).
 func (l *providerLint) boundProviderFindings(call *ast.CallExpr) []string {
 	if len(call.Args) == 0 {
 		return nil
@@ -469,7 +476,7 @@ func (l *providerLint) boundProviderFindings(call *ast.CallExpr) []string {
 		}
 		arg := ast.Unparen(call.Args[argIdx])
 		switch {
-		case op == "=" && l.isProviderConst(arg):
+		case op == "=" && l.providerConst(arg) == "ITProviderTreasury":
 		case op == "in" && isCallTo(arg, "flutterwaveFulfilledProviders"):
 		default:
 			out = append(out, pos+": it_intents provider filter not built from providerTerms")
@@ -733,6 +740,9 @@ func TestProviderLint_FlagsSyntheticComparisons(t *testing.T) {
 		"SQL IN, own list": `func a(db *gorm.DB) { var rows []models.ITIntent
 			db.Where("provider IN ?", []string{"", "flutterwave"}).Find(&rows) }`,
 		"SQL =, literal": `func a(db *gorm.DB) { db.Model(&models.ITIntent{}).Where("status = ? AND provider = ?", "x", "tsa_pool") }`,
+		// Review I2: equality with Flutterwave drops the legacy '' rows; FW
+		// filters must use IN flutterwaveFulfilledProviders().
+		"SQL =, FW constant": `func a(db *gorm.DB) { db.Model(&models.ITIntent{}).Where("status = ? AND provider = ?", "x", models.ITProviderFlutterwave) }`,
 	}
 	for name, body := range forbidden {
 		t.Run(name, func(t *testing.T) {

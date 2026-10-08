@@ -68,6 +68,11 @@ func TestCompanyWalletRoutes_SuperAdminOnly(t *testing.T) {
 			map[string]string{"note": "sent back"}); w.Code != tc.want {
 			t.Fatalf("%s POST: %d %s", tc.role, w.Code, w.Body.String())
 		}
+		// Review I1: the IT group's refund route runs the same handler, same gate.
+		if w := payRoutesDo(r, "POST", "/api/it/admin/stable/buy/"+uuid.NewString()+"/refund", tok,
+			map[string]string{"note": "sent back"}); w.Code != tc.want {
+			t.Fatalf("%s POST it/admin refund: %d %s", tc.role, w.Code, w.Body.String())
+		}
 	}
 	if w := payRoutesDo(r, "GET", "/api/admin/ramp/company-wallet", "", nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous: %d", w.Code)
