@@ -278,18 +278,15 @@ func (s *PayPaymentService) announceReceived(ctx context.Context, id uuid.UUID) 
 	// the fee on themselves.
 	title := "₦" + koboAsNairaText(p.MerchantNetKobo) + " received"
 	message := who + " paid " + m.BusinessName
-	switch {
-	case p.Source == models.PaySourceOpen && p.Description != "":
+	switch text, kind, err := s.payPurpose(ctx, p); {
+	case err != nil:
+		log.Printf("[tsa-pay] payment received alert for %s: purpose: %v", id, err)
+	case kind == payPurposeCustomerNote:
 		// Words a customer typed, marked as theirs, with any link in them made
 		// harmless: this goes out by push and email under our name.
-		message += " · Customer's note: “" + payWithoutLinks(p.Description) + "”"
-	case p.Description != "":
-		message += " · " + p.Description // the merchant's own
-	case p.OpenLinkID != nil:
-		// An open-link payment with no note: the link says what it was for.
-		if labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID}); err == nil && labels[*p.OpenLinkID] != "" {
-			message += " · " + labels[*p.OpenLinkID]
-		}
+		message += " · Customer's note: “" + text + "”"
+	case kind != payPurposeNone:
+		message += " · " + text
 	}
 	if p.Mode == models.PayModeTest {
 		title = "Test: " + title // no real money moved
@@ -298,15 +295,56 @@ func (s *PayPaymentService) announceReceived(ctx context.Context, id uuid.UUID) 
 		Data: map[string]any{"paymentId": p.ID.String(), "merchantId": m.ID.String(), "mode": p.Mode, "source": p.Source}})
 }
 
+// payPurposeKind says whose words a payment's purpose text is.
+type payPurposeKind int
+
+const (
+	payPurposeNone         payPurposeKind = iota
+	payPurposeMerchantText                // the merchant's description, on a link or an API payment
+	payPurposeCustomerNote                // an open-link customer's own note, web addresses already removed
+	payPurposeLinkLabel                   // the open link's label, when the customer left no note
+)
+
+// payPurpose is what a payment was for, and whose words they are — the one
+// rule behind the merchant's "received" alert and the public receipt.
+func (s *PayPaymentService) payPurpose(ctx context.Context, p *models.PayPayment) (string, payPurposeKind, error) {
+	switch {
+	case p.Source == models.PaySourceOpen && p.Description != "":
+		return payWithoutLinks(p.Description), payPurposeCustomerNote, nil
+	case p.Description != "":
+		return p.Description, payPurposeMerchantText, nil
+	case p.OpenLinkID != nil:
+		labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID})
+		if err != nil || labels[*p.OpenLinkID] == "" {
+			return "", payPurposeNone, err
+		}
+		return labels[*p.OpenLinkID], payPurposeLinkLabel, nil
+	}
+	return "", payPurposeNone, nil
+}
+
+// payNameEnds is the first and last words of a name; last is empty for a
+// one-word name.
+func payNameEnds(name string) (first, last string) {
+	parts := strings.Fields(name)
+	switch len(parts) {
+	case 0:
+		return "", ""
+	case 1:
+		return parts[0], ""
+	}
+	return parts[0], parts[len(parts)-1]
+}
+
 // payShortName is a name as first name and last initial — "Ada Okafor" is
 // "Ada O." — or the one word it is.
 func payShortName(name string) string {
-	parts := strings.Fields(name)
-	if len(parts) < 2 {
-		return strings.TrimSpace(name)
+	first, last := payNameEnds(name)
+	if last == "" {
+		return first
 	}
-	last, _ := utf8.DecodeRuneInString(parts[len(parts)-1])
-	return parts[0] + " " + string(last) + "."
+	r, _ := utf8.DecodeRuneInString(last)
+	return first + " " + string(r) + "."
 }
 
 // payLinkInText is an http(s) address or a bare www. one.
