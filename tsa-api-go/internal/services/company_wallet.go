@@ -297,7 +297,7 @@ func (w *CompanyWallet) QuotableChains() []string {
 
 // ReprobeReceipts re-runs the receipt probe on every chain that has an RPC
 // to probe, reopening a chain that passes and closing one that fails. Run by
-// jobs.CompanyWalletReceiptProbe every 5 minutes.
+// jobs.ReceiptProbe every 5 minutes.
 func (w *CompanyWallet) ReprobeReceipts(ctx context.Context) {
 	for chain, rpc := range w.receiptRPCs {
 		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)

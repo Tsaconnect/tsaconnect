@@ -133,6 +133,19 @@ func TestChainReleaseSigner_RefusesATxBuiltForAnotherChain(t *testing.T) {
 	}
 }
 
+// Review M6: Send refuses a tx that names no chain, as SignAndBroadcast does.
+func TestChainReleaseSigner_SendRefusesATxNamingNoChain(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	sonic := &nonceChain{id: 146}
+	s := NewChainReleaseSigner(key, map[int64]ReleaseBroadcaster{146: sonic})
+	_, err := s.Send(context.Background(), 146, func() ([]byte, error) {
+		return json.Marshal(blockchain.UnsignedTx{GasPrice: "1", GasLimit: 21000, To: "0x000000000000000000000000000000000000dEaD", Value: "0"})
+	})
+	if !errors.Is(err, ErrTxNotBroadcast) || len(sonic.sent) != 0 {
+		t.Fatalf("err = %v sent = %v", err, sonic.sent)
+	}
+}
+
 // chainCountingSender proves AutoRelease builds inside Send, on the trade's chain.
 type chainCountingSender struct {
 	fakeReleaseSigner

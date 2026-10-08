@@ -103,7 +103,10 @@ func (l *chainKeyLane) ownTx(unsigned []byte) error {
 	if err := json.Unmarshal(unsigned, &u); err != nil {
 		return fmt.Errorf("decode unsigned tx: %w", err)
 	}
-	if u.ChainID != "" && u.ChainID != strconv.FormatInt(l.chainID, 10) {
+	if u.ChainID == "" {
+		return fmt.Errorf("release signer: the transaction names no chain") // as SignAndBroadcast refuses
+	}
+	if u.ChainID != strconv.FormatInt(l.chainID, 10) {
 		return fmt.Errorf("release signer: a tx built for chain %s was sent on chain %d", u.ChainID, l.chainID)
 	}
 	return nil

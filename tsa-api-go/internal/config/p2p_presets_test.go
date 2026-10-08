@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"log"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -109,5 +112,27 @@ func TestLoad_RetiredBSCEscrowEnvRefused(t *testing.T) {
 	t.Setenv("P2P_ESCROW_EIP712_VERSION_BSC", "2")
 	if err := retiredP2PEnv(); err == nil {
 		t.Fatal("the BSC version alias is retired too")
+	}
+}
+
+// Review M4: BSC's network is chosen once — the FeeManager registry reuses
+// it, so an unknown BSC_NETWORK alerts once, not twice.
+func TestP2PPresets_BSCNetworkChosenOnce(t *testing.T) {
+	t.Setenv("BSC_NETWORK", "garbage")
+	t.Setenv("FEE_MANAGER_ADDRESS_SONIC", "")
+	t.Setenv("FEE_MANAGER_ADDRESS_BSC", poolFMAddr)
+	cfg := &Config{Networks: netsWith(map[string]ChainConfig{"bsc": {ChainID: 56}}, map[string]string{"bsc:USDT": bscUSDT})}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	if err := assembleP2PChains(cfg, map[string]map[string]chainPreset{"bsc": bscPresets}); err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	assembleFeeManagerChains(cfg)
+	if n := strings.Count(buf.String(), "p2p_network_unknown"); n != 1 {
+		t.Fatalf("p2p_network_unknown logged %d times, want once:\n%s", n, buf.String())
+	}
+	if fm, ok := cfg.FeeManagerChains[56]; !ok || fm.ChainKey != "bsc" {
+		t.Fatalf("FeeManagerChains = %+v, want BSC on its selected (mainnet) id", cfg.FeeManagerChains)
 	}
 }

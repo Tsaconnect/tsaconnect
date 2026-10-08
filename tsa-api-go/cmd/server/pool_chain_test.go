@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
@@ -69,5 +70,33 @@ func TestCompanyPMCheck_RefusesUnsetID(t *testing.T) {
 	cfg := testConfig(t)
 	if err := companyPMCheck(cfg)(context.Background()); err == nil {
 		t.Fatal("IT_PM_ID unset must fail gate 7")
+	}
+}
+
+// Review I2: no pool row hands out a nil interface, never a typed nil.
+func TestBuildPoolChain_DormantIsANilInterface(t *testing.T) {
+	var g services.PoolGate = buildPoolChain(testConfig(t), nil, nil, nil, nil)
+	if g != nil {
+		t.Fatalf("dormant gates = %#v, want a nil interface", g)
+	}
+}
+
+// Review I2: a pool row with no RPC client at boot gets closed gates whose
+// re-check job still runs (and re-alerts), rather than none at all.
+func TestBuildPoolChain_NoClientIsClosedAndStillReChecked(t *testing.T) {
+	g := buildPoolChain(poolTestConfig(t, "testnet"), nil, nil, nil, nil)
+	if g == nil {
+		t.Fatal("a pool row must get gates even without a client")
+	}
+	if st := g.Status(); g.Open() || st.Open || len(st.Failures) == 0 || !strings.Contains(st.Failures[0], "no chain client") {
+		t.Fatalf("status = %+v, want closed on no chain client", st)
+	}
+	if g.ReleaseGasOK(context.Background()) {
+		t.Fatal("no client: release gas must not read as OK")
+	}
+	s := jobs.NewScheduler()
+	registerPoolJobs(s, g)
+	if s.Count() != 2 {
+		t.Fatalf("registered %d, want the gate re-check and the release-gas monitor", s.Count())
 	}
 }

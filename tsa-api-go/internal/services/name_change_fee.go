@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -129,19 +128,13 @@ type TreasuryFeeRail struct {
 	treasury  *Treasury
 	verifiers map[string]ERC20TransferVerifier
 	readers   map[string]FeeTxReader
-
-	// Decimals are read on-chain once per token: a hardcoded table would be a
-	// second opinion on the only number that makes a fee cost $1 rather than
-	// a trillionth of it.
-	mu       sync.Mutex
-	decimals map[string]int
 }
 
 // NewTreasuryFeeRail wires the treasury, the per-chain transfer verifiers (the
 // same map converted buys prove their deliveries with) and a transaction reader
 // per chain for the sender, time and depth of a payment.
 func NewTreasuryFeeRail(treasury *Treasury, verifiers map[string]ERC20TransferVerifier, readers map[string]FeeTxReader) *TreasuryFeeRail {
-	return &TreasuryFeeRail{treasury: treasury, verifiers: verifiers, readers: readers, decimals: map[string]int{}}
+	return &TreasuryFeeRail{treasury: treasury, verifiers: verifiers, readers: readers}
 }
 
 // FeeTxReaders is a transaction reader for each chain key that has a client.
@@ -187,32 +180,17 @@ func (r *TreasuryFeeRail) Options(_ context.Context) []StableFeeOption {
 		sort.Strings(symbols)
 		for _, symbol := range symbols {
 			addr := lane.Tokens[symbol]
-			decimals, ok := r.tokenDecimals(lane, addr)
-			if !ok {
+			// Read on-chain through the treasury's one lookup: a hardcoded
+			// table would be a second opinion on the only number that makes a
+			// fee cost $1 rather than a trillionth of it.
+			decimals, err := r.treasury.TokenDecimals(chain, symbol)
+			if err != nil || decimals <= 0 {
 				continue
 			}
 			out = append(out, StableFeeOption{Chain: chain, ChainID: lane.ChainID, Token: symbol, TokenAddress: addr, Decimals: decimals})
 		}
 	}
 	return out
-}
-
-func (r *TreasuryFeeRail) tokenDecimals(lane *TreasuryLane, token string) (int, bool) {
-	key := lane.ChainKey + ":" + strings.ToLower(token)
-	r.mu.Lock()
-	d, ok := r.decimals[key]
-	r.mu.Unlock()
-	if ok {
-		return d, true
-	}
-	d, err := lane.Native.GetTokenDecimals(token)
-	if err != nil || d <= 0 {
-		return 0, false
-	}
-	r.mu.Lock()
-	r.decimals[key] = d
-	r.mu.Unlock()
-	return d, true
 }
 
 func (r *TreasuryFeeRail) PrepareTransfer(chain, tokenAddress, from string, amount *big.Int) ([]byte, error) {

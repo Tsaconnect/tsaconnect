@@ -92,18 +92,38 @@ func (s *ITService) convertedTreasuryFor(chain string, q *StableBuyQuote, v Payc
 		return "", fmt.Errorf("%w: a %d bps conversion budget is over the cap for %s",
 			ErrConversionUnavailable, v.MarkupBps, v.RequestedChain)
 	}
-	// T must be what this D owes at the venue's budget, and something: a
-	// budget outside [0, 100%) would open a buy that owes her nothing or more
-	// than was bought.
-	if v.Kind != models.RouteKindConverted || !strings.EqualFold(v.ChainKey, chain) || !strings.EqualFold(v.Token, q.Asset) ||
-		v.MarkupBps < 0 || v.MarkupBps >= 10_000 || ConversionOwed(q.AssetUnits, v.MarkupBps).Sign() <= 0 ||
-		v.TokenAmountBaseUnits != ConversionOwed(q.AssetUnits, v.MarkupBps).String() {
+	// T must be what this D owes at the venue's budget, in the leg's own
+	// units (S23), and something: a budget outside [0, 100%) would open a buy
+	// that owes her nothing or more than was bought.
+	legUnits, err := CanonicalToChainUnits(q.AssetUnits, venueLegDecimals(v))
+	if err != nil || v.Kind != models.RouteKindConverted || !strings.EqualFold(v.ChainKey, chain) || !strings.EqualFold(v.Token, q.Asset) ||
+		v.MarkupBps < 0 || v.MarkupBps >= 10_000 || ConversionOwed(legUnits, v.MarkupBps).Sign() <= 0 ||
+		v.TokenAmountBaseUnits != ConversionOwed(legUnits, v.MarkupBps).String() {
 		return "", fmt.Errorf("%w: the converted venue was not priced on this settlement leg", ErrConversionUnavailable)
 	}
 	if err := c.Treasury.CheckCaps(chain, StableFromBaseUnits(q.AssetUnits), 0); err != nil {
 		return "", fmt.Errorf("%w: %s", ErrConversionUnavailable, RedactAlertText(err.Error()))
 	}
 	return c.TreasuryAddress, nil
+}
+
+// venueLegDecimals is the decimals a converted venue's T is in: 6 unless the
+// pricer said otherwise.
+func venueLegDecimals(v PaycrestVenue) int {
+	if v.LegDecimals == 0 {
+		return StableAssetDecimals
+	}
+	return v.LegDecimals
+}
+
+// recordLegDecimals is what a conversion record stores for its leg: nil for
+// 6 dp, so a 6-dp record is written exactly as before the pool (nil reads as
+// 6, conversionLegDecimals).
+func recordLegDecimals(v PaycrestVenue) *int {
+	if d := venueLegDecimals(v); d != StableAssetDecimals {
+		return &d
+	}
+	return nil
 }
 
 // feeCaps is the wired cap, or the pricer's default when none is wired.
@@ -140,6 +160,7 @@ func newConversionRecord(intent *models.ITIntent, in ConvertedOpen, holder strin
 		DestinationAddress:     firstNonEmpty(v.RequestedDestination, in.WalletAddress),
 		MarkupBps:              v.MarkupBps,
 		QuotedAmount:           v.TokenAmountBaseUnits, // T, checked against this D by convertedTreasuryFor
+		LegDecimals:            recordLegDecimals(v),   // the units QuotedAmount is in
 		EstimatedAmount:        v.EstimatedAmount,
 		PromisedAmount:         v.PromisedAmount,
 		Holder:                 holder,

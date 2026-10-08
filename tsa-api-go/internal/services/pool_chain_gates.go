@@ -46,6 +46,25 @@ type PoolGateStatus struct {
 	CheckedAt time.Time `json:"checkedAt"`
 }
 
+// PoolGate is the pool's gate surface as boot hands it out (Plans B/C1 hold
+// it). Boot returns a nil PoolGate, never a typed-nil *PoolChainGates, when no
+// pool row exists; *PoolChainGates is nil-receiver safe and reads closed.
+type PoolGate interface {
+	Open() bool
+	Status() PoolGateStatus
+	Check(ctx context.Context) PoolGateStatus
+	Close(reason string)
+	ReleaseGasOK(ctx context.Context) bool
+	ReprobeReceipts(ctx context.Context)
+	Enabled() bool
+	FloatBalances(ctx context.Context) ([]SponsorFloat, error)
+}
+
+var _ PoolGate = (*PoolChainGates)(nil)
+
+// errNoPoolGates is what a nil *PoolChainGates reports: closed.
+const errNoPoolGates = "pool: no gates configured"
+
 // PoolChainGates keeps the pool closed unless every gate passes (fail-closed;
 // decision 17: the configuration is the switch, these are the money guards).
 type PoolChainGates struct {
@@ -57,12 +76,18 @@ type PoolChainGates struct {
 func NewPoolChainGates(c PoolChainGatesConfig) *PoolChainGates { return &PoolChainGates{c: c} }
 
 func (g *PoolChainGates) Open() bool {
+	if g == nil {
+		return false
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.st.Open && g.st.Latched == ""
 }
 
 func (g *PoolChainGates) Status() PoolGateStatus {
+	if g == nil {
+		return PoolGateStatus{Failures: []string{errNoPoolGates}}
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	st := g.st
@@ -73,6 +98,9 @@ func (g *PoolChainGates) Status() PoolGateStatus {
 // Close shuts the pool in-process until a restart re-runs the gates (spec
 // §12.2 step 4: a non-zero fee snapshot on a slice).
 func (g *PoolChainGates) Close(reason string) {
+	if g == nil {
+		return // nothing to close: a nil gate is never open
+	}
 	if reason == "" {
 		reason = "closed without a reason" // an empty latch would read as no latch
 	}
@@ -88,12 +116,18 @@ func (g *PoolChainGates) ReprobeReceipts(ctx context.Context) { g.Check(ctx) }
 
 // Check runs §6.2 gates 1–7 plus the payment-window floor (plan P13).
 func (g *PoolChainGates) Check(ctx context.Context) PoolGateStatus {
+	if g == nil {
+		return g.Status()
+	}
 	var fails []string
 	fail := func(gate, reason string) { fails = append(fails, gate+": "+RedactAlertText(reason)) }
 
-	// Every gate below reads the chain, so without a client the pool is closed now.
+	// Every gate below reads the chain, so without a client the pool is closed
+	// now. The client, the release signer's lane and the token decimals are
+	// all dialled once at boot, so this stays closed until a restart: opening
+	// on a later client would take orders the release key cannot send on.
 	if g.c.Chain == nil {
-		fail("bytecode", "no chain client on "+g.c.ChainKey)
+		fail("bytecode", "no chain client on "+g.c.ChainKey+" (fix the RPC, then restart)")
 		return g.record(fails)
 	}
 	// 1. Bytecode.
@@ -227,16 +261,21 @@ func (g *PoolChainGates) treasuryLane() string {
 // Enabled / FloatBalances make the gates the GasFloatMonitor reader for the
 // release EOA on the pool chain (spec §4.4, F11).
 func (g *PoolChainGates) Enabled() bool {
-	return g.c.ReleaseAdmin != "" && g.c.ReleaseGasFloorWei != nil
+	return g != nil && g.c.ReleaseAdmin != "" && g.c.ReleaseGasFloorWei != nil
 }
 
 func (g *PoolChainGates) FloatBalances(ctx context.Context) ([]SponsorFloat, error) {
 	if !g.Enabled() || g.c.Chain == nil {
-		return nil, fmt.Errorf("no release EOA, gas floor or chain client on %s", g.c.ChainKey)
+		chain := ""
+		if g != nil {
+			chain = g.c.ChainKey
+		}
+		return nil, fmt.Errorf("no release EOA, gas floor or chain client on %s", chain)
 	}
 	bal, err := g.c.Chain.BalanceAt(ctx, common.HexToAddress(g.c.ReleaseAdmin), nil)
 	if err != nil {
-		return nil, fmt.Errorf("release EOA balance on %s: %w", g.c.ChainKey, err)
+		// Redacted: a transport error carries the RPC URL, which can hold a key.
+		return nil, fmt.Errorf("release EOA balance on %s: %s", g.c.ChainKey, RedactAlertText(err.Error()))
 	}
 	return []SponsorFloat{{Chain: g.c.ChainKey, Address: g.c.ReleaseAdmin, BalanceWei: bal, FloorWei: g.c.ReleaseGasFloorWei}}, nil
 }

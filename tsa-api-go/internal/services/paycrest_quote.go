@@ -72,6 +72,10 @@ type PaycrestVenue struct {
 	// Kind is models.RouteKindDirect or models.RouteKindConverted, so the app
 	// (and the order-creation path in Task 9) can tell the two apart.
 	Kind string `json:"kind,omitempty"`
+	// LegDecimals is the settlement leg token's decimals a converted venue was
+	// priced in (TokenAmountBaseUnits is in them; spec 2026-10-08 S23), so the
+	// open checks T and records it in the same units. 0 reads as 6.
+	LegDecimals int `json:"-"`
 	// ViaChain/ViaToken are the Paycrest settlement leg a converted venue
 	// actually creates the order against — same as ChainKey/Token, restated
 	// under their own name so a converted venue can say what it converts
@@ -1328,7 +1332,7 @@ func (s *PaycrestQuoteService) convertedVenue(ctx context.Context, leg *settleme
 		// Paycrest's own network name to submit — without it a converted
 		// order would be created with an empty network.
 		ChainKey: src.ChainKey, Token: src.Token, Network: src.Network,
-		ViaChain: src.ChainKey, ViaToken: src.Token,
+		ViaChain: src.ChainKey, ViaToken: src.Token, LegDecimals: leg.decimals,
 		RequestedChain: asset.ChainKey, RequestedToken: symbol,
 		RequestedChainID: asset.ChainID, RequestedAddress: asset.Address, RequestedDecimals: decimals,
 		RequestedDestination: asset.Destination,

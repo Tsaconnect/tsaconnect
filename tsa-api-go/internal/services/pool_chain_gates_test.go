@@ -21,11 +21,12 @@ const (
 // feeManager/tokenSymbol/rateFor.
 type fakePoolChain struct {
 	fakeEscrowChain
-	feeBps  uint16
-	window  int64
-	admins  map[common.Address]bool
-	noCode  map[common.Address]bool
-	balance *big.Int
+	feeBps     uint16
+	window     int64
+	admins     map[common.Address]bool
+	noCode     map[common.Address]bool
+	balance    *big.Int
+	balanceErr error
 }
 
 func (f *fakePoolChain) CallContract(ctx context.Context, call ethereum.CallMsg, n *big.Int) ([]byte, error) {
@@ -49,7 +50,7 @@ func (f *fakePoolChain) CodeAt(_ context.Context, a common.Address, _ *big.Int) 
 	return []byte{0x60}, nil
 }
 func (f *fakePoolChain) BalanceAt(context.Context, common.Address, *big.Int) (*big.Int, error) {
-	return f.balance, nil
+	return f.balance, f.balanceErr
 }
 
 func healthyPoolChain() *fakePoolChain {
@@ -237,5 +238,42 @@ func TestPoolGates_MissingChainOrTokensFailsClosed(t *testing.T) {
 	g.Close("")
 	if g.Open() || g.Check(context.Background()).Open {
 		t.Fatal("an empty close reason must still latch")
+	}
+}
+
+// Review I2: a nil *PoolChainGates — held directly or in a PoolGate — reads
+// closed on every method and never panics.
+func TestPoolGates_NilReceiverReadsClosed(t *testing.T) {
+	var g *PoolChainGates
+	var pg PoolGate = g
+	ctx := context.Background()
+	for name, gate := range map[string]PoolGate{"pointer": g, "interface": pg} {
+		if gate.Open() {
+			t.Fatalf("%s: Open", name)
+		}
+		if st := gate.Status(); st.Open || len(st.Failures) == 0 {
+			t.Fatalf("%s: Status = %+v, want closed with a reason", name, st)
+		}
+		if st := gate.Check(ctx); st.Open || len(st.Failures) == 0 {
+			t.Fatalf("%s: Check = %+v, want closed with a reason", name, st)
+		}
+		gate.Close("fee snapshot")
+		gate.ReprobeReceipts(ctx)
+		if gate.Enabled() || gate.ReleaseGasOK(ctx) {
+			t.Fatalf("%s: release float must read as off", name)
+		}
+		if fl, err := gate.FloatBalances(ctx); err == nil || fl != nil {
+			t.Fatalf("%s: FloatBalances = %v, %v; want an error", name, fl, err)
+		}
+	}
+}
+
+// Review M1: an RPC error naming a keyed URL never leaves FloatBalances whole.
+func TestPoolGates_FloatBalancesRedactsTheRPCError(t *testing.T) {
+	c := healthyPoolChain()
+	c.balanceErr = errors.New(`Post "https://bnb-mainnet.g.alchemy.com/v2/SECRETKEY123": dial tcp: i/o timeout`)
+	_, err := NewPoolChainGates(healthyGates(c)).FloatBalances(context.Background())
+	if err == nil || strings.Contains(err.Error(), "SECRETKEY123") {
+		t.Fatalf("err = %v, want the RPC URL redacted", err)
 	}
 }

@@ -55,7 +55,7 @@ type sponsorNativeSender interface {
 	EstimateGas(msg ethereum.CallMsg) (uint64, error)
 	SuggestGasPrice() (*big.Int, error)
 	WaitForReceiptContext(ctx context.Context, txHash string, timeout time.Duration) (*types.Receipt, error)
-	GetTokenDecimals(tokenAddress string) (int, error)
+	tokenDecimalsReader
 	// GetTokenBalance exists for the treasury's kept-USDC float check
 	// (Treasury.FloatBalances): the same widen-not-duplicate reasoning as the
 	// ERC-20 methods above.

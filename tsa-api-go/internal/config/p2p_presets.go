@@ -88,6 +88,7 @@ func retiredP2PEnv() error {
 // selected network.
 func assembleP2PChains(cfg *Config, presets map[string]map[string]chainPreset) error {
 	cfg.P2PChains = map[int64]P2PChainConfig{}
+	cfg.p2pNetworks = map[string]string{}
 	keys := make([]string, 0, len(presets))
 	for k := range presets {
 		keys = append(keys, k)
@@ -96,6 +97,7 @@ func assembleP2PChains(cfg *Config, presets map[string]map[string]chainPreset) e
 	for _, chainKey := range keys {
 		rows := presets[chainKey]
 		network := p2pNetwork(chainKey, rows)
+		cfg.p2pNetworks[chainKey] = network
 		if err := addP2PChain(cfg, chainKey, network, rows[network]); err != nil {
 			return err
 		}
@@ -221,7 +223,7 @@ func assembleFeeManagerChains(cfg *Config) {
 		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_BSC", fmBSC); err != nil {
 			log.Fatalf("[config] %v", err)
 		}
-		bscID := cfg.Networks[p2pNetwork("bsc", bscPresets)].Chains["bsc"].ChainID
+		bscID := cfg.Networks[cfg.selectedP2PNetwork("bsc")].Chains["bsc"].ChainID
 		cfg.FeeManagerChains[bscID] = FeeManagerChainConfig{ChainID: bscID, ChainKey: "bsc", Address: fmBSC}
 	}
 	if len(cfg.FeeManagerChains) == 0 {
@@ -229,6 +231,15 @@ func assembleFeeManagerChains(cfg *Config) {
 	} else {
 		log.Printf("[config] FeeManager chains configured: %d", len(cfg.FeeManagerChains))
 	}
+}
+
+// selectedP2PNetwork is the network assembleP2PChains chose for chainKey
+// (mainnet when it has not run): the one choice, never a second env read.
+func (c *Config) selectedP2PNetwork(chainKey string) string {
+	if n := c.p2pNetworks[chainKey]; n != "" {
+		return n
+	}
+	return "mainnet"
 }
 
 // checkPoolFeeManagerExcluded (S4): the admin Author flow pushes one rate to

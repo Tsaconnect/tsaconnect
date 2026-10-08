@@ -261,7 +261,7 @@ Blockchain (wallet feature):
 - `BSC_USDT_TOKEN_ADDRESS` - USDT token contract (BSC)
 - `BSC_USDC_TOKEN_ADDRESS` - USDC token contract (BSC)
 
-P2P trading (Sonic + BSC multi-chain):
+P2P trading (Sonic) and the TSA Liquidity pool chain (BSC):
 - `SONIC_NETWORK` - `"mainnet"` | `"testnet"` (default `mainnet`) — selects the Sonic P2P preset
 - `P2P_ESCROW_ADDRESS` - Sonic P2PEscrowV2 proxy; overrides the preset (hot-fix escape hatch)
 - `P2P_ESCROW_EIP712_VERSION` - EIP-712 domain version matching the deployed Sonic contract (default from preset)

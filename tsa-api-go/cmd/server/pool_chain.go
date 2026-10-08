@@ -109,10 +109,12 @@ func buildReleaseSigner(cfg *config.Config, bs *services.BlockchainService) serv
 }
 
 // buildPoolChain runs the TSA Liquidity boot gates (spec §6.2) once and returns
-// them, or nil when no preset row carries a pool escrow. A failed gate leaves
-// the pool closed (dormant, ALERT logged), never the process down; the fatal
-// checks already ran in config.Load.
-func buildPoolChain(cfg *config.Config, bs *services.BlockchainService, reg *services.P2PEscrowRegistry, release services.ChainSender, treasury *services.Treasury) *services.PoolChainGates {
+// them, or a nil PoolGate (never a typed nil) when no preset row carries a pool
+// escrow. A failed gate leaves the pool closed (ALERT logged), never the
+// process down; the fatal checks already ran in config.Load. A pool row with
+// no RPC client still gets its gates: closed, and re-checked (and re-alerted)
+// by registerPoolJobs until a restart brings a client.
+func buildPoolChain(cfg *config.Config, bs *services.BlockchainService, reg *services.P2PEscrowRegistry, release services.ChainSender, treasury *services.Treasury) services.PoolGate {
 	pool, ok := cfg.PoolChain()
 	if !ok {
 		log.Printf("[liquidity] dormant: no P2P preset row carries a pool escrow")
@@ -122,13 +124,18 @@ func buildPoolChain(cfg *config.Config, bs *services.BlockchainService, reg *ser
 	if bs != nil {
 		client, _ = bs.ClientForChainID(pool.ChainID)
 	}
-	if client == nil || client.Client == nil {
-		log.Printf("[liquidity] ALERT liquidity_pool_gate_failed chain=%s(%d) rpc: no client — pool closed", pool.ChainKey, pool.ChainID)
-		return nil
+	// Assigned only when non-nil: a nil *ethclient.Client in the reader
+	// interface would read as a client and panic on the first gate.
+	var chain services.PoolChainReader
+	var receipts services.RawRPCCaller
+	if client != nil && client.Client != nil {
+		chain, receipts = client.Client, client.Client.Client()
 	}
 	tokens, decimals := map[string]string{}, map[string]int{}
 	for _, sym := range pool.Pool.Tokens {
-		tokens[sym] = bs.TokenAddressForChainID(pool.ChainID, sym)
+		if bs != nil {
+			tokens[sym] = bs.TokenAddressForChainID(pool.ChainID, sym)
+		}
 		if d, ok := reg.TokenDecimals(pool.ChainID, sym); ok {
 			decimals[sym] = d
 		}
@@ -146,7 +153,7 @@ func buildPoolChain(cfg *config.Config, bs *services.BlockchainService, reg *ser
 		Escrow: pool.EscrowAddress, FeeManager: pool.Pool.FeeManager,
 		Tokens: tokens, Decimals: decimals, ReleaseAdmin: admin,
 		ReleaseGasFloorWei: bigFromDecimal(pool.Pool.ReleaseGasFloorWei),
-		Chain:              client.Client, Receipts: client.Client.Client(),
+		Chain:              chain, Receipts: receipts,
 		TreasuryLane: lane, CompanyPM: companyPMCheck(cfg), MinPaymentWindowSec: 3600,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -159,7 +166,7 @@ func buildPoolChain(cfg *config.Config, bs *services.BlockchainService, reg *ser
 
 // registerPoolJobs re-checks every gate each 5 minutes (receipts S38 and the
 // fee invariant, plan P13) and watches the release EOA's gas floor (§4.4).
-func registerPoolJobs(scheduler *jobs.Scheduler, g *services.PoolChainGates) {
+func registerPoolJobs(scheduler *jobs.Scheduler, g services.PoolGate) {
 	if g == nil {
 		return
 	}

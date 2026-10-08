@@ -292,6 +292,8 @@ func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config) *P2PEscrowR
 	return reg
 }
 
+// tokenDecimalsReader is the one ERC-20 decimals() read surface: the registry's
+// chain client, and part of every sponsor/treasury lane's sponsorNativeSender.
 type tokenDecimalsReader interface {
 	GetTokenDecimals(tokenAddress string) (int, error)
 }

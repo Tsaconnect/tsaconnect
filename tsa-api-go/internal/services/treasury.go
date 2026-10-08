@@ -109,7 +109,23 @@ type Treasury struct {
 
 	gasMu    sync.Mutex
 	gasCache map[string]gasReading // chain -> last quote-time reading
+
+	// decimals caches TokenDecimals by "chain|TOKEN": a success for good
+	// (decimals are immutable), a failed read for treasuryDecimalsMissTTL so an
+	// RPC outage does not hold every quote for the client's timeout.
+	decMu    sync.Mutex
+	decimals map[string]int
+	decMiss  map[string]decimalsMiss
 }
+
+type decimalsMiss struct {
+	err   error
+	until time.Time
+}
+
+// treasuryDecimalsMissTTL is how long a failed decimals read is answered from
+// cache before the chain is asked again.
+const treasuryDecimalsMissTTL = 30 * time.Second
 
 // gasReading is one lane's native balance and gas price, as read for
 // quoting. Execution never uses it: requireGas always reads fresh.
@@ -180,8 +196,10 @@ func (t *Treasury) Lane(chainKey string) *TreasuryLane {
 	return t.lanes[strings.ToLower(strings.TrimSpace(chainKey))]
 }
 
-// TokenDecimals is token's decimals on chainKey's lane, read on-chain (cached
-// forever by the client): what a converted leg is priced in (spec S23).
+// TokenDecimals is token's decimals on chainKey's lane, read on-chain: what a
+// converted leg is priced in (spec S23) and what a treasury fee is scaled by.
+// The one treasury decimals lookup; a success is cached for good, a failure
+// for treasuryDecimalsMissTTL.
 func (t *Treasury) TokenDecimals(chainKey, token string) (int, error) {
 	lane := t.Lane(chainKey)
 	if lane == nil || lane.SponsorLane == nil {
@@ -194,7 +212,31 @@ func (t *Treasury) TokenDecimals(chainKey, token string) (int, error) {
 	if lane.Native == nil {
 		return 0, fmt.Errorf("treasury: %s lane has no chain client", chainKey)
 	}
-	return lane.Native.GetTokenDecimals(addr)
+	key := strings.ToLower(strings.TrimSpace(chainKey)) + "|" + strings.ToLower(addr)
+	t.decMu.Lock()
+	if d, ok := t.decimals[key]; ok {
+		t.decMu.Unlock()
+		return d, nil
+	}
+	if m, ok := t.decMiss[key]; ok && t.now().Before(m.until) {
+		t.decMu.Unlock()
+		return 0, m.err
+	}
+	t.decMu.Unlock()
+
+	d, err := lane.Native.GetTokenDecimals(addr)
+	t.decMu.Lock()
+	defer t.decMu.Unlock()
+	if t.decimals == nil {
+		t.decimals, t.decMiss = map[string]int{}, map[string]decimalsMiss{}
+	}
+	if err != nil {
+		t.decMiss[key] = decimalsMiss{err: err, until: t.now().Add(treasuryDecimalsMissTTL)}
+		return 0, err
+	}
+	delete(t.decMiss, key)
+	t.decimals[key] = d
+	return d, nil
 }
 
 // ChainKeys is every chain the treasury has a lane on, sorted — for a caller

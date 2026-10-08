@@ -1021,7 +1021,7 @@ func main() {
 				log.Printf("[ramp-company-wallet] ALERT ramp_company_wallet_index_missing=1 index=uq_ramp_legs_one_live_sale err=%v — dormant", err)
 			} else {
 				itService.SetCompanyWallet(wallet)
-				scheduler.Register(jobs.NewCompanyWalletReceiptProbe(wallet, 5*time.Minute))
+				scheduler.Register(jobs.NewReceiptProbe(jobs.CompanyWalletReceiptProbeName, wallet, 5*time.Minute))
 			}
 		}
 	}

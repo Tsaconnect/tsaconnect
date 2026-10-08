@@ -612,6 +612,11 @@ type Config struct {
 	// like the BSC P2P escrow).
 	FeeManagerChains map[int64]FeeManagerChainConfig
 
+	// p2pNetworks is each preset chain's selected network (<CHAIN>_NETWORK),
+	// chosen once by assembleP2PChains so every later reader agrees and an
+	// unknown value alerts once (review M4).
+	p2pNetworks map[string]string
+
 	// SonicNetwork records which preset was active for this boot
 	// ("mainnet" or "testnet"). Downstream code that needs to query the
 	// right Networks[…] map for sonic-side lookups reads this rather than

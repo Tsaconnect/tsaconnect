@@ -91,3 +91,55 @@ func TestHandoff_LegacyRecordStaysSixDecimals(t *testing.T) {
 		t.Fatalf("updates = %v err = %v", u, err)
 	}
 }
+
+// Review I1: an 18-dp converted leg round-trips quote → open → handoff
+// exactly — the opener checks T in the leg's units and records them.
+func TestConvertedOpen_18dpLegRoundTripsQuoteOpenHandoff(t *testing.T) {
+	s, userID := newConvertedTreasuryService(t, 50_000_000)
+	q := treasuryTestQuote(t, s)
+	rig := deliveredRig(t)
+	rig.svc.treasuryLanes.(*fakeTreasuryLaneChecker).decimals = map[string]int{"base|USDC": 18}
+	rig.lifi.route = &LiFiRoute{ToAmount: big.NewInt(7_278_150), ToAmountMin: big.NewInt(7_250_000),
+		FromAmountUSD: 100, ToAmountUSD: 99.8, GasLimit: 1_200_000, Tool: "across",
+		Data: testBridgeCalldata(t, sponsorTestUser, 10, false)}
+	v, err := rig.svc.PriceConvertedLeg(context.Background(), SettlementLeg{ChainKey: "base", Token: "USDC",
+		Delivered: q.AssetUnits, FiatAmount: "10000", Rate: "1374", MarketRate: 1348}, optimismUSDT)
+	if err != nil || v == nil {
+		t.Fatalf("venue = %+v err = %v", v, err)
+	}
+	scaled, _ := CanonicalToChainUnits(q.AssetUnits, 18)
+	if want := ConversionOwed(scaled, v.MarkupBps).String(); v.TokenAmountBaseUnits != want || v.LegDecimals != 18 {
+		t.Fatalf("venue T = %s at %d dp, want %s at 18", v.TokenAmountBaseUnits, v.LegDecimals, want)
+	}
+	intent, _, rec, err := s.OpenTreasuryConvertedBuy(context.Background(), userID, q, "base",
+		ConvertedOpen{Venue: *v, WalletAddress: testRoutedEVM})
+	if err != nil {
+		t.Fatalf("open an 18-dp converted leg: %v", err)
+	}
+	stored := conversionRecord(t, s, intent.ID)
+	if stored.QuotedAmount != v.TokenAmountBaseUnits || stored.LegDecimals == nil || *stored.LegDecimals != 18 ||
+		rec.QuotedAmount != stored.QuotedAmount {
+		t.Fatalf("record T = %s legDecimals = %v, want %s at 18", stored.QuotedAmount, stored.LegDecimals, v.TokenAmountBaseUnits)
+	}
+	u, err := handoffUpdates(&stored, q.AssetUnits, "0xhash")
+	if err != nil || u["quoted_amount"] != v.TokenAmountBaseUnits || u["token_amount"] != FormatStableUnits(q.AssetUnits.String()) {
+		t.Fatalf("handoff = %v err = %v, want T %s unchanged", u, err, v.TokenAmountBaseUnits)
+	}
+}
+
+// Review I1: a 6-dp converted open writes no leg decimals, as before the pool.
+func TestConvertedOpen_SixDpRecordLeavesLegDecimalsNull(t *testing.T) {
+	s, userID := newConvertedTreasuryService(t, 50_000_000)
+	six := convertedVenueForTest()
+	six.LegDecimals = 6
+	_, _, _, err := s.OpenTreasuryConvertedBuy(context.Background(), userID, treasuryTestQuote(t, s), "base",
+		ConvertedOpen{Venue: six, WalletAddress: testRoutedEVM})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	var n int64
+	s.db.Model(&models.PaycrestOrderRecord{}).Where("leg_decimals IS NOT NULL").Count(&n)
+	if n != 0 {
+		t.Fatalf("%d records carry leg decimals, want none for a 6-dp leg", n)
+	}
+}

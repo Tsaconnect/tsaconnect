@@ -3,6 +3,7 @@ package jobs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"math/big"
 	"os"
@@ -16,11 +17,12 @@ import (
 type fakeFloats struct {
 	enabled bool
 	floats  []services.SponsorFloat
+	err     error
 }
 
 func (f fakeFloats) Enabled() bool { return f.enabled }
 func (f fakeFloats) FloatBalances(context.Context) ([]services.SponsorFloat, error) {
-	return f.floats, nil
+	return f.floats, f.err
 }
 
 func captureLog(t *testing.T, fn func()) string {
@@ -89,5 +91,15 @@ func TestGasFloatMonitor_AlertsWhenKeptUSDCNeedsSweeping(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "ramp_treasury_kept_usdc_high_total=1 chain=base usd=600") {
 		t.Fatalf("log = %q", buf.String())
+	}
+}
+
+// Review M1: a read error leaves the tick redacted — the scheduler logs it as is.
+func TestGasFloatMonitor_ReadErrorIsRedacted(t *testing.T) {
+	m := NewGasFloatMonitorNamed("liquidity_pool_release", fakeFloats{enabled: true,
+		err: errors.New(`release EOA balance: Post "https://bnb-mainnet.g.alchemy.com/v2/SECRETKEY123": EOF`)}, 0)
+	err := m.Run(context.Background())
+	if err == nil || strings.Contains(err.Error(), "SECRETKEY123") {
+		t.Fatalf("tick error = %v, want it redacted", err)
 	}
 }

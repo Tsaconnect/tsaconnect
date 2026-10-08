@@ -34,15 +34,13 @@ type ReleaseBroadcaster interface {
 	ChainID() *big.Int
 }
 
-type txBroadcaster = ReleaseBroadcaster
-
 // LocalKeyReleaseSigner holds the admin key in process. Dev/staging only.
 type LocalKeyReleaseSigner struct {
 	key *ecdsa.PrivateKey
-	bc  txBroadcaster
+	bc  ReleaseBroadcaster
 }
 
-func NewLocalKeyReleaseSigner(key *ecdsa.PrivateKey, bc txBroadcaster) *LocalKeyReleaseSigner {
+func NewLocalKeyReleaseSigner(key *ecdsa.PrivateKey, bc ReleaseBroadcaster) *LocalKeyReleaseSigner {
 	return &LocalKeyReleaseSigner{key: key, bc: bc}
 }
 
