@@ -573,3 +573,118 @@ func TestPayRoutes_ReferenceLookupNeedsTheMerchantKey(t *testing.T) {
 		t.Fatalf("unknown reference: %d", w.Code)
 	}
 }
+
+// seedRoutesPayment stores one payment with a known code, as a fresh merchant's.
+func seedRoutesPayment(t *testing.T, db *gorm.DB, mode, status, code string) *models.PayPayment {
+	t.Helper()
+	m := &models.PayMerchant{MerchantRequestID: uuid.New(), UserID: uuid.New(), BusinessName: "Sky Air",
+		Status: models.PayMerchantActive, SettlementMode: models.PaySettlementFiat, CustomerFeeSharePercent: 100,
+		MinAmountKobo: 100_000, MaxAmountKobo: 500_000_000, WebhookSecretVersion: 1}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	p := &models.PayPayment{MerchantID: m.ID, Mode: mode, Reference: "R-" + code, AmountKobo: 500_000, Currency: "NGN",
+		Source: models.PaySourceLink, Description: "Wedding cake deposit", FeeBps: 100, CustomerFeeSharePercent: 100,
+		CustomerTotalKobo: 505_051, MerchantNetKobo: 500_000, SettlementMode: models.PaySettlementFiat,
+		ExpiresAt: now.Add(time.Hour), Status: status, PayCode: &code}
+	if status == models.PayStatusSucceeded {
+		p.SucceededAt = &now
+	}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// D10: the lookup needs a session, is never cached, and answers a code no
+// payment could have exactly as one no payment has.
+func TestPayRoutes_CodeLookup(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	p := seedRoutesPayment(t, db, models.PayModeTest, models.PayStatusPending, "7K2QFM9XWD")
+
+	if w := payRoutesDo(r, "GET", "/api/pay/code/TSA-7K2QF-M9XWD", "", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no jwt: %d %s", w.Code, w.Body.String())
+	}
+	tok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleUser).ID)
+	w := payRoutesDo(r, "GET", "/api/pay/code/tsa-7k2qf-m9xwd", tok, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+p.ID.String()+`"`) || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("lookup: %d %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+	}
+	unknown := payRoutesDo(r, "GET", "/api/pay/code/TSA-AAAAA-AAAAA", tok, nil)
+	malformed := payRoutesDo(r, "GET", "/api/pay/code/not-a-code", tok, nil)
+	if unknown.Code != http.StatusNotFound || malformed.Code != http.StatusNotFound || unknown.Body.String() != malformed.Body.String() {
+		t.Fatalf("unknown %d %s / malformed %d %s", unknown.Code, unknown.Body.String(), malformed.Code, malformed.Body.String())
+	}
+}
+
+// 20 a minute per user, 60 a minute per address (the IP limiter runs first,
+// so it counts every request, the per-user refusals included).
+func TestPayRoutes_CodeLookupIsLimitedPerUserAndPerAddress(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	get := func(tok string) int { return payRoutesDo(r, "GET", "/api/pay/code/TSA-AAAAA-AAAAA", tok, nil).Code }
+	user := func() string { return payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleUser).ID) }
+
+	first := user()
+	for i := 0; i < 20; i++ {
+		if c := get(first); c != http.StatusNotFound {
+			t.Fatalf("try %d: %d", i+1, c)
+		}
+	}
+	if c := get(first); c != http.StatusTooManyRequests {
+		t.Fatalf("21st try by one user: %d", c)
+	}
+	// 21 so far from this address; two more users bring it to exactly 60.
+	for _, n := range []int{20, 19} {
+		tok := user()
+		for i := 0; i < n; i++ {
+			if c := get(tok); c != http.StatusNotFound {
+				t.Fatalf("another user's try %d: %d", i+1, c)
+			}
+		}
+	}
+	if c := get(user()); c != http.StatusTooManyRequests {
+		t.Fatalf("61st try from one address: %d", c)
+	}
+}
+
+// D12: no session, never cached, and only a succeeded live payment answers —
+// a test one is as unknown as a malformed code.
+func TestPayRoutes_PublicReceipt(t *testing.T) {
+	r, _, db, _ := newPayRoutesRig(t)
+	seedRoutesPayment(t, db, models.PayModeLive, models.PayStatusSucceeded, "7K2QFM9XWD")
+	seedRoutesPayment(t, db, models.PayModeTest, models.PayStatusSucceeded, "AB12CD34EF")
+
+	w := payRoutesDo(r, "GET", "/api/pay/public/receipt/TSA-7K2QF-M9XWD", "", nil)
+	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(w.Body.String(), `"code":"TSA-7K2QF-M9XWD"`) || !strings.Contains(w.Body.String(), `"merchantName":"Sky Air"`) {
+		t.Fatalf("live receipt: %d %q %s", w.Code, w.Header().Get("Cache-Control"), w.Body.String())
+	}
+	var bodies []string
+	for _, code := range []string{"TSA-AB12C-D34EF", "TSA-AAAAA-AAAAA", "x"} {
+		w := payRoutesDo(r, "GET", "/api/pay/public/receipt/"+code, "", nil)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s: %d %s", code, w.Code, w.Body.String())
+		}
+		bodies = append(bodies, w.Body.String())
+	}
+	if bodies[0] != bodies[1] || bodies[1] != bodies[2] {
+		t.Fatalf("404 bodies differ: %v", bodies)
+	}
+	// The status page beside it still answers by id.
+	if w := payRoutesDo(r, "GET", "/api/pay/public/not-a-uuid", "", nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("/public/:id: %d", w.Code)
+	}
+}
+
+func TestPayRoutes_PublicReceiptIsLimitedPerAddress(t *testing.T) {
+	r, _, _, _ := newPayRoutesRig(t)
+	for i := 0; i < 30; i++ {
+		if c := payRoutesDo(r, "GET", "/api/pay/public/receipt/TSA-AAAAA-AAAAA", "", nil).Code; c != http.StatusNotFound {
+			t.Fatalf("try %d: %d", i+1, c)
+		}
+	}
+	if c := payRoutesDo(r, "GET", "/api/pay/public/receipt/TSA-AAAAA-AAAAA", "", nil).Code; c != http.StatusTooManyRequests {
+		t.Fatalf("31st try: %d", c)
+	}
+}

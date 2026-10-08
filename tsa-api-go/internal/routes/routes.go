@@ -1385,6 +1385,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// never authenticates against).
 		payRoot.GET("/public/:id", middleware.RateLimiter(120, time.Minute), payh.Public)
 
+		// A succeeded live payment's public receipt, for the verify page its QR
+		// opens (tsaconnectworld.com/r/<code>). No auth; never cached; 30 a
+		// minute per address; a code no payment could have is answered as an
+		// unknown one before any lookup.
+		payRoot.GET("/public/receipt/:code", middleware.NoStore(), middleware.RateLimiter(30, time.Minute),
+			handlers.PayCodeGuard, payh.PublicReceipt)
+
 		// An open link's payer page: no auth. A :slug no link could have is
 		// answered not found before anything keyed on it or any lookup.
 		//
@@ -1430,6 +1437,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// A payer's own payments, for the app's activity feed. Her record, so
 		// never cached.
 		api.GET("/pay/history", middleware.NoStore(), auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey), payh.History)
+
+		// A payment code typed into the app (Wallet -> TSA Pay): only the id, so
+		// the app opens the checkout it already has. Guessing is what to stop:
+		// 60 a minute per address before auth (it counts every try), 20 a
+		// minute per user after it, and a code no payment could have is
+		// answered exactly as an unknown one, before any lookup.
+		api.GET("/pay/code/:code", middleware.NoStore(), middleware.RateLimiter(60, time.Minute), auth,
+			middleware.RateLimiterBy(20, time.Minute, perUserRateKey), handlers.PayCodeGuard, payh.CodeLookup)
 
 		// A merchant's own account, from the app and the web: JWT user auth.
 		// Every guarded request (payouts, keys, webhooks, the webhook secret)
