@@ -168,6 +168,14 @@ it.each([
   expect(text()).not.toContain('Print / Save PDF');
 });
 
+it('a receipt on the www. host is ours too', async () => {
+  const www = 'https://www.tsaconnectworld.com/r/TSA-7K2QF-M9XWD';
+  await show({ ...paidLive, receiptUrl: www });
+  expect(text()).toContain(`qr:${www}`);
+  expect(text()).toContain('Share receipt');
+  expect(text()).toContain('Print / Save PDF');
+});
+
 it('a test payment shows no receipt block even with a valid receiptUrl', async () => {
   await show({ ...paidLive, mode: 'test' });
   expect(text()).not.toContain('qr:');

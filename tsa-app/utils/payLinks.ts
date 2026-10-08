@@ -32,9 +32,13 @@ export function payReceiptShareMessage(p: { merchantName: string; customerTotal:
   return `Receipt: ${formatKobo(String(p.customerTotal))} paid to ${p.merchantName}${code}. Verify it: ${p.receiptUrl ?? ''}`;
 }
 
+/** Our receipt page's hosts: the apex and www. (the server's checkout base may be either; the landing serves both). */
+const RECEIPT_HOSTS: readonly string[] = [COMPANY.domain, `www.${COMPANY.domain}`];
+
 /** A receipt link is ours or it is nothing: https on our own domain, under /r/ — a tampered response must not open elsewhere. */
 export function safeReceiptUrl(raw: string | undefined): string | undefined {
-  if (!raw || strictHttpsHost(raw) !== COMPANY.domain) return undefined;
+  const host = raw ? strictHttpsHost(raw) : null;
+  if (!raw || !host || !RECEIPT_HOSTS.includes(host)) return undefined;
   try {
     const { pathname } = new URL(raw);
     return pathname.startsWith('/r/') && pathname.length > 3 ? raw : undefined;
