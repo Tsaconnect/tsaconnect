@@ -486,3 +486,31 @@ func TestPayRoutes_TheLandingMayStartAnOpenLinkPayment(t *testing.T) {
 		t.Fatalf("the POST itself: %d %v", w.Code, w.Header())
 	}
 }
+
+// payRoutesOwner is a signed-up user who owns an active, naira-settled merchant.
+func payRoutesOwner(t *testing.T, db *gorm.DB) (*models.User, *models.PayMerchant) {
+	t.Helper()
+	u := payRoutesUser(t, db, models.RoleUser)
+	m := &models.PayMerchant{MerchantRequestID: uuid.New(), UserID: u.ID, BusinessName: "Kemi Cakes",
+		Status: models.PayMerchantActive, SettlementMode: models.PaySettlementFiat, BankCode: "058", AccountNumber: "0123456789",
+		AccountName: "KEMI CAKES", CustomerFeeSharePercent: 100, MinAmountKobo: 100_000, MaxAmountKobo: 500_000_000,
+		WebhookSecretVersion: 1}
+	if err := db.Create(m).Error; err != nil {
+		t.Fatal(err)
+	}
+	return u, m
+}
+
+// /payments/summary is its own route, not a payment id read as "summary".
+func TestPayRoutes_SummaryIsItsOwnRoute(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	if w := payRoutesDo(r, http.MethodGet, "/api/pay/merchant/payments/summary", "", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no session: %d", w.Code)
+	}
+	u, _ := payRoutesOwner(t, db)
+	tok := payRoutesToken(t, cfg.JWTSecret, u.ID)
+	w := payRoutesDo(r, http.MethodGet, "/api/pay/merchant/payments/summary?mode=live&from=2026-10-01&to=2026-10-31", tok, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"byStatus"`) || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+}

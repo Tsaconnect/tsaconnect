@@ -161,8 +161,8 @@ func (m *PayMerchant) WebhookURLFor(mode string) string {
 // never cleared, so a payment someone tried and gave up on stays tried.
 type PayPayment struct {
 	ID                      uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1" json:"merchantId"`
-	Mode                    string     `gorm:"size:8;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:2;index:idx_pay_payments_merchant_mode_created,priority:2" json:"mode"`
+	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1;index:idx_pay_payments_merchant_mode_succeeded,priority:1" json:"merchantId"`
+	Mode                    string     `gorm:"size:8;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:2;index:idx_pay_payments_merchant_mode_created,priority:2;index:idx_pay_payments_merchant_mode_succeeded,priority:2" json:"mode"`
 	Reference               string     `gorm:"size:128;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:3" json:"reference"`
 	AmountKobo              int64      `gorm:"not null" json:"amount"`
 	Currency                string     `gorm:"size:3;not null" json:"currency"`
@@ -193,7 +193,7 @@ type PayPayment struct {
 	PaycrestOrderID         *uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"-"`
 	SettlementRef           string     `gorm:"size:128" json:"settlementRef,omitempty"`
 	FailureReason           string     `gorm:"size:255" json:"failureReason,omitempty"`
-	SucceededAt             *time.Time `json:"succeededAt,omitempty"`
+	SucceededAt             *time.Time `gorm:"index:idx_pay_payments_merchant_mode_succeeded,priority:3" json:"succeededAt,omitempty"`
 	CreatedAt               time.Time  `gorm:"index:idx_pay_payments_merchant_mode_created,priority:3;index:idx_pay_payments_open_link_created,priority:2" json:"createdAt"`
 	UpdatedAt               time.Time  `json:"updatedAt"`
 }

@@ -1442,6 +1442,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.GET("", payh.OwnerMerchant)
 			owner.GET("/payments", payh.OwnerPayments)
 			owner.GET("/payments/:id", payh.OwnerPayment)
+			// Reconciliation reads. Static segments beside /payments/:id (Gin 1.10
+			// matches the static route first).
+			owner.GET("/payments/summary", payh.OwnerPaymentSummary)
 			// Payment links. A create resent with the same Idempotency-Key (a
 			// retry after a lost answer) replays the first link rather than
 			// making a second; it does not hold back a second request already in

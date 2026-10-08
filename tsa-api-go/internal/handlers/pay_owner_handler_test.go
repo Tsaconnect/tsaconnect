@@ -126,6 +126,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	r.POST("/api/pay/merchant/actions/:id/confirm", h.OwnerConfirmAction)
 	r.GET("/api/pay/merchant/payments", h.OwnerPayments)
 	r.GET("/api/pay/merchant/payments/:id", h.OwnerPayment)
+	r.GET("/api/pay/merchant/payments/summary", h.OwnerPaymentSummary)
 	r.POST("/api/pay/merchant/keys", h.OwnerRequestKeys)
 	r.PUT("/api/pay/merchant/endpoints", h.OwnerRequestEndpoints)
 	r.PUT("/api/pay/merchant/business-name", h.OwnerRequestBusinessName)
@@ -763,5 +764,36 @@ func TestPayOwner_PaymentsFilterByTheDayTheyWereMadeInWAT(t *testing.T) {
 		if res := o.do(http.MethodGet, "/api/pay/merchant/payments?mode=live&"+q, nil); res.status != http.StatusBadRequest || res.Code != "date_range" {
 			t.Fatalf("%s: status %d code %q", q, res.status, res.Code)
 		}
+	}
+}
+
+func TestPayOwner_SummaryIsTheirOwnModeAndPeriod(t *testing.T) {
+	o := newOwnerRig(t)
+	ctx := context.Background()
+	paidAt := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	paid := func(m *models.PayMerchant, ref string) {
+		p, _, err := o.payments.Create(ctx, m, models.PayModeLive, services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: ref})
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.db.Model(&models.PayPayment{}).Where("id = ?", p.ID).Updates(map[string]any{"status": models.PayStatusSucceeded, "succeeded_at": paidAt, "created_at": paidAt})
+	}
+	paid(o.m, "PNR-MINE")
+	paid(seedHandlerMerchant(t, o.db), "PNR-STRANGER")
+
+	res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=live&from=2026-10-01&to=2026-10-31", nil)
+	for _, want := range []string{`"succeeded":{"count":1,"customerTotal":5050506,"merchantNet":5000000}`, `"byStatus":{"succeeded":1}`, `"refunds":{"count":0,"amount":"0.00"}`} {
+		if res.status != http.StatusOK || !strings.Contains(res.raw, want) {
+			t.Fatalf("want %s in %d %s", want, res.status, res.raw)
+		}
+	}
+	if res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=test&from=2026-10-01&to=2026-10-31", nil); !strings.Contains(res.raw, `"succeeded":{"count":0,"customerTotal":0,"merchantNet":0},"byStatus":{}`) {
+		t.Fatalf("test mode: %s", res.raw)
+	}
+	if res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=live", nil); !strings.Contains(res.raw, `"count":1`) {
+		t.Fatalf("all time: %s", res.raw)
+	}
+	if res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=live&from=2026-10-01", nil); res.status != http.StatusBadRequest || res.Code != "date_range" {
+		t.Fatalf("half a range: %d %q", res.status, res.Code)
 	}
 }

@@ -2,10 +2,13 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -87,5 +90,92 @@ func TestPayPayment_ListFiltersByTheDayItWasMadeInWAT(t *testing.T) {
 	}
 	if _, total, _ := s.List(ctx, PayListFilter{MerchantID: &m.ID, Mode: models.PayModeLive}); total != 4 {
 		t.Fatalf("no dates: total %d", total)
+	}
+}
+
+// fakeRefundAgg stands in for Plan 3a's refund service.
+type fakeRefundAgg struct {
+	byPayment        map[uuid.UUID]PayRefundAgg
+	totals           PaySummaryRefunds
+	gotStart, gotEnd time.Time
+	calls            [][]uuid.UUID
+}
+
+func (f *fakeRefundAgg) AggregateByPayment(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]PayRefundAgg, error) {
+	f.calls = append(f.calls, append([]uuid.UUID(nil), ids...))
+	out := map[uuid.UUID]PayRefundAgg{}
+	for _, id := range ids {
+		if a, ok := f.byPayment[id]; ok {
+			out[id] = a
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeRefundAgg) TotalsConfirmed(_ context.Context, _ uuid.UUID, _ string, start, end time.Time) (PaySummaryRefunds, error) {
+	f.gotStart, f.gotEnd = start, end
+	return f.totals, nil
+}
+
+func TestPayReconciliation_SummaryCountsMoneyByPaidDayAndStatusesByMadeDay(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	live := models.PayModeLive
+	reconPayment(t, s, m, live, "MADE-SEP-PAID-OCT", reconTime("2026-09-30T12:00:00Z"), reconAt("2026-09-30T23:30:00Z")) // paid 00:30 WAT 1 Oct
+	reconPayment(t, s, m, live, "MADE-PAID-OCT", reconTime("2026-10-05T10:00:00Z"), reconAt("2026-10-05T10:05:00Z"))
+	reconPayment(t, s, m, live, "WAITING", reconTime("2026-10-20T10:00:00Z"), nil)
+	called := reconPayment(t, s, m, live, "CALLED-OFF", reconTime("2026-10-21T10:00:00Z"), nil)
+	s.db.Model(&models.PayPayment{}).Where("id = ?", called.ID).Updates(map[string]any{"status": models.PayStatusExpired, "failure_reason": PayReasonMerchantCancelled})
+	reconPayment(t, s, m, live, "MADE-OCT-PAID-NOV", reconTime("2026-10-22T10:00:00Z"), reconAt("2026-10-31T23:30:00Z")) // paid 00:30 WAT 1 Nov
+	scan := reconPayment(t, s, m, live, "UNTRIED-SCAN", reconTime("2026-10-23T10:00:00Z"), nil)
+	s.db.Model(&models.PayPayment{}).Where("id = ?", scan.ID).Update("source", models.PaySourceOpen)
+	reconPayment(t, s, m, models.PayModeTest, "TEST", reconTime("2026-10-05T10:00:00Z"), reconAt("2026-10-05T10:05:00Z"))
+	reconPayment(t, s, seedPayMerchant(t, s.db), live, "STRANGER", reconTime("2026-10-05T10:00:00Z"), reconAt("2026-10-05T10:05:00Z"))
+
+	start, end, _ := ParsePayDateRange("2026-10-01", "2026-10-31")
+	sum, err := s.Summary(ctx, m.ID, live, start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Succeeded != (PaySummarySucceeded{Count: 2, CustomerTotalKobo: 2 * 5_050_506, MerchantNetKobo: 2 * 5_000_000}) {
+		t.Fatalf("succeeded %+v: the two paid 1–31 Oct Lagos time, whenever they were made", sum.Succeeded)
+	}
+	want := map[string]int64{"succeeded": 2, "pending": 1, "cancelled": 1}
+	if len(sum.ByStatus) != len(want) {
+		t.Fatalf("byStatus %v, want %v", sum.ByStatus, want)
+	}
+	for k, v := range want {
+		if sum.ByStatus[k] != v {
+			t.Fatalf("byStatus %v, want %v", sum.ByStatus, want)
+		}
+	}
+	raw, _ := json.Marshal(sum)
+	if !strings.Contains(string(raw), `"refunds":{"count":0,"amount":"0.00"}`) ||
+		!strings.Contains(string(raw), `"succeeded":{"count":2,"customerTotal":10101012,"merchantNet":10000000}`) {
+		t.Fatalf("json %s", raw)
+	}
+
+	agg := &fakeRefundAgg{totals: PaySummaryRefunds{Count: 1, AmountMicroUSD: 12_500_000}}
+	s.SetRefundAggregator(agg)
+	sum, err = s.Summary(ctx, m.ID, live, start, end)
+	if err != nil || sum.Refunds != agg.totals || !agg.gotStart.Equal(start) || !agg.gotEnd.Equal(end) {
+		t.Fatalf("refunds %+v err %v; aggregator asked for %v–%v", sum.Refunds, err, agg.gotStart, agg.gotEnd)
+	}
+	if raw, _ := json.Marshal(sum); !strings.Contains(string(raw), `"refunds":{"count":1,"amount":"12.50"}`) {
+		t.Fatalf("json %s", raw)
+	}
+	if all, _ := s.Summary(ctx, m.ID, live, time.Time{}, time.Time{}); all.Succeeded.Count != 3 {
+		t.Fatalf("no dates is all time: %+v", all.Succeeded)
+	}
+}
+
+func TestPayPayment_PaidDayReadsHaveTheirIndex(t *testing.T) {
+	db := newPayTestDB(t)
+	var ddl string
+	if err := db.Raw(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_pay_payments_merchant_mode_succeeded'`).Scan(&ddl).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ReplaceAll(ddl, "`", ""), "(merchant_id,mode,succeeded_at)") {
+		t.Fatalf("index columns: %q", ddl)
 	}
 }

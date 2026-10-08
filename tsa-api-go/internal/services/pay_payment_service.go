@@ -116,11 +116,12 @@ type PayPaymentService struct {
 	feeBps       int
 	checkoutBase string
 	now          func() time.Time
-	events       *events.Bus      // nil until SetEvents: no "payment received" alerts
-	intents      payIntents       // nil until SetIntents (ramp sell off: converted payments unavailable)
-	deposits     payDepositReader // nil until SetDepositReader: an expired order can then never be proven empty
-	skipped      atomic.Int64     // reconcile ticks skipped in a row (noteTick)
-	alerted      sync.Map         // alertOnce's memory: name+"/"+attemptID -> time.Time last alerted; pruneAlerted bounds it
+	events       *events.Bus         // nil until SetEvents: no "payment received" alerts
+	intents      payIntents          // nil until SetIntents (ramp sell off: converted payments unavailable)
+	deposits     payDepositReader    // nil until SetDepositReader: an expired order can then never be proven empty
+	refundAgg    PayRefundAggregator // nil until SetRefundAggregator: every payment reads as never refunded
+	skipped      atomic.Int64        // reconcile ticks skipped in a row (noteTick)
+	alerted      sync.Map            // alertOnce's memory: name+"/"+attemptID -> time.Time last alerted; pruneAlerted bounds it
 }
 
 // NewPayPaymentService constructs a PayPaymentService. feeBps is the

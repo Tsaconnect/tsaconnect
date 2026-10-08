@@ -23,3 +23,27 @@ func payOwnerDateRange(c *gin.Context) (time.Time, time.Time, bool) {
 	}
 	return start, end, true
 }
+
+// GET /api/pay/merchant/payments/summary?mode&from&to — the period's totals:
+// what was paid in it (by the day it was paid), how the payments made in it
+// ended, and the refunds confirmed in it. No dates: all time.
+func (h *PayHandler) OwnerPaymentSummary(c *gin.Context) {
+	_, m, ok := h.payOwnerMerchant(c)
+	if !ok {
+		return
+	}
+	mode, ok := payOwnerMode(c)
+	if !ok {
+		return
+	}
+	start, end, ok := payOwnerDateRange(c)
+	if !ok {
+		return
+	}
+	sum, err := h.payments.Summary(c.Request.Context(), m.ID, mode, start, end)
+	if err != nil {
+		payOwnerFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Summary", sum)
+}

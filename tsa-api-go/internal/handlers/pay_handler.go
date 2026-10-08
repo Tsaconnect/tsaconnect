@@ -39,6 +39,7 @@ type payPaymentAPI interface {
 	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID, mode, reason string) (int, error)
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
+	Summary(ctx context.Context, merchantID uuid.UUID, mode string, start, end time.Time) (services.PaySummary, error)
 	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
 	Payer(ctx context.Context, p *models.PayPayment) (*services.PayPayerView, error)
 }
