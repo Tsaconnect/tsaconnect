@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
@@ -106,3 +107,39 @@ func (d *payCSVDownload) Write(b []byte) (int, error) {
 
 // Flush sends what has been written so far, so a long export streams.
 func (d *payCSVDownload) Flush() { d.c.Writer.Flush() }
+
+// POST /api/pay/merchant/deliveries/:id/resend?mode — the owner sends one of
+// their webhooks again. One that never arrived is retried now. One that did is
+// sent anew, under a new delivery id with the payment as it is now, and its
+// record is kept (services.ResendForMerchant). Another merchant's delivery, or
+// one in the other mode, is not found.
+func (h *PayHandler) OwnerResendDelivery(c *gin.Context) {
+	_, m, ok := h.payOwnerMerchant(c)
+	if !ok {
+		return
+	}
+	mode, ok := payOwnerMode(c)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Webhook delivery not found")
+		return
+	}
+	if h.webhooks == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Webhooks aren't available right now")
+		return
+	}
+	d, err := h.webhooks.ResendForMerchant(c.Request.Context(), m.ID, mode, id)
+	switch {
+	case err == nil:
+		utils.SuccessResponse(c, http.StatusOK, "Webhook queued", gin.H{"delivery": payOwnerDelivery(d)})
+	case errors.Is(err, services.ErrPayDeliveryNotFound):
+		utils.ErrorResponse(c, http.StatusNotFound, "Webhook delivery not found")
+	case errors.Is(err, services.ErrPayWebhookNoURL):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "Add a webhook URL for this mode under API keys & webhooks first", "no_webhook_url")
+	default:
+		payOwnerFail(c, err)
+	}
+}

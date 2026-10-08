@@ -480,8 +480,7 @@ func (h *PayHandler) OwnerPayment(c *gin.Context) {
 	}
 	views := make([]payOwnerDeliveryView, len(deliveries))
 	for i, d := range deliveries {
-		views[i] = payOwnerDeliveryView{ID: d.ID, Event: d.Event, Attempts: d.Attempts, LastStatusCode: d.LastStatusCode,
-			LastError: d.LastError, NextAttemptAt: d.NextAttemptAt, DeliveredAt: d.DeliveredAt, FailedAt: d.FailedAt, CreatedAt: d.CreatedAt}
+		views[i] = payOwnerDelivery(d)
 	}
 	payment, err := h.payments.Views(c.Request.Context(), []models.PayPayment{*p})
 	if err != nil {
@@ -503,6 +502,11 @@ type payOwnerDeliveryView struct {
 	DeliveredAt    *time.Time `json:"deliveredAt,omitempty"`
 	FailedAt       *time.Time `json:"failedAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
+}
+
+func payOwnerDelivery(d models.PayWebhookDelivery) payOwnerDeliveryView {
+	return payOwnerDeliveryView{ID: d.ID, Event: d.Event, Attempts: d.Attempts, LastStatusCode: d.LastStatusCode,
+		LastError: d.LastError, NextAttemptAt: d.NextAttemptAt, DeliveredAt: d.DeliveredAt, FailedAt: d.FailedAt, CreatedAt: d.CreatedAt}
 }
 
 // payOwnerBind is the signed-in owner with the request body read into req.

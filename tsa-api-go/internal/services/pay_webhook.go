@@ -76,6 +76,15 @@ const payWebhookBodyReadLimit = 64 * 1024
 // matches the given id.
 var ErrPayWebhookDeliveryNotFound = errors.New("webhook delivery not found")
 
+// ErrPayDeliveryNotFound is the owner routes' name for the same refusal:
+// ResendForMerchant answers it for another merchant's delivery, one in the
+// other mode, and one that doesn't exist alike.
+var ErrPayDeliveryNotFound = ErrPayWebhookDeliveryNotFound
+
+// ErrPayWebhookNoURL: a delivered event can't be sent anew because the
+// merchant has no webhook URL for its mode.
+var ErrPayWebhookNoURL = errors.New("no webhook URL is set for this mode")
+
 // PayWebhookSender delivers TSA Pay webhook events on a schedule, signing
 // each payload with the receiving merchant's per-mode secret and never
 // retrying a delivery the schedule has already given up on.
@@ -84,6 +93,7 @@ type PayWebhookSender struct {
 	merchants *PayMerchantService
 	client    *http.Client
 	now       func() time.Time
+	payments  *PayPaymentService // nil until SetPayments: a delivered event can't be sent anew
 }
 
 // NewPayWebhookSender constructs a PayWebhookSender. client is injected so
@@ -492,4 +502,38 @@ func (s *PayWebhookSender) Resend(ctx context.Context, deliveryID uuid.UUID) err
 		return ErrPayWebhookDeliveryNotFound
 	}
 	return nil
+}
+
+// SetPayments wires the payment service a delivered event is rebuilt from
+// (the payment as it is now). Unset, ResendForMerchant can only retry an
+// undelivered event.
+func (s *PayWebhookSender) SetPayments(p *PayPaymentService) { s.payments = p }
+
+// ResendForMerchant is an owner's "send it again" on one of their own
+// webhook deliveries. ErrPayDeliveryNotFound unless the delivery belongs to
+// merchantID in mode. One not yet delivered (pending a retry, or given up)
+// is retried in place through Resend. One already delivered is never
+// changed: its event is queued as a new delivery of the payment as it is now,
+// under a new id. Either way, the delivery to be sent is returned.
+func (s *PayWebhookSender) ResendForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, deliveryID uuid.UUID) (models.PayWebhookDelivery, error) {
+	var d models.PayWebhookDelivery
+	err := s.db.WithContext(ctx).Where("id = ? AND merchant_id = ? AND mode = ?", deliveryID, merchantID, mode).First(&d).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.PayWebhookDelivery{}, ErrPayDeliveryNotFound
+	}
+	if err != nil {
+		return models.PayWebhookDelivery{}, err
+	}
+	if d.DeliveredAt == nil {
+		if err := s.Resend(ctx, d.ID); err != nil {
+			return models.PayWebhookDelivery{}, err
+		}
+		var fresh models.PayWebhookDelivery
+		err := s.db.WithContext(ctx).First(&fresh, "id = ?", d.ID).Error
+		return fresh, err
+	}
+	if s.payments == nil {
+		return models.PayWebhookDelivery{}, errors.New("tsa-pay: webhook redelivery is not wired (SetPayments)")
+	}
+	return s.payments.redeliver(ctx, &d)
 }

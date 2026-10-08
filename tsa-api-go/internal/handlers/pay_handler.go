@@ -71,6 +71,7 @@ type payOpenLinkAPI interface {
 type payWebhookAPI interface {
 	DeliverDue(ctx context.Context, limit int) (int, error)
 	Resend(ctx context.Context, deliveryID uuid.UUID) error
+	ResendForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, deliveryID uuid.UUID) (models.PayWebhookDelivery, error)
 }
 
 // payCheckoutStarter is the slice of *services.PayCheckoutService the naira

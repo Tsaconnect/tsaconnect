@@ -1447,6 +1447,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.GET("/payments/summary", payh.OwnerPaymentSummary)
 			// The CSV reads up to 10,000 rows: its own tight limit.
 			owner.GET("/payments/export", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerExportPayments)
+			// A webhook sent again: scoped to the owner's merchant and mode in-handler.
+			owner.POST("/deliveries/:id/resend", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerResendDelivery)
 			// Payment links. A create resent with the same Idempotency-Key (a
 			// retry after a lost answer) replays the first link rather than
 			// making a second; it does not hold back a second request already in

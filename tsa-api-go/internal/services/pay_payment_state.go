@@ -634,15 +634,35 @@ func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, ev
 	if p.Untried() {
 		return nil
 	}
+	if err := requirePayWebhookURL(tx, p); errors.Is(err, ErrPayWebhookNoURL) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	delivery, err := s.webhookDelivery(p, event)
+	if err != nil {
+		return err
+	}
+	return tx.Create(&delivery).Error
+}
+
+// requirePayWebhookURL loads p's merchant and returns ErrPayWebhookNoURL when
+// it has no webhook URL for p's mode: nothing is to be queued for it.
+func requirePayWebhookURL(tx *gorm.DB, p *models.PayPayment) error {
 	var m models.PayMerchant
 	if err := tx.First(&m, "id = ?", p.MerchantID).Error; err != nil {
 		return err
 	}
-	url := m.WebhookURLFor(p.Mode)
-	if url == "" {
-		return nil
+	if m.WebhookURLFor(p.Mode) == "" {
+		return ErrPayWebhookNoURL
 	}
+	return nil
+}
 
+// webhookDelivery is one event about p, as p stands now, under a fresh
+// delivery id: the id merchants dedupe on is also the body's "id". Every
+// webhook body is built here.
+func (s *PayPaymentService) webhookDelivery(p *models.PayPayment, event string) (models.PayWebhookDelivery, error) {
 	now := s.now()
 	deliveryID := uuid.New()
 	payload, err := json.Marshal(map[string]any{
@@ -653,10 +673,9 @@ func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, ev
 		"data":     s.View(p),
 	})
 	if err != nil {
-		return err
+		return models.PayWebhookDelivery{}, err
 	}
-
-	delivery := models.PayWebhookDelivery{
+	return models.PayWebhookDelivery{
 		ID:            deliveryID,
 		PaymentID:     p.ID,
 		MerchantID:    p.MerchantID,
@@ -664,6 +683,29 @@ func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, ev
 		Event:         event,
 		Payload:       string(payload),
 		NextAttemptAt: &now,
-	}
-	return tx.Create(&delivery).Error
+	}, nil
+}
+
+// redeliver queues d's event again as a new delivery of its payment as it is
+// now, leaving d (already delivered) as it was. A receiver deduping on
+// X-TSA-Delivery still processes it. ErrPayWebhookNoURL when the merchant has
+// no webhook URL for the mode any more.
+func (s *PayPaymentService) redeliver(ctx context.Context, d *models.PayWebhookDelivery) (models.PayWebhookDelivery, error) {
+	var out models.PayWebhookDelivery
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var p models.PayPayment
+		if err := tx.First(&p, "id = ?", d.PaymentID).Error; err != nil {
+			return err
+		}
+		if err := requirePayWebhookURL(tx, &p); err != nil {
+			return err
+		}
+		row, err := s.webhookDelivery(&p, d.Event)
+		if err != nil {
+			return err
+		}
+		out = row
+		return tx.Create(&out).Error
+	})
+	return out, err
 }

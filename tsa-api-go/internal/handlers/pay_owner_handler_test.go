@@ -110,7 +110,9 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	bus := events.NewBus()
 	seen := collectEvents(bus)
 	payments := services.NewPayPaymentService(db, merchants, 100, "https://x", now)
-	h := NewPayHandler(merchants, payments, nil, false).WithEvents(bus).WithOpenLinks(payments)
+	sender := services.NewPayWebhookSender(db, merchants, http.DefaultClient, now) // never ticked: no request is ever sent
+	sender.SetPayments(payments)
+	h := NewPayHandler(merchants, payments, sender, false).WithEvents(bus).WithOpenLinks(payments)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -128,6 +130,7 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	r.GET("/api/pay/merchant/payments/:id", h.OwnerPayment)
 	r.GET("/api/pay/merchant/payments/summary", h.OwnerPaymentSummary)
 	r.GET("/api/pay/merchant/payments/export", h.OwnerExportPayments)
+	r.POST("/api/pay/merchant/deliveries/:id/resend", h.OwnerResendDelivery)
 	r.POST("/api/pay/merchant/keys", h.OwnerRequestKeys)
 	r.PUT("/api/pay/merchant/endpoints", h.OwnerRequestEndpoints)
 	r.PUT("/api/pay/merchant/business-name", h.OwnerRequestBusinessName)
@@ -823,5 +826,57 @@ func TestPayOwner_ExportIsACSVDownloadAndRefusalsAreJSON(t *testing.T) {
 		if res.status != http.StatusBadRequest || res.Code != "date_range" || !strings.HasPrefix(res.raw, "{") {
 			t.Fatalf("%q: %d %s", q, res.status, res.raw)
 		}
+	}
+}
+
+func TestPayOwner_ResendIsTheirOwnAndKeepsADeliveredRecord(t *testing.T) {
+	o := newOwnerRig(t)
+	o.db.Model(o.m).Update("webhook_url", "https://skyair.ng/hook")
+	p, _, err := o.payments.Create(context.Background(), o.m, models.PayModeLive, services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-HOOK"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := payHandlerNow
+	failed := models.PayWebhookDelivery{PaymentID: p.ID, MerchantID: o.m.ID, Mode: models.PayModeLive, Event: models.PayEventFailed,
+		Payload: `{"old":true}`, Attempts: 7, FailedAt: &at}
+	delivered := models.PayWebhookDelivery{PaymentID: p.ID, MerchantID: o.m.ID, Mode: models.PayModeLive, Event: models.PayEventSucceeded,
+		Payload: `{"old":true}`, Attempts: 1, LastStatusCode: 200, DeliveredAt: &at}
+	stranger := seedHandlerMerchant(t, o.db)
+	theirs := models.PayWebhookDelivery{PaymentID: p.ID, MerchantID: stranger.ID, Mode: models.PayModeLive, Event: models.PayEventSucceeded, Payload: `{}`}
+	for _, d := range []*models.PayWebhookDelivery{&failed, &delivered, &theirs} {
+		if err := o.db.Create(d).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	resend := func(id, mode string) *ownerResponse {
+		return o.do(http.MethodPost, "/api/pay/merchant/deliveries/"+id+"/resend?mode="+mode, nil)
+	}
+
+	if res := resend(failed.ID.String(), "live"); res.status != http.StatusOK || !strings.Contains(res.raw, `"id":"`+failed.ID.String()+`"`) || !strings.Contains(res.raw, `"attempts":0`) {
+		t.Fatalf("failed: %d %s", res.status, res.raw)
+	}
+	res := resend(delivered.ID.String(), "live")
+	if res.status != http.StatusOK || strings.Contains(res.raw, delivered.ID.String()) || strings.Contains(res.raw, "payload") {
+		t.Fatalf("delivered: %d %s", res.status, res.raw)
+	}
+	var kept models.PayWebhookDelivery
+	o.db.First(&kept, "id = ?", delivered.ID)
+	var n int64
+	o.db.Model(&models.PayWebhookDelivery{}).Where("merchant_id = ?", o.m.ID).Count(&n)
+	if kept.DeliveredAt == nil || kept.Attempts != 1 || n != 3 {
+		t.Fatalf("original %+v, %d rows: the delivered record stays and a new one is added", kept, n)
+	}
+	for name, c := range map[string][2]string{
+		"another merchant's": {theirs.ID.String(), "live"},
+		"the other mode":     {failed.ID.String(), "test"},
+		"not an id":          {"nope", "live"},
+	} {
+		if res := resend(c[0], c[1]); res.status != http.StatusNotFound {
+			t.Fatalf("%s: %d %s", name, res.status, res.raw)
+		}
+	}
+	o.db.Model(o.m).Update("webhook_url", "")
+	if res := resend(delivered.ID.String(), "live"); res.status != http.StatusUnprocessableEntity || res.Code != "no_webhook_url" {
+		t.Fatalf("no URL: %d %s", res.status, res.raw)
 	}
 }

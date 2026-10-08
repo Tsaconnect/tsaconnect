@@ -646,3 +646,84 @@ func TestPayWebhook_ATransportFailureDoesNotStoreTheURLQuery(t *testing.T) {
 		t.Fatalf("attempts %d last_error %q", got.Attempts, got.LastError)
 	}
 }
+
+func TestPayWebhook_ResendForMerchantRequeuesOnlyItsOwnUndeliveredEvent(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	d := queuedDelivery(t, s, m, "https://skyair.ng/h")
+	failedAt := payTestNow
+	s.db.Model(d).Updates(map[string]any{"failed_at": &failedAt, "next_attempt_at": nil, "attempts": 7})
+	sender := NewPayWebhookSender(s.db, s.merchants, &http.Client{Transport: failingTransport{t}}, func() time.Time { return payTestNow })
+	sender.SetPayments(s)
+
+	other := seedPayMerchant(t, s.db)
+	for name, c := range map[string]struct {
+		merchant uuid.UUID
+		mode     string
+		id       uuid.UUID
+	}{
+		"another merchant": {other.ID, models.PayModeTest, d.ID},
+		"the other mode":   {m.ID, models.PayModeLive, d.ID},
+		"no such delivery": {m.ID, models.PayModeTest, uuid.New()},
+	} {
+		if _, err := sender.ResendForMerchant(ctx, c.merchant, c.mode, c.id); !errors.Is(err, ErrPayDeliveryNotFound) {
+			t.Fatalf("%s: err %v", name, err)
+		}
+	}
+	got, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID)
+	if err != nil || got.ID != d.ID || got.FailedAt != nil || got.Attempts != 0 || got.NextAttemptAt == nil {
+		t.Fatalf("resend: %+v %v", got, err)
+	}
+	var n int64
+	s.db.Model(&models.PayWebhookDelivery{}).Count(&n)
+	if n != 1 {
+		t.Fatalf("an undelivered event is retried in place, not copied: %d rows", n)
+	}
+}
+
+func TestPayWebhook_ResendForMerchantOfADeliveredEventIsANewDeliveryOfThePaymentNow(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	d := queuedDelivery(t, s, m, "https://skyair.ng/h")
+	deliveredAt := payTestNow
+	s.db.Model(d).Updates(map[string]any{"delivered_at": &deliveredAt, "next_attempt_at": nil, "attempts": 1, "last_status_code": 200})
+	s.db.Model(&models.PayPayment{}).Where("id = ?", d.PaymentID).Update("settlement_ref", "ord_now")
+	sender := NewPayWebhookSender(s.db, s.merchants, &http.Client{Transport: failingTransport{t}}, func() time.Time { return payTestNow })
+	sender.SetPayments(s)
+
+	first, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range []models.PayWebhookDelivery{first, second} {
+		if got.ID == d.ID || got.Event != d.Event || got.PaymentID != d.PaymentID || got.Mode != d.Mode ||
+			got.Attempts != 0 || got.DeliveredAt != nil || got.NextAttemptAt == nil {
+			t.Fatalf("a delivered event is sent anew as its own delivery: %+v", got)
+		}
+		var body struct {
+			ID   string
+			Type string
+			Data struct{ SettlementRef string }
+		}
+		if err := json.Unmarshal([]byte(got.Payload), &body); err != nil || body.ID != got.ID.String() || body.Type != d.Event || body.Data.SettlementRef != "ord_now" {
+			t.Fatalf("payload %s: the new id and the payment as it is now", got.Payload)
+		}
+	}
+	if first.ID == second.ID {
+		t.Fatal("two resends shared one delivery id")
+	}
+	var original models.PayWebhookDelivery
+	s.db.First(&original, "id = ?", d.ID)
+	if original.DeliveredAt == nil || original.Attempts != 1 || original.LastStatusCode != 200 {
+		t.Fatalf("the delivered record was changed: %+v", original)
+	}
+
+	s.db.Model(m).Update("test_webhook_url", "")
+	if _, err := sender.ResendForMerchant(ctx, m.ID, models.PayModeTest, d.ID); !errors.Is(err, ErrPayWebhookNoURL) {
+		t.Fatalf("no webhook URL for the mode: err %v", err)
+	}
+}

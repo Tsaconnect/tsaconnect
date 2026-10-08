@@ -533,3 +533,21 @@ func TestPayRoutes_ExportIsItsOwnRouteAndLimitedTenAMinute(t *testing.T) {
 		t.Fatalf("the 11th export in a minute: %d", w.Code)
 	}
 }
+
+func TestPayRoutes_ResendIsAuthedAndLimitedTenAMinute(t *testing.T) {
+	r, cfg, db, _ := newPayRoutesRig(t)
+	path := "/api/pay/merchant/deliveries/" + uuid.NewString() + "/resend?mode=live"
+	if w := payRoutesDo(r, http.MethodPost, path, "", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no session: %d", w.Code)
+	}
+	u, _ := payRoutesOwner(t, db)
+	tok := payRoutesToken(t, cfg.JWTSecret, u.ID)
+	for i := 1; i <= 10; i++ {
+		if w := payRoutesDo(r, http.MethodPost, path, tok, nil); w.Code == http.StatusTooManyRequests {
+			t.Fatalf("resend %d in a minute refused", i)
+		}
+	}
+	if w := payRoutesDo(r, http.MethodPost, path, tok, nil); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("the 11th resend in a minute: %d", w.Code)
+	}
+}

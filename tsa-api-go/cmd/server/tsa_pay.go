@@ -80,6 +80,8 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 		payments.SetEvents(bus)
 	}
 	sender := services.NewPayWebhookSender(db, merchants, services.NewPayWebhookHTTPClient(), time.Now)
+	// An owner's resend of a delivered event rebuilds it from the payment as it is now.
+	sender.SetPayments(payments)
 
 	scheduler.Register(jobs.NewPayWebhookWorker(sender, 15*time.Second), jobs.AlertOnFailureStreak())
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
