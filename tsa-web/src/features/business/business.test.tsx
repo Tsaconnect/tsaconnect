@@ -279,4 +279,35 @@ describe('business area', () => {
     await screen.findByRole('radio', { name: 'All' });
     expect(screen.queryByLabelText('From')).not.toBeInTheDocument();
   });
+
+  it('Resend sends each webhook again and reads the attempts again', async () => {
+    let reads = 0;
+    const failed = { id: 'd1', event: 'payment.failed', attempts: 7, lastStatusCode: 500, lastError: 'http 500', createdAt: payment.createdAt, failedAt: payment.createdAt };
+    const delivered = { id: 'd2', event: 'payment.succeeded', attempts: 1, lastStatusCode: 200, createdAt: payment.createdAt, deliveredAt: payment.createdAt };
+    const noUrl = { id: 'd3', event: 'payment.expired', attempts: 1, lastStatusCode: 200, createdAt: payment.createdAt, deliveredAt: payment.createdAt };
+    const f = stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 20 }),
+      [`/api/pay/merchant/payments/${payment.id}`]: () => { reads += 1; return ok({ payment, payer: null, deliveries: [failed, delivered, noUrl] }); },
+      '/api/pay/merchant/deliveries/d1/resend': ok({ delivery: { ...failed, attempts: 0, failedAt: undefined, nextAttemptAt: payment.createdAt } }),
+      '/api/pay/merchant/deliveries/d2/resend': ok({ delivery: { ...delivered, id: 'd4', attempts: 0, deliveredAt: undefined } }),
+      '/api/pay/merchant/deliveries/d3/resend': fail(422, 'Add a webhook URL for this mode under API keys & webhooks first', 'no_webhook_url'),
+    });
+    mountAt(`/business/live/payments/${payment.id}`);
+    const drawer = await screen.findByRole('dialog');
+    const row = (event: string) => within(drawer).getByText(event).closest('li')!;
+
+    await userEvent.click(within(await waitFor(() => row('payment.failed'))).getByRole('button', { name: 'Resend' }));
+    expect(await screen.findByText('Queued to send again — it goes out within a minute')).toBeInTheDocument();
+    const call = f.mock.calls.find(([u]) => String(u).startsWith('/api/pay/merchant/deliveries/d1/resend'))!;
+    expect(call[0]).toBe('/api/pay/merchant/deliveries/d1/resend?mode=live');
+    expect(call[1].method).toBe('POST');
+    await waitFor(() => expect(reads).toBe(2));
+
+    await userEvent.click(within(row('payment.succeeded')).getByRole('button', { name: 'Resend' }));
+    expect(await screen.findByText('Sent again as a new delivery — it goes out within a minute')).toBeInTheDocument();
+
+    await userEvent.click(within(row('payment.expired')).getByRole('button', { name: 'Resend' }));
+    expect(await screen.findByText('Add a webhook URL for this mode under API keys & webhooks first')).toBeInTheDocument();
+  });
 });

@@ -281,3 +281,10 @@ export const EXPORT_MAX_DAYS = 366;
 /** The CSV of payments paid from `from` to `to`. It is a plain download, so it carries the session cookie itself. */
 export const paymentsExportUrl = (mode: Mode, from: string, to: string) =>
   `/api/pay/merchant/payments/export?${new URLSearchParams({ mode, from, to })}`;
+
+/**
+ * Sends a webhook again. One that hasn't arrived is retried now. One that has is
+ * sent anew, with a new delivery id and the payment as it is now; its record stays.
+ */
+export const resendDelivery = (mode: Mode, id: string) =>
+  api<{ delivery: Delivery }>(`/pay/merchant/deliveries/${encodeURIComponent(id)}/resend?mode=${mode}`, { method: 'POST' });
