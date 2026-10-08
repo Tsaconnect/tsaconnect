@@ -485,6 +485,8 @@ type treasuryLaneChecker interface {
 	// right now (briefly cached), so a route is never offered that the
 	// treasury could not send.
 	CanPayForGas(ctx context.Context, chainKey string, units uint64) bool
+	// TokenDecimals is a lane token's decimals, read on-chain (spec S23).
+	TokenDecimals(chainKey, token string) (int, error)
 }
 
 // SetTreasuryLanes wires the REAL gate on which requested chains a converted
@@ -1012,13 +1014,16 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 
 // SettlementLeg is a settlement leg whose delivered amount is already known —
 // the company wallet's sale (route 1) or Flutterwave's send (route 2) of D
-// USDC into the conversion treasury (spec §15.7).
+// USDC into the conversion treasury (spec §15.7), or the pool's release.
 type SettlementLeg struct {
-	ChainKey   string   // where D lands: "base" | "polygon"
-	Token      string   // "USDC"
-	Delivered  *big.Int // D, 6-dp units (StableAssetDecimals)
-	FiatAmount string   // major units, as she typed it
-	Rate       string   // the leg's display rate, major units per token
+	ChainKey string // where D lands: "base" | "polygon" | "bsc"
+	Token    string // "USDC" | "USDT"
+	// Delivered is D in 6-dp canonical units (StableAssetDecimals), for every
+	// leg token — an 18-dp leg is scaled to its own base units when priced
+	// (spec 2026-10-08 S23).
+	Delivered  *big.Int
+	FiatAmount string // major units, as she typed it
+	Rate       string // the leg's display rate, major units per token
 	MarketRate float64
 }
 
@@ -1054,7 +1059,7 @@ func (s *PaycrestQuoteService) PriceConvertedLeg(ctx context.Context, leg Settle
 	}
 	dl, ok := s.deliveredLeg(chain, token, leg)
 	if !ok {
-		skip("the settlement leg cannot be priced (unknown chain or token, non-6-dp token or no amount)")
+		skip("the settlement leg cannot be priced (unknown chain or token, fewer than 6 decimals, or no amount)")
 		return nil, nil
 	}
 	v, ok := s.convertedVenue(ctx, dl, want, asset, skip)
@@ -1072,6 +1077,9 @@ func (s *PaycrestQuoteService) PriceConvertedLeg(ctx context.Context, leg Settle
 type settlementLeg struct {
 	venue PaycrestVenue
 	at    func(budgetBps int) (PaycrestVenue, bool)
+	// decimals is the precision the leg was priced in, so the stable promise
+	// is scaled from the same figure rather than a second lookup (S23).
+	decimals int
 }
 
 // paycrestLeg is Paycrest's leg: the direct venue, sent at the company take,
@@ -1084,16 +1092,31 @@ func (s *PaycrestQuoteService) paycrestLeg(src PaycrestVenue, fiatAmount string,
 	return owedLeg(src, d, tokenDecimalsFor(s.chainID(src.ChainKey), src.Token), fiatAmount, marketRate)
 }
 
-// deliveredLeg prices a leg whose D is known — the company wallet's sale or
-// Flutterwave's send. Only a 6-dp token is accepted, so D, T and the intent
-// share one precision (Decision C3).
+// deliveredLeg prices a leg whose D is known — the company wallet's sale,
+// Flutterwave's send, or the pool's releases. D arrives in 6-dp canonical
+// units; the leg is priced in its token's own base units, read on-chain, so an
+// 18-dp BSC USDT leg is exact (spec 2026-10-08 S23). Below 6 decimals is refused.
 func (s *PaycrestQuoteService) deliveredLeg(chain, token string, leg SettlementLeg) (*settlementLeg, bool) {
 	id := s.chainID(chain)
-	if id == 0 || s.tokenAddress(chain, token) == "" || tokenDecimalsFor(id, token) != StableAssetDecimals {
+	if id == 0 || s.tokenAddress(chain, token) == "" || s.treasuryLanes == nil {
+		return nil, false
+	}
+	dec, err := s.treasuryLanes.TokenDecimals(chain, token)
+	if err != nil {
+		// Review m3: an RPC blip before the client's decimals cache fills must
+		// not drop today's 6-dp company-wallet/Flutterwave legs. The table is
+		// trusted only when it says 6; an 18-dp leg is never guessed.
+		if tokenDecimalsFor(id, token) != StableAssetDecimals {
+			return nil, false
+		}
+		dec = StableAssetDecimals
+	}
+	delivered, err := CanonicalToChainUnits(leg.Delivered, dec)
+	if err != nil {
 		return nil, false
 	}
 	base := PaycrestVenue{ChainKey: chain, Network: chain, Token: token, Rate: leg.Rate, Kind: models.RouteKindDirect}
-	return owedLeg(base, leg.Delivered, StableAssetDecimals, leg.FiatAmount, leg.MarketRate)
+	return owedLeg(base, delivered, dec, leg.FiatAmount, leg.MarketRate)
 }
 
 // owedLeg is the one pricing of a settlement leg that delivers `delivered`
@@ -1136,7 +1159,7 @@ func owedLeg(base PaycrestVenue, delivered *big.Int, decimals int, fiatAmount st
 	if !ok {
 		return nil, false
 	}
-	return &settlementLeg{venue: v, at: at}, true
+	return &settlementLeg{venue: v, at: at, decimals: decimals}, true
 }
 
 // allInRate is fiat ÷ units in naira per whole token, rounded UP to the kobo:
@@ -1317,7 +1340,7 @@ func (s *PaycrestQuoteService) convertedVenue(ctx context.Context, leg *settleme
 	// route's cost as its own line, the all-in rate on T.
 	v.EffectiveRate, v.Fees, v.SpreadPercent = src.EffectiveRate, src.Fees, src.SpreadPercent
 	if asset.Stable {
-		promise := StablePromise(routeAmount, tokenDecimalsFor(s.chainID(src.ChainKey), src.Token), decimals)
+		promise := StablePromise(routeAmount, leg.decimals, decimals)
 		if route.ToAmountMin == nil || route.ToAmountMin.Cmp(promise) < 0 {
 			return nil, false // execution would refuse it on every attempt
 		}
