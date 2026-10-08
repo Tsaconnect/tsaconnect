@@ -10,6 +10,7 @@ import { toLiFiQuote, type LiFiQuote } from '@/services/lifi';
 import type { PaycrestOrder } from '@/services/paycrestApi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
 import { isPaymentId } from '@/utils/paymentId';
+import { normalizePayCode, PAY_CODE_NOT_FOUND } from '@/utils/payCode';
 
 export type PayStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'expired';
 
@@ -96,6 +97,19 @@ export type PayPublic = { id: string; merchantName: string; status: PayStatus; e
 export async function getPublicPayment(id: string, signal?: AbortSignal): Promise<PayPublic> {
   if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);
   return request<PayPublic>(`/public/${encodeURIComponent(id)}`, { signal });
+}
+
+/**
+ * The payment a code names (GET /pay/code/:code), for the TSA Pay screen —
+ * which then opens the ordinary checkout by id. A code that can't be one is
+ * refused before it reaches fetch, as a 404 like any unknown code.
+ */
+export async function lookupPayCode(code: string): Promise<string> {
+  const bare = normalizePayCode(code);
+  if (!bare) throw new PayError(PAY_CODE_NOT_FOUND, 404);
+  const data = await request<{ id: string }>(`/code/${bare}`);
+  if (!isPaymentId(data?.id)) throw new PayError(PAY_CODE_NOT_FOUND, 404);
+  return data.id;
 }
 
 /** Refuses a non-UUID before it ever reaches fetch. */
