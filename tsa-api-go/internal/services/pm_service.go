@@ -100,6 +100,34 @@ func (s *PMService) GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*m
 	return &pm, nil
 }
 
+// GetActiveByUserIDKind is GetActiveByUserID limited to one kind. Anything
+// but lp reads as merchant, the column default.
+func (s *PMService) GetActiveByUserIDKind(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
+	q := s.db.WithContext(ctx).Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive)
+	if kind == models.PaymentMerchantKindLP {
+		q = q.Where("kind = ?", models.PaymentMerchantKindLP)
+	} else {
+		q = q.Where("kind <> ?", models.PaymentMerchantKindLP)
+	}
+	var pm models.PaymentMerchant
+	err := q.First(&pm).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPMNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pm, nil
+}
+
+// LPIDs are every LP row's id, any status: the ads they own never list (S29).
+func (s *PMService) LPIDs(ctx context.Context) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+		Where("kind = ?", models.PaymentMerchantKindLP).Pluck("id", &ids).Error
+	return ids, err
+}
+
 // GetByUserID looks up the most recent PaymentMerchant for a user regardless of
 // status (pending/approved/active/paused/rejected). Used by the status read so
 // the app can distinguish "approved, needs activation" from "active".
@@ -365,8 +393,21 @@ func contains(xs []string, s string) bool {
 // ListAll returns every PaymentMerchant row ordered by created_at DESC.
 // Never returns nil; returns an empty slice when the table is empty.
 func (s *PMService) ListAll(ctx context.Context) ([]models.PaymentMerchant, error) {
-	var pms []models.PaymentMerchant
-	if err := s.db.WithContext(ctx).Order("created_at DESC").Find(&pms).Error; err != nil {
+	return s.ListByKind(ctx, "")
+}
+
+// ListByKind is ListAll narrowed to one kind ("" = every row).
+func (s *PMService) ListByKind(ctx context.Context, kind string) ([]models.PaymentMerchant, error) {
+	q := s.db.WithContext(ctx).Order("created_at DESC")
+	switch kind {
+	case "":
+	case models.PaymentMerchantKindLP:
+		q = q.Where("kind = ?", models.PaymentMerchantKindLP)
+	default:
+		q = q.Where("kind <> ?", models.PaymentMerchantKindLP)
+	}
+	pms := []models.PaymentMerchant{}
+	if err := q.Find(&pms).Error; err != nil {
 		return nil, err
 	}
 	return pms, nil

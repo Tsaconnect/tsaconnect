@@ -12,8 +12,8 @@ import (
 )
 
 // newSQLiteForPM opens an in-memory SQLite DB with the payment_merchants table
-// created via raw DDL (not AutoMigrate) to avoid PostgreSQL-specific defaults
-// such as gen_random_uuid(). Mirrors the fee_config and p2p test setups.
+// from the shared createPaymentMerchantsTable (raw DDL, not AutoMigrate, to
+// avoid PostgreSQL-specific defaults such as gen_random_uuid()).
 func newSQLiteForPM(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{
@@ -22,35 +22,7 @@ func newSQLiteForPM(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.Exec(`CREATE TABLE IF NOT EXISTS payment_merchants (
-		id                       TEXT PRIMARY KEY,
-		user_id                  TEXT NOT NULL,
-		name                     TEXT NOT NULL,
-		status                   TEXT NOT NULL DEFAULT 'pending',
-		nomba_account_id         TEXT,
-		nomba_wallet_id          TEXT,
-		nomba_creds_ref          TEXT,
-		inbound_account_number   TEXT,
-		inbound_bank             TEXT,
-		nomba_account_ref        TEXT,
-		operator_wallet_address  TEXT,
-		nomba_sub_account_id     TEXT,
-		settlement_bank_code     TEXT,
-		settlement_account_number TEXT,
-		settlement_account_name  TEXT,
-		available_ngn            TEXT NOT NULL DEFAULT '0',
-		reserved_ngn             TEXT NOT NULL DEFAULT '0',
-		provisioning_status      TEXT NOT NULL DEFAULT 'pending',
-		per_trade_cap_usd        REAL NOT NULL DEFAULT 0,
-		daily_cap_usd            REAL NOT NULL DEFAULT 0,
-		reviewed_by              TEXT,
-		reviewed_at              DATETIME,
-		review_note              TEXT,
-		created_at               DATETIME,
-		updated_at               DATETIME
-	)`).Error; err != nil {
-		t.Fatalf("create payment_merchants: %v", err)
-	}
+	createPaymentMerchantsTable(t, db)
 	return db
 }
 

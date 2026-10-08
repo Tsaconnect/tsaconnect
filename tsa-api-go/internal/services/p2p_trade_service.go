@@ -286,14 +286,15 @@ func (s *P2PTradeService) SetPMService(svc *PMService) {
 	s.pm = svc
 }
 
-// lookupActivePM returns the active PaymentMerchant for the given userID, or
-// nil if the PM feature is dormant (s.pm == nil) or no active PM exists for
-// the user (ErrPMNotFound). Any other DB error is propagated.
+// lookupActivePM returns the active payment MERCHANT (never an LP, spec §7.1)
+// for the given userID, or nil if the PM feature is dormant (s.pm == nil) or no
+// active merchant row exists for the user (ErrPMNotFound). Any other DB error
+// is propagated.
 func (s *P2PTradeService) lookupActivePM(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
 	if s.pm == nil {
 		return nil, nil // PM feature dormant — treat as non-PM user
 	}
-	pm, err := s.pm.GetActiveByUserID(ctx, userID)
+	pm, err := s.pm.GetActiveByUserIDKind(ctx, userID, models.PaymentMerchantKindMerchant)
 	if errors.Is(err, ErrPMNotFound) {
 		return nil, nil // no active PM for this user — normal ad
 	}

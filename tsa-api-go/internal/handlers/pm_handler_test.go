@@ -40,6 +40,7 @@ func newSQLiteForPMHandler(t *testing.T) *gorm.DB {
 		user_id                  TEXT NOT NULL,
 		name                     TEXT NOT NULL,
 		status                   TEXT NOT NULL DEFAULT 'pending',
+		kind TEXT NOT NULL DEFAULT 'merchant', pool_chain_id INTEGER,
 		nomba_account_id         TEXT,
 		nomba_wallet_id          TEXT,
 		nomba_creds_ref          TEXT,

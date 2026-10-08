@@ -18,6 +18,8 @@ const (
 	BusinessTypeP2PMerchant       = "p2p_merchant"
 	BusinessTypeServiceProvider   = "service_provider"
 	BusinessTypePaymentAcceptance = "payment_acceptance"
+	// BusinessTypeLiquidityProvider applies to provide TSA Liquidity (spec §8.1).
+	BusinessTypeLiquidityProvider = "liquidity_provider"
 )
 
 var ValidBusinessTypes = []string{
@@ -26,6 +28,19 @@ var ValidBusinessTypes = []string{
 	BusinessTypeP2PMerchant,
 	BusinessTypeServiceProvider,
 	BusinessTypePaymentAcceptance,
+	BusinessTypeLiquidityProvider,
+}
+
+// PaymentMerchantKindFor maps a request type to the payment_merchants kind it
+// approves into; ok=false for types that make no PaymentMerchant row.
+func PaymentMerchantKindFor(businessType string) (kind string, ok bool) {
+	switch businessType {
+	case BusinessTypeP2PMerchant:
+		return PaymentMerchantKindMerchant, true
+	case BusinessTypeLiquidityProvider:
+		return PaymentMerchantKindLP, true
+	}
+	return "", false
 }
 
 type MerchantRequest struct {

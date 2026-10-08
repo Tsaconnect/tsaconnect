@@ -16,6 +16,14 @@ const (
 	PaymentMerchantStatusRejected = "rejected" // declined at onboarding; never activated
 )
 
+// Payment-merchant kinds (TSA Liquidity spec §7.1, decision 11). An LP is a
+// PaymentMerchant of kind lp: the same request → approval → activation path.
+// uq_payment_merchants_user keeps one row per user, so never both.
+const (
+	PaymentMerchantKindMerchant = "merchant"
+	PaymentMerchantKindLP       = "lp"
+)
+
 // PMProvisioningStatus values track the lifecycle of a PM's Nomba sub-account.
 const (
 	PMProvisioningPending     = "pending"
@@ -34,6 +42,13 @@ type PaymentMerchant struct {
 	Name   string    `gorm:"size:128;not null" json:"name"`
 
 	Status string `gorm:"size:16;not null;default:'pending'" json:"status"`
+
+	// Kind is merchant (a corporate P2P payment merchant) or lp (a TSA
+	// Liquidity provider). Rows that predate it read merchant (the default).
+	Kind string `gorm:"size:16;not null;default:'merchant';index" json:"kind"`
+	// PoolChainID is the chain an LP provides on, set at approval from the one
+	// pool preset row (spec S36). Nil for merchants.
+	PoolChainID *int64 `gorm:"index" json:"poolChainId,omitempty"`
 
 	// Nomba (per-PM). NombaCredsRef points at the secret-store entry holding the
 	// client id/secret; the raw creds are NEVER stored in this table.
@@ -102,3 +117,6 @@ func (m *PaymentMerchant) BeforeCreate(tx *gorm.DB) error {
 func (m *PaymentMerchant) IsActive() bool {
 	return m != nil && m.Status == PaymentMerchantStatusActive
 }
+
+// IsLP reports whether the row is a TSA Liquidity provider.
+func (m *PaymentMerchant) IsLP() bool { return m != nil && m.Kind == PaymentMerchantKindLP }

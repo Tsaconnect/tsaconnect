@@ -117,8 +117,8 @@ func TestNgnEqual(t *testing.T) {
 // ─── Integration harness ─────────────────────────────────────────────────────
 
 // createPaymentMerchantsTable adds the payment_merchants table to the shared
-// trade-service SQLite DB (setupTradeDB doesn't include it). Mirrors the DDL in
-// pm_service_test.go's newSQLiteForPM.
+// trade-service SQLite DB (setupTradeDB doesn't include it). It is also the
+// table behind pm_service_test.go's newSQLiteForPM.
 func createPaymentMerchantsTable(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	if err := db.Exec(`CREATE TABLE IF NOT EXISTS payment_merchants (
@@ -126,6 +126,7 @@ func createPaymentMerchantsTable(t *testing.T, db *gorm.DB) {
 		user_id                  TEXT NOT NULL,
 		name                     TEXT NOT NULL,
 		status                   TEXT NOT NULL DEFAULT 'pending',
+		kind TEXT NOT NULL DEFAULT 'merchant', pool_chain_id INTEGER,
 		nomba_account_id         TEXT,
 		nomba_wallet_id          TEXT,
 		nomba_creds_ref          TEXT,
