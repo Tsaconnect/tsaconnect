@@ -51,18 +51,43 @@ func newPayCode() (string, error) {
 // Tests replace it to force a collision.
 var payCodeNext = newPayCode
 
+// payCodeIgnored are the characters NormalizePayCode drops: whitespace (Go's
+// unicode.IsSpace set) and dash punctuation (Unicode 15's Pd), spelled out
+// rather than read from the unicode tables, whose contents move with the Go
+// toolchain. The app's GO_SPACES/DASHES and the landing's PAY_CODE_IGNORED are
+// this same list — change all three together.
+var payCodeIgnored = func() map[rune]bool {
+	set := map[rune]bool{}
+	for _, r := range []rune{
+		// whitespace
+		'\t', '\n', '\v', '\f', '\r', ' ', 0x85, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+		// dashes
+		'-', 0x58A, 0x5BE, 0x1400, 0x1806, 0x2E17, 0x2E1A, 0x2E3A, 0x2E3B, 0x2E40, 0x2E5D, 0x301C, 0x3030, 0x30A0,
+		0xFE31, 0xFE32, 0xFE58, 0xFE63, 0xFF0D, 0x10EAD,
+	} {
+		set[r] = true
+	}
+	for r := rune(0x2000); r <= 0x200A; r++ { // en quad … hair space
+		set[r] = true
+	}
+	for r := rune(0x2010); r <= 0x2015; r++ { // hyphen … horizontal bar
+		set[r] = true
+	}
+	return set
+}()
+
 // NormalizePayCode reads a code as a payer typed or pasted it: whitespace and
-// dashes of any kind dropped, upper-cased, any other non-ASCII character refused, a leading TSA dropped when exactly
-// a code's worth of characters follows it (a bare code may itself start with
-// TSA), O read as 0, I and L as 1. Anything that is then not exactly ten
-// alphabet characters is not a code.
+// dashes (payCodeIgnored) dropped, upper-cased, any other non-ASCII character
+// refused, a leading TSA dropped when exactly a code's worth of characters
+// follows it (a bare code may itself start with TSA), O read as 0, I and L as
+// 1. Anything that is then not exactly ten alphabet characters is not a code.
 func NormalizePayCode(in string) (string, bool) {
 	if len(in) > 64 {
 		return "", false
 	}
 	var b strings.Builder
 	for _, r := range in {
-		if unicode.IsSpace(r) || unicode.Is(unicode.Pd, r) {
+		if payCodeIgnored[r] {
 			continue
 		}
 		// Checked before upper-casing, which folds ı to I and ſ to S: a code is ASCII.

@@ -13,6 +13,7 @@ describe('normalizePayCode (mirrors the API)', () => {
     ['TSA 7K2QF M9XWD\n', '7K2QFM9XWD'],
     ['TSA\u00A07K2QF\u2013M9XWD', '7K2QFM9XWD'], // NBSP, en dash
     ['TSA-TSA12-345XY', 'TSA12345XY'],
+    ['TSA\u30007K2QF\u{10EAD}M9XWD', '7K2QFM9XWD'], // ideographic space, astral Yezidi hyphen: on the explicit lists
   ])('%j is %s', (input, want) => {
     expect(normalizePayCode(input)).toBe(want);
   });
@@ -20,6 +21,7 @@ describe('normalizePayCode (mirrors the API)', () => {
   it.each(['', 'TSA', '7K2QF-M9XW', '7K2QF-M9XWDD', 'TSA-7K2QF-M9XWU', 'TSA-7K2QF-M9XWD-1',
   '7K2QF-M9XW!', 'A'.repeat(100),
   'TSA-7K2QF-M9XW\u0131', 'TSA-7K2QF-M9XW\u017F', 'TSA-7K2QF-M9XW\u00DF', '7K2QFM9X\u00DF', // ı ſ ß fold to ASCII; a code is ASCII
+  '7K2QF\u{10D6E}M9XWD', '7K2QF\uFEFFM9XWD', // Garay hyphen (Unicode 16 Pd) is on no list; BOM is no space
 ])('%j is not a code', (input) => {
     expect(normalizePayCode(input)).toBeNull();
   });

@@ -55,6 +55,8 @@ func TestPayCode_NormalizeForgivesWhatAPayerTypes(t *testing.T) {
 		"TSA-7K2QF-M9XIL":   "7K2QFM9X11", // I and L read as one
 		"TSA12345XY":        "TSA12345XY", // a bare code that itself starts with TSA
 		"TSA-TSA12-345XY":   "TSA12345XY",
+		// Ideographic space and the astral Yezidi hyphen: both on the explicit lists.
+		"TSA\u30007K2QF\U00010EADM9XWD": "7K2QFM9XWD",
 	} {
 		if got, ok := NormalizePayCode(in); !ok || got != want {
 			t.Fatalf("NormalizePayCode(%q) = %q, %v; want %q", in, got, ok, want)
@@ -62,7 +64,10 @@ func TestPayCode_NormalizeForgivesWhatAPayerTypes(t *testing.T) {
 	}
 	for _, in := range []string{"", "TSA", "7K2QF-M9XW", "7K2QF-M9XWDD", "TSA-7K2QF-M9XWU", "7K2QF-M9XW!",
 		"TSA-7K2QF-M9XWD-1", strings.Repeat("A", 100),
-		"TSA-7K2QF-M9XWı", "TSA-7K2QF-M9XWſ", "TSA-7K2QF-M9XWß", "7K2QFM9Xß"} {
+		"TSA-7K2QF-M9XWı", "TSA-7K2QF-M9XWſ", "TSA-7K2QF-M9XWß", "7K2QFM9Xß",
+		// The Garay hyphen (Unicode 16 Pd) is on none of the three explicit lists:
+		// the dash set must not follow the toolchain's Unicode tables. BOM is not a space.
+		"7K2QF\U00010D6EM9XWD", "7K2QF\uFEFFM9XWD"} {
 		if got, ok := NormalizePayCode(in); ok {
 			t.Fatalf("NormalizePayCode(%q) = %q, accepted", in, got)
 		}

@@ -12,10 +12,13 @@ const MAX_INPUT_BYTES = 64;
 export const PAY_CODE_NOT_FOUND = "We couldn't find that code. Check it and try again.";
 export const PAY_CODE_TOO_MANY = 'Too many tries — wait a minute.';
 
-// Go's unicode.IsSpace (JS \s differs: it also matches U+FEFF, which Go refuses as non-ASCII).
+// The API's payCodeIgnored list, as the app's two sets — the same explicit
+// code points, never a Unicode category whose contents move with the runtime.
+// Whitespace is Go's unicode.IsSpace set (JS \s differs: it also matches
+// U+FEFF, which the API refuses as non-ASCII).
 const GO_SPACES = new Set([0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0x85, 0xa0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000]
   .concat(Array.from({ length: 11 }, (_, i) => 0x2000 + i)));
-// Unicode category Pd (dash punctuation), listed out: Hermes and the Jest transform lack \p{…} escapes.
+// Dash punctuation as of Unicode 15 (Pd), listed out: Hermes and the Jest transform lack \p{…} escapes.
 const DASHES = new Set(
   [0x2d, 0x58a, 0x5be, 0x1400, 0x1806, 0x2e17, 0x2e1a, 0x2e3a, 0x2e3b, 0x2e40, 0x2e5d, 0x301c, 0x3030, 0x30a0,
     0xfe31, 0xfe32, 0xfe58, 0xfe63, 0xff0d, 0x10ead]
