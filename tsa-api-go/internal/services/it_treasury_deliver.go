@@ -126,7 +126,7 @@ func (s *ITService) treasuryIntent(ctx context.Context, intentID uuid.UUID) (*mo
 	if err != nil {
 		return nil, err
 	}
-	if intent.Direction != models.ITDirectionBuy || models.ITIntentProvider(intent) != models.ITProviderTreasury {
+	if intent.Direction != models.ITDirectionBuy || !isCompanyWalletBuy(intent) {
 		return nil, ErrITBadState
 	}
 	return intent, nil

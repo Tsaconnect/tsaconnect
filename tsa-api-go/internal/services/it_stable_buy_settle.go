@@ -181,6 +181,8 @@ func (s *ITService) claimAndPriceStableBuy(
 	)
 	if routed {
 		arrival, qErr = s.priceRoutedArrival(ctx, candidate, amountMinor, arrivedAt, ch)
+	} else if _, terr := providerTerms(candidate); terr != nil {
+		qErr = terr // review M1: never priced at Flutterwave's old endpoint
 	} else {
 		q, qErr = s.QuoteStableBuy(ctx, candidate.Asset, amountMinor, candidate.Currency)
 	}
@@ -302,8 +304,11 @@ func (s *ITService) claimAndPriceStableBuy(
 			log.Printf("[it stable buy] ALERT it_stable_buy_parked_unpriceable intent=%s payment=%s reason=%q",
 				candidate.ID, chargeID, parkedReason)
 		}
-		if routedMetric(candidate) == "treasury" {
+		switch routedMetric(candidate) {
+		case "treasury":
 			log.Printf("[it stable buy] METRIC ramp_treasury_parked intent=%s reason=%s", candidate.ID, parkedReason)
+		case "unknown":
+			log.Printf("[it stable buy] METRIC ramp_unknown_parked intent=%s provider=%q reason=%s", candidate.ID, candidate.Provider, parkedReason)
 		}
 	case routed && arrival.honoured:
 		log.Printf("[it stable buy] payment=%s funded %s %s for user=%s (quote honoured)",
@@ -416,9 +421,16 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 	if intent.Direction != models.ITDirectionBuy || !IsStableAsset(intent.Asset) {
 		return nil, ErrITBadState
 	}
-	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+	terms, err := providerTerms(intent)
+	if err != nil {
+		return nil, err
+	}
+	if terms.companyWallet {
 		// D3: market + take, the maximum, and stock won under the lock.
 		return s.repriceTreasuryParked(ctx, intent, false, nil)
+	}
+	if !terms.flutterwaveFulfils {
+		return nil, fmt.Errorf("%w: %s has no re-price", ErrUnknownITProvider, terms.provider)
 	}
 	var to string
 	switch {

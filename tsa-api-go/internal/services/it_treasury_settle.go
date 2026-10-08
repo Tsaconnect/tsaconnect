@@ -121,7 +121,7 @@ func (s *ITService) DeliverParkedTreasuryBuy(ctx context.Context, adminID, inten
 	if err != nil {
 		return nil, err
 	}
-	if intent.Direction != models.ITDirectionBuy || models.ITIntentProvider(intent) != models.ITProviderTreasury {
+	if intent.Direction != models.ITDirectionBuy || !isCompanyWalletBuy(intent) {
 		return nil, ErrITBadState
 	}
 	if rec, err := s.ConversionFor(ctx, intent); err != nil {

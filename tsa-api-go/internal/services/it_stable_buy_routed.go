@@ -787,7 +787,7 @@ func (s *ITService) GetStableBuyForUser(ctx context.Context, userID, intentID uu
 	if err != nil {
 		return nil, err
 	}
-	if i.Direction != models.ITDirectionBuy || !IsStableAsset(i.Asset) || models.ITIntentProvider(i) != provider {
+	if i.Direction != models.ITDirectionBuy || !IsStableAsset(i.Asset) || !intentIsProvider(i, provider) {
 		return nil, ErrStableIntentNotFound
 	}
 	return i, nil
@@ -867,6 +867,11 @@ func parkClaim(claim map[string]any, reason string) {
 // window and processed inside the grace, is honoured. Everything else is
 // priced live on the intent's own provider terms (D3).
 func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITIntent, amountMinor string, arrivedAt time.Time, ch PayInChannel) (*routedArrival, error) {
+	// S45 / P4: a provider without terms is never claimed, not even honoured.
+	terms, err := providerTerms(intent)
+	if err != nil {
+		return nil, err
+	}
 	paid, ok := new(big.Int).SetString(strings.TrimSpace(amountMinor), 10)
 	if !ok || paid.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, amountMinor)
@@ -891,7 +896,7 @@ func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITInt
 	}
 	return &routedArrival{
 		units: q.AssetUnits, rate: q.RatePerUnitMinor, quote: q, repriced: true,
-		needsStock: models.ITIntentProvider(intent) == models.ITProviderTreasury,
+		needsStock: terms.companyWallet,
 	}, nil
 }
 
@@ -899,10 +904,17 @@ func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITInt
 // provider terms: the company wallet always within its maximum. The one
 // exception, an operator's "deliver anyway", calls quoteTreasuryLive itself.
 func (s *ITService) quoteRoutedLiveFor(ctx context.Context, intent *models.ITIntent, paid *big.Int, ch PayInChannel) (*StableBuyQuote, error) {
-	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+	terms, err := providerTerms(intent)
+	switch {
+	case err != nil:
+		return nil, err
+	case terms.companyWallet:
 		return s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, true, ch)
+	case terms.flutterwaveFulfils:
+		return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency, ch)
+	default:
+		return nil, fmt.Errorf("%w: %s has no live price", ErrUnknownITProvider, terms.provider)
 	}
-	return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency, ch)
 }
 
 // quoteTreasuryLive prices fiatMinor, paid through ch, at the company
@@ -945,12 +957,14 @@ func creditArrival(credit *models.InboundCredit, now time.Time) time.Time {
 func isDeterministicPricingError(err error) bool {
 	return errors.Is(err, ErrStableBuyBelowMinimum) || errors.Is(err, ErrStableNotAnAsset) ||
 		errors.Is(err, ErrStableBuyAboveMaximum) || errors.Is(err, ErrStableRateImplausible) ||
-		errors.Is(err, ErrConvertedOverpaid)
+		errors.Is(err, ErrConvertedOverpaid) || errors.Is(err, ErrUnknownITProvider)
 }
 
 // parkReasonOf names a park for the ramp_treasury_parked metric.
 func parkReasonOf(err error) string {
 	switch {
+	case errors.Is(err, ErrUnknownITProvider):
+		return "unknown_provider"
 	case errors.Is(err, ErrConvertedOverpaid):
 		return "converted_overpaid"
 	case errors.Is(err, ErrStableBuyAboveMaximum):
@@ -966,12 +980,14 @@ func parkReasonOf(err error) string {
 	}
 }
 
-// routedMetric is the provider stem of the routed metric lines.
+// routedMetric is the provider stem of the routed metric lines; "unknown" for
+// a provider without terms, so nothing is misattributed to Flutterwave.
 func routedMetric(i *models.ITIntent) string {
-	if models.ITIntentProvider(i) == models.ITProviderTreasury {
-		return "treasury"
+	t, err := providerTerms(i)
+	if err != nil {
+		return "unknown"
 	}
-	return "fw"
+	return t.metric
 }
 
 // stableBuyPriced: a routed buy is priced from the moment it opens, so
@@ -982,11 +998,20 @@ func stableBuyPriced(i *models.ITIntent) bool { return i.Repriced || IsRoutedSta
 // was opened under (D3). The company wallet is never re-priced here: its
 // re-price must win stock under the lock (repriceTreasuryParked).
 func (s *ITService) quoteForIntent(ctx context.Context, intent *models.ITIntent, fiatMinor string) (*StableBuyQuote, error) {
+	// Review M1: the provider first, so an unknown one is never priced at
+	// Flutterwave's old endpoint either.
+	terms, err := providerTerms(intent)
+	if err != nil {
+		return nil, err
+	}
 	if !IsRoutedStableBuy(intent) {
 		return s.QuoteStableBuy(ctx, intent.Asset, fiatMinor, intent.Currency)
 	}
-	if models.ITIntentProvider(intent) == models.ITProviderTreasury {
+	if terms.companyWallet {
 		return nil, fmt.Errorf("%w: a company-wallet buy is re-priced only under its stock lock", ErrITBadState)
+	}
+	if !terms.flutterwaveFulfils {
+		return nil, fmt.Errorf("%w: %s has no live price", ErrUnknownITProvider, terms.provider)
 	}
 	paid, ok := new(big.Int).SetString(strings.TrimSpace(fiatMinor), 10)
 	if !ok || paid.Sign() <= 0 {
@@ -1010,7 +1035,7 @@ func (s *ITService) quoteForIntent(ctx context.Context, intent *models.ITIntent,
 // wallet must hold (D31). Every other buy sends and holds units.
 func (s *ITService) routedDeliveryAmounts(intent *models.ITIntent, units *big.Int) (send, hold *big.Int) {
 	send, hold = new(big.Int).Set(units), new(big.Int).Set(units)
-	if !IsRoutedStableBuy(intent) || models.ITIntentProvider(intent) != models.ITProviderFlutterwave {
+	if !IsRoutedStableBuy(intent) || !isFlutterwaveBuy(intent) {
 		return send, hold
 	}
 	lim := s.routedLimits()
@@ -1039,11 +1064,14 @@ func (s *ITService) logHonoured(ctx context.Context, intent *models.ITIntent, pa
 			shortfall = short.String()
 		}
 	}
-	if routedMetric(intent) == "treasury" {
+	switch routedMetric(intent) {
+	case "treasury":
 		log.Printf("[it stable buy] METRIC ramp_treasury_honoured intent=%s drift_bps=%s", intent.ID, drift)
-		return
+	case "fw":
+		log.Printf("[it stable buy] METRIC ramp_fw_honoured intent=%s drift_bps=%s shortfall_units=%s", intent.ID, drift, shortfall)
+	default:
+		log.Printf("[it stable buy] METRIC ramp_unknown_honoured intent=%s provider=%q", intent.ID, intent.Provider)
 	}
-	log.Printf("[it stable buy] METRIC ramp_fw_honoured intent=%s drift_bps=%s shortfall_units=%s", intent.ID, drift, shortfall)
 }
 
 // notifyRateUpdated tells her a payment was priced at the live rate.
