@@ -272,7 +272,8 @@ func (s *PayPaymentService) exportRefunds(ctx context.Context, chunk []models.Pa
 }
 
 // payExportRow is one payment as an export row, in payExportHeader's order.
-// The code column stays empty until payments carry a payment code.
+// The code column is the payment code, empty for a payment from before codes:
+// the export reads, it never backfills.
 func payExportRow(p *models.PayPayment, r PayRefundAgg) []string {
 	refundStatus := r.Status
 	if refundStatus == "" {
@@ -281,7 +282,7 @@ func payExportRow(p *models.PayPayment, r PayRefundAgg) []string {
 	return []string{
 		payExportTime(p.SucceededAt),
 		p.CreatedAt.In(payWAT).Format(time.RFC3339),
-		"",
+		formatStoredPayCode(p.PayCode),
 		payCSVSafe(p.Reference),
 		payCSVSafe(p.Description),
 		payCSVSafe(p.CustomerName),

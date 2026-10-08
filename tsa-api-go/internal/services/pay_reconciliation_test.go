@@ -228,7 +228,10 @@ func TestPayReconciliation_ExportIsThePaymentsPaidInTheRangeOldestFirst(t *testi
 	if len(rows) != 4 || strings.Join(rows[0], ",") != strings.Join(payExportHeader, ",") {
 		t.Fatalf("rows %q", rows)
 	}
-	want := []string{"2026-10-01T00:30:00+01:00", "2026-09-30T13:00:00+01:00", "", "PNR-A", "LOS-ABV 12 Oct", "", "succeeded",
+	if a.PayCode == nil {
+		t.Fatal("payment A was created without a code")
+	}
+	want := []string{"2026-10-01T00:30:00+01:00", "2026-09-30T13:00:00+01:00", FormatPayCode(*a.PayCode), "PNR-A", "LOS-ABV 12 Oct", "", "succeeded",
 		"50000.00", "50505.06", "50000.00", "505.06", "ord_PNR-A", "0.00", "none", "api", a.ID.String()}
 	if strings.Join(rows[1], "|") != strings.Join(want, "|") {
 		t.Fatalf("row A:\n got %q\nwant %q", rows[1], want)
@@ -238,6 +241,15 @@ func TestPayReconciliation_ExportIsThePaymentsPaidInTheRangeOldestFirst(t *testi
 	}
 	if rows[3][15] != c.ID.String() || rows[3][3] != "'-100" || rows[3][4] != "Seat 4A, \"window\"\nsecond line" || rows[3][5] != "'\tAda" {
 		t.Fatalf("row C: commas, quotes and newlines stay one cell; a leading - or tab is quoted: %q", rows[3])
+	}
+	// A payment from before codes has none in the export: the export reads, it never backfills.
+	s.db.Model(&models.PayPayment{}).Where("id = ?", b.ID).Update("pay_code", nil)
+	buf.Reset()
+	if err := s.ExportCSV(ctx, &buf, m.ID, live, start, end); err != nil {
+		t.Fatal(err)
+	}
+	if rows := readExport(t, buf.String()); rows[2][2] != "" || rows[1][2] != FormatPayCode(*a.PayCode) {
+		t.Fatalf("legacy row code %q, row A code %q", rows[2][2], rows[1][2])
 	}
 }
 

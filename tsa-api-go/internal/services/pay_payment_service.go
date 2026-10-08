@@ -487,10 +487,15 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 			// What she typed is matched literally: % and _ are not wildcards.
 			esc := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(term)
 			// One group, so the ORs never widen the merchant/mode/status filter.
-			q = q.Where(s.db.Where(`LOWER(reference) LIKE ? ESCAPE '\'`, "%"+esc+"%").
+			match := s.db.Where(`LOWER(reference) LIKE ? ESCAPE '\'`, "%"+esc+"%").
 				Or(`LOWER(description) LIKE ? ESCAPE '\'`, "%"+esc+"%").
 				Or(`LOWER(customer_name) LIKE ? ESCAPE '\'`, "%"+esc+"%").
-				Or(`CAST(id AS TEXT) LIKE ? ESCAPE '\'`, esc+"%"))
+				Or(`CAST(id AS TEXT) LIKE ? ESCAPE '\'`, esc+"%")
+			// A customer reads her code out as TSA-XXXXX-XXXXX, in any case or spacing.
+			if code, ok := NormalizePayCode(f.Query); ok {
+				match = match.Or("pay_code = ?", code)
+			}
+			q = q.Where(match)
 		}
 		return q
 	}

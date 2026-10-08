@@ -52,7 +52,7 @@ func newPayCode() (string, error) {
 var payCodeNext = newPayCode
 
 // NormalizePayCode reads a code as a payer typed or pasted it: whitespace and
-// dashes of any kind dropped, upper-cased, a leading TSA dropped when exactly
+// dashes of any kind dropped, upper-cased, any other non-ASCII character refused, a leading TSA dropped when exactly
 // a code's worth of characters follows it (a bare code may itself start with
 // TSA), O read as 0, I and L as 1. Anything that is then not exactly ten
 // alphabet characters is not a code.
@@ -61,11 +61,15 @@ func NormalizePayCode(in string) (string, bool) {
 		return "", false
 	}
 	var b strings.Builder
-	for _, r := range strings.ToUpper(in) {
+	for _, r := range in {
 		if unicode.IsSpace(r) || unicode.Is(unicode.Pd, r) {
 			continue
 		}
-		b.WriteRune(r)
+		// Checked before upper-casing, which folds ı to I and ſ to S: a code is ASCII.
+		if r > 0x7F {
+			return "", false
+		}
+		b.WriteRune(unicode.ToUpper(r))
 	}
 	s := b.String()
 	if len(s) == len(payCodePrefix)+payCodeLen && strings.HasPrefix(s, payCodePrefix) {
