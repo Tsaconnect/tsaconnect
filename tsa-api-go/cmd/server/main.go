@@ -473,7 +473,7 @@ func main() {
 	// (eth_chainId + bytecode per chain) runs inside the constructor. The trade
 	// service resolves escrow + EIP-712 domain per entity-chain from this registry.
 	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg)
-	if err := checkPoolUnconfigure(config.DB, p2pEscrowRegistry); err != nil {
+	if err := checkPoolUnconfigure(config.DB, cfg, p2pEscrowRegistry); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 	}
 

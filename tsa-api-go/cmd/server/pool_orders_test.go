@@ -228,20 +228,34 @@ func TestStatementFreshness_InboundPollerOrTrueNil(t *testing.T) {
 }
 
 // §25 step 12 (S46): unconfiguring the pool chain with live slices refuses boot.
+// Review I-6: the decision is the configuration's (the row was removed), never
+// the runtime registry's — a pool RPC that fails to dial at boot leaves the
+// chain out of the registry and must not crash-loop the whole API.
 // Postgres (review I7): P2PTrade's default:gen_random_uuid() does not migrate
 // on SQLite (the codebase notes it at p2p_merchant_stats_service_test.go:104).
 func TestCheckPoolUnconfigure_FatalWithLiveSlicesOffThePoolChain_Postgres(t *testing.T) {
 	db := testutil.TempPostgres(t, "liq_c1_unconf_", &models.P2PTrade{})
-	reg := services.NewP2PEscrowRegistryFromMap(nil, "2") // the pool row was emptied
-	if err := checkPoolUnconfigure(db, reg); err != nil {
+	unconfigured := &config.Config{P2PChains: map[int64]config.P2PChainConfig{}}
+	dialFailed := services.NewP2PEscrowRegistryFromMap(nil, "2") // the pool chain's RPC never dialled
+	if err := checkPoolUnconfigure(db, unconfigured, dialFailed); err != nil {
 		t.Fatalf("no slices: %v", err)
 	}
 	intent := uuid.New()
 	db.Create(&models.P2PTrade{ID: uuid.New(), AdID: uuid.New(), BuyerID: uuid.New(), SellerID: uuid.New(), Token: "USDT",
 		ChainID: 56, TokenAmount: "1", FiatAmount: "1", FiatCurrency: "NGN", Rate: "1",
 		Status: models.P2PTradeStatusPendingPayment, ExpiresAt: time.Now(), ITIntentID: &intent})
-	if err := checkPoolUnconfigure(db, reg); err == nil || !strings.Contains(err.Error(), "liquidity_pool_unconfigure_refused") {
+	if err := checkPoolUnconfigure(db, unconfigured, dialFailed); err == nil || !strings.Contains(err.Error(), "liquidity_pool_unconfigure_refused") {
 		t.Fatalf("live slice on an unconfigured chain: %v", err)
+	}
+	configured := &config.Config{P2PChains: map[int64]config.P2PChainConfig{56: {Purpose: config.P2PPurposePool}}}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	if err := checkPoolUnconfigure(db, configured, dialFailed); err != nil {
+		t.Fatalf("a configured pool chain whose RPC is down must boot: %v", err)
+	}
+	if !strings.Contains(buf.String(), "WARN liquidity_pool_chain_not_running") {
+		t.Fatalf("no warning for a configured pool chain the registry is not running:\n%s", buf.String())
 	}
 }
 

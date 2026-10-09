@@ -170,9 +170,13 @@ func registerExpiryCanceller(scheduler *jobs.Scheduler, trades *services.P2PTrad
 }
 
 // checkPoolUnconfigure is §25 step 12 (S46): boot refuses while a
-// non-terminal slice sits on a chain the registry no longer runs as the pool.
-func checkPoolUnconfigure(db *gorm.DB, reg *services.P2PEscrowRegistry) error {
-	if db == nil {
+// non-terminal slice sits on a chain the configuration no longer names as
+// the pool (its preset row was removed). It decides from cfg, never from the
+// runtime registry (review I-6): a pool RPC that fails to dial at boot keeps
+// the chain out of the registry, and refusing then would restart-loop every
+// product until the RPC came back. That case is a warning.
+func checkPoolUnconfigure(db *gorm.DB, cfg *config.Config, reg *services.P2PEscrowRegistry) error {
+	if db == nil || cfg == nil {
 		return nil
 	}
 	var chains []int64
@@ -182,8 +186,11 @@ func checkPoolUnconfigure(db *gorm.DB, reg *services.P2PEscrowRegistry) error {
 		return fmt.Errorf("liquidity: read live slices: %w", err)
 	}
 	for _, id := range chains {
-		if reg.Purpose(id) != config.P2PPurposePool {
+		if cfg.P2PChains[id].Purpose != config.P2PPurposePool {
 			return fmt.Errorf("liquidity_pool_unconfigure_refused: live pool slices on chain %d, which has no pool escrow configured — restore the preset row until they are terminal", id)
+		}
+		if reg.Purpose(id) != config.P2PPurposePool {
+			log.Printf("[liquidity] WARN liquidity_pool_chain_not_running chain=%d: live pool slices, the chain is configured as the pool but its escrow is not running (RPC down at boot?) — slices wait until it is back", id)
 		}
 	}
 	return nil
