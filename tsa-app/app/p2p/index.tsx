@@ -125,9 +125,13 @@ const P2PMarketScreen: React.FC = () => {
     })();
   }, []);
 
-  useEffect(() => {
+  // Re-read on every focus and pull-to-refresh, not just on mount: the card's
+  // availability, rate and limits move, and a card that has stopped filling
+  // must stop being tappable.
+  const loadPoolCard = useCallback(() => {
     liquidityApi.poolCard().then((r) => setPoolCard(r.success ? r.data ?? null : null)).catch(() => setPoolCard(null));
   }, []);
+  useFocusEffect(loadPoolCard);
 
   const load = useCallback(async () => {
     setError(false);
@@ -212,6 +216,7 @@ const P2PMarketScreen: React.FC = () => {
             onRefresh={() => {
               setRefreshing(true);
               load();
+              loadPoolCard();
             }}
           />
         }

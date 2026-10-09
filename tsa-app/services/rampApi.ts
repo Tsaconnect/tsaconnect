@@ -215,13 +215,17 @@ export interface CreateRampBuyInput {
   requestedToken?: string;
   requestedChain?: string;
   destinationAddress?: string;
+  /** Opened from the pinned TSA Connect card: the order is the pool's or
+   *  none, never another provider's (review I-3). Absent on every other buy. */
+  pool?: true;
 }
 
 export function createRampBuy(input: CreateRampBuyInput): Promise<RampOrder> {
-  return withFallback(
-    () => request<RampOrder>('/buy', { method: 'POST', body: JSON.stringify(input) }),
-    () => createBuy(withoutQuote(input)),
-  );
+  const open = () => request<RampOrder>('/buy', { method: 'POST', body: JSON.stringify(input) });
+  // The legacy /paycrest/buy fallback would make a pool buy another
+  // provider's order, so a pool buy has no fallback.
+  if (input.pool) return open();
+  return withFallback(open, () => createBuy(withoutQuote(input)));
 }
 
 export interface CreateRampSellInput {

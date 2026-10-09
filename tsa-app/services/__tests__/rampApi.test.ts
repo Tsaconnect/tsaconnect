@@ -75,6 +75,23 @@ describe('rampApi', () => {
     expect(bodyOf(1).refundAccount).toBe('0123456789');
   });
 
+  it('sends pool: true on a pool-card buy, and never retries it on another provider (I-3)', async () => {
+    fetchMock().mockResolvedValueOnce(routeMissing());
+    const buy = {
+      amount: '10000', chain: 'bsc', token: 'USDT', walletAddress: '0xabc',
+      refundBankCode: '044', refundAccount: '0123456789', currency: 'NGN',
+      quotedRate: '1361.51', handle: 'h',
+    };
+    await expect(createRampBuy({ ...buy, pool: true })).rejects.toBeTruthy();
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    expect(urlOf(0)).toContain('/ramp/buy');
+    expect(bodyOf(0).pool).toBe(true);
+
+    fetchMock().mockReset().mockResolvedValueOnce(ok({ id: 'o2' }, 201));
+    await createRampBuy(buy);
+    expect('pool' in bodyOf(0)).toBe(false);
+  });
+
   it('does NOT fall back on a real JSON 404 (an order that is not hers)', async () => {
     fetchMock().mockResolvedValueOnce(jsonError(404, { success: false, message: 'Order not found' }));
     await expect(getRampOrder('abc')).rejects.toMatchObject({ status: 404, message: 'Order not found' });

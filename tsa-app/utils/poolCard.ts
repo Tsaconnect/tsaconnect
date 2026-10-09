@@ -12,6 +12,8 @@ export interface PoolCardView {
   route?: string;
 }
 
+const POOL_CURRENCY = 'NGN';
+
 // "1361.51" (naira, major units) → "₦1,361.51".
 const naira = (major?: string) => (major ? `₦${formatMinorAsNaira(String(Math.round(Number(major) * 100)))}` : '');
 
@@ -28,6 +30,9 @@ export function poolCardView(card: PoolCard | null | undefined, adSide: 'sell' |
     chainId: String(card.chain.id),
     chain: card.chain.key,
     tokenAddress: card.token.address,
+    // The pool fills naira only; without this the buy screen falls back to
+    // her saved ramp currency and asks the pool for a quote it must refuse.
+    currency: POOL_CURRENCY,
   });
   return {
     ...base,
@@ -41,12 +46,26 @@ export function poolCardView(card: PoolCard | null | undefined, adSide: 'sell' |
 }
 
 /** The buy screen's view of a pool card route. */
-export function poolBuyParams(p: { pool?: string; chainId?: string; chain?: string; tokenAddress?: string; asset?: string }): {
+export function poolBuyParams(p: {
+  pool?: string;
+  chainId?: string;
+  chain?: string;
+  tokenAddress?: string;
+  asset?: string;
+  currency?: string;
+}): {
   pool: boolean;
+  /** Set on a pool buy only: the currency the screen must quote in, whatever the route or her saved choice says. */
+  currency?: string;
   want?: { token: string; chainId: number; chain: string; address: string };
 } {
   const pool = p.pool === '1';
+  if (!pool) return { pool };
   const chainId = Number(p.chainId);
-  if (!pool || !Number.isInteger(chainId) || chainId <= 0 || !p.chain || !p.tokenAddress) return { pool };
-  return { pool, want: { token: (p.asset || 'USDT').toUpperCase(), chainId, chain: p.chain, address: p.tokenAddress } };
+  if (!Number.isInteger(chainId) || chainId <= 0 || !p.chain || !p.tokenAddress) return { pool, currency: POOL_CURRENCY };
+  return {
+    pool,
+    currency: POOL_CURRENCY,
+    want: { token: (p.asset || 'USDT').toUpperCase(), chainId, chain: p.chain, address: p.tokenAddress },
+  };
 }

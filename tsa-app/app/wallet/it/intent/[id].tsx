@@ -40,7 +40,7 @@ import { DisputeSection } from '@/components/disputes/DisputeSection';
 // buy_awaiting_rate, …) that does not exist on the sell side, so statusToHops
 // / isTerminalStableStatus are simply the wrong functions for it, not merely
 // unused ones.
-import { buyStatusToHops, buyStatusLabel, isTerminalBuyStatus } from '@/utils/stableBuyQuote';
+import { buyStatusToHops, buyStatusLabel, isAwaitingPayment, isBuyEstimate, isTerminalBuyStatus } from '@/utils/stableBuyQuote';
 
 const fmtMcgp = (wei?: string) => {
   try {
@@ -466,14 +466,14 @@ export default function ITIntentDetail() {
   // ("buy: the FIAT MINOR UNITS the user actually paid", it_models.go:195-205).
   // Show the quote while it IS still a quote, the actual figure once there is
   // one, and only relabel to "You paid" when it is genuinely the latter.
-  const buyPaidMinor = isStableBuy && intent.status !== 'pending_payment' ? intent.receivedAmount : undefined;
-  // Everything on a pending_payment buy is provisional: the binding price is
+  const buyPaidMinor = isStableBuy && !isAwaitingPayment(intent.status) ? intent.receivedAmount : undefined;
+  // Everything on an unpaid (pending_payment or opening) buy is provisional: the binding price is
   // struck when the naira lands, and settlement rewrites both the asset amount
   // and the rate. Confirm already renders "≈"; dropping it here made the same
   // number read as settled one tap later, then visibly change.
   // A routed buy inside its rate hold is firm, not an estimate (spec §5.2).
   const honour = honourOf(intent);
-  const buyIsEstimate = isStableBuy && intent.status === 'pending_payment' && !honour.holding;
+  const buyIsEstimate = isStableBuy && isBuyEstimate(intent.status, honour.holding);
   // The quoted breakdown (spec §14): the display rate in the Rate row, each
   // provider fee on its own line. Empty for everything but a routed buy.
   const buyFeeLines = isStableBuy
@@ -622,7 +622,7 @@ export default function ITIntentDetail() {
               {conversion ? (
                 <ConversionProgress
                   conversion={conversion}
-                  paid={intent.status !== 'pending_payment' && intent.status !== 'cancelled'}
+                  paid={!isAwaitingPayment(intent.status) && intent.status !== 'cancelled'}
                 />
               ) : null}
             </View>
@@ -850,7 +850,7 @@ export default function ITIntentDetail() {
           subjectType="it_intent"
           subjectId={intent.id}
           disputable={
-            intent.status !== 'pending_payment' &&
+            !isAwaitingPayment(intent.status) &&
             intent.status !== 'pending_deposit' &&
             intent.status !== 'cancelled'
           }

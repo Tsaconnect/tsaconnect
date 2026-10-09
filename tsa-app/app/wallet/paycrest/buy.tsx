@@ -182,7 +182,10 @@ export default function PaycrestBuyScreen() {
     chain?: string;
     tokenAddress?: string;
   }>();
-  const poolBuy = poolBuyParams({ pool, chainId, chain, tokenAddress, asset });
+  const poolBuy = poolBuyParams({ pool, chainId, chain, tokenAddress, asset, currency: currencyParam });
+  // A pool buy settles in naira only, so it overrides both the route's
+  // currency and the saved ramp choice.
+  const routeCurrency = poolBuy.currency ?? currencyParam;
 
   // The currency this order settles in — NOT the display currency (see
   // hooks/useRampCurrency.ts). Restricted to 'paycrest' so the picker below
@@ -202,12 +205,12 @@ export default function PaycrestBuyScreen() {
   const currencyLabel = rampCurrencyLabel(currencyCode);
   useScreenTitle(`Buy with ${currencyLabel}`);
   useEffect(() => {
-    if (currencyParam) setCurrencyCode(currencyParam);
+    if (routeCurrency) setCurrencyCode(routeCurrency);
     // Applying the hub's choice is a one-time sync on arrival, not a binding —
     // re-running on every setCurrencyCode identity change would fight the
     // user's own in-screen picker selection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currencyParam]);
+  }, [routeCurrency]);
   const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
 
   const [amount, setAmount] = useState('');
@@ -459,9 +462,10 @@ export default function PaycrestBuyScreen() {
     try {
       // A direct venue, or a converted one the router priced (it carries a
       // handle), goes through the ramp router, held to the rate she saw.
-      // Paycrest's own converted venue (no handle) keeps its route.
+      // Paycrest's own converted venue (no handle) keeps its route — except
+      // on a pool buy, which always goes to the router flagged pool.
       const routerVenue = !!(venue as RampVenue).handle;
-      const created = isConvertedVenue(venue) && !routerVenue
+      const created = isConvertedVenue(venue) && !routerVenue && !poolBuy.pool
         ? await createBuy({
           amount: amount.trim(),
           // The settlement leg — what Paycrest itself is asked to fill.
@@ -498,6 +502,8 @@ export default function PaycrestBuyScreen() {
             // provider she was shown first — the router falls back.
             quotedRate: quotedRateOf(venue as RampVenue),
             ...((venue as RampVenue).handle ? { handle: (venue as RampVenue).handle } : {}),
+            // From the pinned card: the pool's order or none (I-3).
+            ...(poolBuy.pool ? { pool: true as const } : {}),
             ...(isConvertedVenue(venue)
               ? {
                   requestedChainId: want.chainId,
@@ -571,7 +577,7 @@ export default function PaycrestBuyScreen() {
     } finally {
       setCreating(false);
     }
-  }, [venue, address, amount, refundBank, refundAccount, currencyCode, want]);
+  }, [venue, address, amount, refundBank, refundAccount, currencyCode, want, poolBuy.pool]);
 
   // The explicit alternative offered when nothing can fill the exact pair the
   // user asked for, even with a conversion — never auto-selected, only

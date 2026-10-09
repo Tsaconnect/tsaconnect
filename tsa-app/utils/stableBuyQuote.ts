@@ -37,6 +37,19 @@ export function isTerminalBuyStatus(status: string): boolean {
   return TERMINAL.has((status || '').trim());
 }
 
+/** Still waiting on her money: `opening` is a pool buy whose stock is being
+ *  locked before the pay-in is shown, so nothing has been paid yet either. */
+export function isAwaitingPayment(status: string): boolean {
+  const s = (status || '').trim();
+  return s === 'pending_payment' || s === 'opening';
+}
+
+/** The buy's amounts are still provisional ("≈"): nothing paid yet, and no
+ *  routed rate hold making the quote firm (spec §5.2). */
+export function isBuyEstimate(status: string, rateHolding: boolean): boolean {
+  return isAwaitingPayment(status) && !rateHolding;
+}
+
 function digitsOnly(v: string): string {
   const t = (v ?? '').trim();
   return /^\d+$/.test(t) ? t : '';

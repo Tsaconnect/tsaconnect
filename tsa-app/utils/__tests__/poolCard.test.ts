@@ -22,7 +22,7 @@ describe('poolCardView', () => {
     expect(v.disabled).toBe(false);
     expect(v.lines.join(' ')).toContain('₦1,361.51');
     expect(v.lines.join(' ')).toContain('1.4%');
-    expect(v.route).toBe('/wallet/paycrest/buy?asset=USDT&pool=1&chainId=56&chain=bsc&tokenAddress=0x55d398326f99059fF775485246999027B3197955');
+    expect(v.route).toBe('/wallet/paycrest/buy?asset=USDT&pool=1&chainId=56&chain=bsc&tokenAddress=0x55d398326f99059fF775485246999027B3197955&currency=NGN');
   });
 
   it('stays pinned but disabled when it cannot fill (M6), and never promises returns', () => {
@@ -37,9 +37,14 @@ describe('poolCardView', () => {
 describe('poolBuyParams', () => {
   it('reads the card route back into the buy screen', () => {
     expect(poolBuyParams({ pool: '1', asset: 'usdt', chainId: '56', chain: 'bsc', tokenAddress: '0x55d3' })).toEqual({
-      pool: true, want: { token: 'USDT', chainId: 56, chain: 'bsc', address: '0x55d3' },
+      pool: true, currency: 'NGN', want: { token: 'USDT', chainId: 56, chain: 'bsc', address: '0x55d3' },
     });
     expect(poolBuyParams({ asset: 'USDC' })).toEqual({ pool: false });
-    expect(poolBuyParams({ pool: '1', chainId: 'x' })).toEqual({ pool: true });
+    expect(poolBuyParams({ pool: '1', chainId: 'x' })).toEqual({ pool: true, currency: 'NGN' });
+  });
+
+  it('pins a pool buy to naira whatever currency the route or her saved ramp choice says (I-5)', () => {
+    expect(poolBuyParams({ pool: '1', currency: 'GHS' }).currency).toBe('NGN');
+    expect(poolBuyParams({ currency: 'GHS' }).currency).toBeUndefined();
   });
 });
