@@ -2,21 +2,20 @@
 //
 // Ad detail — mode-aware for both sell-ads (user buys crypto, fiat-amount
 // entry) and buy-ads (user sells crypto to a merchant, token-amount entry).
-// Restyled onto the TSA Signature design system (@/theme + @/components/ui);
-// all data fetching, the fiat↔token computation, the openTrade /
-// openTradeWithDeposit sign+broadcast+confirm flows, and every gate
-// (token-supported, min/max limits, stale rate, valid) are preserved verbatim.
+// Every on-chain step goes through services/p2pTx.runP2PTx (sponsored gas,
+// prepare, sign, broadcast, wait mined, confirm); utils/p2pAdOpen maps the
+// outcomes. A lost open confirm is stashed and lands on the trade (R4).
 //
 // Sell-ad (ad.side === 'sell'):
-//   User enters fiat amount → receives token preview
-//   Submit: tradesApi.open({fiatAmount, buyerAddress, paymentMethodId})
-//           → sign + broadcast → confirmOpen
+//   User enters fiat amount → receives token preview (net of the ad's fee)
+//   Submit: confirm receive chain → runP2PTx('open_trade'):
+//           tradesApi.open({fiatAmount, buyerAddress, paymentMethodId}) → confirmOpen
 //
 // Buy-ad (ad.side === 'buy'):
 //   User enters crypto amount to sell → receives fiat preview
-//   Submit: getActiveWallet → allowance check → approve if needed
-//           (wait for approve tx) → tradesApi.open({tokenAmount, sellerAddress,
-//           fiatAmount, paymentMethodId}) → sign + broadcast → confirmOpen
+//   Submit: KYC gate → allowance check on the ad's chain → runP2PTx('approve')
+//           if short → runP2PTx('open_trade'): tradesApi.open({tokenAmount,
+//           sellerAddress, fiatAmount, paymentMethodId}) → confirmOpen
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -35,32 +34,40 @@ import {
   formatFiat,
   formatTokenAmount,
   hasSufficientAllowance,
-  p2pChainKey,
+  maskedAccountLabel,
   p2pTokenDecimals,
   parseTokenAmount,
   previewFiatFromToken,
-  unsignedTxToTxLike,
   exceedsCapacity,
   withinFiatLimits,
   TOKEN_DECIMALS as P2P_TOKEN_DECIMALS,
   type P2PAd,
+  type P2PAdPaymentMethod,
   type P2PPaymentMethod,
+  type P2PTrade,
 } from '../../../services/p2p';
 import {
   getNigerianBanks,
   resolveAccountName,
   type NgBank,
 } from '../../../services/ngBanks';
-import {
-  broadcastTransaction,
-  ensureGas,
-  getActiveWallet,
-  signTransaction,
-} from '../../../services/wallet';
+import { getActiveWallet } from '../../../services/wallet';
+import { runP2PTx, type RunP2PTxResult } from '../../../services/p2pTx';
+import { kycBlocksPosting, p2pErrorMessage } from '../../../services/p2pErrors';
 import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
+import { useAuth } from '../../../AuthContext/AuthContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
-import { promptKycRefusal } from '../../../utils/kycRefusal';
+import { KYC_VERIFICATION_REQUIRED, promptKycRefusal } from '../../../utils/kycRefusal';
+import { confirmAsync } from '@/utils/confirmAsync';
+import {
+  approveFollowUp,
+  buyAdFeeNote,
+  openFollowUp,
+  sellAdReceivePreview,
+  waitForAllowance,
+  type OpenPrep,
+} from '@/utils/p2pAdOpen';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -80,6 +87,7 @@ import {
   SelectRow,
   Spinner,
   Text,
+  useToast,
 } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
 import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
@@ -98,6 +106,8 @@ const AdDetailScreen: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
   const { supportedCurrencies } = useCurrency();
+  const { currentUser } = useAuth();
+  const toast = useToast();
   // User's own payment methods — used on buy-ad side (merchant pays fiat HERE).
   const [userPaymentMethods, setUserPaymentMethods] = useState<P2PPaymentMethod[]>([]);
   const [loadingUserPms, setLoadingUserPms] = useState(false);
@@ -119,8 +129,8 @@ const AdDetailScreen: React.FC = () => {
   // Buy-ad: show the user's own payment-methods (merchant sends fiat here).
   const isBuyAd = ad?.side === 'buy';
 
-  // @ts-expect-error APP-11 renders masked methods (no accountName)
-  const paymentMethods: P2PPaymentMethod[] = isBuyAd
+  // The public ad's methods are masked ("******7890", no holder name).
+  const paymentMethods: (P2PPaymentMethod | P2PAdPaymentMethod)[] = isBuyAd
     ? userPaymentMethods
     : (ad?.paymentMethods ?? []);
 
@@ -241,6 +251,13 @@ const AdDetailScreen: React.FC = () => {
     }
   }, [ad, amountInput, tokenDecimals, isBuyAd]);
 
+  // Sell-ad "You receive": the buyer receives the crypto, so the ad's live
+  // fee rate comes out of it (net + fee line; neutral note when unknown).
+  const receivePreview = useMemo(
+    () => sellAdReceivePreview(tokenPreview, tokenDecimals, ad?.feeBps, ad?.token ?? ''),
+    [tokenPreview, tokenDecimals, ad?.feeBps, ad?.token],
+  );
+
   // Sell-ad validation: check fiat amount range.
   const fiatAmountNum = isBuyAd ? 0 : parseFloat(amountInput || '0');
   const minOk = isBuyAd || !ad?.minLimit || fiatAmountNum >= parseFloat(ad.minLimit || '0');
@@ -270,6 +287,34 @@ const AdDetailScreen: React.FC = () => {
     return chain?.shortName ?? String(chainId);
   };
 
+  // One landing for both open paths. A lost confirm still lands on the trade:
+  // runP2PTx stashed the hash before the confirm, so the trade screen's R4
+  // banner can retry it, and the chain reconciler backfills it either way.
+  const finishOpen = (r: RunP2PTxResult<OpenPrep, P2PTrade>) => {
+    const next = openFollowUp(r);
+    switch (next.kind) {
+      case 'none':
+        return;
+      case 'kyc':
+        promptKycRefusal(next.code, next.message);
+        return;
+      case 'alert':
+        Alert.alert(next.title, next.message);
+        if (next.reload) load();
+        return;
+      case 'trade':
+        if (next.notice) toast.info(next.notice);
+        router.replace(`/p2p/trade/${next.tradeId}`);
+    }
+  };
+
+  const openStash = (prep: OpenPrep) => ({
+    mode: 'open' as const,
+    tradeId: prep.trade.id,
+    token: prep.trade.token,
+    amount: prep.trade.tokenAmount,
+  });
+
   const handleOpenSellAd = async () => {
     if (!ad || submitting) return;
     setSubmitting(true);
@@ -280,78 +325,34 @@ const AdDetailScreen: React.FC = () => {
         throw new Error('No wallet found. Please set up a wallet first.');
       }
 
-      // Task 6: Confirm the receive-chain token standard BEFORE signing.
       // On a sell-ad the user pays fiat and receives crypto — surface the
-      // chain + token standard so they know what arrives in their wallet.
-      const chain = getChainByChainId(ad.chainId);
-      const chainName = chain?.name ?? `chain ${ad.chainId}`;
-      const standard = receiveStandard(ad.chainId);
-      const chainConfirmed = await new Promise<boolean>((resolve) => {
-        Alert.alert(
-          'Confirm receive chain',
-          `You'll receive ${ad.token} as ${standard} on ${chainName}. Make sure your destination wallet/exchange supports it.`,
-          [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-            { text: 'Continue', onPress: () => resolve(true) },
-          ],
-        );
+      // chain + token standard BEFORE signing so they know what arrives.
+      const chainName = getChainByChainId(ad.chainId)?.name ?? `chain ${ad.chainId}`;
+      const ok = await confirmAsync(
+        'Confirm receive chain',
+        `You'll receive ${ad.token} as ${receiveStandard(ad.chainId)} on ${chainName}. Make sure your destination wallet/exchange supports it.`,
+        'Continue',
+      );
+      if (!ok) return;
+
+      const r = await runP2PTx<OpenPrep, P2PTrade>({
+        chainId: ad.chainId,
+        walletAddress: buyerAddress,
+        action: 'open_trade',
+        adId: ad.id,
+        onStage: setSubmitStage,
+        prepare: () => tradesApi.open(ad.id, {
+          fiatAmount: amountInput.trim(),
+          paymentMethodId: selectedPmId,
+          buyerAddress,
+        }),
+        confirm: (txHash, prep) => tradesApi.confirmOpen(prep.trade.id, txHash, buyerAddress),
+        stash: openStash,
       });
-      if (!chainConfirmed) {
-        setSubmitting(false);
-        setSubmitStage('');
-        return;
-      }
-
-      // Task 7: Gas guard — ensure buyer has native gas before broadcasting.
-      setSubmitStage('Checking gas…');
-      const hasGas = await ensureGas(p2pChainKey(ad.chainId), buyerAddress);
-      if (!hasGas) {
-        setSubmitting(false);
-        setSubmitStage('');
-        return;
-      }
-
-      setSubmitStage('Preparing openTrade transaction…');
-      const openRes = await tradesApi.open(ad.id, {
-        fiatAmount: amountInput.trim(),
-        paymentMethodId: selectedPmId,
-        buyerAddress,
-      });
-      // 503 means the rate feed went stale between page-load and this click.
-      // Surface a clean message and refresh the ad so the stale badge appears.
-      if (openRes.status === 503) {
-        Alert.alert(
-          'Live rate unavailable',
-          "The seller's rate feed is temporarily down. Please try again in a few seconds — the ad will reactivate automatically once the feed recovers.",
-        );
-        load();
-        return;
-      }
-      // The buyer is about to pay in; the server refuses that until it can
-      // attribute their transfer. Only this take path — the deposit open below
-      // is the opener selling, which is not gated.
-      if (promptKycRefusal(openRes.code, openRes.message)) {
-        return;
-      }
-      if (!openRes.success || !openRes.data) {
-        throw new Error(openRes.message || 'Server rejected the trade');
-      }
-      const { trade, unsignedTx } = openRes.data;
-
-      setSubmitStage('Signing transaction…');
-      const signed = await signTransaction(unsignedTxToTxLike(unsignedTx), buyerAddress);
-
-      setSubmitStage('Broadcasting…');
-      const txResp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
-      const txHash = txResp.hash;
-
-      setSubmitStage('Confirming on chain…');
-      const confirmRes = await tradesApi.confirmOpen(trade.id, txHash, buyerAddress);
-      if (!confirmRes.success) openStillConfirming(confirmRes.message);
-
-      router.replace(`/p2p/trade/${trade.id}`);
+      finishOpen(r);
     } catch (err: any) {
-      Alert.alert('Could not open trade', err?.message || String(err));
+      // Wallet lookup, signing or broadcast: nothing reached the chain.
+      Alert.alert('Could not open trade', p2pErrorMessage(err?.message));
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -374,6 +375,14 @@ const AdDetailScreen: React.FC = () => {
       return;
     }
 
+    // The server refuses an unverified buy-ad opener at open — after the
+    // approve would already have spent gas. Unknown status does not block;
+    // the server's 403 (handled in finishOpen) is the backstop.
+    if (kycBlocksPosting(currentUser?.verificationStatus)) {
+      promptKycRefusal(KYC_VERIFICATION_REQUIRED);
+      return;
+    }
+
     setSubmitting(true);
     try {
       setSubmitStage('Loading wallet…');
@@ -382,16 +391,7 @@ const AdDetailScreen: React.FC = () => {
         throw new Error('No wallet found. Please set up a wallet first.');
       }
 
-      // Task 7: Gas guard — ensure seller has native gas before approve/broadcast.
-      setSubmitStage('Checking gas…');
-      const hasGasBuyAd = await ensureGas(p2pChainKey(ad.chainId), sellerAddress);
-      if (!hasGasBuyAd) {
-        setSubmitting(false);
-        setSubmitStage('');
-        return;
-      }
-
-      // Convert human-readable token amount to base units.
+      // Convert human-readable token amount to base units (chain decimals).
       let tokenBaseUnits: string;
       try {
         tokenBaseUnits = parseTokenAmount(amountInput.trim(), tokenDecimals);
@@ -416,98 +416,60 @@ const AdDetailScreen: React.FC = () => {
         throw new Error("Above the merchant's maximum.");
       }
 
-      // Step 1: Check allowance — approve if insufficient.
+      // Step 1: approve the escrow if the allowance on THIS chain is short.
+      // Exact-amount approve (not unlimited) — intentional: leaves no lingering
+      // allowance to the escrow after the trade. Its own gas drip ('approve')
+      // comes right before it; the open's ('open_trade') right before that.
       setSubmitStage('Checking allowance…');
-      const allowanceRes = await poolApi.allowance(ad.token, sellerAddress);
-      const currentAllowance = allowanceRes.data?.allowance ?? '0';
-
-      if (!hasSufficientAllowance(currentAllowance, tokenBaseUnits)) {
-        setSubmitStage('Approving…');
-        // Exact-amount approve (not unlimited) — intentional: leaves no lingering
-        // allowance to the escrow after the trade, at the cost of a per-trade
-        // approve tx. Matches the pool-deposit flow's safety posture.
-        const approveRes = await poolApi.prepareApprove(ad.token, tokenBaseUnits, sellerAddress);
-        if (!approveRes.success || !approveRes.data) {
-          throw new Error(approveRes.message || 'Could not prepare approve transaction');
-        }
-        const approveSigned = await signTransaction(
-          unsignedTxToTxLike(approveRes.data.unsignedTx),
-          sellerAddress,
-        );
-        const approveTxResp = await broadcastTransaction(p2pChainKey(ad.chainId), approveSigned);
-        const approveTxHash = approveTxResp.hash;
-
-        // Wait for the approve tx to be mined before calling open — the
-        // backend gas-estimates the open tx and it reverts if the allowance
-        // isn't confirmed yet. Poll allowance until it covers tokenBaseUnits
-        // (up to ~30s; 3s intervals).
-        setSubmitStage('Waiting for approve confirmation…');
-        const deadline = Date.now() + 30_000;
-        let approved = false;
-        while (Date.now() < deadline) {
-          await new Promise<void>((r) => setTimeout(r, 3000));
-          const poll = await poolApi.allowance(ad.token, sellerAddress);
-          if (hasSufficientAllowance(poll.data?.allowance ?? '0', tokenBaseUnits)) {
-            approved = true;
-            break;
-          }
-        }
-        if (!approved) {
-          throw new Error(
-            `Approve tx ${approveTxHash} not confirmed yet. Wait a moment and retry.`,
-          );
-        }
+      const allowanceRes = await poolApi.allowance(ad.token, sellerAddress, ad.chainId);
+      if (!hasSufficientAllowance(allowanceRes.data?.allowance ?? '0', tokenBaseUnits)) {
+        const approval = await runP2PTx({
+          chainId: ad.chainId,
+          walletAddress: sellerAddress,
+          action: 'approve',
+          onStage: (s) => setSubmitStage(`Approving · ${s}`),
+          prepare: () => poolApi.prepareApprove(ad.token, tokenBaseUnits, sellerAddress, ad.chainId),
+          // The backend gas-estimates the open, which reverts until the API's
+          // node sees the allowance.
+          confirm: () => waitForAllowance(ad.token, sellerAddress, ad.chainId, tokenBaseUnits),
+        });
+        const next = approveFollowUp(approval);
+        if (next.alert) Alert.alert(next.alert.title, next.alert.message);
+        if (!next.proceed) return;
       }
 
       // Step 2: Open the trade (openTradeWithDeposit).
-      setSubmitStage('Depositing & opening trade…');
       // FIX 3: fiatAmount is a display-only value sent here only to satisfy
       // the required field in OpenTradeInput. For buy-ads the backend treats
       // tokenAmount as authoritative and DERIVES fiat from tokenAmount × rate
       // at trade-open time — this value is ignored server-side for buy-ads.
-      const fiatAmount = fiatPreview;
-      const openRes = await tradesApi.open(ad.id, {
-        sellerAddress,
-        tokenAmount: tokenBaseUnits,
-        fiatAmount,
-        paymentMethodId: selectedPmId,
-        // Pass payout bank details for PM buy-ads so the backend knows where
-        // to send the Nomba fiat transfer. Only set when isPm and resolved.
-        ...(isPmBuyAd && payoutResolved
-          ? {
-              payoutAccountNumber,
-              payoutBank: payoutBank!.code,
-              payoutAccountName,
-            }
-          : {}),
+      const r = await runP2PTx<OpenPrep, P2PTrade>({
+        chainId: ad.chainId,
+        walletAddress: sellerAddress,
+        action: 'open_trade',
+        adId: ad.id,
+        onStage: setSubmitStage,
+        prepare: () => tradesApi.open(ad.id, {
+          sellerAddress,
+          tokenAmount: tokenBaseUnits,
+          fiatAmount: fiatPreview,
+          paymentMethodId: selectedPmId,
+          // Pass payout bank details for PM buy-ads so the backend knows where
+          // to send the fiat transfer. Only set when isPm and resolved.
+          ...(isPmBuyAd && payoutResolved
+            ? {
+                payoutAccountNumber,
+                payoutBank: payoutBank!.code,
+                payoutAccountName,
+              }
+            : {}),
+        }),
+        confirm: (txHash, prep) => tradesApi.confirmOpen(prep.trade.id, txHash, sellerAddress),
+        stash: openStash,
       });
-      if (openRes.status === 503) {
-        Alert.alert(
-          'Live rate unavailable',
-          "The merchant's rate feed is temporarily down. Please try again in a few seconds.",
-        );
-        load();
-        return;
-      }
-      if (!openRes.success || !openRes.data) {
-        throw new Error(openRes.message || 'Server rejected the trade');
-      }
-      const { trade, unsignedTx } = openRes.data;
-
-      setSubmitStage('Signing deposit transaction…');
-      const signed = await signTransaction(unsignedTxToTxLike(unsignedTx), sellerAddress);
-
-      setSubmitStage('Broadcasting…');
-      const txResp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
-      const txHash = txResp.hash;
-
-      setSubmitStage('Confirming on chain…');
-      const confirmRes = await tradesApi.confirmOpen(trade.id, txHash, sellerAddress);
-      if (!confirmRes.success) openStillConfirming(confirmRes.message);
-
-      router.replace(`/p2p/trade/${trade.id}`);
+      finishOpen(r);
     } catch (err: any) {
-      Alert.alert('Could not open trade', err?.message || String(err));
+      Alert.alert('Could not open trade', p2pErrorMessage(err?.message));
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -693,6 +655,9 @@ const AdDetailScreen: React.FC = () => {
                 </Text>
                 <AmountText value={fiatPreview} currency={ad.fiatCurrency} variant="title3" color="textPrimary" />
               </View>
+              <Text variant="caption" color="textMuted">
+                {buyAdFeeNote(ad.feeBps)}
+              </Text>
             </View>
           ) : (
             <View style={{ marginTop: spacing.lg, gap: spacing.md }}>
@@ -727,12 +692,15 @@ const AdDetailScreen: React.FC = () => {
                   You receive
                 </Text>
                 <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                  <AmountText value={tokenPreview} variant="title3" color="textPrimary" />
+                  <AmountText value={receivePreview.amount} variant="title3" color="textPrimary" />
                   <Text variant="bodySm" color="textMuted">
                     {ad.token}
                   </Text>
                 </View>
               </View>
+              <Text variant="caption" color="textMuted">
+                {receivePreview.note}
+              </Text>
             </View>
           )}
 
@@ -783,7 +751,7 @@ const AdDetailScreen: React.FC = () => {
                 <RadioRow
                   key={m.id}
                   label={m.bankName}
-                  sublabel={`${m.accountName} · ••••${m.accountNumber.slice(-4)}`}
+                  sublabel={maskedAccountLabel(m)}
                   selected={selectedPmId === m.id}
                   onPress={() => setSelectedPmId(m.id)}
                 />
@@ -918,20 +886,5 @@ const AdDetailScreen: React.FC = () => {
     </SafeAreaView>
   );
 };
-
-// The open is broadcast but the confirm didn't record it. The trade exists, so
-// the caller still lands on it: the API backfills a lost open from the chain,
-// and the trade screen shows it confirming. Only a reverted receipt means no
-// escrow — that one throws to the caller's "Could not open trade".
-function openStillConfirming(message: string | undefined): void {
-  if (/transaction reverted on chain/i.test(message ?? '')) {
-    throw new Error('The network rejected the escrow transaction, so nothing was locked. Try again.');
-  }
-  Alert.alert(
-    'Trade opened — still confirming',
-    'Your escrow transaction was sent but isn’t recorded yet. It should be picked up shortly — ' +
-      'don’t open the trade again.',
-  );
-}
 
 export default AdDetailScreen;
