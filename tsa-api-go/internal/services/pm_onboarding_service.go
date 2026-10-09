@@ -38,6 +38,11 @@ var ErrPMKYCRequired = errors.New("a BVN or NIN is required to activate the paym
 // kind (decision 11: never both a merchant and an LP).
 var ErrPMKindConflict = errors.New("payment merchant: this account already has a profile of the other kind")
 
+// ErrPMOtherKindApproved: the user's application of the other kind is already
+// approved, though its row may not exist yet (review N3). It is a kind
+// conflict too (errors.Is ErrPMKindConflict).
+var ErrPMOtherKindApproved = fmt.Errorf("%w: an application of the other kind is already approved", ErrPMKindConflict)
+
 // ErrLiquidityUnavailable: no pool chain is configured (or the pool is closed
 // for activation), so an LP cannot be approved or activated.
 var ErrLiquidityUnavailable = errors.New("liquidity: providing liquidity is not available right now")
@@ -138,7 +143,7 @@ func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *model
 // ApproveFromRequestTx is ApproveFromRequest inside the caller's transaction,
 // so the merchant-request handler settles the row and its kind in the same
 // transaction as the request's status and the user's role (review I2). It
-// locks the user row first (SELECT … FOR UPDATE): two approvals for one user,
+// locks the user row first (SELECT … FOR NO KEY UPDATE): two approvals for one user,
 // of either kind, run one after the other, and the second sees the first's row
 // and approved request and refuses with ErrPMKindConflict.
 func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm.DB, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
@@ -155,12 +160,17 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 		poolChainID = &id
 	}
 	tx = tx.WithContext(ctx)
-	var locked []models.User // Find: a missing user has no role to race on
-	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Where("id = ?", req.UserID).Find(&locked).Error; err != nil {
+	// NO KEY UPDATE serializes two approvals for the user without blocking rows
+	// that merely reference it (KEY SHARE). Find: a missing user has no role.
+	var locked []models.User
+	if err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).Select("id").Where("id = ?", req.UserID).Find(&locked).Error; err != nil {
 		return nil, fmt.Errorf("pm_onboarding: lock user: %w", err)
 	}
-	// An approved request of the other kind is a profile on its way (its row
-	// may not exist yet, e.g. a merchant approved while PM was dormant).
+	// An approved request of the other kind is a profile on its way even with
+	// no row yet (e.g. a merchant approved while PM was dormant, whose role is
+	// already merchant). Treating it as no conflict would make an LP with the
+	// console role, so it refuses, with its own error so the admin can finish
+	// (re-approve) that application instead (review N3).
 	var other int64
 	if err := tx.Model(&models.MerchantRequest{}).
 		Where("user_id = ? AND business_type IN ? AND business_type <> ? AND status = ?", req.UserID,
@@ -169,7 +179,7 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 		return nil, fmt.Errorf("pm_onboarding: other-kind check: %w", err)
 	}
 	if other > 0 {
-		return nil, ErrPMKindConflict
+		return nil, ErrPMOtherKindApproved
 	}
 	pm, err := s.upsertPendingRow(ctx, tx, req, kind, poolChainID)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -403,5 +404,63 @@ func TestActivateLP_OnPostgres(t *testing.T) {
 	db.First(&raw3, "id = ?", pm3.ID)
 	if raw3.Status != models.PaymentMerchantStatusActive || raw3.SettlementAccountName != "OBI ADA" {
 		t.Fatalf("row = %+v", raw3)
+	}
+}
+
+// Review N2/N3: an approval takes the applicant's user-row lock (FOR NO KEY
+// UPDATE) before it writes, so a second approval for the same user waits for
+// the first to commit. Holding that lock elsewhere must hold the approval back.
+func TestApproveFromRequest_WaitsOnTheUserRowLock_OnPostgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "pm_lp_lock_", &models.User{}, &models.PaymentMerchant{}, &models.MerchantRequest{})
+	user := &models.User{ID: uuid.New(), Email: "lock@example.com", Name: "Ada Obi", Username: "lock" + uuid.New().String()[:8]}
+	if err := db.Create(user).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := NewPMOnboardingService(db, nil)
+	svc.SetLiquidity(97, nil, nil)
+
+	holder := db.Begin()
+	defer holder.Rollback()
+	if err := holder.Exec(`SELECT id FROM users WHERE id = ? FOR NO KEY UPDATE`, user.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(user.ID)); done <- err }()
+	select {
+	case err := <-done:
+		t.Fatalf("approval finished while the user row was locked (err=%v)", err)
+	case <-time.After(400 * time.Millisecond):
+	}
+	holder.Rollback()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("approval after the lock was released: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("approval still blocked after the lock was released")
+	}
+
+	// NO KEY UPDATE, not UPDATE: a row merely referencing the user (FOR KEY
+	// SHARE, as any foreign-key insert takes) must not stall an approval.
+	other := &models.User{ID: uuid.New(), Email: "share@example.com", Name: "Ada Obi", Username: "share" + uuid.New().String()[:8]}
+	if err := db.Create(other).Error; err != nil {
+		t.Fatal(err)
+	}
+	sharer := db.Begin()
+	defer sharer.Rollback()
+	if err := sharer.Exec(`SELECT id FROM users WHERE id = ? FOR KEY SHARE`, other.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	req := fakeLPRequest(other.ID)
+	req.MakerWalletAddress = "0x00000000000000000000000000000000000000e2"
+	go func() { _, err := svc.ApproveFromRequest(context.Background(), req); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("approval beside a key-share lock: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a key-share lock on the user row stalled the approval")
 	}
 }

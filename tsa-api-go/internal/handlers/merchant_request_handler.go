@@ -701,6 +701,11 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		})
 
 		switch {
+		case pmErr != nil && errors.Is(pmErr, services.ErrPMOtherKindApproved):
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"This applicant already has an approved application of the other kind (payment merchant or liquidity provider). Finish that one by approving it again; one account cannot be both.",
+				"other_application_approved")
+			return
 		case pmErr != nil && errors.Is(pmErr, services.ErrPMKindConflict):
 			utils.ErrorResponseWithCode(c, http.StatusConflict, "One account cannot be both a payment merchant and a liquidity provider", "pm_kind_conflict")
 			return
@@ -795,6 +800,14 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 		return
 	}
 
+	// Rejecting is gated like approving (review I3), and before the lookup so a
+	// non-staff caller cannot tell an unknown id from a forbidden one (N4).
+	// AdminAuth alone admits support and every marketplace merchant.
+	if !hasStaffPrivilege(c, admin) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Staff role required")
+		return
+	}
+
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request ID")
@@ -813,13 +826,8 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 		return
 	}
 
-	// Rejecting is gated like approving (review I3): staff only, and a payment
-	// merchant, LP or TSA Pay application is P2P-admin work either way (S35).
-	// AdminAuth alone admits support and every marketplace merchant.
-	if !hasStaffPrivilege(c, admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "Staff role required")
-		return
-	}
+	// A payment merchant, LP or TSA Pay application is P2P-admin work either
+	// way (S35).
 	if needsAdminToDecide(req.BusinessType) && !hasAdminPrivilege(c, admin) {
 		utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to reject this application")
 		return
@@ -871,14 +879,15 @@ func needsAdminToDecide(businessType string) bool {
 }
 
 // redactMerchantRequest strips what only a P2P admin may see (review I3):
-// settlement bank details, the maker wallet and, for an LP, the business name,
-// which is the applicant's verified legal name.
+// settlement bank details, the maker wallet (also on the preloaded user) and,
+// for an LP, the business name, which is the applicant's verified legal name.
 func redactMerchantRequest(c *gin.Context, caller *models.User, req *models.MerchantRequest) {
 	if hasAdminPrivilege(c, caller) {
 		return
 	}
 	req.SettlementBankCode, req.SettlementAccountNumber, req.SettlementAccountName = "", "", ""
 	req.MakerWalletAddress = ""
+	req.User.WalletAddress = "" // usually the same wallet (review N1)
 	if req.BusinessType == models.BusinessTypeLiquidityProvider {
 		req.BusinessName = ""
 	}
