@@ -289,7 +289,7 @@ const AdDetailScreen: React.FC = () => {
 
   // One landing for both open paths. A lost confirm still lands on the trade:
   // runP2PTx stashed the hash before the confirm, so the trade screen's R4
-  // banner can retry it, and the chain reconciler backfills it either way.
+  // banner can retry it; if it never shows, the trade appears once the server picks it up.
   const finishOpen = (r: RunP2PTxResult<OpenPrep, P2PTrade>) => {
     const next = openFollowUp(r);
     switch (next.kind) {

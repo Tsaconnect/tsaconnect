@@ -762,7 +762,7 @@ const CreateAdScreen: React.FC = () => {
         await refreshPendingDeposits();
         Alert.alert(
           'Deposit sent — confirm pending',
-          `Your ${sym} is safe in your escrow balance. Use “Retry confirm” above, then add it to the pool.`,
+          `Your ${sym} deposit was broadcast, but the server could not record it yet. Use “Retry confirm” above, then add it to the pool. Don't send the deposit again.`,
         );
       } else if (res.status === 'done') {
         Alert.alert(

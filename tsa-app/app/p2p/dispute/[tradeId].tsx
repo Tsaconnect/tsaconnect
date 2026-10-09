@@ -41,7 +41,7 @@ import { tradesApi, type P2PTrade } from '../../../services/p2p';
 import { p2pErrorMessage, p2pKycCode } from '../../../services/p2pErrors';
 import { runP2PTx, txOutcomeAlert } from '../../../services/p2pTx';
 import { getActiveWallet } from '../../../services/wallet';
-import { disputeRefusalMessage } from '../../../utils/p2pDispute';
+import { safeProofUrl } from '../../../utils/payInto';
 import { promptKycRefusal } from '../../../utils/kycRefusal';
 
 // Structured reasons. The `reason` string on the wire is free-text (the
@@ -216,6 +216,13 @@ const DisputeWizardScreen: React.FC = () => {
     const reasonStr = wireReason();
     if (!reasonStr) return;
 
+    const safeEvidence = evidence.map(safeProofUrl);
+    if (safeEvidence.some((u) => u === null)) {
+      toast.error('Some evidence images are not secure (https) links. Remove them and add them again.');
+      return;
+    }
+    const evidenceUrls = safeEvidence as string[];
+
     try {
       setSubmitting(true);
 
@@ -227,13 +234,13 @@ const DisputeWizardScreen: React.FC = () => {
         walletAddress: callerAddress,
         action: 'dispute',
         tradeId: trade.id,
-        prepare: () => tradesApi.raiseDispute(trade.id, reasonStr, callerAddress, evidence),
+        prepare: () => tradesApi.raiseDispute(trade.id, reasonStr, callerAddress, evidenceUrls),
         confirm: (h) => tradesApi.confirmRaiseDispute(trade.id, h),
       });
 
       if (r.status === 'refused') {
         if (promptKycRefusal(p2pKycCode(r.response), r.response.message)) return;
-        toast.error(disputeRefusalMessage(r.response));
+        toast.error(p2pErrorMessage(r.response));
         return;
       }
       if (r.status === 'confirmed') {

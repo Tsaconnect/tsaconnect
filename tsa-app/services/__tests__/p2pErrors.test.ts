@@ -29,7 +29,7 @@ describe('p2pErrorMessage', () => {
     ['p2p: rate source is stale; cannot quote', /live rate is unavailable/],
     ['p2p: blockchain temporarily unavailable, please retry', /network is busy/],
     ['p2p: amount outside ad min/max limits', /outside this ad's limits/],
-    ['p2p: trade already has an open dispute', /dispute is already open/],
+    ['p2p: trade already has an open dispute', /already open or being raised.*few minutes/],
     ['p2p: the trade could not be prepared on-chain: execution reverted: Bad voucher signature', /no longer available/],
     ['Network request failed', /Check your connection/],
   ])('%s', (raw, re) => {

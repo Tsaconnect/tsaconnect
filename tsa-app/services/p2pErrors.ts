@@ -43,7 +43,7 @@ const RULES: [RegExp, string][] = [
   [/cannot open a trade on their own ad/i, "You can't trade on your own ad."],
   [/already have an active trade on this ad/i, 'You already have an open trade on this ad. Finish it first.'],
   [/invalid state transition/i, 'This trade has already moved on. Pull down to refresh.'],
-  [/already has an open dispute/i, 'A dispute is already open for this trade.'],
+  [/already has an open dispute/i, 'A dispute is already open or being raised for this trade — check back in a few minutes.'],
   [/not authorized for this action/i, "You can't do that on this trade."],
   [/trade not found|ad not found/i, "We couldn't find that. It may have been removed."],
   [/payment method not found/i, 'Pick a payment method and try again.'],
