@@ -135,45 +135,43 @@ export function tradeFeeLines(trade: P2PTrade, role: 'buyer' | 'seller', decimal
 }
 
 /** How long a sent trade action may sit unrecorded with the trade unmoved
- *  before it stops hiding the buttons. The reconciler moves a mined action
- *  within a minute, so by then the tx almost certainly never landed; sending
- *  again is safe because prepare's gas estimate refuses an action that already
- *  happened. A lost open has no TTL: the backfill or the expiry watchdog always
- *  settles it. */
+ *  before the buttons come back (the stash and its retry stay). The reconciler
+ *  moves a mined action within a minute, so by then the tx almost certainly
+ *  never landed; sending again is safe because prepare's gas estimate refuses
+ *  an action that already happened. A lost open never goes stale: the backfill
+ *  or the expiry watchdog always settles it. */
 export const PENDING_TRADE_TX_STALE_MS = 5 * 60_000;
 
-function pendingTradeTxSettled(
-  rec: PendingTradeTx,
-  trade: Pick<P2PTrade, 'status' | 'openTxHash'>,
-  nowMs: number,
-): boolean {
-  const stale = nowMs - rec.createdAt > PENDING_TRADE_TX_STALE_MS;
+/** The trade has moved past what this stashed tx was doing. */
+function pendingTradeTxSettled(rec: PendingTradeTx, trade: Pick<P2PTrade, 'status' | 'openTxHash'>): boolean {
   switch (rec.mode) {
     case 'open':
       return !!trade.openTxHash || trade.status !== 'pending_payment';
     case 'mark_paid':
     case 'cancel_trade':
-      return stale || trade.status !== 'pending_payment';
+      return trade.status !== 'pending_payment';
     case 'release':
-      return stale || (trade.status !== 'paid' && trade.status !== 'releasing');
+      return trade.status !== 'paid' && trade.status !== 'releasing';
   }
 }
 
-/** This trade's stashed txs: the newest one still unresolved (to show), and
- *  the ones the trade has moved past (to drop from the store). */
+/** This trade's stashed txs: the newest one still unresolved (to show, with
+ *  `stale` once it should stop hiding the buttons), and the ones the trade has
+ *  moved past (to drop from the store). */
 export function splitPendingTradeTxs(
   recs: PendingEscrowConfirm[],
   trade: Pick<P2PTrade, 'id' | 'status' | 'openTxHash'>,
   nowMs: number,
-): { active: PendingTradeTx | null; settled: PendingTradeTx[] } {
+): { active: PendingTradeTx | null; settled: PendingTradeTx[]; stale: boolean } {
   let active: PendingTradeTx | null = null;
   const settled: PendingTradeTx[] = [];
   for (const rec of recs) {
     if (!isPendingTradeTx(rec) || rec.tradeId !== trade.id) continue;
-    if (pendingTradeTxSettled(rec, trade, nowMs)) settled.push(rec);
+    if (pendingTradeTxSettled(rec, trade)) settled.push(rec);
     else if (!active || rec.createdAt > active.createdAt) active = rec;
   }
-  return { active, settled };
+  const stale = !!active && active.mode !== 'open' && nowMs - active.createdAt > PENDING_TRADE_TX_STALE_MS;
+  return { active, settled, stale };
 }
 
 const PENDING_TX_COPY: Record<TradeTxMode, { label: string; sent: string }> = {
@@ -183,9 +181,11 @@ const PENDING_TX_COPY: Record<TradeTxMode, { label: string; sent: string }> = {
   cancel_trade: { label: 'Cancel', sent: 'Your cancel was sent' },
 };
 
-/** Card copy for a stashed trade tx. `label` titles the outcome alerts. */
+/** Card copy for a stashed trade tx. `label` titles the outcome alerts. A
+ *  stale one sits above the buttons again, so it stops saying "don't send". */
 export function pendingTradeTxCopy(
   rec: Pick<PendingTradeTx, 'mode' | 'txHash'>,
+  stale = false,
 ): { title: string; body: string; label: string } {
   const { label, sent } = PENDING_TX_COPY[rec.mode];
   if (rec.mode === 'open') {
@@ -198,8 +198,19 @@ export function pendingTradeTxCopy(
   }
   return {
     label,
-    title: `Confirming ${shortAddress(rec.txHash)}…`,
-    body: `${sent}. We’re waiting for the network to record it — don’t send it again. ` +
-      'Retry to check now; nothing is sent again.',
+    // shortAddress already elides the middle.
+    title: `Confirming ${shortAddress(rec.txHash)}`,
+    body: stale
+      ? `${sent} but still isn’t recorded. Retry to check it now. If it never went through, you can send it again below.`
+      : `${sent}. We’re waiting for the network to record it — don’t send it again. ` +
+        'Retry to check now; nothing is sent again.',
   };
 }
+
+/** A retried open the server saw revert: no escrow, and the watchdog ends the
+ *  trade — there is nothing for the user to redo here. */
+export const OPEN_REVERTED_ALERT = {
+  title: 'Escrow failed',
+  message: 'The network rejected the escrow transaction, so nothing is locked. ' +
+    'This trade will expire and cancel on its own.',
+};

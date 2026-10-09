@@ -2,6 +2,7 @@ import type { P2PTrade } from '@/services/p2p';
 import type { PendingEscrowConfirm } from '@/services/p2pPending';
 import {
   markPaidConfirmMessage,
+  OPEN_REVERTED_ALERT,
   PENDING_TRADE_TX_STALE_MS,
   pendingTradeTxCopy,
   RELEASE_CONFIRM_TITLE,
@@ -157,15 +158,15 @@ describe('splitPendingTradeTxs', () => {
   }
   it('open: settled once the open is recorded — a real hash or "reconciled"', () => {
     const open = stash({ mode: 'open', createdAt: NOW - 24 * 3600_000 });
-    expect(splitPendingTradeTxs([open], t({ openTxHash: '' }), NOW)).toEqual({ active: open, settled: [] });
-    expect(splitPendingTradeTxs([open], t({ openTxHash: 'reconciled' }), NOW)).toEqual({ active: null, settled: [open] });
+    expect(splitPendingTradeTxs([open], t({ openTxHash: '' }), NOW)).toEqual({ active: open, settled: [], stale: false });
+    expect(splitPendingTradeTxs([open], t({ openTxHash: 'reconciled' }), NOW)).toEqual({ active: null, settled: [open], stale: false });
     expect(splitPendingTradeTxs([open], t({ openTxHash: '', status: 'cancelled' }), NOW).settled).toEqual([open]);
   });
   it('mark-paid and cancel: settled once the trade leaves pending_payment', () => {
     const mp = stash({ mode: 'mark_paid' });
     const c = stash({ mode: 'cancel_trade', txHash: '0xc' });
     expect(splitPendingTradeTxs([mp], t(), NOW).active).toBe(mp);
-    expect(splitPendingTradeTxs([mp, c], t({ status: 'paid' }), NOW)).toEqual({ active: null, settled: [mp, c] });
+    expect(splitPendingTradeTxs([mp, c], t({ status: 'paid' }), NOW)).toEqual({ active: null, settled: [mp, c], stale: false });
     expect(splitPendingTradeTxs([c], t({ status: 'cancelled' }), NOW).settled).toEqual([c]);
   });
   it('release: unresolved while paid or releasing', () => {
@@ -174,9 +175,15 @@ describe('splitPendingTradeTxs', () => {
     expect(splitPendingTradeTxs([rel], t({ status: 'releasing' }), NOW).active).toBe(rel);
     expect(splitPendingTradeTxs([rel], t({ status: 'released' }), NOW).settled).toEqual([rel]);
   });
-  it('a trade action that never moved the trade expires, so a dropped tx cannot hide the buttons forever', () => {
+  it('a trade action that never moved the trade goes stale: kept (still retryable), but flagged', () => {
     const old = stash({ createdAt: NOW - PENDING_TRADE_TX_STALE_MS - 1 });
-    expect(splitPendingTradeTxs([old], t(), NOW)).toEqual({ active: null, settled: [old] });
+    expect(splitPendingTradeTxs([old], t(), NOW)).toEqual({ active: old, settled: [], stale: true });
+    // ...and is still dropped once the trade moves past it.
+    expect(splitPendingTradeTxs([old], t({ status: 'paid' }), NOW)).toEqual({ active: null, settled: [old], stale: false });
+  });
+  it('a lost open never goes stale', () => {
+    const open = stash({ mode: 'open', createdAt: NOW - 24 * 3600_000 });
+    expect(splitPendingTradeTxs([open], t({ openTxHash: '' }), NOW).stale).toBe(false);
   });
   it('shows the newest unresolved one', () => {
     const a = stash({ txHash: '0x1', createdAt: NOW - 120_000 });
@@ -186,7 +193,7 @@ describe('splitPendingTradeTxs', () => {
   it('ignores records for other trades or of other kinds', () => {
     const other = stash({ tradeId: 'x' });
     const dep = stash({ mode: 'deposit', tradeId: undefined });
-    expect(splitPendingTradeTxs([other, dep], t(), NOW)).toEqual({ active: null, settled: [] });
+    expect(splitPendingTradeTxs([other, dep], t(), NOW)).toEqual({ active: null, settled: [], stale: false });
   });
 });
 
@@ -194,9 +201,15 @@ describe('pendingTradeTxCopy', () => {
   const hash = '0x' + 'ab'.repeat(32);
   it('names the short hash and never asks to send again', () => {
     const c = pendingTradeTxCopy({ mode: 'mark_paid', txHash: hash });
-    expect(c.title).toBe('Confirming 0xabab…abab…');
+    expect(c.title).toBe('Confirming 0xabab…abab');
     expect(c.body).toMatch(/don’t send it again/i);
     expect(c.label).toBe('Mark paid');
+  });
+  it('stale: offers the buttons again instead of "don’t send it again"', () => {
+    const c = pendingTradeTxCopy({ mode: 'mark_paid', txHash: hash }, true);
+    expect(c.title).toBe('Confirming 0xabab…abab');
+    expect(c.body).toMatch(/send it again below/);
+    expect(c.body).not.toMatch(/don’t send it again/i);
   });
   it('open: says it will be picked up — no promise of an automatic catch-up', () => {
     const c = pendingTradeTxCopy({ mode: 'open', txHash: hash });
@@ -216,5 +229,13 @@ describe('markPaidConfirmMessage', () => {
     expect(markPaidConfirmMessage('USDT', true)).toMatch(
       /The payment window has ended — marking paid now stops the seller cancelling, if it lands first\./,
     );
+  });
+});
+
+describe('OPEN_REVERTED_ALERT (a retried open that reverted)', () => {
+  it('says nothing is locked and the trade ends on its own — no "try again"', () => {
+    expect(OPEN_REVERTED_ALERT.message).toMatch(/nothing is locked/);
+    expect(OPEN_REVERTED_ALERT.message).toMatch(/cancel on its own/);
+    expect(OPEN_REVERTED_ALERT.message).not.toMatch(/try again|pull down/i);
   });
 });

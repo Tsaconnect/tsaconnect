@@ -33,6 +33,7 @@ import {
   KeyboardAvoidingView,
   Linking,
   Platform,
+  RefreshControl,
   ScrollView,
   TextInput,
   View,
@@ -62,6 +63,7 @@ import { MAINNET_CHAINS, TESTNET_CHAINS } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
 import { useTradeExpiryReminder } from '../../../hooks/useTradeExpiryReminder';
 import { useTradeRealtime } from '../../../hooks/useTradeRealtime';
+import { usePendingTradeTx } from '../../../hooks/usePendingTradeTx';
 import { useNotifications } from '../../../contexts/NotificationContext';
 import {
   formatTokenAmount,
@@ -76,17 +78,16 @@ import {
   type UnsignedTx,
 } from '../../../services/p2p';
 import { retryStashedConfirm, runP2PTx, txOutcomeAlert, type RunP2PTxResult } from '../../../services/p2pTx';
-import { listPendingForTrade, removePending, type PendingTradeTx } from '../../../services/p2pPending';
 import { p2pErrorMessage, p2pKycCode } from '../../../services/p2pErrors';
 import { getActiveWallet } from '../../../services/wallet';
 import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { confirmAsync } from '../../../utils/confirmAsync';
 import {
   markPaidConfirmMessage,
+  OPEN_REVERTED_ALERT,
   pendingTradeTxCopy,
   RELEASE_CONFIRM_TITLE,
   releaseConfirmMessage,
-  splitPendingTradeTxs,
   tradeActions,
   tradeFeeLines,
   tradeTxFollowUp,
@@ -121,13 +122,11 @@ const TradeDetailScreen: React.FC = () => {
   // Dispute for this trade — fetched lazily on a resolved trade so we can show
   // the on-chain resolution tx (resolveTxHash lives on the dispute, not trade).
   const [dispute, setDispute] = useState<P2PDispute | null>(null);
-  // A trade tx this device sent whose confirm was lost (runP2PTx `stash`):
-  // shown with a retry instead of re-offering the action.
-  const [pendingTx, setPendingTx] = useState<PendingTradeTx | null>(null);
   // Proof uploaded per trade this session, so a retried mark-paid doesn't
   // re-pick or re-upload it.
   const proofUrlsRef = useRef<Record<string, string>>({});
   const toast = useToast();
+  const [refreshing, setRefreshing] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   // Chat is collapsed by default — it's secondary to the trade actions. The
@@ -310,27 +309,9 @@ const TradeDetailScreen: React.FC = () => {
     };
   }, [trade?.status, tradeId]);
 
-  // Re-read this trade's stash on every refresh: a failed action stashes
-  // before its reload lands, the trade moving past a stashed tx (confirm,
-  // retry, reconciler or backfill) drops it, and a stale one ages out.
-  useEffect(() => {
-    if (!trade) return;
-    let cancelled = false;
-    (async () => {
-      const { active, settled } = splitPendingTradeTxs(await listPendingForTrade(trade.id), trade, Date.now());
-      for (const rec of settled) {
-        try {
-          await removePending(rec.txHash);
-        } catch (err) {
-          console.warn('[trade] drop settled stash failed', err);
-        }
-      }
-      if (!cancelled) setPendingTx(active);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [trade]);
+  // A trade tx this device sent whose confirm was lost (runP2PTx `stash`):
+  // shown with a retry instead of re-offering the action until it goes stale.
+  const { pending: pendingTx, stale: pendingStale, refresh: refreshPending } = usePendingTradeTx(trade);
 
   if (loading || !trade) {
     return (
@@ -371,14 +352,16 @@ const TradeDetailScreen: React.FC = () => {
 
   const tokenDecimals = p2pTokenDecimals(trade.chainId, trade.token);
   const feeLines = tradeFeeLines(trade, role, tokenDecimals);
-  const view = tradeActions(trade, role, Date.now(), pendingTx?.mode);
-  const pendingCopy = pendingTx ? pendingTradeTxCopy(pendingTx) : null;
+  // A stale stash keeps its card and retry but no longer hides the buttons.
+  const view = tradeActions(trade, role, Date.now(), pendingStale ? null : pendingTx?.mode);
+  const pendingCopy = pendingTx ? pendingTradeTxCopy(pendingTx, pendingStale) : null;
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
   // Holds the action slot from the tap — before any dialog or await — so a fast
   // double tap can't start a second flow (React state would still read the old
-  // value). Every user action on this trade goes through it.
+  // value). Every user action on this trade goes through it. The stash is
+  // re-read afterwards whether or not the action's reload got through.
   const withActing = async (fn: () => Promise<void>) => {
     if (actingRef.current) return;
     actingRef.current = 'Starting…';
@@ -386,6 +369,17 @@ const TradeDetailScreen: React.FC = () => {
       await fn();
     } finally {
       stopActing();
+      refreshPending();
+    }
+  };
+
+  const onPullRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+      refreshPending();
     }
   };
 
@@ -499,12 +493,12 @@ const TradeDetailScreen: React.FC = () => {
       startActing('Checking the network…');
       const r = await retryStashedConfirm(rec);
       if (r.status === 'confirmed') {
-        setPendingTx(null);
         if (r.data) setTrade(r.data);
         toast.success(`${label} confirmed`);
       } else if (r.status === 'reverted') {
-        setPendingTx(null);
-        const a = txOutcomeAlert(label, { status: 'reverted', txHash: rec.txHash, prepared: null });
+        const a = rec.mode === 'open'
+          ? OPEN_REVERTED_ALERT
+          : txOutcomeAlert(label, { status: 'reverted', txHash: rec.txHash, prepared: null });
         if (a) Alert.alert(a.title, a.message);
       } else {
         Alert.alert('Still confirming', r.message);
@@ -570,6 +564,9 @@ const TradeDetailScreen: React.FC = () => {
           ref={scrollRef}
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing.xl }}
           keyboardShouldPersistTaps="handled"
+          refreshControl={
+            <RefreshControl refreshing={refreshing} tintColor={colors.accent} onRefresh={onPullRefresh} />
+          }
         >
           <StatusTimeline status={trade.status} />
 
@@ -674,7 +671,7 @@ const TradeDetailScreen: React.FC = () => {
               trade={trade}
               view={view}
               acting={acting}
-              confirming={view.confirmingTx ? pendingCopy : null}
+              confirming={pendingTx && pendingTx.mode !== 'open' ? pendingCopy : null}
               onRetryConfirm={handleRetryConfirm}
               onMarkPaid={handleMarkPaid}
               onRelease={handleRelease}
@@ -965,7 +962,8 @@ const ActionPanel: React.FC<{
    *  backend drives markPaid + release); a dormant PM falls back to manual. */
   view: TradeActions;
   acting: string;
-  /** A sent action still confirming: shown in place of the action buttons. */
+  /** A sent action still confirming: shown in place of the action buttons
+   *  (above them once stale — view.confirmingTx decides). */
   confirming: { title: string; body: string } | null;
   onRetryConfirm: () => void;
   onMarkPaid: () => void;
