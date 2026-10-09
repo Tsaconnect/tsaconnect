@@ -211,6 +211,9 @@ type P2PTradeService struct {
 	// and waits.
 	poolSlices PoolSliceOrders
 	poolSender ChainSender
+	// sliceOpenAlerts throttles the unresolved-open alert per slice (M-12,
+	// re-review N-6): once, then hourly.
+	sliceOpenAlerts *alertThrottle
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -222,12 +225,13 @@ const defaultFloatOffsetMaxBps = 1000
 
 func NewP2PTradeService(db *gorm.DB, escrows *P2PEscrowRegistry, rates RateProvider, bus EventPublisher, defaultChainID int64) *P2PTradeService {
 	return &P2PTradeService{
-		db:             db,
-		escrows:        escrows,
-		rates:          rates,
-		bus:            bus,
-		clock:          SystemClock,
-		defaultChainID: defaultChainID,
+		sliceOpenAlerts: &alertThrottle{},
+		db:              db,
+		escrows:         escrows,
+		rates:           rates,
+		bus:             bus,
+		clock:           SystemClock,
+		defaultChainID:  defaultChainID,
 	}
 }
 

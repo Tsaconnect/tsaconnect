@@ -584,14 +584,20 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 	// If the money leaves and the id write below is lost, the marker still
 	// refuses the canceller's refund and any second payout; the webhook
 	// (matched on the trade-id reference) records the outcome.
+	// firstAttempt (re-review N-4): no earlier request with this reference
+	// can exist once the row has neither the marker nor an id — every
+	// request since the marker shipped is gated on it. A trade whose payout
+	// was attempted before then left no trace; the pre-deploy check covers it.
+	firstAttempt := false
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var cur models.P2PTrade
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Select("id", "status", "dropped_at", "payout_started_at").First(&cur, "id = ?", trade.ID).Error; err != nil {
+			Select("id", "status", "dropped_at", "payout_started_at", "nomba_payout_id").First(&cur, "id = ?", trade.ID).Error; err != nil {
 			return err
 		}
+		firstAttempt = cur.PayoutStartedAt == nil && cur.NombaPayoutID == ""
 		switch {
-		case cur.PayoutStartedAt != nil:
+		case cur.PayoutStartedAt != nil || cur.NombaPayoutID != "":
 			return fmt.Errorf("%w: a payout was already started for this trade; its result is awaited", ErrInvalidTransition)
 		case cur.Status != models.P2PTradeStatusPendingPayment || cur.DroppedAt != nil:
 			return fmt.Errorf("%w: trade expired and is being cancelled", ErrInvalidTransition)
@@ -604,10 +610,10 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 
 	payoutID, err := s.gateway.InitiatePayout(ctx, req)
 	if err != nil {
-		var rejected *ProviderRejectedError
-		if errors.As(err, &rejected) {
-			// The provider refused this request: no transfer exists, so the
-			// marker comes off and the operator may try again.
+		if providerRefusalIsFinal(err, firstAttempt) {
+			// The provider refused this reference's first request: no
+			// transfer exists, so the marker comes off and the operator may
+			// try again.
 			if cerr := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 				Where("id = ? AND nomba_payout_id = ''", trade.ID).
 				Update("payout_started_at", nil).Error; cerr != nil {

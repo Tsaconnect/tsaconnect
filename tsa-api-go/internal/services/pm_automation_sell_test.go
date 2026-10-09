@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -619,5 +620,51 @@ func TestHandlePayoutStatus_SuccessRecordsALostPayoutID(t *testing.T) {
 	db.First(&got, "id = ?", trade.ID)
 	if got.NombaPayoutID != "po_from_webhook" || got.Status != models.P2PTradeStatusReleased {
 		t.Fatalf("payout id %q status %s, want the webhook's id recorded and released", got.NombaPayoutID, got.Status)
+	}
+}
+
+// Re-review N-1: a timeout or 5xx says nothing about whether the transfer
+// exists. The marker stays: no retry reaches the gateway, and the canceller
+// refuses the refund.
+func TestInitiateSellPayout_UnknownOutcomeKeepsTheMarker(t *testing.T) {
+	for _, gwErr := range []error{context.DeadlineExceeded, errors.New("flutterwave direct-transfer: HTTP 502")} {
+		_, svc, trade, gw, auto, _ := expiredSellTrade(t)
+		gw.err = gwErr
+		if _, err := auto.InitiateSellPayout(context.Background(), trade.ID); err == nil {
+			t.Fatalf("%v: reported success", gwErr)
+		}
+		gw.err = nil
+		if _, err := auto.InitiateSellPayout(context.Background(), trade.ID); !errors.Is(err, ErrInvalidTransition) {
+			t.Fatalf("%v: retry = %v, want ErrInvalidTransition", gwErr, err)
+		}
+		if len(gw.calls) != 1 {
+			t.Fatalf("%v: gateway called %d times, want 1", gwErr, len(gw.calls))
+		}
+		if ok, err := svc.decideLegacyCancel(context.Background(), trade, time.Now()); ok || err != nil {
+			t.Fatalf("%v: decide = %v %v, want the refund refused", gwErr, ok, err)
+		}
+	}
+}
+
+// Re-review N-4: the rule the IT sell payout uses, shared — a refusal proves
+// no transfer only on a reference's first attempt. On a retry it can mean
+// "that reference already exists", Replayed or not.
+func TestProviderRefusalIsFinal(t *testing.T) {
+	refused := &ProviderRejectedError{Err: errors.New("HTTP 400")}
+	replayed := &ProviderRejectedError{Err: errors.New("HTTP 400"), Replayed: true}
+	for _, c := range []struct {
+		err   error
+		first bool
+		want  bool
+	}{
+		{refused, true, true},
+		{fmt.Errorf("wrapped: %w", refused), true, true},
+		{refused, false, false},
+		{replayed, false, false},
+		{errors.New("timeout"), true, false},
+	} {
+		if got := providerRefusalIsFinal(c.err, c.first); got != c.want {
+			t.Errorf("providerRefusalIsFinal(%v, first=%v) = %v, want %v", c.err, c.first, got, c.want)
+		}
 	}
 }

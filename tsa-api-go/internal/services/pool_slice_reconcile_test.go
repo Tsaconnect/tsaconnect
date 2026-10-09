@@ -343,4 +343,10 @@ func TestReconcileOrphanOpen_UnresolvedPastAnHourAlerts(t *testing.T) {
 	if !strings.Contains(buf.String(), "ALERT liquidity_pool_slice_open_unresolved slice="+old.ID.String()) {
 		t.Fatalf("no alert for a 2-hour-old unresolved open:\n%s", buf.String())
 	}
+	// Re-review N-6: the next passes within the hour do not repeat it.
+	r.trades.ReconcileTrade(context.Background(), old.ID)
+	r.trades.ReconcileTrade(context.Background(), old.ID)
+	if n := strings.Count(buf.String(), "ALERT liquidity_pool_slice_open_unresolved slice="+old.ID.String()); n != 1 {
+		t.Fatalf("alerted %d times within the hour, want 1", n)
+	}
 }

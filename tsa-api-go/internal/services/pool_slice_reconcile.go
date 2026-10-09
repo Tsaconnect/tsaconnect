@@ -56,7 +56,7 @@ func (s *P2PTradeService) sliceOrphanable(ctx context.Context, t *models.P2PTrad
 	}
 	s.rotateSlice(ctx, t)
 	log.Printf("[liquidity] METRIC liquidity_pool_slice_open_unresolved slice=%s nonce=%d", t.ID, *t.OpenNonce)
-	if age := s.clock.Now().Sub(t.CreatedAt); age >= sliceOpenUnresolvedAlertAfter {
+	if age := s.clock.Now().Sub(t.CreatedAt); age >= sliceOpenUnresolvedAlertAfter && s.sliceOpenAlerts.due(t.ID, s.clock.Now()) {
 		// Review M-12: an open the probe can resolve neither way (landed but
 		// unreadable, or a nonce never consumed) would otherwise wait in
 		// silence; past the slice window an operator looks.

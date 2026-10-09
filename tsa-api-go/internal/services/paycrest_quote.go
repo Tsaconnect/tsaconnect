@@ -1151,7 +1151,7 @@ func owedLeg(base PaycrestVenue, delivered *big.Int, decimals int, fiatAmount st
 		v.EffectiveRate = allInRate(fiat, owed, decimals)
 		v.Fees = nil
 		if cost := new(big.Int).Sub(delivered, owed); cost.Sign() > 0 {
-			v.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionLiFiLabel, cost, decimals, rate)}
+			v.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionFeeLabel, cost, decimals, rate)}
 		}
 		if marketRate > 0 {
 			eff, _ := new(big.Rat).Quo(fiat, new(big.Rat).SetFrac(owed, pow10(decimals))).Float64()

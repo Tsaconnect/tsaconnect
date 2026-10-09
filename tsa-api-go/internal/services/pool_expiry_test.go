@@ -425,3 +425,60 @@ func TestExpiry_SustainedDeferralAlerts(t *testing.T) {
 		t.Fatalf("no sustained-deferral alert:\n%s", buf.String())
 	}
 }
+
+// Re-review N-2: a trade whose payout may be in flight alerts once, then at
+// most hourly — not on every tick for a day.
+func TestExpiry_PayoutInFlightAlertIsHourly(t *testing.T) {
+	r := newPoolRig(t)
+	tr := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-31*time.Minute))
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Update("payout_started_at", time.Now().Add(-40*time.Minute))
+	r.sonic.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, CreatedAt: big.NewInt(time.Now().Add(-2 * time.Hour).Unix())}
+	now := time.Now()
+	ec := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: releaseSender(), Now: func() time.Time { return now }})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	count := func() int { return strings.Count(buf.String(), "ALERT p2p_expiry_payout_in_flight") }
+	ec.RunOnce(context.Background())
+	now = now.Add(time.Minute)
+	ec.RunOnce(context.Background())
+	if count() != 1 {
+		t.Fatalf("alerts after two ticks = %d, want 1", count())
+	}
+	now = now.Add(time.Hour)
+	ec.RunOnce(context.Background())
+	if count() != 2 {
+		t.Fatalf("alerts an hour later = %d, want 2", count())
+	}
+}
+
+// Re-review N-2 backstop: a payout with no outcome that has aged out of the
+// legacy window is never silent — a daily sweep alerts it.
+func TestExpiry_PayoutWithNoOutcomePastTheWindowAlertsDaily(t *testing.T) {
+	r := newPoolRig(t)
+	old := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-30*time.Hour))
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", old.ID).Update("payout_started_at", time.Now().Add(-31*time.Hour))
+	failed := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-30*time.Hour))
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", failed.ID).Updates(map[string]any{
+		"payout_started_at": time.Now().Add(-31 * time.Hour), "nomba_payout_id": "po_f", "cancel_reason": pmPayoutFailedReason + " (x)"})
+	now := time.Now()
+	ec := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: releaseSender(), Now: func() time.Time { return now }})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	count := func() int { return strings.Count(buf.String(), "ALERT p2p_payout_outcome_unresolved") }
+	ec.RunOnce(context.Background())
+	if count() != 1 || !strings.Contains(buf.String(), "trade="+old.ID.String()) || strings.Contains(buf.String(), "trade="+failed.ID.String()) {
+		t.Fatalf("first sweep:\n%s", buf.String())
+	}
+	now = now.Add(time.Hour)
+	ec.RunOnce(context.Background())
+	if count() != 1 {
+		t.Fatalf("swept again within the day: %d", count())
+	}
+	now = now.Add(24 * time.Hour)
+	ec.RunOnce(context.Background())
+	if count() != 2 {
+		t.Fatalf("no daily repeat: %d", count())
+	}
+}

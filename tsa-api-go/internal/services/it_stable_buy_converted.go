@@ -21,7 +21,7 @@ import (
 const ITConversionRefPrefix = "ITC-"
 
 const (
-	ConversionLiFiLabel = "Conversion (provider)"
+	ConversionFeeLabel = "Conversion (provider)"
 )
 
 var ErrStableBuyAbandonCapReached = errors.New("too many unpaid purchases were cancelled or expired today")
@@ -385,7 +385,7 @@ func conversionFee(delivered, owed, displayRate *big.Int) StableBuyFee {
 	units := new(big.Int).Sub(delivered, owed)
 	ngn := new(big.Int).Mul(units, displayRate)
 	ngn.Quo(ngn, stableUnitsPerToken())
-	return StableBuyFee{Kind: FeeKindConversion, Label: ConversionLiFiLabel, Provider: FeeProviderShown,
+	return StableBuyFee{Kind: FeeKindConversion, Label: ConversionFeeLabel, Provider: FeeProviderShown,
 		Units: units.String(), NgnMinor: ngn.String()}
 }
 

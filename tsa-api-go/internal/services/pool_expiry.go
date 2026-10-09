@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,12 +28,18 @@ const (
 	// expiryDeferredAlertAfter (review M-9): a stale statement defers every
 	// cancel; past this it is an alert, repeated at most this often.
 	expiryDeferredAlertAfter = 30 * time.Minute
-	expiryZombieWindow       = 2 * time.Hour // cancelled slices re-checked every minute
-	expiryZombieSweep        = 7 * 24 * time.Hour
-	expiryZombieEvery        = 24 * time.Hour
-	expiryOpeningAfter       = 2 * time.Minute
-	expiryPendingMargin      = 5 * time.Minute // past rate_expires_at + grace (§14); inside poolHonourSafety (Task 10)
-	expiryPerChainDefault    = 20
+	// expiryRealertEvery (re-review N-2/N-6): a per-trade alert repeats at
+	// most this often — the scheduler's failure-streak cadence.
+	expiryRealertEvery = time.Hour
+	// expiryPayoutSweepEvery (re-review N-2): the backstop for a payout with
+	// no outcome that has left the legacy window.
+	expiryPayoutSweepEvery = 24 * time.Hour
+	expiryZombieWindow     = 2 * time.Hour // cancelled slices re-checked every minute
+	expiryZombieSweep      = 7 * 24 * time.Hour
+	expiryZombieEvery      = 24 * time.Hour
+	expiryOpeningAfter     = 2 * time.Minute
+	expiryPendingMargin    = 5 * time.Minute // past rate_expires_at + grace (§14); inside poolHonourSafety (Task 10)
+	expiryPerChainDefault  = 20
 	// expiryScanLimit is one page of a scope. Pages advance on a keyset and
 	// wrap (review I1), so rows the canceller cannot act on yet — an open that
 	// never landed waits for S44 — never hold the window.
@@ -70,6 +77,39 @@ type ExpiryCanceller struct {
 	// skipped: the answer cannot change.
 	legacyAbsent                     map[uuid.UUID]time.Time
 	deferredSince, deferredAlertedAt time.Time
+	moneyMovedAlerts                 alertThrottle
+	lastPayoutSweep                  time.Time
+}
+
+// alertThrottle is the scheduler's re-alert rule (jobs: alert on the first
+// failure, then at most hourly) kept per key, for alerts raised on every
+// tick or pass about one row. Its zero value is ready; safe for concurrent use.
+type alertThrottle struct {
+	mu   sync.Mutex
+	last map[uuid.UUID]time.Time
+}
+
+// due reports whether id's alert should fire at now, and records it if so.
+// A nil throttle never holds an alert back.
+func (a *alertThrottle) due(id uuid.UUID, now time.Time) bool {
+	if a == nil {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.last == nil {
+		a.last = map[uuid.UUID]time.Time{}
+	}
+	if at, ok := a.last[id]; ok && now.Sub(at) < expiryRealertEvery {
+		return false
+	}
+	for k, at := range a.last { // bounded: an entry past the interval would fire anyway
+		if now.Sub(at) >= expiryRealertEvery {
+			delete(a.last, k)
+		}
+	}
+	a.last[id] = now
+	return true
 }
 
 // errExpiryTradeAbsent: the escrow reports no such trade.
@@ -125,6 +165,10 @@ func (e *ExpiryCanceller) RunOnce(ctx context.Context) (ExpiryTick, error) {
 		n, err := e.c.Pool.SweepStaleOpening(ctx, now)
 		tick.Opening = n
 		errs = append(errs, err)
+	}
+	if now.Sub(e.lastPayoutSweep) >= expiryPayoutSweepEvery {
+		e.lastPayoutSweep = now
+		errs = append(errs, e.c.Trades.alertUnresolvedPayouts(ctx, now))
 	}
 	if e.c.Fresh != nil {
 		if last := e.c.Fresh.LastIngestOK(); last.IsZero() || now.Sub(last) > expiryStatementStaleAfter {
@@ -294,7 +338,17 @@ func (e *ExpiryCanceller) legacyScope(ctx context.Context, now time.Time, budget
 		if _, absent := e.legacyAbsent[tr.ID]; absent {
 			continue
 		}
-		sent, cerr := e.cancelOnChain(ctx, tr, now, func() (bool, error) { return e.c.Trades.decideLegacyCancel(ctx, tr, now) })
+		sent, cerr := e.cancelOnChain(ctx, tr, now, func() (bool, error) {
+			cancel, leg, err := e.c.Trades.decideLegacyCancelLeg(ctx, tr, now)
+			if leg != "" && e.moneyMovedAlerts.due(tr.ID, now) {
+				metric := "p2p_expiry_money_moved"
+				if leg == "payout" {
+					metric = "p2p_expiry_payout_in_flight"
+				}
+				log.Printf("[p2p-expiry] ALERT %s trade=%s leg=%s: expired but naira has moved; not cancelled (repeats hourly)", metric, tr.ID, leg)
+			}
+			return cancel, err
+		})
 		switch {
 		case errors.Is(cerr, errExpiryTradeAbsent):
 			e.legacyAbsent[tr.ID] = tr.ExpiredNotifiedAt.Add(expiryLegacyLookback)
@@ -366,7 +420,14 @@ func (s *ITService) decideSliceCancel(ctx context.Context, slice *models.P2PTrad
 // payout (which commits its started marker under it before the gateway call), the operator's and the
 // buyer's mark-paid, and the release — so whoever locks the row first wins.
 func (s *P2PTradeService) decideLegacyCancel(ctx context.Context, tr *models.P2PTrade, now time.Time) (bool, error) {
-	cancel := false
+	cancel, _, err := s.decideLegacyCancelLeg(ctx, tr, now)
+	return cancel, err
+}
+
+// decideLegacyCancelLeg is decideLegacyCancel, also naming the off-chain leg
+// that refused it ("" when none did), for the canceller's throttled alert.
+func (s *P2PTradeService) decideLegacyCancelLeg(ctx context.Context, tr *models.P2PTrade, now time.Time) (bool, string, error) {
+	cancel, moved := false, ""
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var cur models.P2PTrade
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&cur, "id = ?", tr.ID).Error; err != nil {
@@ -381,11 +442,7 @@ func (s *P2PTradeService) decideLegacyCancel(ctx context.Context, tr *models.P2P
 			return err
 		}
 		if leg != "" {
-			metric := "p2p_expiry_money_moved"
-			if leg == "payout" {
-				metric = "p2p_expiry_payout_in_flight"
-			}
-			log.Printf("[p2p-expiry] ALERT %s trade=%s leg=%s: expired but naira has moved; not cancelled", metric, cur.ID, leg)
+			moved = leg
 			return nil
 		}
 		cancel = true
@@ -394,7 +451,29 @@ func (s *P2PTradeService) decideLegacyCancel(ctx context.Context, tr *models.P2P
 		}
 		return tx.Model(&models.P2PTrade{}).Where("id = ?", cur.ID).Update("dropped_at", now).Error
 	})
-	return cancel, err
+	return cancel, moved, err
+}
+
+// alertUnresolvedPayouts is re-review N-2's backstop: a sell payout started
+// (or recorded) with no outcome — no success settled the trade, no failure
+// was recorded — whose trade has left the legacy window is never silent. The
+// trade waits for its webhook or an operator (provider lookup, then replay
+// the webhook); this names it once a day until then.
+func (s *P2PTradeService) alertUnresolvedPayouts(ctx context.Context, now time.Time) error {
+	var rows []models.P2PTrade
+	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).Scopes(notPoolSlice).
+		Select("id", "chain_id", "nomba_payout_id").
+		Where("status = ? AND (payout_started_at IS NOT NULL OR nomba_payout_id <> '')", models.P2PTradeStatusPendingPayment).
+		Where("cancel_reason IS NULL OR cancel_reason NOT LIKE ?", pmPayoutFailedReason+"%").
+		Where("expired_notified_at IS NOT NULL AND expired_notified_at < ?", now.Add(-expiryLegacyLookback)).
+		Order("expired_notified_at").Limit(100).Find(&rows).Error; err != nil {
+		return fmt.Errorf("unresolved payouts: %w", err)
+	}
+	for _, r := range rows {
+		log.Printf("[p2p-expiry] ALERT p2p_payout_outcome_unresolved trade=%s chain=%d payout=%q — a sell payout with no outcome, past the canceller's window; look it up at the provider and replay its webhook (repeats daily)",
+			r.ID, r.ChainID, r.NombaPayoutID)
+	}
+	return nil
 }
 
 // undoLegacyDecision is review M-7: the cancel this tick decided provably
