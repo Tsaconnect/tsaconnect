@@ -203,6 +203,9 @@ type P2PTradeService struct {
 	// balanceMoved is told of every confirmed deposit and withdrawal (the LP
 	// balance cache, review I4); nil when liquidity is dormant.
 	balanceMoved func(chainID int64, wallet, token string)
+
+	// alerter emails operators about P2P money events (p2p_alert.go). Nil-safe.
+	alerter P2PAlerter
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service

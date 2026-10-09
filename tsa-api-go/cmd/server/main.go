@@ -1279,6 +1279,7 @@ func main() {
 		// transition so the chat thread is self-documenting.
 		p2pMessageSvc = services.NewP2PMessageService(config.DB, eventBus)
 		p2pTradeSvc.SetMessageService(p2pMessageSvc)
+		p2pTradeSvc.SetAlerter(inboundAlerts)
 		// Register the timeout watchdog — scans for pending_payment trades
 		// past expires_at every minute and nudges participants to call the
 		// permissionless cancelByTimeout. Phase 1 has no operator EOA, so
