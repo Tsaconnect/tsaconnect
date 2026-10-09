@@ -78,15 +78,15 @@ func TestQuoteRoutedStableBuy_FeeLines(t *testing.T) {
 		t.Fatalf("fees = %+v", q.Fees)
 	}
 	funding, conv, network := q.Fees[0], q.Fees[1], q.Fees[2]
-	if funding.Kind != FeeKindFunding || funding.Label != "Funding fee (1.4%)" || funding.Provider != "Flutterwave" ||
+	if funding.Kind != FeeKindFunding || funding.Label != "Funding fee (1.4%)" || funding.Provider != "provider" ||
 		funding.Units != "1393035" || funding.NgnMinor != "231034" {
 		t.Errorf("funding = %+v", funding)
 	}
-	if conv.Kind != FeeKindConversion || conv.Label != "Provider conversion fee (1.5%)" || conv.Provider != "Flutterwave" ||
+	if conv.Kind != FeeKindConversion || conv.Label != "Provider conversion fee (1.5%)" || conv.Provider != "provider" ||
 		conv.Units != "1471642" || conv.NgnMinor != "244071" {
 		t.Errorf("conversion = %+v", conv)
 	}
-	if network.Kind != FeeKindNetwork || network.Label != "Network fee" || network.Provider != "Flutterwave" ||
+	if network.Kind != FeeKindNetwork || network.Label != "Network fee" || network.Provider != "provider" ||
 		network.Units != "1500000" || network.NgnMinor != "248775" {
 		t.Errorf("network = %+v", network)
 	}
@@ -103,9 +103,9 @@ func TestQuoteRoutedStableBuy_WorkedExample(t *testing.T) {
 	wantUnits(t, "net", q.AssetUnits, 15_912_187)
 	wantUnits(t, "effective rate", q.RatePerUnitMinor, 157113)
 	want := []StableBuyFee{
-		{Kind: FeeKindFunding, Label: "Funding fee (1.4%)", Provider: "Flutterwave", Units: "250996", NgnMinor: "34999"},
-		{Kind: FeeKindConversion, Label: "Provider conversion fee (1.5%)", Provider: "Flutterwave", Units: "265160", NgnMinor: "36974"},
-		{Kind: FeeKindNetwork, Label: "Network fee", Provider: "Flutterwave", Units: "1500000", NgnMinor: "209166"},
+		{Kind: FeeKindFunding, Label: "Funding fee (1.4%)", Provider: "provider", Units: "250996", NgnMinor: "34999"},
+		{Kind: FeeKindConversion, Label: "Provider conversion fee (1.5%)", Provider: "provider", Units: "265160", NgnMinor: "36974"},
+		{Kind: FeeKindNetwork, Label: "Network fee", Provider: "provider", Units: "1500000", NgnMinor: "209166"},
 	}
 	if len(q.Fees) != len(want) {
 		t.Fatalf("fees = %+v", q.Fees)
@@ -127,7 +127,7 @@ func TestQuoteTreasuryBuy_MarketPlusTakeAndAFundingLine(t *testing.T) {
 	// ₦1,348 × 1.005 = ₦1,354.74 buys 7.381490; less 1.4% funding = 7.278150.
 	wantUnits(t, "display rate", q.DisplayRateMinor, 135474)
 	wantUnits(t, "net", q.AssetUnits, 7_278_150)
-	want := StableBuyFee{Kind: FeeKindFunding, Label: "Funding fee (1.4%)", Provider: "Flutterwave", Units: "103340", NgnMinor: "13999"}
+	want := StableBuyFee{Kind: FeeKindFunding, Label: "Funding fee (1.4%)", Provider: "provider", Units: "103340", NgnMinor: "13999"}
 	if len(q.Fees) != 1 || q.Fees[0] != want {
 		t.Fatalf("fees = %+v, want only %+v", q.Fees, want)
 	}

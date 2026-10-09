@@ -385,12 +385,7 @@ func newConversionView(rec *models.PaycrestOrderRecord, intent *models.ITIntent)
 	if rec == nil || intent == nil {
 		return nil
 	}
-	fee := services.ConversionFeeLine(intent, rec)
-	if fee != nil {
-		// Her view never names a provider (owner rule, §19); the label
-		// already says "Conversion (provider)".
-		fee.Provider = services.PoolFeeProvider
-	}
+	fee := services.ConversionFeeLine(intent, rec) // tagged "provider" at its source (review I-4)
 	return &conversionView{OrderID: rec.ID.String(), Status: rec.Status, Holder: rec.Holder,
 		RequestedToken: rec.RequestedToken, RequestedChain: rec.RequestedChain, RequestedChainID: rec.RequestedChainID,
 		RequestedTokenDecimals: rec.RequestedTokenDecimals, EstimatedAmount: rec.EstimatedAmount,

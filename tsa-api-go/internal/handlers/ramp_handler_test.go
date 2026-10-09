@@ -315,7 +315,7 @@ func TestRampOrder_ITViewCarriesTheQuotedBreakdown(t *testing.T) {
 		t.Fatalf("fees = %#v", d["fees"])
 	}
 	first, _ := feeRows[0].(map[string]any)
-	if first["token"] != "1.46216" || first["ngn"] != "2474.80" || first["provider"] != "Flutterwave" || first["label"] != "Provider conversion fee (1.5%)" {
+	if first["token"] != "1.46216" || first["ngn"] != "2474.80" || first["provider"] != "provider" || first["label"] != "Provider conversion fee (1.5%)" {
 		t.Fatalf("fee = %#v", first)
 	}
 	// amount ÷ rate − Σfees = tokenAmount, within one base unit.

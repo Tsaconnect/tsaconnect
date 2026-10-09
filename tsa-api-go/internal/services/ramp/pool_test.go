@@ -96,8 +96,8 @@ func TestPoolProvider_ConvertedVenueNamesNoProvider(t *testing.T) {
 		t.Fatalf("venues = %+v err = %v", venues, err)
 	}
 	for _, f := range venues[0].Fees {
-		if f.Provider != services.PoolFeeProvider {
-			t.Fatalf("fee line %q tagged %q, want %q", f.Label, f.Provider, services.PoolFeeProvider)
+		if f.Provider != services.FeeProviderShown {
+			t.Fatalf("fee line %q tagged %q, want %q", f.Label, f.Provider, services.FeeProviderShown)
 		}
 	}
 }

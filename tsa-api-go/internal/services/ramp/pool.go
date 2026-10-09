@@ -198,16 +198,7 @@ func (p *PoolProvider) QuoteConverted(ctx context.Context, r Request) ([]Venue, 
 	if !p.converts(r) {
 		return nil, nil
 	}
-	venues := p.quoteConverted(ctx, p.converted(), r)
-	// Re-review N2 / §19: the shared converted pricer tags its conversion line
-	// "LiFi". On a pool venue every line says "provider" (owner rule). The
-	// intent itself stores only the pool quote's own lines, already tagged.
-	for i := range venues {
-		for j := range venues[i].Fees {
-			venues[i].Fees[j].Provider = services.PoolFeeProvider
-		}
-	}
-	return venues, nil
+	return p.quoteConverted(ctx, p.converted(), r), nil // every fee line is tagged at its source (review I-4)
 }
 
 func (p *PoolProvider) OpenConverted(ctx context.Context, r Request, in OrderInput) (*Order, error) {

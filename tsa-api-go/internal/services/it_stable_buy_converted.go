@@ -21,7 +21,6 @@ import (
 const ITConversionRefPrefix = "ITC-"
 
 const (
-	FeeProviderLiFi     = "LiFi"
 	ConversionLiFiLabel = "Conversion (provider)"
 )
 
@@ -386,7 +385,7 @@ func conversionFee(delivered, owed, displayRate *big.Int) StableBuyFee {
 	units := new(big.Int).Sub(delivered, owed)
 	ngn := new(big.Int).Mul(units, displayRate)
 	ngn.Quo(ngn, stableUnitsPerToken())
-	return StableBuyFee{Kind: FeeKindConversion, Label: ConversionLiFiLabel, Provider: FeeProviderLiFi,
+	return StableBuyFee{Kind: FeeKindConversion, Label: ConversionLiFiLabel, Provider: FeeProviderShown,
 		Units: units.String(), NgnMinor: ngn.String()}
 }
 

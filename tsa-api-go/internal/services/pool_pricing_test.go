@@ -78,17 +78,16 @@ func TestPoolPricing_FeeLineInvariant(t *testing.T) {
 }
 
 // S15: central account only.
-// Review I5 / §19: the buyer never sees a provider's name. fundingCost tags its
-// line "Flutterwave" for the Flutterwave and company-wallet venues; the pool's
-// line says "provider".
+// Review I5 / I-4 / §19: the buyer never sees a provider's name; every fee
+// line says "provider" from where it is made.
 func TestPoolQuote_FundingLineNamesNoProvider(t *testing.T) {
 	p := quotePool(t, centralPoolService(t), "100000")
 	if len(p.Quote.Fees) == 0 {
 		t.Fatal("no fee lines")
 	}
 	for _, f := range p.Quote.Fees {
-		if f.Provider != PoolFeeProvider && f.Provider != "" {
-			t.Fatalf("fee line %q tagged %q, want %q", f.Label, f.Provider, PoolFeeProvider)
+		if f.Provider != FeeProviderShown && f.Provider != "" {
+			t.Fatalf("fee line %q tagged %q, want %q", f.Label, f.Provider, FeeProviderShown)
 		}
 	}
 }

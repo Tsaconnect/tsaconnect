@@ -144,10 +144,10 @@ type VenueFee struct {
 
 // tokenFeeLine is a fee of `units` (decimals dp) valued at rate, naira per
 // whole token, rounded down to the kobo.
-func tokenFeeLine(kind, label, provider string, units *big.Int, decimals int, rate *big.Rat) VenueFee {
+func tokenFeeLine(kind, label string, units *big.Int, decimals int, rate *big.Rat) VenueFee {
 	ngn := new(big.Rat).Mul(new(big.Rat).SetFrac(units, pow10(decimals)), rate)
 	kobo := new(big.Int).Quo(new(big.Int).Mul(ngn.Num(), big.NewInt(100)), ngn.Denom())
-	return VenueFee{Kind: kind, Label: label, Provider: provider,
+	return VenueFee{Kind: kind, Label: label, Provider: FeeProviderShown,
 		Token: BaseUnitsToDecimal(units, decimals), Ngn: FormatMinor(kobo.String())}
 }
 
@@ -1151,7 +1151,7 @@ func owedLeg(base PaycrestVenue, delivered *big.Int, decimals int, fiatAmount st
 		v.EffectiveRate = allInRate(fiat, owed, decimals)
 		v.Fees = nil
 		if cost := new(big.Int).Sub(delivered, owed); cost.Sign() > 0 {
-			v.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionLiFiLabel, FeeProviderLiFi, cost, decimals, rate)}
+			v.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionLiFiLabel, cost, decimals, rate)}
 		}
 		if marketRate > 0 {
 			eff, _ := new(big.Rat).Quo(fiat, new(big.Rat).SetFrac(owed, pow10(decimals))).Float64()

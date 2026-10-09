@@ -16,10 +16,6 @@ var (
 	ErrPoolCentralOnly = errors.New("liquidity pool: payable only into the company account")
 )
 
-// PoolFeeProvider tags the pool's fee lines (review I5, §19): the buyer sees
-// "provider", never the name of the company the cost is paid to.
-const PoolFeeProvider = "provider"
-
 // PoolPrice is one pool price (spec §10.1): the quote she sees and the
 // snapshot an open writes into pool_orders.
 type PoolPrice struct {
@@ -49,7 +45,6 @@ func (s *ITService) poolQuoteAt(asset, currency string, fiatMinor *big.Int, mid 
 	if err != nil {
 		return nil, err
 	}
-	funding.provider = PoolFeeProvider // review I5: never a provider's name in her quote
 	base := new(big.Rat).Mul(mid, big.NewRat(10_000+set.SpreadBps, 10_000))
 	p := priceInHouseBuy(fiatMinor, base, set.TakeBps, []passThroughCost{funding})
 	if p.net.Sign() <= 0 || p.net.Cmp(set.MinSliceUnits) < 0 {

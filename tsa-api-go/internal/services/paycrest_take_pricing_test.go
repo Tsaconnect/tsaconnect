@@ -98,7 +98,7 @@ func TestPaycrestTake_ConvertedBuyChargesTheTakePlusTheRoutesCost(t *testing.T) 
 		t.Fatalf("fees = %+v, want one Conversion (provider) line", v.Fees)
 	}
 	f := v.Fees[0]
-	if f.Kind != FeeKindConversion || f.Label != ConversionLiFiLabel || f.Provider != FeeProviderLiFi ||
+	if f.Kind != FeeKindConversion || f.Label != ConversionLiFiLabel || f.Provider != FeeProviderShown ||
 		f.Token != "0.298508" || f.Ngn != "450.00" {
 		t.Fatalf("fee line = %+v, want 0.298508 USDC (₦450.00 at 1507.50)", f)
 	}

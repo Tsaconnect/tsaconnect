@@ -68,10 +68,13 @@ const (
 
 // Fee lines (spec §14, Decision D39).
 const (
-	FeeKindFunding         = "funding"
-	FeeKindConversion      = "conversion"
-	FeeKindNetwork         = "network"
-	FeeProviderFlutterwave = "Flutterwave"
+	FeeKindFunding    = "funding"
+	FeeKindConversion = "conversion"
+	FeeKindNetwork    = "network"
+	// FeeProviderShown is the provider tag on every fee line she sees, ramp
+	// and IT alike (owner rule, review I-4): never the name of the company
+	// the cost is paid to. Set where the line is made, never patched later.
+	FeeProviderShown = "provider"
 )
 
 // StableBuyFee is one provider fee inside a quote, stored with the intent.
@@ -387,9 +390,9 @@ func formatBps(bps int64) string {
 // shown as its own fee line: bps of what is left when it is charged, or a
 // flat number of token units.
 type passThroughCost struct {
-	kind, label, provider string
-	bps                   int64
-	flat                  *big.Int
+	kind, label string
+	bps         int64
+	flat        *big.Int
 }
 
 // inHousePrice is one in-house buy price: the display rate, what she
@@ -429,7 +432,7 @@ func priceInHouseBuy(fiatMinor *big.Int, baseRate *big.Rat, takeBps int64, costs
 		}
 		left.Sub(left, units)
 		ngn := new(big.Int).Mul(units, p.displayRate)
-		p.fees = append(p.fees, StableBuyFee{Kind: c.kind, Label: c.label, Provider: c.provider,
+		p.fees = append(p.fees, StableBuyFee{Kind: c.kind, Label: c.label, Provider: FeeProviderShown,
 			Units: units.String(), NgnMinor: ngn.Quo(ngn, stableUnitsPerToken()).String()})
 	}
 	p.net = left
@@ -451,7 +454,7 @@ func (s *ITService) fundingCost(ch PayInChannel) (passThroughCost, error) {
 	default:
 		return passThroughCost{}, fmt.Errorf("%w: no funding cost for pay-in channel %q", ErrStableQuoteUnavailable, ch)
 	}
-	return passThroughCost{kind: FeeKindFunding, provider: FeeProviderFlutterwave, bps: bps,
+	return passThroughCost{kind: FeeKindFunding, bps: bps,
 		label: fmt.Sprintf("Funding fee (%s%%)", formatBps(bps))}, nil
 }
 
@@ -495,9 +498,9 @@ func (s *ITService) routedPrice(fiatMinor *big.Int, fiatPerUnit *big.Rat, ch Pay
 	}
 	return priceInHouseBuy(fiatMinor, fiatPerUnit, s.rampTerms().takeBps, []passThroughCost{
 		funding,
-		{kind: FeeKindConversion, provider: FeeProviderFlutterwave, bps: lim.conversionFeeBps,
+		{kind: FeeKindConversion, bps: lim.conversionFeeBps,
 			label: fmt.Sprintf("Provider conversion fee (%s%%)", formatBps(lim.conversionFeeBps))},
-		{kind: FeeKindNetwork, provider: FeeProviderFlutterwave, label: "Network fee", flat: lim.sendFeeUnits},
+		{kind: FeeKindNetwork, label: "Network fee", flat: lim.sendFeeUnits},
 	}), nil
 }
 
@@ -684,7 +687,8 @@ func marshalFees(fees []StableBuyFee) datatypes.JSON {
 }
 
 // StableBuyFees decodes an intent's stored fee lines (spec §14). Unreadable
-// JSON reads as none — the amounts on the intent stay authoritative.
+// JSON reads as none — the amounts on the intent stay authoritative. A line
+// stored before review I-4 named the vendor; it reads as FeeProviderShown.
 func StableBuyFees(i *models.ITIntent) []StableBuyFee {
 	if i == nil || len(i.Fees) == 0 {
 		return nil
@@ -692,6 +696,9 @@ func StableBuyFees(i *models.ITIntent) []StableBuyFee {
 	var out []StableBuyFee
 	if err := json.Unmarshal(i.Fees, &out); err != nil {
 		return nil
+	}
+	for k := range out {
+		out[k].Provider = FeeProviderShown
 	}
 	return out
 }
