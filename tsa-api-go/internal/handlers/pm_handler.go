@@ -71,7 +71,18 @@ type PMHandler struct {
 	// lpActivator is nil until boot wires LP onboarding; an LP's activation
 	// then 503s liquidity_unavailable and /p2p/pm/me reports no liquidity.
 	lpActivator LPActivator
+	// lpView adds the LP columns to /admin/pm?kind=lp; nil leaves them out.
+	lpView LPAdminViewer
 }
+
+// LPAdminViewer adds the LP columns to the admin list (spec §20), bounded and
+// deadline-limited (review I7). *services.LiquidityService satisfies it.
+type LPAdminViewer interface {
+	AdminLPViews(ctx context.Context, lps []models.PaymentMerchant) map[uuid.UUID]*services.LPAdminView
+}
+
+// SetLiquidityView wires the LP columns. Pass only a non-nil viewer.
+func (h *PMHandler) SetLiquidityView(v LPAdminViewer) { h.lpView = v }
 
 // NewPMHandler creates a PMHandler backed by the given PMAutomation and an
 // optional PMService for read-only PM list queries and the GetMyPMStatus read.
@@ -193,6 +204,8 @@ type pmListItem struct {
 	ReviewedAt              *time.Time `json:"reviewedAt"`
 	Kind                    string     `json:"kind"`
 	PoolChainID             *int64     `json:"poolChainId,omitempty"`
+	// LP is set only on the ?kind=lp list (review I7).
+	LP *services.LPAdminView `json:"lp,omitempty"`
 }
 
 // toPMListItem maps a PaymentMerchant to the safe projection. Single source of
@@ -219,23 +232,36 @@ func toPMListItem(p *models.PaymentMerchant) pmListItem {
 	}
 }
 
-// ListPMs handles GET /api/admin/pm — returns a JSON array of all PM rows
-// (safe fields only; NombaCredsRef and any secret references are omitted).
-// When h.pm is nil (dormant), returns an empty array with 200 OK.
+// ListPMs handles GET /api/admin/pm[?kind=merchant|lp] — returns a JSON array
+// of PM rows (safe fields only; NombaCredsRef and any secret references are
+// omitted). When h.pm is nil (dormant), returns an empty array with 200 OK.
 func (h *PMHandler) ListPMs(c *gin.Context) {
+	kind := c.Query("kind")
+	if kind != "" && kind != models.PaymentMerchantKindMerchant && kind != models.PaymentMerchantKindLP {
+		utils.ErrorResponse(c, http.StatusBadRequest, "kind must be merchant or lp")
+		return
+	}
 	if h.pm == nil {
 		utils.SuccessResponse(c, http.StatusOK, "Payment merchants", []pmListItem{})
 		return
 	}
-	pms, err := h.pm.ListAll(c.Request.Context())
+	pms, err := h.pm.ListByKind(c.Request.Context(), kind)
 	if err != nil {
 		log.Printf("[pm handler] ListPMs: %v", err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load payment merchants")
 		return
 	}
+	// Chain reads only for the LP view (?kind=lp): the default list never
+	// touches the pool RPC (review I7).
+	var views map[uuid.UUID]*services.LPAdminView
+	if kind == models.PaymentMerchantKindLP && h.lpView != nil {
+		views = h.lpView.AdminLPViews(c.Request.Context(), pms)
+	}
 	items := make([]pmListItem, 0, len(pms))
 	for i := range pms {
-		items = append(items, toPMListItem(&pms[i]))
+		item := toPMListItem(&pms[i])
+		item.LP = views[pms[i].ID]
+		items = append(items, item)
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment merchants", items)
 }

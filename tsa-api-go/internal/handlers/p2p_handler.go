@@ -39,6 +39,8 @@ type P2PHandler struct {
 	// it nil once INBOUND_MODE=central is on hands buyers the merchant's own
 	// account, which no longer feeds the statement the ingestor reads.
 	central CentralAccountSource
+	// liquidity is the LP read side; nil until a pool chain exists.
+	liquidity LiquidityReader
 }
 
 // CentralAccountSource is the single thing the PM buy screens need from the IT
