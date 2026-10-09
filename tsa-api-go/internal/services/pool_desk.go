@@ -27,6 +27,7 @@ type PoolDeskConfig struct {
 	Generation  func() uint64       // the pool chain client's EndpointGeneration (S43)
 	Nonces      *TreasuryNonceWatch // the lane's stuck-nonce watch (F24)
 	BuyerUserID uuid.UUID           // IT_PM_ID's user: the slices' DB buyer (S10)
+	ChainName   string              // "BNB Smart Chain": the card's chain label
 	Now         func() time.Time
 }
 
