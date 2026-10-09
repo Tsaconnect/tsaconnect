@@ -5,6 +5,8 @@
 // do not add a second unlock path), and nothing runs until the payer actually
 // authorizes. usePayTest, usePayNaira and usePayCrypto each hand it what to do
 // once they have; the modal props they spread are this hook's `authorization`.
+// An optional `description` says what is being authorized (the refund screen
+// names the amount, token, network and the customer's wallet before she signs).
 import { useCallback, useState } from 'react';
 
 export type AuthorizationProps = {

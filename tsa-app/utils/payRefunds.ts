@@ -3,6 +3,7 @@
 // Pure helpers for a TSA Pay refund in the app: the list's order, the options, whether her
 // wallet is the one that must send it, whether she holds enough of the token, and the
 // sentences the screens show. No imports with side effects, so it tests without mocks.
+import { MAINNET_CHAINS, type ChainConfig, type ChainKey } from '@/constants/chains';
 import type { MerchantRefund } from '@/services/payApi';
 import type { PayRefundDetail, PayRefundOption, PayRefundStatus } from '@/services/payMerchantApi';
 import type { WalletBalance } from '@/services/walletApi';
@@ -21,6 +22,18 @@ export const optionKey = (o: Pick<PayRefundOption, 'chainId' | 'tokenSymbol'>) =
 
 /** The customer's own deposit network and token, else the first offered. */
 export const defaultOption = (options: PayRefundOption[]) => options.find((o) => o.isDefault) ?? options[0];
+
+/**
+ * The option's mainnet chain, only when its key and id agree. Gas is read on the network the
+ * transfer is signed for (its chainId); a chainKey naming another network is not trusted for it.
+ */
+export function refundOptionChain(o: Pick<PayRefundOption, 'chainId' | 'chainKey'> | undefined): ChainConfig | undefined {
+  const chain = o ? MAINNET_CHAINS[o.chainKey as ChainKey] : undefined;
+  return chain && chain.chainId === o?.chainId ? chain : undefined;
+}
+
+/** "12.50 USD" until a token carries it, then "12.50 USDT". */
+export const refundAmountLabel = (r: { amount: string; tokenSymbol?: string }) => `${r.amount} ${r.tokenSymbol || 'USD'}`;
 
 export const sameAddress = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 

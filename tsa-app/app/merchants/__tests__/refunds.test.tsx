@@ -245,6 +245,12 @@ describe('Refund screen', () => {
     ],
   });
   const disabled = (label: string) => byLabel(tree, label).props.accessibilityState.disabled;
+  const deferred = <T,>() => {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail; });
+    return { promise, resolve, reject };
+  };
 
   beforeEach(() => {
     mockParams.id = RID;
@@ -263,7 +269,7 @@ describe('Refund screen', () => {
     expect(shown).toContain('For: LOS–ABV 12 Oct');
     expect(shown).toContain('Payment: TSA-7K3QX-M2P9D');
     expect(shown).toContain('Customer wallet: 0x2222…2222');
-    expect(shown).toContain('Sending: 12.5 USDT on BNB Smart Chain');
+    expect(shown).toContain('You send: 12.5 USDT on BNB Smart Chain');
     expect(shown).toContain('You have 40 USDT on BNB Smart Chain');
     expect(getPayRefund).toHaveBeenCalledWith(RID);
     expect(getWalletBalances).toHaveBeenCalledWith(56, OWNER, 'mainnet');
@@ -277,7 +283,9 @@ describe('Refund screen', () => {
     await press('authorize');
     expect(sendPayRefund).toHaveBeenCalledWith(RID, bscUsdt, PAYER, OWNER);
     expect(mockToast.success).toHaveBeenCalledWith('Refund sent. Waiting for the network to confirm it.');
-    expect(text(tree)).toContain('Sending');
+    expect(text(tree)).toContain('Sent to Ada. Waiting for the network to confirm it.');
+    // Once a token carries it, the amount is in that token.
+    expect(text(tree)).toContain('12.50 USDT');
     expect(() => byLabel(tree, 'button:Send refund')).toThrow();
   });
 
@@ -285,7 +293,7 @@ describe('Refund screen', () => {
     await mount(<RefundDetailScreen />);
     await press('radio:8453:USDC');
     expect(getWalletBalances).toHaveBeenLastCalledWith(8453, OWNER, 'mainnet');
-    expect(text(tree)).toContain('Sending: 12.5 USDC on Base');
+    expect(text(tree)).toContain('You send: 12.5 USDC on Base');
   });
 
   it('a route id that is not a refund id is not found, and nothing is requested', async () => {
@@ -406,7 +414,7 @@ describe('Refund screen', () => {
     jest.mocked(getPayRefund).mockResolvedValue(sent());
     await press('button:Send refund');
     await press('authorize');
-    expect(text(tree)).toContain('Sending');
+    expect(text(tree)).toContain('Sent to Ada. Waiting for the network to confirm it.');
     expect(() => byLabel(tree, 'button:Send refund')).toThrow();
   });
 
@@ -458,6 +466,97 @@ describe('Refund screen', () => {
     await press('button:Cancel request');
     await press('Confirm cancel request');
     expect(mockToast.error).toHaveBeenCalledWith('This refund was already sent');
-    expect(text(tree)).toContain('Sending');
+    // Only the re-read refund says this: the screen shows it as it now is.
+    expect(text(tree)).toContain('Sent to Ada. Waiting for the network to confirm it.');
+    expect(() => byLabel(tree, 'button:Cancel request')).toThrow();
+    expect(() => byLabel(tree, 'button:Send refund')).toThrow();
+  });
+  // Fix round 1: Send comes back only once a re-read says the refund still waits.
+  it('a failed send keeps Send off until the refund is read again, and never re-offers it once sent', async () => {
+    jest.mocked(sendPayRefund).mockRejectedValue(Object.assign(new Error('Could not reach the server.'), { status: 0 }));
+    await mount(<RefundDetailScreen />);
+    const reread = deferred<PayRefundDetail>();
+    jest.mocked(getPayRefund).mockReturnValue(reread.promise);
+    await press('button:Send refund');
+    await press('authorize');
+    // Still busy until the re-read lands: neither a second send nor a cancel of a refund that may be sent.
+    expect(disabled('button:Send refund')).toBe(true);
+    expect(disabled('button:Cancel request')).toBe(true);
+    await act(async () => { reread.resolve(sent()); });
+    await flush();
+    expect(text(tree)).toContain('Sent to Ada. Waiting for the network to confirm it.');
+    expect(() => byLabel(tree, 'button:Send refund')).toThrow();
+  });
+
+  it('a failed send whose re-read also fails keeps Send off and asks her to pull to refresh', async () => {
+    jest.mocked(sendPayRefund).mockRejectedValue(Object.assign(new Error('Could not reach the server.'), { status: 0 }));
+    await mount(<RefundDetailScreen />);
+    jest.mocked(getPayRefund).mockRejectedValue(new Error('offline'));
+    await press('button:Send refund');
+    await press('authorize');
+    expect(text(tree)).toContain("Couldn't check the refund — pull to refresh.");
+    expect(disabled('button:Send refund')).toBe(true);
+
+    // A read that works again shows what the server holds, and only then offers Send.
+    jest.mocked(getPayRefund).mockResolvedValue(detail());
+    await act(async () => { jest.advanceTimersByTime(15_000); });
+    await flush();
+    expect(text(tree)).not.toContain("Couldn't check the refund");
+    expect(disabled('button:Send refund')).toBe(false);
+  });
+
+  it('an authorization still open when a poll finds the refund sent is closed and sends nothing', async () => {
+    await mount(<RefundDetailScreen />);
+    await press('button:Send refund');
+    const staleTap = byLabel(tree, 'authorize').props.onPress;
+    jest.mocked(getPayRefund).mockResolvedValue(sent());
+    await act(async () => { jest.advanceTimersByTime(15_000); });
+    await flush();
+    expect(() => byLabel(tree, 'authorize')).toThrow();
+    await act(async () => { staleTap(); });
+    await flush();
+    expect(sendPayRefund).not.toHaveBeenCalled();
+  });
+
+  it('a double tap on authorize sends once', async () => {
+    const pending = deferred<PayRefund>();
+    jest.mocked(sendPayRefund).mockReturnValue(pending.promise);
+    await mount(<RefundDetailScreen />);
+    await press('button:Send refund');
+    const tap = byLabel(tree, 'authorize').props.onPress;
+    await act(async () => { tap(); tap(); });
+    await flush();
+    expect(sendPayRefund).toHaveBeenCalledTimes(1);
+    await act(async () => { pending.resolve(refund({ status: 'submitted', chainId: 56, tokenSymbol: 'USDT', txHash: HASH })); });
+    await flush();
+  });
+
+  // Fix round 1: she funds her wallet elsewhere and comes back.
+  it('reads her balance again on each refresh, so topping up enables Send', async () => {
+    jest.mocked(getWalletBalances).mockResolvedValue(balances('0') as never);
+    await mount(<RefundDetailScreen />);
+    expect(disabled('button:Send refund')).toBe(true);
+    jest.mocked(getWalletBalances).mockResolvedValue(balances('40') as never);
+    await act(async () => { jest.advanceTimersByTime(15_000); });
+    await flush();
+    expect(text(tree)).toContain('You have 40 USDT on BNB Smart Chain');
+    expect(disabled('button:Send refund')).toBe(false);
+  });
+
+  it('keeps Send off until her balance has been read', async () => {
+    const read = deferred<never>();
+    jest.mocked(getWalletBalances).mockReturnValue(read.promise);
+    await mount(<RefundDetailScreen />);
+    expect(disabled('button:Send refund')).toBe(true);
+    await act(async () => { read.resolve(balances('40') as never); });
+    await flush();
+    expect(disabled('button:Send refund')).toBe(false);
+  });
+
+  it('a balance that cannot be read says so and keeps Send off', async () => {
+    jest.mocked(getWalletBalances).mockRejectedValue(new Error('offline'));
+    await mount(<RefundDetailScreen />);
+    expect(text(tree)).toContain("Couldn't read your balance — pull to refresh.");
+    expect(disabled('button:Send refund')).toBe(true);
   });
 });

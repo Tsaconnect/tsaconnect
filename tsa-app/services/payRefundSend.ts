@@ -6,9 +6,9 @@
 // POST /pay/merchant/refunds/:id/submit, where the server checks it, records its hash and
 // only then broadcasts it. Never /wallet/submit-tx, and never retried here: once the
 // server has recorded a send, a second one is refused, and the screen re-reads the refund.
-import { MAINNET_CHAINS, type ChainKey } from '@/constants/chains';
+import type { ChainKey } from '@/constants/chains';
 import { formatNativeAmount, hasGasShortfall, preparedFeeNative } from '@/utils/sendForm';
-import { sameAddress, unprovenWalletMessage, wrongWalletMessage } from '@/utils/payRefunds';
+import { refundOptionChain, sameAddress, unprovenWalletMessage, wrongWalletMessage } from '@/utils/payRefunds';
 import { assertPreparedTransfer } from './paycrestDeposit';
 import { submitPayRefund, type PayRefund, type PayRefundOption } from './payMerchantApi';
 import { getSignableWallet, nativeBalance, signTransaction } from './wallet';
@@ -51,8 +51,7 @@ export async function sendPayRefund(refundId: string, option: PayRefundOption, t
 
   // Refunds are mainnet money whatever the wallet's testnet toggle says. The gas read follows
   // the chainId the transfer is signed for; a chainKey naming another network reads as unknown.
-  const keyed = MAINNET_CHAINS[option.chainKey as ChainKey];
-  const chain = keyed?.chainId === option.chainId ? keyed : undefined;
+  const chain = refundOptionChain(option);
   const wei = chain ? await nativeBalance(option.chainKey as ChainKey, fromAddress, 'mainnet') : null;
   const gas = wei === null ? null : Number(wei) / 1e18;
   const fee = preparedFeeNative(tx.gasPrice, tx.gasLimit);

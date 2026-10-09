@@ -21,7 +21,7 @@ import {
 } from '@/services/payMerchantApi';
 import { errorMessage } from '@/utils/payCheckout';
 import { formatLinkTime } from '@/utils/payLinks';
-import { refundBroadcastNote, sortRefundsOpenFirst } from '@/utils/payRefunds';
+import { refundAmountLabel, refundBroadcastNote, sortRefundsOpenFirst } from '@/utils/payRefunds';
 
 const PAGE = 50;
 const POLL_MS = 15_000;
@@ -99,7 +99,7 @@ function RefundRow({ refund: r }: { refund: PayRefundRow }) {
     <PressableScale
       onPress={() => router.push(`${PAY_REFUNDS}/${r.id}`)}
       accessibilityRole="button"
-      accessibilityLabel={`${who}, ${r.amount} USD, ${getStatusVisual('payRefund', r.status).label}`}
+      accessibilityLabel={`${who}, ${refundAmountLabel(r)}, ${getStatusVisual('payRefund', r.status).label}`}
       testID={`refund-${r.id}`}
     >
       <Card style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
@@ -113,7 +113,7 @@ function RefundRow({ refund: r }: { refund: PayRefundRow }) {
           ) : null}
         </View>
         <View style={{ alignItems: 'flex-end', gap: spacing.xs }}>
-          <Text variant="bodyMed" weight="700" numeric>{`${r.amount} USD`}</Text>
+          <Text variant="bodyMed" weight="700" numeric>{refundAmountLabel(r)}</Text>
           <StatusPill kind="payRefund" status={r.status} size="sm" />
         </View>
       </Card>

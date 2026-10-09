@@ -1,5 +1,6 @@
 import {
-  defaultOption, merchantRefundLine, merchantRefundSubtitle, optionKey, refundBroadcastNote, refundFunding, refundStatusLine, sameAddress, sortRefundsOpenFirst, unprovenWalletMessage, wrongWalletMessage,
+  defaultOption, merchantRefundLine, merchantRefundSubtitle, optionKey, refundAmountLabel, refundBroadcastNote, refundFunding, refundOptionChain,
+  refundStatusLine, sameAddress, sortRefundsOpenFirst, unprovenWalletMessage, wrongWalletMessage,
 } from '../payRefunds';
 import type { PayRefundDetail, PayRefundOption } from '@/services/payMerchantApi';
 import type { WalletBalance } from '@/services/walletApi';
@@ -46,6 +47,21 @@ describe('refund helpers', () => {
   // Plans review I10: no wallet named yet is not a blank address.
   it('asks her to prove her wallet when the server names none', () => {
     expect(unprovenWalletMessage).toBe('Prove this wallet to send refunds. TSA Connect checks that the wallet on this device is yours before any money leaves it.');
+  });
+
+  it('labels a refund in dollars until a token carries it', () => {
+    expect(refundAmountLabel({ amount: '12.50' })).toBe('12.50 USD');
+    expect(refundAmountLabel({ amount: '12.50', tokenSymbol: '' })).toBe('12.50 USD');
+    expect(refundAmountLabel({ amount: '12.50', tokenSymbol: 'USDT' })).toBe('12.50 USDT');
+  });
+
+  // Gas is read on the network the transfer is signed for: a chainKey naming another network is not trusted.
+  it('names an option\'s chain only when its key and id agree', () => {
+    expect(refundOptionChain(option)?.chainId).toBe(8453);
+    expect(refundOptionChain(option)?.nativeCurrency.symbol).toBe('ETH');
+    expect(refundOptionChain({ ...option, chainKey: 'bsc' })).toBeUndefined();
+    expect(refundOptionChain({ ...option, chainKey: 'nowhere' })).toBeUndefined();
+    expect(refundOptionChain(undefined)).toBeUndefined();
   });
 
   it('says why the network has not taken a refund yet', () => {
