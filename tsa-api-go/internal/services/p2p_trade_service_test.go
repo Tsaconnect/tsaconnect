@@ -2015,6 +2015,18 @@ func seedBuyAdWithTrade(t *testing.T, db *gorm.DB, status string) (svc *P2PTrade
 	return svc, esc, tradeID, adID
 }
 
+// seededBuyAdChainTrade is the escrow's view of seedBuyAdWithTrade's trade as
+// it was prepared: the merchant (ad.SellerAddress) is the on-chain buyer.
+func seededBuyAdChainTrade(status OnChainP2PTradeStatus) *OnChainP2PTrade {
+	return &OnChainP2PTrade{
+		Status: status, Funding: models.P2PTradeFundingDepositedByTaker,
+		Seller: common.HexToAddress("0x000000000000000000000000000000000000beef"),
+		Buyer:  common.HexToAddress("0x000000000000000000000000000000000000d00d"),
+		Token:  common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
+		Amount: big.NewInt(30), Exists: true,
+	}
+}
+
 // TestReconcile_OrphanOpen_ReclaimsCapacity locks audit #4: a pending_payment trade
 // whose on-chain open never landed (OpenTxHash empty, not on chain) and whose window
 // has elapsed is reclaimed by the reconciler — cancelled + ad capacity restored.
@@ -2082,10 +2094,7 @@ func TestReconcileBuyAdTrade_Cancelled_RestoresCapacity(t *testing.T) {
 func TestReconcileBuyAdTrade_Released_DecrementsReservedOnly(t *testing.T) {
 	db := setupTradeDB(t)
 	svc, esc, tradeID, adID := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
-	esc.onChainTrade = &OnChainP2PTrade{
-		Status: OnChainP2PStatusReleased, Funding: models.P2PTradeFundingDepositedByTaker,
-		Amount: big.NewInt(30), Exists: true,
-	}
+	esc.onChainTrade = seededBuyAdChainTrade(OnChainP2PStatusReleased)
 	out, err := svc.ReconcileTrade(context.Background(), tradeID)
 	if err != nil {
 		t.Fatalf("ReconcileTrade: %v", err)
@@ -2113,10 +2122,7 @@ func TestReconcileBuyAdTrade_Resolved_RefundSeller_RestoresCapacity(t *testing.T
 	}).Error; err != nil {
 		t.Fatalf("seed dispute: %v", err)
 	}
-	esc.onChainTrade = &OnChainP2PTrade{
-		Status: OnChainP2PStatusResolved, Funding: models.P2PTradeFundingDepositedByTaker,
-		Amount: big.NewInt(30), Exists: true,
-	}
+	esc.onChainTrade = seededBuyAdChainTrade(OnChainP2PStatusResolved)
 	out, err := svc.ReconcileTrade(context.Background(), tradeID)
 	if err != nil {
 		t.Fatalf("ReconcileTrade: %v", err)
@@ -2143,10 +2149,7 @@ func TestReconcileBuyAdTrade_Resolved_RefundBuyer_NoRemainingCredit(t *testing.T
 	}).Error; err != nil {
 		t.Fatalf("seed dispute: %v", err)
 	}
-	esc.onChainTrade = &OnChainP2PTrade{
-		Status: OnChainP2PStatusResolved, Funding: models.P2PTradeFundingDepositedByTaker,
-		Amount: big.NewInt(30), Exists: true,
-	}
+	esc.onChainTrade = seededBuyAdChainTrade(OnChainP2PStatusResolved)
 	if _, err := svc.ReconcileTrade(context.Background(), tradeID); err != nil {
 		t.Fatalf("ReconcileTrade: %v", err)
 	}

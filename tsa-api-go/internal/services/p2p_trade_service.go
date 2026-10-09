@@ -2964,12 +2964,21 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	funding := onchain.Funding
 
 	// The open is on chain but its confirm-open never reached us (app killed
-	// after broadcast): record it so mark-paid and dispute are allowed. A
-	// mismatch is logged as an ALERT and left for an operator. When the chain
-	// has moved past Pending, the switch below still applies that transition.
+	// after broadcast): record it so mark-paid and dispute are allowed. When
+	// the chain has moved past Pending, the switch below still applies that
+	// transition. A refused backfill (ALERT logged) means the on-chain trade
+	// under our id is not the one we prepared, so its Paid/Released/Resolved/
+	// Disputed must never reach our row; only Cancelled is applied, as it just
+	// returns the capacity our row reserved. The rest waits for an operator.
 	if strings.TrimSpace(trade.OpenTxHash) == "" {
 		if ok, err := s.recordOpenFromChain(ctx, &trade, onchain); err != nil {
-			log.Printf("[p2p reconcile] open backfill refused: trade=%s err=%v", trade.ID, err)
+			if !errors.Is(err, ErrInvalidTransition) && !errors.Is(err, ErrUnsupportedToken) {
+				return ReconcileResult{}, fmt.Errorf("backfill open: %w", err)
+			}
+			log.Printf("[p2p reconcile] open backfill refused: trade=%s chainStatus=%d err=%v", trade.ID, onchain.Status, err)
+			if onchain.Status != OnChainP2PStatusCancelled {
+				return ReconcileResult{}, nil
+			}
 		} else if ok && onchain.Status == OnChainP2PStatusPending {
 			return ReconcileResult{Changed: true, FromStatus: trade.Status, ToStatus: trade.Status,
 				Reason: "open backfilled"}, nil

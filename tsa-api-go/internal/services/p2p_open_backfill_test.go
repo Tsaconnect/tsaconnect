@@ -321,3 +321,90 @@ func TestConfirmOpenTrade_IdempotentOnceOpenRecordedAndMovedOn(t *testing.T) {
 		t.Fatalf("retry-confirm after backfill must succeed: %+v %v", got, err)
 	}
 }
+
+// foreignOpen is lostOpen where the on-chain trade under our id names the
+// opener's own wallet as merchant: not the open we prepared.
+func foreignOpen(t *testing.T, status OnChainP2PTradeStatus) (*P2PTradeService, *mockBus, models.P2PTrade, *gorm.DB) {
+	t.Helper()
+	svc, esc, tr, db, _ := lostOpen(t, 30)
+	esc.onChainTrade.Buyer = common.HexToAddress(openTestAttacker)
+	esc.onChainTrade.Status = status
+	return svc, svc.bus.(*mockBus), tr, db
+}
+
+func adCapacity(t *testing.T, db *gorm.DB, adID uuid.UUID) (remaining, reserved string) {
+	t.Helper()
+	var ad models.P2PAd
+	if err := db.First(&ad, "id = ?", adID).Error; err != nil {
+		t.Fatalf("load ad: %v", err)
+	}
+	return ad.Remaining, ad.Reserved
+}
+
+// A refused backfill must not let a foreign trade's Paid/Released/Resolved/
+// Disputed reach our row: no status flip, no events, no audit, no capacity use.
+func TestReconcile_RefusedBackfillIgnoresForeignChainProgress(t *testing.T) {
+	for _, st := range []OnChainP2PTradeStatus{OnChainP2PStatusPending, OnChainP2PStatusPaid,
+		OnChainP2PStatusReleased, OnChainP2PStatusResolved, OnChainP2PStatusDisputed} {
+		svc, bus, tr, db := foreignOpen(t, st)
+		out, err := svc.ReconcileTrade(context.Background(), tr.ID)
+		if err != nil || out.Changed {
+			t.Fatalf("chain status %d: out=%+v err=%v, want a no-op", st, out, err)
+		}
+		var after models.P2PTrade
+		db.First(&after, "id = ?", tr.ID)
+		if after.Status != models.P2PTradeStatusPendingPayment || after.OpenTxHash != "" {
+			t.Fatalf("chain status %d: trade = %s/%q, want pending_payment untouched", st, after.Status, after.OpenTxHash)
+		}
+		if len(bus.published) != 0 {
+			t.Fatalf("chain status %d: %d events published, want none", st, len(bus.published))
+		}
+		var audits int64
+		db.Model(&models.P2PAuditLog{}).Where("trade_id = ?", tr.ID).Count(&audits)
+		if audits != 0 {
+			t.Fatalf("chain status %d: %d audit rows, want none", st, audits)
+		}
+		if rem, res := adCapacity(t, db, tr.AdID); rem != "70" || res != "30" {
+			t.Fatalf("chain status %d: ad remaining/reserved = %s/%s, want 70/30", st, rem, res)
+		}
+	}
+}
+
+// Chain Cancelled is the one status still applied after a refusal: it only
+// restores the capacity our row reserved.
+func TestReconcile_RefusedBackfillStillAppliesChainCancelled(t *testing.T) {
+	svc, _, tr, db := foreignOpen(t, OnChainP2PStatusCancelled)
+	out, err := svc.ReconcileTrade(context.Background(), tr.ID)
+	if err != nil || out.ToStatus != models.P2PTradeStatusCancelled {
+		t.Fatalf("out=%+v err=%v", out, err)
+	}
+	var after models.P2PTrade
+	db.First(&after, "id = ?", tr.ID)
+	if after.Status != models.P2PTradeStatusCancelled || after.OpenTxHash != "" {
+		t.Fatalf("trade = %s/%q, want cancelled with no open recorded", after.Status, after.OpenTxHash)
+	}
+	if rem, res := adCapacity(t, db, tr.AdID); rem != "100" || res != "0" {
+		t.Fatalf("ad remaining/reserved = %s/%s, want 100/0", rem, res)
+	}
+}
+
+// After a mined open receipt the trade exists, so a failed or lagging read is
+// a retryable 503 — never a refusal and never a write.
+func TestConfirmOpenTrade_UnreadableEscrowIsRetryable(t *testing.T) {
+	cases := map[string]func(esc *mockEscrow){
+		"read error":      func(esc *mockEscrow) { esc.readTradeErr = errors.New("rpc down") },
+		"not visible yet": func(esc *mockEscrow) { esc.onChainTrade = nil },
+	}
+	for name, breakRead := range cases {
+		t.Run(name, func(t *testing.T) {
+			svc, esc, tr, db, _ := lostOpen(t, 30)
+			breakRead(esc)
+			if _, err := confirmAsOpener(svc, tr); !errors.Is(err, ErrChainUnavailable) {
+				t.Fatalf("err = %v, want ErrChainUnavailable", err)
+			}
+			if got := openTxHash(t, db, tr.ID); got != "" {
+				t.Fatalf("open_tx_hash = %q, want nothing written", got)
+			}
+		})
+	}
+}
