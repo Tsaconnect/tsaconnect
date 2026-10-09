@@ -32,7 +32,13 @@ const ProviderPaycrest = "paycrest"
 const (
 	ProviderTreasury    = "treasury"    // the company wallet
 	ProviderFlutterwave = "flutterwave" // Flutterwave buys and sends each order
+	// ProviderPool is TSA Liquidity (spec 2026-10-08 §11): LP escrow slices
+	// opened by the conversion treasury. Its order ids are bare intent UUIDs.
+	ProviderPool = "tsa_pool"
 )
+
+// PoolBander is the pool provider's preference band (pool_band, read per quote).
+type PoolBander interface{ BandBps() int64 }
 
 // Request is what the user asked for. Token/ChainKey are optional on a quote
 // (unpinned: best venue per pair) and required on an open.
@@ -47,6 +53,9 @@ type Request struct {
 	// authenticated converted quote (Decision C12).
 	Want   *services.RequestedAsset
 	UserID uuid.UUID
+	// PoolOnly is the pinned P2P card's quote (spec §11.3, S30): only the
+	// pool's venues when it can fill, else today's result with poolAvailable=false.
+	PoolOnly bool
 }
 
 // Venue keeps today's PaycrestVenue JSON shape — the app calls
@@ -159,6 +168,8 @@ type QuoteResult struct {
 	Venues     []Venue   `json:"venues"`
 	Best       *Venue    `json:"best"`
 	QuotedAt   time.Time `json:"quotedAt"`
+	// PoolAvailable is set only on a pool-only quote (S30).
+	PoolAvailable *bool `json:"poolAvailable,omitempty"`
 }
 
 // Provider is one ramp provider. Every error it returns from Open is wrapped
