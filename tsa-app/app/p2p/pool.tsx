@@ -46,6 +46,7 @@ import {
   unsignedTxToTxLike,
   type P2PChainInfo,
 } from '../../services/p2p';
+import { ensureP2PGas } from '../../services/p2pGas';
 import {
   addPending,
   listPending,
@@ -308,7 +309,11 @@ const P2PPoolScreen: React.FC = () => {
       // before we sign/broadcast — the withdraw tx pays gas on this chain. Bails
       // with a fund-your-wallet prompt rather than letting the tx fail mid-flow.
       setStage('Checking gas…');
-      const hasGas = await ensureGas(p2pChainKey(selectedChainId), w);
+      // The LP pool chain isn't sponsored; every other P2P chain asks the sponsor.
+      const onPoolChain = chains.find((c) => c.chainId === selectedChainId)?.purpose === 'pool';
+      const hasGas = onPoolChain
+        ? await ensureGas(p2pChainKey(selectedChainId), w)
+        : await ensureP2PGas({ chainId: selectedChainId, walletAddress: w, action: 'withdraw', onStage: setStage });
       if (!hasGas) return; // `finally` resets submitting/stage.
 
       setStage('Preparing transaction…');

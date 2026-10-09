@@ -605,6 +605,7 @@ const CreateAdScreen: React.FC = () => {
           chainId: preflight.chainId,
           amountBaseUnits: tokenAmount,
           walletAddress: sellerAddress,
+          gasAction: 'deposit',
           onStage: setSubmitStage,
           onGasAlert: (m) => Alert.alert('Need gas', m),
         });
@@ -614,15 +615,15 @@ const CreateAdScreen: React.FC = () => {
           return;
         }
         if (action.kind === 'recover') {
-          // The deposit is on-chain & safe in `available`, but the confirm POST
-          // failed. Do NOT publish an unbacked ad — surface the recovery banner
-          // and let the seller retry the confirm, then re-publish.
+          // The deposit was broadcast but the confirm POST failed, so we don't
+          // know it was mined. Do NOT publish an unbacked ad — surface the
+          // recovery banner and let the seller retry the confirm.
           await refreshPendingDeposits();
           Alert.alert(
             'Deposit sent — confirm pending',
-            'Your deposit broadcast on-chain and your funds are safe in escrow, but ' +
-              'the server could not record it yet. Use “Retry confirm” at the top of ' +
-              'the screen, then publish again.',
+            'Your deposit was broadcast, but the server could not record it yet. Use ' +
+              '“Retry confirm” at the top of the screen, then publish again. ' +
+              "Don't send the deposit again.",
           );
           return;
         }
@@ -866,8 +867,8 @@ const CreateAdScreen: React.FC = () => {
                 </View>
                 <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
                   A {amtHuman} {rec.token} deposit on {recChain?.shortName ?? `chain ${rec.chainId}`}{' '}
-                  broadcast on-chain but the server couldn&apos;t record it. Your funds are safe in
-                  escrow — retry to record it, then publish.
+                  was broadcast but the server couldn&apos;t record it yet. Retry to record it, then
+                  publish. Don&apos;t send the deposit again.
                 </Text>
                 <Text variant="caption" color="textMuted" numeric numberOfLines={1} style={{ marginTop: spacing.sm }}>
                   tx {rec.txHash}

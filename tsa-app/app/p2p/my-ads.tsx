@@ -11,12 +11,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
   formatTokenAmount,
-  p2pChainKey,
   p2pTokenDecimals,
-  unsignedTxToTxLike,
   type P2PAd,
 } from '../../services/p2p';
-import { broadcastTransaction, getActiveWallet, signTransaction } from '../../services/wallet';
+import { p2pErrorMessage } from '../../services/p2pErrors';
+import { runP2PTx, txOutcomeAlert } from '../../services/p2pTx';
+import { getActiveWallet } from '../../services/wallet';
 import { useUserRole } from '../../hooks/useUserRole';
 import { useTheme } from '@/theme';
 import {
@@ -88,7 +88,7 @@ const MyAdsScreen: React.FC = () => {
     setActing(ad.id);
     const res = ad.status === 'paused' ? await adsApi.resume(ad.id) : await adsApi.pause(ad.id);
     if (!res.success) {
-      toast.error(res.message || 'Server rejected the request');
+      toast.error(p2pErrorMessage(res, 'Server rejected the request'));
     } else {
       toast.success(ad.status === 'paused' ? 'Ad resumed' : 'Ad paused');
     }
@@ -104,7 +104,7 @@ const MyAdsScreen: React.FC = () => {
     setActing(ad.id);
     Alert.alert(
       'Cancel this ad?',
-      'Cancelling revokes your voucher on-chain. The locked portion stays in your pool ' +
+      'Cancelling closes this ad. The locked portion stays in your pool ' +
         'balance and any trades already in progress will continue until they finish.',
       [
         { text: 'Keep ad', style: 'cancel', onPress: () => setActing('') },
@@ -115,30 +115,27 @@ const MyAdsScreen: React.FC = () => {
   };
 
   const doCancel = async (ad: P2PAd) => {
-    let broadcastHash: string | null = null;
     try {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
-      const prep = await adsApi.prepareCancel(ad.id, sellerAddress);
-      if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
-      // @ts-expect-error APP-12 handles the null unsignedTx of a buy-ad cancel
-      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx));
-      const resp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
-      broadcastHash = resp.hash;
-      const conf = await adsApi.confirmCancel(ad.id, resp.hash);
-      if (!conf.success) throw new Error(conf.message || 'Confirm failed');
-      toast.success('Ad cancelled');
-    } catch (err: any) {
-      const detail = err?.message || String(err);
-      if (broadcastHash) {
-        Alert.alert(
-          'Cancel submitted, server confirm failed',
-          `Tx ${broadcastHash} was broadcast on chain but the server couldn't record it ` +
-            `(${detail}). Wait a minute for the reconciler to catch up; contact support if not.`,
-        );
+      const r = await runP2PTx({
+        chainId: ad.chainId,
+        walletAddress: sellerAddress,
+        action: 'cancel_ad',
+        adId: ad.id,
+        // A buy-ad cancel is DB-only (unsignedTx:null), so there is nothing to sponsor.
+        skipGas: ad.side === 'buy',
+        prepare: () => adsApi.prepareCancel(ad.id, sellerAddress),
+        confirm: (h) => adsApi.confirmCancel(ad.id, h),
+      });
+      if (r.status === 'confirmed' || r.status === 'no-tx') {
+        toast.success('Ad cancelled');
       } else {
-        toast.error(detail);
+        const a = txOutcomeAlert('Cancel', r);
+        if (a) Alert.alert(a.title, a.message);
       }
+    } catch (err: any) {
+      toast.error(p2pErrorMessage(err?.message));
     } finally {
       setActing('');
       load();
