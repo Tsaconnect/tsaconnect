@@ -34,8 +34,11 @@ function fileNameFor(receiptUrl: string): string {
   return `${code ?? 'receipt'}.png`;
 }
 
-/** Past this, the link is shared instead: a spinning Share button is worse than words. */
-const DOWNLOAD_TIMEOUT_MS = 8_000;
+/**
+ * Past this, the link is shared instead. A receipt's first render takes the
+ * landing site ~10 s (a cold function); after that the CDN serves it in ~1–3 s.
+ */
+const DOWNLOAD_TIMEOUT_MS = 20_000;
 
 async function downloadReceiptImage(receiptUrl: string): Promise<string> {
   // idempotent overwrites the copy from an earlier share: a refund changes the image.

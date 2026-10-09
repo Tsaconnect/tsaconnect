@@ -58,13 +58,13 @@ it('a copy from an earlier share is overwritten, never re-sent stale', async () 
   expect(mockDownload).toHaveBeenCalledWith(expect.any(String), expect.anything(), { idempotent: true });
 });
 
-it('a download that hangs gives way to the link after 8 s', async () => {
+it('a download that hangs gives way to the link after 20 s', async () => {
   jest.useFakeTimers();
   setOS('android');
   mockRequireOptional.mockReturnValue({});
   mockDownload.mockReturnValue(new Promise(() => {}));
   const done = shareReceipt(RECEIPT, MESSAGE);
-  await jest.advanceTimersByTimeAsync(8_000);
+  await jest.advanceTimersByTimeAsync(20_000);
   await done;
   expect(mockShareAsync).not.toHaveBeenCalled();
   expect(share).toHaveBeenCalledWith({ message: MESSAGE });
