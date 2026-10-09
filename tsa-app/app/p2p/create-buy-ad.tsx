@@ -1,6 +1,6 @@
 // app/p2p/create-buy-ad.tsx
 //
-// Merchant posts a buy-ad: they want to BUY crypto from users and will pay
+// A verified user posts a buy-ad: they want to BUY crypto from users and will pay
 // fiat. Different capital model from create-ad.tsx:
 //
 //   - No pool deposit required — the ad is a binding intent to buy.
@@ -13,7 +13,7 @@
 //   3. Navigate back to marketplace (buy tab)
 //
 // Restyled onto the TSA Signature design system (@/theme + @/components/ui).
-// Visual/UX only — the merchant-role gate, field validation, payment-method
+// Visual/UX only — field validation, payment-method
 // selection, wallet resolution, and the create-buy-ad submit flow are
 // unchanged.
 
@@ -32,7 +32,8 @@ import {
 import { getActiveWallet } from '../../services/wallet';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
-import { useUserRole } from '../../hooks/useUserRole';
+import { p2pKycCode } from '../../services/p2pErrors';
+import { promptKycRefusal } from '../../utils/kycRefusal';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getNetworkDisplayName } from '../../constants/chains';
@@ -44,7 +45,6 @@ import {
   Button,
   Card,
   Chip,
-  EmptyState,
   Icon,
   Input,
   PressableScale,
@@ -82,7 +82,6 @@ function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
 const CreateBuyAdScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
   const kbHeight = useKeyboardHeight();
-  const { isMerchant, loading: roleLoading } = useUserRole();
   const { currency: marketCurrency } = useP2pCurrency();
   const { supportedCurrencies } = useCurrency();
   // Active PMs pay sellers automatically from their Nomba account, so no manual
@@ -228,6 +227,8 @@ const CreateBuyAdScreen: React.FC = () => {
       });
 
       if (!createRes.success || !createRes.data) {
+        // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
+        if (promptKycRefusal(p2pKycCode(createRes), createRes.message)) return;
         throw new Error(createRes.message || 'Server rejected the buy ad');
       }
 
@@ -245,34 +246,6 @@ const CreateBuyAdScreen: React.FC = () => {
       setSubmitStage('');
     }
   };
-
-  // ─── Role gate ────────────────────────────────────────────────────────────
-
-  if (roleLoading) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <View style={{ paddingTop: spacing['4xl'] }}>
-          <Spinner label="Checking your account…" />
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  if (!isMerchant) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <View style={{ flex: 1, justifyContent: 'center' }}>
-          <EmptyState
-            icon="storefront"
-            title="Merchants only"
-            subtitle="Buy ads can only be posted by verified merchants. Apply for merchant status to unlock this feature."
-            actionLabel="Become a merchant"
-            onAction={() => router.push('/merchants/merchant-request')}
-          />
-        </View>
-      </SafeAreaView>
-    );
-  }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>

@@ -15,7 +15,7 @@ import { Stack } from 'expo-router';
 import { useDefaultScreenOptions } from '@/constants/navigation';
 import { SERVICES_TAB } from '@/constants/routes';
 import { P2PTabBar } from '../../components/p2p/P2PTabBar';
-import { RAILS, railLabel } from '../../constants/rails';
+import { railLabel } from '../../constants/rails';
 
 const P2PLayout = () => {
   const screenOptions = useDefaultScreenOptions({ backFallback: SERVICES_TAB });
@@ -31,11 +31,11 @@ const P2PLayout = () => {
           <Stack.Screen name="my-trades" options={{ title: 'My Trades' }} />
           <Stack.Screen name="create-ad" options={{ title: 'Create Sell Ad' }} />
           <Stack.Screen name="create-buy-ad" options={{ title: 'Post Buy Ad' }} />
-          <Stack.Screen name="pool" options={{ title: `${RAILS.p2p.name} Pool` }} />
+          <Stack.Screen name="pool" options={{ title: 'Escrow funds' }} />
           <Stack.Screen name="ad/[adId]" options={{ title: 'Ad Detail' }} />
           <Stack.Screen name="trade/[tradeId]" options={{ title: 'Trade' }} />
           <Stack.Screen name="dispute/[tradeId]" options={{ title: 'Open Dispute' }} />
-          <Stack.Screen name="seller/[sellerId]" options={{ title: 'Merchant Profile' }} />
+          <Stack.Screen name="seller/[sellerId]" options={{ title: 'Seller profile' }} />
           <Stack.Screen
             name="payment-methods/index"
             options={{ title: 'Payment Methods' }}

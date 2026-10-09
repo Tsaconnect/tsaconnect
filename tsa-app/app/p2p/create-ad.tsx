@@ -40,6 +40,8 @@ import {
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { ensureEscrowFunding } from '../../services/escrowFunding';
+import { p2pKycCode } from '../../services/p2pErrors';
+import { promptKycRefusal } from '../../utils/kycRefusal';
 import { fundingPreflight, publishActionForFunding } from '../../services/createAdFunding';
 import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
 import { decodeRevertError } from '../../services/txErrors';
@@ -665,6 +667,8 @@ const CreateAdScreen: React.FC = () => {
         { text: 'OK', onPress: () => router.back() },
       ]);
     } catch (err: any) {
+      // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
+      if (promptKycRefusal(p2pKycCode(err), err?.message)) return;
       const raw = err?.message || String(err);
       // Turn an opaque on-chain revert (e.g. the ERC20InsufficientBalance hex the
       // backend surfaces when the wallet can't cover the deposit) into a clear,

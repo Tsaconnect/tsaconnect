@@ -390,9 +390,6 @@ const P2PPoolScreen: React.FC = () => {
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
-          <Text variant="title1" weight="700">
-            Escrow funds
-          </Text>
           <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.lg }}>
             Reclaim funds from your escrow pool. Available is withdrawable anytime;
             locked is reserved against open trades.

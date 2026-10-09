@@ -17,7 +17,6 @@ import {
 import { p2pErrorMessage } from '../../services/p2pErrors';
 import { runP2PTx, txOutcomeAlert } from '../../services/p2pTx';
 import { getActiveWallet } from '../../services/wallet';
-import { useUserRole } from '../../hooks/useUserRole';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -55,7 +54,6 @@ const MyAdsScreen: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [acting, setActing] = useState<string>(''); // adId currently undergoing an action
-  const { isMerchant, loading: roleLoading } = useUserRole();
 
   const load = useCallback(async () => {
     const res = await adsApi.listMine(filter === 'all' ? {} : { status: filter });
@@ -162,13 +160,11 @@ const MyAdsScreen: React.FC = () => {
             My Ads
           </Text>
           <Button
-            title={isMerchant ? 'New ad' : 'Become merchant'}
+            title="New ad"
             leftIcon="plus"
             size="sm"
             fullWidth={false}
-            onPress={() =>
-              router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
-            }
+            onPress={() => router.push('/p2p/create-ad')}
           />
         </View>
 
@@ -180,53 +176,26 @@ const MyAdsScreen: React.FC = () => {
             seller's pool available/locked), we show a static subtitle that
             explains the available/locked semantics and invites a tap to
             manage. */}
-        {!roleLoading && isMerchant && (
-          <PressableScale
-            onPress={() => router.push('/p2p/pool')}
-            style={{ marginTop: spacing.lg }}
-          >
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="wallet" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Escrow funds
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Available is withdrawable; locked is reserved against open trades — tap to
-                    manage.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+        <PressableScale
+          onPress={() => router.push('/p2p/pool')}
+          style={{ marginTop: spacing.lg }}
+        >
+          <AccentCard padding="md">
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+              <Icon name="wallet" size={24} color={colors.accent} />
+              <View style={{ flex: 1 }}>
+                <Text variant="bodyMed" weight="700">
+                  Escrow funds
+                </Text>
+                <Text variant="caption" color="textSecondary">
+                  Available is withdrawable; locked is reserved against open trades — tap to
+                  manage.
+                </Text>
               </View>
-            </AccentCard>
-          </PressableScale>
-        )}
-
-        {/* Mirrors the marketplace-side banner: non-merchants reading their
-            (empty) My Ads list get a one-tap path to onboarding instead of
-            hitting a 403 inside the create-ad flow. */}
-        {!roleLoading && !isMerchant && (
-          <PressableScale
-            onPress={() => router.push('/merchants/merchant-request')}
-            style={{ marginTop: spacing.lg }}
-          >
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="storefront" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Become a merchant
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Required to publish P2P ads. Apply in a minute.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
-              </View>
-            </AccentCard>
-          </PressableScale>
-        )}
+              <Icon name="chevronRight" size={20} color={colors.textMuted} />
+            </View>
+          </AccentCard>
+        </PressableScale>
 
         <ScrollView
           horizontal
@@ -267,8 +236,8 @@ const MyAdsScreen: React.FC = () => {
                 ? "You haven't posted any ads yet. Tap 'New ad' to start selling."
                 : `No ads in '${filter}' status.`
             }
-            actionLabel={isMerchant ? 'New ad' : undefined}
-            onAction={isMerchant ? () => router.push('/p2p/create-ad') : undefined}
+            actionLabel="New ad"
+            onAction={() => router.push('/p2p/create-ad')}
           />
         ) : (
           <View style={{ gap: spacing.md }}>

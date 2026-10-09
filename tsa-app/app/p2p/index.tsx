@@ -18,7 +18,6 @@ import {
   type P2PChainInfo,
 } from '../../services/p2p';
 import { getChainByChainId } from '../../constants/chains';
-import { useUserRole } from '../../hooks/useUserRole';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
 import { lpCta } from '@/utils/lpCta';
@@ -75,7 +74,6 @@ const P2PMarketScreen: React.FC = () => {
   const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
   const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
-  const { isMerchant, loading: roleLoading } = useUserRole();
   const { isPm, kind, liquidityAvailable, loading: pmLoading } = useIsPaymentMerchant();
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
@@ -189,7 +187,7 @@ const P2PMarketScreen: React.FC = () => {
   });
 
   const createRoute = adSide === 'sell' ? '/p2p/create-ad' : '/p2p/create-buy-ad';
-  const onCreate = () => router.push((isMerchant ? createRoute : '/merchants/merchant-request') as never);
+  const onCreate = () => router.push(createRoute as never);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -249,25 +247,6 @@ const P2PMarketScreen: React.FC = () => {
             ? `Buy ${token} with ${currency.code}. Funds are escrowed on chain until the seller releases.`
             : `Sell ${token} to a merchant for ${currency.code}. Deposit + escrow happen at trade open.`}
         </Text>
-
-        {adSide === 'sell' && !roleLoading && !isMerchant && !isPmView && (
-          <PressableScale onPress={() => router.push('/merchants/merchant-request')} style={{ marginBottom: spacing.lg }}>
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="storefront" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Want to sell?
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Become a merchant to publish {RAILS.p2p.name} ({RAILS.p2p.acronym}) ads.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
-              </View>
-            </AccentCard>
-          </PressableScale>
-        )}
 
         {shouldShowPmCta({ isPmView, isPm: isPm || kind === 'lp', loading: pmLoading }) && (
           <PressableScale onPress={() => router.push(PM_MERCHANT_REQUEST_ROUTE as never)} style={{ marginBottom: spacing.lg }}>

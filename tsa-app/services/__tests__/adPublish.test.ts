@@ -44,3 +44,8 @@ it('refuses an ad the server left pending', async () => {
   mockSign.mockResolvedValue({ success: true, data: { id: 'ad1', status: 'pending' } });
   await expect(createAndSignAd({ payload, sellerAddress: '0xabc', statusError })).rejects.toThrow(/pending/);
 });
+
+it('keeps the KYC refusal code on the error so the screen can prompt Verify', async () => {
+  mockCreate.mockResolvedValue({ success: false, status: 403, code: 'kyc_verification_required', message: 'Identity verification required' });
+  await expect(createAndSignAd({ payload, sellerAddress: '0xabc', statusError })).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+});
