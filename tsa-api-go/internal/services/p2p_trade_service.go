@@ -17,6 +17,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ─── Errors (handler-mapped to HTTP) ────────────────────────────────────────
@@ -3053,6 +3054,15 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 	from := trade.Status
 	cancelled := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The caller's status is a pre-read; a mark-paid confirm may have landed
+		// since. Re-read under a row lock so the audit, result and paid-trade
+		// alert reflect what was actually flipped.
+		var cur models.P2PTrade
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("status").
+			First(&cur, "id = ?", trade.ID).Error; err != nil {
+			return err
+		}
+		from = cur.Status
 		res := tx.Model(&models.P2PTrade{}).
 			Where("id = ? AND status NOT IN ?", trade.ID,
 				[]string{

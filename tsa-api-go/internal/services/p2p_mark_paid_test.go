@@ -183,3 +183,45 @@ func TestReconcile_CancellingAPaidTradeAlerts(t *testing.T) {
 		}
 	}
 }
+
+func TestReconcileToCancelled_UsesLockedStatusNotPreRead(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, tradeID, _ := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
+	rec := &recordingAlerter{}
+	svc.SetAlerter(rec)
+	var stale models.P2PTrade
+	if err := db.First(&stale, "id = ?", tradeID).Error; err != nil {
+		t.Fatal(err)
+	}
+	stale.Status = models.P2PTradeStatusPendingPayment // pre-read before confirm landed
+	out, err := svc.reconcileToCancelled(context.Background(), &stale, models.P2PTradeFundingDepositedByTaker)
+	if err != nil || !out.Changed || out.FromStatus != models.P2PTradeStatusPaid {
+		t.Fatalf("out=%+v err=%v", out, err)
+	}
+	if len(rec.got) != 1 || rec.got[0].Kind != P2PAlertPaidTradeCancelled || rec.got[0].FromStatus != "paid" {
+		t.Fatalf("alerts=%+v", rec.got)
+	}
+}
+
+func TestReconcileToCancelled_AlreadyTerminalIsNoOp(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, tradeID, _ := seedBuyAdWithTrade(t, db, models.P2PTradeStatusCancelled)
+	rec := &recordingAlerter{}
+	svc.SetAlerter(rec)
+	var tr models.P2PTrade
+	if err := db.First(&tr, "id = ?", tradeID).Error; err != nil {
+		t.Fatal(err)
+	}
+	tr.Status = models.P2PTradeStatusPaid // stale pre-read
+	var before int64
+	db.Model(&models.P2PAuditLog{}).Count(&before)
+	out, err := svc.reconcileToCancelled(context.Background(), &tr, models.P2PTradeFundingDepositedByTaker)
+	if err != nil || out.Changed {
+		t.Fatalf("out=%+v err=%v", out, err)
+	}
+	var after int64
+	db.Model(&models.P2PAuditLog{}).Count(&after)
+	if after != before || len(rec.got) != 0 {
+		t.Fatalf("audit %d->%d alerts=%d", before, after, len(rec.got))
+	}
+}
