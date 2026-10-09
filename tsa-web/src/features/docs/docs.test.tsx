@@ -51,7 +51,7 @@ describe('developer docs', () => {
     expect(within(verify).getAllByText('X-TSA-Signature').length).toBeGreaterThan(0);
     expect(within(verify).getByText('t=<timestamp>,v1=<signature>')).toBeInTheDocument();
     const hooks = screen.getByRole('heading', { level: 2, name: 'Webhooks' }).closest('section')!;
-    for (const event of ['payment.succeeded', 'payment.failed', 'payment.expired']) {
+    for (const event of ['payment.succeeded', 'payment.failed', 'payment.expired', 'payment.refunded']) {
       expect(within(hooks).getAllByText(event).length).toBeGreaterThan(0);
     }
     expect(within(hooks).getByText(/1 minute, 5 minutes, 30 minutes, 2 hours, 6 hours and 24 hours/)).toBeInTheDocument();
@@ -121,5 +121,22 @@ describe('developer docs', () => {
     expect(payCodeRow).toContain('no API lookup by code');
     expect(createResponse).toContain('"payCode": "TSA-7K2QF-M9XWD"');
     expect(webhookBody).toContain('"payCode": "TSA-7K2QF-M9XWD"');
+  });
+
+  it('documents refunds: the event, its body, the payment fields, and that status stays succeeded', () => {
+    mount();
+    const hooks = screen.getByRole('heading', { level: 2, name: 'Webhooks' }).closest('section')!;
+    expect(within(hooks).getByText(/and again each time you refund one/)).toBeInTheDocument();
+    expect(within(hooks).queryByText("When a payment reaches a final status, we POST an event to that mode's webhook URL.")).toBeNull();
+    const sample = screen.getByRole('figure', { name: 'payment.refunded event body' }).textContent!;
+    expect(sample).toContain('"type": "payment.refunded"');
+    expect(sample).toContain('"refund": {');
+    expect(sample).toContain('"token": "USDT"');
+    expect(sample).toContain('"refundStatus": "partial"');
+    const object = screen.getByRole('heading', { level: 2, name: 'The payment object' }).closest('section')!;
+    for (const field of ['refundedAmount', 'refundStatus']) expect(within(object).getAllByText(field).length).toBeGreaterThan(0);
+    expect(object.textContent).toContain("A refund doesn't change status: a refunded payment stays succeeded.");
+    const test = screen.getByRole('heading', { level: 2, name: 'Test mode' }).closest('section')!;
+    expect(test.textContent).toContain('a fixed ₦1,500 per US dollar');
   });
 });
