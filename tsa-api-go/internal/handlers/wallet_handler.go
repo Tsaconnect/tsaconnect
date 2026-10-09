@@ -188,7 +188,10 @@ func formatTokenBalance(balance *big.Int, decimals int) string {
 }
 
 // parseTokenAmount converts a human decimal to exact base units. It refuses
-// malformed input, more fractional digits than the token has, and amounts <= 0.
+// malformed input and amounts <= 0. Fractional digits beyond the token's
+// decimals are dropped (floor), because the app's USD-entry mode sends
+// toFixed(6) amounts to tokens that hold fewer digits; an amount that drops to
+// zero is refused.
 func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
 	// Installed app versions may send ".5" or "12."; keep accepting them.
 	amount = strings.TrimSpace(amount)
@@ -197,6 +200,12 @@ func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
 	}
 	if strings.HasSuffix(amount, ".") {
 		amount = strings.TrimSuffix(amount, ".")
+	}
+	if whole, frac, hasFrac := strings.Cut(amount, "."); hasFrac && len(frac) > decimals {
+		amount = whole
+		if decimals > 0 {
+			amount += "." + frac[:decimals]
+		}
 	}
 	result, err := services.DecimalToBaseUnits(amount, decimals)
 	if err != nil || result.Sign() <= 0 {

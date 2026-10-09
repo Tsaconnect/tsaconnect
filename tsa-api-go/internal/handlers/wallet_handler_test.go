@@ -733,7 +733,11 @@ func TestParseTokenAmount(t *testing.T) {
 		{"0.13", 6, "130000", true},
 		{"1.5", 6, "1500000", true},
 		{"0.000001", 6, "1", true},
-		// More fractional digits than the token has is refused, never truncated.
+		// Digits beyond the token's decimals are floored, not refused.
+		{"0.1234567", 6, "123456", true},
+		{"1.239", 2, "123", true},
+		{"1.9", 0, "1", true},
+		{"0.001", 2, "", false},
 		{"0.0000001", 6, "", false},
 		// ".5" and "12." are normalised (older app versions send them); exponents,
 		// signs and bare "." are malformed.
