@@ -41,6 +41,9 @@ type P2PHandler struct {
 	central CentralAccountSource
 	// liquidity is the LP read side; nil until a pool chain exists.
 	liquidity LiquidityReader
+	// poolCard serves the pinned TSA Connect card (spec §15); nil while the
+	// pool is dormant (P17: the app shows nothing).
+	poolCard PoolCardSource
 }
 
 // CentralAccountSource is the single thing the PM buy screens need from the IT

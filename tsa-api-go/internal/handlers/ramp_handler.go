@@ -88,6 +88,7 @@ func (h *RampHandler) Quote(c *gin.Context) {
 	res, err := h.router.Quote(c.Request.Context(), ramp.Request{
 		Side: side, FiatCode: currency, FiatAmount: amount,
 		Token: c.Query("token"), ChainKey: c.Query("chain"),
+		PoolOnly: c.Query("pool") == "1",
 	})
 	if err != nil {
 		rampError(c, err)
@@ -120,6 +121,7 @@ func (h *RampHandler) ConvertedQuote(c *gin.Context) {
 	chainID, _ := strconv.ParseInt(c.Query("requestedChainId"), 10, 64)
 	res, err := h.router.Quote(c.Request.Context(), ramp.Request{
 		Side: ramp.Buy, FiatCode: currency, FiatAmount: amount, UserID: user.ID,
+		PoolOnly: c.Query("pool") == "1",
 		Want: &services.RequestedAsset{
 			ChainID: chainID, Address: strings.TrimSpace(c.Query("requestedTokenAddress")),
 			Token: strings.TrimSpace(c.Query("requestedToken")), Chain: strings.TrimSpace(c.Query("requestedChain")),
@@ -380,10 +382,16 @@ func newConversionView(rec *models.PaycrestOrderRecord, intent *models.ITIntent)
 	if rec == nil || intent == nil {
 		return nil
 	}
+	fee := services.ConversionFeeLine(intent, rec)
+	if fee != nil {
+		// Her view never names a provider (owner rule, §19); the label
+		// already says "Conversion (provider)".
+		fee.Provider = services.PoolFeeProvider
+	}
 	return &conversionView{OrderID: rec.ID.String(), Status: rec.Status, Holder: rec.Holder,
 		RequestedToken: rec.RequestedToken, RequestedChain: rec.RequestedChain, RequestedChainID: rec.RequestedChainID,
 		RequestedTokenDecimals: rec.RequestedTokenDecimals, EstimatedAmount: rec.EstimatedAmount,
-		PromisedAmount: rec.PromisedAmount, MarkupBps: rec.MarkupBps, Fee: services.ConversionFeeLine(intent, rec),
+		PromisedAmount: rec.PromisedAmount, MarkupBps: rec.MarkupBps, Fee: fee,
 		WalletAddress: rec.WalletAddress, DestinationAddress: rec.DestinationAddress}
 }
 
@@ -427,6 +435,9 @@ const (
 	// convertedOverpaidCode: a converted buy priced above what it was opened
 	// for parks and is refunded, never bridged (N4).
 	convertedOverpaidCode = "converted_overpaid"
+	// The pool was the last venue to refuse (§19): her copy, never a name.
+	poolCannotFillMessage = "That amount can't be filled right now. Try a smaller amount."
+	poolCannotFillCode    = "pool_cannot_fill"
 )
 
 // rampError maps router outcomes; everything else (refusals keep their
@@ -455,7 +466,7 @@ func rampError(c *gin.Context, err error) {
 	case errors.Is(err, ramp.ErrAbandonCapReached), errors.Is(err, services.ErrStableBuyAbandonCapReached):
 		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
 			"You've cancelled too many unpaid purchases today. Try again tomorrow.", rampAbandonCapCode)
-	case errors.Is(err, services.ErrTreasuryDailyCapReached):
+	case errors.Is(err, services.ErrTreasuryDailyCapReached), errors.Is(err, services.ErrPoolDailyCapReached):
 		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
 			"You've reached today's limit for instant purchases. Try a smaller amount, or come back tomorrow.", rampDailyLimitCode)
 	case errors.Is(err, services.ErrPaycrestBankUnsupported), errors.Is(err, services.ErrPaycrestBelowMinimum):
@@ -469,6 +480,9 @@ func rampError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, itBuyPaymentArrivedMessage, itBuyPaymentArrivedCode)
 	case errors.Is(err, services.ErrITBadState):
 		paycrestError(c, services.ErrPaycrestNotCancellable)
+	case errors.Is(err, services.ErrPoolCannotFill):
+		// §19: the pool was the last venue to refuse; never names a provider.
+		utils.ErrorResponseWithCode(c, http.StatusConflict, poolCannotFillMessage, poolCannotFillCode)
 	case errors.Is(err, ramp.ErrUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable,
 			"Bank transfers are temporarily unavailable. Please try again shortly.", "ramp_unavailable")
