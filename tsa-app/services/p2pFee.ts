@@ -50,6 +50,12 @@ export function tradeFee(t: {
   feeAmount?: string | null;
   buyerNetAmount?: string | null;
 }): FeeSplit | null {
-  if (t.buyerNetAmount && t.feeAmount != null) return { fee: t.feeAmount, net: t.buyerNetAmount };
+  const { feeAmount: fee, buyerNetAmount: net } = t;
+  // Trust the server's figures only when they are plain base-unit integers
+  // that add up to the gross; anything else is recomputed from the bps.
+  if (fee && net && /^\d+$/.test(fee) && /^\d+$/.test(net) && /^\d+$/.test(t.tokenAmount)
+    && BigInt(fee) + BigInt(net) === BigInt(t.tokenAmount)) {
+    return { fee, net };
+  }
   return feeSplit(t.tokenAmount, t.feeBps);
 }

@@ -45,6 +45,13 @@ describe('tradeFee', () => {
   it('prefers the API’s own figures', () => {
     expect(tradeFee({ tokenAmount: '1000', feeBps: 50, feeAmount: '7', buyerNetAmount: '993' })).toEqual({ fee: '7', net: '993' });
   });
+  it('ignores malformed server figures and derives from bps', () => {
+    expect(tradeFee({ tokenAmount: '1000', feeBps: 50, feeAmount: '-7', buyerNetAmount: '993' })).toEqual({ fee: '5', net: '995' });
+    expect(tradeFee({ tokenAmount: '1000', feeBps: 50, feeAmount: '0.5', buyerNetAmount: 'abc' })).toEqual({ fee: '5', net: '995' });
+  });
+  it('ignores figures that do not add up to the gross', () => {
+    expect(tradeFee({ tokenAmount: '1000', feeBps: 50, feeAmount: '7', buyerNetAmount: '900' })).toEqual({ fee: '5', net: '995' });
+  });
   it('derives from the snapshot bps otherwise', () => {
     expect(tradeFee({ tokenAmount: '1000', feeBps: 50 })).toEqual({ fee: '5', net: '995' });
   });

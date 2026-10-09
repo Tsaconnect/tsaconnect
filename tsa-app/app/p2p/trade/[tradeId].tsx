@@ -45,7 +45,6 @@ import {
   AmountText,
   Button,
   Card,
-  CopyableField,
   Icon,
   IconButton,
   PressableScale,
@@ -54,8 +53,9 @@ import {
   Text,
   useToast,
 } from '@/components/ui';
-import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
-import { payerInstructionOf } from '@/utils/payInto';
+import { PayToCard } from '@/components/p2p/PayToCard';
+import { PaymentProof } from '@/components/p2p/PaymentProof';
+import { payToFromPayee, payToFromPm } from '@/utils/payInto';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { API_BASE_URL } from '../../../constants/api/config';
 import { MAINNET_CHAINS, TESTNET_CHAINS } from '../../../constants/chains';
@@ -80,7 +80,7 @@ import { p2pErrorMessage, p2pKycCode } from '../../../services/p2pErrors';
 import { getActiveWallet } from '../../../services/wallet';
 import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { confirmAsync } from '../../../utils/confirmAsync';
-import { RELEASE_CONFIRM_TITLE, releaseConfirmMessage, tradeTxFollowUp } from '../../../utils/p2pTradeView';
+import { RELEASE_CONFIRM_TITLE, releaseConfirmMessage, tradeActions, tradeFeeLines, tradeTxFollowUp } from '../../../utils/p2pTradeView';
 import { getAuthHeaders } from '../../../services/walletApi';
 
 // Slow safety reconcile — the fast path is WS events (useTradeRealtime). This
@@ -330,6 +330,7 @@ const TradeDetailScreen: React.FC = () => {
   }
 
   const tokenDecimals = p2pTokenDecimals(trade.chainId, trade.token);
+  const feeLines = tradeFeeLines(trade, role, tokenDecimals);
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
@@ -515,6 +516,16 @@ const TradeDetailScreen: React.FC = () => {
                 </Text>
               </View>
             </SummaryLine>
+            {feeLines && (
+              <>
+                <SummaryLine label={feeLines.feeLabel}>
+                  <Text variant="bodySm" numeric>{feeLines.feeValue}</Text>
+                </SummaryLine>
+                <SummaryLine label={feeLines.receiveLabel}>
+                  <Text variant="bodySm" weight="700" numeric>{feeLines.receiveValue}</Text>
+                </SummaryLine>
+              </>
+            )}
             <SummaryLine label="Your role">
               <Text variant="bodySm" weight="700" style={{ textTransform: 'capitalize' }}>
                 {role}
@@ -851,48 +862,9 @@ const ActionPanel: React.FC<{
   onDispute: () => void;
 }> = ({ role, trade, acting, onMarkPaid, onRelease, onCancel, onDispute }) => {
   const { colors, spacing } = useTheme();
-  const expired = new Date(trade.expiresAt).getTime() < Date.now();
-  // PM (Payment Merchant) trades are automated — the backend bot drives
-  // markPaid + release, so the user must NOT see manual paid/release buttons.
-  // A buyer instead sees a pay-to card. But if isPm is set yet pmPayTo is
-  // missing (PM mis-seeded / no inbound account configured), automation can't
-  // run — fall back to the normal manual flow so the trade stays usable.
-  const pmActive = !!trade.isPm && !!trade.pmPayTo;
-  const pmDormant = !!trade.isPm && !trade.pmPayTo;
-  // Role-awareness for both sell-ad and buy-ad trades:
-  //   sell-ad trade: user is buyer (buys crypto), merchant is seller
-  //     → buyer marks paid, seller (merchant) releases
-  //   buy-ad trade:  user is seller (sells crypto), merchant is buyer
-  //     → buyer (merchant) marks paid after sending fiat, seller (user) releases
-  // The role field already resolves correctly from buyerId/sellerId vs user.id,
-  // so canMarkPaid and canRelease gate correctly in both cases with no changes.
-  // On a PM trade with automation active, both manual gates are suppressed.
-  const canMarkPaid = !pmActive && role === 'buyer' && trade.status === 'pending_payment';
-  // Gate the Release button on the buyer's markPaid (status === 'paid'). The
-  // contract + backend deliberately ALSO allow a seller to release straight from
-  // pending_payment — the seller's signature is the real gate, since markPaid only
-  // records the buyer's claim — but the intended flow is buyer-pays →
-  // buyer-marks-paid → seller-releases, so the button only surfaces once the
-  // buyer has marked the trade paid. (Both sell-ad and buy-ad map to role here:
-  // on a buy-ad the depositing user is the seller and the merchant is the buyer.)
-  const canRelease = !pmActive && role === 'seller' && trade.status === 'paid';
-  // Seller is waiting on the buyer's fiat payment — explains the absent Release.
-  // On an active PM trade the automated-status card replaces this copy.
-  const sellerAwaitingPayment =
-    !pmActive && role === 'seller' && trade.status === 'pending_payment';
-  // PM buyer who still owes fiat: show the pay-to card instead of "I've paid".
-  const showPmPayTo =
-    pmActive && role === 'buyer' && trade.status === 'pending_payment';
-  // PM seller/depositor side (or PM buyer past pending): show an automated-status
-  // info card and suppress the manual release. We surface this for the seller
-  // (depositor who sold to PM) at any non-terminal PM stage, and for the buyer
-  // once they're past the pay-to step.
-  const showPmAutomated = pmActive && !showPmPayTo;
-  const canCancel = expired && trade.status === 'pending_payment';
-  const canDispute =
-    trade.status === 'pending_payment' || trade.status === 'paid';
-  const releasingDisabled = trade.status === 'releasing';
-
+  // PM trades are automated (the backend drives markPaid + release); a dormant
+  // PM (no inbound account) falls back to the manual flow. See tradeActions.
+  const a = tradeActions(trade, role, Date.now());
   return (
     <View style={{ marginTop: spacing.lg }}>
       {acting ? (
@@ -901,10 +873,27 @@ const ActionPanel: React.FC<{
         </AccentCard>
       ) : (
         <View style={{ gap: spacing.md }}>
-          {showPmPayTo && trade.pmPayTo && (
-            <PmPayToCard trade={trade} payTo={trade.pmPayTo} />
+          {a.showPmPayTo && trade.pmPayTo && (
+            <PayToCard
+              mode="pm"
+              details={payToFromPm(trade.pmPayTo)}
+              amount={trade.fiatAmount}
+              currency={trade.fiatCurrency}
+              payerName={trade.payerName}
+            />
           )}
-          {showPmAutomated && (
+          {a.payToFor && trade.payee && (
+            <PayToCard
+              mode={a.payToFor}
+              details={payToFromPayee(trade.payee)}
+              amount={trade.fiatAmount}
+              currency={trade.fiatCurrency}
+            />
+          )}
+          {a.showProof && trade.proofImageUrl && (
+            <PaymentProof url={trade.proofImageUrl} mine={role === 'buyer'} />
+          )}
+          {a.showPmAutomated && (
             <AccentCard padding="md">
               <View style={{ flexDirection: 'row', gap: spacing.sm }}>
                 <Icon name="checkCircle" size={18} color={colors.accent} />
@@ -915,36 +904,36 @@ const ActionPanel: React.FC<{
               </View>
             </AccentCard>
           )}
-          {pmDormant && (
+          {a.pmDormant && (
             <Text variant="caption" color="textMuted" align="center">
               Automated settlement unavailable — proceed manually.
             </Text>
           )}
-          {sellerAwaitingPayment && (
+          {a.sellerAwaitingPayment && (
             <Text variant="bodySm" color="textSecondary" align="center">
               Waiting for the buyer to send payment and mark it paid. You can
               release once they do.
             </Text>
           )}
-          {canMarkPaid && (
+          {a.canMarkPaid && (
             <Button
               title="I've paid — attach proof"
               leftIcon="checkCircle"
               onPress={onMarkPaid}
             />
           )}
-          {canRelease && (
+          {a.canRelease && (
             <Button
-              title={releasingDisabled ? 'Releasing…' : `Release ${trade.token}`}
+              title={a.releasingDisabled ? 'Releasing…' : `Release ${trade.token}`}
               leftIcon="lock"
-              loading={releasingDisabled}
-              disabled={releasingDisabled}
+              loading={a.releasingDisabled}
+              disabled={a.releasingDisabled}
               onPress={onRelease}
             />
           )}
-          {(canCancel || canDispute) && (
+          {(a.canCancel || a.canDispute) && (
             <View style={{ flexDirection: 'row', gap: spacing.sm }}>
-              {canCancel && (
+              {a.canCancel && (
                 <Button
                   title="Cancel (timed out)"
                   leftIcon="close"
@@ -954,7 +943,7 @@ const ActionPanel: React.FC<{
                   onPress={onCancel}
                 />
               )}
-              {canDispute && (
+              {a.canDispute && (
                 <Button
                   title="Open dispute"
                   leftIcon="dispute"
@@ -970,67 +959,6 @@ const ActionPanel: React.FC<{
         </View>
       )}
     </View>
-  );
-};
-
-// Read-only pay-to card for a PM (automated) buy trade. The buyer pays the
-// exact fiat into the PM's Nomba account; the backend bot detects the inbound
-// transfer, then markPaid + release the crypto automatically — no manual button.
-const PmPayToCard: React.FC<{
-  trade: P2PTrade;
-  payTo: NonNullable<P2PTrade['pmPayTo']>;
-}> = ({ trade, payTo }) => {
-  const { colors, spacing } = useTheme();
-  // Central mode: the card points at the shared company account and the API
-  // supplies the own-name notice. The local copy below predates it and is only
-  // right for a merchant's own account — in central mode a mismatched name does
-  // not reliably route to review (a partial match can credit another order),
-  // and payerName is the free-text signup name, not the verified name matched.
-  const payerInstruction = payerInstructionOf(payTo);
-  return (
-    <Card style={{ gap: spacing.md }}>
-      <View style={{ alignItems: 'center', gap: spacing.xs }}>
-        <Text variant="bodySm" color="textSecondary">
-          Pay exactly
-        </Text>
-        <AmountText
-          value={trade.fiatAmount}
-          currency={trade.fiatCurrency}
-          variant="title2"
-        />
-      </View>
-      {payerInstruction ? (
-        <>
-          <PayerInstructionNotice instruction={payerInstruction} />
-          <Text variant="bodySm" color="textSecondary">
-            We release your crypto automatically once your transfer lands — no further action needed.
-          </Text>
-        </>
-      ) : (
-        <Text variant="bodySm" weight="600" style={{ color: colors.danger }}>
-          {trade.payerName
-            ? `Pay from a bank account in YOUR name (${trade.payerName}). A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.`
-            : 'Pay from a bank account in YOUR name. A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.'}
-        </Text>
-      )}
-      <View style={{ gap: spacing.sm }}>
-        <CopyableField
-          label="Account number"
-          value={payTo.accountNumber}
-          toastMessage="Account number copied"
-        />
-        <CopyableField
-          label="Bank"
-          value={payTo.bank}
-          toastMessage="Bank copied"
-        />
-        <CopyableField
-          label="Account name"
-          value={payTo.accountName}
-          toastMessage="Account name copied"
-        />
-      </View>
-    </Card>
   );
 };
 
