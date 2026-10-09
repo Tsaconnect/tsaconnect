@@ -153,7 +153,7 @@ function RecentPayments({ items, mode }: { items: Payment[]; mode: Mode }) {
 }
 
 /**
- * Label and limits, checked as when the link was made. Saved against the version
+ * Label, limits and payment expiry, checked as when the link was made. Saved against the version
  * on screen; if the link changed elsewhere first it is read again (what was typed
  * stays) and the next Save goes against the fresh one.
  */

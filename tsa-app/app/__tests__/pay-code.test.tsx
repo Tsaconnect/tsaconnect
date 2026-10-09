@@ -218,6 +218,16 @@ it('Waiting for you lists the payments she opened and can still pay, and forgets
   expect(router.push).toHaveBeenCalledWith(`/pay?id=${ID}`);
 });
 
+it('a waiting payment that never expires says it is not paid yet, not until when it is open', async () => {
+  jest.mocked(listPayCheckouts).mockResolvedValue([remembered(ID, 'Ojay store')]);
+  jest.mocked(getCheckout).mockResolvedValue(
+    { id: ID, merchantName: 'Ojay store', customerTotal: 505051, status: 'pending', payable: true, youArePaying: false, expiresAt: null } as any,
+  );
+  await mount();
+  expect(shown()).toContain('Not paid yet');
+  expect(shown()).not.toContain('Open until');
+});
+
 it('a remembered payment the server can\'t read right now keeps its row; a gone one is forgotten', async () => {
   jest.mocked(listPayCheckouts).mockResolvedValue([remembered(ID, 'Ojay store'), remembered(OTHER, 'Acme')]);
   jest.mocked(getCheckout).mockImplementation(async (id: string) => {

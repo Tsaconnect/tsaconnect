@@ -67,6 +67,19 @@ it('never remembers one longer than 7 days, whatever its expiry says', async () 
   expect(await hasPendingPayment(T0 + 7 * DAY)).toBe(false);
 });
 
+it('a payment that never expires is remembered for the full 7 days', async () => {
+  await rememberPendingPayment(ID, { expiresAt: null, now: T0 });
+  expect(await hasPendingPayment(T0 + 6 * DAY)).toBe(true);
+  expect(await hasPendingPayment(T0 + 7 * DAY - 1)).toBe(true);
+  expect(await hasPendingPayment(T0 + 7 * DAY)).toBe(false);
+});
+
+it('an expiry that does not read as a time is unknown: 30 minutes', async () => {
+  await rememberPendingPayment(ID, { expiresAt: 'soon', now: T0 });
+  expect(await hasPendingPayment(T0 + 29 * 60_000)).toBe(true);
+  expect(await hasPendingPayment(T0 + 31 * 60_000)).toBe(false);
+});
+
 it('an older record with no window still gets its 30 minutes', async () => {
   await AsyncStorage.setItem('tsapay.pendingPayment', JSON.stringify({ id: ID, savedAt: T0 }));
   expect(await hasPendingPayment(T0 + 29 * 60_000)).toBe(true);

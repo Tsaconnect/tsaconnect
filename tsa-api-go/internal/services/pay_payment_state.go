@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"regexp"
 	"strings"
 	"time"
@@ -27,8 +28,9 @@ import (
 // the clock.
 //
 // Every OTHER caller (a fresh lock) is refused when: the payment is not
-// pending (another payer already holds it, or it finished/expired), there is
-// less than payMinTimeToStart left, the merchant is suspended, the mode is
+// pending (another payer already holds it, or it finished/expired), it has an
+// expiry with less than payMinTimeToStart left, the merchant is suspended or
+// has nowhere to be paid, the mode is
 // live but live payments are disabled (globally or for this merchant), or (live only) the payer is not
 // KYC-verified.
 func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*models.PayPayment, bool, error) {
@@ -45,7 +47,7 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 	}
 
 	now := s.now()
-	if now.Add(payMinTimeToStart).After(p.ExpiresAt) {
+	if payTooLateToStart(p, now) {
 		return nil, false, ErrPayNotPayable
 	}
 
@@ -53,7 +55,7 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 	if err != nil {
 		return nil, false, err
 	}
-	if m.Status != models.PayMerchantActive {
+	if m.Status != models.PayMerchantActive || m.SettlementMode == "" {
 		return nil, false, ErrPayNotPayable
 	}
 	if p.Mode == models.PayModeLive {
@@ -67,19 +69,21 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 		}
 	}
 
+	updates := map[string]any{
+		"status":        models.PayStatusProcessing,
+		"payer_user_id": user.ID,
+		"locked_at":     &now,
+		// Set once, on the first lock ever, and never cleared by a release:
+		// a payment someone tried stays tried (PayPayment.Untried).
+		"attempted_at": gorm.Expr("COALESCE(attempted_at, ?)", now),
+		// A released payment keeps the reason it was released for; a new
+		// attempt must not carry it into whatever it ends as.
+		"failure_reason": "",
+	}
+	maps.Copy(updates, paySettlementColumns(settlementAsStarted(p, m, now)))
 	res := s.db.WithContext(ctx).Model(&models.PayPayment{}).
 		Where("id = ? AND status = ?", id, models.PayStatusPending).
-		Updates(map[string]any{
-			"status":        models.PayStatusProcessing,
-			"payer_user_id": user.ID,
-			"locked_at":     &now,
-			// Set once, on the first lock ever, and never cleared by a release:
-			// a payment someone tried stays tried (PayPayment.Untried).
-			"attempted_at": gorm.Expr("COALESCE(attempted_at, ?)", now),
-			// A released payment keeps the reason it was released for; a new
-			// attempt must not carry it into whatever it ends as.
-			"failure_reason": "",
-		})
+		Updates(updates)
 	if res.Error != nil {
 		return nil, false, res.Error
 	}
@@ -92,6 +96,74 @@ func (s *PayPaymentService) Lock(ctx context.Context, user *models.User, id uuid
 		return nil, false, err
 	}
 	return locked, true, nil
+}
+
+// payTooLateToStart reports whether p has too little time left for a customer
+// to start paying it at now. A payment with no expiry never does.
+func payTooLateToStart(p *models.PayPayment, now time.Time) bool {
+	return p.ExpiresAt != nil && now.Add(payMinTimeToStart).After(*p.ExpiresAt)
+}
+
+// payoutCoolOff is how long a merchant's new payout destination waits before
+// payments made earlier follow it. A payment pays where its merchant is paid
+// when a customer starts it, so a hijacked account that swapped the bank would
+// otherwise collect every payment already out; for a day they keep paying where
+// they were made to, while the owner has time to notice the change.
+const payoutCoolOff = 24 * time.Hour
+
+// settlementAsStarted is p as a customer starting it at now would pay it: to
+// its merchant m's current payout (withCurrentSettlement), unless m's payout
+// changed after p was made and less than payoutCoolOff ago — then as made.
+func settlementAsStarted(p *models.PayPayment, m *models.PayMerchant, now time.Time) *models.PayPayment {
+	if c := m.PayoutChangedAt; c != nil && p.CreatedAt.Before(*c) && now.Before(c.Add(payoutCoolOff)) {
+		return p
+	}
+	return withCurrentSettlement(p, m)
+}
+
+// withCurrentSettlement is p paying where its merchant m is paid now. A
+// payment pays the merchant's payout destination as of the moment a customer
+// starts paying it (Lock), not as of its creation (owner, 2026-10-09): a
+// payment can stay open indefinitely, and a months-old copy may name an
+// account the merchant has since replaced. The amount and fee split stay as
+// created, and a payment already being paid never changes destination.
+func withCurrentSettlement(p *models.PayPayment, m *models.PayMerchant) *models.PayPayment {
+	cur := *p
+	cur.SettlementMode = m.SettlementMode
+	cur.SettleBankCode, cur.SettleAccountNumber, cur.SettleAccountName = m.BankCode, m.AccountNumber, m.AccountName
+	cur.SettleChainID, cur.SettleTokenAddress, cur.SettleTokenSymbol = m.ChainID, m.TokenAddress, m.TokenSymbol
+	cur.SettleWalletAddress = m.WalletAddress
+	return &cur
+}
+
+// GetAsStarted is payment id as a customer starting it now would pay it: a
+// pending payment carries the payout settlementAsStarted gives it, anything
+// else is exactly as stored. Every check made
+// before Lock reads it this way, so it agrees with the checkout view and Lock.
+func (s *PayPaymentService) GetAsStarted(ctx context.Context, id uuid.UUID) (*models.PayPayment, error) {
+	p, err := s.Get(ctx, id)
+	if err != nil || p.Status != models.PayStatusPending {
+		return p, err
+	}
+	m, err := s.merchants.Get(ctx, p.MerchantID)
+	if err != nil {
+		return nil, err
+	}
+	return settlementAsStarted(p, m, s.now()), nil
+}
+
+// paySettlementColumns is p's payout destination as the columns that hold it.
+func paySettlementColumns(p *models.PayPayment) map[string]any {
+	return map[string]any{
+		"settlement_mode":       p.SettlementMode,
+		"settle_bank_code":      p.SettleBankCode,
+		"settle_account_number": p.SettleAccountNumber,
+		"settle_account_name":   p.SettleAccountName,
+		"settle_chain_id":       p.SettleChainID,
+		"settle_token_address":  p.SettleTokenAddress,
+		"settle_token_symbol":   p.SettleTokenSymbol,
+		"settle_wallet_address": p.SettleWalletAddress,
+	}
 }
 
 // payAttempt is the attempt a payment carried when a caller read it: the

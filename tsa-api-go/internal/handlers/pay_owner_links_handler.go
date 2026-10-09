@@ -17,7 +17,8 @@ import (
 // open links, is in pay_open_links_handler.go.
 
 // POST /api/pay/merchant/links?mode=live|test {amount, description,
-// customerName, reference, expiresInDays} — the owner asks a customer to pay.
+// customerName, reference, expiresInDays?} — the owner asks a customer to pay.
+// With no expiresInDays the link stays open until it is paid or cancelled.
 // Answers 201 with the payment; its checkoutUrl is the link to send.
 func (h *PayHandler) OwnerCreateLink(c *gin.Context) {
 	var in services.CreatePayLinkInput

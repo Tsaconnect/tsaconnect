@@ -23,7 +23,7 @@ import {
 
 const NOW = Date.parse('2026-10-09T10:00:00Z');
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-const pay = (n: number, expiresAt = '2026-10-16T10:00:00Z') => ({ id: id(n), merchantName: `M${n}`, customerTotal: n * 100, expiresAt });
+const pay = (n: number, expiresAt: string | null = '2026-10-16T10:00:00Z') => ({ id: id(n), merchantName: `M${n}`, customerTotal: n * 100, expiresAt });
 
 beforeEach(() => (AsyncStorage as any).clear());
 
@@ -40,7 +40,13 @@ it('drops one once it expires, and never keeps one past seven days', async () =>
   expect(await listPayCheckouts(NOW + 8 * 24 * 3600_000)).toHaveLength(0);
 });
 
-it('ignores a payment already expired or with no expiry, and a bad id', async () => {
+it('keeps a payment that never expires for seven days', async () => {
+  await rememberPayCheckout(pay(1, null), NOW);
+  expect((await listPayCheckouts(NOW + 7 * 24 * 3600_000 - 1)).map((r) => r.id)).toEqual([id(1)]);
+  expect(await listPayCheckouts(NOW + 7 * 24 * 3600_000)).toHaveLength(0);
+});
+
+it('ignores a payment already expired or whose expiry is unknown, and a bad id', async () => {
   await rememberPayCheckout(pay(1, '2026-10-01T00:00:00Z'), NOW);
   await rememberPayCheckout({ ...pay(2), expiresAt: undefined }, NOW);
   await rememberPayCheckout({ ...pay(3), id: '../wallet' }, NOW);

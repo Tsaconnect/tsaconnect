@@ -2,7 +2,6 @@ package services
 
 import (
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -13,7 +12,7 @@ func TestPayModels_ReferenceIsUniquePerMerchantAndMode(t *testing.T) {
 	m := seedPayMerchant(t, db)
 	mk := func(mode string) *models.PayPayment {
 		return &models.PayPayment{MerchantID: m.ID, Mode: mode, Reference: "ORD-1", AmountKobo: 100_000, Currency: "NGN",
-			SettlementMode: models.PaySettlementFiat, Status: models.PayStatusPending, ExpiresAt: time.Now()}
+			SettlementMode: models.PaySettlementFiat, Status: models.PayStatusPending}
 	}
 	if err := db.Create(mk(models.PayModeLive)).Error; err != nil {
 		t.Fatal(err)
@@ -44,7 +43,7 @@ func TestPayModels_KeyHashesAndAttemptsAreUniqueButOptional(t *testing.T) {
 	order := uuid.New()
 	mk := func(ref string) *models.PayPayment {
 		return &models.PayPayment{MerchantID: a.ID, Mode: models.PayModeLive, Reference: ref, AmountKobo: 1, Currency: "NGN",
-			SettlementMode: models.PaySettlementFiat, Status: models.PayStatusProcessing, ExpiresAt: time.Now(), PaycrestOrderID: &order}
+			SettlementMode: models.PaySettlementFiat, Status: models.PayStatusProcessing, PaycrestOrderID: &order}
 	}
 	if err := db.Create(mk("A")).Error; err != nil {
 		t.Fatal(err)

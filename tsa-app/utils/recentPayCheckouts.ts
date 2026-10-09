@@ -12,6 +12,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isPaymentId } from '@/utils/paymentId';
 import { MAX_TTL_MS } from '@/utils/postAuthRoute';
+import { paymentExpiryMs } from '@/utils/payCheckout';
 
 export const RECENT_PAY_CHECKOUTS_KEY = 'tsapay.recentCheckouts';
 const MAX_ITEMS = 5;
@@ -49,14 +50,17 @@ async function write(list: RecentPayCheckout[]): Promise<void> {
   }
 }
 
-/** Remembers a payment she opened and can still pay, newest first, until it expires. Never throws. */
+/**
+ * Remembers a payment she opened and can still pay, newest first, until it
+ * expires — or, for one that never does (expiresAt null), for 7 days. Never throws.
+ */
 export async function rememberPayCheckout(
-  c: { id: string; merchantName: string; customerTotal: number; expiresAt?: string },
+  c: { id: string; merchantName: string; customerTotal: number; expiresAt?: string | null },
   now: number = Date.now(),
 ): Promise<void> {
   if (!isPaymentId(c.id)) return;
-  const expires = c.expiresAt ? Date.parse(c.expiresAt) : NaN;
-  if (!Number.isFinite(expires) || expires <= now) return;
+  const expires = paymentExpiryMs(c.expiresAt);
+  if (Number.isNaN(expires) || expires <= now) return;
   const entry: RecentPayCheckout = {
     id: c.id, merchantName: c.merchantName, customerTotal: c.customerTotal, until: Math.min(expires, now + MAX_TTL_MS),
   };

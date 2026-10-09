@@ -14,7 +14,7 @@ jest.mock('@react-native-async-storage/async-storage', () =>
 import type { PayLink } from '@/services/payMerchantApi';
 import {
   koboFromNairaInput, nairaFieldText, nairaInputError, openLinkAmountRule, openLinkNotTakingWhy, openLinkRangeFrom, openLinkReceived,
-  openLinkShareMessage, openLinkStatus, openPaymentPurpose, payLinkCounts, payLinkReceives, payLinkShareMessage, payLinkStatus, payLinkTimeRow,
+  openLinkPaymentExpiryOptions, openLinkShareMessage, openLinkStatus, openPaymentPurpose, payLinkCounts, payLinkReceives, payLinkShareMessage, payLinkStatus, payLinkTimeRow,
   safeReceiptUrl,
 } from '../payLinks';
 
@@ -44,6 +44,9 @@ it('names one time per state, and shows what she receives only while it can come
   expect(payLinkTimeRow({ ...base, status: 'processing' })).toBeNull();
   expect(payLinkTimeRow({ ...base, status: 'failed' })).toBeNull();
   expect(payLinkTimeRow({ ...base, status: 'expired', cancelled: true })).toBeNull();
+  // A link with no expiry has no "open until" — the row is dropped, not shown blank.
+  expect(payLinkTimeRow({ expiresAt: null, status: 'pending' })).toBeNull();
+  expect(payLinkTimeRow({ expiresAt: null, status: 'expired' })).toBeNull();
 
   expect(payLinkReceives({ status: 'pending' })).toBe(true);
   expect(payLinkReceives({ status: 'succeeded' })).toBe(true);
@@ -148,4 +151,14 @@ it.each([
   'https://www.tsaconnectworld.com/r/',
 ])('refuses %s', (url) => {
   expect(safeReceiptUrl(url)).toBeUndefined();
+});
+
+it("offers no expiry first for a reusable link's payments, and keeps a lifetime it doesn't offer as itself", () => {
+  const offered = [
+    { key: '0', label: 'No expiry' }, { key: '1800', label: '30 min' }, { key: '3600', label: '1 hour' }, { key: '86400', label: '24 hours' },
+  ];
+  expect(openLinkPaymentExpiryOptions(0)).toEqual(offered);
+  expect(openLinkPaymentExpiryOptions(3600)).toEqual(offered);
+  expect(openLinkPaymentExpiryOptions(900)).toEqual([...offered, { key: '900', label: '15 min' }]);
+  expect(openLinkPaymentExpiryOptions(7200)).toEqual([...offered, { key: '7200', label: '2 hours' }]);
 });

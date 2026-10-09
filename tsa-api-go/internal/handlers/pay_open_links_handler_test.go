@@ -273,3 +273,23 @@ func TestPayOpenLinks_TheMerchantAPICannotCancelThem(t *testing.T) {
 		}
 	}
 }
+
+// paymentExpiresIn goes in and comes back by that name, on create and edit;
+// a value outside 15 minutes to 24 hours is refused with the payer-safe text.
+func TestPayOpenLinks_PaymentExpiryRoundTrips(t *testing.T) {
+	o := newOwnerRig(t)
+	l := o.newOpenLink(t, map[string]any{"label": "Till 2", "paymentExpiresIn": 1800})
+	if l.PaymentExpiresIn != 1800 {
+		t.Fatalf("create: paymentExpiresIn %d", l.PaymentExpiresIn)
+	}
+	up := o.openLink(http.MethodPut, "/api/pay/merchant/open-links/"+l.ID.String()+"?mode=test",
+		map[string]any{"paymentExpiresIn": 0, "expectedVersion": l.Version})
+	if up.status != http.StatusOK || up.Link.PaymentExpiresIn != 0 || !strings.Contains(up.raw, `"paymentExpiresIn":0`) {
+		t.Fatalf("clear: %d %s", up.status, up.raw)
+	}
+	if res := o.openLink(http.MethodPost, "/api/pay/merchant/open-links?mode=test",
+		map[string]any{"label": "Till 3", "paymentExpiresIn": 60}); res.status != http.StatusUnprocessableEntity ||
+		res.Msg != "Payments can expire after 15 minutes to 24 hours, or never" {
+		t.Fatalf("60 seconds: %d %s", res.status, res.raw)
+	}
+}

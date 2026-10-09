@@ -14,7 +14,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  AccentCard, Button, Card, ErrorState, Input, Sheet, StatusPill, SummaryCard, SummaryRow, Text, useToast,
+  AccentCard, Button, Card, ErrorState, Input, SegmentedControl, Sheet, StatusPill, SummaryCard, SummaryRow, Text,
+  useToast,
 } from '@/components/ui';
 import { NairaField } from '@/components/pay/NairaField';
 import { PayLinkShare, TestLinkBanner } from '@/components/pay/PayLinkShare';
@@ -27,8 +28,8 @@ import {
 } from '@/services/payMerchantApi';
 import { errorMessage } from '@/utils/payCheckout';
 import {
-  formatLinkTime, nairaFieldText, openLinkAmountRule, openLinkNotTakingWhy, openLinkRangeFrom, openLinkReceived,
-  openLinkShareMessage, openLinkStatus, openPaymentPurpose, payLinkStatus,
+  formatLinkTime, nairaFieldText, openLinkAmountRule, openLinkNotTakingWhy, openLinkPaymentExpiryOptions,
+  openLinkRangeFrom, openLinkReceived, openLinkShareMessage, openLinkStatus, openPaymentPurpose, payLinkStatus,
 } from '@/utils/payLinks';
 import { formatKobo } from '@/utils/stableSellQuote';
 
@@ -36,12 +37,15 @@ const QR_SIZE = 240;
 const POLL_MS = 15_000;
 const WEB_DASHBOARD = COMPANY.webApp.replace(/^https:\/\//, '');
 
-/** The link as it stands, as a change: what Pause/Resume sends with only `active` moved. */
+/**
+ * The link as it stands, as a change: what Pause/Resume sends with only `active`
+ * moved. paymentExpiresIn is left out, so Pause/Resume never touches it.
+ */
 const changeOf = (l: OpenLink): OpenLinkChange => ({
   label: l.label, minAmount: l.minAmount, maxAmount: l.maxAmount, active: l.active,
 });
 
-type EditForm = { label: string; min: string; max: string };
+type EditForm = { label: string; min: string; max: string; paymentExpiresIn: number };
 
 export default function OpenLinkDetail() {
   const { id, mode: modeParam } = useLocalSearchParams<{ id: string; mode?: string }>();
@@ -138,7 +142,7 @@ function LinkDetail({ id, mode, businessName, suspended }: {
     setFieldErrors(errors);
     if ('errors' in range || errors.label) return;
     setSheetError(undefined);
-    const change = { ...changeOf(link), label: form.label.trim(), ...range.range };
+    const change = { ...changeOf(link), label: form.label.trim(), ...range.range, paymentExpiresIn: form.paymentExpiresIn };
     if (await run(() => updateOpenLink(mode, link.id, change, link.version), setSheetError)) {
       setForm(null);
       toast.success('Link saved');
@@ -155,7 +159,13 @@ function LinkDetail({ id, mode, businessName, suspended }: {
 
   const notTakingWhy = openLinkNotTakingWhy(link);
   const openEdit = () => {
-    setForm({ label: link.label, min: nairaFieldText(link.minAmount), max: nairaFieldText(link.maxAmount) });
+    setForm({
+      label: link.label,
+      min: nairaFieldText(link.minAmount),
+      max: nairaFieldText(link.maxAmount),
+      // An older server sends none: no expiry.
+      paymentExpiresIn: link.paymentExpiresIn ?? 0,
+    });
     setFieldErrors({});
     setSheetError(undefined);
   };
@@ -262,6 +272,14 @@ function LinkDetail({ id, mode, businessName, suspended }: {
               error={fieldErrors.max}
               helper="Leave both blank to take any amount within your TSA Pay limits."
             />
+            <View style={{ gap: spacing.xs }}>
+              <Text variant="bodySm" weight="600" color="textSecondary">Each payment expires after</Text>
+              <SegmentedControl<string>
+                segments={openLinkPaymentExpiryOptions(link.paymentExpiresIn ?? 0)}
+                value={String(form.paymentExpiresIn)}
+                onChange={(k) => edit({ paymentExpiresIn: Number(k) })}
+              />
+            </View>
             {sheetError ? <Text variant="bodySm" style={{ color: colors.danger }}>{sheetError}</Text> : null}
             <View style={{ flexDirection: 'row', gap: spacing.md }}>
               <View style={{ flex: 1 }}>

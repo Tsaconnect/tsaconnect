@@ -1,7 +1,7 @@
 import {
   directPriceMovedCopy, BROADCAST_UNCONFIRMED, KEEP_CHECKING, nothingToContinueCopy, heldNotSentCopy, NOT_CONFIRMED, PAYMENT_STILL_GOING, RESERVE_WINDOW,
   classifyStartError, estimateError, exceedsPriced, PRICE_TOLERANCE_BPS, priceMovedMessage, startFailure, unconfirmedCopy,
-  errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, payScreenState, receiveAmountLabel,
+  errorCode, errorMessage, intentForPayment, isRouteRefused, PAY_ATTEMPT_UNCERTAIN, PAYMENT_PAUSED, CANT_PAY_WITH_TOKEN, nairaFromKobo, payAmountLabel, paymentExpiryMs, payScreenState, receiveAmountLabel,
   shortfallCopy, unsupportedNetworkMessage, depositStillToSendCopy,
   linkedOrder,
 } from '../payCheckout';
@@ -25,6 +25,18 @@ it('is payable with time to spare', () => {
 it('blocks with under five minutes left, allows exactly five', () => {
   expect(payScreenState({ id: ID, authed: true, checkout: base, now: Date.parse('2026-09-23T12:25:01Z') }).kind).toBe('blocked');
   expect(payScreenState({ id: ID, authed: true, checkout: base, now: Date.parse('2026-09-23T12:25:00Z') }).kind).toBe('payable');
+});
+it('a payment with no expiry is payable at any time — never "under five minutes"', () => {
+  const never = { ...base, expiresAt: null };
+  expect(payScreenState({ id: ID, authed: true, checkout: never, now }).kind).toBe('payable');
+  expect(payScreenState({ id: ID, authed: true, checkout: never, now: Date.parse('2030-01-01T00:00:00Z') }).kind).toBe('payable');
+});
+it('reads an expiry as a time, as never (null), or as unknown', () => {
+  expect(paymentExpiryMs('2026-09-23T12:30:00Z')).toBe(Date.parse('2026-09-23T12:30:00Z'));
+  expect(paymentExpiryMs(null)).toBe(Infinity);
+  expect(paymentExpiryMs(undefined)).toBeNaN();
+  expect(paymentExpiryMs('')).toBeNaN();
+  expect(paymentExpiryMs('not a time')).toBeNaN();
 });
 it('blocks with the server reason when not payable', () => {
   const s = payScreenState({ id: ID, authed: true, checkout: { ...base, status: 'processing', payable: false, notPayableWhy: 'Someone else is completing this payment' }, now });

@@ -756,7 +756,7 @@ func seedPayMerchant(t *testing.T, db *gorm.DB, userID uuid.UUID) *models.PayMer
 func seedPayPayment(t *testing.T, db *gorm.DB, merchantID uuid.UUID, payer *uuid.UUID, mode, status string) {
 	t.Helper()
 	p := &models.PayPayment{MerchantID: merchantID, Mode: mode, Reference: "PNR-" + uuid.NewString()[:8],
-		AmountKobo: 5_000_000, Currency: "NGN", Status: status, PayerUserID: payer, ExpiresAt: time.Now().Add(time.Hour)}
+		AmountKobo: 5_000_000, Currency: "NGN", Status: status, PayerUserID: payer}
 	if err := db.Create(p).Error; err != nil {
 		t.Fatalf("seed payment: %v", err)
 	}

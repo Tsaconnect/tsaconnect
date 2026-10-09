@@ -1,8 +1,9 @@
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import type { OpenLinkDraft, OpenLinkErrors } from './openLinkForm';
+import { Segmented } from '@/components/ui/segmented';
+import { paymentExpiryOptions, type OpenLinkDraft, type OpenLinkErrors } from './openLinkForm';
 
-/** A reusable link's label and optional limits. */
+/** A reusable link's label, optional limits and how long each payment stays open. */
 export function OpenLinkFields({ draft, errors, set }: {
   draft: OpenLinkDraft;
   errors: OpenLinkErrors;
@@ -20,6 +21,17 @@ export function OpenLinkFields({ draft, errors, set }: {
         <Field label="Maximum (₦, optional)" hint="Blank: your account's limit." error={errors.max}>
           <Input inputMode="decimal" value={draft.max} onChange={(e) => set('max')(e.target.value)} />
         </Field>
+      </div>
+      <div className="grid gap-1.5">
+        <p aria-hidden className="text-[13px] leading-[18px] font-semibold text-text-secondary">Each payment expires after</p>
+        <Segmented
+          legend="Each payment expires after"
+          name="paymentExpiresIn"
+          value={draft.paymentExpiresIn}
+          options={paymentExpiryOptions(draft.paymentExpiresIn)}
+          onChange={set('paymentExpiresIn')}
+        />
+        <p className="text-caption text-text-secondary">Counted from when a customer enters the amount.</p>
       </div>
     </>
   );

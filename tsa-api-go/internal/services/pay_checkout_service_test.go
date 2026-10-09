@@ -217,9 +217,11 @@ func (r *payCheckoutRig) converted(t *testing.T) (*models.RampSellIntent, *SellS
 	return r.svc.PayConverted(context.Background(), r.alice, r.p.ID, PayConvertedInput{SourceChainID: 56, SourceToken: evmNativeAddress, SourceAddress: r.alice.WalletAddress})
 }
 
-func TestPayDirect_SellsExactlyTheSnapshottedNetToTheSnapshottedBank(t *testing.T) {
+func TestPayDirect_SellsExactlyTheSnapshottedNetToTheMerchantsCurrentBank(t *testing.T) {
 	r := newPayCheckoutRig(t)
-	// An admin edits the merchant after the payment was created: the payment keeps its snapshot.
+	// The merchant is edited after the payment was created: the amount keeps its
+	// snapshot, while the payout goes where the merchant is paid when the
+	// customer starts paying (withCurrentSettlement).
 	r.pay.db.Model(r.m).Updates(map[string]any{"bank_code": "044", "account_number": "9876543210", "customer_fee_share_percent": 0})
 	if _, err := r.direct(t); err != nil {
 		t.Fatal(err)
@@ -227,7 +229,7 @@ func TestPayDirect_SellsExactlyTheSnapshottedNetToTheSnapshottedBank(t *testing.
 	if r.orders.sell.PayPaymentID == nil || *r.orders.sell.PayPaymentID != r.p.ID {
 		t.Fatalf("the sell request does not name its payment: %+v", r.orders.sell)
 	}
-	if r.orders.sell.FiatAmount != "50000.00" || r.orders.sell.AccountNo != "0123456789" || r.orders.sell.BankCode != "058" || r.orders.converted {
+	if r.orders.sell.FiatAmount != "50000.00" || r.orders.sell.AccountNo != "9876543210" || r.orders.sell.BankCode != "044" || r.orders.converted {
 		t.Fatalf("sell = %+v converted=%v", r.orders.sell, r.orders.converted)
 	}
 	if !r.orders.sell.KeepSurplus {
@@ -330,13 +332,14 @@ func TestPayConverted_WithoutAnIntentServiceIsUnavailableAndLeavesThePaymentFree
 
 func TestPayCheckout_RefusalsLeaveThePaymentFree(t *testing.T) {
 	r := newPayCheckoutRig(t)
-	r.pay.db.Model(&models.PayPayment{}).Where("id = ?", r.p.ID).Update("settlement_mode", models.PaySettlementCrypto)
+	r.pay.db.Model(r.m).Update("settlement_mode", models.PaySettlementCrypto)
 	if _, err := r.direct(t); !errors.Is(err, ErrPayWrongRoute) {
 		t.Fatalf("crypto merchant: err = %v", err)
 	}
 	if got := r.get(t); got.Status != models.PayStatusPending || got.PayerUserID != nil {
 		t.Fatalf("after a refusal: %+v", got)
 	}
+	r.pay.db.Model(r.m).Update("settlement_mode", models.PaySettlementFiat)
 	in := payIn()
 	in.Reference = "TEST-1"
 	test, _, _ := r.pay.Create(context.Background(), r.m, models.PayModeTest, in)
@@ -407,7 +410,7 @@ func TestPayQuote_RefusesWhatThisPayerCannotPay(t *testing.T) {
 
 func TestPayQuote_ACryptoMerchantHasNoNairaQuote(t *testing.T) {
 	r := newPayCheckoutRig(t)
-	r.pay.db.Model(&models.PayPayment{}).Where("id = ?", r.p.ID).Update("settlement_mode", models.PaySettlementCrypto)
+	r.pay.db.Model(r.m).Update("settlement_mode", models.PaySettlementCrypto)
 	if _, err := r.svc.Quote(context.Background(), r.alice, r.p.ID, PayConvertedInput{SourceChainID: 56, SourceToken: evmNativeAddress, SourceAddress: r.alice.WalletAddress}); !errors.Is(err, ErrPayWrongRoute) {
 		t.Fatalf("err = %v", err)
 	}
@@ -839,7 +842,7 @@ func TestPayCrypto_ANairaMerchantIsRefusedAndTheLockReleased(t *testing.T) {
 	r := newCryptoRig(t)
 	in := payIn()
 	in.Reference = "NAIRA-1"
-	r.m.SettlementMode = models.PaySettlementFiat
+	r.pay.db.Model(r.m).Update("settlement_mode", models.PaySettlementFiat)
 	naira, _, _ := r.pay.Create(context.Background(), r.m, models.PayModeLive, in)
 	if _, _, err := r.svc.PayCrypto(context.Background(), r.alice, naira.ID, payCryptoSource(r.payCheckoutRig)); !errors.Is(err, ErrPayWrongRoute) {
 		t.Fatalf("err = %v", err)
