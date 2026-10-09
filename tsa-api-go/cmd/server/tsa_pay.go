@@ -91,6 +91,9 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	if checkout := buildPayCheckout(payments, orders, intents, quoter, rates, cfg.TSAPayLiveEnabled); checkout != nil {
 		handler.WithCheckout(checkout)
 	}
+	if refunds := buildPayRefunds(cfg, db, payments, merchants, chains, bus, scheduler); refunds != nil {
+		handler.WithRefunds(refunds)
+	}
 
 	log.Printf("[tsa-pay] merchant administration, payment API and webhook delivery ready (live_enabled=%v, naira start=%v)",
 		cfg.TSAPayLiveEnabled, orders != nil)
