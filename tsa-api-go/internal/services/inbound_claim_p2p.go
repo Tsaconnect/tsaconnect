@@ -159,6 +159,7 @@ func (s *P2PTradeClaimSource) OpenClaims(ctx context.Context, currency string) (
 	var rows []p2pClaimRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id, p2p_trades.buyer_id, p2p_trades.fiat_amount, p2p_trades.fiat_currency, p2p_trades.created_at").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
@@ -236,6 +237,9 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 			return ErrTradeNotFound
 		}
 		return err
+	}
+	if err := hideSlice(&trade); err != nil {
+		return err // a pool slice is settled only by the pool's own path (§12.3)
 	}
 	// Re-asserted from the trade itself rather than trusted from OpenClaims.
 	// The manual-assign path reaches here with a hand-typed claim id and never
