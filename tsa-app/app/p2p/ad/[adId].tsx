@@ -119,6 +119,7 @@ const AdDetailScreen: React.FC = () => {
   // Buy-ad: show the user's own payment-methods (merchant sends fiat here).
   const isBuyAd = ad?.side === 'buy';
 
+  // @ts-expect-error APP-11 renders masked methods (no accountName)
   const paymentMethods: P2PPaymentMethod[] = isBuyAd
     ? userPaymentMethods
     : (ad?.paymentMethods ?? []);

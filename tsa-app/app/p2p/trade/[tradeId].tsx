@@ -354,6 +354,7 @@ const TradeDetailScreen: React.FC = () => {
       return;
     }
     startActing('Marking as paid…');
+    // @ts-expect-error APP-8 replaces markPaid with prepare/confirm mark-paid
     const res = await tradesApi.markPaid(trade.id, proofUrl);
     if (res.success && res.data) {
       setTrade(res.data);

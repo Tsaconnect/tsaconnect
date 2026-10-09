@@ -60,6 +60,29 @@ export interface PmPayTo {
  *
  * Status lifecycle: pending → active → (paused ↔ active) → exhausted | cancelled.
  */
+/** The account the fiat payer must pay on a DIRECT (non-PM) trade — GET
+ *  /p2p/trades/:id `payee`. The API sends it only to the two parties, and only
+ *  while the trade is live. */
+export interface P2PPayee {
+  provider: string;
+  bankName: string;
+  accountNumber: string;
+  accountName: string;
+}
+
+/** A payment method as the PUBLIC ad detail shows it: the number is masked
+ *  ("******7890") and the holder's name is not sent. */
+export interface P2PAdPaymentMethod {
+  id: string;
+  type?: P2PPaymentMethod['type'];
+  provider?: string;
+  bankName: string;
+  accountNumber?: string;
+  accountNumberLast4?: string;
+  /** Not sent by the API any more; optional so older payloads still type. */
+  accountName?: string;
+}
+
 export interface P2PAd {
   id: string;
   sellerId: string;
@@ -90,16 +113,13 @@ export interface P2PAd {
   /** Seller's payment-method rows the buyer should send NGN to. Populated
    *  by the ad-detail endpoint only — the marketplace list omits it so
    *  bank account numbers aren't broadcast in the feed. */
-  paymentMethods?: P2PPaymentMethod[];
+  paymentMethods?: P2PAdPaymentMethod[];
   terms?: string;
-  // ── Pool/voucher fields (post-Phase-2B). Populated by the backend after
-  //    CreateAd; SellerAddress / VoucherSignature are the seller wallet that
-  //    signed the AdVoucher EIP-712 payload returned alongside the ad.
   sellerAddress?: string;
-  voucherNonce?: string;
-  voucherDeadline?: string;
   voucherHash?: string;
-  voucherSignature?: string;
+  /** Live total fee in bps for this ad's chain + token. Omitted when the chain
+   *  could not be read — never guess a rate. */
+  feeBps?: number;
   // ── Legacy lock-on-publish fields (kept on the wire for any rows that
   //    pre-date the migration; new ads do not populate these).
   onChainAdId?: string;
@@ -177,6 +197,12 @@ export interface P2PTrade {
   isPm?: boolean;
   pmPayTo?: PmPayTo | null;
   payerName?: string;
+  /** Who the fiat payer pays, on a direct trade (see P2PPayee). */
+  payee?: P2PPayee | null;
+  /** Fee snapshot at open; amounts are base units. Absent on older trades. */
+  feeBps?: number;
+  feeAmount?: string;
+  buyerNetAmount?: string;
 }
 
 export interface P2PPaymentMethod {
@@ -355,6 +381,8 @@ export interface P2PChainInfo {
   purpose?: 'p2p' | 'pool';
   /** Each asset's decimals as the API read them on-chain (spec S6). */
   decimals?: Record<string, number>;
+  /** Live fee bps per token symbol; absent when unreadable. */
+  feeBps?: Record<string, number>;
 }
 
 // Decimals the API reported, by `${chainId}:${SYMBOL}`. They win over the
@@ -543,7 +571,7 @@ export const adsApi = {
    * flag would still leave the signature presentable by buyers.
    */
   prepareCancel: (id: string, sellerAddress: string) =>
-    request<{ unsignedTx: UnsignedTx }>(
+    request<{ unsignedTx: UnsignedTx | null; ad?: P2PAd }>(
       'POST',
       `/p2p/ads/${encodeURIComponent(id)}/cancel`,
       { sellerAddress }
@@ -696,11 +724,23 @@ export const tradesApi = {
       { txHash, callerAddress }
     ),
 
-  markPaid: (tradeId: string, proofImageUrl: string) =>
+  /** Step 1: save the proof and build the unsigned markPaid(tradeId) for the
+   *  fiat payer (chain buyer). The trade stays pending_payment. Always pass the
+   *  signing wallet: on a buy-ad the payer's on-chain address is not their
+   *  registered wallet. */
+  prepareMarkPaid: (tradeId: string, proofImageUrl: string, callerAddress: string) =>
+    request<{ unsignedTx: UnsignedTx | null; trade: P2PTrade }>(
+      'POST',
+      `/p2p/trades/${encodeURIComponent(tradeId)}/mark-paid/prepare`,
+      { proofImageUrl, callerAddress }
+    ),
+
+  /** Step 2: the server checks the receipt, then flips the trade to paid. */
+  confirmMarkPaid: (tradeId: string, txHash: string) =>
     request<P2PTrade>(
       'POST',
-      `/p2p/trades/${encodeURIComponent(tradeId)}/mark-paid`,
-      { proofImageUrl }
+      `/p2p/trades/${encodeURIComponent(tradeId)}/mark-paid/confirm`,
+      { txHash }
     ),
 
   prepareRelease: (tradeId: string, sellerAddress: string) =>
@@ -758,6 +798,33 @@ export const tradesApi = {
 
   getDispute: (tradeId: string) =>
     request<P2PDispute>('GET', `/p2p/trades/${encodeURIComponent(tradeId)}/dispute`),
+};
+
+// ─── Gas sponsorship ────────────────────────────────────────────────────────
+
+export type P2PGasAction =
+  | 'approve' | 'deposit' | 'withdraw' | 'cancel_ad'
+  | 'open_trade' | 'mark_paid' | 'release' | 'cancel_trade' | 'dispute';
+
+/** approve/deposit/withdraw take no id; open_trade and cancel_ad take adId;
+ *  mark_paid, release, cancel_trade and dispute take tradeId. */
+export interface P2PGasTopUpRequest {
+  action: P2PGasAction;
+  tradeId?: string;
+  adId?: string;
+}
+
+export interface P2PGasTopUp {
+  txHash?: string;
+  amountWei?: string;
+  skipped: boolean;
+}
+
+export const gasApi = {
+  /** Sends S on Sonic mainnet to the account's PROVEN wallet when it can't
+   *  cover `action`. Callers gate on SONIC_CHAIN_IDS and still finish with a
+   *  balance check on the signing wallet. */
+  topUp: (req: P2PGasTopUpRequest) => request<P2PGasTopUp>('POST', '/p2p/gas/top-up', req),
 };
 
 // ─── Chat ───────────────────────────────────────────────────────────────────
@@ -1026,6 +1093,21 @@ export function p2pTokenDecimals(chainId: number | undefined, symbol: string): n
   }
   if (sym === 'USDT' || sym === 'USDC') return 6;
   return 18; // MCGP + default
+}
+
+/** Sonic mainnet + testnet. The gas sponsor itself only serves mainnet (146);
+ *  callers that must not drip on testnet check 146 explicitly. */
+export const SONIC_CHAIN_IDS: ReadonlySet<number> = new Set([146, 14601]);
+
+/** "Name · ••••1234" for a payment-method row, from whatever the API sent:
+ *  the public ad detail masks the number and drops the name. */
+export function maskedAccountLabel(m: {
+  accountName?: string;
+  accountNumber?: string;
+  accountNumberLast4?: string;
+}): string {
+  const last4 = (m.accountNumberLast4 || (m.accountNumber ?? '').replace(/\D/g, '').slice(-4)).trim();
+  return [m.accountName?.trim(), last4 ? `••••${last4}` : ''].filter(Boolean).join(' · ');
 }
 
 /** ChainKey for a P2P entity's chainId; falls back to 'sonic'. */

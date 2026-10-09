@@ -121,6 +121,7 @@ const MyAdsScreen: React.FC = () => {
       if (!sellerAddress) throw new Error('No wallet found');
       const prep = await adsApi.prepareCancel(ad.id, sellerAddress);
       if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
+      // @ts-expect-error APP-12 handles the null unsignedTx of a buy-ad cancel
       const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx));
       const resp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
       broadcastHash = resp.hash;
