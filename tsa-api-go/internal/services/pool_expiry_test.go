@@ -1,9 +1,13 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"math/big"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -333,5 +337,91 @@ func TestExpiry_LegacyNeverCancelsATradeWithAPayoutInFlight(t *testing.T) {
 				t.Fatalf("tick=%+v err=%v sends=%v dropped=%v, want cancel=%v", tick, err, sender.sendChains, got.DroppedAt, c.cancel)
 			}
 		})
+	}
+}
+
+// Review I-1: the legacy scope is a rolling 24-hour window on the expiry
+// notice; an older backlog is an ops step, never swept by a deploy.
+func TestExpiry_LegacyScopeIsARolling24hWindow(t *testing.T) {
+	r := newPoolRig(t)
+	sender := releaseSender()
+	legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-25*time.Hour))
+	r.sonic.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, CreatedAt: big.NewInt(time.Now().Add(-26 * time.Hour).Unix())}
+	tick, err := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: sender}).RunOnce(context.Background())
+	if err != nil || tick.Legacy != 0 || len(sender.sendChains) != 0 || r.sonic.readTradeCalls != 0 {
+		t.Fatalf("tick=%+v sends=%v reads=%d, want a trade notified 25h ago left alone", tick, sender.sendChains, r.sonic.readTradeCalls)
+	}
+}
+
+// Review I-1: a legacy trade the escrow does not know (opened on a retired
+// escrow) is read once, then skipped — never 500 reads a minute.
+func TestExpiry_LegacySkipsTradesTheEscrowDoesNotKnow(t *testing.T) {
+	r := newPoolRig(t)
+	legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-31*time.Minute))
+	r.sonic.onChainTrade = &OnChainP2PTrade{Exists: false}
+	ec := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: releaseSender()})
+	ec.RunOnce(context.Background())
+	ec.RunOnce(context.Background())
+	if r.sonic.readTradeCalls != 1 {
+		t.Fatalf("reads = %d over two ticks, want 1", r.sonic.readTradeCalls)
+	}
+}
+
+// Review I-1 / M-11: a read error is surfaced (logged and counted as failed)
+// and counts against the chain's budget, so an RPC outage costs at most
+// PerChain reads a tick.
+func TestExpiry_ReadErrorsAreSurfacedAndBudgeted(t *testing.T) {
+	r := newPoolRig(t)
+	for i := 0; i < 25; i++ {
+		legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-31*time.Minute))
+	}
+	r.sonic.readTradeErr = errors.New("rpc down")
+	tick, err := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: releaseSender()}).RunOnce(context.Background())
+	if err != nil || tick.Failed != expiryPerChainDefault || r.sonic.readTradeCalls != expiryPerChainDefault {
+		t.Fatalf("tick=%+v err=%v reads=%d, want %d failed reads surfaced", tick, err, r.sonic.readTradeCalls, expiryPerChainDefault)
+	}
+}
+
+// Review M-7: a cancel that provably never broadcast takes its decision back,
+// so the trade's payment paths are open again until a later tick succeeds.
+func TestExpiry_LegacyUnbroadcastCancelClearsTheDecision(t *testing.T) {
+	r := newPoolRig(t)
+	sender := releaseSender()
+	sender.err = notBroadcast(errors.New("insufficient funds for gas"))
+	tr := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-31*time.Minute))
+	r.sonic.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, CreatedAt: big.NewInt(time.Now().Add(-2 * time.Hour).Unix())}
+	ec := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: sender})
+	tick, _ := ec.RunOnce(context.Background())
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", tr.ID)
+	if tick.Failed != 1 || got.DroppedAt != nil {
+		t.Fatalf("tick=%+v dropped=%v, want the failed cancel's decision cleared", tick, got.DroppedAt)
+	}
+	sender.err = nil // the next tick retries at once: nothing was sent, so no back-off
+	if tick, _ := ec.RunOnce(context.Background()); tick.Legacy != 1 {
+		t.Fatalf("retry tick=%+v, want the cancel sent", tick)
+	}
+}
+
+// Review M-9: a statement stale for 30 minutes defers every cancel; that is
+// an alert, not only a per-minute metric.
+func TestExpiry_SustainedDeferralAlerts(t *testing.T) {
+	r := newPoolRig(t)
+	now := time.Now()
+	ec := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: releaseSender(),
+		Fresh: fixedFresh{at: now.Add(-time.Hour)}, Now: func() time.Time { return now }})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	ec.RunOnce(context.Background())
+	now = now.Add(29 * time.Minute)
+	ec.RunOnce(context.Background())
+	if strings.Contains(buf.String(), "ALERT p2p_expiry_deferred_sustained") {
+		t.Fatal("alerted before 30 minutes deferred")
+	}
+	now = now.Add(time.Minute)
+	ec.RunOnce(context.Background())
+	if !strings.Contains(buf.String(), "ALERT p2p_expiry_deferred_sustained") {
+		t.Fatalf("no sustained-deferral alert:\n%s", buf.String())
 	}
 }

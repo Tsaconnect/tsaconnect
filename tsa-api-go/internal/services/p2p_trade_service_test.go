@@ -55,6 +55,8 @@ type mockEscrow struct {
 	disputedEvent  *P2PTradeDisputedEvent
 	resolvedEvent  *P2PTradeResolvedEvent
 	onChainTrade   *OnChainP2PTrade
+	readTradeErr   error
+	readTradeCalls int
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -276,6 +278,10 @@ func (m *mockEscrow) VerifyTradeResolved(txHash string, tradeId [32]byte) (*P2PT
 		AmountMoved: big.NewInt(99), FeeToSystem: big.NewInt(1)}, nil
 }
 func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
+	m.readTradeCalls++
+	if m.readTradeErr != nil {
+		return nil, m.readTradeErr
+	}
 	if m.onChainTrade != nil {
 		return m.onChainTrade, nil
 	}
