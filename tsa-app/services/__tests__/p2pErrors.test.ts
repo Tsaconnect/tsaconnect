@@ -110,17 +110,17 @@ describe('p2pErrorMessage: API codes', () => {
 
 describe('wrong active wallet for this trade', () => {
   const copy = 'This trade belongs to a different wallet. Switch to the wallet you used for this trade and try again.';
-  it.each([
-    'estimate gas (would revert): execution reverted: Only buyer',
-    'estimate gas (would revert): execution reverted: Only seller',
-    'estimate gas (would revert): execution reverted: OnlyBuyer()',
-    'estimate gas (would revert): execution reverted: custom error 0x86efbb55',
-    'execution reverted 0x85d1f726',
-    'estimate gas (would revert): execution reverted: NotAParty()',
-  ])('%s', (message) => {
-    expect(p2pErrorMessage({ status: 422, message })).toBe(copy);
+  // The prepare 422 exactly as the API sends it since API-19: ErrTradePrepareReverted
+  // wrapping buildUnsignedTx's error, with withRevertReason appending the
+  // decoded reason (V3 custom error "Name()", or a V1/V2 Error(string)) to the
+  // node's bare "execution reverted".
+  const prepared = (reason: string) =>
+    'p2p: the trade could not be prepared on-chain: estimate gas (would revert): ' +
+    `failed to estimate gas: execution reverted: ${reason}`;
+  it.each(['OnlyBuyer()', 'OnlySeller()', 'NotAParty()', 'Only buyer', 'Only seller'])('422 %s', (reason) => {
+    expect(p2pErrorMessage({ status: 422, message: prepared(reason) })).toBe(copy);
   });
   it('leaves other reverts alone', () => {
-    expect(p2pErrorMessage({ message: 'execution reverted: NotPending()' })).toMatch(/would reject this transaction/);
+    expect(p2pErrorMessage({ status: 422, message: prepared('NotPending()') })).toMatch(/would reject this transaction/);
   });
 });

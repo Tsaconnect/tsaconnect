@@ -13,7 +13,7 @@
 //
 // Buy-ad (ad.side === 'buy'):
 //   User enters crypto amount to sell → receives fiat preview
-//   Submit: KYC gate → allowance check on the ad's chain → runP2PTx('approve')
+//   Submit: allowance check on the ad's chain → runP2PTx('approve')
 //           if short → runP2PTx('open_trade'): tradesApi.open({tokenAmount,
 //           sellerAddress, fiatAmount, paymentMethodId}) → confirmOpen
 import { router, useLocalSearchParams } from 'expo-router';
@@ -53,19 +53,20 @@ import {
 } from '../../../services/ngBanks';
 import { getActiveWallet } from '../../../services/wallet';
 import { runP2PTx, type RunP2PTxResult } from '../../../services/p2pTx';
-import { kycBlocksPosting, p2pErrorMessage } from '../../../services/p2pErrors';
+import { p2pErrorMessage } from '../../../services/p2pErrors';
 import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
-import { useAuth } from '../../../AuthContext/AuthContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
-import { KYC_VERIFICATION_REQUIRED, promptKycRefusal } from '../../../utils/kycRefusal';
+import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { confirmAsync } from '@/utils/confirmAsync';
 import {
+  allowanceReadFollowUp,
   approveFollowUp,
   buyAdFeeNote,
   openFollowUp,
   sellAdReceivePreview,
   waitForAllowance,
+  type ApproveFollowUp,
   type OpenPrep,
 } from '@/utils/p2pAdOpen';
 import { useTheme } from '@/theme';
@@ -106,7 +107,6 @@ const AdDetailScreen: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState('');
   const { supportedCurrencies } = useCurrency();
-  const { currentUser } = useAuth();
   const toast = useToast();
   // User's own payment methods — used on buy-ad side (merchant pays fiat HERE).
   const [userPaymentMethods, setUserPaymentMethods] = useState<P2PPaymentMethod[]>([]);
@@ -308,6 +308,11 @@ const AdDetailScreen: React.FC = () => {
     }
   };
 
+  const stopForApproval = (next: ApproveFollowUp) => {
+    if (next.kyc) promptKycRefusal(next.kyc.code, next.kyc.message);
+    else if (next.alert) Alert.alert(next.alert.title, next.alert.message);
+  };
+
   const openStash = (prep: OpenPrep) => ({
     mode: 'open' as const,
     tradeId: prep.trade.id,
@@ -375,14 +380,6 @@ const AdDetailScreen: React.FC = () => {
       return;
     }
 
-    // The server refuses an unverified buy-ad opener at open — after the
-    // approve would already have spent gas. Unknown status does not block;
-    // the server's 403 (handled in finishOpen) is the backstop.
-    if (kycBlocksPosting(currentUser?.verificationStatus)) {
-      promptKycRefusal(KYC_VERIFICATION_REQUIRED);
-      return;
-    }
-
     setSubmitting(true);
     try {
       setSubmitStage('Loading wallet…');
@@ -421,8 +418,13 @@ const AdDetailScreen: React.FC = () => {
       // allowance to the escrow after the trade. Its own gas drip ('approve')
       // comes right before it; the open's ('open_trade') right before that.
       setSubmitStage('Checking allowance…');
-      const allowanceRes = await poolApi.allowance(ad.token, sellerAddress, ad.chainId);
-      if (!hasSufficientAllowance(allowanceRes.data?.allowance ?? '0', tokenBaseUnits)) {
+      // An unverified seller is refused here (403), before anything is signed.
+      const read = allowanceReadFollowUp(await poolApi.allowance(ad.token, sellerAddress, ad.chainId));
+      if (!read.proceed) {
+        stopForApproval(read);
+        return;
+      }
+      if (!hasSufficientAllowance(read.allowance ?? '0', tokenBaseUnits)) {
         const approval = await runP2PTx({
           chainId: ad.chainId,
           walletAddress: sellerAddress,
@@ -434,8 +436,10 @@ const AdDetailScreen: React.FC = () => {
           confirm: () => waitForAllowance(ad.token, sellerAddress, ad.chainId, tokenBaseUnits),
         });
         const next = approveFollowUp(approval);
-        if (next.alert) Alert.alert(next.alert.title, next.alert.message);
-        if (!next.proceed) return;
+        if (!next.proceed) {
+          stopForApproval(next);
+          return;
+        }
       }
 
       // Step 2: Open the trade (openTradeWithDeposit).

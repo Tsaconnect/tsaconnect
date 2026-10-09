@@ -19,9 +19,18 @@ export type OpenPrep = { trade: P2PTrade; unsignedTx: UnsignedTx | null };
 
 export const OPEN_FAILED = 'Could not open trade';
 
+// ErrRateStale (p2p_trade_service.go): "p2p: rate source is stale; cannot quote".
+const STALE_RATE = /rate source is stale/i;
+
+/** A refusal the screen routes to promptKycRefusal (utils/kycRefusal). */
+export interface KycDecision {
+  code: string;
+  message?: string;
+}
+
 export type OpenFollowUp =
   | { kind: 'none' }
-  | { kind: 'kyc'; code: string; message?: string }
+  | ({ kind: 'kyc' } & KycDecision)
   | { kind: 'alert'; title: string; message: string; reload: boolean }
   /** Land on the trade. A lost confirm lands there too: its R4 banner retries
    *  from the stashed hash and the reconciler backfills it. */
@@ -49,7 +58,9 @@ export function openFollowUp(r: RunP2PTxResult<OpenPrep, P2PTrade>): OpenFollowU
       };
     case 'refused': {
       const res = r.response;
-      if (res.status === 503) {
+      // A 503 is also an RPC outage or a closed pool — only a stale feed
+      // gets the "reactivates automatically" copy.
+      if (res.status === 503 && STALE_RATE.test(res.message ?? '')) {
         return {
           kind: 'alert',
           title: 'Live rate unavailable',
@@ -59,8 +70,14 @@ export function openFollowUp(r: RunP2PTxResult<OpenPrep, P2PTrade>): OpenFollowU
       }
       const code = p2pKycCode(res);
       if (code) return { kind: 'kyc', code, message: res.message };
-      // 409: the ad closed or its seller was suspended — refresh what we show.
-      return { kind: 'alert', title: OPEN_FAILED, message: p2pErrorMessage(res), reload: res.status === 409 };
+      // 409: the ad closed or its seller was suspended; 503: the ad may now
+      // show as stale or paused — refresh what we show.
+      return {
+        kind: 'alert',
+        title: OPEN_FAILED,
+        message: p2pErrorMessage(res),
+        reload: res.status === 409 || res.status === 503,
+      };
     }
     default:
       // aborted (the gas alert has been shown) or busy (another run owns it).
@@ -71,6 +88,18 @@ export function openFollowUp(r: RunP2PTxResult<OpenPrep, P2PTrade>): OpenFollowU
 export interface ApproveFollowUp {
   proceed: boolean;
   alert?: { title: string; message: string };
+  kyc?: KycDecision;
+}
+
+/** The allowance read before the approve. A failed read stops the open with
+ *  the mapped error — treating it as "0" would start a needless approve. */
+export function allowanceReadFollowUp(
+  res: ApiResponse<{ allowance: string }>,
+): ApproveFollowUp & { allowance?: string } {
+  if (res.success && res.data) return { proceed: true, allowance: res.data.allowance };
+  const code = p2pKycCode(res);
+  if (code) return { proceed: false, kyc: { code, message: res.message } };
+  return { proceed: false, alert: { title: OPEN_FAILED, message: p2pErrorMessage(res) } };
 }
 
 /** The approve before a buy-ad's openTradeWithDeposit. It moves no funds, so a
@@ -81,13 +110,18 @@ export function approveFollowUp(r: RunP2PTxResult<unknown, unknown>): ApproveFol
   switch (r.status) {
     case 'confirmed':
       return { proceed: true };
-    case 'refused':
+    case 'refused': {
+      // Gas, allowance and approve prepare all 403 an unverified user before
+      // anything is signed.
+      const code = p2pKycCode(r.response);
+      if (code) return { proceed: false, kyc: { code, message: r.response.message } };
       return stop(p2pErrorMessage(r.response));
+    }
     case 'reverted':
       return stop('The network rejected the approval, so nothing changed (only the network fee was spent). Try again.');
     case 'confirm-failed':
       return stop(
-        "Your approval was sent but hasn't confirmed yet. Wait a moment, then tap Open trade again — you won't need to approve twice.",
+        "Your approval was sent but hasn't confirmed yet. Wait a moment, then tap Open trade again — you may not need to approve again.",
         'Approval still confirming',
       );
     case 'no-tx':

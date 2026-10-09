@@ -1,6 +1,7 @@
 import * as p2p from '@/services/p2p';
 import type { P2PTrade } from '@/services/p2p';
 import {
+  allowanceReadFollowUp,
   approveFollowUp,
   buyAdFeeNote,
   OPEN_FAILED,
@@ -55,9 +56,25 @@ describe('openFollowUp (every runP2PTx outcome of an open)', () => {
     });
   });
 
-  it('refused 503: the live-rate copy and a reload', () => {
-    const f = openFollowUp({ status: 'refused', response: { success: false, status: 503, message: 'rate source is stale' } });
+  it('refused 503 stale rate: the live-rate copy and a reload', () => {
+    const f = openFollowUp({
+      status: 'refused',
+      response: { success: false, status: 503, message: 'p2p: rate source is stale; cannot quote' },
+    });
     expect(f).toMatchObject({ kind: 'alert', title: 'Live rate unavailable', reload: true });
+  });
+
+  it('refused 503 for another reason (RPC down, pool closed): its own copy, still a reload', () => {
+    expect(openFollowUp({
+      status: 'refused',
+      response: { success: false, status: 503, message: 'p2p: blockchain temporarily unavailable, please retry' },
+    })).toEqual({ kind: 'alert', title: OPEN_FAILED, message: 'The network is busy right now. Try again in a minute.', reload: true });
+    const closed = openFollowUp({
+      status: 'refused',
+      response: { success: false, status: 503, code: 'liquidity_pool_closed', message: 'Liquidity pool is closed' },
+    });
+    expect(closed).toMatchObject({ kind: 'alert', title: OPEN_FAILED, reload: true });
+    expect(closed.kind === 'alert' && closed.message).not.toMatch(/rate/i);
   });
 
   it('refused with a KYC code: routes to the KYC prompt (buy-ad openers too)', () => {
@@ -113,6 +130,14 @@ describe('approveFollowUp', () => {
     expect(f.proceed).toBe(false);
     expect(f.alert?.title).toBe('Approval still confirming');
     expect(f.alert?.message).not.toMatch(/failed/i);
+    expect(f.alert?.message).toMatch(/may not need to approve again/);
+  });
+
+  it('refused with a KYC code (approve, allowance or gas 403): the KYC prompt', () => {
+    expect(approveFollowUp({
+      status: 'refused',
+      response: { success: false, status: 403, code: 'kyc_verification_required', message: 'verify' },
+    })).toEqual({ proceed: false, kyc: { code: 'kyc_verification_required', message: 'verify' } });
   });
 
   it('refused: friendly copy', () => {
@@ -157,6 +182,25 @@ describe('waitForAllowance (the approve "confirm")', () => {
     const r = await p;
     expect(r.success).toBe(false);
     expect(r.message).toMatch(/not confirmed yet/);
+  });
+});
+
+describe('allowanceReadFollowUp (a failed read never starts an approve)', () => {
+  it('a good read: proceed with the allowance', () => {
+    expect(allowanceReadFollowUp({ success: true, data: { allowance: '7' } })).toEqual({ proceed: true, allowance: '7' });
+  });
+  it('a network error: stop with the mapped copy', () => {
+    expect(allowanceReadFollowUp({ success: false, message: 'Network request failed' })).toEqual({
+      proceed: false,
+      alert: { title: OPEN_FAILED, message: "Can't reach TSA Connect. Check your connection and try again." },
+    });
+  });
+  it('a success without a body: stop, not "0"', () => {
+    expect(allowanceReadFollowUp({ success: true }).proceed).toBe(false);
+  });
+  it('a KYC 403: the KYC prompt', () => {
+    expect(allowanceReadFollowUp({ success: false, status: 403, code: 'kyc_verification_required', message: 'v' }))
+      .toEqual({ proceed: false, kyc: { code: 'kyc_verification_required', message: 'v' } });
   });
 });
 
