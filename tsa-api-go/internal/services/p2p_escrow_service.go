@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,8 +13,10 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -24,6 +27,8 @@ import (
 // or event added/renamed/removed must be reflected here. The full ABI is
 // emitted by Hardhat at artifacts/contracts/P2PEscrow.sol/P2PEscrow.json;
 // inlining only the symbols the backend uses keeps the binding small.
+// The trailing "error" entries are every custom error of P2PEscrowV3.sol, so
+// decodeRevertReason can name a revert.
 const p2pEscrowABI = `[
 	{"inputs":[{"name":"token","type":"address"},{"name":"amount","type":"uint256"}],"name":"deposit","outputs":[],"stateMutability":"nonpayable","type":"function"},
 	{"inputs":[{"name":"token","type":"address"},{"name":"amount","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},
@@ -60,7 +65,53 @@ const p2pEscrowABI = `[
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"amountToBuyer","type":"uint256"},{"indexed":false,"name":"feeToSystem","type":"uint256"}],"name":"TradeAutoReleased","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":false,"name":"amount","type":"uint256"},{"indexed":false,"name":"returnedToPool","type":"bool"}],"name":"TradeCancelled","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":true,"name":"by","type":"address"}],"name":"TradeDisputed","type":"event"},
-	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":false,"name":"releasedToBuyer","type":"bool"},{"indexed":false,"name":"amountMoved","type":"uint256"},{"indexed":false,"name":"feeToSystem","type":"uint256"}],"name":"TradeResolved","type":"event"}
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"tradeId","type":"bytes32"},{"indexed":false,"name":"releasedToBuyer","type":"bool"},{"indexed":false,"name":"amountMoved","type":"uint256"},{"indexed":false,"name":"feeToSystem","type":"uint256"}],"name":"TradeResolved","type":"event"},
+	{"inputs":[],"name":"Reentrant","type":"error"},
+	{"inputs":[],"name":"NotAdmin","type":"error"},
+	{"inputs":[],"name":"ZeroAddress","type":"error"},
+	{"inputs":[],"name":"AlreadyAdmin","type":"error"},
+	{"inputs":[],"name":"InvalidToken","type":"error"},
+	{"inputs":[],"name":"TokenNotAccepted","type":"error"},
+	{"inputs":[],"name":"BadAmount","type":"error"},
+	{"inputs":[],"name":"InsufficientAvailable","type":"error"},
+	{"inputs":[],"name":"AccountingCorrupt","type":"error"},
+	{"inputs":[],"name":"ExceedsExcess","type":"error"},
+	{"inputs":[],"name":"OnlyVoucherSeller","type":"error"},
+	{"inputs":[],"name":"SnapshotFeeTooHigh","type":"error"},
+	{"inputs":[],"name":"InvalidTradeId","type":"error"},
+	{"inputs":[],"name":"TradeExists","type":"error"},
+	{"inputs":[],"name":"InvalidVoucherSeller","type":"error"},
+	{"inputs":[],"name":"SelfTrade","type":"error"},
+	{"inputs":[],"name":"VoucherExpired","type":"error"},
+	{"inputs":[],"name":"VoucherBadBounds","type":"error"},
+	{"inputs":[],"name":"BelowVoucherMin","type":"error"},
+	{"inputs":[],"name":"AboveVoucherMax","type":"error"},
+	{"inputs":[],"name":"VoucherCancelledErr","type":"error"},
+	{"inputs":[],"name":"ExceedsVoucherCapacity","type":"error"},
+	{"inputs":[],"name":"BadVoucherSignature","type":"error"},
+	{"inputs":[],"name":"SellerInsufficient","type":"error"},
+	{"inputs":[],"name":"InvalidMerchant","type":"error"},
+	{"inputs":[],"name":"WindowOutOfBounds","type":"error"},
+	{"inputs":[],"name":"NotPending","type":"error"},
+	{"inputs":[],"name":"OnlyBuyer","type":"error"},
+	{"inputs":[],"name":"NotReleasable","type":"error"},
+	{"inputs":[],"name":"OnlySeller","type":"error"},
+	{"inputs":[],"name":"EmptyTrade","type":"error"},
+	{"inputs":[],"name":"LockedInvariant","type":"error"},
+	{"inputs":[],"name":"SystemWalletNotSet","type":"error"},
+	{"inputs":[],"name":"TimeoutNotElapsed","type":"error"},
+	{"inputs":[],"name":"NotDisputable","type":"error"},
+	{"inputs":[],"name":"NotAParty","type":"error"},
+	{"inputs":[],"name":"NotDisputed","type":"error"},
+	{"inputs":[],"name":"NotPaid","type":"error"},
+	{"inputs":[],"name":"AutoReleaseNotArmed","type":"error"},
+	{"inputs":[],"name":"WindowNotElapsed","type":"error"},
+	{"inputs":[],"name":"FeeTooHigh","type":"error"},
+	{"inputs":[],"name":"InvalidMcgp","type":"error"},
+	{"inputs":[],"name":"McgpNotAccepted","type":"error"},
+	{"inputs":[],"name":"FeeManagerZero","type":"error"},
+	{"inputs":[],"name":"Permit2NotSet","type":"error"},
+	{"inputs":[],"name":"InvalidSystemWallet","type":"error"}
 ]`
 
 var parsedP2PEscrowABI abi.ABI
@@ -1151,7 +1202,7 @@ func (s *P2PEscrowService) buildUnsignedTx(from string, callData []byte) ([]byte
 		Data: callData,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("estimate gas (would revert): %w", err)
+		return nil, fmt.Errorf("estimate gas (would revert): %w", withRevertReason(err))
 	}
 
 	tx := blockchain.UnsignedTx{
@@ -1164,4 +1215,52 @@ func (s *P2PEscrowService) buildUnsignedTx(from string, callData []byte) ([]byte
 		ChainID:  s.client.ChainID().String(),
 	}
 	return json.Marshal(tx)
+}
+
+var (
+	revertErrorSelector = []byte{0x08, 0xc3, 0x79, 0xa0} // Error(string)
+	revertPanicSelector = []byte{0x4e, 0x48, 0x7b, 0x71} // Panic(uint256)
+)
+
+// decodeRevertReason turns the revert data a node attaches to a failed
+// eth_estimateGas / eth_call (rpc.DataError) into a human-readable reason:
+// Error(string) -> the string, Panic(uint256) -> "panic 0x..", a P2PEscrowV3
+// custom error -> "Name()", anything else -> the raw hex. Returns "" when the
+// error carries no revert data.
+func decodeRevertReason(err error) string {
+	var de rpc.DataError
+	if !errors.As(err, &de) {
+		return ""
+	}
+	raw, ok := de.ErrorData().(string)
+	if !ok {
+		return ""
+	}
+	data, decodeErr := hexutil.Decode(raw)
+	if decodeErr != nil || len(data) < 4 {
+		return ""
+	}
+	switch {
+	case bytes.Equal(data[:4], revertErrorSelector):
+		if reason, unpackErr := abi.UnpackRevert(data); unpackErr == nil {
+			return reason
+		}
+	case bytes.Equal(data[:4], revertPanicSelector):
+		return "panic 0x" + new(big.Int).SetBytes(data[4:]).Text(16)
+	default:
+		if abiErr, lookupErr := parsedP2PEscrowABI.ErrorByID([4]byte(data[:4])); lookupErr == nil {
+			return abiErr.Sig
+		}
+	}
+	return raw
+}
+
+// withRevertReason appends the decoded revert reason to err (keeping err
+// wrapped, so isChainRevert and errors.As still work). Errors without revert
+// data, e.g. transport failures, are returned untouched.
+func withRevertReason(err error) error {
+	if reason := decodeRevertReason(err); reason != "" {
+		return fmt.Errorf("%w: %s", err, reason)
+	}
+	return err
 }
