@@ -9,8 +9,10 @@ import { Toaster } from '@/components/ui/toaster';
 import { AppRoutes } from '@/routes';
 import type { OpenLink, OwnMerchant, Payment } from '@/features/business/api';
 
-/** A fixed answer, or one worked out per call (it gets the URL, query included). */
-type Route = Response | ((url: string) => Response | Promise<Response>);
+/** What api() sends: method, its JSON body as a string, and the headers. */
+type Init = { method: string; body: string; headers: Record<string, string> };
+/** A fixed answer, or one worked out per call (it gets the URL, query included, and the request). */
+type Route = Response | ((url: string, init: Init) => Response | Promise<Response>);
 
 export const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -111,10 +113,10 @@ export const openLink: OpenLink = {
 export function stubFetch(routes: Record<string, Route>) {
   const table: Record<string, Route> = { '/api/auth/web/me': ok({ user: ada }), ...routes };
   // Typed as api() calls it (body is its JSON string), so tests can JSON.parse(init.body).
-  const f = vi.fn<(url: string, init: { method: string; body: string; headers: Record<string, string> }) => Promise<Response>>(async (url) => {
+  const f = vi.fn<(url: string, init: Init) => Promise<Response>>(async (url, init) => {
     const route = table[new URL(url, 'http://x').pathname];
     if (route === undefined) return fail(404, 'Not found');
-    return typeof route === 'function' ? route(url) : route.clone();
+    return typeof route === 'function' ? route(url, init) : route.clone();
   });
   vi.stubGlobal('fetch', f);
   return f;

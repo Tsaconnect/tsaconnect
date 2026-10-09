@@ -17,6 +17,7 @@ import { toast } from '@/components/ui/toaster';
 import { cancelLink, getPayment, resendDelivery, type Delivery, type Mode, type Payer, type Payment, type PaymentDetail } from './api';
 import { LINK_STATUS_LABELS, linkCard, linkMessage, paymentFor, statusOf, youReceive } from './display';
 import { LinkShare } from './LinkShare';
+import { PaymentRefunds } from './PaymentRefunds';
 import { queryKeys } from './queryKeys';
 import { useMerchant } from './useMerchant';
 
@@ -201,6 +202,8 @@ function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Paymen
       </dl>
 
       {p.source === 'link' && <PaymentLink payment={p} mode={mode} />}
+
+      {p.status === 'succeeded' && <PaymentRefunds payment={p} mode={mode} />}
 
       {/* Links are often made by owners with no webhook at all: nothing sent is nothing to show. */}
       {(p.source !== 'link' || deliveries.length > 0) && (
