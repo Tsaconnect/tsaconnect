@@ -15,6 +15,10 @@ import (
 // payRefundOpenFirst orders open refunds (the ones someone has to act on) first.
 const payRefundOpenFirst = "CASE WHEN status IN ('requested', 'submitted', 'needs_review') THEN 0 ELSE 1 END"
 
+// payRefundCheckFailedReason is shown in place of the Refund button when a
+// payment's refund capacity couldn't be read (a transient failure).
+const payRefundCheckFailedReason = "Refund availability can't be checked right now — try again shortly."
+
 // PayRefundFilter is one page of a merchant's refunds in a mode: Status ""
 // is every status; From/To bound created_at ([From, To), zero is open).
 type PayRefundFilter struct {
@@ -58,7 +62,7 @@ func (s *PayRefundService) List(ctx context.Context, f PayRefundFilter) ([]PayRe
 		return nil, 0, err
 	}
 	var rows []models.PayRefund
-	if err := scope().Order(payRefundOpenFirst).Order("created_at DESC").Offset((f.Page - 1) * f.Limit).Limit(f.Limit).Find(&rows).Error; err != nil {
+	if err := scope().Order(payRefundOpenFirst).Order("created_at DESC").Order("id").Offset((f.Page - 1) * f.Limit).Limit(f.Limit).Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	payments, err := s.paymentsOf(ctx, rows)
@@ -115,7 +119,7 @@ type PayPaymentRefunds struct {
 // ListForPayment is p's refunds, newest first, with its cap and remaining.
 func (s *PayRefundService) ListForPayment(ctx context.Context, p *models.PayPayment) (*PayPaymentRefunds, error) {
 	var rows []models.PayRefund
-	if err := s.db.WithContext(ctx).Where("payment_id = ?", p.ID).Order("created_at DESC").Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("payment_id = ?", p.ID).Order("created_at DESC").Order("id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := &PayPaymentRefunds{Refunds: make([]PayRefundView, len(rows)), Cap: FormatMicroUSD(0), Remaining: FormatMicroUSD(0)}
@@ -137,7 +141,11 @@ func (s *PayRefundService) ListForPayment(ctx context.Context, p *models.PayPaym
 			out.NotRefundableReason = why
 			return out, nil
 		}
-		return nil, err
+		// Only the capacity lookup failed: the refunds already made are still
+		// worth showing, and a retry will size the rest.
+		log.Printf("[tsa-pay] refund capacity for payment %s: %v", p.ID, err)
+		out.NotRefundableReason = payRefundCheckFailedReason
+		return out, nil
 	}
 	remaining := max(src.capMicroUSD-used, 0)
 	out.Cap, out.Remaining = FormatMicroUSD(src.capMicroUSD), FormatMicroUSD(remaining)
@@ -189,7 +197,7 @@ func (s *PayRefundService) AdminList(ctx context.Context, f PayRefundAdminFilter
 		return nil, 0, err
 	}
 	var rows []models.PayRefund
-	if err := scope().Order(payRefundOpenFirst).Order("created_at DESC").Offset((f.Page - 1) * f.Limit).Limit(f.Limit).Find(&rows).Error; err != nil {
+	if err := scope().Order(payRefundOpenFirst).Order("created_at DESC").Order("id").Offset((f.Page - 1) * f.Limit).Limit(f.Limit).Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	payments, err := s.paymentsOf(ctx, rows)

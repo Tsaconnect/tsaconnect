@@ -33,12 +33,65 @@ func TestPayRefundList_OpenFirstThenNewestWithinTheRange(t *testing.T) {
 	if !strings.HasPrefix(items[1].PaymentCode, "TSA-") || items[1].Description != "LOS-ABV 12 Oct" || items[0].Amount != "1.00" {
 		t.Fatalf("item fields %+v", items[1])
 	}
-	confirmed, total, _ := r.s.List(ctx, PayRefundFilter{MerchantID: r.m.ID, Mode: models.PayModeLive, Status: models.PayRefundConfirmed})
-	if total != 1 || confirmed[0].ID != done.ID {
+	confirmed, total, err := r.s.List(ctx, PayRefundFilter{MerchantID: r.m.ID, Mode: models.PayModeLive, Status: models.PayRefundConfirmed})
+	if err != nil || total != 1 || confirmed[0].ID != done.ID {
 		t.Fatalf("status filter %+v", confirmed)
 	}
-	if _, total, _ := r.s.List(ctx, PayRefundFilter{MerchantID: uuid.New(), Mode: models.PayModeLive}); total != 0 {
-		t.Fatal("another merchant's refunds were listed")
+	if _, total, err := r.s.List(ctx, PayRefundFilter{MerchantID: uuid.New(), Mode: models.PayModeLive}); err != nil || total != 0 {
+		t.Fatalf("another merchant's refunds were listed: %d %v", total, err)
+	}
+}
+
+// Rows that tie on status class and created_at keep one order, so a page
+// boundary never repeats or drops a refund; a mode's list holds only its own.
+func TestPayRefundList_PagesAreStableAndStayInTheirMode(t *testing.T) {
+	ctx := context.Background()
+	r := newRefundRig(t)
+	p := r.paidDirect(t, "PAGE-1", "34", "")
+	want := map[uuid.UUID]bool{}
+	for range 5 {
+		want[r.insertRefund(t, p, models.PayRefundCancelled, 1_000_000).ID] = true
+	}
+	testPayment := r.paid(t, models.PayModeTest, "PAGE-2", nil)
+	r.insertRefund(t, testPayment, models.PayRefundCancelled, 1_000_000)
+
+	var seen []uuid.UUID
+	for page := 1; page <= 3; page++ {
+		items, total, err := r.s.List(ctx, PayRefundFilter{MerchantID: r.m.ID, Mode: models.PayModeLive, Page: page, Limit: 2})
+		if err != nil || total != 5 {
+			t.Fatalf("page %d: total %d err %v", page, total, err)
+		}
+		for _, it := range items {
+			seen = append(seen, it.ID)
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("pages held %d refunds, want 5: %v", len(seen), seen)
+	}
+	for _, id := range seen {
+		if !want[id] {
+			t.Fatalf("refund %s listed twice or from another mode", id)
+		}
+		delete(want, id)
+	}
+	if test, total, err := r.s.List(ctx, PayRefundFilter{MerchantID: r.m.ID, Mode: models.PayModeTest}); err != nil || total != 1 || test[0].Mode != models.PayModeTest {
+		t.Fatalf("test mode %+v %d %v", test, total, err)
+	}
+}
+
+// A page asks for at most 100 rows however much is requested.
+func TestPayRefundList_LimitIsCappedAt100(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paidDirect(t, "CAP100", "34", "")
+	for range 101 {
+		r.insertRefund(t, p, models.PayRefundCancelled, 1)
+	}
+	items, total, err := r.s.List(context.Background(), PayRefundFilter{MerchantID: r.m.ID, Mode: models.PayModeLive, Page: 1, Limit: 1000})
+	if err != nil || total != 101 || len(items) != 100 {
+		t.Fatalf("%d items of %d, err %v", len(items), total, err)
+	}
+	if admin, total, err := r.s.AdminList(context.Background(), PayRefundAdminFilter{Page: 2, Limit: 1000}); err != nil || total != 101 || len(admin) != 1 {
+		t.Fatalf("admin page 2: %d items of %d, err %v", len(admin), total, err)
 	}
 }
 
@@ -51,9 +104,25 @@ func TestPayRefundListForPayment_CapRemainingAndRefundable(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 	r.insertRefund(t, p, models.PayRefundRequested, 5_000_000)
-	got, _ = r.s.ListForPayment(context.Background(), p)
-	if got.Remaining != "9.00" || got.Refundable || got.NotRefundableReason != "A refund is already in progress" {
+	got, err = r.s.ListForPayment(context.Background(), p)
+	if err != nil || got.Remaining != "9.00" || got.Refundable || got.NotRefundableReason != "A refund is already in progress" {
 		t.Fatalf("with an open refund: %+v", got)
+	}
+}
+
+// Only the capacity lookup failing (the order read, say) must not hide the
+// refunds already made: they are listed, with a try-again sentence.
+func TestPayRefundListForPayment_ACapacityLookupFailureStillListsTheRefunds(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paidDirect(t, "LFP-DB", "34", "")
+	r.insertRefund(t, p, models.PayRefundConfirmed, 5_000_000)
+	if err := r.db.Migrator().DropTable(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.s.ListForPayment(context.Background(), p)
+	if err != nil || got == nil || len(got.Refunds) != 1 || got.Refundable ||
+		got.NotRefundableReason != "Refund availability can't be checked right now — try again shortly." {
+		t.Fatalf("%+v %v", got, err)
 	}
 }
 
@@ -86,15 +155,15 @@ func TestPayRefundAdminList_NamesTheMerchantAndFilters(t *testing.T) {
 	if err != nil || total != 1 || items[0].ID != sent.ID || items[0].MerchantName != "Sky Air" {
 		t.Fatalf("%+v %d %v", items, total, err)
 	}
-	byPayment, total, _ := r.s.AdminList(context.Background(), PayRefundAdminFilter{PaymentID: &b.ID})
-	if total != 1 || byPayment[0].PaymentID != b.ID {
+	byPayment, total, err := r.s.AdminList(context.Background(), PayRefundAdminFilter{PaymentID: &b.ID})
+	if err != nil || total != 1 || byPayment[0].PaymentID != b.ID {
 		t.Fatalf("payment filter %+v", byPayment)
 	}
 	// Review M10: live and test refunds can be told apart and filtered.
 	testPayment := r.paid(t, models.PayModeTest, "ADM-3", nil)
 	r.insertRefund(t, testPayment, models.PayRefundConfirmed, 1_000_000)
-	live, total, _ := r.s.AdminList(context.Background(), PayRefundAdminFilter{Mode: models.PayModeLive})
-	if total != 2 || live[0].Mode != models.PayModeLive || live[1].Mode != models.PayModeLive {
+	live, total, err := r.s.AdminList(context.Background(), PayRefundAdminFilter{Mode: models.PayModeLive})
+	if err != nil || total != 2 || live[0].Mode != models.PayModeLive || live[1].Mode != models.PayModeLive {
 		t.Fatalf("live filter %+v", live)
 	}
 	if test, total, _ := r.s.AdminList(context.Background(), PayRefundAdminFilter{Mode: models.PayModeTest}); total != 1 || test[0].Mode != models.PayModeTest {
