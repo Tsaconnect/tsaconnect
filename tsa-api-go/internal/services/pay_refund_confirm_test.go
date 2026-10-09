@@ -614,3 +614,24 @@ func TestPayRefundConfirm_UnreadableRawTxAndCreditAlertOnce(t *testing.T) {
 		}
 	})
 }
+
+// alertOnce's memory used to grow with every refund ever alerted on;
+// pruneAlerted bounds it to payAlertedTTL, like the payment service's.
+func TestPayRefundAlertOnce_ForgetsARefundOncePruneAlertedPassesTheTTL(t *testing.T) {
+	now := payTestNow
+	s := &PayRefundService{now: func() time.Time { return now }}
+	id := uuid.New()
+	if !s.alertOnce(id, "pay_refund_unconfirmed") || s.alertOnce(id, "pay_refund_unconfirmed") {
+		t.Fatal("alertOnce must say yes once")
+	}
+	now = payTestNow.Add(payAlertedTTL - time.Minute)
+	s.pruneAlerted()
+	if s.alertOnce(id, "pay_refund_unconfirmed") {
+		t.Fatal("forgotten before the TTL")
+	}
+	now = payTestNow.Add(payAlertedTTL + time.Minute)
+	s.pruneAlerted()
+	if !s.alertOnce(id, "pay_refund_unconfirmed") {
+		t.Fatal("not forgotten after the TTL")
+	}
+}

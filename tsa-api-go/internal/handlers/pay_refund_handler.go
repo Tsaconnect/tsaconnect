@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
@@ -159,6 +158,9 @@ func (h *PayHandler) OwnerCancelRefund(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Refund cancelled", gin.H{"refund": h.refunds.View(r)})
 }
 
+// payRefundSubmitMaxBytes bounds the owner's submit body.
+const payRefundSubmitMaxBytes = 16 << 10
+
 // POST /api/pay/merchant/refunds/:id/submit {chainId, tokenSymbol, signedTx} —
 // the owner's app hands over the transfer it signed (not broadcast). It must be
 // signed by the owner's proven wallet; the server checks it, records it, then
@@ -168,6 +170,9 @@ func (h *PayHandler) OwnerSubmitRefund(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// A signed ERC-20 transfer is a few hundred bytes; the body is capped before
+	// it is decoded.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, payRefundSubmitMaxBytes)
 	var req services.PayRefundSubmit
 	if err := c.ShouldBindJSON(&req); err != nil || req.ChainID == 0 || strings.TrimSpace(req.TokenSymbol) == "" || strings.TrimSpace(req.SignedTx) == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "chainId, tokenSymbol and signedTx are required")
@@ -222,7 +227,6 @@ func payRefundFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPayRefundUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, services.PayRefundRefusal(err), "refunds_unavailable")
 	default:
-		log.Printf("[tsa-pay] refund request failed: %s %s: %s", c.Request.Method, c.FullPath(), services.RedactAlertText(err.Error()))
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Something went wrong")
+		payInternalFail(c, err)
 	}
 }

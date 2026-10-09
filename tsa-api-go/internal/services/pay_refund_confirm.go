@@ -64,6 +64,7 @@ const (
 // worker's failure streak is the alert — and changes nothing else. Errors are
 // returned redacted: the worker logs them as they are.
 func (s *PayRefundService) ConfirmDue(ctx context.Context) error {
+	s.pruneAlerted()
 	var due []models.PayRefund
 	if err := s.db.WithContext(ctx).Where("status = ?", models.PayRefundSubmitted).
 		Order("checked_at NULLS FIRST, submitted_at").Limit(payRefundConfirmBatch).Find(&due).Error; err != nil {
@@ -321,6 +322,19 @@ type payRefundAlertKey struct {
 // alertOnce reports whether this process has not yet raised alert for the
 // refund, and marks it raised.
 func (s *PayRefundService) alertOnce(refund uuid.UUID, alert string) bool {
-	_, seen := s.alerted.LoadOrStore(payRefundAlertKey{refund, alert}, true)
+	_, seen := s.alerted.LoadOrStore(payRefundAlertKey{refund, alert}, s.now())
 	return !seen
+}
+
+// pruneAlerted drops alertOnce's memory of anything older than payAlertedTTL,
+// so the map a long-lived process holds does not grow forever. An ALERT about
+// a refund still stuck past the TTL is raised again, on purpose.
+func (s *PayRefundService) pruneAlerted() {
+	cutoff := s.now().Add(-payAlertedTTL)
+	s.alerted.Range(func(key, value any) bool {
+		if at, ok := value.(time.Time); !ok || at.Before(cutoff) {
+			s.alerted.Delete(key)
+		}
+		return true
+	})
 }

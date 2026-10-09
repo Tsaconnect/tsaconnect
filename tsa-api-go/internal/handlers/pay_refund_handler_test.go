@@ -547,3 +547,61 @@ func TestPayRefundOwner_EachRefusalAnswersItsStatusAndCode(t *testing.T) {
 		}
 	}
 }
+
+func TestPayRefundOwner_ListFiltersByStatus(t *testing.T) {
+	o := newRefundHandlerRig(t)
+	open := o.paid(t, models.PayModeLive, "H-FILT-1")
+	if res := o.do(http.MethodPost, "/api/pay/merchant/payments/"+open.ID.String()+"/refunds", map[string]any{"amount": "1"}); res.status != http.StatusCreated {
+		t.Fatalf("create %d %s", res.status, res.raw)
+	}
+	done := o.paid(t, models.PayModeLive, "H-FILT-2")
+	at := payHandlerNow
+	if err := o.db.Create(&models.PayRefund{PaymentID: done.ID, MerchantID: o.m.ID, Mode: models.PayModeLive, AmountMicroUSD: 1_000_000, CapMicroUSD: 34_000_000,
+		Status: models.PayRefundConfirmed, RequestedVia: models.PayRefundViaApp, CreatedAt: payHandlerNow, ConfirmedAt: &at}).Error; err != nil {
+		t.Fatal(err)
+	}
+	all := o.do(http.MethodGet, "/api/pay/merchant/refunds", nil)
+	if all.data()["total"] != float64(2) {
+		t.Fatalf("unfiltered %s", all.raw)
+	}
+	requested := o.do(http.MethodGet, "/api/pay/merchant/refunds?status=requested", nil)
+	items, _ := requested.data()["refunds"].([]any)
+	if requested.data()["total"] != float64(1) || len(items) != 1 || items[0].(map[string]any)["status"] != "requested" {
+		t.Fatalf("status=requested %s", requested.raw)
+	}
+}
+
+func TestPayRefundOwner_SubmitBodyIsCappedAt16KiB(t *testing.T) {
+	o := newRefundHandlerRig(t)
+	huge := map[string]any{"chainId": 56, "tokenSymbol": "USDT", "signedTx": "0x" + strings.Repeat("ab", 10<<10)}
+	res := o.do(http.MethodPost, "/api/pay/merchant/refunds/"+uuid.NewString()+"/submit", huge)
+	if res.status != http.StatusBadRequest {
+		t.Fatalf("a 20 KiB body: %d %s", res.status, res.raw)
+	}
+}
+
+// One helper answers every unrecognised owner-route error: a plain 500 and a
+// redacted log line, never the error's own words.
+func TestPayInternalFail_IsRedactedAndPlain(t *testing.T) {
+	const secret = "SECRETKEY"
+	err := errors.New(`Post "https://bsc.example-rpc.io/v2/` + secret + `": dial tcp`)
+	for name, fail := range map[string]func(*gin.Context){
+		"payOwnerFail":  func(c *gin.Context) { payOwnerFail(c, err) },
+		"payRefundFail": func(c *gin.Context) { payRefundFail(c, err) },
+	} {
+		var logged bytes.Buffer
+		log.SetOutput(&logged)
+		w := payDo(func() *gin.Engine {
+			r := gin.New()
+			r.GET("/x", fail)
+			return r
+		}(), http.MethodGet, "/x", nil, nil)
+		log.SetOutput(os.Stderr)
+		if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), secret) || strings.Contains(w.Body.String(), "dial") {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+		if logged.Len() == 0 || strings.Contains(logged.String(), secret) {
+			t.Errorf("%s: log %q", name, logged.String())
+		}
+	}
+}

@@ -215,3 +215,18 @@ func TestPayerHistory_CarriesTheMerchantRefund(t *testing.T) {
 		t.Errorf("pending: %+v", mr)
 	}
 }
+
+// An open refund already explains why another can't be asked for; a failing
+// capacity lookup must not replace that with a try-again sentence.
+func TestPayRefundListForPayment_AnOpenRefundWinsOverAFailedCapacityLookup(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paidDirect(t, "LFP-OPEN-DB", "34", "")
+	r.insertRefund(t, p, models.PayRefundSubmitted, 5_000_000)
+	if err := r.db.Migrator().DropTable(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.s.ListForPayment(context.Background(), p)
+	if err != nil || got == nil || len(got.Refunds) != 1 || got.Refundable || got.NotRefundableReason != "A refund is already in progress" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}

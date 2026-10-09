@@ -15,6 +15,9 @@ import (
 // payRefundOpenFirst orders open refunds (the ones someone has to act on) first.
 const payRefundOpenFirst = "CASE WHEN status IN ('requested', 'submitted', 'needs_review') THEN 0 ELSE 1 END"
 
+// payRefundInProgressReason is why another refund can't be asked for while one is open.
+const payRefundInProgressReason = "A refund is already in progress"
+
 // payRefundCheckFailedReason is shown in place of the Refund button when a
 // payment's refund capacity couldn't be read (a transient failure).
 const payRefundCheckFailedReason = "Refund availability can't be checked right now — try again shortly."
@@ -145,13 +148,16 @@ func (s *PayRefundService) ListForPayment(ctx context.Context, p *models.PayPaym
 		// worth showing, and a retry will size the rest.
 		log.Printf("[tsa-pay] refund capacity for payment %s: %v", p.ID, err)
 		out.NotRefundableReason = payRefundCheckFailedReason
+		if open {
+			out.NotRefundableReason = payRefundInProgressReason
+		}
 		return out, nil
 	}
 	remaining := max(src.capMicroUSD-used, 0)
 	out.Cap, out.Remaining = FormatMicroUSD(src.capMicroUSD), FormatMicroUSD(remaining)
 	switch {
 	case open:
-		out.NotRefundableReason = "A refund is already in progress"
+		out.NotRefundableReason = payRefundInProgressReason
 	case remaining == 0:
 		out.NotRefundableReason = "This payment has been fully refunded"
 	default:

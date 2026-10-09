@@ -698,7 +698,14 @@ func payOwnerFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPayCodeInvalid):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "That code isn't right", "code_invalid")
 	default:
-		log.Printf("[tsa-pay] owner request failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+		payInternalFail(c, err)
 	}
+}
+
+// payInternalFail answers an unrecognised error on a Pay route: the error is
+// logged redacted (a database or RPC error can carry a provider URL or key)
+// and the caller gets a plain 500, never the error's words.
+func payInternalFail(c *gin.Context, err error) {
+	log.Printf("[tsa-pay] request failed: %s %s: %s", c.Request.Method, c.FullPath(), services.RedactAlertText(err.Error()))
+	utils.ErrorResponse(c, http.StatusInternalServerError, "Something went wrong")
 }
