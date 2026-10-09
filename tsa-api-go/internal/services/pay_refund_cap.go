@@ -117,8 +117,9 @@ func (s *PayRefundService) source(ctx context.Context, p *models.PayPayment) (*p
 }
 
 // orderSource: the cap is the payer's deposit into the order (the sender fee
-// is inside it, rounded down) less anything returned (rounded up). On the converted route the order is
-// the Base-USDC deposit the swap made, handed over to the payment.
+// is inside it, rounded down) less anything returned (rounded up). On the
+// converted route the order is the Base-USDC deposit the swap made, handed
+// over to the payment.
 func (s *PayRefundService) orderSource(ctx context.Context, p *models.PayPayment) (*payRefundSource, error) {
 	var o models.PaycrestOrderRecord
 	q := s.db.WithContext(ctx)
@@ -170,14 +171,14 @@ func (s *PayRefundService) cryptoSource(ctx context.Context, p *models.PayPaymen
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s decimals on %s: %s", ErrPayRefundUnavailable, symbol, chain, RedactAlertText(err.Error()))
 	}
+	// Only a delivered sale paid the merchant, however it is linked: a failed
+	// attempt delivered nothing and must not size the refund.
 	var in models.RampSellIntent
-	q := s.db.WithContext(ctx)
+	q := s.db.WithContext(ctx).Where("status = ?", models.SellIntentDelivered)
 	if p.SellIntentID != nil {
 		err = q.First(&in, "id = ?", *p.SellIntentID).Error
 	} else {
-		// Only a delivered sale paid the merchant: a failed attempt beside it
-		// delivered nothing and must not size the refund.
-		err = q.Where("pay_payment_id = ? AND status = ?", p.ID, models.SellIntentDelivered).Order("created_at DESC").First(&in).Error
+		err = q.Where("pay_payment_id = ?", p.ID).Order("created_at DESC").First(&in).Error
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		log.Printf("[tsa-pay] refund: crypto payment %s has no intent to size a refund on", p.ID)

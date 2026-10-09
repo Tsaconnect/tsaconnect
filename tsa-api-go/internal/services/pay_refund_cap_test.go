@@ -287,3 +287,16 @@ func TestPayRefundCap_CryptoFindsTheDeliveredIntentByItsReverseLink(t *testing.T
 		t.Fatalf("only failed intents: %v", err)
 	}
 }
+
+// A directly linked intent counts only once it delivered: an attempt that
+// failed paid the merchant nothing.
+func TestPayRefundCap_CryptoDirectLinkMustBeDelivered(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paidCrypto(t, "CAP-23", 8453, refundBaseUSDC, "USDC", "33000000")
+	if err := r.db.Model(&models.RampSellIntent{}).Where("id = ?", *p.SellIntentID).Update("status", models.SellIntentFailed).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.s.source(context.Background(), p); !errors.Is(err, ErrPayRefundNotRefundable) {
+		t.Fatalf("%v", err)
+	}
+}

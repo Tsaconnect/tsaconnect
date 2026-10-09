@@ -422,11 +422,56 @@ func TestPayRefundRequest_TheIndexBacksTheLockOnPostgres(t *testing.T) {
 		_, err := r.s.Request(context.Background(), r.m, models.PayModeLive, p.ID, PayRefundRequest{Amount: "1", Via: models.PayRefundViaApp})
 		done <- err
 	}()
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("the request must not have returned yet — it should wait on the index: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
 	if err := tx.Commit().Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; !errors.Is(err, ErrPayRefundOpen) {
 		t.Fatalf("%v", err)
+	}
+}
+
+// A simulated refund is committed, confirmed and announced before Request
+// returns, so Request hands back the row it claimed rather than reading it
+// again: a failed re-read would report an error for a refund that exists, and
+// the owner's retry would simulate a second one.
+func TestPayRefundRequest_ATestRefundIsReturnedAsClaimedWithoutAReRead(t *testing.T) {
+	r := newRefundRig(t)
+	p := r.paid(t, models.PayModeTest, "REQ-15", map[string]any{"customer_total_kobo": int64(1_500_000)})
+	const failReads = "test:fail_pay_refund_reads_outside_tx"
+	if err := r.db.Callback().Query().Before("gorm:query").Register(failReads, func(db *gorm.DB) {
+		if _, inTx := db.Statement.ConnPool.(gorm.TxCommitter); !inTx && db.Statement.Table == "pay_refunds" {
+			db.AddError(errors.New("read after commit failed"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := r.s.Request(context.Background(), r.m, models.PayModeTest, p.ID, webRefund("2.50"))
+	if err := r.db.Callback().Query().Remove(failReads); err != nil {
+		t.Fatal(err)
+	}
+	if err != nil || ref.Status != models.PayRefundConfirmed || ref.CreditedMicroUSD != 2_500_000 || ref.ConfirmedAt == nil {
+		t.Fatalf("%+v %v", ref, err)
+	}
+	var n int64
+	r.db.Model(&models.PayRefund{}).Where("payment_id = ? AND status = ?", p.ID, models.PayRefundConfirmed).Count(&n)
+	if n != 1 {
+		t.Fatalf("%d confirmed refunds", n)
+	}
+}
+
+// A failed refund always says something after "failed:", even when no reason
+// was recorded.
+func TestPayRefundAnnounce_AFailedRefundWithoutAReasonStillReadsWell(t *testing.T) {
+	r := newRefundRig(t)
+	ref := r.insertRefund(t, r.paidDirect(t, "REQ-16", "34", ""), models.PayRefundFailed, 1_000_000)
+	r.s.announce(context.Background(), ref, events.PayRefundFailed)
+	failed := r.alertsOf(events.PayRefundFailed)
+	if len(failed) != 1 || failed[0].Message != "Refund to Ada failed: "+payRefundFailedFallback+". You can request it again." {
+		t.Fatalf("%+v", failed)
 	}
 }

@@ -112,8 +112,10 @@ func (s *PayRefundService) Request(ctx context.Context, m *models.PayMerchant, m
 		return nil, err
 	}
 	if r.Mode == models.PayModeTest {
+		// r is the row as claimed: re-reading it could fail after the commit and
+		// send the owner to retry — simulating a second refund.
 		s.announce(ctx, r, events.PayRefundConfirmed) // after commit
-		return s.Get(ctx, m.ID, r.ID)
+		return r, nil
 	}
 	if via == models.PayRefundViaWeb {
 		s.announce(ctx, r, events.PayRefundRequested)
@@ -277,6 +279,10 @@ func payRefundWebhookObject(r *models.PayRefund) map[string]any {
 		"chainId": r.ChainID, "txHash": txHash, "confirmedAt": r.ConfirmedAt}
 }
 
+// payRefundFailedFallback is what a failed refund's notice says when no
+// reason was recorded.
+const payRefundFailedFallback = "the transfer didn't go through"
+
 // payerFirstName is the payer's first name as the merchant knows them, "" for
 // none or a deleted account.
 func (s *PayRefundService) payerFirstName(ctx context.Context, p *models.PayPayment) string {
@@ -333,7 +339,11 @@ func (s *PayRefundService) announce(ctx context.Context, r *models.PayRefund, ki
 		}
 		publish(kind, m.UserID, "Refund confirmed", "Refund to "+who+" confirmed")
 	case events.PayRefundFailed:
-		publish(kind, m.UserID, "Refund failed", "Refund to "+who+" failed: "+r.FailureReason+". You can request it again.")
+		why := r.FailureReason
+		if why == "" {
+			why = payRefundFailedFallback
+		}
+		publish(kind, m.UserID, "Refund failed", "Refund to "+who+" failed: "+why+". You can request it again.")
 	case events.PayRefundNeedsReview:
 		if r.CreditedMicroUSD > 0 {
 			publish(kind, m.UserID, "Refund needs review", "The refund to "+who+" credited less than "+amount+" "+token+" — support is reviewing it")
