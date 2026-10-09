@@ -822,7 +822,7 @@ export interface P2PGasTopUp {
 
 export const gasApi = {
   /** Sends S on Sonic mainnet to the account's PROVEN wallet when it can't
-   *  cover `action`. Callers gate on SONIC_CHAIN_IDS and still finish with a
+   *  cover `action`. Callers gate on SONIC_GAS_SPONSOR_CHAIN_IDS and still finish with a
    *  balance check on the signing wallet. */
   topUp: (req: P2PGasTopUpRequest) => request<P2PGasTopUp>('POST', '/p2p/gas/top-up', req),
 };
@@ -1095,9 +1095,9 @@ export function p2pTokenDecimals(chainId: number | undefined, symbol: string): n
   return 18; // MCGP + default
 }
 
-/** Sonic mainnet + testnet. The gas sponsor itself only serves mainnet (146);
- *  callers that must not drip on testnet check 146 explicitly. */
-export const SONIC_CHAIN_IDS: ReadonlySet<number> = new Set([146, 14601]);
+/** The only chain the P2P gas sponsor serves: Sonic mainnet (146). Never testnet
+ *  (14601) — a drip there would be useless mainnet S. */
+export const SONIC_GAS_SPONSOR_CHAIN_IDS: ReadonlySet<number> = new Set([146]);
 
 /** "Name · ••••1234" for a payment-method row, from whatever the API sent:
  *  the public ad detail masks the number and drops the name. */

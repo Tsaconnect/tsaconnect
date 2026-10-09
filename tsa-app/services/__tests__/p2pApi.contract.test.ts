@@ -4,7 +4,7 @@ jest.mock('../walletApi', () => ({ getAuthHeaders: jest.fn(async () => ({ 'Conte
 jest.mock('../../constants/api/config', () => ({ API_BASE_URL: 'https://api.test/api' }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { adsApi, gasApi, maskedAccountLabel, SONIC_CHAIN_IDS, tradesApi } from '../p2p';
+import { adsApi, gasApi, maskedAccountLabel, SONIC_GAS_SPONSOR_CHAIN_IDS, tradesApi } from '../p2p';
 
 const fetchMock = jest.fn();
 beforeEach(() => {
@@ -59,9 +59,10 @@ describe('gas top-up (R3)', () => {
     await gasApi.topUp({ action: 'approve' });
     expect(lastCall().body).toEqual({ action: 'approve' });
   });
-  it('serves only Sonic mainnet-or-testnet ids', () => {
-    expect(SONIC_CHAIN_IDS.has(146)).toBe(true);
-    expect(SONIC_CHAIN_IDS.has(56)).toBe(false);
+  it('sponsors Sonic mainnet only', () => {
+    expect(SONIC_GAS_SPONSOR_CHAIN_IDS.has(146)).toBe(true);
+    expect(SONIC_GAS_SPONSOR_CHAIN_IDS.has(14601)).toBe(false);
+    expect(SONIC_GAS_SPONSOR_CHAIN_IDS.has(56)).toBe(false);
   });
 });
 
