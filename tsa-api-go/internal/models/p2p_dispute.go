@@ -9,7 +9,7 @@ import (
 )
 
 // P2PDispute is the off-chain audit row for a disputed trade. Exactly one
-// row per trade (enforced by unique index on TradeID for non-rejected rows).
+// row per trade (enforced by a plain unique index on TradeID; an unconfirmed open row is rewritten by a retry, not duplicated).
 // The on-chain dispute state lives in P2PEscrow.Trade.status; this record
 // captures the WHY (raised reason, raised role) and the resolution decision
 // the admin made (refundedToBuyer, free-form note).

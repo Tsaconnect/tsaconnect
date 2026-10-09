@@ -2442,16 +2442,26 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	if err := s.requireOpenOnChain(ctx, &trade, escrow); err != nil {
 		return nil, err
 	}
-	// Reject duplicate open dispute. Unique constraint on TradeID makes the
-	// race unlikely; this is the friendly-error path.
+	// An open dispute row that is not yet on chain is an abandoned prepare (the
+	// user closed the sign sheet): let either party replace it. Only a chain
+	// already showing Disputed is a real duplicate. The TradeID unique index
+	// allows one row per trade, so we rewrite that row rather than add one.
 	var existing models.P2PDispute
+	var replace *models.P2PDispute
 	err = s.db.WithContext(ctx).
 		Where("trade_id = ? AND status = ?", trade.ID, models.P2PDisputeStatusOpen).
 		First(&existing).Error
-	if err == nil {
-		return nil, ErrDisputeAlreadyOpen
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	switch {
+	case err == nil:
+		onchain, rerr := escrow.ReadTrade(HashID(trade.ID))
+		if rerr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrChainUnavailable, rerr)
+		}
+		if onchain != nil && onchain.Status == OnChainP2PStatusDisputed {
+			return nil, ErrDisputeAlreadyOpen
+		}
+		replace = &existing
+	case !errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, err
 	}
 
@@ -2464,22 +2474,43 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		EvidenceURLs: evidenceJSON,
 		Status:       models.P2PDisputeStatusOpen,
 	}
-	if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
+	if replace != nil {
+		res := s.db.WithContext(ctx).Model(&models.P2PDispute{}).
+			Where("id = ? AND status = ?", replace.ID, models.P2PDisputeStatusOpen).
+			Updates(map[string]any{
+				"raised_by":     userID,
+				"raised_role":   role,
+				"reason":        reason,
+				"evidence_urls": evidenceJSON,
+				"created_at":    s.clock.Now(),
+				"resolved_by":   nil,
+				"resolution":    "",
+			})
+		if res.Error != nil {
+			return nil, fmt.Errorf("replace dispute: %w", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return nil, ErrDisputeAlreadyOpen
+		}
+	} else if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
 		return nil, fmt.Errorf("persist dispute: %w", err)
 	}
 
 	unsignedTx, err := escrow.PrepareRaiseDispute(HashID(trade.ID), callerAddress)
 	if err != nil {
-		// Best-effort rollback so a failed prep doesn't leave a phantom
-		// dispute row blocking future retries.
-		_ = s.db.WithContext(ctx).Delete(&models.P2PDispute{}, "id = ?", dispute.ID).Error
+		// Roll back only a row created by this call; a replaced row stays and
+		// the next retry replaces it again.
+		if replace == nil {
+			_ = s.db.WithContext(ctx).Delete(&models.P2PDispute{}, "id = ?", dispute.ID).Error
+		}
 		return nil, fmt.Errorf("prepare raiseDispute: %w", err)
 	}
 
-	s.audit(ctx, models.P2PAuditTradeDisputed, &userID, &trade.AdID, &trade.ID, map[string]any{
-		"role":   role,
-		"reason": reason,
-	})
+	auditMeta := map[string]any{"role": role, "reason": reason}
+	if replace != nil {
+		auditMeta["replacedRaisedBy"] = replace.RaisedBy
+	}
+	s.audit(ctx, models.P2PAuditTradeDisputed, &userID, &trade.AdID, &trade.ID, auditMeta)
 	// Notify only the raiser at prepare time. The counter-party notice and the
 	// "funds frozen" chat message fire in ConfirmRaiseDispute — after the dispute
 	// is actually on chain — so a never-broadcast prepare can't signal the
