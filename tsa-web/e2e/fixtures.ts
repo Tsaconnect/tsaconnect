@@ -27,7 +27,7 @@ type Payment = {
   id: string; reference: string; mode: 'live' | 'test'; status: string; amount: number; customerTotal: number; merchantNet: number;
   fee: number; currency: 'NGN'; description: string; source: 'api' | 'link' | 'open'; customerName?: string; cancelled?: boolean;
   openLinkId?: string; linkLabel?: string;
-  returnUrl?: string; expiresAt: string; settlementRef?: string;
+  returnUrl?: string; expiresAt: string | null; settlementRef?: string;
   failureReason?: string; succeededAt?: string; appUrl: string; checkoutUrl: string; createdAt: string;
 };
 
@@ -87,7 +87,7 @@ export type MockApi = {
 
 type OpenLink = {
   id: string; mode: 'live' | 'test'; slug: string; url: string; label: string; minAmount: number; maxAmount: number;
-  active: boolean; version: number; paidCount: number; paidTotal: number; receivedTotal: number; createdAt: string;
+  active: boolean; version: number; paidCount: number; paidTotal: number; receivedTotal: number; paymentExpiresIn: number; createdAt: string;
 };
 
 // The merchant's own bounds (pay_merchant_service.go defaults), in kobo.
@@ -122,8 +122,12 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
   // A reusable-link payment's description is the customer's own note (often blank); linkLabel names the link.
   function payThrough(link: OpenLink, amount: number, note = '') {
     const n = api.payments.length;
+    const now = new Date();
     const made = payment(`0e11ed00-0000-4000-8000-${String(n).padStart(12, '0')}`, `open_${String(n).padStart(12, 'q')}`, link.mode, 'succeeded', amount,
-      new Date().toISOString(), { source: 'open', openLinkId: link.id, linkLabel: link.label, description: note, succeededAt: new Date().toISOString() });
+      now.toISOString(), {
+        source: 'open', openLinkId: link.id, linkLabel: link.label, description: note, succeededAt: now.toISOString(),
+        expiresAt: link.paymentExpiresIn ? new Date(now.getTime() + link.paymentExpiresIn * 1000).toISOString() : null,
+      });
     api.payments.unshift(made);
     Object.assign(link, { paidCount: link.paidCount + 1, paidTotal: link.paidTotal + amount, receivedTotal: link.receivedTotal + made.merchantNet });
     return made;
@@ -135,11 +139,15 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
       : l.mode === 'live' && !m.liveAllowed ? 'live_off' : !l.active ? 'paused' : undefined;
     return { ...l, merchantMinAmount: MIN_KOBO, merchantMaxAmount: MAX_KOBO, takingPayments: !reason, ...(reason ? { notTakingReason: reason } : {}) };
   };
-  /** Label and bounds as the API checks them; null when they pass. */
+  /** Label, bounds and payment expiry as the API checks them; null when they pass. */
   const openLinkRefused = (body: Record<string, unknown>) => {
     const label = String(body.label ?? '').trim();
     const min = Number(body.minAmount ?? 0);
     const max = Number(body.maxAmount ?? 0);
+    const expiresIn = Number(body.paymentExpiresIn ?? 0);
+    if (expiresIn && !(Number.isInteger(expiresIn) && expiresIn >= 900 && expiresIn <= 86_400)) {
+      return fail(422, 'A payment can expire after 900 to 86400 seconds, or never');
+    }
     if (!label || label.length > 80) return fail(422, 'Give the link a label of up to 80 characters');
     const inBounds = (k: number) => k === 0 || (Number.isInteger(k) && k >= MIN_KOBO && k <= MAX_KOBO);
     if (!inBounds(min) || !inBounds(max)) return fail(422, 'Enter an amount between ₦1,000.00 and ₦5,000,000.00');
@@ -214,7 +222,8 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
       const made: OpenLink = {
         id: `0be11111-0000-4000-8000-${String(api.openLinks.length).padStart(12, '0')}`, mode, slug, url: openUrl(slug),
         label: String(body.label).trim(), minAmount: Number(body.minAmount ?? 0), maxAmount: Number(body.maxAmount ?? 0),
-        active: true, version: 1, paidCount: 0, paidTotal: 0, receivedTotal: 0, createdAt: new Date().toISOString(),
+        active: true, version: 1, paidCount: 0, paidTotal: 0, receivedTotal: 0, paymentExpiresIn: Number(body.paymentExpiresIn ?? 0),
+        createdAt: new Date().toISOString(),
       };
       api.openLinks.unshift(made);
       return ok(openView(made), 'Payment link created', 201);
@@ -239,6 +248,8 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
         Object.assign(l, {
           label: String(body.label).trim(), minAmount: Number(body.minAmount ?? 0), maxAmount: Number(body.maxAmount ?? 0),
           active: Boolean(body.active), version: l.version + 1,
+          // Left out, it stays as it is; 0 clears it.
+          ...(body.paymentExpiresIn !== undefined ? { paymentExpiresIn: Number(body.paymentExpiresIn) } : {}),
         });
         return ok(openView(l), 'Payment link saved');
       }
@@ -256,10 +267,11 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
       if (!m.settlementMode) return fail(409, 'Set where you want to be paid before you request a payment', 'settlement_not_set');
       const amount = Number(body.amount);
       const description = String(body.description ?? '').trim();
-      const days = Number(body.expiresInDays ?? 0) || 7;
+      // No expiresInDays (or 0): the link never expires.
+      const days = Number(body.expiresInDays ?? 0);
       if (!Number.isInteger(amount) || amount < 100_000 || amount > 500_000_000) return fail(422, 'Enter an amount between ₦1,000.00 and ₦5,000,000.00');
       if (!description || description.length > 255) return fail(422, "Say what the payment is for (up to 255 characters)");
-      if (![1, 3, 7].includes(days)) return fail(422, 'A link can be open for 1, 3 or 7 days');
+      if (days && ![1, 3, 7].includes(days)) return fail(422, 'A link can be open for 1, 3 or 7 days');
       let reference = String(body.reference ?? '').trim();
       if (reference && api.payments.some((p) => p.mode === mode && p.reference === reference)) {
         return fail(409, "You've already used this reference — use another or leave it blank", 'reference_taken');
@@ -269,7 +281,7 @@ export async function mockApi(page: Page, opts: { signedIn?: boolean } = {}): Pr
       const id = `c0ffee00-0000-4000-8000-${String(api.payments.length).padStart(12, '0')}`;
       const made = payment(id, reference, mode, 'pending', amount, now.toISOString(), {
         description, source: 'link', ...(body.customerName ? { customerName: String(body.customerName).trim() } : {}),
-        expiresAt: new Date(now.getTime() + days * 24 * 60 * 60_000).toISOString(),
+        expiresAt: days ? new Date(now.getTime() + days * 24 * 60 * 60_000).toISOString() : null,
       });
       api.payments.unshift(made);
       return ok(made, 'Payment link created', 201);

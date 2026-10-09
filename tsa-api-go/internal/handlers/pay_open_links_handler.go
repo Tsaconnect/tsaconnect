@@ -17,8 +17,8 @@ import (
 // shares it; each customer who opens it enters an amount and starts their own
 // payment (source "open"), paid through the same checkout as any other.
 
-// POST /api/pay/merchant/open-links?mode {label, minAmount?, maxAmount?} —
-// answers 201 with the open link.
+// POST /api/pay/merchant/open-links?mode {label, minAmount?, maxAmount?,
+// paymentExpiresIn?} — answers 201 with the open link.
 func (h *PayHandler) OwnerCreateOpenLink(c *gin.Context) {
 	var in services.PayOpenLinkInput
 	m, mode, ok := h.payOwnerLinkCreate(c, &in)
@@ -88,8 +88,8 @@ func (h *PayHandler) OwnerOpenLink(c *gin.Context) {
 }
 
 // PUT /api/pay/merchant/open-links/:id?mode {label?, minAmount?, maxAmount?,
-// active?, expectedVersion} — each field sent replaces the link's, each left
-// out stays as it is. Answers the open link.
+// paymentExpiresIn?, active?, expectedVersion} — each field sent replaces the
+// link's, each left out stays as it is. Answers the open link.
 func (h *PayHandler) OwnerUpdateOpenLink(c *gin.Context) {
 	var in services.PayOpenLinkUpdate
 	m, mode, ok := h.payOwnerLinkEdit(c, &in)

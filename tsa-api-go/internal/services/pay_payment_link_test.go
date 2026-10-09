@@ -17,7 +17,7 @@ func payLinkIn() CreatePayLinkInput {
 	return CreatePayLinkInput{AmountKobo: 2_500_000, Description: "  Wedding cake deposit ", CustomerName: " Ada Obi "}
 }
 
-func TestPayLink_CreateMakesALinkPaymentOpenSevenDaysByDefault(t *testing.T) {
+func TestPayLink_CreateMakesALinkPaymentOpenUntilPaidByDefault(t *testing.T) {
 	s, m := newPayPaymentRig(t)
 	p, err := s.CreateLink(context.Background(), m, models.PayModeTest, payLinkIn())
 	if err != nil {
@@ -25,7 +25,7 @@ func TestPayLink_CreateMakesALinkPaymentOpenSevenDaysByDefault(t *testing.T) {
 	}
 	if p.Source != models.PaySourceLink || p.CustomerName != "Ada Obi" || p.Description != "Wedding cake deposit" ||
 		p.ReturnURL != "" || p.Currency != "NGN" || p.Status != models.PayStatusPending ||
-		!p.ExpiresAt.Equal(payTestNow.Add(7*24*time.Hour)) {
+		p.ExpiresAt != nil {
 		t.Fatalf("link = %+v", p)
 	}
 	if !regexp.MustCompile(`^link_[a-z2-7]{12}$`).MatchString(p.Reference) {

@@ -77,7 +77,7 @@ jest.mock('@/components/ui', () => {
     }, props.children),
     Input: input,
     AmountInput: input,
-    SegmentedControl: (props: any) => react.createElement(View, null, props.segments.map((s: any) =>
+    SegmentedControl: (props: any) => react.createElement(View, { testID: 'segmented', value: props.value }, props.segments.map((s: any) =>
       react.createElement(RNText, { key: s.key, accessibilityLabel: `segment:${s.key}`, onPress: () => props.onChange(s.key) }, s.label))),
     Sheet: (props: any) => (props.visible ? react.createElement(View, null, props.children) : null),
     useToast: () => mockToast,
@@ -226,6 +226,31 @@ describe('Request payment', () => {
     expect(share).toHaveBeenCalledWith({
       message: 'Sky Air is requesting ₦5,050.00 for Two bags of rice. Pay here: https://tsaconnectworld.com/pay?id=p1',
     });
+  });
+
+  it('a link never expires unless she picks how long it stays open', async () => {
+    jest.mocked(createPayLink).mockResolvedValue(link({ expiresAt: null }));
+    await mount(<NewPayLink />);
+    expect(byTestID(tree, 'segmented').props.value).toBe('0');
+    expect(text(tree)).toContain('No expiry');
+    await type('Amount', '5000');
+    await type("What it's for", 'Two bags of rice');
+    await press('button:Create link');
+    // What goes on the wire: no expiresInDays at all.
+    const sent = JSON.parse(JSON.stringify(jest.mocked(createPayLink).mock.calls[0][1]));
+    expect(sent).toEqual({ amount: 500_000, description: 'Two bags of rice' });
+
+    // Request another starts from no expiry again, whatever she picked before.
+    await press('button:Request another');
+    await act(async () => { byLabel(tree, 'segment:7').props.onPress(); });
+    expect(byTestID(tree, 'segmented').props.value).toBe('7');
+    jest.mocked(createPayLink).mockResolvedValue(link());
+    await type('Amount', '5000');
+    await type("What it's for", 'Rice');
+    await press('button:Create link');
+    expect(jest.mocked(createPayLink).mock.calls[1][1]).toMatchObject({ expiresInDays: 7 });
+    await press('button:Request another');
+    expect(byTestID(tree, 'segmented').props.value).toBe('0');
   });
 
   it('a live merchant (live allowed, not just switched) makes a live link', async () => {
@@ -433,6 +458,12 @@ describe('A payment link', () => {
     expect(text(tree)).toContain("You'll receive: ₦4,900.00");
     act(() => tree.unmount());
 
+    // One that never expires has no "open until" row at all, not "Open until —".
+    jest.mocked(getPayLink).mockResolvedValue(link({ expiresAt: null }));
+    await mount(<PayLinkDetail />);
+    expect(text(tree)).not.toMatch(/Open until|Expired:/);
+    act(() => tree.unmount());
+
     jest.mocked(getPayLink).mockResolvedValue(link({ status: 'expired' }));
     await mount(<PayLinkDetail />);
     expect(text(tree)).toContain('Expired:');
@@ -478,9 +509,23 @@ describe('A reusable link', () => {
     await type('Lowest amount (optional)', '500');
     await press('button:Create link');
     expect(createOpenLink).toHaveBeenCalledWith('test', {
-      label: 'Mama Ngozi Store — Shop 12', minAmount: 50_000, maxAmount: 0,
+      label: 'Mama Ngozi Store — Shop 12', minAmount: 50_000, maxAmount: 0, paymentExpiresIn: 0,
     }, 'key-1');
     expect(router.replace).toHaveBeenCalledWith('/merchants/pay-links/open/o1?mode=test');
+  });
+
+  it('payments through it never expire unless she sets how long each stays open', async () => {
+    jest.mocked(createOpenLink).mockResolvedValue(openLink());
+    await chooseReusable();
+    expect(byTestID(tree, 'segmented').props.value).toBe('0');
+    expect(text(tree)).toContain('Each payment expires after');
+    expect(text(tree)).toMatch(/No expiry.*30 min.*1 hour.*24 hours/);
+    await type('Name', 'Shop 12');
+    await act(async () => { byLabel(tree, 'segment:3600').props.onPress(); });
+    await press('button:Create link');
+    expect(createOpenLink).toHaveBeenCalledWith('test', {
+      label: 'Shop 12', minAmount: 0, maxAmount: 0, paymentExpiresIn: 3600,
+    }, 'key-1');
   });
 
   it('is listed first, marked Reusable, beside one-time links', async () => {
@@ -594,10 +639,35 @@ describe('A reusable link', () => {
       await type('Name', 'Shop 14');
       await type('Highest amount (optional)', '20000');
       await press('button:Save');
+      // An older server sends no paymentExpiresIn: that is no expiry, and saving says so.
       expect(updateOpenLink).toHaveBeenCalledWith('test', 'o1', {
-        label: 'Shop 14', minAmount: 0, maxAmount: 2_000_000, active: true,
+        label: 'Shop 14', minAmount: 0, maxAmount: 2_000_000, active: true, paymentExpiresIn: 0,
       }, 3);
       expect(text(tree)).toContain('Any amount from ₦100.00 to ₦20,000.00');
+    });
+
+    it('edits how long each payment stays open, starting from what it is now', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({ openLink: openLink({ paymentExpiresIn: 1800 }), payments: [] });
+      jest.mocked(updateOpenLink).mockResolvedValue(openLink({ paymentExpiresIn: 0, version: 4 }));
+      await mount(<OpenLinkDetail />);
+      await press('button:Edit');
+      expect(byTestID(tree, 'segmented').props.value).toBe('1800');
+      await act(async () => { byLabel(tree, 'segment:0').props.onPress(); });
+      await press('button:Save');
+      expect(updateOpenLink).toHaveBeenCalledWith('test', 'o1', {
+        label: 'Mama Ngozi Store — Shop 12', minAmount: 0, maxAmount: 0, active: true, paymentExpiresIn: 0,
+      }, 3);
+    });
+
+    it('a lifetime set elsewhere that the app does not offer still shows as itself', async () => {
+      jest.mocked(getOpenLink).mockResolvedValue({ openLink: openLink({ paymentExpiresIn: 900 }), payments: [] });
+      jest.mocked(updateOpenLink).mockResolvedValue(openLink({ paymentExpiresIn: 900, version: 4 }));
+      await mount(<OpenLinkDetail />);
+      await press('button:Edit');
+      expect(byTestID(tree, 'segmented').props.value).toBe('900');
+      expect(text(tree)).toContain('15 min');
+      await press('button:Save');
+      expect(jest.mocked(updateOpenLink).mock.calls[0][2]).toMatchObject({ paymentExpiresIn: 900 });
     });
 
     it('is replaced only after she confirms the posters will stop working', async () => {

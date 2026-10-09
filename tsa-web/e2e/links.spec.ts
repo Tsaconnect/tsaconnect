@@ -76,12 +76,14 @@ test('an owner requests a payment, shares the link and cancels it', async ({ pag
   // One create, with an Idempotency-Key, in the mode on screen (live was never tried).
   const creates = api.calls.filter((c) => c.method === 'POST' && c.path === '/api/pay/merchant/links');
   expect(creates).toHaveLength(1);
-  expect(creates[0].body).toEqual({ amount: 500_000, description: 'Balance for LOS-ABV, 12 Oct', customerName: 'Tolu Adeyemi', reference: '', expiresInDays: 7 });
+  // No expiry chosen: none is sent, and the link never expires.
+  expect(creates[0].body).toEqual({ amount: 500_000, description: 'Balance for LOS-ABV, 12 Oct', customerName: 'Tolu Adeyemi', reference: '' });
   expect(creates[0].idempotencyKey).toBeTruthy();
 
   await ready.getByRole('button', { name: 'Done' }).click();
   const row = page.getByRole('row').filter({ hasText: 'Tolu Adeyemi' });
   await expect(row.getByText('Awaiting payment')).toBeVisible();
+  await expect(row.getByText('No expiry')).toBeVisible();
 
   // The link from the list: share it again, or cancel it.
   await row.getByRole('link', { name: 'Balance for LOS-ABV, 12 Oct' }).click();
@@ -144,6 +146,7 @@ test('an owner makes a reusable link for the shop counter, prints its poster, pa
   await expect(form.getByRole('radio', { name: /customer enters the amount/i })).toBeChecked();
   await form.getByLabel('Label').fill('Sky Air — Ikeja ticket desk');
   await form.getByLabel('Minimum (₦, optional)').fill('1,000');
+  await form.getByText('30 min').click();
   await form.getByRole('button', { name: 'Create link' }).click();
 
   const ready = page.getByRole('dialog', { name: 'Your reusable link is ready' });
@@ -152,7 +155,7 @@ test('an owner makes a reusable link for the shop counter, prints its poster, pa
   await expect(ready.getByText(/From ₦1,000.00 to ₦5,000,000.00/)).toBeVisible();
   await expect(ready.getByRole('img', { name: 'QR code for the payment link' })).toBeVisible();
   const create = api.calls.find((c) => c.method === 'POST' && c.path === '/api/pay/merchant/open-links')!;
-  expect(create.body).toEqual({ label: 'Sky Air — Ikeja ticket desk', minAmount: 100_000, maxAmount: 0 });
+  expect(create.body).toEqual({ label: 'Sky Air — Ikeja ticket desk', minAmount: 100_000, maxAmount: 0, paymentExpiresIn: 1800 });
   expect(create.idempotencyKey).toBeTruthy();
 
   // The poster: a page of its own, laid out for A4, printed with the browser's Print.
@@ -194,11 +197,14 @@ test('an owner makes a reusable link for the shop counter, prints its poster, pa
   expect(link.active).toBe(false);
   await drawer.getByRole('button', { name: 'Resume' }).click();
   await expect(drawer.getByRole('button', { name: 'Pause' })).toBeVisible();
+  // Pausing and resuming leave the payment expiry as it was.
+  expect(link.paymentExpiresIn).toBe(1800);
 
   // Edit: a maximum below the minimum is refused on the form; a good one is saved against the current version.
   await drawer.getByRole('button', { name: 'Edit' }).click();
   const edit = page.getByRole('dialog', { name: 'Edit link' });
   await expect(edit.getByLabel('Minimum (₦, optional)')).toHaveValue('1000');
+  await expect(edit.getByRole('radio', { name: '30 min' })).toBeChecked();
   await edit.getByLabel('Maximum (₦, optional)').fill('500');
   await edit.getByRole('button', { name: 'Save' }).click();
   await expect(edit.getByText('The maximum must be at least the minimum.')).toBeVisible();
@@ -208,7 +214,7 @@ test('an owner makes a reusable link for the shop counter, prints its poster, pa
   await edit.getByRole('button', { name: 'Save' }).click();
   await expect(edit).toBeHidden();
   const put = api.calls.filter((c) => c.method === 'PUT').at(-1)!;
-  expect(put.body).toEqual({ label: 'Sky Air — Ikeja desk', minAmount: 100_000, maxAmount: 5_000_000, active: true, expectedVersion: version });
+  expect(put.body).toEqual({ label: 'Sky Air — Ikeja desk', minAmount: 100_000, maxAmount: 5_000_000, paymentExpiresIn: 1800, active: true, expectedVersion: version });
   await expect(page.getByRole('dialog', { name: 'Sky Air — Ikeja desk' }).getByText('From ₦1,000.00 to ₦50,000.00')).toBeVisible();
 
   const oldUrl = link.url;

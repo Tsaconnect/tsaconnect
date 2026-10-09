@@ -159,6 +159,18 @@ it.each([['Sign in', '/login'], ['Create an account', '/signup']] as const)(
   },
 );
 
+it('signed out, a payment that never expires is remembered as such — without asking again', async () => {
+  jest.mocked(getCheckout).mockRejectedValue(httpError(401, 'Please authenticate'));
+  jest.mocked(getPublicPayment).mockResolvedValueOnce({ expiresAt: null } as never);
+  await mount();
+  jest.mocked(getPublicPayment).mockClear();
+  const button = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Sign in')[0];
+  await act(async () => { await button.props.onPress(); });
+  // null is an answer (no expiry), not a read still to come: no second public read.
+  expect(getPublicPayment).not.toHaveBeenCalled();
+  expect(rememberPendingPayment).toHaveBeenCalledWith(ID, { expiresAt: null });
+});
+
 it('a finished payment is forgotten: nothing to come back to after sign-in or KYC', async () => {
   jest.mocked(getCheckout).mockResolvedValue({ ...testCheckout(), status: 'succeeded' } as PayCheckout);
   await mount();

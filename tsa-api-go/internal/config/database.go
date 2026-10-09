@@ -245,6 +245,20 @@ func AutoMigrate() error {
 		return err
 	}
 
+	// A TSA Pay payment expires only when its merchant set an expiry (owner,
+	// 2026-10-09), so expires_at is NULL on one that never does. AutoMigrate
+	// does not relax an existing NOT NULL; this does, and is idempotent.
+	if err := DB.Exec(`ALTER TABLE pay_payments ALTER COLUMN expires_at DROP NOT NULL`).Error; err != nil {
+		return err
+	}
+	// With no default expiry, untried open-link payments (an amount entered,
+	// never paid) are kept, not swept, and the owner's payment list hides
+	// them. This index serves that list without reading them.
+	if err := DB.Exec(`CREATE INDEX IF NOT EXISTS idx_pay_payments_owner_list
+		ON pay_payments (merchant_id, mode, created_at DESC) WHERE NOT (` + models.PayUntriedOpenSQL + `)`).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build idx_pay_payments_owner_list: %v", err)
+	}
+
 	// The 4-column UNIQUE GORM builds from the struct tags does NOT make a
 	// fee rate unique in Postgres: NULLs compare as DISTINCT in a unique index,
 	// so two identical (feature, token, NULL chain, NULL direction) rows both

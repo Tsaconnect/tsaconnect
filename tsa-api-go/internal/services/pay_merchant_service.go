@@ -919,6 +919,12 @@ func (s *PayMerchantService) prepare(ctx context.Context, m *models.PayMerchant,
 	if updated.AccountName != before.AccountName {
 		changes["account_name"] = updated.AccountName // set by the name enquiry
 	}
+	if !sameSettlement(&before, &updated) {
+		// Outstanding payments wait a day before they follow it (payoutCoolOff).
+		now := s.now()
+		updated.PayoutChangedAt = &now
+		changes["payout_changed_at"] = &now
+	}
 	return &payEdit{before: before, updated: updated, changes: changes}, nil
 }
 

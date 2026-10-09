@@ -75,7 +75,8 @@ export type Payment = {
   /** The reusable link a customer paid through (source open), and its label. */
   openLinkId?: string;
   linkLabel?: string;
-  expiresAt: string;
+  /** null: it never expires (the owner set no expiry). */
+  expiresAt: string | null;
   settlementRef?: string;
   failureReason?: string;
   succeededAt?: string;
@@ -125,8 +126,8 @@ export const listLinks = (mode: Mode, p: PaymentFilter, signal?: AbortSignal) =>
 
 export type LinkDays = 1 | 3 | 7;
 
-/** A payment link: `amount` in kobo; a blank reference is made by the server. */
-export type NewLink = { amount: number; description: string; customerName: string; reference: string; expiresInDays: LinkDays };
+/** A payment link: `amount` in kobo; a blank reference is made by the server; no `expiresInDays`, it never expires. */
+export type NewLink = { amount: number; description: string; customerName: string; reference: string; expiresInDays?: LinkDays };
 
 /** One Idempotency-Key per open form, so a double submit or a retry makes one link. */
 export const createLink = (mode: Mode, link: NewLink, idempotencyKey: string) =>
@@ -294,17 +295,22 @@ export type OpenLink = {
   paidCount: number;
   paidTotal: number;
   receivedTotal: number;
+  /** Seconds each payment started from it stays open; 0 (or left out by an older API): they never expire. */
+  paymentExpiresIn?: number;
   createdAt: string;
 };
 
-export type NewOpenLink = { label: string; minAmount: number; maxAmount: number };
+/** `paymentExpiresIn`: 0 means payments never expire; else 900 to 86400 seconds. Left out of a change, it stays as it is. */
+export type NewOpenLink = { label: string; minAmount: number; maxAmount: number; paymentExpiresIn?: number };
 
-/** PUT /open-links/:id replaces every setting, so each change sends them all. */
+/** PUT /open-links/:id replaces every setting (a left-out paymentExpiresIn is kept), so each change sends them all. */
 export type OpenLinkChange = NewOpenLink & { active: boolean; expectedVersion: number };
 
-/** The settings a change starts from: what the link has now. */
+/** The settings a change starts from: what the link has now (a payment expiry an older API didn't send is left alone). */
 export const openLinkChange = (l: OpenLink): OpenLinkChange => ({
-  label: l.label, minAmount: l.minAmount, maxAmount: l.maxAmount, active: l.active, expectedVersion: l.version,
+  label: l.label, minAmount: l.minAmount, maxAmount: l.maxAmount,
+  ...(l.paymentExpiresIn !== undefined ? { paymentExpiresIn: l.paymentExpiresIn } : {}),
+  active: l.active, expectedVersion: l.version,
 });
 
 /** Like a payment link, one Idempotency-Key per request body. */

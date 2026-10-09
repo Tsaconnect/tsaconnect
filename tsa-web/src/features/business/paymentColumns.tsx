@@ -94,7 +94,7 @@ export const paymentColumns: PaymentColumn[] = [
 ];
 
 /** Until a link is paid or closed, when it stops working; after that, nothing to say. */
-const closesAt = (p: Payment) => (p.status === 'pending' ? dateTime(p.expiresAt) : '—');
+const closesAt = (p: Payment) => (p.status !== 'pending' ? '—' : p.expiresAt ? dateTime(p.expiresAt) : 'No expiry');
 
 export const linkColumns: PaymentColumn[] = [
   {

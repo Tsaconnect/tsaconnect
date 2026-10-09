@@ -10,7 +10,7 @@ import { rememberPendingPayment } from '@/utils/postAuthRoute';
  */
 export async function verifyThenReturnToPayment(
   router: { push(href: Href): void },
-  payment: { id: string; expiresAt?: string },
+  payment: { id: string; expiresAt?: string | null },
 ): Promise<void> {
   await rememberPendingPayment(payment.id, { expiresAt: payment.expiresAt });
   router.push(`${KYC_ROUTE}?returnTo=pay` as Href);

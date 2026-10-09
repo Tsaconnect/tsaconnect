@@ -56,8 +56,8 @@ const sentence = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 /** How long a tap on Sign in / Create an account waits for the payment's expiry. */
 const EXPIRY_WAIT_MS = 2000;
 
-/** The payment's expiry from the public read, or undefined if it doesn't answer in time. */
-async function publicExpiry(id: string): Promise<string | undefined> {
+/** The payment's expiry from the public read (null: it never expires), or undefined if it doesn't answer in time. */
+async function publicExpiry(id: string): Promise<string | null | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), EXPIRY_WAIT_MS);
   try {
@@ -152,7 +152,8 @@ export default function PayScreen() {
   // Signed out, she may be a new customer: signing up, verifying her email and
   // passing KYC can take days. The public read says until when this payment is
   // worth returning to, so it is remembered that long, not a flat half hour.
-  const [expiresAt, setExpiresAt] = useState<string | undefined>();
+  // undefined until the read lands; null once it says the payment never expires.
+  const [expiresAt, setExpiresAt] = useState<string | null | undefined>();
   useEffect(() => {
     if (!needsSignIn || typeof id !== 'string') return;
     getPublicPayment(id).then((p) => setExpiresAt(p.expiresAt), () => {});
@@ -194,7 +195,7 @@ export default function PayScreen() {
   const leaveToAuth = async (to: '/login' | '/signup') => {
     if (typeof id === 'string') {
       // Tapped before the public read landed: give it a moment rather than fall back to half an hour.
-      const until = expiresAt ?? (await publicExpiry(id));
+      const until = expiresAt !== undefined ? expiresAt : await publicExpiry(id);
       await rememberPendingPayment(id, { expiresAt: until });
     }
     router.replace(to);

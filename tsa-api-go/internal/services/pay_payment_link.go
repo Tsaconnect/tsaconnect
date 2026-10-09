@@ -16,7 +16,7 @@ import (
 
 // CreatePayLinkInput is an owner asking a customer to pay: how much, what it
 // is for, who it is for, their own reference if they keep one, and how many
-// days the link stays open.
+// days the link stays open (0: until it is paid or cancelled).
 type CreatePayLinkInput struct {
 	AmountKobo    int64  `json:"amount"`
 	Description   string `json:"description"`
@@ -26,16 +26,15 @@ type CreatePayLinkInput struct {
 }
 
 const (
-	payLinkDefaultDays        = 7
+	payLinkMaxDays            = 7
 	payLinkMaxCustomerNameLen = 100
 	payLinkReferencePrefix    = "link_"
 	payReferenceRandomChars   = 12
 )
 
-// payLinkDays are how long an owner may keep a link open. A link waits on a
-// person reading a message, not on a checkout page they are already looking
-// at, so it lives for days where an API payment lives for minutes.
-var payLinkDays = []int{1, 3, 7}
+// payLinkDays are how long an owner may choose to keep a link open, if they
+// choose at all: a link with none stays open until it is paid or cancelled.
+var payLinkDays = []int{1, 3, payLinkMaxDays}
 
 // CreateLink makes a payment link: a payment the owner creates by hand and
 // sends to a customer, rather than one their own server creates with an API
@@ -44,7 +43,8 @@ var payLinkDays = []int{1, 3, 7}
 // rules that differ for a person typing it in:
 //   - the description is required, because it is what the payer sees;
 //   - a customer name may be given (it is shown to the payer too);
-//   - it stays open 1, 3 or 7 days (default 7);
+//   - it stays open 1, 3 or 7 days if the owner chose, else until it is paid
+//     or cancelled;
 //   - a blank reference is made up for them, and one they already used is
 //     refused (ErrPayLinkReferenceTaken), never returned as a retry;
 //   - there is no return URL: a link finishes on the TSA receipt.
@@ -65,11 +65,8 @@ func (s *PayPaymentService) CreateLink(ctx context.Context, m *models.PayMerchan
 		return nil, payInvalid("customerName must not contain control or format characters", "The customer's name can't contain hidden or control characters")
 	}
 	days := in.ExpiresInDays
-	if days == 0 {
-		days = payLinkDefaultDays
-	}
-	if !slices.Contains(payLinkDays, days) {
-		return nil, payInvalid("expiresInDays must be 1, 3 or 7", "A link can stay open for 1, 3 or 7 days")
+	if days != 0 && !slices.Contains(payLinkDays, days) {
+		return nil, payInvalid("expiresInDays must be 1, 3 or 7", "A link can stay open for 1, 3 or 7 days, or until it is paid")
 	}
 	var p *models.PayPayment
 	create := func(reference string) error {
@@ -80,7 +77,7 @@ func (s *PayPaymentService) CreateLink(ctx context.Context, m *models.PayMerchan
 			Reference:        reference,
 			Description:      description,
 			ExpiresInSeconds: days * 24 * 60 * 60,
-		}, payCreateOptions{source: models.PaySourceLink, customerName: customerName, maxExpirySeconds: payLinkDefaultDays * 24 * 60 * 60})
+		}, payCreateOptions{source: models.PaySourceLink, customerName: customerName, maxExpirySeconds: payLinkMaxDays * 24 * 60 * 60})
 		return err
 	}
 	if reference := strings.TrimSpace(in.Reference); reference != "" {
