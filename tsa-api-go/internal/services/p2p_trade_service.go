@@ -1293,9 +1293,10 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	}
 
 	// Below the buy-ad branch on purpose. From here down `buyerID` really is
-	// the buyer: they are about to send fiat. On the branch above the opener is
-	// depositing crypto to SELL it, and gating that would trap a balance they
-	// already hold.
+	// the buyer: they are about to send fiat, so the stricter money-in gate
+	// (verified AND a legal name) applies. The buy-ad opener above only needs
+	// to be verified (openTradeWithDeposit); they have not deposited yet when
+	// that gate runs, so refusing traps nothing.
 	if err := requireVerifiedForMoneyIn(ctx, s.db, buyerID); err != nil {
 		return nil, nil, err
 	}
@@ -1489,6 +1490,14 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	}
 	if ad.SellerAddress == "" || !common.IsHexAddress(ad.SellerAddress) {
 		return nil, nil, fmt.Errorf("%w: buy-ad missing merchant wallet", ErrInvalidTransition)
+	}
+	// Non-PM buy-ads: anyone may post one now, so the user selling into it must
+	// be verified. Before any tx build or capacity mutation. PM buy-ads keep
+	// their existing behaviour.
+	if ad.PMID == nil {
+		if err := requireKYCVerified(ctx, s.db, openerID); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// PM buy-ad: the PM automation will pay the user fiat after release, so a

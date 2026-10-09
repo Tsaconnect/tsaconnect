@@ -156,7 +156,7 @@ func TestOpenTradeWithDeposit_PMBuyAd_MissingPayout_Errors(t *testing.T) {
 func TestOpenTradeWithDeposit_NonPMBuyAd_PayoutOptional(t *testing.T) {
 	svc, _, _, _, adID, _, db := buyAdFixture(t) // pm_id stays NULL
 
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 

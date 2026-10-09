@@ -312,23 +312,23 @@ func TestCreateSellIntent_IsNotGatedOnVerification(t *testing.T) {
 	// every other sell test in this package hits too.
 }
 
-// The buy-ad (JIT-funded) open is the opener DEPOSITING crypto to sell it. It
-// reaches the same OpenTrade entry point as the buyer take, and must not be
-// caught by the gate.
-func TestOpenTrade_BuyAdDepositorIsNotGated(t *testing.T) {
+// The buy-ad (JIT-funded) opener sells crypto into someone's ad. Owner decision
+// 2026-10-09: that user must be KYC-verified too. They have not deposited yet
+// when the gate runs, so refusing traps nothing.
+func TestOpenTrade_BuyAdOpenerMustBeVerified(t *testing.T) {
 	svc, _, _, _, adID, _, db := buyAdFixture(t)
-	// The opener deposits crypto to sell it; they are unverified on purpose.
-	openerID := seedUserAt(t, db, uuid.New(), models.VerificationStatusPending)
-	openerPm := seedPaymentMethod(t, db, openerID, "NGN")
-
-	_, _, err := svc.OpenTrade(context.Background(), adID, openerID,
-		"0x000000000000000000000000000000000000beef",
-		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: openerPm})
-	if errors.Is(err, ErrKYCVerificationRequired) {
-		t.Fatal("the JIT sell open was refused — that path moves money OUT and must not be gated")
+	pending := seedUserAt(t, db, uuid.New(), models.VerificationStatusPending)
+	pm := seedPaymentMethod(t, db, pending, "NGN")
+	_, _, err := svc.OpenTrade(context.Background(), adID, pending, "0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pm})
+	if !errors.Is(err, ErrKYCVerificationRequired) {
+		t.Fatalf("unverified buy-ad opener must be refused: %v", err)
 	}
-	if err != nil {
-		t.Fatalf("OpenTrade(buy-ad): %v", err)
+	ok := seedVerifiedUser(t, db)
+	pm2 := seedPaymentMethod(t, db, ok, "NGN")
+	if _, _, err := svc.OpenTrade(context.Background(), adID, ok, "0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: pm2}); err != nil {
+		t.Fatal(err)
 	}
 }
 

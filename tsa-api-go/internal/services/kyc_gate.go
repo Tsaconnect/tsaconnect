@@ -98,6 +98,21 @@ func requireVerifiedForMoneyIn(ctx context.Context, db *gorm.DB, userID uuid.UUI
 	return nil
 }
 
+// requireKYCVerified refuses a user whose Didit verification has not passed.
+// Status only: unlike requireVerifiedForMoneyIn it needs no legal name, because
+// no inbound fiat credit is matched against this user (a buy-ad opener sells
+// crypto and is paid by the ad's poster).
+func requireKYCVerified(ctx context.Context, db *gorm.DB, userID uuid.UUID) error {
+	verified, err := IsKYCVerified(ctx, db, userID)
+	if err != nil {
+		return err
+	}
+	if !verified {
+		return ErrKYCVerificationRequired
+	}
+	return nil
+}
+
 // The machine codes every money-in refusal carries, on every gated path. The
 // app routes KYCVerificationRequiredCode to the verification flow and shows
 // KYCLegalNameMissingCode as a contact-support message, so a second spelling

@@ -1402,7 +1402,7 @@ func buyAdFixture(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, merchant
 
 func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
 	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
-	userID := uuid.New() // the user selling crypto
+	userID := seedVerifiedUser(t, db) // the user selling crypto
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
@@ -1459,7 +1459,7 @@ func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
 // and fiat is derived from it (50 USDT × 1300 = 65000 NGN).
 func TestOpenBuyAdTrade_TokenAmountIsAuthoritative(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
@@ -1490,8 +1490,8 @@ func TestOpenBuyAdTrade_RejectsMerchantSelfTake(t *testing.T) {
 }
 
 func TestOpenBuyAdTrade_RejectsExceedingCapacity(t *testing.T) {
-	svc, _, _, _, adID, pmID, _ := buyAdFixture(t)
-	userID := uuid.New()
+	svc, _, _, _, adID, pmID, db := buyAdFixture(t)
+	userID := seedVerifiedUser(t, db)
 	// 100 USDT @ 1300 = 130000 NGN cap; ask for way more fiat than capacity.
 	_, _, err := svc.OpenTrade(context.Background(), adID, userID, "0x000000000000000000000000000000000000beef",
 		OpenTradeParams{FiatAmount: "1000000", PaymentMethodID: pmID})
@@ -1502,7 +1502,7 @@ func TestOpenBuyAdTrade_RejectsExceedingCapacity(t *testing.T) {
 
 func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1538,7 +1538,7 @@ func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 
 func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 	svc, esc, merchantID, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1661,7 +1661,7 @@ func TestPrepareRelease_UnconfiguredChain_FailsLoud(t *testing.T) {
 // regressions where a refactoring accidentally credits remaining on release.
 func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
@@ -1722,7 +1722,7 @@ func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 
 func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1755,7 +1755,7 @@ func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
 
 func TestConfirmCancelBuyAdTrade_RejectsPoolFlagMismatch(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1805,7 +1805,7 @@ func TestValidateCreateAd_RejectsNonNumeric(t *testing.T) {
 // flipped to `paid`.
 func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 	svc, _, merchantID, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
@@ -1823,7 +1823,7 @@ func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 // same opener on the same ad is rejected (would otherwise double-debit capacity).
 func TestOpenTrade_RejectsDuplicateActiveTrade(t *testing.T) {
 	svc, _, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	addr := "0x000000000000000000000000000000000000beef"
 	if _, _, err := svc.OpenTrade(context.Background(), adID, userID, addr,
@@ -1902,7 +1902,7 @@ func TestExpressMatch_RanksAndFilters(t *testing.T) {
 // the count/URL validation rejects bad input.
 func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 	svc, _, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
@@ -1938,7 +1938,7 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 
 func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) {
 	svc, esc, merchantID, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -2032,7 +2032,7 @@ func seededBuyAdChainTrade(status OnChainP2PTradeStatus) *OnChainP2PTrade {
 // has elapsed is reclaimed by the reconciler — cancelled + ad capacity restored.
 func TestReconcile_OrphanOpen_ReclaimsCapacity(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",

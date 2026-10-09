@@ -747,25 +747,27 @@ func TestCreateAd_ReturnsTypedDataAndPending(t *testing.T) {
 	}
 }
 
-// TestCreateAd_RejectsNonMerchant: only merchant/admin tiers can publish
-// ads. A regular 'user' role gets 403 before the request body is even
-// validated, so any downstream resource (payment method, on-chain balance
-// check) is untouched.
-func TestCreateAd_RejectsNonMerchant(t *testing.T) {
+// TestCreateAd_AllowsVerifiedNonMerchant: any KYC-verified user may post an
+// ad off the pool chain (owner decision 2026-10-09).
+func TestCreateAd_AllowsVerifiedNonMerchant(t *testing.T) {
 	r := newRig(t)
 	r.user.Role = models.RoleUser
 	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
-	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
-	body := makeCreateAdBody(pmID)
+	pm := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeCreateAdBody(pm)
 	body["sellerAddress"] = r.user.WalletAddress
-	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body); rec.Code != http.StatusCreated {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
-	decoded := decode(t, rec)
-	msg, _ := decoded["message"].(string)
-	if !strings.Contains(strings.ToLower(msg), "merchant") {
-		t.Errorf("expected 'merchant' in error message, got %q", msg)
+}
+
+// Every /api/p2p/* KYC refusal carries the machine code the app routes on.
+func TestP2PRequire_UnverifiedGetsKYCCode(t *testing.T) {
+	r := newRig(t)
+	r.user.VerificationStatus = "pending"
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", map[string]any{})
+	if rec.Code != http.StatusForbidden || decode(t, rec)["code"] != "kyc_verification_required" {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1176,6 +1178,10 @@ func TestOpenBuyAdTrade_DepositPath(t *testing.T) {
 	// On a buy-ad, the PM must be owned by the TAKER (opener), who receives the
 	// fiat — not the merchant's allowlisted PM. Seed one for the opener.
 	openerPm := seedPaymentMethod(t, r.db, opener.ID, "NGN")
+	// The service re-reads verification from the users table (the gate).
+	if err := r.db.Exec("INSERT INTO users (id, verification_status) VALUES (?, 'verified')", opener.ID).Error; err != nil {
+		t.Fatal(err)
+	}
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads/"+adID+"/trades", map[string]any{
 		"fiatAmount":      "1300",
 		"paymentMethodId": openerPm.String(),

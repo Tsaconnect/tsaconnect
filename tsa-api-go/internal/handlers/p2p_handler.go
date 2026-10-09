@@ -125,6 +125,7 @@ func (h *P2PHandler) require(c *gin.Context) (*models.User, bool) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Identity verification required for P2P",
+			"code":    services.KYCVerificationRequiredCode,
 		})
 		return nil, false
 	}
@@ -739,15 +740,11 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	// Only merchants (and admin tiers, who are implicitly trusted) may
-	// publish ads. The pool-model rewrite makes ad creation cheap (off-chain
-	// voucher signing, no per-ad gas), but we still want a verified
-	// counterparty behind every ad to keep the marketplace clean of spam /
-	// unverified sellers. Buyer-side actions (open trade, mark paid, dispute)
-	// stay open to all authenticated users. An active LP is admitted only on
-	// the pool chain, for its stock ad; never for an ordinary ad (plan B I1).
-	lpOnPool := h.trade.IsPoolChain(req.ChainID) && h.trade.IsActiveLP(c.Request.Context(), user.ID)
-	if user.Role != models.RoleMerchant && !hasAdminPrivilege(c, user) && !lpOnPool {
+	// Any KYC-verified user (require() above) may post an ad. The TSA Liquidity
+	// pool chain keeps its stricter rule: merchants, admin tiers, and an active
+	// LP (for its stock ad) only.
+	if h.trade.IsPoolChain(req.ChainID) && user.Role != models.RoleMerchant &&
+		!hasAdminPrivilege(c, user) && !h.trade.IsActiveLP(c.Request.Context(), user.ID) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Merchant account required to publish P2P ads.",
