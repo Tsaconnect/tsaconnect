@@ -37,20 +37,20 @@ describe('refund money', () => {
 });
 
 describe('refund wording', () => {
-  const r = (status: Refund['status']) => ({ amount: '12.50', status } as Refund);
+  const r = (status: Refund['status']) => ({ amount: '12.50', status, tokenSymbol: status === 'requested' ? undefined : 'USDT' } as Refund);
   it('a refund still moving is open', () => {
     expect(['requested', 'submitted', 'needs_review'].every((s) => isOpenRefund(s as Refund['status']))).toBe(true);
     expect(['confirmed', 'failed', 'cancelled'].some((s) => isOpenRefund(s as Refund['status']))).toBe(false);
   });
   it('tells the merchant what an open refund waits for', () => {
     expect(waitingNote(r('requested'))).toBe('A refund of 12.50 USD is waiting for you to approve and send it in the TSA Connect app.');
-    expect(waitingNote(r('submitted'))).toBe('A refund of 12.50 USD is on its way — waiting for the network to confirm it.');
-    expect(waitingNote(r('needs_review'))).toBe('A refund of 12.50 USD is being checked by TSA Connect.');
+    expect(waitingNote(r('submitted'))).toBe('A refund of 12.50 USDT is on its way — waiting for the network to confirm it.');
+    expect(waitingNote(r('needs_review'))).toBe('A refund of 12.50 USDT is being checked by TSA Connect.');
   });
   // Plans review I6: a send the network refused says why, and that it is retried.
   it('a refund the network refused says why', () => {
     expect(waitingNote({ ...r('submitted'), lastBroadcastError: 'Not enough gas in your wallet' })).toBe(
-      "A refund of 12.50 USD hasn't reached the network yet. Couldn't broadcast: Not enough gas in your wallet — top up gas; we retry automatically.");
-    expect(waitingNote({ ...r('submitted'), lastBroadcastError: '' })).toBe('A refund of 12.50 USD is on its way — waiting for the network to confirm it.');
+      "A refund of 12.50 USDT hasn't reached the network yet. Couldn't broadcast: Not enough gas in your wallet — top up gas; we retry automatically.");
+    expect(waitingNote({ ...r('submitted'), lastBroadcastError: '' })).toBe('A refund of 12.50 USDT is on its way — waiting for the network to confirm it.');
   });
 });

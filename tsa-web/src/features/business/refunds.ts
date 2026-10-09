@@ -53,7 +53,7 @@ export const broadcastNote = (reason: string) => `Couldn't broadcast: ${reason} 
 
 /** What an open refund is waiting for, in one line. */
 export function waitingNote(r: Refund): string {
-  const what = `A refund of ${r.amount} USD`;
+  const what = `A refund of ${refundAmountLabel(r)}`;
   if (r.status === 'submitted') {
     return r.lastBroadcastError
       ? `${what} hasn't reached the network yet. ${broadcastNote(r.lastBroadcastError)}`

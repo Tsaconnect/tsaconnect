@@ -96,27 +96,27 @@ export function RefundsList({ mode, from, to }: RefundsListProps) {
               {data.refunds.map((r) => {
                 const txUrl = r.txHash && r.chainId ? txExplorerUrl(r.txHash, r.chainId) : undefined;
                 return (
-                <TR key={r.id}>
-                  <TD className="whitespace-nowrap text-text-secondary">{dateTime(r.createdAt)}</TD>
-                  <TD>
-                    <Link to={`/business/${mode}/payments/${r.paymentId}`} className="font-mono text-[13px] font-semibold text-accent-strong hover:underline">
-                      {r.paymentCode || r.paymentId.slice(0, 8)}
-                    </Link>
-                    {r.description && <p className="max-w-[240px] truncate text-caption text-text-secondary">{r.description}</p>}
-                  </TD>
-                  <TD>{r.customerName || '—'}</TD>
-                  <TD className="whitespace-nowrap text-right font-semibold tabular">{refundAmountLabel(r)}</TD>
-                  <TD className="whitespace-nowrap">{r.chainId ? `${r.tokenSymbol ?? ''} on ${chainLabelById(r.chainId)}`.trim() : '—'}</TD>
-                  <TD>
-                    <RefundStatusPill status={r.status} />
-                    {r.lastBroadcastError && <p className="mt-1 max-w-[220px] text-caption text-danger-strong">{r.lastBroadcastError}</p>}
-                    {txUrl && (
-                      <a href={txUrl} target="_blank" rel="noopener noreferrer" className="mt-1 block text-caption font-semibold text-accent-strong hover:underline">
-                        View transaction
-                      </a>
-                    )}
-                  </TD>
-                </TR>
+                  <TR key={r.id}>
+                    <TD className="whitespace-nowrap text-text-secondary">{dateTime(r.createdAt)}</TD>
+                    <TD>
+                      <Link to={`/business/${mode}/payments/${r.paymentId}`} className="font-mono text-[13px] font-semibold text-accent-strong hover:underline">
+                        {r.paymentCode || r.paymentId.slice(0, 8)}
+                      </Link>
+                      {r.description && <p className="max-w-[240px] truncate text-caption text-text-secondary">{r.description}</p>}
+                    </TD>
+                    <TD>{r.customerName || '—'}</TD>
+                    <TD className="whitespace-nowrap text-right font-semibold tabular">{refundAmountLabel(r)}</TD>
+                    <TD className="whitespace-nowrap">{r.chainId ? `${r.tokenSymbol ?? ''} on ${chainLabelById(r.chainId)}`.trim() : '—'}</TD>
+                    <TD>
+                      <RefundStatusPill status={r.status} />
+                      {r.lastBroadcastError && <p className="mt-1 max-w-[220px] text-caption text-danger-strong">{r.lastBroadcastError}</p>}
+                      {txUrl && (
+                        <a href={txUrl} target="_blank" rel="noopener noreferrer" className="mt-1 block text-caption font-semibold text-accent-strong hover:underline">
+                          View transaction
+                        </a>
+                      )}
+                    </TD>
+                  </TR>
                 );
               })}
             </TBody>
