@@ -133,6 +133,12 @@ export default function MerchantLayout() {
                 }}
             />
             <Stack.Screen
+                name="refunds/[id]"
+                options={{
+                    title: 'Refund',
+                }}
+            />
+            <Stack.Screen
                 name="activate-pm"
                 options={{
                     title: 'Activate Payment Merchant',

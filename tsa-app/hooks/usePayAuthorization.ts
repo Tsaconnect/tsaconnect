@@ -10,12 +10,15 @@ import { useCallback, useState } from 'react';
 export type AuthorizationProps = {
   visible: boolean;
   title: string;
+  /** What is being authorized, in words (the refund screen names amount, token, network and wallet). */
+  description?: string;
   onAuthorized(): void;
   onCancel(): void;
 };
 
 export function usePayAuthorization<T>(opts: {
   title: (pending: T | null) => string;
+  description?: (pending: T | null) => string | undefined;
   onAuthorized: (pending: T) => void;
 }): { request(pending: T): void; authorization: AuthorizationProps } {
   const [visible, setVisible] = useState(false);
@@ -41,6 +44,12 @@ export function usePayAuthorization<T>(opts: {
 
   return {
     request,
-    authorization: { visible, title: opts.title(pending?.value ?? null), onAuthorized, onCancel },
+    authorization: {
+      visible,
+      title: opts.title(pending?.value ?? null),
+      description: opts.description?.(pending?.value ?? null),
+      onAuthorized,
+      onCancel,
+    },
   };
 }
