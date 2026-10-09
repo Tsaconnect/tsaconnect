@@ -873,6 +873,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.POST("/trades/:id/rate", idem, p2p.RateTrade)
 		}
 
+		// TSA Liquidity (spec §15): the caller's own LP state. Registered only
+		// when a pool chain exists (the handlers assume a wired reader).
+		// Signed-in users only; no KYC gate, so a non-LP gets status "none".
+		if p2p.HasLiquidity() {
+			liq := api.Group("/liquidity")
+			liq.Use(auth)
+			liq.GET("/me", p2p.GetLiquidityMe)
+			liq.GET("/me/activity", p2p.ListLiquidityActivity)
+		}
+
 		// Admin dispute resolution — funds-moving, audit-writing. AdminAuth
 		// admits merchants/support too, so we layer RequireP2PAdmin on top
 		// to restrict to admin / super_admin.

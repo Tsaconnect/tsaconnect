@@ -1814,6 +1814,15 @@ func main() {
 	poolGates := buildPoolChain(cfg, blockchainService, p2pEscrowRegistry, releaseSigner, poolTreasury)
 	registerPoolJobs(scheduler, poolGates)
 
+	// TSA Liquidity plan B: LP onboarding, the /liquidity reads and the voucher
+	// renewal job, live only with a pool chain (prod stays dormant until the
+	// BSC mainnet row is filled). bankDirectory is an interface value (nil when
+	// dormant, never a typed nil); pmOnboarding is its final value here — the
+	// central-inbound block above may have built it.
+	liquidity := wireLiquidity(config.DB, pmSvc, p2pEscrowRegistry, p2pTradeSvc, poolGates,
+		blockchainService.TokenAddressForChainID, poolChainName(cfg), pmOnboarding, bankDirectory)
+	attachLiquidity(liquidity, p2pHandler, pmh, pmOnboarding, p2pTradeSvc, scheduler)
+
 	if treasuryRates == nil { // Paycrest off: Flutterwave mid against the FX feed
 		treasuryRates = wireTreasuryMarketRate(itService, nil, cfg.RampTreasuryRateTolBps)
 	}
