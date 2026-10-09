@@ -91,6 +91,19 @@ describe('refunds in the payment drawer', () => {
     expect(await screen.findByText('Test refund done')).toBeInTheDocument();
   });
 
+  it('reads the payments list again after a refund, so its refund status refreshes', async () => {
+    const user = userEvent.setup();
+    const testPayment: Payment = { ...payment, mode: 'test' };
+    const f = stub(testPayment, refunds({ cap: '56.90', remaining: '56.90' }), refund({ mode: 'test', status: 'confirmed', chainId: undefined, txHash: undefined, tokenSymbol: undefined }));
+    const listCalls = () => f.mock.calls.filter(([u]) => new URL(u, 'http://x').pathname === '/api/pay/merchant/payments').length;
+    mountAt(`/business/test/payments/${payment.id}`);
+    await user.click(await within(await screen.findByRole('dialog')).findByRole('button', { name: 'Simulate refund' }));
+    const before = listCalls();
+    expect(before).toBeGreaterThan(0);
+    await user.click(within(await screen.findByRole('dialog', { name: 'Refund this payment' })).getByRole('button', { name: 'Simulate refund' }));
+    await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
+  });
+
   it('a payment that can\'t be refunded says why and offers no button', async () => {
     stub(payment, refunds({ refundable: false, notRefundableReason: "Refunds aren't available for this payment" }));
     mountAt(`/business/live/payments/${payment.id}`);

@@ -86,6 +86,7 @@ function RefundDialog({ payment: p, mode, data, onClose }: { payment: Payment; m
       void queryClient.invalidateQueries({ queryKey: queryKeys.paymentRefunds(mode, p.id) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.payment(mode, p.id) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.refunds(mode) });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.list('payments', mode) });
     },
   });
 
