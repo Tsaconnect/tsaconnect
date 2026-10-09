@@ -155,7 +155,7 @@ func TestLPWithdraw_AllowedWhilePoolClosedAndLPPaused(t *testing.T) {
 	}
 }
 
-func TestChainsFor_PoolChainOnlyForActiveLP(t *testing.T) {
+func TestChainsFor_PoolChainForLPNotOrdinaryUser(t *testing.T) {
 	r := newPoolRig(t)
 	ctx := context.Background()
 	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, lpWallet)
@@ -173,6 +173,38 @@ func TestChainsFor_PoolChainOnlyForActiveLP(t *testing.T) {
 	c, ok := has(r.svc.ChainsFor(ctx, lp.UserID))
 	if !ok || c.Purpose != "pool" || c.Decimals["USDT"] != 18 {
 		t.Fatalf("LP chains = %+v", c)
+	}
+}
+
+// Review I1: exits are never gated, so a paused (or not yet active) LP is
+// still offered the pool chain to read and withdraw its balance. New money
+// stays active-only (TestPoolChain_NonLPRefused).
+func TestChainsFor_PoolChainForAnyLPBoundToIt(t *testing.T) {
+	r := newPoolRig(t)
+	ctx := context.Background()
+	onPool := func(cs []P2PChainInfo) bool {
+		for _, c := range cs {
+			if c.ChainID == poolTestChain && c.Purpose == config.P2PPurposePool {
+				return true
+			}
+		}
+		return false
+	}
+	for _, status := range []string{models.PaymentMerchantStatusPaused, models.PaymentMerchantStatusApproved, models.PaymentMerchantStatusRejected} {
+		lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, status, lpWallet)
+		if !onPool(r.svc.ChainsFor(ctx, lp.UserID)) {
+			t.Errorf("%s LP is not offered the pool chain to withdraw from", status)
+		}
+	}
+	merchant := seedPMRow(t, r.db, models.PaymentMerchantKindMerchant, models.PaymentMerchantStatusPaused, lpWallet)
+	if onPool(r.svc.ChainsFor(ctx, merchant.UserID)) {
+		t.Error("a payment merchant is offered the pool chain")
+	}
+	elsewhere := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusPaused, lpWallet)
+	other := int64(56)
+	r.db.Model(elsewhere).Update("pool_chain_id", other)
+	if onPool(r.svc.ChainsFor(ctx, elsewhere.UserID)) {
+		t.Error("an LP bound to another chain is offered this pool chain")
 	}
 }
 

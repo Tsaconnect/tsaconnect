@@ -249,7 +249,7 @@ func unsignedTxJSON(raw []byte) any {
 // ─── Chains ────────────────────────────────────────────────────────────────
 
 // GetChains returns the P2P-enabled chains + their tradeable assets, plus the
-// pool chain for an active liquidity provider.
+// pool chain for a liquidity provider bound to it.
 func (h *P2PHandler) GetChains(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
@@ -257,7 +257,7 @@ func (h *P2PHandler) GetChains(c *gin.Context) {
 	}
 	chains := []services.P2PChainInfo{}
 	if h.trade != nil {
-		// The pool chain is added for an active LP only (plan B P10).
+		// The pool chain is added for an LP bound to it (plan B P10, review I1).
 		if cs := h.trade.ChainsFor(c.Request.Context(), user.ID); cs != nil {
 			chains = cs
 		}

@@ -194,10 +194,12 @@ func (s *P2PTradeService) createPoolAd(ctx context.Context, lp *models.PaymentMe
 	return &CreateAdResult{Ad: ad, TypedData: s.buildVoucherTypedData(voucher, escrow.ContractAddress(), domainChainID, version)}, nil
 }
 
-// closeSupersededStockAds runs when a stock ad is signed: every other live
+// closeSupersededStockAds runs when a stock ad is signed: every OLDER live
 // stock ad of the LP on the same chain and token with no live trade is closed,
 // so the LP has one signed voucher in use. One still carrying a trade stays
-// until that trade ends.
+// until that trade ends. A newer one is never touched (review M3): with two
+// drafts signed at once, the newer survives whichever order the signs land in,
+// instead of each closing the other.
 func (s *P2PTradeService) closeSupersededStockAds(ctx context.Context, fresh *models.P2PAd) {
 	if fresh.PMID == nil {
 		return
@@ -208,7 +210,7 @@ func (s *P2PTradeService) closeSupersededStockAds(ctx context.Context, fresh *mo
 		return
 	}
 	for i := range ads {
-		if ads[i].ID == fresh.ID {
+		if !stockAdBefore(&ads[i], fresh) {
 			continue
 		}
 		n, err := s.liveTradeCount(ctx, ads[i].ID)
@@ -223,4 +225,13 @@ func (s *P2PTradeService) closeSupersededStockAds(ctx context.Context, fresh *mo
 			log.Printf("[p2p pool] superseded stock ad %s not closed: %v", ads[i].ID, err)
 		}
 	}
+}
+
+// stockAdBefore orders stock ads by (created_at, id), so a tie still has one
+// newest.
+func stockAdBefore(a, b *models.P2PAd) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID.String() < b.ID.String()
 }

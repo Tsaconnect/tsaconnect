@@ -200,6 +200,9 @@ type P2PTradeService struct {
 	// poolGate answers "is the TSA Liquidity pool open?" for the LP route
 	// (plan B P6, P14). Nil reads closed.
 	poolGate PoolOpener
+	// balanceMoved is told of every confirmed deposit and withdrawal (the LP
+	// balance cache, review I4); nil when liquidity is dormant.
+	balanceMoved func(chainID int64, wallet, token string)
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -4015,6 +4018,7 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 		"txHash":  txHash,
 		"chainId": chainID,
 	})
+	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
 	s.emit(events.P2PDepositConfirmed, sellerID, "Deposit confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil
@@ -4094,6 +4098,7 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 		"txHash":  txHash,
 		"chainId": chainID,
 	})
+	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
 	s.emit(events.P2PWithdrawConfirmed, sellerID, "Withdrawal confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil

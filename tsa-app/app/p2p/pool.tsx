@@ -61,6 +61,7 @@ import {
 } from '../../services/wallet';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { reclaimChainFor } from '@/utils/reclaimChain';
 import {
   AccentCard,
   AmountInput,
@@ -83,7 +84,6 @@ type Token = typeof TOKENS[number];
 // Sonic chain IDs (mainnet + testnet) — the screen defaults to Sonic so existing
 // single-chain behavior is preserved when the chains endpoint is unreachable or
 // hasn't loaded yet.
-const SONIC_CHAIN_IDS = [146, 14601];
 
 const P2PPoolScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
@@ -135,24 +135,20 @@ const P2PPoolScreen: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // listAll keeps the pool chain (sent only to an active LP) so an LP can
-      // reclaim there; it also records each chain's token decimals.
+      // listAll keeps the pool chain (sent to an LP bound to it, paused too)
+      // so an LP can reclaim there; it also records each chain's token decimals.
       const res = await chainsApi.listAll();
       if (cancelled || !res.success || !res.data || res.data.length === 0) return;
       const list = res.data;
       setChains(list);
-      // Prefer Sonic; otherwise fall back to the first enabled chain so the
-      // selected chain is always one the backend actually serves.
-      setSelectedChainId((prev) => {
-        if (list.some((c) => c.chainId === prev)) return prev;
-        const sonic = list.find((c) => SONIC_CHAIN_IDS.includes(c.chainId));
-        return (sonic ?? list[0]).chainId;
-      });
+      // Keep the chain the screen was opened on (an LP's Withdraw); otherwise
+      // prefer Sonic, then the first enabled chain (reclaimChainFor).
+      setSelectedChainId((prev) => reclaimChainFor(list, prev, Number(chainParam) || undefined));
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [chainParam]);
 
   // Label a chain for the selector — prefer the constants' shortName, else the
   // chains endpoint can't supply a name so fall back to "Chain <id>".

@@ -122,3 +122,14 @@ it('creates the stock ad after the first deposit and says the deposit is safe if
     payload: expect.objectContaining({ token: 'USDT', chainId: 97, sellerAddress: '0xabc', fiatCurrency: 'NGN' }),
   }));
 });
+
+// Review I4: "Leave the amount empty and tap Renew" works on the very next tap,
+// even while /liquidity/me still shows the pre-deposit (empty) balance.
+it('retries only the stock ad on Renew after a failed first publish, with no second deposit', async () => {
+  mockCreateAndSign.mockResolvedValue({ id: 'ad1', status: 'active' });
+  const stale = { ...me, available: '0', locked: '0', stake: '0', headroom: '5000', voucher: undefined };
+  const res = await runLpDeposit({ ...base, me: stale, input: '' });
+  expect(mockBalance).not.toHaveBeenCalled();
+  expect(mockFund).not.toHaveBeenCalled();
+  expect(res).toEqual({ status: 'done', depositedUnits: '0', stockAd: true });
+});

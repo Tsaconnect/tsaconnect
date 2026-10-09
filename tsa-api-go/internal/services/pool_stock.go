@@ -80,7 +80,7 @@ func (p *PoolStock) Position(ctx context.Context, lp *models.PaymentMerchant, fr
 	if err != nil {
 		return nil, err
 	}
-	key := strings.ToLower(lp.OperatorWalletAddress) + "|" + tok.Symbol
+	key := poolBalanceKey(lp.OperatorWalletAddress, tok.Symbol)
 	read := func() (*OnChainBalance, error) {
 		b, err := readBalanceWithin(ctx, escrow, lp.OperatorWalletAddress, tok.Address, p.timeout)
 		p.balances.Put(key, p.now(), b, err)
@@ -103,6 +103,18 @@ func (p *PoolStock) Position(ctx context.Context, lp *models.PaymentMerchant, fr
 	return &LPPosition{Token: tok, Wallet: lp.OperatorWalletAddress,
 		Available: new(big.Int).Set(bal.Available), Locked: new(big.Int).Set(bal.Locked),
 		Stake: stake, AboveMax: above, Min: min, Max: max}, nil
+}
+
+func poolBalanceKey(wallet, symbol string) string {
+	return strings.ToLower(wallet) + "|" + strings.ToUpper(symbol)
+}
+
+// Forget drops wallet's cached balance of symbol on the pool chain, so the
+// next read is fresh (review I4: a confirmed deposit must show at once).
+func (p *PoolStock) Forget(chainID int64, wallet, symbol string) {
+	if tok, ok := p.Token(); ok && tok.ChainID == chainID && strings.EqualFold(tok.Symbol, symbol) {
+		p.balances.Forget(poolBalanceKey(wallet, tok.Symbol))
+	}
 }
 
 // lpStake is min(available + locked, max) and the part above max.

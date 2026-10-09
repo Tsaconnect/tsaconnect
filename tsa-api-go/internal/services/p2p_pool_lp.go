@@ -41,6 +41,18 @@ func (e *LiquidityLimitError) Error() string {
 // route closed.
 func (s *P2PTradeService) SetPoolGate(g PoolOpener) { s.poolGate = g }
 
+// OnPoolBalanceMoved registers what to tell when a confirmed deposit or
+// withdrawal moves a seller's escrow balance (the LP balance cache, review I4).
+func (s *P2PTradeService) OnPoolBalanceMoved(f func(chainID int64, wallet, token string)) {
+	s.balanceMoved = f
+}
+
+func (s *P2PTradeService) poolBalanceMoved(chainID int64, wallet, token string) {
+	if s.balanceMoved != nil {
+		s.balanceMoved(chainID, wallet, strings.ToUpper(token))
+	}
+}
+
 func (s *P2PTradeService) poolOpen() bool { return s.poolGate != nil && s.poolGate.Open() }
 
 // lookupActiveLP is the caller's active LP row; (nil, nil) when there is none
@@ -139,16 +151,24 @@ func (s *P2PTradeService) checkLPDeposit(ctx context.Context, lp *models.Payment
 	return nil
 }
 
-// ChainsFor is EnabledChains plus, for an active LP, the pool chain (purpose
-// "pool", with decimals): the only caller ever offered it (spec §5).
+// ChainsFor is EnabledChains plus the pool chain (purpose "pool", with
+// decimals) for an LP row bound to it, whatever its status (spec §5): exits are
+// never gated (review I1), so a paused LP must still reach its balance to
+// withdraw. New money stays active-only (openableFor).
 func (s *P2PTradeService) ChainsFor(ctx context.Context, userID uuid.UUID) []P2PChainInfo {
 	chains := s.EnabledChains()
 	pool, ok := s.escrows.PoolChain()
-	if !ok {
-		return chains
-	}
-	if lp, err := s.activeLPOn(ctx, userID, pool.ChainID); err != nil || lp == nil {
+	if !ok || !s.lpBoundTo(ctx, userID, pool.ChainID) {
 		return chains
 	}
 	return append(chains, P2PChainInfo{ChainID: pool.ChainID, Assets: pool.Assets, Purpose: config.P2PPurposePool, Decimals: pool.Decimals})
+}
+
+// lpBoundTo reports whether the user's PM row, any status, is an LP on chainID.
+func (s *P2PTradeService) lpBoundTo(ctx context.Context, userID uuid.UUID, chainID int64) bool {
+	if s.pm == nil {
+		return false
+	}
+	row, err := s.pm.GetByUserID(ctx, userID)
+	return err == nil && row.IsLP() && row.PoolChainID != nil && *row.PoolChainID == chainID
 }

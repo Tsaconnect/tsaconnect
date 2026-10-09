@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,8 +26,9 @@ const (
 )
 
 var (
-	ErrNotLiquidityProvider  = errors.New("liquidity: not a liquidity provider")
-	ErrLiquidityActivityType = errors.New("liquidity: activity type must be deposits, withdrawals or payouts")
+	ErrNotLiquidityProvider    = errors.New("liquidity: not a liquidity provider")
+	ErrLiquidityActivityType   = errors.New("liquidity: activity type must be deposits, withdrawals or payouts")
+	ErrLiquidityActivityCursor = errors.New("liquidity: invalid activity cursor")
 )
 
 type LiquidityChain struct {
@@ -120,7 +122,13 @@ type LiquidityService struct {
 	adminDeadline time.Duration
 }
 
+// NewLiquidityService builds the LP read side and subscribes stock to the trade
+// service's confirmed deposits and withdrawals, so an LP's cached balance never
+// outlives a move it made (review I4).
 func NewLiquidityService(db *gorm.DB, pm *PMService, trade *P2PTradeService, stock *PoolStock, gate PoolOpener, chainName string) *LiquidityService {
+	if trade != nil && stock != nil {
+		trade.OnPoolBalanceMoved(stock.Forget)
+	}
 	return &LiquidityService{db: db, pm: pm, trade: trade, stock: stock, gate: gate, chainName: chainName, now: time.Now,
 		adminDeadline: adminLPViewDeadline}
 }
@@ -214,9 +222,48 @@ func (s *LiquidityService) fromRequest(ctx context.Context, userID uuid.UUID, ou
 
 const liquidityAuditScan = 200
 
+// activityCursor is a (created_at, id) keyset position, so rows that share a
+// timestamp are never skipped across a page boundary (review M2).
+type activityCursor struct {
+	at time.Time
+	id uuid.UUID // uuid.Nil: the first page, everything before at
+}
+
+// encode is "<RFC3339Nano createdAt>_<id>".
+func (c activityCursor) encode() string {
+	return c.at.UTC().Format(time.RFC3339Nano) + "_" + c.id.String()
+}
+
+func parseActivityCursor(v string) (activityCursor, error) {
+	at, id, ok := strings.Cut(v, "_")
+	if !ok {
+		return activityCursor{}, ErrLiquidityActivityCursor
+	}
+	t, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return activityCursor{}, ErrLiquidityActivityCursor
+	}
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return activityCursor{}, ErrLiquidityActivityCursor
+	}
+	return activityCursor{at: t.UTC(), id: u}, nil
+}
+
+// before scopes q to rows strictly after the cursor in (created_at DESC, id
+// DESC) order, and orders them so.
+func (c activityCursor) before(q *gorm.DB) *gorm.DB {
+	if c.id == uuid.Nil {
+		q = q.Where("created_at < ?", c.at)
+	} else {
+		q = q.Where("(created_at < ? OR (created_at = ? AND id < ?))", c.at, c.at, c.id)
+	}
+	return q.Order("created_at DESC").Order("id DESC")
+}
+
 // Activity pages the LP's deposits, withdrawals (confirmed audit rows on the
 // pool chain) or payouts (settlement forwards), newest first. cursor is the
-// RFC3339Nano createdAt of the last item seen. Fills arrive with Plan C1.
+// nextCursor of the previous page. Fills arrive with Plan C1.
 func (s *LiquidityService) Activity(ctx context.Context, userID uuid.UUID, typ, cursor string, limit int) (*LiquidityActivityPage, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
@@ -228,32 +275,32 @@ func (s *LiquidityService) Activity(ctx context.Context, userID uuid.UUID, typ, 
 	if err != nil {
 		return nil, err
 	}
-	before := s.now().UTC().Add(time.Hour) // UTC: SQLite compares the stored text
+	// UTC: SQLite compares the stored text.
+	from := activityCursor{at: s.now().UTC().Add(time.Hour)}
 	if cursor != "" {
-		if before, err = time.Parse(time.RFC3339Nano, cursor); err != nil {
-			return nil, ErrLiquidityActivityType
+		if from, err = parseActivityCursor(cursor); err != nil {
+			return nil, err
 		}
-		before = before.UTC()
 	}
 	switch typ {
 	case "deposits":
-		return s.auditActivity(ctx, userID, models.P2PAuditDepositConfirmed, "deposit", before, limit)
+		return s.auditActivity(ctx, userID, models.P2PAuditDepositConfirmed, "deposit", from, limit)
 	case "withdrawals":
-		return s.auditActivity(ctx, userID, models.P2PAuditWithdrawConfirmed, "withdrawal", before, limit)
+		return s.auditActivity(ctx, userID, models.P2PAuditWithdrawConfirmed, "withdrawal", from, limit)
 	case "payouts":
-		return s.payoutActivity(ctx, pm, before, limit)
+		return s.payoutActivity(ctx, pm, from, limit)
 	}
 	return nil, ErrLiquidityActivityType
 }
 
-func (s *LiquidityService) auditActivity(ctx context.Context, userID uuid.UUID, action, kind string, before time.Time, limit int) (*LiquidityActivityPage, error) {
+func (s *LiquidityService) auditActivity(ctx context.Context, userID uuid.UUID, action, kind string, from activityCursor, limit int) (*LiquidityActivityPage, error) {
 	tok, ok := s.stock.Token()
 	if !ok {
 		return &LiquidityActivityPage{Items: []LiquidityActivityItem{}}, nil
 	}
 	var rows []models.P2PAuditLog
-	if err := s.db.WithContext(ctx).Where("actor_id = ? AND action = ? AND created_at < ?", userID, action, before).
-		Order("created_at DESC").Limit(liquidityAuditScan).Find(&rows).Error; err != nil {
+	q := s.db.WithContext(ctx).Where("actor_id = ? AND action = ?", userID, action)
+	if err := from.before(q).Limit(liquidityAuditScan).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	page := &LiquidityActivityPage{Items: []LiquidityActivityItem{}}
@@ -273,20 +320,21 @@ func (s *LiquidityService) auditActivity(ctx context.Context, userID uuid.UUID, 
 		page.Items = append(page.Items, LiquidityActivityItem{ID: r.ID.String(), Type: kind, CreatedAt: r.CreatedAt,
 			Amount: BaseUnitsToDecimal(amt, tok.Decimals), TxHash: meta.TxHash})
 		if len(page.Items) == limit {
-			page.NextCursor = r.CreatedAt.Format(time.RFC3339Nano)
+			page.NextCursor = activityCursor{at: r.CreatedAt, id: r.ID}.encode()
 			return page, nil
 		}
 	}
 	if len(rows) == liquidityAuditScan {
-		page.NextCursor = rows[len(rows)-1].CreatedAt.Format(time.RFC3339Nano)
+		last := rows[len(rows)-1]
+		page.NextCursor = activityCursor{at: last.CreatedAt, id: last.ID}.encode()
 	}
 	return page, nil
 }
 
-func (s *LiquidityService) payoutActivity(ctx context.Context, lp *models.PaymentMerchant, before time.Time, limit int) (*LiquidityActivityPage, error) {
+func (s *LiquidityService) payoutActivity(ctx context.Context, lp *models.PaymentMerchant, from activityCursor, limit int) (*LiquidityActivityPage, error) {
 	var rows []models.P2PSettlementForward
-	if err := s.db.WithContext(ctx).Where("pm_id = ? AND created_at < ?", lp.ID, before).
-		Order("created_at DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
+	q := s.db.WithContext(ctx).Where("pm_id = ?", lp.ID)
+	if err := from.before(q).Limit(limit + 1).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	last4 := lp.SettlementAccountNumber
@@ -296,7 +344,8 @@ func (s *LiquidityService) payoutActivity(ctx context.Context, lp *models.Paymen
 	page := &LiquidityActivityPage{Items: []LiquidityActivityItem{}}
 	for i, f := range rows {
 		if i == limit {
-			page.NextCursor = rows[i-1].CreatedAt.Format(time.RFC3339Nano)
+			prev := rows[i-1]
+			page.NextCursor = activityCursor{at: prev.CreatedAt, id: prev.ID}.encode()
 			break
 		}
 		page.Items = append(page.Items, LiquidityActivityItem{ID: f.ID.String(), Type: "payout", CreatedAt: f.CreatedAt,

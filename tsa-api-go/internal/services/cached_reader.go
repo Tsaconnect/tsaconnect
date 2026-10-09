@@ -58,3 +58,12 @@ func (c *cachedReader[T]) Put(key string, now time.Time, v T, err error) {
 	c.entries[key] = cachedEntry[T]{value: v, err: err, at: now}
 	c.mu.Unlock()
 }
+
+// Forget drops key's reading, and any read of it in flight, so the next Get
+// reads afresh.
+func (c *cachedReader[T]) Forget(key string) {
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+	c.flight.Forget(key)
+}

@@ -57,6 +57,8 @@ func (h *P2PHandler) ListLiquidityActivity(c *gin.Context) {
 	switch {
 	case errors.Is(err, services.ErrLiquidityActivityType):
 		utils.ErrorResponse(c, http.StatusBadRequest, "type must be deposits, withdrawals or payouts")
+	case errors.Is(err, services.ErrLiquidityActivityCursor):
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid cursor")
 	case errors.Is(err, services.ErrNotLiquidityProvider):
 		utils.ErrorResponse(c, http.StatusNotFound, "You are not a liquidity provider")
 	case err != nil:

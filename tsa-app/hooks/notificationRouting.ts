@@ -7,6 +7,7 @@
 // disambiguated (the app currently has two `orderdetail` routes).
 import { NAME_CHANGE, PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
 import { isPaymentId } from '@/utils/paymentId';
+import { LP_DASHBOARD_ROUTE } from '@/utils/lpCta';
 
 export interface NotificationData {
   type?: string;
@@ -28,6 +29,10 @@ export function routeForNotification(data: NotificationData | null | undefined):
   }
   if (type === 'p2p.withdraw.confirmed') {
     return '/p2p/pool';
+  }
+  // An LP's stock ad is due for renewal: the liquidity dashboard offers Renew.
+  if (type === 'liquidity.voucher_expiring') {
+    return LP_DASHBOARD_ROUTE;
   }
   // A TSA Pay merchant was paid, in the payment's own mode (a test payment is
   // on the test list). A one-time link opens that link — the payment is the

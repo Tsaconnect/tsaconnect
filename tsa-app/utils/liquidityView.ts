@@ -46,10 +46,11 @@ export function lpDepositPlan(me: LiquidityMe, input: string): LpDepositPlan {
   }
   const held = units(me.available, d) + units(me.locked, d);
   const needsStockAd = !me.voucher || me.voucher.status !== 'active' || me.voucher.renewDue;
+  // Renew only: the API signs a stock ad without reading any balance, so a
+  // cached view that has not caught up with a deposit that just landed must
+  // not send the LP to deposit again (review I4).
   if (amount === 0n) {
-    return needsStockAd && held > 0n
-      ? { ok: true, amountBaseUnits: '0', needsStockAd }
-      : { ok: false, error: 'Enter an amount.' };
+    return needsStockAd ? { ok: true, amountBaseUnits: '0', needsStockAd } : { ok: false, error: 'Enter an amount.' };
   }
   if (amount > units(me.headroom, d)) {
     return { ok: false, error: `You can add at most ${formatLiquidityAmount(me.headroom)} ${sym} (limit ${me.limits.max} ${sym}).` };

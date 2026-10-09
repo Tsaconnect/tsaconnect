@@ -118,6 +118,35 @@ func TestLiquidityActivity_DepositsOnPoolChainOnly(t *testing.T) {
 	}
 }
 
+// Review I4: a confirmed deposit or withdrawal refreshes the LP's cached
+// balance, so /liquidity/me shows it at once and "Renew" needs no second
+// deposit.
+func TestLiquidityMe_FreshAfterConfirmedDepositOrWithdraw(t *testing.T) {
+	r, svc := newLiquidityRig(t)
+	ctx := context.Background()
+	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, lpWallet)
+	r.pool.balance = OnChainBalance{Available: usdt18(0), Locked: usdt18(0)}
+	if me, err := svc.Me(ctx, lp.UserID); err != nil || me.Available != "0" {
+		t.Fatalf("before = %+v %v", me, err)
+	}
+	r.pool.balance = OnChainBalance{Available: usdt18(10), Locked: usdt18(0)}
+	r.pool.depositedEvent = &P2PDepositedEvent{Amount: usdt18(10)}
+	if _, err := r.svc.ConfirmDeposit(ctx, lp.UserID, lpWallet, "USDT", usdt18(10).String(), "0xd", poolTestChain); err != nil {
+		t.Fatal(err)
+	}
+	if me, _ := svc.Me(ctx, lp.UserID); me.Available != "10" {
+		t.Fatalf("after deposit available = %q, want 10 (stale cache)", me.Available)
+	}
+	r.pool.balance = OnChainBalance{Available: usdt18(4), Locked: usdt18(0)}
+	r.pool.withdrawnEvent = &P2PWithdrawnEvent{Amount: usdt18(6)}
+	if _, err := r.svc.ConfirmWithdraw(ctx, lp.UserID, lpWallet, "USDT", usdt18(6).String(), "0xw", poolTestChain); err != nil {
+		t.Fatal(err)
+	}
+	if me, _ := svc.Me(ctx, lp.UserID); me.Available != "4" {
+		t.Fatalf("after withdraw available = %q, want 4 (stale cache)", me.Available)
+	}
+}
+
 func TestLiquidityActivity_PayoutsCarryNoBuyer(t *testing.T) {
 	r, svc := newLiquidityRig(t)
 	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, lpWallet)
@@ -279,8 +308,42 @@ func TestLiquidityActivity_CursorPages(t *testing.T) {
 			t.Fatalf("%s pages = %v, want %v", typ, got, want)
 		}
 	}
-	if _, err := svc.Activity(context.Background(), lp.UserID, "deposits", "not-a-time", 2); !errors.Is(err, ErrLiquidityActivityType) {
-		t.Fatalf("bad cursor = %v", err)
+}
+
+// Review M2: rows sharing the page-boundary timestamp are never skipped, and a
+// malformed cursor says so.
+func TestLiquidityActivity_CursorNeverSkipsTies(t *testing.T) {
+	r, svc := newLiquidityRig(t)
+	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, lpWallet)
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	for i := 0; i < 3; i++ {
+		auditRow(t, r, lp.UserID, models.P2PAuditDepositConfirmed, map[string]any{"chainId": poolTestChain, "amount": usdt18(int64(i + 1)).String()}, at)
+		if err := r.db.Create(&models.P2PSettlementForward{ID: uuid.New(), TradeID: uuid.New(), PMID: lp.ID, ProviderRef: "tie-" + strconv.Itoa(i),
+			Currency: "NGN", Amount: strconv.Itoa(i+1) + "00.00", Status: models.P2PForwardPending, Reference: "tie-" + strconv.Itoa(i), CreatedAt: at}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, typ := range []string{"deposits", "payouts"} {
+		seen := map[string]bool{}
+		cursor := ""
+		for page := 0; page < 5; page++ {
+			p, err := svc.Activity(context.Background(), lp.UserID, typ, cursor, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, it := range p.Items {
+				seen[it.ID] = true
+			}
+			if cursor = p.NextCursor; cursor == "" {
+				break
+			}
+		}
+		if len(seen) != 3 {
+			t.Fatalf("%s: paged %d of 3 rows that share one timestamp", typ, len(seen))
+		}
+	}
+	if _, err := svc.Activity(context.Background(), lp.UserID, "deposits", "not-a-cursor", 2); !errors.Is(err, ErrLiquidityActivityCursor) {
+		t.Fatalf("bad cursor = %v, want ErrLiquidityActivityCursor", err)
 	}
 }
 

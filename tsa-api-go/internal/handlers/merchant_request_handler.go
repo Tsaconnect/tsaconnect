@@ -353,6 +353,15 @@ func (h *MerchantRequestHandler) GetMyMerchantRequest(c *gin.Context) {
 // ListMerchantRequests handles GET /api/admin/merchant-requests.
 // Supports optional status filter and pagination via page/limit query params.
 func (h *MerchantRequestHandler) ListMerchantRequests(c *gin.Context) {
+	caller := getUserFromContext(c)
+	if caller == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if !hasStaffPrivilege(c, caller) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Staff role required")
+		return
+	}
 	status := c.Query("status")
 	page := 1
 	limit := 20
@@ -402,6 +411,9 @@ func (h *MerchantRequestHandler) ListMerchantRequests(c *gin.Context) {
 		return
 	}
 
+	for i := range requests {
+		redactMerchantRequest(c, caller, &requests[i])
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Merchant requests retrieved", gin.H{
 		"requests": requests,
 		"total":    total,
@@ -422,6 +434,11 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request ID")
+		return
+	}
+
+	if !hasStaffPrivilege(c, admin) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Staff role required")
 		return
 	}
 
@@ -639,13 +656,29 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	}
 
 	now := time.Now()
+	ctx := c.Request.Context()
 
-	if !isPMRetry && !isPayRetry {
-		// First approval: flip status → approved. The role upgrade to
-		// "merchant" (the admin-console marketplace role) does NOT apply to
-		// TSA Pay — accepting payments is a separate capability, not a
-		// marketplace-merchant grant.
-		txErr := h.DB.Transaction(func(tx *gorm.DB) error {
+	// One transaction settles everything a PM-kind approval writes (review I2):
+	// the payment_merchants row and its kind first, under the user-row lock
+	// (ApproveFromRequestTx), then the request's status and the role. A kind
+	// conflict, or an approval of the other kind for the same user landing at
+	// the same moment, rolls all of it back, so an LP can never be left with
+	// role=merchant and a refused approval is never half-applied.
+	if isPMRequestType(req.BusinessType) || (!isPMRetry && !isPayRetry) {
+		var pmErr error
+		txErr := h.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if isPMRequestType(req.BusinessType) {
+				if _, pmErr = h.PMOnboarding.ApproveFromRequestTx(ctx, tx, &req); pmErr != nil {
+					return pmErr
+				}
+			}
+			if isPMRetry || isPayRetry {
+				return nil // the status flip and role were done on attempt 1
+			}
+			// First approval: flip status → approved. The role upgrade to
+			// "merchant" (the admin-console marketplace role) does NOT apply to
+			// TSA Pay — accepting payments is a separate capability, not a
+			// marketplace-merchant grant.
 			if err := tx.Model(&req).Updates(map[string]interface{}{
 				"status":      models.MerchantRequestStatusApproved,
 				"reviewed_by": admin.ID,
@@ -667,7 +700,21 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			return nil
 		})
 
-		if txErr != nil {
+		switch {
+		case pmErr != nil && errors.Is(pmErr, services.ErrPMKindConflict):
+			utils.ErrorResponseWithCode(c, http.StatusConflict, "One account cannot be both a payment merchant and a liquidity provider", "pm_kind_conflict")
+			return
+		case pmErr != nil && errors.Is(pmErr, services.ErrLiquidityUnavailable):
+			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
+			return
+		case pmErr != nil && errors.Is(pmErr, services.ErrInvalidPMTransition):
+			utils.ErrorResponse(c, http.StatusConflict, "This liquidity provider is already live")
+			return
+		case pmErr != nil:
+			log.Printf("ApproveMerchantRequest: PM approval failed for request %s: %v", req.ID, pmErr)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Payment merchant setup failed and nothing was approved — try again")
+			return
+		case txErr != nil:
 			log.Printf("ApproveMerchantRequest: transaction error: %v", txErr)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve merchant request")
 			return
@@ -686,27 +733,6 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 
 	if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
 		log.Printf("ApproveMerchantRequest: reload error: %v", err)
-	}
-
-	// Corporate PM provisioning: if this is a p2p_merchant request, spin up the
-	// Nomba sub-account + virtual account inline — the request stays re-approvable
-	// for retry (via isPMRetry above) if provisioning fails here. Admin-role and
-	// PMOnboarding-availability are already enforced in the pre-flight gate above.
-	if isPMRequestType(req.BusinessType) {
-		if _, err := h.PMOnboarding.ApproveFromRequest(c.Request.Context(), &req); err != nil {
-			switch {
-			case errors.Is(err, services.ErrPMKindConflict):
-				utils.ErrorResponseWithCode(c, http.StatusConflict, "One account cannot be both a payment merchant and a liquidity provider", "pm_kind_conflict")
-			case errors.Is(err, services.ErrLiquidityUnavailable):
-				utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
-			case errors.Is(err, services.ErrInvalidPMTransition):
-				utils.ErrorResponse(c, http.StatusConflict, "This liquidity provider is already live")
-			default:
-				log.Printf("ApproveMerchantRequest: PM approval failed for request %s: %v", req.ID, err)
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but PM setup failed — retry the approval to resume")
-			}
-			return
-		}
 	}
 
 	// TSA Pay provisioning: create the pay_merchants row from the approved
@@ -738,6 +764,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		})
 	}
 
+	redactMerchantRequest(c, admin, &req)
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
 }
 
@@ -786,10 +813,15 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 		return
 	}
 
-	// Deciding an LP application is P2P-admin work either way (S35): AdminAuth
-	// alone admits support and marketplace merchants.
-	if req.BusinessType == models.BusinessTypeLiquidityProvider && !hasAdminPrivilege(c, admin) {
-		utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to reject a liquidity provider")
+	// Rejecting is gated like approving (review I3): staff only, and a payment
+	// merchant, LP or TSA Pay application is P2P-admin work either way (S35).
+	// AdminAuth alone admits support and every marketplace merchant.
+	if !hasStaffPrivilege(c, admin) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Staff role required")
+		return
+	}
+	if needsAdminToDecide(req.BusinessType) && !hasAdminPrivilege(c, admin) {
+		utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to reject this application")
 		return
 	}
 
@@ -828,7 +860,28 @@ func (h *MerchantRequestHandler) RejectMerchantRequest(c *gin.Context) {
 		})
 	}
 
+	redactMerchantRequest(c, admin, &req)
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request rejected", req)
+}
+
+// needsAdminToDecide: approving or rejecting this application type is P2P
+// admin work, never support's (payment merchants, LPs, TSA Pay).
+func needsAdminToDecide(businessType string) bool {
+	return isPMRequestType(businessType) || businessType == models.BusinessTypePaymentAcceptance
+}
+
+// redactMerchantRequest strips what only a P2P admin may see (review I3):
+// settlement bank details, the maker wallet and, for an LP, the business name,
+// which is the applicant's verified legal name.
+func redactMerchantRequest(c *gin.Context, caller *models.User, req *models.MerchantRequest) {
+	if hasAdminPrivilege(c, caller) {
+		return
+	}
+	req.SettlementBankCode, req.SettlementAccountNumber, req.SettlementAccountName = "", "", ""
+	req.MakerWalletAddress = ""
+	if req.BusinessType == models.BusinessTypeLiquidityProvider {
+		req.BusinessName = ""
+	}
 }
 
 // isPMRequestType: the request approves into a payment_merchants row.

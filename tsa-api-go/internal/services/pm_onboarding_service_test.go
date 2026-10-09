@@ -23,6 +23,7 @@ func newSQLiteForOnboarding(t *testing.T) *gorm.DB {
 	}
 
 	sqls := []string{
+		`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, verification_status TEXT, verified_legal_name TEXT)`, // approval locks the user row
 		`CREATE TABLE IF NOT EXISTS payment_merchants (
 			id                        TEXT PRIMARY KEY,
 			user_id                   TEXT NOT NULL,

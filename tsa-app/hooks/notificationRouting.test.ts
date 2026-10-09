@@ -31,6 +31,10 @@ describe('routeForNotification', () => {
     expect(routeForNotification({ type: 'p2p.withdraw.confirmed' })).toBe('/p2p/pool');
   });
 
+  it('routes a liquidity voucher reminder to the liquidity dashboard', () => {
+    expect(routeForNotification({ type: 'liquidity.voucher_expiring', adId: 'a' })).toBe('/liquidity');
+  });
+
   it('returns null for unmapped / missing types (tap just opens the app)', () => {
     expect(routeForNotification({ type: 'order.shipped', orderId: '1' } as any)).toBeNull();
     expect(routeForNotification({ type: 'security.account_locked' })).toBeNull();

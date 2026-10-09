@@ -41,3 +41,11 @@ func actingUser(c *gin.Context, u *models.User) *models.User {
 	stripped.Role = models.RoleUser
 	return &stripped
 }
+
+// hasStaffPrivilege reports whether the caller u is staff (admin, super_admin
+// or support) on this request. AdminAuth also admits marketplace merchants,
+// who are not staff.
+func hasStaffPrivilege(c *gin.Context, u *models.User) bool {
+	return !middleware.IsWebSession(c) && u != nil &&
+		(isAdminUser(u) || u.Role == models.RoleSupport)
+}

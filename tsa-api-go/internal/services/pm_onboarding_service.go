@@ -123,6 +123,25 @@ func pmAccountRef(userID uuid.UUID) string { return "pm-" + userID.String() }
 // Idempotent: re-running on an already-approved/active row copies the same
 // fields without downgrading an active PM's status.
 func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
+	var pm *models.PaymentMerchant
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		pm, err = s.ApproveFromRequestTx(ctx, tx, req)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pm, nil
+}
+
+// ApproveFromRequestTx is ApproveFromRequest inside the caller's transaction,
+// so the merchant-request handler settles the row and its kind in the same
+// transaction as the request's status and the user's role (review I2). It
+// locks the user row first (SELECT … FOR UPDATE): two approvals for one user,
+// of either kind, run one after the other, and the second sees the first's row
+// and approved request and refuses with ErrPMKindConflict.
+func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm.DB, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
 	kind, ok := models.PaymentMerchantKindFor(req.BusinessType)
 	if !ok {
 		return nil, fmt.Errorf("pm_onboarding: %s does not make a payment merchant", req.BusinessType)
@@ -135,7 +154,24 @@ func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *model
 		}
 		poolChainID = &id
 	}
-	pm, err := s.upsertPendingRow(ctx, req, kind, poolChainID)
+	tx = tx.WithContext(ctx)
+	var locked []models.User // Find: a missing user has no role to race on
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Where("id = ?", req.UserID).Find(&locked).Error; err != nil {
+		return nil, fmt.Errorf("pm_onboarding: lock user: %w", err)
+	}
+	// An approved request of the other kind is a profile on its way (its row
+	// may not exist yet, e.g. a merchant approved while PM was dormant).
+	var other int64
+	if err := tx.Model(&models.MerchantRequest{}).
+		Where("user_id = ? AND business_type IN ? AND business_type <> ? AND status = ?", req.UserID,
+			[]string{models.BusinessTypeP2PMerchant, models.BusinessTypeLiquidityProvider}, req.BusinessType, models.MerchantRequestStatusApproved).
+		Count(&other).Error; err != nil {
+		return nil, fmt.Errorf("pm_onboarding: other-kind check: %w", err)
+	}
+	if other > 0 {
+		return nil, ErrPMKindConflict
+	}
+	pm, err := s.upsertPendingRow(ctx, tx, req, kind, poolChainID)
 	if err != nil {
 		return nil, fmt.Errorf("pm_onboarding: upsert: %w", err)
 	}
@@ -167,7 +203,7 @@ func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *model
 	if pm.Status == models.PaymentMerchantStatusPending {
 		fields["status"] = models.PaymentMerchantStatusApproved
 	}
-	if err := s.persistFields(ctx, pm, fields); err != nil {
+	if err := tx.Model(pm).Updates(fields).Error; err != nil {
 		return pm, fmt.Errorf("pm_onboarding: approve: %w", err)
 	}
 	if pm.Status == models.PaymentMerchantStatusPending {
@@ -337,14 +373,15 @@ func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID 
 // A rejected LP re-applying as an LP is reset to pending in one guarded
 // statement so the approval can advance it (plan B P18); merchant rows are
 // reused exactly as they are.
-func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, req *models.MerchantRequest, kind string, poolChainID *int64) (*models.PaymentMerchant, error) {
+func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, db *gorm.DB, req *models.MerchantRequest, kind string, poolChainID *int64) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
+	db = db.WithContext(ctx)
 
 	// Try to find an existing row for this user (from a prior attempt).
-	err := s.db.WithContext(ctx).Where("user_id = ?", req.UserID).First(&pm).Error
+	err := db.Where("user_id = ?", req.UserID).First(&pm).Error
 	if err == nil {
 		if kind == models.PaymentMerchantKindLP && pm.IsLP() && pm.Status == models.PaymentMerchantStatusRejected {
-			res := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+			res := db.Model(&models.PaymentMerchant{}).
 				Where("id = ? AND status = ?", pm.ID, models.PaymentMerchantStatusRejected).
 				Updates(map[string]interface{}{"status": models.PaymentMerchantStatusPending, "review_note": ""})
 			if res.Error != nil {
@@ -384,18 +421,21 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, req *models.
 
 	// Use OnConflict DoNothing + Clauses so that a concurrent duplicate insert
 	// (unlikely in practice) doesn't fail — we reload below.
-	result := s.db.WithContext(ctx).
+	result := db.
 		Clauses(clause.OnConflict{DoNothing: true}).
 		Create(&pm)
 	if result.Error != nil {
 		return nil, result.Error
 	}
 
-	// If another concurrent insert won the race, reload.
+	// If another concurrent insert won the race, reload — into a fresh struct:
+	// pm's own (never written) id would otherwise join the WHERE and miss.
 	if result.RowsAffected == 0 {
-		if err := s.db.WithContext(ctx).Where("user_id = ?", req.UserID).First(&pm).Error; err != nil {
+		var winner models.PaymentMerchant
+		if err := db.Where("user_id = ?", req.UserID).First(&winner).Error; err != nil {
 			return nil, err
 		}
+		return &winner, nil
 	}
 
 	return &pm, nil

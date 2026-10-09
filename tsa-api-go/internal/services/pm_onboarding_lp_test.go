@@ -356,7 +356,7 @@ func TestActivateLP_GuardedWrite(t *testing.T) {
 // ActivateLP on PostgreSQL: the bank's name and provisioning_status=active are
 // persisted by the one guarded UPDATE, and the guard holds there too.
 func TestActivateLP_OnPostgres(t *testing.T) {
-	db := testutil.TempPostgres(t, "pm_lp_activate_", &models.User{}, &models.PaymentMerchant{})
+	db := testutil.TempPostgres(t, "pm_lp_activate_", &models.User{}, &models.PaymentMerchant{}, &models.MerchantRequest{})
 	ctx := context.Background()
 	newLP := func() (*PMOnboardingService, *models.PaymentMerchant, uuid.UUID) {
 		user := &models.User{ID: uuid.New(), Email: "lp+" + uuid.New().String()[:8] + "@example.com", Name: "Ada Obi", Username: "lp" + uuid.New().String()[:8],

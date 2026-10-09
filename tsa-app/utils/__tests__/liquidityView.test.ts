@@ -49,6 +49,12 @@ describe('lpDepositPlan', () => {
     const plan = lpDepositPlan(me({ available: '40', voucher: { adId: 'a', status: 'active', remaining: '1', renewDue: true } }), '');
     expect(plan).toEqual({ ok: true, amountBaseUnits: '0', needsStockAd: true });
   });
+  // Review I4: the deposit landed but the stock ad failed. The cached view can
+  // still show nothing held; Renew must not demand a second deposit.
+  it('allows a renew-only plan without a cached balance when a stock ad is needed', () => {
+    expect(lpDepositPlan(me(), '')).toEqual({ ok: true, amountBaseUnits: '0', needsStockAd: true });
+    expect(lpDepositPlan(me({ voucher: { adId: 'a', status: 'active', remaining: '500000', renewDue: false } }), '').ok).toBe(false);
+  });
   it('needs a stock ad when none exists or the live one is paused, and refuses a paused LP', () => {
     expect(lpDepositPlan(me(), '10')).toMatchObject({ ok: true, needsStockAd: true });
     expect(lpDepositPlan(me({ voucher: { adId: 'a', status: 'paused', remaining: '1', renewDue: false } }), '10')).toMatchObject({ ok: true, needsStockAd: true });

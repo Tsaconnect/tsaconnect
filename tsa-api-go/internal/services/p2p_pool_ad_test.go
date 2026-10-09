@@ -137,6 +137,50 @@ func TestSignPoolAd_ClosesSupersededAd(t *testing.T) {
 	}
 }
 
+// Review M3: two drafts from racing creates, signed in either order. Signing
+// the older one never closes the newer one, so the LP always ends with the
+// newest signed stock ad live and never with none.
+func TestSignPoolAd_ConcurrentDraftsKeepTheNewest(t *testing.T) {
+	r := newPoolRig(t)
+	lp, sign := r.newLPWithKey(t)
+	ctx := context.Background()
+	older, err := r.svc.CreateAd(ctx, lp.UserID, lp.OperatorWalletAddress, poolAdParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := r.svc.CreateAd(ctx, lp.UserID, lp.OperatorWalletAddress, poolAdParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The race: the second create did not see the first draft, so both wait.
+	base := time.Date(2026, 10, 8, 11, 0, 0, 0, time.UTC)
+	r.db.Model(&models.P2PAd{}).Where("id = ?", older.Ad.ID).Updates(map[string]any{"status": models.P2PAdStatusPending, "created_at": base})
+	r.db.Model(&models.P2PAd{}).Where("id = ?", newer.Ad.ID).Update("created_at", base.Add(time.Second))
+
+	signAd := func(res *CreateAdResult) error {
+		h, _ := hexToHash32(res.Ad.VoucherHash)
+		_, err := r.svc.SignAd(ctx, res.Ad.ID, lp.UserID, lp.OperatorWalletAddress, sign(h))
+		return err
+	}
+	if err := signAd(older); err != nil {
+		t.Fatalf("sign older: %v", err)
+	}
+	var n models.P2PAd
+	r.db.First(&n, "id = ?", newer.Ad.ID)
+	if n.Status != models.P2PAdStatusPending {
+		t.Fatalf("signing the older draft closed the newer one (status %s)", n.Status)
+	}
+	if err := signAd(newer); err != nil {
+		t.Fatalf("sign newer: %v", err)
+	}
+	var o models.P2PAd
+	r.db.First(&o, "id = ?", older.Ad.ID)
+	r.db.First(&n, "id = ?", newer.Ad.ID)
+	if n.Status != models.P2PAdStatusActive || o.Status != models.P2PAdStatusCancelled {
+		t.Fatalf("newer=%s older=%s, want active/cancelled", n.Status, o.Status)
+	}
+}
+
 // Review Focus 3.
 func TestCreatePoolAd_RefusesBuySideNonLPAndWrongWallet(t *testing.T) {
 	r := newPoolRig(t)
