@@ -3050,6 +3050,7 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *models.P2PTrade, funding uint8) (ReconcileResult, error) {
 	now := s.clock.Now()
 	from := trade.Status
+	cancelled := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.P2PTrade{}).
 			Where("id = ? AND status NOT IN ?", trade.ID,
@@ -3069,6 +3070,7 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 		if res.RowsAffected == 0 {
 			return nil
 		}
+		cancelled = true
 		if err := tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
@@ -3086,6 +3088,10 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if !cancelled {
+		// A concurrent writer already settled the trade; nothing was changed.
+		return ReconcileResult{}, nil
+	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusCancelled,
 		"funding": funding,
@@ -3096,6 +3102,9 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
 	} else {
 		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	}
+	if from == models.P2PTradeStatusPaid || from == models.P2PTradeStatusReleasing {
+		s.alert(ctx, P2PAlertPaidTradeCancelled, trade, func(a *P2PAlert) { a.FromStatus = from })
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusCancelled,
 		Reason: "chain Cancelled"}, nil

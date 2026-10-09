@@ -160,3 +160,26 @@ func TestReconcile_ChainPaidBackfillUsesMarkPaidCore(t *testing.T) {
 		t.Fatalf("reconciler drift audit kept (audits=%d)", n)
 	}
 }
+
+func TestReconcile_CancellingAPaidTradeAlerts(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		alerts int
+	}{{models.P2PTradeStatusPaid, 1}, {models.P2PTradeStatusReleasing, 1}, {models.P2PTradeStatusPendingPayment, 0}} {
+		db := setupTradeDB(t)
+		svc, esc, tradeID, _ := seedBuyAdWithTrade(t, db, tc.status)
+		rec := &recordingAlerter{}
+		svc.SetAlerter(rec)
+		esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusCancelled, Funding: models.P2PTradeFundingDepositedByTaker, Amount: big.NewInt(30), Exists: true}
+		out, err := svc.ReconcileTrade(context.Background(), tradeID)
+		if err != nil || out.ToStatus != models.P2PTradeStatusCancelled {
+			t.Fatalf("%s: out=%+v err=%v", tc.status, out, err)
+		}
+		if len(rec.got) != tc.alerts {
+			t.Fatalf("%s: alerts=%d want %d", tc.status, len(rec.got), tc.alerts)
+		}
+		if tc.alerts == 1 && (rec.got[0].Kind != P2PAlertPaidTradeCancelled || rec.got[0].FromStatus != tc.status) {
+			t.Fatalf("alert = %+v", rec.got[0])
+		}
+	}
+}
