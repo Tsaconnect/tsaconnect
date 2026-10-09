@@ -49,6 +49,9 @@ type rampBuyBody struct {
 	paycrestBuyBody
 	QuotedRate string `json:"quotedRate"`
 	Handle     string `json:"handle"`
+	// Pool: the buy came from the pinned TSA Connect card (as the quote's
+	// ?pool=1). The router keeps it the pool's order or none (review I-3).
+	Pool bool `json:"pool"`
 }
 
 type rampSellBody struct {
@@ -170,7 +173,7 @@ func (h *RampHandler) Buy(c *gin.Context) {
 	}
 	o, err := h.router.Open(c.Request.Context(), ramp.OpenRequest{
 		Request: ramp.Request{Side: ramp.Buy, FiatCode: body.Currency, FiatAmount: body.Amount,
-			Token: body.Token, ChainKey: body.Chain},
+			Token: body.Token, ChainKey: body.Chain, PoolOnly: body.Pool},
 		Handle: body.Handle, QuotedRate: body.QuotedRate,
 		Input: ramp.OrderInput{UserID: user.ID, WalletAddress: wallet,
 			RefundBankCode: body.RefundBankCode, RefundAccount: body.RefundAccount, RefundAccountName: body.RefundAccountName},
@@ -183,11 +186,11 @@ func (h *RampHandler) Buy(c *gin.Context) {
 }
 
 // buyConverted opens a converted venue the router priced. Only a
-// company-wallet or Flutterwave handle reaches the router; anything else is
+// company-wallet, Flutterwave or TSA pool handle reaches the router; anything else is
 // Paycrest's converted buy, served on /paycrest/buy.
 func (h *RampHandler) buyConverted(c *gin.Context, user *models.User, body rampBuyBody) {
 	name, _, herr := ramp.DecodeHandle(body.Handle)
-	if herr != nil || (name != ramp.ProviderTreasury && name != ramp.ProviderFlutterwave) {
+	if herr != nil || (name != ramp.ProviderTreasury && name != ramp.ProviderFlutterwave && name != ramp.ProviderPool) {
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
 			"This purchase needs the conversion route. Update the app and try again.", "use_paycrest_route")
 		return
@@ -197,7 +200,7 @@ func (h *RampHandler) buyConverted(c *gin.Context, user *models.User, body rampB
 		return
 	}
 	o, err := h.router.OpenConverted(c.Request.Context(), ramp.OpenRequest{
-		Request: ramp.Request{Side: ramp.Buy, FiatCode: body.Currency, FiatAmount: body.Amount, UserID: user.ID,
+		Request: ramp.Request{Side: ramp.Buy, FiatCode: body.Currency, FiatAmount: body.Amount, UserID: user.ID, PoolOnly: body.Pool,
 			Want: &services.RequestedAsset{Chain: strings.TrimSpace(body.RequestedChain), Token: strings.TrimSpace(body.RequestedToken),
 				ChainID: body.RequestedChainID, Address: strings.TrimSpace(body.RequestedTokenAddress),
 				Destination: strings.TrimSpace(body.DestinationAddress), Recipient: wallet}},

@@ -2,6 +2,7 @@ package ramp
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -186,5 +187,52 @@ func TestRouter_PoolsSharingATargetStayBestFirst(t *testing.T) {
 	want := []string{"tsa_pool:bsc:USDT@1381.00", "tsa_pool:bsc:USDT@1383.00", "paycrest:bsc:USDT@1380.00"}
 	if !reflect.DeepEqual(names(q.Venues), want) {
 		t.Fatalf("quote = %v, want %v", names(q.Venues), want)
+	}
+}
+
+func poolCardOpen(handle, quoted string) OpenRequest {
+	req := openReq(handle, quoted)
+	req.Request.Token, req.Request.ChainKey, req.Request.PoolOnly = "USDT", "bsc", true
+	return req
+}
+
+// Review I-3 / decision 14: a pool-card open is the pool's order or none —
+// it never fails over to another provider, in band or not.
+func TestRouterOpen_PoolCardNeverBecomesAnotherProvidersOrder(t *testing.T) {
+	for _, handle := range []string{"", EncodeHandle(ProviderPool, VenueKey{"bsc", "USDT"})} {
+		p := pool("1381.00")
+		p.openResults = []openResult{{err: ErrVenueUnavailable}}
+		pc := fakeNamed(ProviderPaycrest, venue(ProviderPaycrest, "bsc", "USDT", "1380.00"))
+		pc.openResults = []openResult{{order: okOrder}}
+		o, err := testRouter(p, pc).Open(context.Background(), poolCardOpen(handle, "1381.00"))
+		if o != nil || !errors.Is(err, ErrUnavailable) || len(pc.opened) != 0 {
+			t.Fatalf("handle %q: o=%v err=%v paycrest opened=%v, want no order and Paycrest untouched", handle, o, err, pc.opened)
+		}
+	}
+}
+
+// On the card's screen she may tap another provider's offer (the pool could
+// not fill): that is her choice, and it opens — and fails over — as any open does.
+func TestRouterOpen_PoolCardFallbackChoiceOpens(t *testing.T) {
+	pc := fakeNamed(ProviderPaycrest, venue(ProviderPaycrest, "bsc", "USDT", "1380.00"))
+	pc.openResults = []openResult{{err: ErrVenueUnavailable}}
+	fw := fakeNamed(ProviderFlutterwave, venue(ProviderFlutterwave, "bsc", "USDT", "1381.00"))
+	fw.openResults = []openResult{{order: okOrder}}
+	o, err := testRouter(pc, fw).Open(context.Background(), poolCardOpen(EncodeHandle(ProviderPaycrest, VenueKey{"bsc", "USDT"}), "1380.00"))
+	if err != nil || o != okOrder || len(fw.opened) != 1 {
+		t.Fatalf("o=%v err=%v fw=%v, want her Paycrest choice to fail over normally", o, err, fw.opened)
+	}
+}
+
+// Review I-3: a pool-card open's "price moved" re-show is the pool-only list,
+// shaped exactly as the pool=1 quote shapes it.
+func TestRouterOpen_PoolCardPriceMovedIsPoolOnly(t *testing.T) {
+	p := pool("1450.00") // moved past the 50 bps tolerance on 1381
+	pc := fakeNamed(ProviderPaycrest, venue(ProviderPaycrest, "bsc", "USDT", "1380.00"))
+	_, err := testRouter(p, pc).Open(context.Background(), poolCardOpen("", "1381.00"))
+	var pm *PriceMovedError
+	if !errors.As(err, &pm) || pm.Quote.PoolAvailable == nil || !*pm.Quote.PoolAvailable ||
+		!reflect.DeepEqual(names(pm.Quote.Venues), []string{"tsa_pool:bsc:USDT@1450.00"}) || len(pc.opened) != 0 {
+		t.Fatalf("err=%v quote=%+v paycrest opened=%v, want the pool-only re-show", err, pm, pc.opened)
 	}
 }

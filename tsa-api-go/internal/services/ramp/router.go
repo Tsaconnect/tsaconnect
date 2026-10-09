@@ -157,19 +157,8 @@ func (r *Router) quote(ctx context.Context, req Request, rule bool) (*QuoteResul
 			res.Venues = append(res.Venues, v)
 		}
 	}
-	if rule && req.PoolOnly {
-		pools, _ := splitPool(res.Venues)
-		avail := len(pools) > 0
-		res.PoolAvailable = &avail
-		if avail {
-			sortVenues(req.Side, pools)
-			res.Venues = pools
-			res.Best = &res.Venues[0]
-			return res, nil
-		}
-	}
 	if rule {
-		res.Venues = r.ruled(req.Side, res.Venues, req.Token == "" || req.ChainKey == "")
+		r.shown(res, req)
 	} else {
 		sortVenues(req.Side, res.Venues) // every venue, pools included; Open orders them itself
 	}
@@ -178,6 +167,34 @@ func (r *Router) quote(ctx context.Context, req Request, rule bool) (*QuoteResul
 	}
 	res.Best = &res.Venues[0]
 	return res, nil
+}
+
+// shown shapes what a quote shows her — the quote's own tail, and an open's
+// "price moved" re-show (review I-3), so the two cannot drift. A pool-card
+// (PoolOnly) quote lists the pool's venues best-first with PoolAvailable set;
+// when the pool has none it says so and falls back to the ruled list. Any
+// other quote is the ruled list.
+func (r *Router) shown(res *QuoteResult, req Request) {
+	if req.PoolOnly {
+		pools, _ := splitPool(res.Venues)
+		avail := len(pools) > 0
+		res.PoolAvailable = &avail
+		if avail {
+			sortVenues(req.Side, pools)
+			res.Venues = pools
+			return
+		}
+	}
+	res.Venues = r.ruled(req.Side, res.Venues, req.Token == "" || req.ChainKey == "")
+}
+
+// poolCardOnly reports an open from the pinned pool card that must stay the
+// pool's order (decision 14, review I-3): PoolOnly, and the venue she tapped
+// was the pool's (or none was named). A pool-card screen showing other
+// offers because the pool could not fill lets her pick one, which opens as
+// any open does.
+func poolCardOnly(q Request, handleProvider string) bool {
+	return q.PoolOnly && (handleProvider == "" || handleProvider == ProviderPool)
 }
 
 // bestPerPair keeps the first (best, since sorted) venue per target — what it
@@ -547,6 +564,7 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 	pinned := VenueKey{ChainKey: q.ChainKey, Token: q.Token}
 
 	var first Provider
+	handleProvider := ""
 	if strings.TrimSpace(req.Handle) != "" {
 		name, k, err := DecodeHandle(req.Handle)
 		if err != nil {
@@ -556,7 +574,9 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			return nil, ErrInvalidQuote
 		}
 		first = r.provider(name) // nil when that provider is gone: start at step 3
+		handleProvider = name
 	}
+	q.PoolOnly = poolCardOnly(q, handleProvider)
 
 	in := req.Input
 	in.LimitRate, in.Guard = limit, r.cfg.Guard
@@ -595,6 +615,9 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			if budget.Err() != nil {
 				break
 			}
+			if q.PoolOnly && v.Provider != ProviderPool {
+				continue // a pool-card open is the pool's order or none
+			}
 			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
 				continue
 			}
@@ -631,9 +654,10 @@ func (r *Router) noneOpened(st *openState, fresh *QuoteResult, qerr error, pinne
 			fresh = &QuoteResult{FiatCode: q.FiatCode, FiatAmount: q.FiatAmount, Side: string(q.Side),
 				Venues: []Venue{}, QuotedAt: time.Now()} // never "venues": null
 		}
-		// What she is shown again obeys the same rules as any quote: the
-		// re-quote kept every venue for failover (rule=false).
-		fresh.Venues = r.ruled(q.Side, fresh.Venues, q.Token == "" || q.ChainKey == "")
+		// What she is shown again obeys the same rules as any quote — a
+		// pool-card open's is pool-only (review I-3): the re-quote kept every
+		// venue for failover (rule=false).
+		r.shown(fresh, q)
 		fresh.Best = nil
 		if len(fresh.Venues) > 0 {
 			fresh.Best = &fresh.Venues[0]
@@ -675,6 +699,7 @@ func (r *Router) OpenConverted(ctx context.Context, req OpenRequest) (*Order, er
 			return nil, err
 		}
 		first = r.provider(name) // nil when that provider is gone: start at the re-quote
+		q.PoolOnly = poolCardOnly(q, name)
 		// A handle carries the pair the provider delivers: her target means a
 		// direct venue, anything else the settlement leg of a conversion.
 		shown = Venue{Provider: name, ChainKey: k.ChainKey, Token: k.Token, Kind: models.RouteKindDirect}
@@ -733,6 +758,9 @@ func (r *Router) OpenConverted(ctx context.Context, req OpenRequest) (*Order, er
 			}
 			if v.Kind != models.RouteKindConverted && v.Target() != target {
 				continue // a direct venue for another pair: an alternative, not her order
+			}
+			if q.PoolOnly && v.Provider != ProviderPool {
+				continue // a pool-card open is the pool's order or none
 			}
 			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
 				continue
