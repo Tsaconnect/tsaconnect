@@ -45,6 +45,8 @@ export type RampVenue = PaycrestVenue & { handle?: string; effectiveRate?: strin
 export type RampQuote = Omit<PaycrestQuote, 'venues' | 'best'> & {
   venues: RampVenue[];
   best: RampVenue | null;
+  /** Set only on a pool-only quote (pool=1): false = TSA Connect cannot fill this, these are other offers. */
+  poolAvailable?: boolean;
 };
 
 /** Where to pay for a company-wallet or Flutterwave buy. */
@@ -57,7 +59,7 @@ export interface RampPayInto {
   payerInstruction?: string;
 }
 
-export type RampProviderName = 'paycrest' | 'treasury' | 'flutterwave';
+export type RampProviderName = 'paycrest' | 'treasury' | 'flutterwave' | 'tsa_pool';
 
 /** An order from any provider. A Paycrest body is unchanged (no `provider`);
  *  an IT-backed buy says which provider fills it and carries its pay-into
@@ -78,12 +80,13 @@ export function quotedRateOf(v: { rate: string; effectiveRate?: string }): strin
   return v.effectiveRate || v.rate;
 }
 
-/** The Instant Transfer purchase behind an order the company wallet or
- *  Flutterwave fills — its screen. Null for anything Paycrest fills. */
+/** The Instant Transfer purchase behind an order the company wallet,
+ *  Flutterwave or the TSA Connect pool fills — its screen. Null for Paycrest. */
 export function itIntentIdOf(o: unknown): string | null {
   if (!o || typeof o !== 'object') return null;
   const { provider, id } = o as { provider?: unknown; id?: unknown };
-  return (provider === 'treasury' || provider === 'flutterwave') && typeof id === 'string' && id ? id : null;
+  const it = provider === 'treasury' || provider === 'flutterwave' || provider === 'tsa_pool';
+  return it && typeof id === 'string' && id ? id : null;
 }
 
 export const RAMP_ORDER_OPEN = 'ramp_order_open';
@@ -163,14 +166,17 @@ async function withFallback<T>(primary: () => Promise<T>, fallback: () => Promis
 /** The router's venues. With `want` (a buy of a named asset) the authenticated
  *  converted quote answers: every direct venue plus converted ones, company
  *  wallet first (spec §15.8). Older servers fall back to /ramp/quote, then
- *  /paycrest/quote. */
+ *  /paycrest/quote. `pool` asks for the TSA Connect pool's venues only
+ *  (pool=1); the answer's `poolAvailable` says whether it could fill. */
 export function getRampQuote(
   side: 'buy' | 'sell',
   amount: string,
   currency = 'NGN',
   want?: RequestedAsset,
+  opts: { pool?: boolean } = {},
 ): Promise<RampQuote> {
   const q = new URLSearchParams({ side, amount, currency });
+  if (opts.pool) q.set('pool', '1');
   const direct = () =>
     withFallback(
       () => request<RampQuote>(`/quote?${q.toString()}`),
@@ -186,6 +192,7 @@ export function getRampQuote(
   });
   if (want.chain) c.set('requestedChain', want.chain);
   if (want.destinationAddress) c.set('destinationAddress', want.destinationAddress);
+  if (opts.pool) c.set('pool', '1');
   return withFallback(() => request<RampQuote>(`/converted-quote?${c.toString()}`), direct);
 }
 
