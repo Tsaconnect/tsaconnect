@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
@@ -13,23 +15,35 @@ import (
 
 // P2PGasSponsor is what the gas route needs from services.P2PGasSponsor.
 type P2PGasSponsor interface {
-	TopUp(ctx context.Context, user *models.User, wallet string, action services.P2PGasAction) (services.GasTopUpResult, error)
+	TopUp(ctx context.Context, user *models.User, wallet string, req services.P2PGasRequest) (services.GasTopUpResult, error)
 }
 
-// p2pGasUnavailableCode is the code the app keys its "add a little S" copy on.
-const p2pGasUnavailableCode = "gas_unavailable"
+// The codes the app keys on. Every refusal this route makes carries one of
+// these, sponsorship_in_progress, WALLET_PROOF_REQUIRED or
+// kyc_verification_required — or is a 400 (bad request) / 429 (daily cap).
+const (
+	p2pGasUnavailableCode = "gas_unavailable"
+	p2pGasNotNeededCode   = "gas_not_needed"
+	p2pGasUnusedCode      = "gas_topup_unused"
+)
 
 // SetGasSponsor wires the Sonic gas top-up, from main.go, only when the shared
 // sponsor lane is live.
 func (h *P2PHandler) SetGasSponsor(g P2PGasSponsor) { h.gas = g }
 
+// p2pGasTopUpRequest: tradeId for mark_paid / release / cancel_trade /
+// dispute; adId for open_trade / cancel_ad; neither for approve / deposit /
+// withdraw.
 type p2pGasTopUpRequest struct {
-	Action string `json:"action" binding:"required"`
+	Action  string `json:"action" binding:"required"`
+	TradeID string `json:"tradeId"`
+	AdID    string `json:"adId"`
 }
 
-// GasTopUp is POST /api/p2p/gas/top-up {action}: S for the caller's next P2P
-// tx, sent to her proven wallet only. {skipped: true} when she already holds
-// enough; otherwise the confirmed top-up's {txHash, amountWei}.
+// GasTopUp is POST /api/p2p/gas/top-up {action, tradeId?, adId?}: S for the
+// caller's next P2P tx, sent to her proven wallet only, and only when that tx
+// is really hers to sign now. {skipped: true} when she already holds enough;
+// otherwise the confirmed top-up's {txHash, amountWei}.
 func (h *P2PHandler) GasTopUp(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
@@ -45,6 +59,12 @@ func (h *P2PHandler) GasTopUp(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "unknown gas action")
 		return
 	}
+	tradeID, okTrade := optionalUUID(req.TradeID)
+	adID, okAd := optionalUUID(req.AdID)
+	if !okTrade || !okAd {
+		utils.ErrorResponse(c, http.StatusBadRequest, "tradeId and adId must be valid ids")
+		return
+	}
 	if h.gas == nil {
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, services.ErrP2PGasUnavailable.Error(), p2pGasUnavailableCode)
 		return
@@ -53,29 +73,60 @@ func (h *P2PHandler) GasTopUp(c *gin.Context) {
 	if !ok {
 		return
 	}
-	res, err := h.gas.TopUp(c.Request.Context(), user, wallet, action)
+	res, err := h.gas.TopUp(c.Request.Context(), user, wallet, services.P2PGasRequest{Action: action, TradeID: tradeID, AdID: adID})
 	if err != nil {
-		p2pGasError(c, err)
+		p2pGasError(c, res, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Gas ready", res)
 }
 
-// p2pGasError maps a top-up refusal; what P2P does not phrase itself goes to
-// the shared sponsorship mapping (429 cap, 409 sponsorship_in_progress, 503).
-func p2pGasError(c *gin.Context, err error) {
+// optionalUUID parses an id the request may omit: "" is uuid.Nil and fine.
+func optionalUUID(s string) (uuid.UUID, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return uuid.Nil, true
+	}
+	id, err := uuid.Parse(s)
+	return id, err == nil
+}
+
+// p2pGasError maps a top-up refusal. Anything not named here is ours (a chain
+// read, a send that failed) and reads as gas_unavailable, so the app only
+// ever branches on the contract's codes.
+func p2pGasError(c *gin.Context, res services.GasTopUpResult, err error) {
 	switch {
 	case errors.Is(err, services.ErrP2PGasUnavailable):
-		// The sentinel's own sentence: a wrapped error carries the lane's detail.
-		logSponsorshipFailure(c, http.StatusServiceUnavailable, err)
-		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, services.ErrP2PGasUnavailable.Error(), p2pGasUnavailableCode)
+		// First: an unavailable error wraps its cause, which must not be
+		// mistaken for one of the caller's own refusals below.
+		p2pGasUnavailable(c, res, err)
+	case errors.Is(err, services.ErrInvalidParams):
+		utils.ErrorResponse(c, http.StatusBadRequest, "That trade or ad could not be found, or none was given for this step.")
+	case errors.Is(err, services.ErrP2PGasNotNeeded):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, services.ErrP2PGasNotNeeded.Error(), p2pGasNotNeededCode)
+	case errors.Is(err, services.ErrP2PGasUnused):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, services.ErrP2PGasUnused.Error(), p2pGasUnusedCode)
+	case errors.Is(err, services.ErrSponsorshipInProgress):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Your network fee is already on its way. Check your balance in a moment.", sponsorshipInProgressCode)
+	case errors.Is(err, services.ErrTopUpDailyCap):
+		utils.ErrorResponse(c, http.StatusTooManyRequests, services.ErrTopUpDailyCap.Error())
 	case errors.Is(err, services.ErrKYCRequired):
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity to have the network fee covered.", services.KYCVerificationRequiredCode)
 	case errors.Is(err, services.ErrSponsorWallet):
 		utils.ErrorResponse(c, http.StatusForbidden, "Gas can only be sent to your own linked wallet.")
-	case errors.Is(err, services.ErrInvalidParams):
-		utils.ErrorResponse(c, http.StatusBadRequest, "unknown gas action")
 	default:
-		sponsorshipError(c, err)
+		p2pGasUnavailable(c, res, err)
 	}
+}
+
+// p2pGasUnavailable answers 503 gas_unavailable with the sentinel's own
+// sentence (a wrapped error carries the lane's detail, which is logged).
+func p2pGasUnavailable(c *gin.Context, res services.GasTopUpResult, err error) {
+	logSponsorshipFailure(c, http.StatusServiceUnavailable, err)
+	if res.TxHash != "" {
+		// Sent but not confirmed in time: the hash lets the app watch for it.
+		utils.ErrorResponseWithCodeData(c, http.StatusServiceUnavailable, services.ErrP2PGasUnavailable.Error(), p2pGasUnavailableCode, res)
+		return
+	}
+	utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, services.ErrP2PGasUnavailable.Error(), p2pGasUnavailableCode)
 }

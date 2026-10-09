@@ -1847,9 +1847,12 @@ func main() {
 	if sonicShared != nil {
 		scheduler.Register(jobs.NewGasFloatMonitorNamed("marketplace_sonic_gas", sonicShared, 10*time.Minute))
 	}
-	if p2pGas := services.NewP2PGasSponsor(sonicShared, cfg.P2PGasTopUpsPerDay, nil); p2pGas != nil {
-		// Only a live sponsor: a nil *P2PGasSponsor in the interface would be non-nil.
-		p2pHandler.SetGasSponsor(p2pGas)
+	// Only a live sponsor with a trade service to check needs against: a nil
+	// pointer in either interface would be non-nil.
+	if p2pTradeSvc != nil {
+		if p2pGas := services.NewP2PGasSponsor(sonicShared, p2pTradeSvc, cfg.P2PGasTopUpsPerDay, nil); p2pGas != nil {
+			p2pHandler.SetGasSponsor(p2pGas)
+		}
 	}
 	var sonicGas *services.RampSponsorship
 	if cfg.MarketplaceFundingEnabled {
