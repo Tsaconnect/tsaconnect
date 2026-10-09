@@ -828,7 +828,9 @@ type routedArrival struct {
 	honoured    bool
 	repriced    bool
 	needsStock  bool // company wallet, priced live: win the stock under the lock
-	// needsPoolCoverage: a pool buy priced live, S18 under the pool lock (claimPoolLive)
+	// needsPoolCoverage: a pool buy, honoured or priced live — claimed only by
+	// claimPool, under the pool lock, over the slices that still back it (S18,
+	// review C-2)
 	needsPoolCoverage bool
 }
 
@@ -887,7 +889,7 @@ func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITInt
 		if !okU || units.Sign() <= 0 || !okR || locked.Sign() <= 0 {
 			return nil, fmt.Errorf("it stable buy: routed intent %s has no usable quote", intent.ID)
 		}
-		return &routedArrival{units: units, rate: locked, honoured: true}, nil
+		return &routedArrival{units: units, rate: locked, honoured: true, needsPoolCoverage: terms.pool}, nil
 	}
 	if terms.pool {
 		return &routedArrival{repriced: true, needsPoolCoverage: true}, nil // priced under the lock

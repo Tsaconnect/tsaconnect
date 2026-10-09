@@ -87,12 +87,15 @@ var poolSites = []providerSite{
 		_, err := s.DeliverParkedTreasuryBuy(context.Background(), uuid.New(), i.ID, "note")
 		return errors.Is(err, ErrITBadState)
 	}},
-	// The honoured claim is today's code, unchanged (P12).
+	// Review C-2 (supersedes P12's "honoured is today's code"): an honoured
+	// pool claim is decided under the pool lock over the order's slices. With
+	// no desk it writes nothing and the central poller retries — never paid
+	// without slices. The wired path: TestPoolHonoured_ClaimsWithoutTouchingSlices.
 	{"claimAndPriceStableBuy/honoured-central", models.ITStatusPendingPayment, func(t *testing.T, s *ITService, _ uuid.UUID, i *models.ITIntent) bool {
 		ok, err := s.claimAndPriceStableBuy(context.Background(), i, "sess_pool_1", i.AmountMinor, time.Now(), false, PayInCentral)
 		var got models.ITIntent
 		s.db.First(&got, "id = ?", i.ID)
-		return ok && err == nil && got.Status == models.ITStatusPaymentReceived && !got.Repriced && got.AssetAmount == i.AssetAmount
+		return !ok && err != nil && got.Status == models.ITStatusPendingPayment && got.PaymentRef == ""
 	}},
 	// Review M4: a non-routed pool row can never price, so its money parks in
 	// the claiming write (deterministic) instead of being retried every 30 s.

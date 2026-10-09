@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,9 +16,21 @@ import (
 
 // Roadmap risk 6: a late claim and the canceller's decision interleave on the
 // intent lock; a paid order never has a slice the canceller decided to cancel.
-func TestPoolClaimVsExpiry_Race_Postgres(t *testing.T) {
+func TestPoolClaimVsExpiry_Race_Postgres(t *testing.T) { poolClaimVsExpiryRace(t, false) }
+
+// Review C-2: the honoured claim takes the same lock and coverage check, so
+// the canceller's decision and an exact, on-time payment cannot both win.
+func TestPoolHonouredClaimVsExpiry_Race_Postgres(t *testing.T) { poolClaimVsExpiryRace(t, true) }
+
+// poolClaimVsExpiryRace races the claim against the canceller over 20 rounds.
+// Every round one side must win (review M-5: never vacuous): the claim pays
+// the order on slices nobody decided, or the canceller's decision makes it
+// park pool_slices_short. Both outcomes are counted.
+func poolClaimVsExpiryRace(t *testing.T, honoured bool) {
+	paidRounds, parkedRounds := 0, 0
 	for round := 0; round < 20; round++ {
 		r := newPoolOpenRigPG(t)
+		r.addLP(t, 50)
 		r.addLP(t, 50)
 		r.it.SetTreasuryMarketRate(&fixedTreasuryRate{rate: poolMid})
 		p := r.price(t, "5000")
@@ -26,31 +39,62 @@ func TestPoolClaimVsExpiry_Race_Postgres(t *testing.T) {
 		if err := r.desk.insertOrder(context.Background(), intent, p, nil, &slices); err != nil {
 			t.Fatal(err)
 		}
-		expired := time.Now().Add(-40 * time.Minute)
-		r.db.Model(intent).Updates(map[string]any{"status": models.ITStatusPendingPayment, "rate_expires_at": expired})
+		expires := time.Now().Add(-40 * time.Minute) // late: priced live
+		decideAt := time.Now()
+		if honoured {
+			expires = time.Now().Add(10 * time.Minute) // on time: honoured
+			decideAt = expires.Add(r.it.rampTerms().honourGrace + expiryPendingMargin + time.Minute)
+		}
+		r.db.Model(intent).Updates(map[string]any{"status": models.ITStatusPendingPayment, "rate_expires_at": expires})
 		r.db.Model(&models.P2PTrade{}).Where("it_intent_id = ?", intent.ID).Update("opened_at", time.Now())
-		intent.Status, intent.RateExpiresAt = models.ITStatusPendingPayment, &expired
+		intent.Status, intent.RateExpiresAt = models.ITStatusPendingPayment, &expires
 		var wg sync.WaitGroup
 		decided := make([]bool, len(slices))
+		var claimed bool
+		var claimErr error
+		start := make(chan struct{})
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, _ = r.it.claimAndPriceStableBuy(context.Background(), intent, "sess_race", intent.AmountMinor, time.Now(), false, PayInCentral)
+			<-start
+			claimed, claimErr = r.it.claimAndPriceStableBuy(context.Background(), intent, "sess_race", intent.AmountMinor, time.Now(), false, PayInCentral)
 		}()
 		go func() {
 			defer wg.Done()
+			<-start
+			for t0 := time.Now(); time.Since(t0) < time.Duration(round)*50*time.Microsecond; {
+			} // staggered so both orders occur
 			for i := range slices {
-				decided[i], _ = r.it.decideSliceCancel(context.Background(), &slices[i], time.Now())
+				decided[i], _ = r.it.decideSliceCancel(context.Background(), &slices[i], decideAt)
 			}
 		}()
+		close(start)
 		wg.Wait()
+		if !claimed || claimErr != nil {
+			t.Fatalf("round %d: the claim did not run: %v %v", round, claimed, claimErr)
+		}
 		final := r.intent(t, intent.ID)
-		for i, d := range decided {
-			if d && final.Status == models.ITStatusPaymentReceived {
-				t.Fatalf("round %d: order paid but slice %s was decided cancellable", round, slices[i].ID)
+		switch {
+		case final.Status == models.ITStatusPaymentReceived:
+			for i, d := range decided {
+				if d {
+					t.Fatalf("round %d: order paid but slice %s was decided cancellable", round, slices[i].ID)
+				}
 			}
+			if honoured && final.Repriced {
+				t.Fatalf("round %d: an honoured claim was re-priced", round)
+			}
+			paidRounds++
+		case final.Status == models.ITStatusBuyAwaitingRate && strings.HasPrefix(final.FailureReason, models.ITFailurePoolSlicesShort):
+			parkedRounds++
+		default:
+			t.Fatalf("round %d: neither side won: %s %q", round, final.Status, final.FailureReason)
 		}
 	}
+	if paidRounds == 0 {
+		t.Fatalf("the claim never won a round (parked %d): the race proves nothing", parkedRounds)
+	}
+	t.Logf("claim paid %d of 20 rounds, the canceller's decision parked %d", paidRounds, parkedRounds)
 }
 
 // Money rule (legacy scope): a central-account credit and the canceller's

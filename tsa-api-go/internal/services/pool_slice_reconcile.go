@@ -20,8 +20,11 @@ import (
 // PoolSliceOrders is what the reconciler asks about a slice's order.
 type PoolSliceOrders interface {
 	// SliceOrderPaid: the order is paid (payment_received or later) and the
-	// slice still backs it. A read, for alerts only.
+	// slice still backs it — never a dropped slice. A read, for alerts only.
 	SliceOrderPaid(ctx context.Context, slice *models.P2PTrade) (bool, error)
+	// SliceOrderHoldsMoney: the order holds her naira, whether or not the
+	// slice still backs it. A read, for alerts only.
+	SliceOrderHoldsMoney(ctx context.Context, slice *models.P2PTrade) (bool, error)
 	// DecideSliceResolve is F21's decision, taken under the intent's row lock
 	// (the claim's lock, review M7): true = resolve to the treasury; false =
 	// back to the LP, with dropped_at written in the same transaction.
@@ -71,6 +74,21 @@ func (s *P2PTradeService) notePaidSliceLost(ctx context.Context, trade *models.P
 	}
 	if paid, err := s.poolSlices.SliceOrderPaid(ctx, trade); err == nil && paid {
 		log.Printf("[liquidity] ALERT liquidity_pool_paid_slice_lost slice=%s intent=%s how=%s", trade.ID, trade.ITIntentID, how)
+	}
+}
+
+// noteResolvedToLP (review I3, C-2(a)): an LP's dispute sent a slice back to
+// the LP while the order holds her naira. F21 always drops the slice it
+// resolves to the LP, so SliceOrderPaid (which never counts a dropped slice)
+// would stay silent; this asks about the order alone. With the claim decided
+// under the same lock it means the order was short-parked or is paid on its
+// other slices — either way an operator looks.
+func (s *P2PTradeService) noteResolvedToLP(ctx context.Context, trade *models.P2PTrade) {
+	if s.poolSlices == nil {
+		return
+	}
+	if holds, err := s.poolSlices.SliceOrderHoldsMoney(ctx, trade); err == nil && holds {
+		log.Printf("[liquidity] ALERT liquidity_pool_paid_slice_lost slice=%s intent=%s how=resolved_to_lp", trade.ID, trade.ITIntentID)
 	}
 }
 
@@ -181,7 +199,7 @@ func (s *P2PTradeService) reconcileSliceResolved(ctx context.Context, trade *mod
 		return ReconcileResult{}, err
 	}
 	if !ev.ReleasedToBuyer {
-		s.notePaidSliceLost(ctx, trade, "resolved_to_lp") // review I3: never ours, but if paid, say so
+		s.noteResolvedToLP(ctx, trade)
 	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"reason": "pool slice resolved", "toTreasury": ev.ReleasedToBuyer})
@@ -211,7 +229,15 @@ func (s *P2PTradeService) noteSliceSelfRelease(ctx context.Context, trade *model
 // SliceOrderPaid: the slice's order is payment_received or later and the
 // slice was not dropped.
 func (s *ITService) SliceOrderPaid(ctx context.Context, slice *models.P2PTrade) (bool, error) {
-	if slice == nil || slice.ITIntentID == nil || slice.DroppedAt != nil {
+	if slice == nil || slice.DroppedAt != nil {
+		return false, nil
+	}
+	return s.SliceOrderHoldsMoney(ctx, slice)
+}
+
+// SliceOrderHoldsMoney: the slice's order holds her naira (poolOrderHoldsMoney).
+func (s *ITService) SliceOrderHoldsMoney(ctx context.Context, slice *models.P2PTrade) (bool, error) {
+	if slice == nil || slice.ITIntentID == nil {
 		return false, nil
 	}
 	var i models.ITIntent

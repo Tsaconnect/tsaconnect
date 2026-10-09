@@ -1,9 +1,12 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -208,5 +211,56 @@ func TestPoolLate_NoMidWritesNothing(t *testing.T) {
 		if sl.DroppedAt != nil {
 			t.Fatalf("slice %s dropped on a transient outage", sl.ID)
 		}
+	}
+}
+
+// Review C-2: an honoured claim decides under the pool lock with the intent
+// row locked, over the slices that still back the order. A slice the
+// canceller or F21 already dropped does not back it: the order parks
+// pool_slices_short instead of being paid against stock that is going back.
+func TestPoolHonoured_ParksWhenASliceWasDropped(t *testing.T) {
+	for _, how := range []string{"canceller", "f21"} {
+		t.Run(how, func(t *testing.T) {
+			r, intent, sl, _, _ := openOne(t)
+			ctx := context.Background()
+			switch how {
+			case "canceller":
+				r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("dropped_at", time.Now())
+			case "f21":
+				r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusDisputed)
+				if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+					t.Fatal(err)
+				}
+				if len(r.chain.resolves) != 1 || r.chain.resolves[0] {
+					t.Fatalf("resolves = %v, want the unpaid slice back to its LP", r.chain.resolves)
+				}
+			}
+			ok, err := r.it.claimAndPriceStableBuy(ctx, intent, "sess_honour_"+how, intent.AmountMinor, time.Now(), false, PayInCentral)
+			got := r.intent(t, intent.ID)
+			if !ok || err != nil || got.Status != models.ITStatusBuyAwaitingRate || !strings.HasPrefix(got.FailureReason, models.ITFailurePoolSlicesShort) {
+				t.Fatalf("honoured claim on a dropped slice = %v %v, intent %s/%q; want parked %s", ok, err, got.Status, got.FailureReason, models.ITFailurePoolSlicesShort)
+			}
+		})
+	}
+}
+
+// Review M-13: a claim whose pool-order snapshot is missing still stands (the
+// money is hers), but the unbooked surplus is alerted, never silent.
+func TestPoolLate_MissingSnapshotAlertsTheSurplus(t *testing.T) {
+	r := newPoolOpenRig(t)
+	threeLPs(t, r)
+	intent, _, err := r.open(t, "100000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.db.Where("intent_id = ?", intent.ID).Delete(&models.PoolOrder{})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	if ok, err := lateClaim(t, r, intent, 99_000); !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_surplus_unrecorded") {
+		t.Fatalf("no surplus alert:\n%s", buf.String())
 	}
 }

@@ -261,3 +261,63 @@ func TestPoolSlice_PaidOrderOrphanAlerts(t *testing.T) {
 		t.Fatalf("no paid-slice-lost alert:\n%s", buf.String())
 	}
 }
+
+// Review C-2(a): an LP's dispute resolved back to the LP while the order holds
+// her money is never silent — F21 dropped the slice, so SliceOrderPaid (which
+// never counts a dropped slice) cannot be what decides this alert.
+func TestPoolSlice_ResolvedToLPAfterPaymentAlerts(t *testing.T) {
+	r, intent, sl, _, _ := openOne(t)
+	ctx := context.Background()
+	r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusDisputed)
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	// She pays inside the honour window; the order parks short (C-2).
+	if ok, err := r.it.claimAndPriceStableBuy(ctx, intent, "sess_after_f21", intent.AmountMinor, time.Now(), false, PayInCentral); !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	r.chain.resolvedEvent = &P2PTradeResolvedEvent{TradeID: HashID(sl.ID), ReleasedToBuyer: false}
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_paid_slice_lost") || !strings.Contains(buf.String(), "how=resolved_to_lp") {
+		t.Fatalf("no paid-slice-lost alert:\n%s", buf.String())
+	}
+}
+
+// A slice S18 left unselected is dropped; the canceller freeing it after the
+// order is paid is the plan, not a loss: SliceOrderPaid never counts it.
+func TestPoolSlice_DroppedSliceCancelledAfterPaymentIsSilent(t *testing.T) {
+	r := newPoolOpenRig(t)
+	threeLPs(t, r)
+	intent, _, err := r.open(t, "100000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.trades.SetPoolSlices(r.it, releaseSender())
+	if ok, err := lateClaim(t, r, intent, 82_500); !ok || err != nil { // slice A alone backs it
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	var dropped *models.P2PTrade
+	for _, sl := range r.slicesOf(t, intent.ID) {
+		if sl.DroppedAt != nil {
+			dropped = &sl
+		}
+	}
+	if dropped == nil {
+		t.Fatal("no unselected slice")
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	r.chain.setTrade(HashID(dropped.ID), OnChainP2PStatusCancelled)
+	if _, err := r.trades.ReconcileTrade(context.Background(), dropped.ID); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "liquidity_pool_paid_slice_lost") {
+		t.Fatalf("an unselected slice's cancel alerted as lost:\n%s", buf.String())
+	}
+}

@@ -209,7 +209,7 @@ func (s *ITService) claimAndPriceStableBuy(
 		parkClaim(claim, "could not price at settlement: "+qErr.Error())
 		parkedReason = parkReasonOf(qErr)
 	case routed && arrival.needsPoolCoverage:
-		// Priced under the pool lock by claimPoolLive, below.
+		// Claimed under the pool lock by claimPool, below.
 	case routed:
 		arrival.writeTo(claim)
 	default:
@@ -227,7 +227,7 @@ func (s *ITService) claimAndPriceStableBuy(
 	var res *gorm.DB
 	if routed && qErr == nil && arrival.needsPoolCoverage {
 		var poolErr error
-		res, parkedReason, poolErr = s.claimPoolLive(ctx, candidate, claim, amountMinor, ch, arrival, write)
+		res, parkedReason, poolErr = s.claimPool(ctx, candidate, claim, amountMinor, ch, arrival, write)
 		if poolErr != nil {
 			if !parkOnBadRate {
 				return false, fmt.Errorf("it stable buy: cannot price pool %q: %w", paymentRef, poolErr)
@@ -486,30 +486,39 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 	return s.getIntent(ctx, intentID)
 }
 
-// claimPoolLive is S18 for a pool buy priced live (spec §12.3), under the pool
-// lock with the intent row locked: price at the current mid and settings,
-// cover the owed units from this order's pending slices, and either claim
-// (dropping the unselected slices, booking the surplus) or park
-// pool_slices_short (dropping every pending slice for the canceller). A
-// deterministic pricing error parks and drops too. A transient one (no mid)
-// writes nothing: the central poller retries in 30 s.
-func (s *ITService) claimPoolLive(ctx context.Context, candidate *models.ITIntent, claim map[string]any, amountMinor string,
+// claimPool claims a pool buy (spec §12.3) under the pool lock with the
+// intent row locked — the lock the expiry canceller (decideSliceCancel) and
+// F21 (DecideSliceResolve) decide under, so whoever locks the intent first
+// wins (P1, M7). The owed units are the honoured quote's, or for a buy priced
+// live (S18) the current mid and settings'. Either way they must be covered
+// by this order's slices that still back it (never a dropped one, review
+// C-2): covered → claim (dropping the unselected slices, booking the
+// surplus); not → park pool_slices_short (dropping every pending slice for
+// the canceller). A deterministic pricing error parks and drops too. A
+// transient one (no mid) writes nothing: the central poller retries in 30 s.
+func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, claim map[string]any, amountMinor string,
 	ch PayInChannel, arrival *routedArrival, write func(*gorm.DB) *gorm.DB) (*gorm.DB, string, error) {
 	d := s.poolDesk
-	if d == nil || s.treasuryRates == nil {
+	if d == nil {
 		return nil, "", fmt.Errorf("%w: the pool is not wired", ErrStableQuoteUnavailable)
 	}
 	paid, ok := new(big.Int).SetString(strings.TrimSpace(amountMinor), 10)
 	if !ok || paid.Sign() <= 0 {
 		return nil, "", fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, amountMinor)
 	}
-	mid, err := s.treasuryRates.BuyRate(ctx, candidate.Currency)
-	if err != nil {
-		return nil, "", err
+	var mid *big.Rat
+	if !arrival.honoured {
+		if s.treasuryRates == nil {
+			return nil, "", fmt.Errorf("%w: the pool is not wired", ErrStableQuoteUnavailable)
+		}
+		var err error
+		if mid, err = s.treasuryRates.BuyRate(ctx, candidate.Currency); err != nil {
+			return nil, "", err
+		}
 	}
 	var res *gorm.DB
 	parked := ""
-	err = withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
+	err := withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
 		var locked models.ITIntent
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, "id = ?", candidate.ID).Error; err != nil {
 			return err
@@ -527,30 +536,39 @@ func (s *ITService) claimPoolLive(ctx context.Context, candidate *models.ITInten
 			res = write(tx) // lost the race: RowsAffected 0, the caller re-checks by ref
 			return res.Error
 		}
-		p, perr := s.poolQuoteAt(locked.Asset, locked.Currency, paid, mid, CurrentPoolSettings(), ch, false)
-		if perr != nil {
-			parkClaim(claim, "could not price at settlement: "+RedactAlertText(perr.Error())) // review M13
-			parked = parkReasonOf(perr)
-			if err := d.dropSlices(tx, pendingIDs, now); err != nil {
-				return err
+		owed, minSlice := arrival.units, CurrentPoolSettings().MinSliceUnits
+		var p *PoolPrice
+		if !arrival.honoured {
+			var perr error
+			if p, perr = s.poolQuoteAt(locked.Asset, locked.Currency, paid, mid, CurrentPoolSettings(), ch, false); perr != nil {
+				parkClaim(claim, "could not price at settlement: "+RedactAlertText(perr.Error())) // review M13
+				parked = parkReasonOf(perr)
+				if err := d.dropSlices(tx, pendingIDs, now); err != nil {
+					return err
+				}
+				res = write(tx)
+				return res.Error
 			}
-			res = write(tx)
-			return res.Error
+			owed, minSlice = p.Quote.AssetUnits, p.Settings.MinSliceUnits
 		}
-		cov := EvaluatePoolCoverage(p.Quote.AssetUnits, released, pending, p.Settings.MinSliceUnits)
+		cov := EvaluatePoolCoverage(owed, released, pending, minSlice)
 		if !cov.Covered {
-			parkClaim(claim, models.ITFailurePoolSlicesShort+": the live amount is not covered by this order's locked slices")
+			parkClaim(claim, models.ITFailurePoolSlicesShort+": the amount owed is not covered by this order's locked slices")
 			parked = models.ITFailurePoolSlicesShort
-			log.Printf("[liquidity] ALERT liquidity_pool_slices_short intent=%s live=%s owed=%s", locked.ID, p.Quote.AssetUnits, cov.Owed)
+			log.Printf("[liquidity] ALERT liquidity_pool_slices_short intent=%s owed=%s honoured=%v", locked.ID, cov.Owed, arrival.honoured)
 			if err := d.dropSlices(tx, pendingIDs, now); err != nil {
 				return err
 			}
 			res = write(tx)
 			return res.Error
 		}
-		setQuoteColumns(claim, p.Quote.AssetUnits, p.Quote.RatePerUnitMinor, p.Quote.DisplayRateMinor, p.Quote.Fees)
-		claim["repriced"] = true
-		arrival.units, arrival.rate, arrival.quote = p.Quote.AssetUnits, p.Quote.RatePerUnitMinor, p.Quote
+		if arrival.honoured {
+			arrival.writeTo(claim)
+		} else {
+			setQuoteColumns(claim, p.Quote.AssetUnits, p.Quote.RatePerUnitMinor, p.Quote.DisplayRateMinor, p.Quote.Fees)
+			claim["repriced"] = true
+			arrival.units, arrival.rate, arrival.quote = p.Quote.AssetUnits, p.Quote.RatePerUnitMinor, p.Quote
+		}
 		res = write(tx)
 		if res.Error != nil || res.RowsAffected == 0 {
 			return res.Error
@@ -563,8 +581,15 @@ func (s *ITService) claimPoolLive(ctx context.Context, candidate *models.ITInten
 			Select("COALESCE(MAX(generation), 1)").Scan(&gen).Error; err != nil {
 			return err
 		}
-		return tx.Model(&models.PoolOrder{}).Where("intent_id = ? AND generation = ?", locked.ID, gen).
-			Update("surplus_units", cov.Surplus.String()).Error
+		sr := tx.Model(&models.PoolOrder{}).Where("intent_id = ? AND generation = ?", locked.ID, gen).
+			Update("surplus_units", cov.Surplus.String())
+		if sr.Error == nil && sr.RowsAffected == 0 {
+			// Review M-13: the claim stands (the money is hers); the
+			// snapshot it books against is missing, so C2's accounting
+			// would miss the surplus.
+			log.Printf("[liquidity] ALERT liquidity_pool_surplus_unrecorded intent=%s generation=%d surplus=%s — no pool order snapshot", locked.ID, gen, cov.Surplus)
+		}
+		return sr.Error
 	})
 	return res, parked, err
 }
