@@ -35,6 +35,7 @@ import {
 } from './wallet';
 import { addPending } from './p2pPending';
 import { waitMined } from './txWait';
+import { ensureP2PGas } from './p2pGas';
 
 export interface EnsureFundingParams {
   token: string;
@@ -54,6 +55,12 @@ export interface EnsureFundingParams {
    * deposit more or less than the LP asked for.
    */
   exactDepositBaseUnits?: string;
+  /**
+   * Ask the P2P gas sponsor (R3) instead of the plain balance check. Each tx
+   * gets its own drip right before it ('approve', then 'deposit'). TSA
+   * Liquidity (lpDeposit) leaves this unset, so its behaviour is unchanged.
+   */
+  gasAction?: 'deposit';
 }
 
 export type EnsureFundingResult =
@@ -68,7 +75,7 @@ export type EnsureFundingResult =
  * math is BigInt over base-unit strings.
  */
 export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<EnsureFundingResult> {
-  const { token, chainId, amountBaseUnits, walletAddress, onStage, onGasAlert, exactDepositBaseUnits } = p;
+  const { token, chainId, amountBaseUnits, walletAddress, onStage, onGasAlert, exactDepositBaseUnits, gasAction } = p;
 
   // Never broadcast on an unresolved/defaulted chain — a silent Sonic fallback
   // would fund the wrong chain and desync the voucher domain.
@@ -100,17 +107,18 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
 
   const chainKey = p2pChainKey(chainId);
 
-  // Gas guard before any broadcast — both approve and deposit pay gas here.
+  // Gas guard before each broadcast — approve and deposit both pay gas.
   // ensureGas takes a (title, message) alerter; collapse to the single-string
-  // onGasAlert this module exposes.
-  onStage?.('Checking gas…');
-  const hasGas = await ensureGas(
-    chainKey,
-    walletAddress,
-    onGasAlert ? (title, message) => onGasAlert(`${title}: ${message}`) : undefined,
-  );
-  if (!hasGas) {
-    return { status: 'aborted', reason: 'no gas' };
+  // onGasAlert this module exposes. Sponsored flows drip per step instead, so
+  // an approve's S is not requested until the approve is about to be sent.
+  const alert = onGasAlert ? (title: string, message: string) => onGasAlert(`${title}: ${message}`) : undefined;
+  const checkGas = (action: 'approve' | 'deposit') =>
+    gasAction
+      ? ensureP2PGas({ chainId, walletAddress, action, onStage, onAlert: alert })
+      : ensureGas(chainKey, walletAddress, alert);
+  if (!gasAction) {
+    onStage?.('Checking gas…');
+    if (!(await checkGas('deposit'))) return { status: 'aborted', reason: 'no gas' };
   }
 
   // Approve the escrow for the shortfall if the current allowance is short.
@@ -129,6 +137,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   }
 
   if (allowance < shortfall) {
+    if (gasAction && !(await checkGas('approve'))) return { status: 'aborted', reason: 'no gas' };
     onStage?.('Preparing approve…');
     const aPrep = await poolApi.prepareApprove(token, shortfall.toString(), walletAddress, chainId);
     if (!aPrep.success || !aPrep.data) {
@@ -148,6 +157,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   }
 
   // Deposit the shortfall into the seller's `available` balance.
+  if (gasAction && !(await checkGas('deposit'))) return { status: 'aborted', reason: 'no gas' };
   onStage?.('Preparing deposit…');
   const dPrep = await poolApi.prepareDeposit(token, shortfall.toString(), walletAddress, chainId);
   if (!dPrep.success || !dPrep.data) {

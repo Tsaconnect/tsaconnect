@@ -51,6 +51,9 @@ jest.mock('../wallet', () => ({
   getProvider: () => ({ waitForTransaction: (...a: any[]) => mockWaitForTransaction(...a) }),
 }));
 
+const mockEnsureP2PGas = jest.fn();
+jest.mock('../p2pGas', () => ({ ensureP2PGas: (...a: any[]) => mockEnsureP2PGas(...a) }));
+
 const mockAddPending = jest.fn();
 jest.mock('../p2pPending', () => ({
   addPending: (...a: any[]) => mockAddPending(...a),
@@ -357,5 +360,36 @@ describe('ensureEscrowFunding — exactDepositBaseUnits', () => {
 
     expect(res).toEqual({ status: 'aborted', reason: 'balance-changed' });
     expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('P2P gas sponsor (gasAction)', () => {
+  it('asks the P2P sponsor when gasAction is set; LP (unset) keeps ensureGas', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockConfirmDeposit.mockResolvedValue({ success: true });
+    mockPrepareDeposit.mockResolvedValue({ success: true, data: { unsignedTx: {} } });
+    mockEnsureP2PGas.mockResolvedValue(true);
+
+    await ensureEscrowFunding(params({ gasAction: 'deposit' }));
+    expect(mockEnsureP2PGas).toHaveBeenCalledWith(expect.objectContaining({ chainId: CHAIN_ID, walletAddress: WALLET, action: 'deposit' }));
+    expect(mockEnsureGas).not.toHaveBeenCalled();
+  });
+
+  it('requests one drip per step: approve before the approve, deposit before the deposit', async () => {
+    const order: string[] = [];
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockConfirmDeposit.mockResolvedValue({ success: true });
+    mockPrepareApprove.mockResolvedValue({ success: true, data: { unsignedTx: {} } });
+    mockPrepareDeposit.mockResolvedValue({ success: true, data: { unsignedTx: {} } });
+    mockWaitForTransaction.mockResolvedValue({ status: 1 });
+    mockEnsureP2PGas.mockImplementation(async (a: any) => { order.push(`gas:${a.action}`); return true; });
+    mockBroadcastTransaction.mockImplementation(async () => { order.push('broadcast'); return { hash: '0xh' }; });
+
+    await ensureEscrowFunding(params({ gasAction: 'deposit' }));
+    expect(order).toEqual(['gas:approve', 'broadcast', 'gas:deposit', 'broadcast']);
   });
 });
