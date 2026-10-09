@@ -63,4 +63,7 @@ const (
 	// P2PAuditAdRenewalDue: an LP stock ad's voucher is due for renewal and the
 	// LP was told (TSA Liquidity S28); it also spaces the notices.
 	P2PAuditAdRenewalDue = "ad.renewal_due"
+	// P2PAuditTradePaidStaleAlerted: operators were told this trade sat paid
+	// without release; its presence is the once-per-trade dedupe.
+	P2PAuditTradePaidStaleAlerted = "trade.paid_stale_alerted"
 )

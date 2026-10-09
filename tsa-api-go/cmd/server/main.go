@@ -1289,6 +1289,8 @@ func main() {
 		// trades and corrects DB drift against on-chain truth. Safety net
 		// for dropped-response failures in the prepare/confirm flow.
 		scheduler.Register(jobs.NewChainReconciler(p2pTradeSvc), jobs.AlertOnFailureStreak())
+		// Operators hear once when a trade sits paid past the threshold.
+		scheduler.Register(jobs.NewP2PPaidUnreleasedAlerter(p2pTradeSvc, cfg.P2PPaidUnreleasedAlertAfter), jobs.AlertOnFailureStreak())
 		// Register the merchant-reputation reconciler — recomputes windowed
 		// stats nightly as a correctness backstop for the incremental path.
 		merchantStats = services.NewMerchantStatsService(config.DB, eventBus, services.TrustedThresholds{

@@ -681,6 +681,9 @@ type Config struct {
 	// to the reference feed. Tune via env to widen/tighten platform-wide.
 	P2PFloatOffsetMaxBps int
 
+	// A trade paid but not released for this long pages the operators once.
+	P2PPaidUnreleasedAlertAfter time.Duration
+
 	// Nomba — used for Nigerian bank directory + account name enquiry today,
 	// and the auto-payout path in Phase 2. Falls back to "feature disabled"
 	// when credentials aren't set so dev environments work without them.
@@ -1270,6 +1273,7 @@ func Load() *Config {
 	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
 	// P2P's typical platform-wide deviation cap.
 	cfg.P2PFloatOffsetMaxBps = int(getEnvInt64("P2P_FLOAT_OFFSET_MAX_BPS", 1000))
+	cfg.P2PPaidUnreleasedAlertAfter = getEnvDuration("P2P_PAID_UNRELEASED_ALERT_AFTER", 2*time.Hour)
 
 	// Nomba — sandbox by default. Production should set NOMBA_BASE_URL to
 	// https://api.nomba.com and provide live credentials.
