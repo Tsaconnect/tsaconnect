@@ -2,8 +2,12 @@
 //
 // A TSA Pay payment code as a payer types it: "TSA-7K2QF-M9XWD". Mirrors the
 // API's NormalizePayCode (tsa-api-go/internal/services/pay_code.go) — change
-// both together; the server re-normalises whatever is sent. Zero-dependency,
-// like utils/paymentId.ts, so the screen and its tests import it freely.
+// both together; the server re-normalises whatever is sent. Depends only on
+// zero-dependency modules, so the screen and its tests import it freely.
+import { COMPANY } from '@/constants/legal/company';
+import { isPaymentId } from '@/utils/paymentId';
+import { strictHttpsHost } from '@/utils/strictHttpsHost';
+
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const CODE_LENGTH = 10;
 const PREFIX = 'TSA';
@@ -91,4 +95,32 @@ export function payCodeLookupError(err: unknown): string {
   if (e.status === 404) return PAY_CODE_NOT_FOUND;
   if (e.status === 429) return PAY_CODE_TOO_MANY;
   return e.message || 'Could not look up that code. Try again.';
+}
+
+/** What the Pay screen can open from a pasted or typed value. */
+export type PayInput = { kind: 'code'; code: string } | { kind: 'payment'; id: string };
+
+/** Our site's hosts, the apex and www.: where a checkout link or a receipt can be (the server's checkout base may be either). */
+export const TSA_SITE_HOSTS: readonly string[] = [COMPANY.domain, `www.${COMPANY.domain}`];
+
+/**
+ * A payment code, or a one-time pay link — https://tsaconnectworld.com/pay/<id>
+ * or the app's own tsaconnect://pay?id=<id> — read down to the payment id it
+ * names. Anything else, including a reusable /pay/l/<slug> link (which opens in
+ * the browser, where the customer enters the amount), is null. Only the id is
+ * ever kept, and only once isPaymentId accepts it: the rest of the URL is
+ * whoever sent it.
+ */
+export function parsePayInput(input: string): PayInput | null {
+  const text = input.trim();
+  const code = normalizePayCode(text);
+  if (code) return { kind: 'code', code };
+  const app = /^tsaconnect:\/\/pay\?(?:[^#]*&)?id=([^&#]+)/i.exec(text);
+  if (app) return isPaymentId(app[1]) ? { kind: 'payment', id: app[1].toLowerCase() } : null;
+  // strictHttpsHost, never URL alone: React Native's URL reads
+  // "https://evil.example#@tsaconnectworld.com/…" as our host.
+  const host = strictHttpsHost(text);
+  if (!host || !TSA_SITE_HOSTS.includes(host)) return null;
+  const m = /^\/pay\/([^/]+)\/?$/.exec(new URL(text).pathname);
+  return m && isPaymentId(m[1]) ? { kind: 'payment', id: m[1].toLowerCase() } : null;
 }

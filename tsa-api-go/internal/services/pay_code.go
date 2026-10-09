@@ -9,7 +9,7 @@ import (
 
 // Payment codes (spec D7): ten Crockford base32 characters — 50 random bits —
 // shown as TSA-XXXXX-XXXXX and stored bare. A payer reads one off the hosted
-// page or a printed invoice and types it into the app (Wallet → TSA Pay), so
+// page or a printed invoice and types it into the app (Pay on Home), so
 // the alphabet has no I, L, O or U, and what she types is forgiven the usual
 // confusions. The app (tsa-app/utils/payCode.ts) and the landing site
 // (tsa-landing src/lib/pay-core.ts) mirror NormalizePayCode: change all three

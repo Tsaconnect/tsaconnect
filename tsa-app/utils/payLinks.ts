@@ -5,8 +5,8 @@
 // as, the times and money it shows, the amount she types — and, for a reusable
 // link, its share message, amount rule and range.
 import type { OpenLink, OpenLinkNotTakingReason, OpenLinkRange, PayLink } from '@/services/payMerchantApi';
-import { COMPANY } from '@/constants/legal/company';
 import { strictHttpsHost } from '@/utils/strictHttpsHost';
+import { TSA_SITE_HOSTS } from '@/utils/payCode';
 import { formatKobo, koboFromNaira } from '@/utils/stableSellQuote';
 
 /** How long a link stays open; the server takes exactly these. */
@@ -32,13 +32,11 @@ export function payReceiptShareMessage(p: { merchantName: string; customerTotal:
   return `Receipt: ${formatKobo(String(p.customerTotal))} paid to ${p.merchantName}${code}. Verify it: ${p.receiptUrl ?? ''}`;
 }
 
-/** Our receipt page's hosts: the apex and www. (the server's checkout base may be either; the landing serves both). */
-const RECEIPT_HOSTS: readonly string[] = [COMPANY.domain, `www.${COMPANY.domain}`];
 
 /** A receipt link is ours or it is nothing: https on our own domain, under /r/ — a tampered response must not open elsewhere. */
 export function safeReceiptUrl(raw: string | undefined): string | undefined {
   const host = raw ? strictHttpsHost(raw) : null;
-  if (!raw || !host || !RECEIPT_HOSTS.includes(host)) return undefined;
+  if (!raw || !host || !TSA_SITE_HOSTS.includes(host)) return undefined;
   try {
     const { pathname } = new URL(raw);
     return pathname.startsWith('/r/') && pathname.length > 3 ? raw : undefined;

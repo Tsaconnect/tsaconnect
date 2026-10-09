@@ -11,7 +11,7 @@
 // State is computed by payScreenState (utils/payCheckout.ts) — this file
 // only wires data in and renders whatever it says.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, ScrollView, View } from 'react-native';
+import { AppState, Linking, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '@/AuthContext/AuthContext';
@@ -35,6 +35,8 @@ import { getCheckout, getPublicPayment, returnUrlFor, type PayCheckout, type Pay
 import { clearPayHold } from '@/services/payHold';
 import { payScreenState, TERMINAL_STATUSES } from '@/utils/payCheckout';
 import { forgetPendingPayment, rememberPendingPayment } from '@/utils/postAuthRoute';
+import { forgetPayCheckout, rememberPayCheckout } from '@/utils/recentPayCheckouts';
+import { shareReceipt } from '@/services/receiptShare';
 import { verifyThenReturnToPayment } from '@/utils/verifyThenReturn';
 import { KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
 import { usePayTest } from '@/hooks/usePayTest';
@@ -123,6 +125,29 @@ export default function PayScreen() {
       void forgetPendingPayment(checkout.id);
     }
   }, [checkout]);
+
+  // The Pay screen's "Waiting for you": a payment she opened and can still pay
+  // is remembered on this phone; once she starts paying it, or it ends, it is
+  // her history's (or nobody's) and is forgotten.
+  useEffect(() => {
+    if (!checkout) return;
+    if (checkout.status === 'pending' && checkout.payable && !checkout.youArePaying) {
+      void rememberPayCheckout(checkout);
+    } else {
+      void forgetPayCheckout(checkout.id);
+    }
+  }, [checkout]);
+
+  // A paid payment can still change under her — the merchant may refund it —
+  // so its summary is re-read when the app comes back to the foreground: a
+  // notification or link that lands on this screen while it is already open
+  // brings no new mount to read it.
+  const paid = checkout?.status === 'succeeded';
+  useEffect(() => {
+    if (!paid) return undefined;
+    const sub = AppState.addEventListener('change', (s) => { if (s === 'active') void fetchCheckout(); });
+    return () => sub.remove();
+  }, [paid, fetchCheckout]);
 
   // Signed out, she may be a new customer: signing up, verifying her email and
   // passing KYC can take days. The public read says until when this payment is
@@ -351,13 +376,7 @@ export default function PayScreen() {
                   it has succeeded, and never for a test payment. */}
               {state.checkout.status === 'succeeded' && state.checkout.mode === 'live' && receiptUrl ? (
                 <View style={{ width: '100%' }}>
-                  <PayLinkShare
-                    url={receiptUrl}
-                    message={payReceiptShareMessage({ ...state.checkout, receiptUrl })}
-                    qrSize={160}
-                    shareTitle="Share receipt"
-                    secondary={{ title: 'Print / Save PDF', icon: 'print', onPress: () => void openReceipt(receiptUrl) }}
-                  />
+                  <ReceiptShare receiptUrl={receiptUrl} checkout={state.checkout} onPrint={() => void openReceipt(receiptUrl)} />
                 </View>
               ) : null}
               {/* Her payment is over, but it may still need chasing — failed with
@@ -415,5 +434,20 @@ export default function PayScreen() {
       </SafeAreaView>
       <AuthorizationModal {...payTest.authorization} />
     </>
+  );
+}
+
+/** A live receipt's QR, Share receipt (its image, else its words and link) and Print / Save PDF. */
+function ReceiptShare({ receiptUrl, checkout, onPrint }: { receiptUrl: string; checkout: PayCheckout; onPrint: () => void }) {
+  const message = payReceiptShareMessage({ ...checkout, receiptUrl });
+  return (
+    <PayLinkShare
+      url={receiptUrl}
+      message={message}
+      onShare={() => shareReceipt(receiptUrl, message)}
+      qrSize={160}
+      shareTitle="Share receipt"
+      secondary={{ title: 'Print / Save PDF', icon: 'print', onPress: onPrint }}
+    />
   );
 }

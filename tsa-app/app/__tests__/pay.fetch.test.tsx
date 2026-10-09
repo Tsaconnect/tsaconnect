@@ -62,13 +62,18 @@ jest.mock('@/utils/postAuthRoute', () => ({
 jest.mock('@/utils/verifyThenReturn', () => ({ __esModule: true, verifyThenReturnToPayment: jest.fn(async () => {}) }));
 jest.mock('@/services/payApi', () => ({ __esModule: true, getCheckout: jest.fn(), getPublicPayment: jest.fn(async () => ({ expiresAt: '2026-10-03T12:00:00Z' })), returnUrlFor: () => null }));
 jest.mock('@/services/payHold', () => ({ __esModule: true, clearPayHold: jest.fn(async () => {}) }));
+jest.mock('@/utils/recentPayCheckouts', () => ({
+  __esModule: true, rememberPayCheckout: jest.fn(async () => {}), forgetPayCheckout: jest.fn(async () => {}),
+}));
 jest.mock('@/components/pay/PayNaira', () => ({ __esModule: true, PayNaira: () => null }));
 jest.mock('@/components/pay/PayCrypto', () => ({ __esModule: true, PayCrypto: () => null }));
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { getCheckout, type PayCheckout } from '@/services/payApi';
+import { AppState, type AppStateStatus } from 'react-native';
 import { clearPayHold } from '@/services/payHold';
+import { forgetPayCheckout, rememberPayCheckout } from '@/utils/recentPayCheckouts';
 import { verifyThenReturnToPayment } from '@/utils/verifyThenReturn';
 import PayScreen from '../pay';
 
@@ -203,4 +208,62 @@ describe('a payment she cannot pay yet', () => {
     expect(text()).toContain('Someone else is completing this payment');
     expect(text()).not.toContain('Verify identity');
   });
+});
+
+// The Pay screen's "Waiting for you" is this phone's list of payments she opened and can still pay.
+it('a payment she can still pay is remembered for Waiting for you', async () => {
+  const c = checkoutWith({ status: 'pending', payable: true, youArePaying: false });
+  jest.mocked(getCheckout).mockResolvedValue(c);
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(rememberPayCheckout).toHaveBeenCalledWith(c);
+  expect(forgetPayCheckout).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['she is paying it', { status: 'processing', youArePaying: true }],
+  ['it is paid', { status: 'succeeded', youArePaying: false }],
+  ['she cannot pay it', { status: 'pending', payable: false, youArePaying: false }],
+] as const)('a payment is forgotten from Waiting for you once %s', async (_why, over) => {
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith(over as Partial<PayCheckout>));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(forgetPayCheckout).toHaveBeenCalledWith(ID);
+  expect(rememberPayCheckout).not.toHaveBeenCalled();
+});
+
+// A refund notification or link that lands on this screen while it is already
+// open brings no new mount: coming back to the foreground re-reads a paid one.
+it('a paid payment is re-read when the app comes back to the foreground', async () => {
+  let onChange: (s: AppStateStatus) => void = () => {};
+  const spy = jest.spyOn(AppState, 'addEventListener').mockImplementation(((_: string, cb: (s: AppStateStatus) => void) => {
+    onChange = cb;
+    return { remove: () => {} };
+  }) as any);
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({ status: 'succeeded', youArePaying: false }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  const reads = jest.mocked(getCheckout).mock.calls.length;
+  await act(async () => { onChange('active'); });
+  await flush();
+  expect(jest.mocked(getCheckout).mock.calls.length).toBe(reads + 1);
+  spy.mockRestore();
+});
+
+it('only a paid payment listens for the foreground, and stops when the screen goes', async () => {
+  const remove = jest.fn();
+  const spy = jest.spyOn(AppState, 'addEventListener').mockImplementation((() => ({ remove })) as any);
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({ status: 'pending', payable: true, youArePaying: false }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(spy).not.toHaveBeenCalled();
+  act(() => tree.unmount());
+
+  jest.mocked(getCheckout).mockResolvedValue(checkoutWith({ status: 'succeeded', youArePaying: false }));
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(spy).toHaveBeenCalledTimes(1);
+  act(() => tree.unmount());
+  expect(remove).toHaveBeenCalled();
+  spy.mockRestore();
 });

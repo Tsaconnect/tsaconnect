@@ -30,7 +30,7 @@ export type MerchantRefund = {
 
 export type PayCheckout = {
   id: string;
-  /** The payment's code, "TSA-XXXXX-XXXXX" — what a payer types in Wallet → TSA Pay, and the receipt's number. Absent on an older server or an older payment. */
+  /** The payment's code, "TSA-XXXXX-XXXXX" — what a payer types under Pay on Home (or Wallet → TSA Pay), and the receipt's number. Absent on an older server or an older payment. */
   payCode?: string;
   merchantName: string;
   mode: 'live' | 'test';

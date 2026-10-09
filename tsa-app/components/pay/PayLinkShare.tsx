@@ -13,7 +13,7 @@ import { AccentCard, Button, Card, Text, useToast, type IconName } from '@/compo
 import { QrPanel } from '@/components/common/QrPanel';
 
 export function PayLinkShare({
-  url, message, qrSize, children, shareTitle = 'Share', secondary,
+  url, message, qrSize, children, shareTitle = 'Share', secondary, onShare,
 }: {
   url: string;
   message: string;
@@ -24,6 +24,8 @@ export function PayLinkShare({
   shareTitle?: string;
   /** Takes Copy link's place (a receipt offers Print / Save PDF); the two buttons then stack. */
   secondary?: { title: string; icon: IconName; onPress: () => void };
+  /** Shares something richer than `message` (a receipt shares its image); `message` stays its fallback. */
+  onShare?: () => Promise<void>;
 }) {
   const { spacing } = useTheme();
   const toast = useToast();
@@ -37,11 +39,17 @@ export function PayLinkShare({
     }
   };
 
+  // A receipt's image is fetched before the sheet opens: the button says so meanwhile.
+  const [sharing, setSharing] = React.useState(false);
   const share = async () => {
+    if (sharing) return;
+    setSharing(true);
     try {
-      await Share.share({ message });
+      await (onShare ? onShare() : Share.share({ message }));
     } catch (err) {
       console.error('Share error:', err);
+    } finally {
+      setSharing(false);
     }
   };
 
@@ -55,7 +63,7 @@ export function PayLinkShare({
         {url}
       </Text>
       <View style={{ flexDirection: secondary ? 'column' : 'row', gap: spacing.md, alignSelf: 'stretch' }}>
-        <Button title={shareTitle} leftIcon="share" onPress={share} style={buttonStyle} />
+        <Button title={shareTitle} leftIcon="share" onPress={share} loading={sharing} disabled={sharing} style={buttonStyle} />
         {secondary ? (
           <Button title={secondary.title} variant="secondary" leftIcon={secondary.icon} onPress={secondary.onPress} />
         ) : (
