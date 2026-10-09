@@ -236,6 +236,12 @@ it('starts her payment links: Request payment and the Payment links row', async 
   expect(router.push).toHaveBeenCalledWith('/merchants/pay-links');
 });
 
+it('opens her refunds from the Refunds row', async () => {
+  const tree = await mount();
+  await act(async () => { byLabel(tree, 'Refunds').props.onPress(); });
+  expect(router.push).toHaveBeenCalledWith('/merchants/refunds');
+});
+
 it('a suspended merchant can read her links but not request a payment', async () => {
   jest.mocked(getOwnMerchant).mockResolvedValue({ ...merchant, status: 'suspended' });
   const tree = await mount();

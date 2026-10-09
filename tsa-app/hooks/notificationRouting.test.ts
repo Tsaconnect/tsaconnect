@@ -64,4 +64,18 @@ describe('routeForNotification', () => {
       expect(routeForNotification({ type })).toBe('/merchants/pay-settings');
     }
   });
+
+  it('routes the owner\'s refund events to the refund, or to her refunds without a refund id', () => {
+    const id = '3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f';
+    for (const type of ['pay_refund_requested', 'pay_refund_confirmed', 'pay_refund_failed', 'pay_refund_needs_review']) {
+      expect(routeForNotification({ type, refundId: id, paymentId: 'x' })).toBe(`/merchants/refunds/${id}`);
+      expect(routeForNotification({ type, refundId: '../evil' })).toBe('/merchants/refunds');
+    }
+  });
+
+  it('routes the payer\'s refund to the payment\'s summary', () => {
+    const id = '8e4d2c1b-6a5f-4e3d-9c2b-7a1f0e9d8c7b';
+    expect(routeForNotification({ type: 'pay_refund_received', paymentId: id, refundId: 'r' })).toBe(`/pay?id=${id}`);
+    expect(routeForNotification({ type: 'pay_refund_received', paymentId: 'nope' })).toBeNull();
+  });
 });

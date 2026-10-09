@@ -49,3 +49,6 @@ export const PAY_CODE = '/pay-code' satisfies Href;
 
 /** A verified user's name change: pay, verify again with her ID, and its outcome. */
 export const NAME_CHANGE = '/profile/name-change' satisfies Href;
+
+/** A TSA Pay merchant's refunds, each approved and sent from her TSA wallet. */
+export const PAY_REFUNDS = '/merchants/refunds' satisfies Href;

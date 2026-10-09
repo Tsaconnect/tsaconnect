@@ -1,9 +1,9 @@
 // Single source of truth for P2P status presentation — and a TSA Pay payment
 // link's (one-time, and reusable), as its merchant sees it, and a verified
-// user's name change. Namespace-aware because
+// user's name change. And a TSA Pay refund, as the business owner sends it. Namespace-aware because
 // `cancelled`/`resolved` mean different things across trade/ad/dispute. Pure +
 // testable; StatusPill resolves `tone` -> theme color/bg.
-export type StatusKind = 'trade' | 'ad' | 'dispute' | 'payLink' | 'openLink' | 'nameChange';
+export type StatusKind = 'trade' | 'ad' | 'dispute' | 'payLink' | 'openLink' | 'nameChange' | 'payRefund';
 export type StatusTone = 'success' | 'warning' | 'danger' | 'info' | 'escrow' | 'accent' | 'neutral';
 
 export interface StatusVisual {
@@ -70,6 +70,16 @@ const NAME_CHANGE: Record<string, StatusVisual> = {
   cancelled: { label: 'Cancelled', tone: 'neutral' },
 };
 
+// A TSA Pay refund, as the owner sends it: waiting for her, on its way, then final.
+const PAY_REFUND: Record<string, StatusVisual> = {
+  requested: { label: 'Waiting for you', tone: 'warning' },
+  submitted: { label: 'Sending', tone: 'info' },
+  confirmed: { label: 'Refunded', tone: 'success' },
+  failed: { label: 'Failed', tone: 'danger' },
+  needs_review: { label: 'Under review', tone: 'warning' },
+  cancelled: { label: 'Cancelled', tone: 'neutral' },
+};
+
 export const STATUS_MAP: Record<StatusKind, Record<string, StatusVisual>> = {
   trade: TRADE,
   ad: AD,
@@ -77,6 +87,7 @@ export const STATUS_MAP: Record<StatusKind, Record<string, StatusVisual>> = {
   payLink: PAY_LINK,
   openLink: OPEN_LINK,
   nameChange: NAME_CHANGE,
+  payRefund: PAY_REFUND,
 };
 
 /** Resolve a status string in its namespace; unknown values fall back to a neutral pill. */
