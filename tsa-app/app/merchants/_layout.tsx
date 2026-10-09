@@ -1,8 +1,8 @@
 // app/merchants/_layout.tsx
 //
 // Stack layout for the Merchant section (dashboard, inventory, orders, P2P
-// buy/sell, digital assets, profile, merchant application, TSA Pay settings and
-// payment links).
+// buy/sell, digital assets, profile, merchant application, TSA Pay settings,
+// payment links and refunds).
 //
 // Headers used to be hidden here on the theory that "each merchant screen
 // renders its own chrome". Five of the thirteen rendered none at all
@@ -124,6 +124,12 @@ export default function MerchantLayout() {
                 name="pay-links/open/[id]"
                 options={{
                     title: 'Reusable link',
+                }}
+            />
+            <Stack.Screen
+                name="refunds/index"
+                options={{
+                    title: 'Refunds',
                 }}
             />
             <Stack.Screen

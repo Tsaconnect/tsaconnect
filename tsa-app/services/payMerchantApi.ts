@@ -323,8 +323,8 @@ export type PayRefundDetail = {
 };
 
 /** Her refunds in one mode, newest first (the screen puts the open ones first). */
-export function listPayRefunds(mode: PayLinkMode, page = 1, limit = 50): Promise<PayRefundPage> {
-  return request<PayRefundPage>(`/refunds?mode=${mode}&page=${page}&limit=${limit}`);
+export function listPayRefunds(mode: PayLinkMode, page = 1, limit = 50, status?: PayRefundStatus): Promise<PayRefundPage> {
+  return request<PayRefundPage>(`/refunds?mode=${mode}&page=${page}&limit=${limit}${status ? `&status=${status}` : ''}`);
 }
 
 export function getPayRefund(id: string): Promise<PayRefundDetail> {
