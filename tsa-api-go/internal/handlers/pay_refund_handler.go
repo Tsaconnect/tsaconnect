@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -229,4 +230,61 @@ func payRefundFail(c *gin.Context, err error) {
 	default:
 		payInternalFail(c, err)
 	}
+}
+
+// GET /api/admin/pay/refunds?status&mode&paymentId&page&limit — every merchant's
+// refunds, open first: what support watches (submitted, needs_review).
+func (h *PayHandler) AdminListRefunds(c *gin.Context) {
+	f := services.PayRefundAdminFilter{Status: strings.TrimSpace(c.Query("status")),
+		Page: clamp(atoiDefault(c.Query("page"), 1), 1, 1<<30), Limit: clamp(atoiDefault(c.Query("limit"), 20), 1, 100)}
+	if f.Status != "" && !models.IsPayRefundStatus(f.Status) {
+		utils.ErrorResponse(c, http.StatusBadRequest, "status must be requested, submitted, confirmed, failed, needs_review or cancelled")
+		return
+	}
+	switch mode := strings.TrimSpace(c.Query("mode")); mode {
+	case "", models.PayModeLive, models.PayModeTest:
+		f.Mode = mode
+	default:
+		utils.ErrorResponse(c, http.StatusBadRequest, "mode must be live or test")
+		return
+	}
+	if raw := strings.TrimSpace(c.Query("paymentId")); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payment id")
+			return
+		}
+		f.PaymentID = &id
+	}
+	items, total, err := h.refunds.AdminList(c.Request.Context(), f)
+	if err != nil {
+		payInternalFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Refunds", gin.H{"refunds": items, "total": total, "page": f.Page, "limit": f.Limit})
+}
+
+// POST /api/admin/pay/refunds/:id/reevaluate (super_admin) — re-read the chain
+// for a submitted or needs_review refund now, and close it the way the
+// evidence points (the exit from needs_review).
+func (h *PayHandler) AdminReevaluateRefund(c *gin.Context) {
+	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Refund not found")
+		return
+	}
+	r, err := h.refunds.Reevaluate(c.Request.Context(), id)
+	switch {
+	case errors.Is(err, services.ErrPayRefundNotFound):
+		utils.ErrorResponse(c, http.StatusNotFound, "Refund not found")
+		return
+	case errors.Is(err, services.ErrPayRefundState):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Only a submitted or needs-review refund can be re-checked", "refund_state")
+		return
+	case err != nil:
+		log.Printf("[tsa-pay] admin reevaluate refund %s: %s", id, services.RedactAlertText(err.Error()))
+		utils.ErrorResponseWithCode(c, http.StatusBadGateway, "Couldn't read the chain — try again", "chain_unreadable")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Refund re-checked", gin.H{"refund": h.refunds.View(r)})
 }

@@ -26,6 +26,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
@@ -603,5 +604,105 @@ func TestPayInternalFail_IsRedactedAndPlain(t *testing.T) {
 		if logged.Len() == 0 || strings.Contains(logged.String(), secret) {
 			t.Errorf("%s: log %q", name, logged.String())
 		}
+	}
+}
+
+// adminRefundEngine mounts the admin refund routes for a user of role, with
+// the super-admin gate exactly as routes.go puts it on reevaluate.
+func (o *refundHandlerRig) adminRefundEngine(role string) *gin.Engine {
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set("user", &models.User{ID: uuid.New(), Role: role}) })
+	r.GET("/api/admin/pay/refunds", o.h.AdminListRefunds)
+	r.GET("/api/admin/pay/payments", o.h.AdminListPayments)
+	r.POST("/api/admin/pay/refunds/:id/reevaluate", middleware.RequireSuperAdmin(), o.h.AdminReevaluateRefund)
+	return r
+}
+
+func (o *refundHandlerRig) adminDo(role, method, path string) refundResp {
+	w := payDo(o.adminRefundEngine(role), method, path, nil, nil)
+	out := refundResp{status: w.Code, raw: w.Body.String()}
+	json.Unmarshal(w.Body.Bytes(), &out.body)
+	return out
+}
+
+func (o *refundHandlerRig) submittedRefund(t *testing.T, ref string) *models.PayRefund {
+	t.Helper()
+	p := o.paid(t, models.PayModeLive, ref)
+	at, hash := payHandlerNow, "0x"+strings.Repeat("cd", 32)
+	r := &models.PayRefund{PaymentID: p.ID, MerchantID: o.m.ID, Mode: models.PayModeLive, AmountMicroUSD: 1_000_000, CapMicroUSD: 34_000_000,
+		ToAddress: refundTestFunding, FromAddress: o.owner.WalletAddress, ChainID: 56, TokenSymbol: "USDT", TokenAddress: refundTestUSDT,
+		TxHash: &hash, RawTx: "0x00", Status: models.PayRefundSubmitted, RequestedVia: models.PayRefundViaApp, CreatedAt: payHandlerNow, SubmittedAt: &at}
+	if err := o.db.Create(r).Error; err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestPayRefundAdmin_ListsAndFiltersEveryMerchantsRefunds(t *testing.T) {
+	o := newRefundHandlerRig(t)
+	sent := o.submittedRefund(t, "ADM-H-1")
+	other := o.paid(t, models.PayModeLive, "ADM-H-2")
+	o.refunds.Request(context.Background(), o.m, models.PayModeLive, other.ID, services.PayRefundRequest{Amount: "1", Via: models.PayRefundViaApp})
+
+	all := o.adminDo(models.RoleAdmin, http.MethodGet, "/api/admin/pay/refunds")
+	if all.status != http.StatusOK || all.data()["total"] != float64(2) {
+		t.Fatalf("all %d %s", all.status, all.raw)
+	}
+	bySent := o.adminDo(models.RoleAdmin, http.MethodGet, "/api/admin/pay/refunds?status=submitted")
+	items, _ := bySent.data()["refunds"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["id"] != sent.ID.String() || items[0].(map[string]any)["merchantName"] != "Sky Air" {
+		t.Fatalf("by status %s", bySent.raw)
+	}
+	byPayment := o.adminDo(models.RoleAdmin, http.MethodGet, "/api/admin/pay/refunds?paymentId="+other.ID.String())
+	if byPayment.data()["total"] != float64(1) {
+		t.Fatalf("by payment %s", byPayment.raw)
+	}
+	if testOnly := o.adminDo(models.RoleAdmin, http.MethodGet, "/api/admin/pay/refunds?mode=test"); testOnly.data()["total"] != float64(0) {
+		t.Fatalf("by mode %s", testOnly.raw)
+	}
+	for _, q := range []string{"?status=refunded", "?paymentId=nope", "?mode=sandbox"} {
+		if bad := o.adminDo(models.RoleAdmin, http.MethodGet, "/api/admin/pay/refunds"+q); bad.status != http.StatusBadRequest {
+			t.Errorf("%s: %d", q, bad.status)
+		}
+	}
+}
+
+func TestPayRefundAdmin_ReevaluateIsSuperAdminOnlyAndOnlyForOpenProofs(t *testing.T) {
+	o := newRefundHandlerRig(t)
+	sent := o.submittedRefund(t, "ADM-H-3")
+	path := "/api/admin/pay/refunds/" + sent.ID.String() + "/reevaluate"
+	if res := o.adminDo(models.RoleAdmin, http.MethodPost, path); res.status != http.StatusForbidden {
+		t.Fatalf("plain admin: %d %s", res.status, res.raw)
+	}
+	res := o.adminDo(models.RoleSuperAdmin, http.MethodPost, path)
+	if res.status != http.StatusOK || res.refund()["status"] != "submitted" {
+		t.Fatalf("super admin: %d %s", res.status, res.raw)
+	}
+	p := o.paid(t, models.PayModeLive, "ADM-H-4")
+	waiting, _ := o.refunds.Request(context.Background(), o.m, models.PayModeLive, p.ID, services.PayRefundRequest{Amount: "1", Via: models.PayRefundViaApp})
+	if res := o.adminDo(models.RoleSuperAdmin, http.MethodPost, "/api/admin/pay/refunds/"+waiting.ID.String()+"/reevaluate"); res.status != http.StatusConflict || res.code() != "refund_state" {
+		t.Fatalf("requested: %d %s", res.status, res.raw)
+	}
+	if res := o.adminDo(models.RoleSuperAdmin, http.MethodPost, "/api/admin/pay/refunds/"+uuid.NewString()+"/reevaluate"); res.status != http.StatusNotFound {
+		t.Fatalf("unknown: %d", res.status)
+	}
+}
+
+// The admin payments list is built from Views, so it carries the refund
+// totals the console shows beside each payment.
+func TestPayRefundAdmin_PaymentsListCarriesRefundTotals(t *testing.T) {
+	o := newRefundHandlerRig(t)
+	o.submittedRefund(t, "ADM-H-5")
+	res := o.adminDo(models.RoleAdmin, http.MethodGet, "/api/admin/pay/payments")
+	items, _ := res.data()["payments"].([]any)
+	if res.status != http.StatusOK || len(items) == 0 {
+		t.Fatalf("%d %s", res.status, res.raw)
+	}
+	first := items[0].(map[string]any)
+	if _, ok := first["refundedAmount"]; !ok {
+		t.Fatalf("no refundedAmount: %s", res.raw)
+	}
+	if _, ok := first["refundStatus"]; !ok {
+		t.Fatalf("no refundStatus: %s", res.raw)
 	}
 }

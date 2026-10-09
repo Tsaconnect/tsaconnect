@@ -1358,6 +1358,12 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminPay.GET("/payments", payh.AdminListPayments)
 			adminPay.GET("/payments/:id/deliveries", payh.AdminPaymentDeliveries)
 			adminPay.POST("/deliveries/:id/resend", payh.AdminResendWebhook)
+			if payh.RefundsEnabled() {
+				// Refunds across merchants; re-reading the chain to close a
+				// needs_review refund is super_admin, like IT sell reevaluate.
+				adminPay.GET("/refunds", payh.AdminListRefunds)
+				adminPay.POST("/refunds/:id/reevaluate", middleware.RequireSuperAdmin(), payh.AdminReevaluateRefund)
+			}
 		}
 
 		// TSA Pay merchant API — its own top-level group, deliberately NOT
