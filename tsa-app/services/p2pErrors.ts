@@ -26,12 +26,14 @@ const CODE_COPY: Record<string, string> = {
   WALLET_PROOF_REQUIRED: 'Prove ownership of your wallet before continuing.',
 };
 
-// A timeout says nothing about the outcome: the request may have landed.
+// A client-side timeout says nothing about the outcome: the request may have
+// landed. Only status-less errors qualify (a server reply is a real answer);
+// "confirmation timed out" is services/txWait.ts's waitMined message.
+const CLIENT_TIMEOUT = /^request timed out|etimedout|confirmation timed out/i;
 const TIMEOUT_COPY =
   'We could not confirm this in time. It may still go through, so check the trade before trying again.';
 
 const RULES: [RegExp, string][] = [
-  [/timed out|timeout|etimedout|aborted/i, TIMEOUT_COPY],
   [/network request failed|^network error$|failed to fetch/i, "Can't reach TSA Connect. Check your connection and try again."],
   [/rate source is stale/i, 'The live rate is unavailable right now. Try again in a few seconds.'],
   [/blockchain temporarily unavailable/i, 'The network is busy right now. Try again in a minute.'],
@@ -65,8 +67,13 @@ export function p2pErrorMessage(
   if (r.code && CODE_COPY[r.code]) return CODE_COPY[r.code];
   if (r.status === 401) return 'Your session has expired. Sign in again.';
   if (r.status === 410) return 'Your app version is out of date — please update and retry.';
-  if (r.status === 429) return "You've hit the daily limit for gas top-ups. Try again tomorrow.";
+  if (r.status === 429) {
+    return /used today's gas top-ups/i.test(raw)
+      ? "You've hit the daily limit for gas top-ups. Try again tomorrow."
+      : 'Too many requests. Wait a moment and try again.';
+  }
   for (const [re, copy] of RULES) if (re.test(raw)) return copy;
+  if (r.status == null && CLIENT_TIMEOUT.test(raw)) return TIMEOUT_COPY;
   if (decodeRevertError(raw)) {
     return 'The network would reject this transaction, so nothing was sent. Pull down to refresh and try again.';
   }

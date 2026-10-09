@@ -85,8 +85,21 @@ describe('p2pErrorMessage: API codes', () => {
   ])('gas/wallet code %s', (code, re) => {
     expect(p2pErrorMessage({ code, message: 'raw' })).toMatch(re);
   });
-  it('maps a 429 to the daily cap', () => {
-    expect(p2pErrorMessage({ status: 429, message: 'x' })).toMatch(/daily limit/i);
+  it('maps the gas 429 to the daily cap', () => {
+    expect(p2pErrorMessage({ status: 429, message: "you've used today's gas top-ups" })).toMatch(/daily limit/i);
+  });
+  it('maps any other 429 to a generic wait', () => {
+    expect(p2pErrorMessage({ status: 429, message: 'Too many requests, please try again later.' })).toBe(
+      'Too many requests. Wait a moment and try again.',
+    );
+  });
+  it('treats waitMined and ETIMEDOUT as unconfirmed', () => {
+    expect(p2pErrorMessage('approve confirmation timed out')).toMatch(/may still go through/i);
+    expect(p2pErrorMessage('connect ETIMEDOUT')).toMatch(/may still go through/i);
+  });
+  it('does not call server timeouts or aborts unconfirmed', () => {
+    expect(p2pErrorMessage({ status: 504, message: 'upstream timeout' })).not.toMatch(/may still go through/i);
+    expect(p2pErrorMessage({ message: 'p2p: trade aborted' })).not.toMatch(/may still go through/i);
   });
   it('never says a timeout failed', () => {
     const msg = p2pErrorMessage('Request timed out');

@@ -75,7 +75,7 @@ it('a refused top-up with enough balance stays silent and proceeds', async () =>
 
 it('a refused top-up + empty signer wallet surfaces the friendly refusal copy', async () => {
   const onAlert = jest.fn();
-  mockTopUp.mockResolvedValue({ success: false, status: 429, message: 'daily cap' });
+  mockTopUp.mockResolvedValue({ success: false, status: 429, message: "you've used today's gas top-ups" });
   mockEnsureGas.mockImplementation(async (_c: string, _w: string, alert: any) => {
     alert('Not enough gas', 'You need S on Sonic to cover the transaction fee.');
     return false;
