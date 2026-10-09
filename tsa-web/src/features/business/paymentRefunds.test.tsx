@@ -140,6 +140,40 @@ describe('refunds in the payment drawer', () => {
     expect(await within(drawer).findByRole('button', { name: 'Refund' })).toBeInTheDocument();
   });
 
+  it('refunds switched off (503 refunds_unavailable): the drawer shows the message, reads once, no button', async () => {
+    const p = payment;
+    const f = stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [p], total: 1, page: 1, limit: 20 }),
+      [`/api/pay/merchant/payments/${p.id}`]: ok({ payment: p, payer: { name: 'Ada Obi' }, deliveries: [] }),
+      [`/api/pay/merchant/payments/${p.id}/refunds`]: () => fail(503, "Refunds aren't available yet.", 'refunds_unavailable'),
+    });
+    mountAt(`/business/live/payments/${p.id}`);
+    const drawer = await screen.findByRole('dialog');
+    expect(await within(drawer).findByText("Couldn't load refunds")).toBeInTheDocument();
+    expect(within(drawer).getByText("Refunds aren't available yet.")).toBeInTheDocument();
+    expect(within(drawer).queryByRole('button', { name: 'Refund' })).not.toBeInTheDocument();
+    expect(f.mock.calls.filter(([u]) => String(u).includes('/refunds'))).toHaveLength(1);
+  });
+
+  it('refunds switched off while the dialog is open: the create answers 503, the dialog shows the message once', async () => {
+    const user = userEvent.setup();
+    const f = stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [payment], total: 1, page: 1, limit: 20 }),
+      [`/api/pay/merchant/payments/${payment.id}`]: ok({ payment, payer: { name: 'Ada Obi' }, deliveries: [] }),
+      [`/api/pay/merchant/payments/${payment.id}/refunds`]: (_url, init) =>
+        init?.method === 'POST' ? fail(503, "Refunds aren't available yet.", 'refunds_unavailable') : ok(refunds()),
+    });
+    mountAt(`/business/live/payments/${payment.id}`);
+    const drawer = await screen.findByRole('dialog');
+    await user.click(await within(drawer).findByRole('button', { name: 'Refund' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Refund this payment' });
+    await user.click(within(dialog).getByRole('button', { name: 'Request refund' }));
+    expect(await within(dialog).findByText("Refunds aren't available yet.")).toBeInTheDocument();
+    expect(posts(f)).toHaveLength(1);
+  });
+
   it('a payment that can\'t be refunded says why and offers no button', async () => {
     stub(payment, refunds({ refundable: false, notRefundableReason: "Refunds aren't available for this payment" }));
     mountAt(`/business/live/payments/${payment.id}`);

@@ -48,7 +48,7 @@ jest.mock('@/components/ui', () => {
       onPress: props.disabled ? undefined : props.onPress,
       accessibilityState: { disabled: !!props.disabled },
     }, props.title),
-    ErrorState: (props: any) => react.createElement(RNText, null, props.title),
+    ErrorState: (props: any) => react.createElement(RNText, null, props.title, ' ', props.subtitle),
     EmptyState: (props: any) => react.createElement(RNText, null, props.title),
     Spinner: () => null,
     Icon: () => null,
@@ -188,6 +188,20 @@ describe('Refunds list', () => {
     expect(text(tree)).toContain('Could not load your refunds');
   });
 
+  it('refunds switched off (503 refunds_unavailable) shows the server message and polls at its normal 15 s pace only', async () => {
+    const off = Object.assign(new Error("Refunds aren't available yet."), { status: 503, code: 'refunds_unavailable' });
+    jest.mocked(listPayRefunds).mockRejectedValue(off);
+    await mount(<PayRefunds />);
+    expect(text(tree)).toContain('Could not load your refunds');
+    expect(text(tree)).toContain("Refunds aren't available yet.");
+    const first = jest.mocked(listPayRefunds).mock.calls.length;
+    await act(async () => { jest.advanceTimersByTime(14_000); });
+    expect(jest.mocked(listPayRefunds).mock.calls.length).toBe(first);
+    await act(async () => { jest.advanceTimersByTime(1_000); });
+    await flush();
+    expect(jest.mocked(listPayRefunds).mock.calls.length).toBe(first * 2);
+  });
+
   it('never hides an older requested refund behind a full newest page', async () => {
     jest.mocked(listPayRefunds).mockImplementation(async (_m, _p, _l, status) => ({
       refunds: status === 'requested'
@@ -294,6 +308,20 @@ describe('Refund screen', () => {
     await press('radio:8453:USDC');
     expect(getWalletBalances).toHaveBeenLastCalledWith(8453, OWNER, 'mainnet');
     expect(text(tree)).toContain('You send: 12.5 USDC on Base');
+  });
+
+  it('refunds switched off (503 refunds_unavailable) shows the server message and re-reads at the normal 5 s pace only', async () => {
+    jest.mocked(getPayRefund).mockRejectedValue(Object.assign(new Error("Refunds aren't available yet."), { status: 503, code: 'refunds_unavailable' }));
+    jest.mocked(getSignableWallet).mockResolvedValue(OWNER);
+    await mount(<RefundDetailScreen />);
+    expect(text(tree)).toContain('Could not load this refund');
+    expect(text(tree)).toContain("Refunds aren't available yet.");
+    const first = jest.mocked(getPayRefund).mock.calls.length;
+    await act(async () => { jest.advanceTimersByTime(4_000); });
+    expect(jest.mocked(getPayRefund).mock.calls.length).toBe(first);
+    await act(async () => { jest.advanceTimersByTime(1_000); });
+    await flush();
+    expect(jest.mocked(getPayRefund).mock.calls.length).toBe(first + 1);
   });
 
   it('a route id that is not a refund id is not found, and nothing is requested', async () => {

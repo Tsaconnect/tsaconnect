@@ -107,4 +107,11 @@ describe('refunds list (reconciliation)', () => {
     expect(await screen.findByText('12.50 USDT')).toBeInTheDocument();
     expect(f.mock.calls.filter(([u]) => String(u).startsWith('/api/pay/merchant/refunds'))).toHaveLength(2);
   });
+
+  it('refunds switched off (503 refunds_unavailable) shows the message once, no crash', async () => {
+    const f = stubFetch({ '/api/pay/merchant/refunds': () => fail(503, "Refunds aren't available yet.", 'refunds_unavailable') });
+    mount();
+    expect(await screen.findByRole('alert')).toHaveTextContent("Refunds aren't available yet.");
+    expect(f.mock.calls.filter(([u]) => String(u).startsWith('/api/pay/merchant/refunds'))).toHaveLength(1);
+  });
 });
