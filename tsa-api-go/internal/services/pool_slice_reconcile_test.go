@@ -1,0 +1,263 @@
+package services
+
+import (
+	"bytes"
+	"context"
+	"log"
+	"math/big"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+)
+
+func releaseSender() *chainCountingSender {
+	return &chainCountingSender{fakeReleaseSigner: fakeReleaseSigner{addr: "0x00000000000000000000000000000000000000a1",
+		hash: "0x" + strings.Repeat("e1", 32)}}
+}
+
+// openOne opens a ₦5,000 order on one LP and wires the slice hooks.
+func openOne(t *testing.T) (*poolOpenRig, *models.ITIntent, models.P2PTrade, *models.PaymentMerchant, *chainCountingSender) {
+	t.Helper()
+	r := newPoolOpenRig(t)
+	lp, _ := r.addLP(t, 50)
+	intent, _, err := r.open(t, "5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := releaseSender()
+	r.trades.SetPoolSlices(r.it, sender)
+	return r, intent, r.slicesOf(t, intent.ID)[0], lp, sender
+}
+
+// F21: an LP disputes a slice of a PAID order → resolved to the treasury,
+// LP paused, no P2P dispute row, through the release key's Send.
+func TestPoolSlice_DisputeAutoResolvesToTreasuryWhenPaid(t *testing.T) {
+	r, intent, sl, lp, sender := openOne(t)
+	ctx := context.Background()
+	if ok, err := r.it.claimAndPriceStableBuy(ctx, intent, "sess_paid", intent.AmountMinor, time.Now(), false, PayInCentral); !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusDisputed)
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.chain.resolves) != 1 || !r.chain.resolves[0] || len(sender.sendChains) != 1 || sender.sendChains[0] != poolTestChain || sender.direct != 0 {
+		t.Fatalf("resolves=%v sends=%v direct=%d, want one Send releasing to the treasury", r.chain.resolves, sender.sendChains, sender.direct)
+	}
+	var n int64
+	r.db.Model(&models.P2PDispute{}).Count(&n)
+	var lpRow models.PaymentMerchant
+	r.db.First(&lpRow, "id = ?", lp.ID)
+	if n != 0 || lpRow.Status != models.PaymentMerchantStatusPaused {
+		t.Fatalf("disputes=%d lp=%s, want no dispute row and the LP paused", n, lpRow.Status)
+	}
+	// The next pass sees Resolved and reads the outcome from the resolve receipt.
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", sl.ID)
+	if got.Status != models.P2PTradeStatusResolved || got.DroppedAt != nil {
+		t.Fatalf("slice = %+v, want resolved and still backing the order", got)
+	}
+}
+
+// F21: unpaid → back to the LP; the slice no longer backs the order.
+func TestPoolSlice_DisputeAutoResolvesToLPWhenUnpaid(t *testing.T) {
+	r, _, sl, _, _ := openOne(t)
+	ctx := context.Background()
+	r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusDisputed)
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.chain.resolves) != 1 || r.chain.resolves[0] {
+		t.Fatalf("resolves = %v, want one back to the LP", r.chain.resolves)
+	}
+	r.chain.resolvedEvent = &P2PTradeResolvedEvent{TradeID: HashID(sl.ID), ReleasedToBuyer: false}
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", sl.ID)
+	var ad models.P2PAd
+	r.db.First(&ad, "id = ?", sl.AdID)
+	if got.Status != models.P2PTradeStatusResolved || got.DroppedAt == nil || ad.Reserved != "0" {
+		t.Fatalf("slice=%+v ad reserved=%s, want resolved, dropped, capacity restored", got, ad.Reserved)
+	}
+}
+
+// F22: a self-release on an unpaid order is recorded and alerted, never forwarded (C2).
+func TestPoolSlice_SelfReleaseUnpaidAlerts(t *testing.T) {
+	r, _, sl, _, _ := openOne(t)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusReleased)
+	if _, err := r.trades.ReconcileTrade(context.Background(), sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_slice_self_released") {
+		t.Fatalf("no self-release alert:\n%s", buf.String())
+	}
+}
+
+// S44 (review I1): an unlanded slice is reclaimed only once it can never
+// land — it never had a nonce, or its nonce was consumed by another
+// transaction — EVEN WHEN a broadcast hash was recorded (a connection reset,
+// a dropped tx). While it may still land it waits, and its row rotates to
+// the back of the reconciler's updated_at window so it never starves the
+// trades behind it.
+func TestReconcileOrphanOpen_SliceNeedsConsumedNonce(t *testing.T) {
+	r := newPoolOpenRig(t)
+	r.trades.SetPoolSlices(r.it, releaseSender())
+	_, ad := r.addLP(t, 50)
+	nonce := int64(15)
+	old := time.Now().Add(-2 * time.Hour)
+	withNonce := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), Nonce: &nonce, CreatedAt: old})
+	unminedHash := "0x" + strings.Repeat("c3", 32) // broadcast, never mined: no receipt
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", withNonce.ID).UpdateColumn("open_tx_hash", unminedHash) // keeps updated_at at the seed time
+	noNonce := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), CreatedAt: old})
+	r.chain.latest = 15 // nonce 15 not yet used
+	ctx := context.Background()
+	r.trades.ReconcileTrade(ctx, withNonce.ID)
+	r.trades.ReconcileTrade(ctx, noNonce.ID)
+	row := func(id interface{}) models.P2PTrade {
+		var t models.P2PTrade
+		r.db.First(&t, "id = ?", id)
+		return t
+	}
+	if got := row(withNonce.ID); got.Status != models.P2PTradeStatusPendingPayment || !got.UpdatedAt.After(old) {
+		t.Fatalf("in-flight slice = %s updated=%s, want waiting and rotated past its seed time", got.Status, got.UpdatedAt)
+	}
+	if row(noNonce.ID).Status != models.P2PTradeStatusCancelled {
+		t.Fatal("a slice that never had a nonce was not reclaimed")
+	}
+	// Re-review N5: inside its window too, an unlanded slice rotates.
+	youngAt := time.Now().Add(-10 * time.Minute)
+	young := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), Nonce: &nonce, CreatedAt: youngAt})
+	r.trades.ReconcileTrade(ctx, young.ID)
+	if got := row(young.ID); got.Status != models.P2PTradeStatusPendingPayment || !got.UpdatedAt.After(youngAt) {
+		t.Fatalf("in-window slice = %s updated=%s, want waiting and rotated", got.Status, got.UpdatedAt)
+	}
+	r.chain.latest = 16 // consumed by another transaction: it can never land
+	r.trades.ReconcileTrade(ctx, withNonce.ID)
+	if got := row(withNonce.ID); got.Status != models.P2PTradeStatusCancelled || got.CancelReason != "reconciled_orphan" {
+		t.Fatalf("slice with a dead hash = %s (%s), want reclaimed", got.Status, got.CancelReason)
+	}
+}
+
+// Review I3: until C2 settles, a slice of a PAID order that is cancelled
+// on-chain (cancelByTimeout is permissionless after 60 min) or resolved back
+// to its LP is money with no stock behind it. That is never silent.
+func TestPoolSlice_PaidSliceLostAlerts(t *testing.T) {
+	r, intent, sl, _, _ := openOne(t)
+	ctx := context.Background()
+	if ok, err := r.it.claimAndPriceStableBuy(ctx, intent, "sess_lost", intent.AmountMinor, time.Now(), false, PayInCentral); !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusCancelled)
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_paid_slice_lost") || !strings.Contains(buf.String(), "how=cancelled") {
+		t.Fatalf("no paid-slice-lost alert:\n%s", buf.String())
+	}
+}
+
+// receiptProbe is the pool chain with our open's receipt overridden (a
+// reverted open), and an optional endpoint failover mid-decision.
+type receiptProbe struct {
+	*poolOpenChain
+	reverted *types.Receipt
+	failover bool
+}
+
+func (p *receiptProbe) TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error) {
+	if p.failover {
+		p.gen.Add(1)
+	}
+	if p.reverted != nil {
+		return p.reverted, nil
+	}
+	return p.poolOpenChain.TransactionReceipt(ctx, h)
+}
+
+// S44 (controller rule): a slice whose trade exists on-chain is opened. A
+// consumed nonce, or no receipt for the hash we hold, never makes it "gone".
+func TestSliceOpenGone_NeverWhileTheTradeExists(t *testing.T) {
+	r, _, sl, _, _ := openOne(t)
+	ctx := context.Background()
+	if sl.OpenNonce == nil || sl.OpenTxHash == "" {
+		t.Fatalf("landed slice has nonce=%v hash=%q", sl.OpenNonce, sl.OpenTxHash)
+	}
+	r.chain.latest = uint64(*sl.OpenNonce) + 5 // the nonce is long consumed
+	if gone, err := r.it.SliceOpenGone(ctx, &sl); gone || err != nil {
+		t.Fatalf("landed slice: gone=%v err=%v, want waiting", gone, err)
+	}
+	other := sl
+	other.OpenTxHash = "0x" + strings.Repeat("d4", 32) // a hash with no receipt
+	if gone, err := r.it.SliceOpenGone(ctx, &other); gone || err != nil {
+		t.Fatalf("trade exists, receipt for another hash missing: gone=%v err=%v, want waiting", gone, err)
+	}
+}
+
+// S44: a reverted open is gone only once its receipt is poolProveDepth deep,
+// the trade is still absent, and the probe never failed over meanwhile.
+func TestSliceOpenGone_RevertedOpenMustBeDeep(t *testing.T) {
+	r := newPoolOpenRig(t)
+	_, ad := r.addLP(t, 50)
+	nonce := int64(15)
+	sl := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), Nonce: &nonce})
+	sl.OpenTxHash = "0x" + strings.Repeat("c5", 32)
+	r.chain.latest = 15 // the nonce read alone would say "wait"
+	probe := &receiptProbe{poolOpenChain: r.chain}
+	r.desk.c.Probe = probe
+	ctx := context.Background()
+	head := r.chain.head + r.chain.depth
+	probe.reverted = &types.Receipt{Status: types.ReceiptStatusFailed, BlockNumber: new(big.Int).SetUint64(head - poolProveDepth + 1)}
+	if gone, err := r.it.SliceOpenGone(ctx, sl); gone || err != nil {
+		t.Fatalf("shallow revert: gone=%v err=%v, want waiting", gone, err)
+	}
+	probe.reverted.BlockNumber = new(big.Int).SetUint64(head - poolProveDepth)
+	probe.failover = true
+	if gone, _ := r.it.SliceOpenGone(ctx, sl); gone {
+		t.Fatal("decided across an endpoint failover")
+	}
+	probe.failover = false
+	if gone, err := r.it.SliceOpenGone(ctx, sl); !gone || err != nil {
+		t.Fatalf("deep revert: gone=%v err=%v, want gone", gone, err)
+	}
+	probe.reverted.Status = types.ReceiptStatusSuccessful
+	if gone, _ := r.it.SliceOpenGone(ctx, sl); gone {
+		t.Fatal("a mined, successful open was called gone")
+	}
+}
+
+// Review I3: an orphaned slice of a PAID order is reclaimed loudly.
+func TestPoolSlice_PaidOrderOrphanAlerts(t *testing.T) {
+	r, intent, _, _, _ := openOne(t)
+	ctx := context.Background()
+	if ok, err := r.it.claimAndPriceStableBuy(ctx, intent, "sess_orphan", intent.AmountMinor, time.Now(), false, PayInCentral); !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	var ad models.P2PAd
+	r.db.First(&ad, "id = ?", r.slicesOf(t, intent.ID)[0].AdID)
+	orphan := seedPoolSlice(t, r.db, sliceSeed{Intent: intent.ID, Ad: &ad, Units: usdt18(1), CreatedAt: time.Now().Add(-2 * time.Hour)})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	if _, err := r.trades.ReconcileTrade(ctx, orphan.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_paid_slice_lost") || !strings.Contains(buf.String(), "how=never_opened") {
+		t.Fatalf("no paid-slice-lost alert:\n%s", buf.String())
+	}
+}

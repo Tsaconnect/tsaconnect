@@ -206,6 +206,11 @@ type P2PTradeService struct {
 	// balanceMoved is told of every confirmed deposit and withdrawal (the LP
 	// balance cache, review I4); nil when liquidity is dormant.
 	balanceMoved func(chainID int64, wallet, token string)
+	// poolSlices and poolSender handle LP-side actions on pool slices (spec
+	// S42, F21–F22; plan C1 P14). Nil: dormant pool — the reconciler alerts
+	// and waits.
+	poolSlices PoolSliceOrders
+	poolSender ChainSender
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -2803,10 +2808,21 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// appear on chain. Such a row permanently holds reserved/remaining capacity,
 	// so reclaim it — cancel + restore the ad's off-chain counters.
 	if !onchain.Exists {
+		// An ordinary trade keeps today's rule (no open hash). A slice is
+		// judged by S44 alone, hash or not (review I1): its open is gone only
+		// when it can never land.
 		if trade.Status == models.P2PTradeStatusPendingPayment &&
-			trade.OpenTxHash == "" &&
-			s.clock.Now().After(trade.ExpiresAt) {
+			s.clock.Now().After(trade.ExpiresAt) &&
+			((!trade.IsPoolSlice() && trade.OpenTxHash == "") || (trade.IsPoolSlice() && s.sliceOrphanable(ctx, &trade))) {
+			if trade.IsPoolSlice() {
+				s.notePaidSliceLost(ctx, &trade, "never_opened") // a paid order's slice is never silently gone
+			}
 			return s.reconcileOrphanOpen(ctx, &trade)
+		}
+		// Re-review N5: a slice not on-chain yet, still inside its window, is
+		// rotated too, so an hour of failed opens never holds the window.
+		if trade.IsPoolSlice() && trade.Status == models.P2PTradeStatusPendingPayment && !s.clock.Now().After(trade.ExpiresAt) {
+			s.rotateSlice(ctx, &trade)
 		}
 		return ReconcileResult{}, nil
 	}
@@ -2829,12 +2845,24 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 
 	switch onchain.Status {
 	case OnChainP2PStatusReleased:
+		if trade.IsPoolSlice() {
+			s.noteSliceSelfRelease(ctx, &trade)
+		}
 		return s.reconcileToReleased(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusCancelled:
+		if trade.IsPoolSlice() {
+			s.notePaidSliceLost(ctx, &trade, "cancelled") // review I3
+		}
 		return s.reconcileToCancelled(ctx, &trade, funding)
 	case OnChainP2PStatusResolved:
+		if trade.IsPoolSlice() {
+			return s.reconcileSliceResolved(ctx, &trade)
+		}
 		return s.reconcileToResolved(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusDisputed:
+		if trade.IsPoolSlice() {
+			return s.reconcileSliceDisputed(ctx, &trade)
+		}
 		return s.reconcileToDisputed(ctx, &trade)
 	case OnChainP2PStatusPaid:
 		// Chain Paid + DB pending_payment → someone called on-chain markPaid

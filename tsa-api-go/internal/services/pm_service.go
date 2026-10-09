@@ -337,6 +337,17 @@ func (s *PMService) PausePM(ctx context.Context, pmID, adminID uuid.UUID) (*mode
 		models.PaymentMerchantStatusPaused)
 }
 
+// AutoPauseLP pauses an active LP for a system reason (spec F21): it is never
+// allocated again until an admin resumes it; in-flight slices finish. A row
+// that is not active is left as it is (nil, nil).
+func (s *PMService) AutoPauseLP(ctx context.Context, pmID uuid.UUID, reason string) (*models.PaymentMerchant, error) {
+	pm, err := s.transition(ctx, pmID, uuid.Nil, reason, []string{models.PaymentMerchantStatusActive}, models.PaymentMerchantStatusPaused)
+	if errors.Is(err, ErrInvalidPMTransition) {
+		return nil, nil
+	}
+	return pm, err
+}
+
 // ResumePM flips a PAUSED payment merchant back to 'active'. Returns
 // ErrInvalidPMTransition unless the PM is currently paused.
 func (s *PMService) ResumePM(ctx context.Context, pmID, adminID uuid.UUID) (*models.PaymentMerchant, error) {
