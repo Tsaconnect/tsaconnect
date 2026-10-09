@@ -748,6 +748,12 @@ func TestParseTokenAmount(t *testing.T) {
 		{"", 6, "", false},
 		{"1e3", 6, "", false},
 		{"+1", 6, "", false},
+		// Malformed input is refused before any digits are dropped.
+		{"1.2.3", 1, "", false},
+		{"1.5e3", 1, "", false},
+		{"1.x", 0, "", false},
+		{"1..5", 0, "", false},
+		{"1.5e", 1, "", false},
 	}
 
 	for _, tt := range tests {

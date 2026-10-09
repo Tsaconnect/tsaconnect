@@ -201,7 +201,11 @@ func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
 	if strings.HasSuffix(amount, ".") {
 		amount = strings.TrimSuffix(amount, ".")
 	}
-	if whole, frac, hasFrac := strings.Cut(amount, "."); hasFrac && len(frac) > decimals {
+	whole, frac, hasFrac := strings.Cut(amount, ".")
+	if !isASCIIDigits(whole) || (hasFrac && !isASCIIDigits(frac)) {
+		return nil, false
+	}
+	if hasFrac && len(frac) > decimals {
 		amount = whole
 		if decimals > 0 {
 			amount += "." + frac[:decimals]
@@ -212,6 +216,19 @@ func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
 		return nil, false
 	}
 	return result, true
+}
+
+// isASCIIDigits reports whether s is non-empty and made only of 0-9.
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // erc20SendDecimals returns the decimals a send amount is scaled by.
