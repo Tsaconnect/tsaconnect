@@ -232,6 +232,9 @@ type dailyBuyCap struct {
 	limit   *big.Int
 	reached error
 	metric  string
+	// logTag and who keep each provider's own log prefix and error prefix
+	// (review M-10: dashboards grep "[it treasury buy]").
+	logTag, who string
 }
 
 // scopeCompanyWalletBuys is the company wallet's rows (a positive constant
@@ -252,6 +255,7 @@ func (s *ITService) checkTreasuryDailyCap(ctx context.Context, db *gorm.DB, user
 	return s.checkDailyBuyCap(ctx, db, userID, units, exclude, dailyBuyCap{
 		scope: scopeCompanyWalletBuys, limit: s.treasuryLimits().dailyUserMaxUnits,
 		reached: ErrTreasuryDailyCapReached, metric: "ramp_treasury_daily_cap_hit",
+		logTag: "it treasury buy", who: "company wallet",
 	})
 }
 
@@ -267,7 +271,7 @@ func (s *ITService) checkDailyBuyCap(ctx context.Context, db *gorm.DB, userID uu
 		q = q.Where("id <> ?", exclude)
 	}
 	if err := q.Pluck("asset_amount", &amounts).Error; err != nil {
-		return fmt.Errorf("read daily total: %w", err)
+		return fmt.Errorf("%s: read daily total: %w", c.who, err)
 	}
 	total := new(big.Int).Set(units)
 	for _, a := range amounts {
@@ -276,7 +280,7 @@ func (s *ITService) checkDailyBuyCap(ctx context.Context, db *gorm.DB, userID uu
 		}
 	}
 	if total.Cmp(c.limit) > 0 {
-		log.Printf("[it buy] METRIC %s user=%s total_units=%s cap_units=%s", c.metric, userID, total, c.limit)
+		log.Printf("[%s] METRIC %s user=%s total_units=%s cap_units=%s", c.logTag, c.metric, userID, total, c.limit)
 		return c.reached
 	}
 	return nil

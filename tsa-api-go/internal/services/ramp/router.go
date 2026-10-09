@@ -290,8 +290,10 @@ func (r *Router) poolsInBand(side Side, pools []Venue, third map[VenueKey]string
 		if has {
 			gap = bandGapBps(p.RankRate(), best)
 		}
-		log.Printf("[ramp] METRIC ramp_pool_band target=%s/%s pool=%s best_third_party=%q gap_bps=%s preferred=%t",
-			p.Target().ChainKey, p.Target().Token, p.RankRate(), best, gap, preferred)
+		if !preferred { // review M-14: only the pool priced out of its band is worth a line
+			log.Printf("[ramp] METRIC ramp_pool_band target=%s/%s pool=%s best_third_party=%q gap_bps=%s preferred=false",
+				p.Target().ChainKey, p.Target().Token, p.RankRate(), best, gap)
+		}
 		if preferred {
 			in = append(in, p)
 		} else {

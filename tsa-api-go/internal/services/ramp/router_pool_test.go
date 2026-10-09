@@ -1,9 +1,13 @@
 package ramp
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -234,5 +238,24 @@ func TestRouterOpen_PoolCardPriceMovedIsPoolOnly(t *testing.T) {
 	if !errors.As(err, &pm) || pm.Quote.PoolAvailable == nil || !*pm.Quote.PoolAvailable ||
 		!reflect.DeepEqual(names(pm.Quote.Venues), []string{"tsa_pool:bsc:USDT@1450.00"}) || len(pc.opened) != 0 {
 		t.Fatalf("err=%v quote=%+v paycrest opened=%v, want the pool-only re-show", err, pm, pc.opened)
+	}
+}
+
+// Review M-14: the band metric is logged only when the pool is priced out of
+// its band — not once per pool venue on every quote and open.
+func TestRouter_PoolBandMetricOnlyWhenOutOfBand(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	pc := func() *fakeProvider {
+		return fakeNamed(ProviderPaycrest, venue(ProviderPaycrest, "bsc", "USDT", "1380.00"))
+	}
+	_, _ = NewRouter(Config{}, pool("1381.00"), pc()).Quote(context.Background(), bscReq())
+	if strings.Contains(buf.String(), "ramp_pool_band") {
+		t.Fatalf("in-band quote logged the band metric:\n%s", buf.String())
+	}
+	_, _ = NewRouter(Config{}, pool("1450.00"), pc()).Quote(context.Background(), bscReq())
+	if !strings.Contains(buf.String(), "ramp_pool_band") || !strings.Contains(buf.String(), "preferred=false") {
+		t.Fatalf("out-of-band quote did not log the band metric:\n%s", buf.String())
 	}
 }

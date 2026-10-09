@@ -1,9 +1,13 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"math/big"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,5 +253,22 @@ func TestNewPoolDesk_OrdersRefusedOnMainnetUntilSettleShips(t *testing.T) {
 	}
 	if _, err := NewPoolDesk(PoolDeskConfig{Token: PoolToken{ChainID: 97, Decimals: 18}}); !errors.Is(err, errPoolDeskIncomplete) {
 		t.Fatalf("BSC testnet: NewPoolDesk = %v, want only the incomplete-desk refusal", err)
+	}
+}
+
+// Review M-15: an undecodable voucher hash fails closed (the ad reads as
+// cancelled and is closed), and says so in an alert.
+func TestAllocator_UndecodableVoucherAlerts(t *testing.T) {
+	r := newDeskRig(t)
+	_, ad := r.addLP(t, 100)
+	ad.VoucherHash = "0xnot-a-hash"
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	if !r.desk.voucherCancelled(context.Background(), *ad) {
+		t.Fatal("an undecodable voucher must read as cancelled (fail closed)")
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_voucher_undecodable ad="+ad.ID.String()) {
+		t.Fatalf("no alert:\n%s", buf.String())
 	}
 }

@@ -321,3 +321,26 @@ func TestPoolSlice_DroppedSliceCancelledAfterPaymentIsSilent(t *testing.T) {
 		t.Fatalf("an unselected slice's cancel alerted as lost:\n%s", buf.String())
 	}
 }
+
+// Review M-12: an open that cannot be resolved either way waits, rotating;
+// past an hour that is an alert, not only a per-pass metric.
+func TestReconcileOrphanOpen_UnresolvedPastAnHourAlerts(t *testing.T) {
+	r := newPoolOpenRig(t)
+	r.trades.SetPoolSlices(r.it, releaseSender())
+	_, ad := r.addLP(t, 50)
+	nonce := int64(15)
+	r.chain.latest = 15 // never consumed: it may still land
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	young := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), Nonce: &nonce, CreatedAt: time.Now().Add(-10 * time.Minute)})
+	r.trades.ReconcileTrade(context.Background(), young.ID)
+	if strings.Contains(buf.String(), "ALERT liquidity_pool_slice_open_unresolved") {
+		t.Fatalf("alerted on a 10-minute-old open:\n%s", buf.String())
+	}
+	old := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), Nonce: &nonce, CreatedAt: time.Now().Add(-2 * time.Hour)})
+	r.trades.ReconcileTrade(context.Background(), old.ID)
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_slice_open_unresolved slice="+old.ID.String()) {
+		t.Fatalf("no alert for a 2-hour-old unresolved open:\n%s", buf.String())
+	}
+}

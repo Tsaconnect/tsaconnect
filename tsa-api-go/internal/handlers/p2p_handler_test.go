@@ -1456,3 +1456,18 @@ func TestIsISO2Country(t *testing.T) {
 		}
 	}
 }
+
+// Plan C1 §23 (T9 ledger, final review): a pool slice is not a trade any
+// user can rate — even its LP, a party to it, reads not-found.
+func TestRateTrade_PoolSliceIsNotFound(t *testing.T) {
+	r := newRig(t)
+	tradeID, intent := uuid.New(), uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, BuyerID: uuid.New(), SellerID: r.sellerID,
+		Status: models.P2PTradeStatusReleased, ITIntentID: &intent}).Error; err != nil {
+		t.Fatalf("seed slice: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/rate", map[string]any{"value": 1})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}

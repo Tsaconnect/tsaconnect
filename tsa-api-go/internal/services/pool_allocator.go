@@ -375,6 +375,9 @@ func (d *PoolDesk) closeCancelledAds(ctx context.Context, ads []models.P2PAd) {
 func (d *PoolDesk) voucherCancelled(ctx context.Context, ad models.P2PAd) bool {
 	h, err := decodeHex32(ad.VoucherHash)
 	if err != nil {
+		// Fails closed — the ad is closed as if cancelled — but never silently
+		// (review M-15): a stored hash that does not decode is a data defect.
+		log.Printf("[liquidity] ALERT liquidity_pool_voucher_undecodable ad=%s — treated as cancelled; the ad will be closed", ad.ID)
 		return true
 	}
 	type res struct{ cancelled bool }

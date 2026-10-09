@@ -62,6 +62,7 @@ func scopePoolBuys(db *gorm.DB) *gorm.DB {
 func (s *ITService) CheckPoolDailyCap(ctx context.Context, userID uuid.UUID, units *big.Int, set PoolSettings) error {
 	return s.checkDailyBuyCap(ctx, s.db, userID, units, uuid.Nil, dailyBuyCap{
 		scope: scopePoolBuys, limit: set.UserDailyMaxUnits, reached: ErrPoolDailyCapReached, metric: "ramp_pool_daily_cap_hit",
+		logTag: "liquidity", who: "liquidity pool",
 	})
 }
 
