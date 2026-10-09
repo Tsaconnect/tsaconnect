@@ -1,5 +1,5 @@
 import {
-  defaultOption, optionKey, refundBroadcastNote, refundFunding, refundStatusLine, sameAddress, sortRefundsOpenFirst, unprovenWalletMessage, wrongWalletMessage,
+  defaultOption, merchantRefundLine, merchantRefundSubtitle, optionKey, refundBroadcastNote, refundFunding, refundStatusLine, sameAddress, sortRefundsOpenFirst, unprovenWalletMessage, wrongWalletMessage,
 } from '../payRefunds';
 import type { PayRefundDetail, PayRefundOption } from '@/services/payMerchantApi';
 import type { WalletBalance } from '@/services/walletApi';
@@ -84,5 +84,19 @@ describe('refund helpers', () => {
     expect(refundStatusLine(d('needs_review'))).toBe('TSA Connect is checking this transfer. We will be in touch.');
     expect(refundStatusLine(d('cancelled'))).toBe('This refund request was cancelled.');
     expect(refundStatusLine(d('requested'))).toBe("This refund can't be sent from the app right now. Please try again later.");
+  });
+});
+
+describe('the payer\'s refund', () => {
+  // Built from a LOCAL date so the day reads the same in every timezone.
+  const r = { status: 'full' as const, amount: '12.50', tokenSymbol: 'USDT', chainId: 56, confirmedAt: new Date(2026, 9, 9, 12).toISOString() };
+  it('reads as amount, token and day', () => {
+    expect(merchantRefundLine(r)).toBe('12.50 USDT · 9 Oct');
+    expect(merchantRefundLine({ ...r, confirmedAt: undefined })).toBe('12.50 USDT');
+  });
+  it('names a full, partial or pending refund in one line', () => {
+    expect(merchantRefundSubtitle(r)).toBe('Refunded 12.50 USDT');
+    expect(merchantRefundSubtitle({ ...r, status: 'partial', amount: '5.00' })).toBe('Partly refunded 5.00 USDT');
+    expect(merchantRefundSubtitle({ status: 'pending', amount: '0.00' })).toBe('Refund on its way');
   });
 });

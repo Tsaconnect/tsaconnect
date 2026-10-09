@@ -41,6 +41,7 @@ import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
 import { PayCrypto } from '@/components/pay/PayCrypto';
 import { PayBlockedNotice } from '@/components/pay/PayBlockedNotice';
+import { MerchantRefundLines } from '@/components/pay/MerchantRefundLines';
 import { DisputeSection } from '@/components/disputes/DisputeSection';
 import { isDisputableOrder } from '@/services/paycrestStatus';
 import { formatKobo } from '@/utils/stableSellQuote';
@@ -340,8 +341,12 @@ export default function PayScreen() {
                   {state.checkout.status === 'succeeded' && state.checkout.succeededAt ? (
                     <SummaryRow label="Paid on" value={formatLinkTime(state.checkout.succeededAt)} />
                   ) : null}
+                  {state.checkout.merchantRefund ? <MerchantRefundLines refund={state.checkout.merchantRefund} /> : null}
                 </SummaryCard>
               </Card>
+              {state.checkout.status === 'succeeded' && state.checkout.mode === 'live' ? (
+                <Text variant="caption" color="textMuted" align="center">Refunds go to your TSA wallet.</Text>
+              ) : null}
               {/* A live payment's receipt: the server sends receiptUrl only once
                   it has succeeded, and never for a test payment. */}
               {state.checkout.status === 'succeeded' && state.checkout.mode === 'live' && receiptUrl ? (

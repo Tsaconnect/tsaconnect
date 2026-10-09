@@ -14,6 +14,20 @@ import { normalizePayCode, PAY_CODE_NOT_FOUND } from '@/utils/payCode';
 
 export type PayStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'expired';
 
+/**
+ * The merchant's refund of this payment, as its payer sees it: the confirmed total so far
+ * (pending: only one on its way), and the latest refund's token, network and transaction.
+ * Distinct from a history item's `status: 'refunded'`, which is a returned Paycrest attempt.
+ */
+export type MerchantRefund = {
+  status: 'partial' | 'full' | 'pending';
+  amount: string;
+  tokenSymbol?: string;
+  chainId?: number;
+  txHash?: string;
+  confirmedAt?: string;
+};
+
 export type PayCheckout = {
   id: string;
   /** The payment's code, "TSA-XXXXX-XXXXX" — what a payer types in Wallet → TSA Pay, and the receipt's number. Absent on an older server or an older payment. */
@@ -55,6 +69,8 @@ export type PayCheckout = {
   orderStatus?: PaycrestStatus;
   /** Why her payment failed — only to her, only once it has. */
   failureReason?: string;
+  /** The merchant refunded some or all of it (to her TSA wallet). Older APIs leave it out. */
+  merchantRefund?: MerchantRefund | null;
 };
 
 export class PayError extends ApiError {}
@@ -89,6 +105,8 @@ export type PayHistoryItem = {
   succeededAt?: string;
   /** Set on a refunded past attempt: its refund, and any report of it, are on this order. */
   orderId?: string;
+  /** The merchant refunded some or all of this payment — not the same as `status: 'refunded'`. */
+  merchantRefund?: MerchantRefund | null;
 };
 
 /** Her live payments, newest first (the server caps the list). */

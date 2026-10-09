@@ -3,6 +3,7 @@
 // Pure helpers for a TSA Pay refund in the app: the list's order, the options, whether her
 // wallet is the one that must send it, whether she holds enough of the token, and the
 // sentences the screens show. No imports with side effects, so it tests without mocks.
+import type { MerchantRefund } from '@/services/payApi';
 import type { PayRefundDetail, PayRefundOption, PayRefundStatus } from '@/services/payMerchantApi';
 import type { WalletBalance } from '@/services/walletApi';
 import { shortAddress } from './sendForm';
@@ -84,4 +85,25 @@ export function refundStatusLine(d: Pick<PayRefundDetail, 'refund' | 'payerFirst
       // Waiting, but no network can carry it right now (no options from the server).
       return "This refund can't be sent from the app right now. Please try again later.";
   }
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// A fixed month list, not ICU: the same "9 Oct" on every phone.
+const dayOf = (iso?: string) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '' : `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+};
+
+/** "12.50 USDT · 9 Oct" — what came back to her, and when. */
+export function merchantRefundLine(r: MerchantRefund): string {
+  const what = `${r.amount} ${r.tokenSymbol ?? 'USD'}`;
+  const day = dayOf(r.confirmedAt);
+  return day ? `${what} · ${day}` : what;
+}
+
+/** Her activity row's line under a payment the merchant refunded. */
+export function merchantRefundSubtitle(r: MerchantRefund): string {
+  if (r.status === 'pending') return 'Refund on its way';
+  return `${r.status === 'partial' ? 'Partly refunded' : 'Refunded'} ${r.amount} ${r.tokenSymbol ?? 'USD'}`;
 }
