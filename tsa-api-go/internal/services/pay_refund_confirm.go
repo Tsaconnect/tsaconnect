@@ -78,7 +78,7 @@ func (s *PayRefundService) ConfirmDue(ctx context.Context) error {
 			errs = append(errs, errors.New(RedactAlertText(err.Error())))
 			continue
 		}
-		if err := s.check(ctx, &due[i], []string{models.PayRefundSubmitted}); err != nil {
+		if err := s.check(ctx, &due[i], []string{models.PayRefundSubmitted}, true); err != nil {
 			msg := RedactAlertText(err.Error())
 			log.Printf("[tsa-pay] refund %s: check: %s", due[i].ID, msg)
 			errs = append(errs, fmt.Errorf("refund %s: %s", due[i].ID, msg))
@@ -101,7 +101,7 @@ func (s *PayRefundService) Reevaluate(ctx context.Context, id uuid.UUID) (*model
 	if r.Status != models.PayRefundSubmitted && r.Status != models.PayRefundNeedsReview {
 		return nil, ErrPayRefundState
 	}
-	if err := s.check(ctx, &r, []string{models.PayRefundSubmitted, models.PayRefundNeedsReview}); err != nil {
+	if err := s.check(ctx, &r, []string{models.PayRefundSubmitted, models.PayRefundNeedsReview}, true); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, r.MerchantID, r.ID)
@@ -112,6 +112,8 @@ func (s *PayRefundService) Reevaluate(ctx context.Context, id uuid.UUID) (*model
 //
 // confirmFrom is the statuses a proven full credit may confirm r from:
 // ConfirmDue and Submit pass [submitted], Reevaluate [submitted, needs_review].
+// resend lets a transfer the chain doesn't know be sent again; Submit passes
+// false when its own broadcast was just refused, leaving that to the confirmer.
 // Every other move starts from submitted only:
 //   - failed: only on facts that cannot un-happen — a receipt that reverted,
 //     at least MinConf deep, or a transfer at least MinConf deep that credited
@@ -130,7 +132,7 @@ func (s *PayRefundService) Reevaluate(ctx context.Context, id uuid.UUID) (*model
 // The server decoded and recorded the transaction itself (D23), so no
 // NotBefore applies: when it was mined says nothing about whether it is this
 // refund. Verify counts only Transfer logs emitted by r's token contract.
-func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confirmFrom []string) error {
+func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confirmFrom []string, resend bool) error {
 	if r.TxHash == nil || *r.TxHash == "" || s.network == nil || s.verifier == nil {
 		return nil
 	}
@@ -168,7 +170,7 @@ func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confi
 		s.alertUnconfirmed(r) // pending in the mempool, or mined and the receipt lags
 		return nil
 	}
-	return s.unknownToChain(ctx, chain, r)
+	return s.unknownToChain(ctx, chain, r, resend)
 }
 
 // refundReadingName names a refuting reading for the log.
@@ -217,9 +219,9 @@ func (s *PayRefundService) settleProven(ctx context.Context, chain string, r *mo
 // know ours, ours can never mine — but the one that took its place may have
 // paid the customer (the same key in another wallet app re-sent or sped it
 // up), or the node may have pruned our transaction's index. So it is parked
-// in needs_review, never failed (review I4). Otherwise send it again
-// (idempotent — the same signed bytes), recording any refusal on the row.
-func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *models.PayRefund) error {
+// in needs_review, never failed (review I4). Otherwise, when resend, send it
+// again (idempotent — the same signed bytes), recording any refusal on the row.
+func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *models.PayRefund, resend bool) error {
 	tx, signer, err := blockchain.DecodeSignedTx(r.RawTx)
 	if err != nil {
 		if s.alertOnce(r.ID, "pay_refund_raw_tx_unreadable") {
@@ -241,7 +243,9 @@ func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *
 		}
 		return s.markNeedsReview(ctx, r, 0, payRefundReplacedReason, payRefundReviewReplaced)
 	}
-	s.broadcast(ctx, chain, r, tx)
+	if resend {
+		s.broadcast(ctx, chain, r, tx)
+	}
 	s.alertUnconfirmed(r)
 	return nil
 }

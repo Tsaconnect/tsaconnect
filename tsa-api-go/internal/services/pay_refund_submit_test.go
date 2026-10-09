@@ -418,6 +418,32 @@ func TestPayRefundSubmit_ABroadcastErrorLeavesItSubmitted(t *testing.T) {
 	}
 }
 
+// Submit's own broadcast was refused and the chain doesn't know the transfer:
+// its first check leaves sending it again to the confirmer instead of
+// re-sending at once and overwriting the refusal it just recorded.
+func TestPayRefundSubmit_ARefusedBroadcastIsNotSentAgainInTheSameRequest(t *testing.T) {
+	r := newRefundRig(t)
+	ref := r.requested(t, "SUB-18", "1")
+	r.net.broadcastErr = errors.New("replacement transaction underpriced")
+	r.ver.set(nil, errors.New("verify: not found"), false)
+	raw, _ := signRefundTx(t, r.exactRefundTx(ref))
+	got, err := r.s.Submit(context.Background(), r.m, ref.ID, r.ownerWallet, PayRefundSubmit{ChainID: 56, TokenSymbol: "USDT", SignedTx: raw})
+	if err != nil || got.Status != models.PayRefundSubmitted || got.LastBroadcastError != "The network fee was too low" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if n := len(r.net.broadcasts()); n != 1 {
+		t.Fatalf("sent %d times in one submit, want 1", n)
+	}
+	// The confirmer still sends it again.
+	r.net.broadcastErr = nil
+	if err := r.s.ConfirmDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(r.net.broadcasts()); n != 2 {
+		t.Fatalf("the confirmer sent it %d times in all, want 2", n)
+	}
+}
+
 // A node that already has the transaction took it: no error is recorded.
 func TestPayRefundSubmit_AlreadyKnownIsASend(t *testing.T) {
 	r := newRefundRig(t)

@@ -231,12 +231,13 @@ func (s *PayRefundService) Submit(ctx context.Context, m *models.PayMerchant, id
 	if res.RowsAffected == 0 {
 		return nil, ErrPayRefundState
 	}
-	s.broadcast(ctx, signed.chain, r, signed.tx)
-	// D24: the submit also tries the confirmation once; the confirmer does the rest.
+	sent := s.broadcast(ctx, signed.chain, r, signed.tx)
+	// D24: the submit also tries the confirmation once; the confirmer does the
+	// rest — including sending again a transfer whose broadcast just failed.
 	if r, err = s.Get(ctx, m.ID, id); err != nil {
 		return nil, err
 	}
-	if err := s.check(ctx, r, []string{models.PayRefundSubmitted}); err != nil {
+	if err := s.check(ctx, r, []string{models.PayRefundSubmitted}, sent); err != nil {
 		log.Printf("[tsa-pay] refund %s: first check: %s", r.ID, RedactAlertText(err.Error()))
 	}
 	return s.Get(ctx, m.ID, id)
@@ -259,8 +260,8 @@ func isPayRefundTxHashViolation(err error) bool {
 // The send and its record outlive ctx: once the transfer may be in a mempool,
 // an owner's app hanging up must not leave the row silent about it. The
 // record only ever writes a submitted refund — one the confirmer settled in
-// the meantime keeps its record clean.
-func (s *PayRefundService) broadcast(ctx context.Context, chain string, r *models.PayRefund, tx *types.Transaction) {
+// the meantime keeps its record clean. It reports whether the send went through.
+func (s *PayRefundService) broadcast(ctx context.Context, chain string, r *models.PayRefund, tx *types.Transaction) bool {
 	ctx = context.WithoutCancel(ctx)
 	err := s.network.Broadcast(ctx, chain, tx)
 	if err != nil && alreadyKnownTx(err) {
@@ -280,11 +281,12 @@ func (s *PayRefundService) broadcast(ctx context.Context, chain string, r *model
 		UpdateColumns(map[string]any{"last_broadcast_error": reason, "last_broadcast_at": &at})
 	if res.Error != nil {
 		log.Printf("[tsa-pay] refund %s: record broadcast: %s", r.ID, RedactAlertText(res.Error.Error()))
-		return
+		return reason == ""
 	}
 	if res.RowsAffected == 1 {
 		r.LastBroadcastError, r.LastBroadcastAt = reason, &at
 	}
+	return reason == ""
 }
 
 // nonceTooLowReason words a "nonce too low" answer to sending tx again. Most
