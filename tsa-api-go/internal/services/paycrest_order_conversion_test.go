@@ -53,6 +53,11 @@ type fakePaycrestConversionClient struct {
 	// offrampRate is the provider's own rate on the order it answers with;
 	// empty is the book's 1500, which a 0.5% fee then prices at 1492.50.
 	offrampRate string
+	// offrampRates, when set, is the rate per CreateOfframpOrder call in turn
+	// (a reopened order filling at a different rate); past its end, offrampRate.
+	offrampRates []string
+	// offrampFeesSent is the senderFeePercent of every CreateOfframpOrder call.
+	offrampFeesSent []string
 	// offrampSenderFee is the fee amount Paycrest reports on the order; empty reports none.
 	offrampSenderFee string
 	// offrampReportsFeeOnDeposit reports the fee the way live Paycrest does at
@@ -105,6 +110,7 @@ func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req 
 func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req PaycrestOfframpRequest) (*PaycrestOrder, error) {
 	f.offrampCalls++
 	f.lastOfframp = req
+	f.offrampFeesSent = append(f.offrampFeesSent, req.SenderFeePercent)
 	if f.offrampEntered != nil && f.offrampCalls == 1 {
 		f.offrampEntered <- struct{}{}
 		<-f.offrampGate
@@ -116,6 +122,9 @@ func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req
 		return nil, f.offrampErrFirst
 	}
 	rate := f.offrampRate
+	if i := f.offrampCalls - 1; i < len(f.offrampRates) {
+		rate = f.offrampRates[i]
+	}
 	if rate == "" {
 		rate = "1500"
 	}
