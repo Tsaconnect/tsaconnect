@@ -56,7 +56,9 @@ func TestPayRefundTotals_OnEveryExistingPaymentAnswer(t *testing.T) {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	var created struct{ Data services.PayPaymentView }
-	json.Unmarshal(w.Body.Bytes(), &created)
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create body: %v %s", err, w.Body.String())
+	}
 
 	for name, w := range map[string]*httptest.ResponseRecorder{
 		"replay":    payDo(r, "POST", "/pay/v1/payments", body, nil),
