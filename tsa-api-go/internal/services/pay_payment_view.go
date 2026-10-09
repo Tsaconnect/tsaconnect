@@ -93,6 +93,10 @@ type PayCheckoutView struct {
 	// FailureReason says why her payment failed — written for her ("support is
 	// reviewing it") — and only to her.
 	FailureReason string `json:"failureReason,omitempty"`
+	// MerchantRefund is what the merchant refunded her (USD stablecoin), only
+	// to the payer; absent when nothing was (omitempty keeps the existing
+	// exact key-set tests valid). Distinct from a returned attempt.
+	MerchantRefund *PayMerchantRefund `json:"merchantRefund,omitempty"`
 }
 
 // PayPublicView is the unauthenticated status page a customer's browser (or
@@ -306,6 +310,9 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 			v.OrderStatus = order.Status
 		}
 	}
+	if isPayer && p.Status == models.PayStatusSucceeded {
+		v.MerchantRefund = s.merchantRefundsFor(ctx, []uuid.UUID{p.ID})[p.ID]
+	}
 	// A return URL often carries the merchant's own order token, so it is
 	// shown only once the payment has succeeded — like PublicView — not to
 	// whoever merely holds the payment id.
@@ -468,6 +475,9 @@ type PayHistoryItem struct {
 	// any report of it, are on that order. The payment itself may have been
 	// paid since, or be payable again, so it is not this row's receipt.
 	OrderID *uuid.UUID `json:"orderId,omitempty"`
+	// MerchantRefund: the merchant's refund of this payment to her (paid rows
+	// only); absent when there is none.
+	MerchantRefund *PayMerchantRefund `json:"merchantRefund,omitempty"`
 }
 
 // PayHistoryRefunded is the Status of a refunded past attempt. Not a payment
@@ -549,6 +559,18 @@ func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) 
 			ID: r.ID, PayCode: formatStoredPayCode(r.PayCode), OrderID: r.OrderID, MerchantName: r.BusinessName, Description: r.Description, Status: r.Status,
 			CustomerTotal: r.CustomerTotalKobo, Currency: r.Currency, PaidAt: paidAt(r), SucceededAt: r.SucceededAt,
 		})
+	}
+	var paid []uuid.UUID
+	for _, it := range out {
+		if it.Status == models.PayStatusSucceeded {
+			paid = append(paid, it.ID)
+		}
+	}
+	refunds := s.merchantRefundsFor(ctx, paid)
+	for i := range out {
+		if out[i].Status == models.PayStatusSucceeded {
+			out[i].MerchantRefund = refunds[out[i].ID]
+		}
 	}
 	return out, nil
 }
