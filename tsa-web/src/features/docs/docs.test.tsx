@@ -133,6 +133,10 @@ describe('developer docs', () => {
     expect(sample).toContain('"refund": {');
     expect(sample).toContain('"token": "USDT"');
     expect(sample).toContain('"refundStatus": "partial"');
+    for (const key of ['chainId', 'confirmedAt', 'txHash']) expect(sample).toContain(`"${key}":`);
+    expect(hooks.textContent).toContain("to your customer's TSA Connect wallet");
+    expect(hooks.textContent).toContain('up to what your customer actually paid (which includes any fee they paid); TSA does not return its own fee');
+    expect(hooks.textContent).not.toContain('the fee is not returned');
     const object = screen.getByRole('heading', { level: 2, name: 'The payment object' }).closest('section')!;
     for (const field of ['refundedAmount', 'refundStatus']) expect(within(object).getAllByText(field).length).toBeGreaterThan(0);
     expect(object.textContent).toContain("A refund doesn't change status: a refunded payment stays succeeded.");

@@ -227,9 +227,10 @@ export function Docs() {
             <CodeBlock title="Event body" code={webhookBody} />
             <H3>Refunds</H3>
             <P>
-              You ask for a refund from a succeeded payment in your dashboard. The business owner sends it in the TSA Connect app from their TSA
-              wallet, in USDT or USDC, to the wallet your customer paid from. Partial refunds are allowed up to what the customer paid; the fee is
-              not returned. <C>payment.refunded</C> is sent once the transfer is confirmed. Refunds can't be created with an API key yet.
+              You ask for a refund from a succeeded payment in your dashboard. You, the merchant, pay it from your own TSA wallet in the TSA
+              Connect app, in USDT or USDC, to your customer's TSA Connect wallet. You can refund in part or in full, up to what your customer
+              actually paid (which includes any fee they paid); TSA does not return its own fee. <C>payment.refunded</C> is sent once the transfer
+              is confirmed. Refunds can't be created with an API key yet.
             </P>
             <CodeBlock title="payment.refunded event body" code={refundWebhookBody} />
             <Reference
