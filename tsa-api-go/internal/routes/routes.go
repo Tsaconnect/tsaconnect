@@ -1358,12 +1358,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminPay.GET("/payments", payh.AdminListPayments)
 			adminPay.GET("/payments/:id/deliveries", payh.AdminPaymentDeliveries)
 			adminPay.POST("/deliveries/:id/resend", payh.AdminResendWebhook)
-			if payh.RefundsEnabled() {
-				// Refunds across merchants; re-reading the chain to close a
-				// needs_review refund is super_admin, like IT sell reevaluate.
-				adminPay.GET("/refunds", payh.AdminListRefunds)
-				adminPay.POST("/refunds/:id/reevaluate", middleware.RequireSuperAdmin(), payh.AdminReevaluateRefund)
-			}
+			// Refunds across merchants; re-reading the chain to close a
+			// needs_review refund is super_admin, like IT sell reevaluate.
+			// Mounted always: with refunds off they answer 503.
+			adminPay.GET("/refunds", payh.AdminListRefunds)
+			adminPay.POST("/refunds/:id/reevaluate", middleware.RequireSuperAdmin(), payh.AdminReevaluateRefund)
 		}
 
 		// TSA Pay merchant API — its own top-level group, deliberately NOT
@@ -1464,20 +1463,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.GET("", payh.OwnerMerchant)
 			owner.GET("/payments", payh.OwnerPayments)
 			owner.GET("/payments/:id", payh.OwnerPayment)
-			if payh.RefundsEnabled() {
-				// Refunds (merchant-funded, in USDT/USDC). A create resent with the
-				// same Idempotency-Key replays the first answer; the one-open rule
-				// refuses a second refund anyway. Creating and cancelling share one
-				// write limit; a signed transfer handed over has its own. Refund-id
-				// routes take no mode: the row has its own.
-				refundWrite := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
-				owner.POST("/payments/:id/refunds", middleware.Idempotency(config.DB), refundWrite, payh.OwnerCreateRefund)
-				owner.GET("/payments/:id/refunds", payh.OwnerPaymentRefunds)
-				owner.GET("/refunds", payh.OwnerRefunds)
-				owner.GET("/refunds/:id", payh.OwnerRefund)
-				owner.POST("/refunds/:id/cancel", refundWrite, payh.OwnerCancelRefund)
-				owner.POST("/refunds/:id/submit", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerSubmitRefund)
-			}
+			// Refunds (merchant-funded, in USDT/USDC). A create resent with the
+			// same Idempotency-Key replays the first answer; the one-open rule
+			// refuses a second refund anyway. Creating and cancelling share one
+			// write limit; a signed transfer handed over has its own. Refund-id
+			// routes take no mode: the row has its own. Mounted always: with
+			// refunds off (TSA_PAY_REFUNDS) they answer 503.
+			refundWrite := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
+			owner.POST("/payments/:id/refunds", middleware.Idempotency(config.DB), refundWrite, payh.OwnerCreateRefund)
+			owner.GET("/payments/:id/refunds", payh.OwnerPaymentRefunds)
+			owner.GET("/refunds", payh.OwnerRefunds)
+			owner.GET("/refunds/:id", payh.OwnerRefund)
+			owner.POST("/refunds/:id/cancel", refundWrite, payh.OwnerCancelRefund)
+			owner.POST("/refunds/:id/submit", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerSubmitRefund)
 			// Reconciliation reads. Static segments beside /payments/:id (Gin 1.10
 			// matches the static route first).
 			owner.GET("/payments/summary", payh.OwnerPaymentSummary)

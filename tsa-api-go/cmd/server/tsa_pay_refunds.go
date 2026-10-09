@@ -12,8 +12,14 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
-// buildPayRefunds wires TSA Pay refunds (spec 2026-10-08 Part 3), or returns
-// nil — no chain registry, no refunds — with a log line.
+// buildPayRefunds wires TSA Pay refunds (spec 2026-10-08 Part 3). It returns
+// the service for the refund routes, or nil — the routes then answer 503
+// refunds_unavailable — when refunds are off (TSA_PAY_REFUNDS) or there is no
+// chain registry.
+//
+// Off, the service is still built and set as the payments' refund aggregator:
+// payment views, totals and webhooks keep reading refunds already made, and
+// none is ever hidden. Only the routes and the confirmer need the flag.
 //
 // The proof is a SECOND StableTransferVerifier, over every mainnet chain with
 // a client — never the ramp treasury's lanes, so a refund is proven whether or
@@ -22,10 +28,15 @@ import (
 // leaves merchants unsure whether to pay twice.
 //
 // No chain is excluded at boot: one whose RPC refuses receipt reads surfaces
-// through that alert and the pay_refund_unconfirmed ALERT. The fix is to repoint
-// the RPC (see the plan's rollout prerequisites).
+// through that alert and the pay_refund_unconfirmed ALERT. That is why the flag
+// exists — repoint such RPCs before turning it on (tsa-api-go/CLAUDE.md).
 func buildPayRefunds(cfg *config.Config, db *gorm.DB, payments *services.PayPaymentService, merchants *services.PayMerchantService,
 	chains *services.BlockchainService, bus *events.Bus, scheduler *jobs.Scheduler) *services.PayRefundService {
+	state := "off"
+	if cfg.TSAPayRefundsEnabled {
+		state = "on"
+	}
+	log.Printf("[tsa-pay] refunds: %s (TSA_PAY_REFUNDS)", state)
 	if chains == nil || payments == nil {
 		log.Printf("[tsa-pay] refunds dormant: no chain registry")
 		return nil
@@ -38,6 +49,9 @@ func buildPayRefunds(cfg *config.Config, db *gorm.DB, payments *services.PayPaym
 		refunds.SetEvents(bus)
 	}
 	payments.SetRefundAggregator(refunds)
+	if !cfg.TSAPayRefundsEnabled {
+		return nil
+	}
 	scheduler.Register(jobs.NewPayRefundConfirmer(refunds, 30*time.Second), jobs.AlertOnFailureStreak())
 	log.Printf("[tsa-pay] refunds ready over %d mainnet chains (confirmations=%d)", len(keys), cfg.RampTreasuryConfirmations)
 	return refunds

@@ -68,14 +68,30 @@ func payRefundRoutesCreate(r *gin.Engine, tok, paymentID, key string) *httptest.
 	return w
 }
 
-// The refund routes are mounted only when refunds are wired.
-func TestPayRefundRoutes_UnmountedWithoutRefunds(t *testing.T) {
+// With refunds off (TSA_PAY_REFUNDS unset, so cmd/server never wires them)
+// every owner and admin refund route is still mounted and answers 503
+// refunds_unavailable — never a 404 a client would read as a missing refund.
+func TestPayRefundRoutes_OffAnswersRefundsUnavailable(t *testing.T) {
 	r, cfg, db, _ := newPayRoutesRig(t)
 	u, _ := payRoutesOwner(t, db)
-	tok := payRoutesToken(t, cfg.JWTSecret, u.ID)
-	for _, path := range []string{"/api/pay/merchant/refunds", "/api/pay/merchant/refunds/" + uuid.NewString()} {
-		if w := payRoutesDo(r, http.MethodGet, path, tok, nil); w.Code != http.StatusNotFound {
-			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+	owner := payRoutesToken(t, cfg.JWTSecret, u.ID)
+	super := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, models.RoleSuperAdmin).ID)
+	id := uuid.NewString()
+	for _, rt := range []struct{ method, path, tok string }{
+		{http.MethodPost, "/api/pay/merchant/payments/" + id + "/refunds?mode=test", owner},
+		{http.MethodGet, "/api/pay/merchant/payments/" + id + "/refunds?mode=test", owner},
+		{http.MethodGet, "/api/pay/merchant/refunds?mode=test", owner},
+		{http.MethodGet, "/api/pay/merchant/refunds/" + id, owner},
+		{http.MethodPost, "/api/pay/merchant/refunds/" + id + "/cancel", owner},
+		{http.MethodPost, "/api/pay/merchant/refunds/" + id + "/submit", owner},
+		{http.MethodGet, "/api/admin/pay/refunds", super},
+		{http.MethodPost, "/api/admin/pay/refunds/" + id + "/reevaluate", super},
+	} {
+		w := payRoutesDo(r, rt.method, rt.path, rt.tok, map[string]any{})
+		var body struct{ Message, Code string }
+		json.Unmarshal(w.Body.Bytes(), &body)
+		if w.Code != http.StatusServiceUnavailable || body.Code != "refunds_unavailable" || body.Message != "Refunds aren't available yet." {
+			t.Errorf("%s %s: %d %s", rt.method, rt.path, w.Code, w.Body.String())
 		}
 	}
 }

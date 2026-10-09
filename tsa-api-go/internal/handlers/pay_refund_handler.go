@@ -17,7 +17,8 @@ import (
 )
 
 // payRefundAPI is the slice of *services.PayRefundService the refund routes
-// need. Nil leaves the refund routes unmounted (RefundsEnabled).
+// need. Nil — refunds off (TSA_PAY_REFUNDS) or unwired — makes every refund
+// route answer 503 refunds_unavailable (refundsOn).
 type payRefundAPI interface {
 	Request(ctx context.Context, m *models.PayMerchant, mode string, paymentID uuid.UUID, in services.PayRefundRequest) (*models.PayRefund, error)
 	Cancel(ctx context.Context, merchantID, id uuid.UUID) (*models.PayRefund, error)
@@ -30,20 +31,35 @@ type payRefundAPI interface {
 	View(r *models.PayRefund) services.PayRefundView
 }
 
-// WithRefunds turns the refund routes on. Pass a real service or nothing —
-// never a typed-nil pointer, which would read as wired.
+// WithRefunds turns the refund routes on (cmd/server does only when
+// TSA_PAY_REFUNDS is set). Pass a real service or nothing — never a typed-nil
+// pointer, which would read as wired.
 func (h *PayHandler) WithRefunds(r payRefundAPI) *PayHandler {
 	h.refunds = r
 	return h
 }
 
-// RefundsEnabled reports whether the refund routes are mounted.
+// RefundsEnabled reports whether the refund routes do anything but refuse.
 func (h *PayHandler) RefundsEnabled() bool { return h != nil && h.refunds != nil }
+
+// refundsOn is false, with 503 refunds_unavailable written, while refunds are
+// off. Every refund route asks it first: the routes stay mounted either way, so
+// a client never reads a 404 as "no such refund".
+func (h *PayHandler) refundsOn(c *gin.Context) bool {
+	if h.RefundsEnabled() {
+		return true
+	}
+	utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Refunds aren't available yet.", "refunds_unavailable")
+	return false
+}
 
 // POST /api/pay/merchant/payments/:id/refunds?mode {amount, reason} — the owner
 // asks for a refund of one of their succeeded payments. Live: it waits for the
 // owner's app to sign it. Test: it is confirmed at once ("Simulate refund").
 func (h *PayHandler) OwnerCreateRefund(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	m, mode, p, ok := h.payOwnerPayment(c)
 	if !ok {
 		return
@@ -71,6 +87,9 @@ func (h *PayHandler) OwnerCreateRefund(c *gin.Context) {
 // GET /api/pay/merchant/payments/:id/refunds?mode — the payment's refunds, its
 // cap and what is left, and whether another can be asked for now.
 func (h *PayHandler) OwnerPaymentRefunds(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	_, _, p, ok := h.payOwnerPayment(c)
 	if !ok {
 		return
@@ -86,6 +105,9 @@ func (h *PayHandler) OwnerPaymentRefunds(c *gin.Context) {
 // GET /api/pay/merchant/refunds?mode&status&from&to&page&limit — the owner's
 // refunds in one mode, open first, by the day they were asked for.
 func (h *PayHandler) OwnerRefunds(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	_, m, ok := h.payOwnerMerchant(c)
 	if !ok {
 		return
@@ -133,6 +155,9 @@ func (h *PayHandler) payOwnerRefund(c *gin.Context) (*models.User, *models.PayMe
 // GET /api/pay/merchant/refunds/:id — the refund, its payment and payer, the
 // wallet it must be signed with, and the networks it can be sent on.
 func (h *PayHandler) OwnerRefund(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	_, m, id, ok := h.payOwnerRefund(c)
 	if !ok {
 		return
@@ -147,6 +172,9 @@ func (h *PayHandler) OwnerRefund(c *gin.Context) {
 
 // POST /api/pay/merchant/refunds/:id/cancel — withdraw a refund nobody has sent yet.
 func (h *PayHandler) OwnerCancelRefund(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	_, m, id, ok := h.payOwnerRefund(c)
 	if !ok {
 		return
@@ -167,6 +195,9 @@ const payRefundSubmitMaxBytes = 16 << 10
 // signed by the owner's proven wallet; the server checks it, records it, then
 // broadcasts it.
 func (h *PayHandler) OwnerSubmitRefund(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	user, m, id, ok := h.payOwnerRefund(c)
 	if !ok {
 		return
@@ -235,6 +266,9 @@ func payRefundFail(c *gin.Context, err error) {
 // GET /api/admin/pay/refunds?status&mode&paymentId&page&limit — every merchant's
 // refunds, open first: what support watches (submitted, needs_review).
 func (h *PayHandler) AdminListRefunds(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	f := services.PayRefundAdminFilter{Status: strings.TrimSpace(c.Query("status")),
 		Page: clamp(atoiDefault(c.Query("page"), 1), 1, 1<<30), Limit: clamp(atoiDefault(c.Query("limit"), 20), 1, 100)}
 	if f.Status != "" && !models.IsPayRefundStatus(f.Status) {
@@ -268,6 +302,9 @@ func (h *PayHandler) AdminListRefunds(c *gin.Context) {
 // for a submitted or needs_review refund now, and close it the way the
 // evidence points (the exit from needs_review).
 func (h *PayHandler) AdminReevaluateRefund(c *gin.Context) {
+	if !h.refundsOn(c) {
+		return
+	}
 	id, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusNotFound, "Refund not found")

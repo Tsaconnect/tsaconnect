@@ -102,7 +102,7 @@ type PayHandler struct {
 	openLinks   payOpenLinkAPI
 	webhooks    payWebhookAPI
 	checkout    payCheckoutStarter
-	refunds     payRefundAPI // nil until WithRefunds: no refund routes
+	refunds     payRefundAPI // nil until WithRefunds: refund routes answer 503
 	events      *events.Bus
 	liveEnabled bool
 	// businessNameChange: owners may ask for a rename (NAME_CHANGE_ENABLED).

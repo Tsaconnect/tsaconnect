@@ -706,3 +706,47 @@ func TestPayRefundAdmin_PaymentsListCarriesRefundTotals(t *testing.T) {
 		t.Fatalf("no refundStatus: %s", res.raw)
 	}
 }
+
+// With refunds off (no WithRefunds — TSA_PAY_REFUNDS unset) every owner and
+// admin refund handler answers 503 refunds_unavailable before reading anything;
+// the payment views still carry refund totals.
+func TestPayRefund_OffAnswersRefundsUnavailableOnEveryRoute(t *testing.T) {
+	o := newRefundHandlerRig(t)
+	p := o.paid(t, models.PayModeLive, "OFF-1")
+	off := NewPayHandler(o.merchants, o.payments, nil, false)
+	owner := refundOwnerRouter(off, o.owner)
+	admin := (&refundHandlerRig{h: off}).adminRefundEngine(models.RoleSuperAdmin)
+	id := uuid.NewString()
+	for _, rt := range []struct {
+		r            *gin.Engine
+		method, path string
+	}{
+		{owner, http.MethodPost, "/api/pay/merchant/payments/" + p.ID.String() + "/refunds?mode=live"},
+		{owner, http.MethodGet, "/api/pay/merchant/payments/" + p.ID.String() + "/refunds?mode=live"},
+		{owner, http.MethodGet, "/api/pay/merchant/refunds?mode=live"},
+		{owner, http.MethodGet, "/api/pay/merchant/refunds/" + id},
+		{owner, http.MethodPost, "/api/pay/merchant/refunds/" + id + "/cancel"},
+		{owner, http.MethodPost, "/api/pay/merchant/refunds/" + id + "/submit"},
+		{admin, http.MethodGet, "/api/admin/pay/refunds"},
+		{admin, http.MethodPost, "/api/admin/pay/refunds/" + id + "/reevaluate"},
+	} {
+		w := payDo(rt.r, rt.method, rt.path, map[string]any{"amount": "1"}, nil)
+		var body struct{ Message, Code string }
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s %s: %v %s", rt.method, rt.path, err, w.Body.String())
+		}
+		if w.Code != http.StatusServiceUnavailable || body.Code != "refunds_unavailable" || body.Message != "Refunds aren't available yet." {
+			t.Errorf("%s %s: %d %s", rt.method, rt.path, w.Code, w.Body.String())
+		}
+	}
+	var n int64
+	if o.db.Model(&models.PayRefund{}).Count(&n); n != 0 {
+		t.Fatalf("refunds off made %d refunds", n)
+	}
+	done := o.submittedRefund(t, "OFF-2")
+	o.db.Model(done).Update("status", models.PayRefundConfirmed)
+	w := payDo(admin, http.MethodGet, "/api/admin/pay/payments", nil, nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"refundStatus":"partial"`) {
+		t.Fatalf("payments list with refunds off: %d %s", w.Code, w.Body.String())
+	}
+}
