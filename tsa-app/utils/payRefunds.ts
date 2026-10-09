@@ -45,8 +45,12 @@ export const wrongWalletMessage = (fromAddress: string) =>
 export const unprovenWalletMessage =
   'Prove this wallet to send refunds. TSA Connect checks that the wallet on this device is yours before any money leaves it.';
 
+/** The API's owner-safe reason for a broadcast refused for gas (payRefundBroadcastReason) — the one topping up fixes. */
+export const NO_GAS_REASON = 'Not enough gas in your wallet';
+
 /** The network refused the last send; the server retries it (plans review I6). */
-export const refundBroadcastNote = (reason: string) => `Couldn't broadcast: ${reason} — top up gas; we retry automatically.`;
+export const refundBroadcastNote = (reason: string) =>
+  `Couldn't broadcast: ${reason} — ${reason === NO_GAS_REASON ? 'top up gas; ' : ''}we retry automatically.`;
 
 export type RefundFunding =
   | { kind: 'unknown' }
@@ -87,7 +91,7 @@ export function refundStatusLine(d: Pick<PayRefundDetail, 'refund' | 'payerFirst
         ? `Sent to ${who}, but the network hasn't taken it yet. ${refundBroadcastNote(r.lastBroadcastError)}`
         : `Sent to ${who}. Waiting for the network to confirm it.`;
     case 'confirmed':
-      return `${who} received ${r.credited || r.amount} ${r.tokenSymbol ?? 'USD'}.`;
+      return `${who} received ${r.credited || r.amount} ${r.tokenSymbol || 'USD'}.`;
     case 'failed':
       return `Nothing was refunded: ${r.failureReason || 'the transaction failed'}. Ask for the refund again from your dashboard on the web.`;
     case 'needs_review':
@@ -110,13 +114,16 @@ const dayOf = (iso?: string) => {
 
 /** "12.50 USDT · 9 Oct" — what came back to her, and when. */
 export function merchantRefundLine(r: MerchantRefund): string {
-  const what = `${r.amount} ${r.tokenSymbol ?? 'USD'}`;
+  const what = `${r.amount} ${r.tokenSymbol || 'USD'}`;
   const day = dayOf(r.confirmedAt);
   return day ? `${what} · ${day}` : what;
 }
 
-/** Her activity row's line under a payment the merchant refunded. */
+/**
+ * Her activity row's line under a payment the merchant refunded. Pending is any open refund —
+ * one only asked for (which the merchant may still cancel) as much as one already sent.
+ */
 export function merchantRefundSubtitle(r: MerchantRefund): string {
-  if (r.status === 'pending') return 'Refund on its way';
-  return `${r.status === 'partial' ? 'Partly refunded' : 'Refunded'} ${r.amount} ${r.tokenSymbol ?? 'USD'}`;
+  if (r.status === 'pending') return 'Refund in progress';
+  return `${r.status === 'partial' ? 'Partly refunded' : 'Refunded'} ${r.amount} ${r.tokenSymbol || 'USD'}`;
 }

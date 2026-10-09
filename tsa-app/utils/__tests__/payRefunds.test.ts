@@ -69,6 +69,14 @@ describe('refund helpers', () => {
       .toBe("Couldn't broadcast: Not enough gas in your wallet — top up gas; we retry automatically.");
   });
 
+  // Topping up gas only helps when gas is what was missing (the API's exact owner-safe reason).
+  it('asks for gas only when gas is what the network refused it for', () => {
+    expect(refundBroadcastNote('The network fee was too low')).toBe("Couldn't broadcast: The network fee was too low — we retry automatically.");
+    expect(refundBroadcastNote('Another transaction from your wallet already used its place'))
+      .toBe("Couldn't broadcast: Another transaction from your wallet already used its place — we retry automatically.");
+    expect(refundBroadcastNote("The network didn't take it")).toBe("Couldn't broadcast: The network didn't take it — we retry automatically.");
+  });
+
   it('reads her token balance against the exact amount', () => {
     expect(refundFunding(null, option)).toEqual({ kind: 'unknown' });
     expect(refundFunding([], option)).toEqual({ kind: 'empty' });
@@ -96,6 +104,8 @@ describe('refund helpers', () => {
     expect(refundStatusLine(d('submitted', { lastBroadcastError: 'Not enough gas in your wallet' }))).toBe(
       "Sent to Ada, but the network hasn't taken it yet. Couldn't broadcast: Not enough gas in your wallet — top up gas; we retry automatically.");
     expect(refundStatusLine(d('confirmed'))).toBe('Ada received 12.50 USDT.');
+    // A test refund is never sent: the API answers tokenSymbol "" for it.
+    expect(refundStatusLine(d('confirmed', { tokenSymbol: '' }))).toBe('Ada received 12.50 USD.');
     expect(refundStatusLine(d('failed'))).toBe('Nothing was refunded: The transaction failed on-chain. Ask for the refund again from your dashboard on the web.');
     expect(refundStatusLine(d('needs_review'))).toBe('TSA Connect is checking this transfer. We will be in touch.');
     expect(refundStatusLine(d('cancelled'))).toBe('This refund request was cancelled.');
@@ -113,6 +123,7 @@ describe('the payer\'s refund', () => {
   it('names a full, partial or pending refund in one line', () => {
     expect(merchantRefundSubtitle(r)).toBe('Refunded 12.50 USDT');
     expect(merchantRefundSubtitle({ ...r, status: 'partial', amount: '5.00' })).toBe('Partly refunded 5.00 USDT');
-    expect(merchantRefundSubtitle({ status: 'pending', amount: '0.00' })).toBe('Refund on its way');
+    // Pending covers a refund the merchant has only asked for, not just one already sent.
+    expect(merchantRefundSubtitle({ status: 'pending', amount: '0.00' })).toBe('Refund in progress');
   });
 });

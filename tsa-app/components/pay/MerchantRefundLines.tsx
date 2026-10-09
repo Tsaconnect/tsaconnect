@@ -1,7 +1,7 @@
 // components/pay/MerchantRefundLines.tsx
 //
 // The rows a payer's done summary gains once the merchant refunds her: what came back
-// (and when), or that one is on its way, and the transaction on its explorer.
+// (and when), or that one is in progress, and the transaction on its explorer.
 import React from 'react';
 import { Linking } from 'react-native';
 import { SummaryRow, Text } from '@/components/ui';
@@ -15,7 +15,7 @@ export function MerchantRefundLines({ refund }: { refund: MerchantRefund }) {
   const label = refund.status === 'pending' ? 'Refund' : refund.status === 'partial' ? 'Partly refunded' : 'Refunded';
   return (
     <>
-      <SummaryRow label={label} value={refund.status === 'pending' ? 'On its way to your TSA wallet' : merchantRefundLine(refund)} />
+      <SummaryRow label={label} value={refund.status === 'pending' ? 'In progress' : merchantRefundLine(refund)} />
       {url && refund.txHash ? (
         <SummaryRow
           label="Refund transaction"

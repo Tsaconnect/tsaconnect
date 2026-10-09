@@ -37,6 +37,6 @@ it('a partial refund and a pending one say so, with no link before there is a tr
   await act(async () => { t = TestRenderer.create(<MerchantRefundLines refund={{ status: 'partial', amount: '5.00', tokenSymbol: 'USDC' }} />); });
   expect(textOf(t)).toContain('Partly refunded: 5.00 USDC');
   await act(async () => { t.update(<MerchantRefundLines refund={{ status: 'pending', amount: '0.00' }} />); });
-  expect(textOf(t)).toContain('Refund: On its way to your TSA wallet');
+  expect(textOf(t)).toContain('Refund: In progress');
   expect(t.root.findAll((n: any) => n.props.accessibilityLabel === 'View refund transaction')).toHaveLength(0);
 });

@@ -16,7 +16,7 @@ export type PayStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'exp
 
 /**
  * The merchant's refund of this payment, as its payer sees it: the confirmed total so far
- * (pending: only one on its way), and the latest refund's token, network and transaction.
+ * (pending: one asked for or sent, not yet confirmed), and the latest refund's token, network and transaction.
  * Distinct from a history item's `status: 'refunded'`, which is a returned Paycrest attempt.
  */
 export type MerchantRefund = {
