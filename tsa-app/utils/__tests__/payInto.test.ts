@@ -5,7 +5,7 @@
 // mode (the mitigation silently gone) or shows it in VA mode (telling a payer
 // their own account is wrong).
 
-import { exactNairaOf, payerInstructionOf } from '@/utils/payInto';
+import { exactNairaOf, payerInstructionOf, payToCopy, payToFromPayee, payToFromPm, safeProofUrl } from '@/utils/payInto';
 
 const INSTRUCTION =
   'Pay from a bank account named JOHN DOE. Payments from other accounts can be delayed for review or ' +
@@ -49,5 +49,50 @@ describe('exactNairaOf', () => {
     expect(exactNairaOf({ amountNgn: '1000.50' })).toBeNull();
     expect(exactNairaOf({ amountNgn: '-500' })).toBeNull();
     expect(exactNairaOf({ amountNgn: 'abc' })).toBeNull();
+  });
+});
+
+describe('pay-to details', () => {
+  it('normalises a direct payee (bank name wins over provider slug)', () => {
+    expect(payToFromPayee({ provider: 'bank_transfer', bankName: 'GTBank', accountNumber: '0123456789', accountName: 'Ada Obi' }))
+      .toEqual({ bankLabel: 'GTBank', accountNumber: '0123456789', accountName: 'Ada Obi' });
+  });
+  it('falls back to the provider for wallets with no bank name', () => {
+    expect(payToFromPayee({ provider: 'opay', bankName: '', accountNumber: '0801', accountName: 'Ada' }).bankLabel).toBe('opay');
+  });
+  it('keeps the PM payer instruction', () => {
+    expect(payToFromPm({ bank: 'Nomba', accountNumber: '9', accountName: 'TSA', payerInstruction: 'Pay from Ada Obi' }))
+      .toEqual({ bankLabel: 'Nomba', accountNumber: '9', accountName: 'TSA', payerInstruction: 'Pay from Ada Obi' });
+  });
+});
+
+describe('payToCopy', () => {
+  it('direct payer: pay exactly, then mark paid', () => {
+    const c = payToCopy('direct-payer');
+    expect(c.heading).toBe('Pay exactly');
+    expect(c.note).toMatch(/I've paid/);
+  });
+  it('direct payee: check this account before releasing', () => {
+    expect(payToCopy('direct-payee').note).toMatch(/before you release/);
+  });
+  it('pm keeps today’s name-match wording verbatim', () => {
+    expect(payToCopy('pm', 'Ada Obi').note).toBe(
+      'Pay from a bank account in YOUR name (Ada Obi). A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.',
+    );
+    expect(payToCopy('pm').note).toBe(
+      'Pay from a bank account in YOUR name. A name mismatch routes your trade to manual review. We release your crypto automatically once your transfer lands — no further action needed.',
+    );
+  });
+});
+
+describe('safeProofUrl', () => {
+  it('accepts only https URLs (proof URLs are user-supplied)', () => {
+    expect(safeProofUrl('https://cdn.example.com/p.png')).toBe('https://cdn.example.com/p.png');
+    expect(safeProofUrl(' https://x.io/a.jpg ')).toBe('https://x.io/a.jpg');
+    expect(safeProofUrl('http://x.io/a.jpg')).toBeNull();
+    expect(safeProofUrl('javascript:alert(1)')).toBeNull();
+    expect(safeProofUrl('file:///etc/passwd')).toBeNull();
+    expect(safeProofUrl('')).toBeNull();
+    expect(safeProofUrl(undefined)).toBeNull();
   });
 });
