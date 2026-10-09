@@ -53,15 +53,8 @@ func (s *ITService) TreasuryCanPayGas(ctx context.Context, chain string) bool {
 // open, live pricing at claim, operator re-price. SQLite (tests) is
 // single-writer, as the checkout lock notes.
 func (s *ITService) withStockLock(ctx context.Context, chain, token string, fn func(tx *gorm.DB) error) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if tx.Dialector.Name() == "postgres" {
-			key := "ramp_treasury:" + strings.ToLower(strings.TrimSpace(chain)) + ":" + strings.ToUpper(strings.TrimSpace(token))
-			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", key).Error; err != nil {
-				return fmt.Errorf("company wallet: stock lock: %w", err)
-			}
-		}
-		return fn(tx)
-	})
+	key := "ramp_treasury:" + strings.ToLower(strings.TrimSpace(chain)) + ":" + strings.ToUpper(strings.TrimSpace(token))
+	return withAdvisoryLock(ctx, s.db, key, "company wallet: stock lock", fn)
 }
 
 // reservedTreasuryUnits is what open company-wallet orders have been promised
@@ -231,6 +224,22 @@ func (s *ITService) insertTreasuryIntentWith(ctx context.Context, intent *models
 	})
 }
 
+// dailyBuyCap is one provider's rolling-24h per-user limit (spec §10.4,
+// extended from the company wallet's): which rows count, the limit in
+// canonical units, the error when reached, and the metric stem.
+type dailyBuyCap struct {
+	scope   func(*gorm.DB) *gorm.DB
+	limit   *big.Int
+	reached error
+	metric  string
+}
+
+// scopeCompanyWalletBuys is the company wallet's rows (a positive constant
+// match, as the P7 lint allows).
+func scopeCompanyWalletBuys(db *gorm.DB) *gorm.DB {
+	return db.Model(&models.ITIntent{}).Where("provider = ?", models.ITProviderTreasury)
+}
+
 // CheckTreasuryDailyCap refuses when this order would take the user past
 // RAMP_TREASURY_DAILY_USER_MAX_USD over a rolling 24h (§13 Q2, D59).
 func (s *ITService) CheckTreasuryDailyCap(ctx context.Context, userID uuid.UUID, units *big.Int) error {
@@ -240,16 +249,25 @@ func (s *ITService) CheckTreasuryDailyCap(ctx context.Context, userID uuid.UUID,
 // checkTreasuryDailyCap is CheckTreasuryDailyCap on db, leaving out exclude:
 // an order being priced live counts at its new amount, not twice.
 func (s *ITService) checkTreasuryDailyCap(ctx context.Context, db *gorm.DB, userID uuid.UUID, units *big.Int, exclude uuid.UUID) error {
+	return s.checkDailyBuyCap(ctx, db, userID, units, exclude, dailyBuyCap{
+		scope: scopeCompanyWalletBuys, limit: s.treasuryLimits().dailyUserMaxUnits,
+		reached: ErrTreasuryDailyCapReached, metric: "ramp_treasury_daily_cap_hit",
+	})
+}
+
+// checkDailyBuyCap refuses when units would take the user past c.limit over a
+// rolling 24h, leaving out exclude (an order priced live counts once).
+func (s *ITService) checkDailyBuyCap(ctx context.Context, db *gorm.DB, userID uuid.UUID, units *big.Int, exclude uuid.UUID, c dailyBuyCap) error {
 	var amounts []string
-	q := db.WithContext(ctx).Model(&models.ITIntent{}).
-		Where("user_id = ? AND provider = ? AND direction = ? AND status NOT IN ? AND created_at >= ?",
-			userID, models.ITProviderTreasury, models.ITDirectionBuy,
+	q := c.scope(db.WithContext(ctx)).
+		Where("user_id = ? AND direction = ? AND status NOT IN ? AND created_at >= ?",
+			userID, models.ITDirectionBuy,
 			[]string{models.ITStatusCancelled, models.ITStatusRefunded}, time.Now().Add(-24*time.Hour))
 	if exclude != uuid.Nil {
 		q = q.Where("id <> ?", exclude)
 	}
 	if err := q.Pluck("asset_amount", &amounts).Error; err != nil {
-		return fmt.Errorf("company wallet: read daily total: %w", err)
+		return fmt.Errorf("read daily total: %w", err)
 	}
 	total := new(big.Int).Set(units)
 	for _, a := range amounts {
@@ -257,9 +275,9 @@ func (s *ITService) checkTreasuryDailyCap(ctx context.Context, db *gorm.DB, user
 			total.Add(total, v)
 		}
 	}
-	if lim := s.treasuryLimits().dailyUserMaxUnits; total.Cmp(lim) > 0 {
-		log.Printf("[it treasury buy] METRIC ramp_treasury_daily_cap_hit user=%s total_units=%s cap_units=%s", userID, total, lim)
-		return ErrTreasuryDailyCapReached
+	if total.Cmp(c.limit) > 0 {
+		log.Printf("[it buy] METRIC %s user=%s total_units=%s cap_units=%s", c.metric, userID, total, c.limit)
+		return c.reached
 	}
 	return nil
 }
