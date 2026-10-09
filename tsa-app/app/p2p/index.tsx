@@ -5,7 +5,7 @@
 import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { goBack } from '@/utils/back';
 import { SERVICES_TAB } from '@/constants/routes';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BackHandler, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -17,6 +17,8 @@ import {
   type P2PAd,
   type P2PChainInfo,
 } from '../../services/p2p';
+import { KycRequiredState } from '@/components/p2p/KycRequiredState';
+import { marketLoadError, type MarketError } from '@/utils/p2pMarketError';
 import { getChainByChainId } from '../../constants/chains';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
@@ -66,7 +68,7 @@ const P2PMarketScreen: React.FC = () => {
   const [token, setToken] = useState<string>('USDT');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<MarketError | null>(null);
   // Optional deep-link intent from the marketplace P2P heading: ?side=buy means
   // "I want to BUY crypto" → browse sell-ads (adSide 'sell'); ?side=sell means
   // "I want to SELL crypto" → browse buy-ads (adSide 'buy').
@@ -120,7 +122,7 @@ const P2PMarketScreen: React.FC = () => {
   }, []);
 
   const load = useCallback(async () => {
-    setError(false);
+    setError(null);
     const res = await adsApi.list({
       side: adSide,
       token,
@@ -133,7 +135,7 @@ const P2PMarketScreen: React.FC = () => {
     if (res.success && res.data) {
       setAds(res.data);
     } else {
-      setError(true);
+      setError(marketLoadError(res));
     }
     setLoading(false);
     setRefreshing(false);
@@ -160,6 +162,19 @@ const P2PMarketScreen: React.FC = () => {
       };
       const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
       return () => sub.remove();
+    }, []),
+  );
+
+  // Back from verification the screen is still mounted: re-fetch so the market
+  // recovers without a restart. Driven by the server's last answer, not a cached
+  // verification status, which goes stale mid-session.
+  const retryIfKycBlocked = useRef<() => void>(() => {});
+  retryIfKycBlocked.current = () => {
+    if (error?.kycCode) load();
+  };
+  useFocusEffect(
+    useCallback(() => {
+      retryIfKycBlocked.current();
     }, []),
   );
 
@@ -332,7 +347,11 @@ const P2PMarketScreen: React.FC = () => {
         {loading ? (
           <SkeletonGroup shape="adCard" count={4} />
         ) : error ? (
-          <ErrorState subtitle="Couldn’t load the market. Check your connection." onRetry={() => { setLoading(true); load(); }} />
+          error.kycCode ? (
+            <KycRequiredState code={error.kycCode} purpose="market" />
+          ) : (
+            <ErrorState subtitle={error.message} onRetry={() => { setLoading(true); load(); }} />
+          )
         ) : ads.length === 0 ? (
           <EmptyState
             icon="storefront"

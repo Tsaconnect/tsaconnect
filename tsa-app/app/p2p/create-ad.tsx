@@ -668,7 +668,7 @@ const CreateAdScreen: React.FC = () => {
       ]);
     } catch (err: any) {
       // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
-      if (promptKycRefusal(p2pKycCode(err), err?.message)) return;
+      if (promptKycRefusal(p2pKycCode(err), err?.message, 'p2p')) return;
       const raw = err?.message || String(err);
       // Turn an opaque on-chain revert (e.g. the ERC20InsufficientBalance hex the
       // backend surfaces when the wallet can't cover the deposit) into a clear,

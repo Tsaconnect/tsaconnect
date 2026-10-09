@@ -239,7 +239,7 @@ const DisputeWizardScreen: React.FC = () => {
       });
 
       if (r.status === 'refused') {
-        if (promptKycRefusal(p2pKycCode(r.response), r.response.message)) return;
+        if (promptKycRefusal(p2pKycCode(r.response), r.response.message, 'p2p')) return;
         toast.error(p2pErrorMessage(r.response));
         return;
       }

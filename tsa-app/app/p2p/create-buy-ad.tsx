@@ -228,7 +228,7 @@ const CreateBuyAdScreen: React.FC = () => {
 
       if (!createRes.success || !createRes.data) {
         // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
-        if (promptKycRefusal(p2pKycCode(createRes), createRes.message)) return;
+        if (promptKycRefusal(p2pKycCode(createRes), createRes.message, 'p2p')) return;
         throw new Error(createRes.message || 'Server rejected the buy ad');
       }
 

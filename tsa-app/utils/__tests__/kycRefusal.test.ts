@@ -57,6 +57,14 @@ describe('kycRefusalFor', () => {
   });
 });
 
+describe('kycRefusalFor p2p context', () => {
+  it('is neutral about paying in', () => {
+    const msg = kycRefusalFor(KYC_VERIFICATION_REQUIRED, undefined, 'p2p')?.message ?? '';
+    expect(msg).toContain('trade on P2P');
+    expect(msg).not.toContain('pay in');
+  });
+});
+
 describe('promptKycRefusal', () => {
   it('offers a Verify now action that opens the KYC screen', () => {
     expect(promptKycRefusal(KYC_VERIFICATION_REQUIRED)).toBe(true);

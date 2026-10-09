@@ -296,7 +296,7 @@ const AdDetailScreen: React.FC = () => {
       case 'none':
         return;
       case 'kyc':
-        promptKycRefusal(next.code, next.message);
+        promptKycRefusal(next.code, next.message, 'p2p');
         return;
       case 'alert':
         Alert.alert(next.title, next.message);
@@ -309,7 +309,7 @@ const AdDetailScreen: React.FC = () => {
   };
 
   const stopForApproval = (next: ApproveFollowUp) => {
-    if (next.kyc) promptKycRefusal(next.kyc.code, next.kyc.message);
+    if (next.kyc) promptKycRefusal(next.kyc.code, next.kyc.message, 'p2p');
     else if (next.alert) Alert.alert(next.alert.title, next.alert.message);
   };
 

@@ -21,19 +21,28 @@ export const KYC_LEGAL_NAME_MISSING = 'kyc_legal_name_missing';
 /** The Didit verification screen. */
 export const KYC_ROUTE = '/profile/kyc';
 
+/** 'p2p' swaps the pay-in wording, which is wrong for a seller. */
+export type KycContext = 'p2p';
+
 export type KycRefusal =
   | { kind: 'verify'; title: string; message: string }
   | { kind: 'support'; title: string; message: string };
 
 /** Describes the prompt for a refusal code, or null when the code is not one. */
-export function kycRefusalFor(code?: string, serverMessage?: string): KycRefusal | null {
+export function kycRefusalFor(
+  code?: string,
+  serverMessage?: string,
+  context?: KycContext,
+): KycRefusal | null {
   switch (code) {
     case KYC_VERIFICATION_REQUIRED:
       return {
         kind: 'verify',
         title: 'Verify your identity',
         message:
-          'You need to finish identity verification before you can pay in. It only takes a few minutes.',
+          context === 'p2p'
+            ? 'You need to finish identity verification before you can trade on P2P. It only takes a few minutes.'
+            : 'You need to finish identity verification before you can pay in. It only takes a few minutes.',
       };
     case KYC_LEGAL_NAME_MISSING:
       return {
@@ -52,8 +61,8 @@ export function kycRefusalFor(code?: string, serverMessage?: string): KycRefusal
  * Shows the right prompt when a response carries a KYC refusal code and returns
  * true, so the caller can stop. Returns false for any other response.
  */
-export function promptKycRefusal(code?: string, serverMessage?: string): boolean {
-  const refusal = kycRefusalFor(code, serverMessage);
+export function promptKycRefusal(code?: string, serverMessage?: string, context?: KycContext): boolean {
+  const refusal = kycRefusalFor(code, serverMessage, context);
   if (!refusal) return false;
   if (refusal.kind === 'verify') {
     Alert.alert(refusal.title, refusal.message, [

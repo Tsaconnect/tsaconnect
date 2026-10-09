@@ -407,7 +407,7 @@ const TradeDetailScreen: React.FC = () => {
         confirm: (txHash) => confirm(txHash),
         stash: () => ({ mode: action, tradeId: trade.id, token: trade.token, amount: trade.tokenAmount }),
       });
-      if (r.status === 'refused' && promptKycRefusal(p2pKycCode(r.response), r.response.message)) return r.status;
+      if (r.status === 'refused' && promptKycRefusal(p2pKycCode(r.response), r.response.message, 'p2p')) return r.status;
       const next = tradeTxFollowUp(r);
       if (next.trade) setTrade(next.trade);
       const alert = txOutcomeAlert(label, r);
