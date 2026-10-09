@@ -23,6 +23,7 @@ const REGISTRY = {
   swap: { set: 'mci', glyph: 'swap-horizontal' },
   copy: { set: 'ion', glyph: 'copy-outline' },
   share: { set: 'ion', glyph: 'share-outline' },
+  print: { set: 'ion', glyph: 'print-outline' },
   check: { set: 'ion', glyph: 'checkmark' },
   checkCircle: { set: 'ion', glyph: 'checkmark-circle' },
   close: { set: 'ion', glyph: 'close' },

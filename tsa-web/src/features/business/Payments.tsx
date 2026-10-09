@@ -32,7 +32,8 @@ function PaymentsBody() {
         columns={paymentColumns}
         statuses={STATUSES}
         load={listPayments}
-        searchPlaceholder="Reference, description or ID"
+        searchPlaceholder="Reference, code, description or ID"
+        dateFilter
         empty={<NoPaymentsYet mode={mode} />}
       />
       <Outlet />

@@ -14,10 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -188,20 +187,48 @@ func formatTokenBalance(balance *big.Int, decimals int) string {
 	return result
 }
 
+// parseTokenAmount converts a human decimal to exact base units. It refuses
+// malformed input and amounts <= 0. Fractional digits beyond the token's
+// decimals are dropped (floor), because the app's USD-entry mode sends
+// toFixed(6) amounts to tokens that hold fewer digits; an amount that drops to
+// zero is refused.
 func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
-	f, ok := new(big.Float).SetString(amount)
-	if !ok {
+	// Installed app versions may send ".5" or "12."; keep accepting them.
+	amount = strings.TrimSpace(amount)
+	if strings.HasPrefix(amount, ".") {
+		amount = "0" + amount
+	}
+	if strings.HasSuffix(amount, ".") {
+		amount = strings.TrimSuffix(amount, ".")
+	}
+	whole, frac, hasFrac := strings.Cut(amount, ".")
+	if !isASCIIDigits(whole) || (hasFrac && !isASCIIDigits(frac)) {
 		return nil, false
 	}
-	multiplier := new(big.Float).SetInt(
-		new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil),
-	)
-	f.Mul(f, multiplier)
-	result, _ := f.Int(nil)
-	if result.Sign() <= 0 {
+	if hasFrac && len(frac) > decimals {
+		amount = whole
+		if decimals > 0 {
+			amount += "." + frac[:decimals]
+		}
+	}
+	result, err := services.DecimalToBaseUnits(amount, decimals)
+	if err != nil || result.Sign() <= 0 {
 		return nil, false
 	}
 	return result, true
+}
+
+// isASCIIDigits reports whether s is non-empty and made only of 0-9.
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // erc20SendDecimals returns the decimals a send amount is scaled by.
@@ -753,8 +780,8 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		return
 	}
 
-	signedTxBytes, err := hexutil.Decode(req.SignedTx)
-	if err != nil {
+	parsedTx, signerAddr, decodeErr := blockchain.DecodeSignedTx(req.SignedTx)
+	if errors.Is(decodeErr, blockchain.ErrSignedTxHex) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction format")
 		return
 	}
@@ -776,13 +803,11 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 	if expectedSigner == "" {
 		expectedSigner = user.WalletAddress
 	}
-	var parsedTx types.Transaction
-	if err := parsedTx.UnmarshalBinary(signedTxBytes); err != nil {
+	switch {
+	case errors.Is(decodeErr, blockchain.ErrSignedTxEncoding):
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction encoding")
 		return
-	}
-	signerAddr, err := types.Sender(types.LatestSignerForChainID(parsedTx.ChainId()), &parsedTx)
-	if err != nil {
+	case decodeErr != nil:
 		utils.ErrorResponse(c, http.StatusBadRequest, "Could not verify the transaction signature")
 		return
 	}
@@ -793,6 +818,13 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		return
 	}
 
+	// The canonical encoding of what was decoded: byte-identical to what the
+	// client sent, since only a canonical encoding decodes.
+	signedTxBytes, err := parsedTx.MarshalBinary()
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid signed transaction encoding")
+		return
+	}
 	txHash, err := client.SendRawTransaction(signedTxBytes)
 	if err != nil {
 		log.Printf("Failed to submit tx to %s: %v", chainName, err)

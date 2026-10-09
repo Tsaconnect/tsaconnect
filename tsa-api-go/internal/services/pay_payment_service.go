@@ -116,11 +116,12 @@ type PayPaymentService struct {
 	feeBps       int
 	checkoutBase string
 	now          func() time.Time
-	events       *events.Bus      // nil until SetEvents: no "payment received" alerts
-	intents      payIntents       // nil until SetIntents (ramp sell off: converted payments unavailable)
-	deposits     payDepositReader // nil until SetDepositReader: an expired order can then never be proven empty
-	skipped      atomic.Int64     // reconcile ticks skipped in a row (noteTick)
-	alerted      sync.Map         // alertOnce's memory: name+"/"+attemptID -> time.Time last alerted; pruneAlerted bounds it
+	events       *events.Bus         // nil until SetEvents: no "payment received" alerts
+	intents      payIntents          // nil until SetIntents (ramp sell off: converted payments unavailable)
+	deposits     payDepositReader    // nil until SetDepositReader: an expired order can then never be proven empty
+	refundAgg    PayRefundAggregator // nil until SetRefundAggregator: every payment reads as never refunded
+	skipped      atomic.Int64        // reconcile ticks skipped in a row (noteTick)
+	alerted      sync.Map            // alertOnce's memory: name+"/"+attemptID -> time.Time last alerted; pruneAlerted bounds it
 }
 
 // NewPayPaymentService constructs a PayPaymentService. feeBps is the
@@ -292,25 +293,33 @@ func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, m
 	return s.createOrExisting(ctx, p, in)
 }
 
-// createOrExisting inserts p outside any transaction. If another request won
-// an insert-race for the same (merchant, mode, reference) between create's
-// pre-check and this insert, the unique index refuses the row; we re-read
-// the winner and give the same answer create's pre-check would have, rather
-// than surfacing an error for a request that in fact succeeded.
+// createOrExisting inserts p outside any transaction, with a fresh payment code
+// — the one place a payment is inserted, so every kind of payment gets a code
+// and a collision is retried in one place. A code another payment already has
+// is drawn again; that is checked first, so it is never mistaken for the
+// reference race below. If another request won an insert-race for the same
+// (merchant, mode, reference) between create's pre-check and this insert, the
+// unique index refuses the row; we re-read the winner and give the same answer
+// create's pre-check would have, rather than surfacing an error for a request
+// that in fact succeeded.
 func (s *PayPaymentService) createOrExisting(ctx context.Context, p *models.PayPayment, in CreatePayPaymentInput) (*models.PayPayment, bool, error) {
-	if err := s.db.WithContext(ctx).Create(p).Error; err != nil {
-		if !isUniqueViolation(err) {
-			return nil, false, err
-		}
-		var existing models.PayPayment
-		if reErr := s.db.WithContext(ctx).
-			Where("merchant_id = ? AND mode = ? AND reference = ?", p.MerchantID, p.Mode, p.Reference).
-			First(&existing).Error; reErr != nil {
-			return nil, false, reErr
-		}
-		return payReferenceReused(&existing, p.Source, p.AmountKobo, p.Currency, p.Description, p.ReturnURL)
+	err := payTryFresh(payCodeNext, func(code string) error {
+		p.PayCode = &code
+		return s.db.WithContext(ctx).Create(p).Error
+	}, payCodeTaken)
+	if err == nil {
+		return p, true, nil
 	}
-	return p, true, nil
+	if payCodeTaken(err) || !isUniqueViolation(err) {
+		return nil, false, err
+	}
+	var existing models.PayPayment
+	if reErr := s.db.WithContext(ctx).
+		Where("merchant_id = ? AND mode = ? AND reference = ?", p.MerchantID, p.Mode, p.Reference).
+		First(&existing).Error; reErr != nil {
+		return nil, false, reErr
+	}
+	return payReferenceReused(&existing, p.Source, p.AmountKobo, p.Currency, p.Description, p.ReturnURL)
 }
 
 // payReferenceReused answers a request whose (merchant, mode, reference)
@@ -351,6 +360,26 @@ func (s *PayPaymentService) GetForMerchant(ctx context.Context, merchantID uuid.
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrPayPaymentNotFound
 		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+// GetByReference returns merchantID's payment in mode whose reference is
+// exactly reference: trimmed as Create stored it, case-sensitive, no
+// wildcards. A reference no payment could have (empty, a NUL, too long) is
+// not found without a query.
+func (s *PayPaymentService) GetByReference(ctx context.Context, merchantID uuid.UUID, mode, reference string) (*models.PayPayment, error) {
+	reference = strings.TrimSpace(reference)
+	if reference == "" || strings.ContainsRune(reference, 0) || utf8.RuneCountInString(reference) > payMaxReferenceLen {
+		return nil, ErrPayPaymentNotFound
+	}
+	var p models.PayPayment
+	err := s.db.WithContext(ctx).Where("merchant_id = ? AND mode = ? AND reference = ?", merchantID, mode, reference).First(&p).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPayPaymentNotFound
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &p, nil
@@ -411,24 +440,27 @@ const PayListCancelled = "cancelled"
 // PayListCancelled. Query matches the reference, description or customer name
 // (case-insensitive substring) or an id prefix. HideUntriedOpen leaves out
 // untried open-link payments (PayPayment.Untried) — scan noise to an owner.
+// From/To bound created_at to [From, To) (ParsePayDateRange); zero is open.
 type PayListFilter struct {
 	MerchantID                  *uuid.UUID
 	Mode, Status, Source, Query string
 	HideUntriedOpen             bool
+	From, To                    time.Time
 	Page, Limit                 int
+}
+
+// payPage is the page and page size every TSA Pay list reads: page from 1,
+// 20 a page unless asked, never more than 100.
+func payPage(page, limit int) (int, int) {
+	if limit < 1 {
+		limit = 20
+	}
+	return max(page, 1), min(limit, 100)
 }
 
 // List is one page of payments, newest first, with the total that matched.
 func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models.PayPayment, int64, error) {
-	if f.Page < 1 {
-		f.Page = 1
-	}
-	if f.Limit < 1 {
-		f.Limit = 20
-	}
-	if f.Limit > 100 {
-		f.Limit = 100
-	}
+	f.Page, f.Limit = payPage(f.Page, f.Limit)
 	filter := func(q *gorm.DB) *gorm.DB {
 		if f.MerchantID != nil {
 			q = q.Where("merchant_id = ?", *f.MerchantID)
@@ -451,14 +483,20 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 		if f.HideUntriedOpen {
 			q = payHideUntriedOpen(q)
 		}
+		q = payBetween(q, "created_at", f.From, f.To)
 		if term := strings.ToLower(strings.TrimSpace(f.Query)); term != "" {
 			// What she typed is matched literally: % and _ are not wildcards.
 			esc := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(term)
 			// One group, so the ORs never widen the merchant/mode/status filter.
-			q = q.Where(s.db.Where(`LOWER(reference) LIKE ? ESCAPE '\'`, "%"+esc+"%").
+			match := s.db.Where(`LOWER(reference) LIKE ? ESCAPE '\'`, "%"+esc+"%").
 				Or(`LOWER(description) LIKE ? ESCAPE '\'`, "%"+esc+"%").
 				Or(`LOWER(customer_name) LIKE ? ESCAPE '\'`, "%"+esc+"%").
-				Or(`CAST(id AS TEXT) LIKE ? ESCAPE '\'`, esc+"%"))
+				Or(`CAST(id AS TEXT) LIKE ? ESCAPE '\'`, esc+"%")
+			// A customer reads her code out as TSA-XXXXX-XXXXX, in any case or spacing.
+			if code, ok := NormalizePayCode(f.Query); ok {
+				match = match.Or("pay_code = ?", code)
+			}
+			q = q.Where(match)
 		}
 		return q
 	}

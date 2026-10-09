@@ -47,6 +47,7 @@ export const createResponse = `{
   "data": {
     "id": "3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
     "reference": "PNR-K8Q2ZL",
+    "payCode": "TSA-7K2QF-M9XWD",
     "mode": "live",
     "status": "pending",
     "amount": 8450000,
@@ -59,7 +60,9 @@ export const createResponse = `{
     "expiresAt": "2026-09-24T16:31:00Z",
     "appUrl": "tsaconnect://pay?id=3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
     "checkoutUrl": "https://tsaconnectworld.com/pay/3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
-    "createdAt": "2026-09-24T16:01:00Z"
+    "createdAt": "2026-09-24T16:01:00Z",
+    "refundedAmount": "0.00",
+    "refundStatus": "none"
   }
 }`;
 
@@ -77,6 +80,7 @@ export const webhookBody = `{
   "data": {
     "id": "3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
     "reference": "PNR-K8Q2ZL",
+    "payCode": "TSA-7K2QF-M9XWD",
     "mode": "live",
     "status": "succeeded",
     "amount": 8450000,
@@ -91,7 +95,9 @@ export const webhookBody = `{
     "succeededAt": "2026-09-24T16:03:00Z",
     "appUrl": "tsaconnect://pay?id=3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
     "checkoutUrl": "https://tsaconnectworld.com/pay/3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
-    "createdAt": "2026-09-24T16:01:00Z"
+    "createdAt": "2026-09-24T16:01:00Z",
+    "refundedAmount": "0.00",
+    "refundStatus": "none"
   },
   "id": "b7e0c1d2-5a4f-4c3e-8d2b-9f1a6e7c3d40",
   "livemode": true,
@@ -138,4 +144,49 @@ export const errorBody = `{
   "success": false,
   "message": "invalid API key",
   "code": "invalid_key"
+}`;
+
+// GET /payments?reference= — the lookup by the merchant's own reference (FindPaymentByReference).
+export const findByReferenceCurl = `curl -G ${BASE_URL}/payments \\
+  --data-urlencode "reference=PNR-K8Q2ZL" \\
+  -H "Authorization: Bearer $TSA_PAY_KEY"`;
+
+// The refund event: the payment as it is now (refundedAmount/refundStatus), plus this refund.
+// Top-level keys sorted, as Go marshals the event map (pay_payment_state.go webhookDelivery);
+// refund's keys are sorted too (pay_refund_request.go payRefundWebhookObject).
+export const refundWebhookBody = `{
+  "created": 1790352180,
+  "data": {
+    "id": "3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
+    "reference": "PNR-K8Q2ZL",
+    "payCode": "TSA-7K2QF-M9XWD",
+    "mode": "live",
+    "status": "succeeded",
+    "amount": 8450000,
+    "customerTotal": 8535354,
+    "merchantNet": 8450000,
+    "fee": 85354,
+    "currency": "NGN",
+    "description": "LOS-ABV 12 Oct, 1 adult",
+    "returnUrl": "https://skyair.ng/booking/K8Q2ZL",
+    "expiresAt": "2026-09-24T16:31:00Z",
+    "settlementRef": "c41e7b09-2f6a-4d85-b3e1-7a9d0c5f2e18",
+    "succeededAt": "2026-09-24T16:03:00Z",
+    "appUrl": "tsaconnect://pay?id=3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
+    "checkoutUrl": "https://tsaconnectworld.com/pay/3f2c1a9e-7b4d-4e21-9c8a-1d2e3f4d5e6f",
+    "createdAt": "2026-09-24T16:01:00Z",
+    "refundedAmount": "12.50",
+    "refundStatus": "partial"
+  },
+  "id": "e2a9c4f1-8b3d-4f6e-9a1c-5d7b2e8f0a63",
+  "livemode": true,
+  "refund": {
+    "amount": "12.50",
+    "chainId": 56,
+    "confirmedAt": "2026-09-25T10:12:00Z",
+    "id": "9c1e5a7b-3d2f-4b8a-8e6c-1f4a7d9b2c50",
+    "token": "USDT",
+    "txHash": "0x5e1f9a2b7c3d4e8f6a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f"
+  },
+  "type": "payment.refunded"
 }`;

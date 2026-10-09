@@ -5,7 +5,7 @@
 // notification still displays; tapping just opens the app (no dead navigation).
 // Non-P2P deep-links (orders/wallet) are a follow-on once those routes are
 // disambiguated (the app currently has two `orderdetail` routes).
-import { NAME_CHANGE, PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
+import { NAME_CHANGE, PAY_LINKS, PAY_REFUNDS, PAY_SETTINGS } from '@/constants/routes';
 import { isPaymentId } from '@/utils/paymentId';
 import { LP_DASHBOARD_ROUTE } from '@/utils/lpCta';
 
@@ -47,6 +47,15 @@ export function routeForNotification(data: NotificationData | null | undefined):
     }
     return mode ? `${PAY_LINKS}?mode=${mode}` : PAY_LINKS;
   }
+  // A refund she must approve and send (or one that confirmed, failed or is under review): its
+  // own screen. isPaymentId is the UUID gate; anything else lands on her refunds.
+  if (PAY_REFUND_EVENTS.has(type)) {
+    return isPaymentId(data.refundId) ? `${PAY_REFUNDS}/${data.refundId}` : PAY_REFUNDS;
+  }
+  // The payer's refund arrived: the payment's own summary shows it.
+  if (type === 'pay_refund_received') {
+    return isPaymentId(data.paymentId) ? `/pay?id=${data.paymentId}` : null;
+  }
   // Her name change started (fee paid), was approved, held for review, rejected or lapsed: its screen shows which.
   if (NAME_CHANGE_EVENTS.has(type)) return NAME_CHANGE;
   // Her TSA Pay business rename was filed, approved or rejected.
@@ -66,4 +75,11 @@ const NAME_CHANGE_EVENTS = new Set([
   'name_change_held',
   'name_change_rejected',
   'name_change_lapsed',
+]);
+
+const PAY_REFUND_EVENTS = new Set([
+  'pay_refund_requested',
+  'pay_refund_confirmed',
+  'pay_refund_failed',
+  'pay_refund_needs_review',
 ]);

@@ -80,3 +80,35 @@ func TestPayAmounts_RejectsBadInputs(t *testing.T) {
 		t.Fatalf("zero amount: err = %v, want ErrPayAmountInvalid", err)
 	}
 }
+
+func TestFormatMicroUSD_TwoToSixDecimals(t *testing.T) {
+	for in, want := range map[int64]string{
+		0: "0.00", 1: "0.000001", 500_000: "0.50", 12_500_000: "12.50", 1_230_000: "1.23",
+		1_234_500: "1.2345", 1_234_567: "1.234567", 100_000_000: "100.00", -2_500_000: "-2.50",
+	} {
+		if got := FormatMicroUSD(in); got != want {
+			t.Errorf("FormatMicroUSD(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseMicroUSD_PositiveAndAtMostSixPlaces(t *testing.T) {
+	for in, want := range map[string]int64{
+		"12.50": 12_500_000, "12.5": 12_500_000, "12": 12_000_000, "0.000001": 1, " 3.25 ": 3_250_000,
+		"999999999999.999999": 999_999_999_999_999_999,
+	} {
+		got, err := ParseMicroUSD(in)
+		if err != nil || got != want {
+			t.Errorf("ParseMicroUSD(%q) = %d, %v; want %d", in, got, err, want)
+			continue
+		}
+		if back, err := ParseMicroUSD(FormatMicroUSD(got)); err != nil || back != got {
+			t.Errorf("round trip of %q: %d %v", in, back, err)
+		}
+	}
+	for _, bad := range []string{"", "0", "0.00", "-1", "1.0000001", "1e3", ".5", "12.", "1,000.00", "$5", "1000000000000"} {
+		if _, err := ParseMicroUSD(bad); !errors.Is(err, ErrMicroUSDInvalid) {
+			t.Errorf("ParseMicroUSD(%q): err %v, want ErrMicroUSDInvalid", bad, err)
+		}
+	}
+}

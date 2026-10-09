@@ -14,9 +14,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/states';
 import { StatusPill } from '@/components/ui/status-pill';
 import { toast } from '@/components/ui/toaster';
-import { cancelLink, getPayment, type Delivery, type Mode, type Payer, type Payment, type PaymentDetail } from './api';
+import { cancelLink, getPayment, resendDelivery, type Delivery, type Mode, type Payer, type Payment, type PaymentDetail } from './api';
 import { LINK_STATUS_LABELS, linkCard, linkMessage, paymentFor, statusOf, youReceive } from './display';
 import { LinkShare } from './LinkShare';
+import { PaymentRefunds } from './PaymentRefunds';
 import { queryKeys } from './queryKeys';
 import { useMerchant } from './useMerchant';
 
@@ -46,7 +47,26 @@ function deliveryState(d: Delivery): string {
   return `${dateTime(d.createdAt)} · ${tries}`;
 }
 
-function Deliveries({ items }: { items: Delivery[] }) {
+function ResendButton({ delivery, mode, paymentId }: { delivery: Delivery; mode: Mode; paymentId: string }) {
+  const queryClient = useQueryClient();
+  const resend = useMutation({
+    mutationFn: () => resendDelivery(mode, delivery.id),
+    onSuccess: () =>
+      toast.success(delivery.deliveredAt
+        ? 'Sent again as a new delivery — it goes out within a minute'
+        : 'Queued to send again — it goes out within a minute'),
+    onError: (err) => toast.error(err.message),
+    // Either way the attempts are read again: a new delivery, or this one requeued.
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: queryKeys.payment(mode, paymentId) }),
+  });
+  return (
+    <Button variant="secondary" size="sm" className="shrink-0" aria-label={`Resend ${delivery.event}`} loading={resend.isPending} onClick={() => resend.mutate()}>
+      Resend
+    </Button>
+  );
+}
+
+function Deliveries({ items, mode, paymentId }: { items: Delivery[]; mode: Mode; paymentId: string }) {
   if (items.length === 0) {
     return <p className="text-body-sm text-text-secondary">No webhooks sent for this payment yet.</p>;
   }
@@ -60,6 +80,7 @@ function Deliveries({ items }: { items: Delivery[] }) {
             <p className="text-caption text-text-secondary">{deliveryState(d)}</p>
             {d.lastError && <p className="mt-1 break-words text-caption text-danger-strong">{d.lastError}</p>}
           </div>
+          <ResendButton delivery={d} mode={mode} paymentId={paymentId} />
         </li>
       ))}
     </ul>
@@ -149,6 +170,7 @@ function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Paymen
         <Row label={p.status === 'succeeded' ? 'Paid by' : 'Payer'}><PaidBy payer={payer} status={p.status} /></Row>
         {p.customerName && <Row label="Requested for">{p.customerName}</Row>}
         <Row label="Your reference"><span className="font-mono text-[13px]">{p.reference}</span></Row>
+        {p.payCode && <Row label="Payment code"><span className="font-mono text-[13px]">{p.payCode}</span></Row>}
         {forWhat.what && <Row label="For">{forWhat.what}</Row>}
         {forWhat.note && <Row label="Customer's note">{forWhat.note}</Row>}
         {p.source === 'open' && p.openLinkId && (
@@ -181,11 +203,13 @@ function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Paymen
 
       {p.source === 'link' && <PaymentLink payment={p} mode={mode} />}
 
+      {p.status === 'succeeded' && <PaymentRefunds payment={p} mode={mode} />}
+
       {/* Links are often made by owners with no webhook at all: nothing sent is nothing to show. */}
       {(p.source !== 'link' || deliveries.length > 0) && (
         <>
           <SectionHeading>Webhooks sent</SectionHeading>
-          <Deliveries items={deliveries} />
+          <Deliveries items={deliveries} mode={mode} paymentId={p.id} />
         </>
       )}
     </>

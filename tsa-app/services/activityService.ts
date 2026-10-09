@@ -7,6 +7,7 @@ import { getNonEVMHistory, type NonEVMActivity } from './chains/nonevmApi';
 import { listITIntents } from './itApi';
 import { listOrders as listPaycrestOrders } from './paycrestApi';
 import { listMyPayments, type PayHistoryItem } from './payApi';
+import { merchantRefundSubtitle } from '../utils/payRefunds';
 import { formatKobo } from '../utils/stableSellQuote';
 import { buildITActivity, fiatSymbol, type ITActivity, type SymbolFor } from '../utils/itActivity';
 import type { StatusVisual } from '../components/ui/statusMap';
@@ -409,7 +410,9 @@ function fromPayment(p: PayHistoryItem): ActivityItem {
     type: 'payment',
     subtype: p.status,
     title: `Payment to ${p.merchantName}`,
-    subtitle: p.description || 'TSA Pay',
+    // The merchant refunded a payment she made: said under it. A returned Paycrest attempt
+    // (status 'refunded') is its own row and keeps its own words.
+    subtitle: (p.status !== 'refunded' && p.merchantRefund ? merchantRefundSubtitle(p.merchantRefund) : '') || p.description || 'TSA Pay',
     amount: formatKobo(String(p.customerTotal)),
     positive: false,
     status: p.status,

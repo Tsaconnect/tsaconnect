@@ -251,48 +251,48 @@ const (
 	stableProven
 )
 
+// nameChangeStableReasons words ProveStableTransfer's reasons the way a
+// name-change fee has always been explained (the review note reads these).
+var nameChangeStableReasons = map[StableTransferReason]string{
+	StableReasonUnreadable:   "not found on-chain yet",
+	StableReasonShallow:      "waiting for confirmations",
+	StableReasonNothingMoved: "the transaction moved none of the fee to the treasury from the proven wallet",
+	StableReasonReverted:     "the transaction reverted or paid someone else",
+	StableReasonWrongSender:  "sent by a wallet other than the one proven for this change",
+	StableReasonTooEarly:     "made before this change was opened",
+}
+
 // checkStablePayment reads txHash and holds it to everything a fee for ch must
 // be: the right token to the treasury, sent by the proven wallet itself, mined
 // after the change was opened, and deep enough. txHash is the change's named
-// payment, or the one it stopped waiting for (ClearedPayRef).
+// payment, or the one it stopped waiting for (ClearedPayRef). The policy is
+// the shared ProveStableTransfer.
 func (s *NameChangeService) checkStablePayment(ctx context.Context, ch *models.UserNameChange, txHash string) (stableOutcome, *StablePayment, string) {
 	if s.rail == nil || txHash == "" {
 		return stablePending, nil, "no payment to check"
 	}
 	p, err := s.rail.VerifyPayment(ctx, ch.PayChain, txHash, ch.PayTokenAddress, ch.PayFrom, ch.PayTo)
-	if errors.Is(err, ErrTransferNoMatch) {
-		// Mined and successful, yet it moved none of the token to the treasury
-		// from the proven wallet (paid from another wallet, another token, or
-		// nothing). Once it is as deep as a payment has to be, nothing will
-		// change that; until then a reorg still could.
-		if p != nil && p.Confirmations >= uint64(s.minConfirmations(ch.PayChain)) {
-			return stableRefuted, p, "the transaction moved none of the fee to the treasury from the proven wallet"
-		}
-		return stablePending, p, "waiting for confirmations"
-	}
-	var credited *big.Int
-	if p != nil {
-		credited = p.Credited
-	}
-	switch ClassifyTransfer(credited, err) {
-	case TransferRefuted:
-		return stableRefuted, nil, "the transaction reverted or paid someone else"
-	case TransferUnproven:
+	out := ProveStableTransfer(p, err, StableTransferWant{
+		From:      ch.PayFrom,
+		NotBefore: ch.CreatedAt.Add(-time.Minute), // a minute for clock skew between us and the chain
+		MinConf:   uint64(s.minConfirmations(ch.PayChain)),
+	})
+	switch out.Reason {
+	case StableReasonUnreadable:
 		if err != nil && !errors.Is(err, ErrTransferNotFound) {
-			log.Printf("[name-change] change=%s payment not readable yet: %v", ch.ID, err)
+			log.Printf("[name-change] change=%s payment not readable yet: %s", ch.ID, RedactAlertText(err.Error()))
 		}
-		return stablePending, nil, "not found on-chain yet"
+		p = nil
+	case StableReasonReverted:
+		p = nil
 	}
-	if !strings.EqualFold(p.Sender, ch.PayFrom) {
-		return stableRefuted, p, "sent by a wallet other than the one proven for this change"
+	switch out.Verdict {
+	case StableTransferProven:
+		return stableProven, p, ""
+	case StableTransferRefuted:
+		return stableRefuted, p, nameChangeStableReasons[out.Reason]
 	}
-	if p.BlockTime.Before(ch.CreatedAt.Add(-time.Minute)) { // a minute for clock skew between us and the chain
-		return stableRefuted, p, "made before this change was opened"
-	}
-	if p.Confirmations < uint64(s.minConfirmations(ch.PayChain)) {
-		return stablePending, p, "waiting for confirmations"
-	}
-	return stableProven, p, ""
+	return stablePending, p, nameChangeStableReasons[out.Reason]
 }
 
 func (s *NameChangeService) minConfirmations(chain string) int {

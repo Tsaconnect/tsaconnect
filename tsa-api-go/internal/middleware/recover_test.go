@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,5 +82,56 @@ func TestRecover_AResponseAlreadyStartedIsLeftAlone(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/x", nil))
 	if w.Code != http.StatusOK || w.Body.String() != "partial" {
 		t.Fatalf("status %d body %q: a started response must not get a second body", w.Code, w.Body.String())
+	}
+}
+
+// http.ErrAbortHandler is how a handler that has already started its response
+// says "abort the connection": Recover must pass it on to net/http, not end the
+// response cleanly, and it is no fault worth a stack trace.
+func TestRecover_PassesAnAbortOnToNetHTTP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logs := captureLog(t)
+	r := gin.New()
+	r.Use(Recover())
+	r.GET("/x", func(c *gin.Context) {
+		c.String(http.StatusOK, "partial")
+		panic(http.ErrAbortHandler)
+	})
+
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	}()
+	if got != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler passed on", got)
+	}
+	if strings.Contains(logs.String(), "[panic]") {
+		t.Fatalf("an abort was logged as a panic:\n%s", logs.String())
+	}
+}
+
+// Over a real connection, the client of an aborted response sees its body cut
+// off, never a clean end.
+func TestRecover_AnAbortedResponseFailsOnTheClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	captureLog(t)
+	r := gin.New()
+	r.Use(Recover())
+	r.GET("/x", func(c *gin.Context) {
+		c.String(http.StatusOK, "partial")
+		c.Writer.Flush()
+		panic(http.ErrAbortHandler)
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	res, err := http.Get(srv.URL + "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if body, err := io.ReadAll(res.Body); err == nil {
+		t.Fatalf("body %q read to a clean end: want the connection cut", body)
 	}
 }

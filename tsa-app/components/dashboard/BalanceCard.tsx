@@ -1,7 +1,8 @@
 // components/dashboard/BalanceCard.tsx
 //
 // Total-portfolio hero with the display-currency picker, activity history, the
-// value-hide toggle and the four quick actions (Buy / Services / Trade / Wallet).
+// value-hide toggle and the four quick actions (Buy / Services / Trade / Pay).
+// Pay opens TSA Pay by code; the wallet already has its own tab, so it gave up its tile here.
 // The currency and history controls live here, not in a page header, because
 // they are about this balance. Migrated onto the TSA Signature design
 // system — the dual-price reads, the visibility toggle, and every quick-action
@@ -13,6 +14,7 @@ import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
 import { Card, Divider, Icon, IconButton, PressableScale, Text } from '@/components/ui';
 import CurrencySelector from '@/components/currency/CurrencySelector';
+import { PAY_CODE } from '@/constants/routes';
 import type { IconName } from '@/components/ui';
 
 const EYE: IconName = 'eye';
@@ -29,7 +31,7 @@ const QUICK_ACTIONS: { key: string; label: string; icon: IconName; route: string
   { key: 'buy', label: 'Buy', icon: 'storefront', route: '/(dashboard)/(tabs)/(marketplace)' },
   { key: 'services', label: 'Services', icon: 'list', route: '/(dashboard)/(tabs)/(services)/serviceshome' },
   { key: 'trade', label: 'Trade', icon: 'trendingUp', route: '/easyswap' },
-  { key: 'wallet', label: 'Wallet', icon: 'wallet', route: '/tokenization' },
+  { key: 'pay', label: 'Pay', icon: 'card', route: PAY_CODE },
 ];
 
 export const BalanceCard: React.FC<BalanceCardProps> = ({

@@ -86,13 +86,35 @@ export const openLinkCard = (businessName: string, l: OpenLink) =>
 /** WhatsApp's share page with the message filled in; the sender picks the chat. */
 export const whatsAppUrl = (message: string) => `https://wa.me/?text=${encodeURIComponent(message)}`;
 
-const CHAINS: Record<string, string> = {
-  base: 'Base', bsc: 'BNB Chain', ethereum: 'Ethereum', polygon: 'Polygon', arbitrum: 'Arbitrum',
-  optimism: 'Optimism', avalanche: 'Avalanche', sonic: 'Sonic', linea: 'Linea',
+// The networks a TSA Pay payout or refund can use: name, chain id and block explorer.
+const CHAINS: Record<string, { name: string; id: number; explorer: string }> = {
+  base: { name: 'Base', id: 8453, explorer: 'https://basescan.org' },
+  bsc: { name: 'BNB Chain', id: 56, explorer: 'https://bscscan.com' },
+  ethereum: { name: 'Ethereum', id: 1, explorer: 'https://etherscan.io' },
+  polygon: { name: 'Polygon', id: 137, explorer: 'https://polygonscan.com' },
+  arbitrum: { name: 'Arbitrum', id: 42161, explorer: 'https://arbiscan.io' },
+  optimism: { name: 'Optimism', id: 10, explorer: 'https://optimistic.etherscan.io' },
+  avalanche: { name: 'Avalanche', id: 43114, explorer: 'https://snowtrace.io' },
+  sonic: { name: 'Sonic', id: 146, explorer: 'https://sonicscan.org' },
+  linea: { name: 'Linea', id: 59144, explorer: 'https://lineascan.build' },
 };
+const chainById = (id: number) => Object.values(CHAINS).find((c) => c.id === id);
 
 /** "base" → "Base"; an unlisted chain key is capitalised. */
-export const chainLabel = (chain: string) => CHAINS[chain] ?? chain.charAt(0).toUpperCase() + chain.slice(1);
+export const chainLabel = (chain: string) => CHAINS[chain]?.name ?? chain.charAt(0).toUpperCase() + chain.slice(1);
+
+/** 56 → "BNB Chain"; an unlisted id → "chain 56". */
+export const chainLabelById = (id: number) => chainById(id)?.name ?? `chain ${id}`;
+
+// A hash lands in a URL path: anything but a plain EVM hash ("../address/0x…") could send
+// the link elsewhere on a trusted explorer. The same rule as the app's txExplorerUrl.
+const EVM_TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+/** A transaction's explorer page, or undefined for an unknown chain or anything that isn't a hash. */
+export function txExplorerUrl(hash: string, chainId: number): string | undefined {
+  const chain = chainById(chainId);
+  return chain && EVM_TX_HASH.test(hash) ? `${chain.explorer}/tx/${hash}` : undefined;
+}
 
 /** A select option's value and label: "USDC:8453", "USDC on Base". */
 export const optionValue = (o: SettlementOption) => `${o.symbol}:${o.chainId}`;
@@ -100,6 +122,9 @@ export const optionLabel = (o: SettlementOption) => `${o.symbol} on ${chainLabel
 
 /** A wallet as the owner should compare it: first six and last four (0x5290…9EE7). */
 export const shortAddress = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a);
+
+/** A transaction link's accessible name: each one in a list reads apart ("View transaction 0xabab…abab"). */
+export const txLinkLabel = (hash: string) => `View transaction ${shortAddress(hash)}`;
 
 export const bankName = (code: string | undefined, banks: Bank[] | undefined) => banks?.find((b) => b.code === code)?.name;
 

@@ -205,6 +205,18 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
     the transfer fee) are operations costs, which the admin-set platform fee is meant to cover
     (owner, 2026-10-05).
 
+TSA Pay crypto refunds (`services/pay_refund_*.go`, `pay-refund-confirmer` job):
+- Always on (no flag, owner 2026-10-09). Without a chain registry the service is unwired and
+  every owner and admin refund route answers 503 `refunds_unavailable`; the routes stay mounted
+  so a client never reads a 404 as "no such refund". Boot logs
+  `[tsa-pay] refunds ready over N mainnet chains`.
+- **RPCs must serve receipts.** Refunds are proven by reading the receipt on every mainnet chain
+  with a client. A chain whose RPC refuses receipt reads (publicnode 403s them on Base, BSC,
+  Arbitrum, Optimism) pays the customer on-chain but leaves the refund `submitted` with only
+  the `pay_refund_unconfirmed` ALERT. Failover only skips a URL on 429/5xx/transport errors, so
+  a 403 endpoint must not be first in a `*_MAINNET_RPC_URL` list. All chains verified
+  2026-10-09.
+
 Background-job failure alerts (`internal/jobs/scheduler_alert.go`):
 - A worker registered with `jobs.AlertOnFailureStreak()` alerts when it has failed every tick
   for ~5 minutes (`ceil(5m / interval)` consecutive failures, never fewer than 3; override with

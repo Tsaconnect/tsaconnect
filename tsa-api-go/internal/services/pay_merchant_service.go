@@ -449,15 +449,7 @@ func (s *PayMerchantService) Get(ctx context.Context, id uuid.UUID) (*models.Pay
 // List returns a page of merchants, newest first, as the admin console's
 // read shape (parsed return domains, key presence booleans, no hashes).
 func (s *PayMerchantService) List(ctx context.Context, page, limit int) ([]PayMerchantView, int64, error) {
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
-	}
+	page, limit = payPage(page, limit)
 
 	var total int64
 	if err := s.db.WithContext(ctx).Model(&models.PayMerchant{}).Count(&total).Error; err != nil {
@@ -679,12 +671,19 @@ func (s *PayMerchantService) listedStablecoin(chainID int64, token string) (stri
 	if s.chains == nil {
 		return "", fmt.Errorf("%w: no chain registry configured for crypto settlement", ErrPayMerchantInvalid)
 	}
-	chain, ok := s.chains.MainnetChainNameForID(chainID)
+	return payListedStablecoin(s.chains, chainID, token)
+}
+
+// payListedStablecoin is the symbol of token when it is one of
+// payOwnerSettlementTokens as listed on chainID — what an owner may be paid in,
+// and what a refund may be sized in and paid with.
+func payListedStablecoin(chains payChainRegistry, chainID int64, token string) (string, error) {
+	chain, ok := chains.MainnetChainNameForID(chainID)
 	if !ok {
 		return "", fmt.Errorf("%w: chain id %d is not a supported settlement chain", ErrPayMerchantInvalid, chainID)
 	}
 	for _, symbol := range payOwnerSettlementTokens {
-		if listed := s.chains.TokenAddress(chain, symbol); listed != "" && sameTokenAddress(listed, token) {
+		if listed := chains.TokenAddress(chain, symbol); listed != "" && sameTokenAddress(listed, token) {
 			return symbol, nil
 		}
 	}

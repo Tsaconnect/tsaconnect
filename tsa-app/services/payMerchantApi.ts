@@ -6,7 +6,9 @@
 // with the code emailed to them
 // (POST /api/pay/merchant/actions/:id/confirm), the payment links she sends
 // customers — one-time (/api/pay/merchant/links) and reusable, where the
-// customer enters the amount (/api/pay/merchant/open-links). The payer's side of TSA Pay is
+// customer enters the amount (/api/pay/merchant/open-links).
+// Refunds she approves and sends from the app (/api/pay/merchant/refunds).
+// The payer's side of TSA Pay is
 // services/payApi.ts; the merchant's server API (/api/pay/v1, key-authenticated)
 // is never called from the app.
 import { createApiRequest } from '@/services/apiRequest';
@@ -261,4 +263,88 @@ export function updateOpenLink(mode: PayLinkMode, id: string, change: OpenLinkCh
 /** A new address and QR for the same link (same id); the old address stops working, and posters printed with it. */
 export function replaceOpenLink(mode: PayLinkMode, id: string): Promise<OpenLink> {
   return request<OpenLink>(`/open-links/${encodeURIComponent(id)}/replace?mode=${mode}`, { method: 'POST' });
+}
+
+/** A refund's state: waiting for her to send it, on its way, or final. */
+export type PayRefundStatus = 'requested' | 'submitted' | 'confirmed' | 'failed' | 'needs_review' | 'cancelled';
+
+/** One refund (the server's PayRefundView). Amounts are decimal US dollars ("12.50"). */
+export type PayRefund = {
+  id: string;
+  paymentId: string;
+  mode: PayLinkMode;
+  status: PayRefundStatus;
+  amount: string;
+  cap: string;
+  credited?: string;
+  reason?: string;
+  /** The customer's wallet, fixed by the server. */
+  toAddress: string;
+  /** Set once sent: her wallet, the network and token, the transaction. */
+  fromAddress?: string;
+  chainId?: number;
+  tokenSymbol?: string;
+  tokenAddress?: string;
+  txHash?: string;
+  failureReason?: string;
+  /** The network refused the last send (owner-safe words); "" once one went through. Retried automatically. */
+  lastBroadcastError?: string;
+  lastBroadcastAt?: string | null;
+  requestedVia: 'web' | 'app';
+  createdAt: string;
+  submittedAt?: string | null;
+  confirmedAt?: string | null;
+};
+
+export type PayRefundRow = PayRefund & { paymentCode?: string; customerName?: string; description?: string };
+export type PayRefundPage = { refunds: PayRefundRow[]; total: number; page: number; limit: number };
+
+/** A network and token the refund can be sent as, with the exact amount in its base units. */
+export type PayRefundOption = {
+  chainId: number;
+  chainKey: string;
+  chainName: string;
+  tokenSymbol: string;
+  tokenAddress: string;
+  decimals: number;
+  amountBaseUnits: string;
+  amountDisplay: string;
+  /** The customer's own deposit network and token. */
+  isDefault: boolean;
+};
+
+/** One refund as its screen reads it. `fromAddress` is the only wallet that may send it. */
+export type PayRefundDetail = {
+  refund: PayRefund;
+  payment: { id: string; code?: string; description: string; customerTotal: number; succeededAt?: string; merchantName: string };
+  payerFirstName: string;
+  fromAddress: string;
+  options: PayRefundOption[];
+};
+
+/** Her refunds in one mode, newest first (the screen puts the open ones first). */
+export function listPayRefunds(mode: PayLinkMode, page = 1, limit = 50, status?: PayRefundStatus): Promise<PayRefundPage> {
+  return request<PayRefundPage>(`/refunds?mode=${mode}&page=${page}&limit=${limit}${status ? `&status=${status}` : ''}`);
+}
+
+export function getPayRefund(id: string): Promise<PayRefundDetail> {
+  return request<PayRefundDetail>(`/refunds/${encodeURIComponent(id)}`);
+}
+
+/** Withdraw a refund nobody has sent yet. Refused (409) once it is sent. */
+export async function cancelPayRefund(id: string): Promise<PayRefund> {
+  const data = await request<{ refund: PayRefund }>(`/refunds/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+  return data.refund;
+}
+
+/**
+ * Hand the server the transfer she signed. It decodes and checks it (her wallet, the token,
+ * the customer, the exact amount), records its hash, then broadcasts it. Never /wallet/submit-tx.
+ */
+export async function submitPayRefund(id: string, body: { chainId: number; tokenSymbol: string; signedTx: string }): Promise<PayRefund> {
+  const data = await request<{ refund: PayRefund }>(`/refunds/${encodeURIComponent(id)}/submit`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  return data.refund;
 }

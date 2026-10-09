@@ -10,11 +10,28 @@ import { toLiFiQuote, type LiFiQuote } from '@/services/lifi';
 import type { PaycrestOrder } from '@/services/paycrestApi';
 import type { SellIntent } from '@/services/paycrestSellSwap';
 import { isPaymentId } from '@/utils/paymentId';
+import { normalizePayCode, PAY_CODE_NOT_FOUND } from '@/utils/payCode';
 
 export type PayStatus = 'pending' | 'processing' | 'succeeded' | 'failed' | 'expired';
 
+/**
+ * The merchant's refund of this payment, as its payer sees it: the confirmed total so far
+ * (pending: one asked for or sent, not yet confirmed), and the latest refund's token, network and transaction.
+ * Distinct from a history item's `status: 'refunded'`, which is a returned Paycrest attempt.
+ */
+export type MerchantRefund = {
+  status: 'partial' | 'full' | 'pending';
+  amount: string;
+  tokenSymbol?: string;
+  chainId?: number;
+  txHash?: string;
+  confirmedAt?: string;
+};
+
 export type PayCheckout = {
   id: string;
+  /** The payment's code, "TSA-XXXXX-XXXXX" — what a payer types under Pay on Home (or Wallet → TSA Pay), and the receipt's number. Absent on an older server or an older payment. */
+  payCode?: string;
   merchantName: string;
   mode: 'live' | 'test';
   status: PayStatus;
@@ -37,6 +54,10 @@ export type PayCheckout = {
   settleTokenAddress?: string;
   settleChainId?: number;
   returnUrl?: string;
+  /** When it was paid — set once it has succeeded. */
+  succeededAt?: string;
+  /** The public page that verifies this receipt (tsaconnectworld.com/r/<code>) — live payments only, once succeeded. */
+  receiptUrl?: string;
   payable: boolean;
   notPayableWhy?: string;
   /** Set when she can clear the block herself — a KYC refusal code (utils/kycRefusal.ts). Branch on this, never the words. */
@@ -48,6 +69,8 @@ export type PayCheckout = {
   orderStatus?: PaycrestStatus;
   /** Why her payment failed — only to her, only once it has. */
   failureReason?: string;
+  /** The merchant refunded some or all of it (to her TSA wallet). Older APIs leave it out. */
+  merchantRefund?: MerchantRefund | null;
 };
 
 export class PayError extends ApiError {}
@@ -69,6 +92,7 @@ export { isPaymentId };
 /** One of her own payments, as her activity lists it (GET /pay/history). */
 export type PayHistoryItem = {
   id: string;
+  payCode?: string;
   merchantName: string;
   description?: string;
   /** A payment's status — or `refunded`, for a past attempt of hers whose money came back. */
@@ -81,6 +105,8 @@ export type PayHistoryItem = {
   succeededAt?: string;
   /** Set on a refunded past attempt: its refund, and any report of it, are on this order. */
   orderId?: string;
+  /** The merchant refunded some or all of this payment — not the same as `status: 'refunded'`. */
+  merchantRefund?: MerchantRefund | null;
 };
 
 /** Her live payments, newest first (the server caps the list). */
@@ -96,6 +122,19 @@ export type PayPublic = { id: string; merchantName: string; status: PayStatus; e
 export async function getPublicPayment(id: string, signal?: AbortSignal): Promise<PayPublic> {
   if (!isPaymentId(id)) throw new PayError('This payment link is not valid.', 400);
   return request<PayPublic>(`/public/${encodeURIComponent(id)}`, { signal });
+}
+
+/**
+ * The payment a code names (GET /pay/code/:code), for the TSA Pay screen —
+ * which then opens the ordinary checkout by id. A code that can't be one is
+ * refused before it reaches fetch, as a 404 like any unknown code.
+ */
+export async function lookupPayCode(code: string): Promise<string> {
+  const bare = normalizePayCode(code);
+  if (!bare) throw new PayError(PAY_CODE_NOT_FOUND, 404);
+  const data = await request<{ id: string }>(`/code/${bare}`);
+  if (!isPaymentId(data?.id)) throw new PayError(PAY_CODE_NOT_FOUND, 404);
+  return data.id;
 }
 
 /** Refuses a non-UUID before it ever reaches fetch. */

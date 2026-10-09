@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -110,7 +111,9 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	bus := events.NewBus()
 	seen := collectEvents(bus)
 	payments := services.NewPayPaymentService(db, merchants, 100, "https://x", now)
-	h := NewPayHandler(merchants, payments, nil, false).WithEvents(bus).WithOpenLinks(payments)
+	sender := services.NewPayWebhookSender(db, merchants, http.DefaultClient, now) // never ticked: no request is ever sent
+	sender.SetPayments(payments)
+	h := NewPayHandler(merchants, payments, sender, false).WithEvents(bus).WithOpenLinks(payments)
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -126,6 +129,9 @@ func newOwnerRig(t *testing.T) *ownerRig {
 	r.POST("/api/pay/merchant/actions/:id/confirm", h.OwnerConfirmAction)
 	r.GET("/api/pay/merchant/payments", h.OwnerPayments)
 	r.GET("/api/pay/merchant/payments/:id", h.OwnerPayment)
+	r.GET("/api/pay/merchant/payments/summary", h.OwnerPaymentSummary)
+	r.GET("/api/pay/merchant/payments/export", h.OwnerExportPayments)
+	r.POST("/api/pay/merchant/deliveries/:id/resend", h.OwnerResendDelivery)
 	r.POST("/api/pay/merchant/keys", h.OwnerRequestKeys)
 	r.PUT("/api/pay/merchant/endpoints", h.OwnerRequestEndpoints)
 	r.PUT("/api/pay/merchant/business-name", h.OwnerRequestBusinessName)
@@ -736,5 +742,178 @@ func TestPayOwner_AllowedIPsAreShownAndAnnounced(t *testing.T) {
 	}
 	if seen = o.events(); len(seen) != 2 || !strings.Contains(seen[1].Message, "Your live API key is accepted from any IP address.") {
 		t.Fatalf("events %+v", seen)
+	}
+}
+
+func TestPayOwner_PaymentsFilterByTheDayTheyWereMadeInWAT(t *testing.T) {
+	o := newOwnerRig(t)
+	ctx := context.Background()
+	in := services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-OCT", Description: "LOS-ABV"}
+	oct, _, err := o.payments.Create(ctx, o.m, models.PayModeLive, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Reference = "PNR-SEP"
+	sep, _, err := o.payments.Create(ctx, o.m, models.PayModeLive, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.db.Model(&models.PayPayment{}).Where("id = ?", oct.ID).Update("created_at", time.Date(2026, 9, 30, 23, 0, 0, 0, time.UTC))   // 1 Oct 00:00 WAT
+	o.db.Model(&models.PayPayment{}).Where("id = ?", sep.ID).Update("created_at", time.Date(2026, 9, 30, 22, 59, 59, 0, time.UTC)) // 30 Sep, WAT
+
+	res := o.do(http.MethodGet, "/api/pay/merchant/payments?mode=live&from=2026-10-01&to=2026-10-31", nil)
+	if res.status != http.StatusOK || !strings.Contains(res.raw, `"total":1`) || !strings.Contains(res.raw, oct.ID.String()) || strings.Contains(res.raw, sep.ID.String()) {
+		t.Fatalf("status %d body %s", res.status, res.raw)
+	}
+	for _, q := range []string{"from=2026-10-01", "to=2026-10-31", "from=2026-10-31&to=2026-10-01", "from=01-10-2026&to=31-10-2026"} {
+		if res := o.do(http.MethodGet, "/api/pay/merchant/payments?mode=live&"+q, nil); res.status != http.StatusBadRequest || res.Code != "date_range" {
+			t.Fatalf("%s: status %d code %q", q, res.status, res.Code)
+		}
+	}
+}
+
+func TestPayOwner_SummaryIsTheirOwnModeAndPeriod(t *testing.T) {
+	o := newOwnerRig(t)
+	ctx := context.Background()
+	paidAt := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	paid := func(m *models.PayMerchant, ref string) {
+		p, _, err := o.payments.Create(ctx, m, models.PayModeLive, services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: ref})
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.db.Model(&models.PayPayment{}).Where("id = ?", p.ID).Updates(map[string]any{"status": models.PayStatusSucceeded, "succeeded_at": paidAt, "created_at": paidAt})
+	}
+	paid(o.m, "PNR-MINE")
+	paid(seedHandlerMerchant(t, o.db), "PNR-STRANGER")
+
+	res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=live&from=2026-10-01&to=2026-10-31", nil)
+	for _, want := range []string{`"succeeded":{"count":1,"customerTotal":5050506,"merchantNet":5000000}`, `"byStatus":{"succeeded":1}`, `"refunds":{"count":0,"amount":"0.00"}`} {
+		if res.status != http.StatusOK || !strings.Contains(res.raw, want) {
+			t.Fatalf("want %s in %d %s", want, res.status, res.raw)
+		}
+	}
+	if res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=test&from=2026-10-01&to=2026-10-31", nil); !strings.Contains(res.raw, `"succeeded":{"count":0,"customerTotal":0,"merchantNet":0},"byStatus":{}`) {
+		t.Fatalf("test mode: %s", res.raw)
+	}
+	if res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=live", nil); !strings.Contains(res.raw, `"count":1`) {
+		t.Fatalf("all time: %s", res.raw)
+	}
+	if res := o.do(http.MethodGet, "/api/pay/merchant/payments/summary?mode=live&from=2026-10-01", nil); res.status != http.StatusBadRequest || res.Code != "date_range" {
+		t.Fatalf("half a range: %d %q", res.status, res.Code)
+	}
+}
+
+func TestPayOwner_ExportIsACSVDownloadAndRefusalsAreJSON(t *testing.T) {
+	o := newOwnerRig(t)
+	p, _, err := o.payments.Create(context.Background(), o.m, models.PayModeLive, services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-CSV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paidAt := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	o.db.Model(&models.PayPayment{}).Where("id = ?", p.ID).Updates(map[string]any{"status": models.PayStatusSucceeded, "succeeded_at": paidAt, "created_at": paidAt})
+
+	w := payDo(o.r, http.MethodGet, "/api/pay/merchant/payments/export?mode=live&from=2026-10-01&to=2026-10-31", nil, nil)
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "text/csv; charset=utf-8" ||
+		w.Header().Get("Content-Disposition") != `attachment; filename="tsa-pay-live-2026-10-01-2026-10-31.csv"` ||
+		!strings.HasPrefix(w.Body.String(), "\uFEFFpaid_at,created_at,code,") || !strings.Contains(w.Body.String(), p.ID.String()) {
+		t.Fatalf("%d %v %q", w.Code, w.Header(), w.Body.String())
+	}
+	w = payDo(o.r, http.MethodGet, "/api/pay/merchant/payments/export?mode=test&from=2026-10-01&to=2026-10-31", nil, nil)
+	if w.Code != http.StatusOK || strings.Count(w.Body.String(), "\n") != 1 {
+		t.Fatalf("test mode is only the header: %q", w.Body.String())
+	}
+	for _, q := range []string{"", "&from=2026-10-01", "&from=2025-01-01&to=2026-10-31"} {
+		res := o.do(http.MethodGet, "/api/pay/merchant/payments/export?mode=live"+q, nil)
+		if res.status != http.StatusBadRequest || res.Code != "date_range" || !strings.HasPrefix(res.raw, "{") {
+			t.Fatalf("%q: %d %s", q, res.status, res.raw)
+		}
+	}
+}
+
+// failingExport is the payments service with an export that fails after
+// writing written (nothing, or the start of the file).
+type failingExport struct {
+	payPaymentAPI
+	written string
+}
+
+func (f failingExport) ExportCSV(_ context.Context, w io.Writer, _ uuid.UUID, _ string, _, _ time.Time) error {
+	if f.written != "" {
+		io.WriteString(w, f.written)
+	}
+	return errors.New("chunk read failed")
+}
+
+func TestPayOwner_AnExportThatFailsPartWayIsAbortedNotEndedCleanly(t *testing.T) {
+	o := newOwnerRig(t)
+	const path = "/api/pay/merchant/payments/export?mode=live&from=2026-10-01&to=2026-10-31"
+
+	o.h.payments = failingExport{payPaymentAPI: o.payments}
+	if res := o.do(http.MethodGet, path, nil); res.status != http.StatusInternalServerError || !strings.HasPrefix(res.raw, "{") {
+		t.Fatalf("before the first byte: %d %q, want a JSON 500", res.status, res.raw)
+	}
+
+	o.h.payments = failingExport{payPaymentAPI: o.payments, written: "\uFEFFpaid_at\n"}
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		payDo(o.r, http.MethodGet, path, nil, nil)
+	}()
+	if got != http.ErrAbortHandler {
+		t.Fatalf("after the first byte: recovered %v, want http.ErrAbortHandler so the connection is cut", got)
+	}
+}
+
+func TestPayOwner_ResendIsTheirOwnAndKeepsADeliveredRecord(t *testing.T) {
+	o := newOwnerRig(t)
+	o.db.Model(o.m).Update("webhook_url", "https://skyair.ng/hook")
+	p, _, err := o.payments.Create(context.Background(), o.m, models.PayModeLive, services.CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-HOOK"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := payHandlerNow
+	failed := models.PayWebhookDelivery{PaymentID: p.ID, MerchantID: o.m.ID, Mode: models.PayModeLive, Event: models.PayEventFailed,
+		Payload: `{"old":true}`, Attempts: 7, FailedAt: &at}
+	delivered := models.PayWebhookDelivery{PaymentID: p.ID, MerchantID: o.m.ID, Mode: models.PayModeLive, Event: models.PayEventSucceeded,
+		Payload: `{"old":true}`, Attempts: 1, LastStatusCode: 200, DeliveredAt: &at}
+	stranger := seedHandlerMerchant(t, o.db)
+	theirs := models.PayWebhookDelivery{PaymentID: p.ID, MerchantID: stranger.ID, Mode: models.PayModeLive, Event: models.PayEventSucceeded, Payload: `{}`}
+	for _, d := range []*models.PayWebhookDelivery{&failed, &delivered, &theirs} {
+		if err := o.db.Create(d).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	resend := func(id, mode string) *ownerResponse {
+		return o.do(http.MethodPost, "/api/pay/merchant/deliveries/"+id+"/resend?mode="+mode, nil)
+	}
+
+	if res := resend(failed.ID.String(), "live"); res.status != http.StatusOK || !strings.Contains(res.raw, `"id":"`+failed.ID.String()+`"`) || !strings.Contains(res.raw, `"attempts":0`) {
+		t.Fatalf("failed: %d %s", res.status, res.raw)
+	}
+	res := resend(delivered.ID.String(), "live")
+	if res.status != http.StatusOK || strings.Contains(res.raw, delivered.ID.String()) || strings.Contains(res.raw, "payload") {
+		t.Fatalf("delivered: %d %s", res.status, res.raw)
+	}
+	var kept models.PayWebhookDelivery
+	o.db.First(&kept, "id = ?", delivered.ID)
+	var n int64
+	o.db.Model(&models.PayWebhookDelivery{}).Where("merchant_id = ?", o.m.ID).Count(&n)
+	if kept.DeliveredAt == nil || kept.Attempts != 1 || n != 3 {
+		t.Fatalf("original %+v, %d rows: the delivered record stays and a new one is added", kept, n)
+	}
+	for name, c := range map[string][2]string{
+		"another merchant's": {theirs.ID.String(), "live"},
+		"the other mode":     {failed.ID.String(), "test"},
+		"not an id":          {"nope", "live"},
+	} {
+		if res := resend(c[0], c[1]); res.status != http.StatusNotFound {
+			t.Fatalf("%s: %d %s", name, res.status, res.raw)
+		}
+	}
+	o.db.Model(o.m).Update("webhook_url", "")
+	for _, id := range []uuid.UUID{delivered.ID, failed.ID} {
+		if res := resend(id.String(), "live"); res.status != http.StatusUnprocessableEntity || res.Code != "no_webhook_url" {
+			t.Fatalf("no URL, %s: %d %s", id, res.status, res.raw)
+		}
 	}
 }

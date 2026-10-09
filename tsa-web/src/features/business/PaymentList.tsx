@@ -12,6 +12,8 @@ import type { Mode, Page, PaymentFilter } from './api';
 import type { Column } from './paymentColumns';
 import { queryKeys, type ListKind } from './queryKeys';
 import { PaymentsTable } from './PaymentsTable';
+import { DateRangeFields } from './DateRangeFields';
+import { periodProblem } from './period';
 
 /**
  * A filterable, paged list — payments, one-time payment links, reusable links.
@@ -29,11 +31,13 @@ export type PaymentListProps<T> = {
   /** The list before there is anything in it (no filter set). */
   empty: ReactNode;
   columns: Column<T>[];
+  /** Filter by the day a row was made (From/To, in the URL as from/to). Payments only. */
+  dateFilter?: boolean;
 };
 
 // Filters live in the URL, so the detail drawer, the mode switch and the back
 // button all keep them.
-export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, statuses = [], load, searchPlaceholder, empty, columns }: PaymentListProps<T>) {
+export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, statuses = [], load, searchPlaceholder, empty, columns, dateFilter = false }: PaymentListProps<T>) {
   const mode = useMode();
   const [params, setParams] = useSearchParams();
   const status = statuses.find((s) => s.value === params.get('status'))?.value ?? '';
@@ -41,9 +45,15 @@ export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, sta
   const q = searchPlaceholder ? params.get('q') ?? '' : '';
   const page = Math.max(1, Math.floor(Number(params.get('page'))) || 1);
 
+  // Dates go to the API only as a valid pair; a half-set or backwards range says why instead.
+  const from = dateFilter ? params.get('from') ?? '' : '';
+  const to = dateFilter ? params.get('to') ?? '' : '';
+  const dateProblem = periodProblem(from, to);
+  const filter = { status, q, page, ...(!dateProblem && from && to ? { from, to } : {}) };
+
   const list = useQuery({
-    queryKey: queryKeys.list(kind, mode, { status, q, page }),
-    queryFn: ({ signal }) => load(mode, { status, q, page }, signal),
+    queryKey: queryKeys.list(kind, mode, filter),
+    queryFn: ({ signal }) => load(mode, filter, signal),
     // Keep the rows on screen while the next page or filter of the SAME list
     // loads — never another list's rows (they'd read through the wrong columns),
     // and never across a mode switch (live rows under the Test banner).
@@ -65,7 +75,7 @@ export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, sta
   };
 
   const data = list.data;
-  const filtered = Boolean(status || q);
+  const filtered = Boolean(status || q || from || to);
   // A page past the end (a stale link, or the list shrank) has no rows but a total.
   const pastEnd = Boolean(data && data.items.length === 0 && data.total > 0);
   const first = data && data.items.length ? (data.page - 1) * data.limit + 1 : 0;
@@ -73,7 +83,7 @@ export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, sta
 
   return (
     <Card>
-      {(statuses.length > 0 || searchPlaceholder) && (
+      {(statuses.length > 0 || searchPlaceholder || dateFilter) && (
         <div className="flex flex-wrap items-center gap-3 border-b border-hairline px-5 py-3">
           {statuses.length > 0 && (
             <Segmented
@@ -83,6 +93,16 @@ export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, sta
               value={status}
               options={statuses}
               onChange={(value) => update({ status: value, page: '' })}
+            />
+          )}
+          {dateFilter && (
+            <DateRangeFields
+              legend="Created between"
+              caption="Created"
+              value={{ from, to }}
+              onChange={(next) => update({ ...next, page: '' })}
+              problem={dateProblem}
+              clearLabel="Clear dates"
             />
           )}
           {searchPlaceholder && (
@@ -107,8 +127,8 @@ export function PaymentList<T extends { id: string }>({ kind, rowPath, noun, sta
         filtered ? (
           <EmptyState
             title={`No ${noun} match`}
-            body="Try another status, or search for a different reference."
-            action={<Button variant="secondary" size="sm" onClick={() => update({ status: '', q: '', page: '' })}>Clear filters</Button>}
+            body="Try another status, date range, or search."
+            action={<Button variant="secondary" size="sm" onClick={() => update({ status: '', q: '', from: '', to: '', page: '' })}>Clear filters</Button>}
           />
         ) : (
           empty

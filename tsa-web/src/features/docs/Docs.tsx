@@ -5,9 +5,10 @@ import { DEFAULT_HOME } from '@/session/context';
 import { Brand } from '@/components/shell/Brand';
 import { Note } from '@/components/ui/note';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
+import { REFUND_TERMS } from '@/features/business/refunds';
 import { CodeBlock } from './CodeBlock';
 import {
-  BASE_URL, createCurl, createNode, createResponse, errorBody, expressNode, retrieveCurl, verifyNode, webhookBody,
+  BASE_URL, createCurl, createNode, createResponse, errorBody, expressNode, findByReferenceCurl, retrieveCurl, verifyNode, webhookBody, refundWebhookBody,
 } from './samples';
 
 // The public TSA Pay developer docs. Every field, header, event, limit and error
@@ -163,6 +164,14 @@ export function Docs() {
               <C>payment.expired</C> webhook; any other status answers <C>409</C>.
             </P>
             <CodeBlock title="Read and cancel with curl" code={retrieveCurl} />
+
+            <H3>Find a payment by your reference</H3>
+            <P>
+              <C>GET /payments?reference=&lt;your reference&gt;</C> returns the payment with exactly that reference in your key's mode,
+              as <C>data</C>, exactly like <C>GET /payments/:id</C>. The match is exact and case-sensitive; no match answers <C>404</C>. Use it to reconcile by your
+              own order id. URL-encode the reference.
+            </P>
+            <CodeBlock title="Find by reference with curl" code={findByReferenceCurl} />
           </Section>
 
           <Section id="the-payment-object" lead="Returned by every endpoint and sent as the data of every webhook. Empty optional fields are omitted.">
@@ -171,6 +180,7 @@ export function Docs() {
               rows={[
                 [<C>id</C>, 'string (UUID)', 'Our id for the payment.'],
                 [<C>reference</C>, 'string', 'Your reference.'],
+                [<C>payCode</C>, 'string, optional', <>The code your customer sees, like <C>TSA-7K2QF-M9XWD</C>. They can type it in the TSA Connect app (tap Pay on the home screen) to pay, and it is the number on their receipt. Unique. To find a payment by its code, search for it in your dashboard's Payments list (any case, with or without dashes) — there is no API lookup by code; use the id or your reference.</>],
                 [<C>mode</C>, 'string', <><C>live</C> or <C>test</C>.</>],
                 [<C>status</C>, 'string', <><C>pending</C>, <C>processing</C>, <C>succeeded</C>, <C>failed</C> or <C>expired</C>.</>],
                 [<C>amount</C>, 'integer', 'Your price, in kobo.'],
@@ -187,6 +197,8 @@ export function Docs() {
                 [<C>appUrl</C>, 'string', 'Opens the payment in the TSA Connect app.'],
                 [<C>checkoutUrl</C>, 'string', 'The web checkout page.'],
                 [<C>createdAt</C>, 'string (RFC 3339)', 'When it was created.'],
+                [<C>refundedAmount</C>, 'string', <>Confirmed refunds so far, in US dollars, e.g. <C>"12.50"</C>; <C>"0.00"</C> when none.</>],
+                [<C>refundStatus</C>, 'string', <><C>none</C>, <C>partial</C> or <C>full</C>.</>],
               ]}
             />
             <H3>Statuses</H3>
@@ -195,23 +207,31 @@ export function Docs() {
               <li><C>processing</C> → <C>succeeded</C> or <C>failed</C> — final.</li>
               <li><C>pending</C> → <C>expired</C> — unpaid by <C>expiresAt</C>, cancelled, or your account was suspended. Final.</li>
               <li><C>processing</C> → <C>pending</C> — the customer abandoned the attempt; it can be paid again. No webhook.</li>
+              <li>A refund doesn't change <C>status</C>: a refunded payment stays <C>succeeded</C>. Read <C>refundStatus</C> and <C>refundedAmount</C>.</li>
             </ul>
             <P>Fulfil orders on <C>succeeded</C> only, confirmed by webhook or <C>GET /payments/:id</C> — never by the customer reaching your <C>returnUrl</C>.</P>
           </Section>
 
-          <Section id="webhooks" lead="When a payment reaches a final status, we POST an event to that mode's webhook URL.">
+          <Section id="webhooks" lead="When a payment succeeds, fails or expires, and again each time you refund one, we POST an event to that mode's webhook URL.">
             <Reference
               head={['Event', 'Sent when']}
               rows={[
                 [<C>payment.succeeded</C>, 'The customer paid. Fulfil the order.'],
                 [<C>payment.failed</C>, <>The payment failed; see <C>data.failureReason</C>.</>],
                 [<C>payment.expired</C>, 'It expired unpaid, was cancelled, or your account was suspended.'],
+                [<C>payment.refunded</C>, <>A refund you sent is confirmed on-chain. <C>data</C> is the payment with its new <C>refundedAmount</C>; <C>refund</C> is this refund.</>],
               ]}
             />
             <P>
               Live and test events go to separate URLs; a mode with no URL gets no events. URLs must be <C>https</C> on a public address.
             </P>
             <CodeBlock title="Event body" code={webhookBody} />
+            <H3>Refunds</H3>
+            <P>
+              You ask for a refund from a succeeded payment in your dashboard. {REFUND_TERMS} <C>payment.refunded</C> is sent once the
+              transfer is confirmed. Refunds can't be created with an API key yet.
+            </P>
+            <CodeBlock title="payment.refunded event body" code={refundWebhookBody} />
             <Reference
               head={['Header', 'Value']}
               rows={[
@@ -255,6 +275,10 @@ export function Docs() {
                 <b className="font-semibold">Decline</b> to make it <C>succeeded</C> or <C>failed</C>.
               </li>
               <li>Test payments and their webhook deliveries appear in your dashboard in test mode.</li>
+              <li>
+                Refund a test payment from its page in your dashboard (<b className="font-semibold">Simulate refund</b>): it is refunded at once and a
+                test <C>payment.refunded</C> is sent. Nothing moves on-chain. What a test payment can refund is its naira total at a fixed ₦1,500 per US dollar.
+              </li>
             </ul>
           </Section>
 

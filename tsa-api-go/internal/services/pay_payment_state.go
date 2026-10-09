@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"regexp"
 	"strings"
@@ -278,18 +279,15 @@ func (s *PayPaymentService) announceReceived(ctx context.Context, id uuid.UUID) 
 	// the fee on themselves.
 	title := "₦" + koboAsNairaText(p.MerchantNetKobo) + " received"
 	message := who + " paid " + m.BusinessName
-	switch {
-	case p.Source == models.PaySourceOpen && p.Description != "":
+	switch text, kind, err := s.payPurpose(ctx, p); {
+	case err != nil:
+		log.Printf("[tsa-pay] payment received alert for %s: purpose: %v", id, err)
+	case kind == payPurposeCustomerNote:
 		// Words a customer typed, marked as theirs, with any link in them made
 		// harmless: this goes out by push and email under our name.
-		message += " · Customer's note: “" + payWithoutLinks(p.Description) + "”"
-	case p.Description != "":
-		message += " · " + p.Description // the merchant's own
-	case p.OpenLinkID != nil:
-		// An open-link payment with no note: the link says what it was for.
-		if labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID}); err == nil && labels[*p.OpenLinkID] != "" {
-			message += " · " + labels[*p.OpenLinkID]
-		}
+		message += " · Customer's note: “" + text + "”"
+	case kind != payPurposeNone:
+		message += " · " + text
 	}
 	if p.Mode == models.PayModeTest {
 		title = "Test: " + title // no real money moved
@@ -298,15 +296,67 @@ func (s *PayPaymentService) announceReceived(ctx context.Context, id uuid.UUID) 
 		Data: map[string]any{"paymentId": p.ID.String(), "merchantId": m.ID.String(), "mode": p.Mode, "source": p.Source}})
 }
 
+// payPurposeKind says whose words a payment's purpose text is.
+type payPurposeKind int
+
+const (
+	payPurposeNone         payPurposeKind = iota
+	payPurposeMerchantText                // the merchant's description, on a link or an API payment
+	payPurposeCustomerNote                // an open-link customer's own note, web addresses already removed
+	payPurposeLinkLabel                   // the open link's label, when the customer left no note
+)
+
+// payPurpose is what a payment was for, and whose words they are — the one
+// rule behind the merchant's "received" alert and (as payPublicPurpose) the
+// public status page and receipt.
+func (s *PayPaymentService) payPurpose(ctx context.Context, p *models.PayPayment) (string, payPurposeKind, error) {
+	switch {
+	case p.Source == models.PaySourceOpen && p.Description != "":
+		return payWithoutLinks(p.Description), payPurposeCustomerNote, nil
+	case p.Description != "":
+		return p.Description, payPurposeMerchantText, nil
+	case p.OpenLinkID != nil:
+		labels, err := s.openLinkLabels(ctx, []uuid.UUID{*p.OpenLinkID})
+		if err != nil || labels[*p.OpenLinkID] == "" {
+			return "", payPurposeNone, err
+		}
+		return labels[*p.OpenLinkID], payPurposeLinkLabel, nil
+	}
+	return "", payPurposeNone, nil
+}
+
+// payPublicPurpose is payPurpose as anyone holding the payment's id or code
+// sees it — the public status page and the receipt: never an API payment's
+// description, which is the merchant's own (booking codes, order details).
+func (s *PayPaymentService) payPublicPurpose(ctx context.Context, p *models.PayPayment) (string, payPurposeKind, error) {
+	if p.Source == models.PaySourceAPI {
+		return "", payPurposeNone, nil
+	}
+	return s.payPurpose(ctx, p)
+}
+
+// payNameEnds is the first and last words of a name; last is empty for a
+// one-word name.
+func payNameEnds(name string) (first, last string) {
+	parts := strings.Fields(name)
+	switch len(parts) {
+	case 0:
+		return "", ""
+	case 1:
+		return parts[0], ""
+	}
+	return parts[0], parts[len(parts)-1]
+}
+
 // payShortName is a name as first name and last initial — "Ada Okafor" is
 // "Ada O." — or the one word it is.
 func payShortName(name string) string {
-	parts := strings.Fields(name)
-	if len(parts) < 2 {
-		return strings.TrimSpace(name)
+	first, last := payNameEnds(name)
+	if last == "" {
+		return first
 	}
-	last, _ := utf8.DecodeRuneInString(parts[len(parts)-1])
-	return parts[0] + " " + string(last) + "."
+	r, _ := utf8.DecodeRuneInString(last)
+	return first + " " + string(r) + "."
 }
 
 // payLinkInText is an http(s) address or a bare www. one.
@@ -629,34 +679,71 @@ func (s *PayPaymentService) transitionIn(tx *gorm.DB, id uuid.UUID, g payGuard, 
 // mode is not queued at all — WebhookURLFor returns "" — and nor is an
 // open-link payment nobody started paying.
 func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, event string) error {
+	return s.enqueueWebhookWith(tx, p, event, nil)
+}
+
+// enqueueWebhookWith is enqueueWebhook with extra top-level keys on the body,
+// beside data — payment.refunded's `refund` (contract ruling: a top-level key).
+func (s *PayPaymentService) enqueueWebhookWith(tx *gorm.DB, p *models.PayPayment, event string, extra map[string]any) error {
 	// An untried open-link payment is one visitor entering an amount; its
 	// merchant is not told when it lapses. (One that succeeds was always tried.)
 	if p.Untried() {
 		return nil
 	}
-	var m models.PayMerchant
-	if err := tx.First(&m, "id = ?", p.MerchantID).Error; err != nil {
+	if err := requirePayWebhookURL(tx, p.MerchantID, p.Mode); errors.Is(err, ErrPayWebhookNoURL) {
+		return nil
+	} else if err != nil {
 		return err
 	}
-	url := m.WebhookURLFor(p.Mode)
-	if url == "" {
-		return nil
+	delivery, err := s.webhookDelivery(tx, p, event, extra)
+	if err != nil {
+		return err
 	}
+	return tx.Create(&delivery).Error
+}
 
+// requirePayWebhookURL loads the merchant and returns ErrPayWebhookNoURL when
+// it has no webhook URL for mode: nothing is to be queued for it.
+func requirePayWebhookURL(tx *gorm.DB, merchantID uuid.UUID, mode string) error {
+	var m models.PayMerchant
+	if err := tx.First(&m, "id = ?", merchantID).Error; err != nil {
+		return err
+	}
+	if m.WebhookURLFor(mode) == "" {
+		return ErrPayWebhookNoURL
+	}
+	return nil
+}
+
+// webhookDelivery is one event about p, as p stands now in tx, under a fresh
+// delivery id: the id merchants dedupe on is also the body's "id". extra is
+// top-level keys beside data (nil for none). Every webhook body is built here.
+func (s *PayPaymentService) webhookDelivery(tx *gorm.DB, p *models.PayPayment, event string, extra map[string]any) (models.PayWebhookDelivery, error) {
 	now := s.now()
 	deliveryID := uuid.New()
-	payload, err := json.Marshal(map[string]any{
+	data, err := s.webhookData(tx, p)
+	if err != nil {
+		return models.PayWebhookDelivery{}, err
+	}
+	body := map[string]any{
 		"id":       deliveryID,
 		"type":     event,
 		"livemode": p.Mode == models.PayModeLive,
 		"created":  now.Unix(),
-		"data":     s.View(p),
-	})
-	if err != nil {
-		return err
+		"data":     data,
 	}
-
-	delivery := models.PayWebhookDelivery{
+	// Extra top-level keys beside data — payment.refunded's `refund`. The
+	// envelope's own keys are never overwritten.
+	for k, v := range extra {
+		if _, taken := body[k]; !taken {
+			body[k] = v
+		}
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return models.PayWebhookDelivery{}, err
+	}
+	return models.PayWebhookDelivery{
 		ID:            deliveryID,
 		PaymentID:     p.ID,
 		MerchantID:    p.MerchantID,
@@ -664,6 +751,72 @@ func (s *PayPaymentService) enqueueWebhook(tx *gorm.DB, p *models.PayPayment, ev
 		Event:         event,
 		Payload:       string(payload),
 		NextAttemptAt: &now,
+	}, nil
+}
+
+// webhookData is a webhook's data: the payment view with its refund totals as
+// they stand in tx (so a refund confirmed in the same transaction counts).
+// Without refunds wired nothing reads pay_refunds.
+func (s *PayPaymentService) webhookData(tx *gorm.DB, p *models.PayPayment) (PayPaymentView, error) {
+	view := s.View(p)
+	if s.refundAgg != nil {
+		aggs, err := payRefundAggregates(tx, []uuid.UUID{p.ID})
+		if err != nil {
+			return PayPaymentView{}, err
+		}
+		view.withRefunds(aggs[p.ID])
 	}
-	return tx.Create(&delivery).Error
+	return view, nil
+}
+
+// redeliver queues d's event again as a new delivery of its payment as it is
+// now, leaving d (already delivered) as it was. A receiver deduping on
+// X-TSA-Delivery still processes it. ErrPayWebhookNoURL when the merchant has
+// no webhook URL for the mode any more; ErrPayDeliveryNotFound when its payment
+// is gone.
+func (s *PayPaymentService) redeliver(ctx context.Context, d *models.PayWebhookDelivery) (models.PayWebhookDelivery, error) {
+	var out models.PayWebhookDelivery
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var p models.PayPayment
+		err := tx.First(&p, "id = ?", d.PaymentID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrPayDeliveryNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if err := requirePayWebhookURL(tx, p.MerchantID, p.Mode); err != nil {
+			return err
+		}
+		extra, err := redeliveryExtra(d)
+		if err != nil {
+			return err
+		}
+		row, err := s.webhookDelivery(tx, &p, d.Event, extra)
+		if err != nil {
+			return err
+		}
+		out = row
+		return tx.Create(&out).Error
+	})
+	return out, err
+}
+
+// redeliveryExtra is the top-level keys a resend of d must carry again beside
+// data. A payment.refunded body's `refund` is copied from d's own payload: a
+// confirmed refund never changes, so the copy is exact, and a receiver keyed on
+// refund.id still finds it. Every other event has none.
+func redeliveryExtra(d *models.PayWebhookDelivery) (map[string]any, error) {
+	if d.Event != models.PayEventRefunded {
+		return nil, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(d.Payload), &raw); err != nil {
+		return nil, fmt.Errorf("resend %s: read the original payload: %w", d.ID, err)
+	}
+	refund, ok := raw["refund"]
+	if !ok {
+		return nil, nil
+	}
+	return map[string]any{"refund": refund}, nil
 }

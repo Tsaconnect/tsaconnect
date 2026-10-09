@@ -11,7 +11,7 @@
 // State is computed by payScreenState (utils/payCheckout.ts) — this file
 // only wires data in and renders whatever it says.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, ScrollView, View } from 'react-native';
+import { AppState, Linking, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useAuth } from '@/AuthContext/AuthContext';
@@ -35,15 +35,20 @@ import { getCheckout, getPublicPayment, returnUrlFor, type PayCheckout, type Pay
 import { clearPayHold } from '@/services/payHold';
 import { payScreenState, TERMINAL_STATUSES } from '@/utils/payCheckout';
 import { forgetPendingPayment, rememberPendingPayment } from '@/utils/postAuthRoute';
+import { forgetPayCheckout, rememberPayCheckout } from '@/utils/recentPayCheckouts';
+import { shareReceipt } from '@/services/receiptShare';
 import { verifyThenReturnToPayment } from '@/utils/verifyThenReturn';
 import { KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
 import { usePayTest } from '@/hooks/usePayTest';
 import { PayNaira } from '@/components/pay/PayNaira';
 import { PayCrypto } from '@/components/pay/PayCrypto';
 import { PayBlockedNotice } from '@/components/pay/PayBlockedNotice';
+import { MerchantRefundLines } from '@/components/pay/MerchantRefundLines';
 import { DisputeSection } from '@/components/disputes/DisputeSection';
 import { isDisputableOrder } from '@/services/paycrestStatus';
 import { formatKobo } from '@/utils/stableSellQuote';
+import { PayLinkShare } from '@/components/pay/PayLinkShare';
+import { formatLinkTime, payReceiptShareMessage, safeReceiptUrl } from '@/utils/payLinks';
 
 /** The server writes reasons for her in lower case ("support is reviewing it"); a line of its own starts with a capital. */
 const sentence = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
@@ -121,6 +126,29 @@ export default function PayScreen() {
     }
   }, [checkout]);
 
+  // The Pay screen's "Waiting for you": a payment she opened and can still pay
+  // is remembered on this phone; once she starts paying it, or it ends, it is
+  // her history's (or nobody's) and is forgotten.
+  useEffect(() => {
+    if (!checkout) return;
+    if (checkout.status === 'pending' && checkout.payable && !checkout.youArePaying) {
+      void rememberPayCheckout(checkout);
+    } else {
+      void forgetPayCheckout(checkout.id);
+    }
+  }, [checkout]);
+
+  // A paid payment can still change under her — the merchant may refund it —
+  // so its summary is re-read when the app comes back to the foreground: a
+  // notification or link that lands on this screen while it is already open
+  // brings no new mount to read it.
+  const paid = checkout?.status === 'succeeded';
+  useEffect(() => {
+    if (!paid) return undefined;
+    const sub = AppState.addEventListener('change', (s) => { if (s === 'active') void fetchCheckout(); });
+    return () => sub.remove();
+  }, [paid, fetchCheckout]);
+
   // Signed out, she may be a new customer: signing up, verifying her email and
   // passing KYC can take days. The public read says until when this payment is
   // worth returning to, so it is remembered that long, not a flat half hour.
@@ -183,6 +211,16 @@ export default function PayScreen() {
     }
   };
 
+  // The receipt's own page prints and saves as a PDF in the browser: no native print module.
+  const openReceipt = async (url: string) => {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      toast.error('Could not open the receipt');
+    }
+  };
+  const receiptUrl = safeReceiptUrl(checkout?.receiptUrl);
+
   if (!isHydrated) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
@@ -242,6 +280,7 @@ export default function PayScreen() {
               <Card>
                 <SummaryCard>
                   <SummaryRow label="Paying" value={state.checkout.merchantName} />
+                  {state.checkout.payCode ? <SummaryRow label="Code" value={state.checkout.payCode} /> : null}
                   {/* Through a reusable link, what it's for is the link's name; the
                       description is only the payer's own note, and is labelled as that. */}
                   {state.checkout.source === 'open' ? (
@@ -321,8 +360,25 @@ export default function PayScreen() {
                     value={state.checkout.merchantName}
                   />
                   <SummaryRow label="Amount" value={formatKobo(String(state.checkout.customerTotal))} />
+                  {state.checkout.status === 'succeeded' && state.checkout.payCode ? (
+                    <SummaryRow label="Code" value={state.checkout.payCode} />
+                  ) : null}
+                  {state.checkout.status === 'succeeded' && state.checkout.succeededAt ? (
+                    <SummaryRow label="Paid on" value={formatLinkTime(state.checkout.succeededAt)} />
+                  ) : null}
+                  {state.checkout.merchantRefund ? <MerchantRefundLines refund={state.checkout.merchantRefund} /> : null}
                 </SummaryCard>
               </Card>
+              {state.checkout.status === 'succeeded' && state.checkout.mode === 'live' ? (
+                <Text variant="caption" color="textMuted" align="center">Refunds go to your TSA wallet.</Text>
+              ) : null}
+              {/* A live payment's receipt: the server sends receiptUrl only once
+                  it has succeeded, and never for a test payment. */}
+              {state.checkout.status === 'succeeded' && state.checkout.mode === 'live' && receiptUrl ? (
+                <View style={{ width: '100%' }}>
+                  <ReceiptShare receiptUrl={receiptUrl} checkout={state.checkout} onPrint={() => void openReceipt(receiptUrl)} />
+                </View>
+              ) : null}
               {/* Her payment is over, but it may still need chasing — failed with
                   her money in it, or "the merchant says it never arrived". The
                   report is filed on the order behind it; she never opens that
@@ -378,5 +434,20 @@ export default function PayScreen() {
       </SafeAreaView>
       <AuthorizationModal {...payTest.authorization} />
     </>
+  );
+}
+
+/** A live receipt's QR, Share receipt (its image, else its words and link) and Print / Save PDF. */
+function ReceiptShare({ receiptUrl, checkout, onPrint }: { receiptUrl: string; checkout: PayCheckout; onPrint: () => void }) {
+  const message = payReceiptShareMessage({ ...checkout, receiptUrl });
+  return (
+    <PayLinkShare
+      url={receiptUrl}
+      message={message}
+      onShare={() => shareReceipt(receiptUrl, message)}
+      qrSize={160}
+      shareTitle="Share receipt"
+      secondary={{ title: 'Print / Save PDF', icon: 'print', onPress: onPrint }}
+    />
   );
 }

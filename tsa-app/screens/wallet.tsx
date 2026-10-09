@@ -12,6 +12,7 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
+import { QuickActions } from '@/components/wallet/QuickActions';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -265,14 +266,6 @@ async function mergeCustomTokens(
   }
 }
 
-// ── Quick Actions ──
-const QUICK_ACTIONS = [
-  { key: 'fund', label: 'Deposit', icon: 'bank' as const },
-  { key: 'swap', label: 'Swap', icon: 'swap' as const },
-  { key: 'send', label: 'Withdraw', icon: 'send' as const },
-  { key: 'instant-pay', label: 'Instant Pay', icon: 'bolt' as const },
-] as const;
-
 // ── Balance Card ──
 const WalletBalanceCard: React.FC<{
   totalUsdValue: number;
@@ -289,7 +282,7 @@ const WalletBalanceCard: React.FC<{
   onQuickAction: (action: string) => void;
   onWalletPress: () => void;
 }> = ({ totalUsdValue, isTotalPending, isValuesHidden, activeLabel, onToggleVisibility, onQuickAction, onWalletPress }) => {
-  const { colors, spacing, radius } = useTheme();
+  const { colors, spacing } = useTheme();
   return (
     <AccentCard padding="xl">
       <PressableScale
@@ -334,32 +327,7 @@ const WalletBalanceCard: React.FC<{
 
       <Divider spacing="lg" />
 
-      <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
-        {QUICK_ACTIONS.map((action) => (
-          <PressableScale
-            key={action.key}
-            style={{ alignItems: 'center', minWidth: 56 }}
-            onPress={() => onQuickAction(action.key)}
-          >
-            <View
-              style={{
-                width: 44,
-                height: 44,
-                borderRadius: radius.pill,
-                backgroundColor: colors.accentMuted,
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginBottom: spacing.xs,
-              }}
-            >
-              <Icon name={action.icon} size={20} color={colors.accent} />
-            </View>
-            <Text variant="caption" color="textSecondary">
-              {action.label}
-            </Text>
-          </PressableScale>
-        ))}
-      </View>
+      <QuickActions onPress={onQuickAction} />
     </AccentCard>
   );
 };

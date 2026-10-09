@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -27,11 +28,14 @@ type payPaymentAPI interface {
 	Create(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayPaymentInput) (*models.PayPayment, bool, error)
 	CreateLink(ctx context.Context, m *models.PayMerchant, mode string, in services.CreatePayLinkInput) (*models.PayPayment, error)
 	GetForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) (*models.PayPayment, error)
+	GetByReference(ctx context.Context, merchantID uuid.UUID, mode, reference string) (*models.PayPayment, error)
 	View(p *models.PayPayment) services.PayPaymentView
 	Views(ctx context.Context, ps []models.PayPayment) ([]services.PayPaymentView, error)
 	CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*services.PayCheckoutView, error)
 	PayerHistory(ctx context.Context, userID uuid.UUID) ([]services.PayHistoryItem, error)
 	PublicView(ctx context.Context, id uuid.UUID, liveEnabled bool) (*services.PayPublicView, error)
+	IDByCode(ctx context.Context, code string, user *models.User) (uuid.UUID, error)
+	PublicReceipt(ctx context.Context, code string) (services.PayReceiptView, error)
 	SimulateTestOutcome(ctx context.Context, user *models.User, id uuid.UUID, approve bool) (*models.PayPayment, error)
 	Cancel(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
 	CancelLink(ctx context.Context, merchantID uuid.UUID, mode string, id uuid.UUID) error
@@ -39,6 +43,8 @@ type payPaymentAPI interface {
 	ExpirePendingForMerchant(ctx context.Context, merchantID uuid.UUID, mode, reason string) (int, error)
 	AdminList(ctx context.Context, merchantID *uuid.UUID, mode, status string, page, limit int) ([]models.PayPayment, int64, error)
 	List(ctx context.Context, f services.PayListFilter) ([]models.PayPayment, int64, error)
+	Summary(ctx context.Context, merchantID uuid.UUID, mode string, start, end time.Time) (services.PaySummary, error)
+	ExportCSV(ctx context.Context, w io.Writer, merchantID uuid.UUID, mode string, start, end time.Time) error
 	Deliveries(ctx context.Context, paymentID uuid.UUID) ([]models.PayWebhookDelivery, error)
 	Payer(ctx context.Context, p *models.PayPayment) (*services.PayPayerView, error)
 }
@@ -68,6 +74,7 @@ type payOpenLinkAPI interface {
 type payWebhookAPI interface {
 	DeliverDue(ctx context.Context, limit int) (int, error)
 	Resend(ctx context.Context, deliveryID uuid.UUID) error
+	ResendForMerchant(ctx context.Context, merchantID uuid.UUID, mode string, deliveryID uuid.UUID) (models.PayWebhookDelivery, error)
 }
 
 // payCheckoutStarter is the slice of *services.PayCheckoutService the naira
@@ -95,6 +102,7 @@ type PayHandler struct {
 	openLinks   payOpenLinkAPI
 	webhooks    payWebhookAPI
 	checkout    payCheckoutStarter
+	refunds     payRefundAPI // nil until WithRefunds: refund routes answer 503
 	events      *events.Bus
 	liveEnabled bool
 	// businessNameChange: owners may ask for a rename (NAME_CHANGE_ENABLED).
@@ -491,6 +499,13 @@ func (h *PayHandler) AdminListPayments(c *gin.Context) {
 		return
 	}
 
+	payViews, err := h.payments.Views(c.Request.Context(), rows)
+	if err != nil {
+		log.Printf("[tsa-pay] admin list payments failed: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to list payments")
+		return
+	}
+
 	// Merchant names are looked up once per distinct merchant id in the
 	// page, not once per row — a page is at most `limit` (<=100) rows, so
 	// this stays cheap without needing a join in the service layer.
@@ -505,7 +520,7 @@ func (h *PayHandler) AdminListPayments(c *gin.Context) {
 			}
 			names[p.MerchantID] = name
 		}
-		views[i] = payAdminPaymentView{PayPaymentView: h.payments.View(p), MerchantName: name}
+		views[i] = payAdminPaymentView{PayPaymentView: payViews[i], MerchantName: name}
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payments", gin.H{
 		"payments": views,
@@ -620,7 +635,7 @@ func (h *PayHandler) CreatePayment(c *gin.Context) {
 		utils.SuccessResponse(c, http.StatusCreated, "Payment created", h.payments.View(p))
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+	h.respondPayment(c, p)
 }
 
 // GET /api/pay/v1/payments/:id — a merchant reads only its own payments,
@@ -642,7 +657,41 @@ func (h *PayHandler) GetPayment(c *gin.Context) {
 		payPaymentFail(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Payment", h.payments.View(p))
+	h.respondPayment(c, p)
+}
+
+// respondPayment answers one existing payment as its merchant reads it —
+// through Views, so its refund totals are there.
+func (h *PayHandler) respondPayment(c *gin.Context, p *models.PayPayment) {
+	views, err := h.payments.Views(c.Request.Context(), []models.PayPayment{*p})
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payment", views[0])
+}
+
+// GET /api/pay/v1/payments?reference= — the payment with exactly this
+// reference, in the key's own merchant and mode, as data (same shape as
+// GET /payments/:id), so a merchant reconciles by their own order id.
+// No match is 404.
+func (h *PayHandler) FindPaymentByReference(c *gin.Context) {
+	m, mode, ok := payMerchantFromContext(c)
+	if !ok {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+		return
+	}
+	reference := c.Query("reference")
+	if strings.TrimSpace(reference) == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "reference is required")
+		return
+	}
+	p, err := h.payments.GetByReference(c.Request.Context(), m.ID, mode, reference)
+	if err != nil {
+		payPaymentFail(c, err)
+		return
+	}
+	h.respondPayment(c, p)
 }
 
 // payPaymentFail maps a PayPaymentService error to the wire response: not
