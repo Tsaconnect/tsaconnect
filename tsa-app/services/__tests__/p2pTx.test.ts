@@ -29,7 +29,7 @@ jest.mock('../p2pPending', () => ({
 }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { runP2PTx, txOutcomeAlert } from '../p2pTx';
+import { P2P_MINE_WAIT_MS, runP2PTx, txOutcomeAlert } from '../p2pTx';
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import { TxRevertedError } from '../txWait';
 
@@ -50,6 +50,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   arrange();
 });
+afterEach(() => jest.restoreAllMocks());
 
 it('gas → prepare → sign as the wallet → broadcast on the trade chain → mine → confirm', async () => {
   const order: string[] = [];
@@ -63,7 +64,7 @@ it('gas → prepare → sign as the wallet → broadcast on the trade chain → 
   expect(order).toEqual(['gas', 'prepare', 'mined', 'confirm']);
   expect(mockSign).toHaveBeenCalledWith({ __txLike: true, ...UTX }, W);
   expect(mockBroadcast).toHaveBeenCalledWith('chain-146', '0xsigned');
-  expect(mockWaitMined).toHaveBeenCalledWith(146, '0xhash', expect.any(Object));
+  expect(mockWaitMined).toHaveBeenCalledWith(146, '0xhash', expect.objectContaining({ timeoutMs: P2P_MINE_WAIT_MS }));
   expect(confirm).toHaveBeenCalledWith('0xhash', prepared);
   expect(r).toEqual({ status: 'confirmed', txHash: '0xhash', prepared, data: { id: 't1', status: 'paid' } });
 });
@@ -137,7 +138,74 @@ it('a thrown confirm is confirm-failed too', async () => {
   expect(r.status).toBe('confirm-failed');
 });
 
+it('refuses an unsigned tx built for another chain, signing nothing', async () => {
+  const r = await runP2PTx({ chainId: 56, walletAddress: W, action: 'release', tradeId: 't1', prepare: ok, confirm: jest.fn() });
+  expect(r).toMatchObject({ status: 'refused', response: { success: false } });
+  expect(mockSign).not.toHaveBeenCalled();
+  expect(mockBroadcast).not.toHaveBeenCalled();
+  expect(txOutcomeAlert('Release', r)?.message).toMatch(/different network/);
+});
+
+describe('in-flight guard', () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  it('a concurrent double call is busy: nothing prepared or signed twice', async () => {
+    const gate = deferred<{ success: boolean; data: typeof prepared }>();
+    const prepare = jest.fn(() => gate.promise);
+    const params = { chainId: 146, walletAddress: W, action: 'release' as const, tradeId: 't1', prepare, confirm: async () => ({ success: true }) };
+
+    const first = runP2PTx(params);
+    const second = await runP2PTx(params);
+    expect(second).toEqual({ status: 'busy' });
+    expect(txOutcomeAlert('Release', second)).toBeNull();
+
+    gate.resolve({ success: true, data: prepared });
+    expect((await first).status).toBe('confirmed');
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(mockSign).toHaveBeenCalledTimes(1);
+    expect(mockEnsureP2PGas).toHaveBeenCalledTimes(1);
+  });
+
+  it('different trades do not block each other', async () => {
+    const gate = deferred<{ success: boolean; data: typeof prepared }>();
+    const first = runP2PTx({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't1', prepare: () => gate.promise, confirm: async () => ({ success: true }) });
+    const other = await runP2PTx({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't2', prepare: ok, confirm: async () => ({ success: true }) });
+    expect(other.status).toBe('confirmed');
+    gate.resolve({ success: true, data: prepared });
+    await first;
+  });
+
+  it('is released after success, a failure outcome and a throw', async () => {
+    const run = (prepare: () => Promise<any>) =>
+      runP2PTx({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't1', prepare, confirm: async () => ({ success: true }) });
+
+    expect((await run(ok)).status).toBe('confirmed');
+    expect((await run(ok)).status).toBe('confirmed');
+    expect((await run(async () => ({ success: false, message: 'x' }))).status).toBe('refused');
+    mockBroadcast.mockRejectedValueOnce(new Error('nonce too low'));
+    await expect(run(ok)).rejects.toThrow();
+    mockEnsureP2PGas.mockRejectedValueOnce(new Error('boom'));
+    await expect(run(ok)).rejects.toThrow('boom');
+    expect((await run(ok)).status).toBe('confirmed');
+  });
+});
+
 describe('mining', () => {
+  it('waits on the provider that accepted the broadcast (it may be a fallback RPC)', async () => {
+    const provider = { waitForTransaction: jest.fn() };
+    mockBroadcast.mockResolvedValue({ hash: '0xhash', provider });
+    await runP2PTx({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't1', prepare: ok, confirm: async () => ({ success: true }) });
+    expect(mockWaitMined).toHaveBeenCalledWith(146, '0xhash', expect.objectContaining({ provider }));
+  });
+
+  it('waits less than the server does on confirm (~30s)', () => {
+    expect(P2P_MINE_WAIT_MS).toBeLessThanOrEqual(25_000);
+  });
+
   it('a reverted tx is a clear failure and is never sent to confirm', async () => {
     mockWaitMined.mockRejectedValue(new TxRevertedError('0xhash'));
     const confirm = jest.fn();
@@ -186,7 +254,6 @@ describe('lost-confirm stash', () => {
       txHash: '0xhash', chainId: 146, walletAddress: W, createdAt: 1_700_000_000_000,
     });
     expect(mockRemovePending).toHaveBeenCalledWith('0xhash');
-    jest.restoreAllMocks();
   });
 
   it('keeps the stash when the confirm fails, so a retry can record it', async () => {
@@ -205,19 +272,17 @@ describe('lost-confirm stash', () => {
 
   it('a storage failure never blocks the confirm', async () => {
     mockAddPending.mockRejectedValue(new Error('disk full'));
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
     const r = await runP2PTx({ chainId: 146, walletAddress: W, action: 'open_trade', adId: 'a', prepare: ok, stash,
       confirm: async () => ({ success: true }) });
     expect(r.status).toBe('confirmed');
-    warn.mockRestore();
   });
 
   it('a throwing stash builder never turns a broadcast tx into a thrown error', async () => {
-    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
     const r = await runP2PTx({ chainId: 146, walletAddress: W, action: 'open_trade', adId: 'a', prepare: ok,
       stash: () => { throw new Error('no trade in prepare'); }, confirm: async () => ({ success: true }) });
     expect(r.status).toBe('confirmed');
-    warn.mockRestore();
   });
 
   it('no stash builder → storage untouched', async () => {

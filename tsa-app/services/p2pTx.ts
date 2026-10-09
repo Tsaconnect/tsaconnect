@@ -9,17 +9,24 @@
 // Once a tx is broadcast the user must never be told the action "failed"
 // unless the chain says so (a reverted receipt): a lost confirm or a slow
 // receipt may still be recorded by a retry or the server's chain reconciler.
+//
+// One run per action + entity at a time (`${action}:${tradeId ?? adId ??
+// wallet}`): a double tap that slips past a screen's own `acting` flag gets
+// { status: 'busy' } before any gas, prepare or signing, instead of a second
+// tx that reverts and reads as "failed".
 import { p2pChainKey, unsignedTxToTxLike, type ApiResponse, type UnsignedTx } from './p2p';
 import { broadcastTransaction, signTransaction } from './wallet';
 import { ensureP2PGas } from './p2pGas';
 import { mapSubmitError, TRANSFER_COPY } from './submitErrors';
 import { p2pErrorMessage } from './p2pErrors';
-import { TxRevertedError, waitMined } from './txWait';
+import { TxRevertedError, waitMined, type ReceiptSource } from './txWait';
 import { addPending, removePending, type PendingEscrowConfirm } from './p2pPending';
 
-// The API waits 30s for the receipt on confirm; the client allows more before
-// handing the question to the server anyway.
-const MINE_WAIT_MS = 60_000;
+// The API waits ~30s for the receipt on confirm, so the client wait only buys
+// early revert detection and the `mined` copy — keep it under the server's.
+export const P2P_MINE_WAIT_MS = 25_000;
+
+const inFlight = new Set<string>();
 
 // What the confirm endpoints report when the receipt has status 0
 // (p2p_escrow_service.go fetchReceiptAndCheckOK).
@@ -62,6 +69,8 @@ export type RunP2PTxResult<P, C> =
   | { status: 'reverted'; txHash: string; prepared: P }
   /** No gas and none could be sponsored; the gas alert has been shown. */
   | { status: 'aborted' }
+  /** The same action on the same entity is already running; nothing was done. */
+  | { status: 'busy' }
   | { status: 'refused'; response: ApiResponse<P> };
 
 function errorMessage(err: unknown): string {
@@ -77,7 +86,22 @@ async function bestEffort(what: string, op: () => Promise<void>): Promise<void> 
   }
 }
 
+const WRONG_CHAIN = 'This transaction was built for a different network. Pull down to refresh and try again.';
+
 export async function runP2PTx<P extends { unsignedTx?: UnsignedTx | null }, C>(
+  p: RunP2PTxParams<P, C>,
+): Promise<RunP2PTxResult<P, C>> {
+  const key = `${p.action}:${p.tradeId ?? p.adId ?? p.walletAddress.toLowerCase()}`;
+  if (inFlight.has(key)) return { status: 'busy' };
+  inFlight.add(key);
+  try {
+    return await run(p);
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+async function run<P extends { unsignedTx?: UnsignedTx | null }, C>(
   p: RunP2PTxParams<P, C>,
 ): Promise<RunP2PTxResult<P, C>> {
   const { chainId, walletAddress, action, adId, tradeId, prepare, confirm, onStage, onGasAlert, stash } = p;
@@ -96,13 +120,21 @@ export async function runP2PTx<P extends { unsignedTx?: UnsignedTx | null }, C>(
   if (!prep.success || !prep.data) return { status: 'refused', response: prep };
   const prepared = prep.data;
   if (!prepared.unsignedTx) return { status: 'no-tx', prepared };
+  // Signing for one chain and broadcasting on another would fail at best.
+  if (Number(prepared.unsignedTx.chainId) !== chainId) {
+    return { status: 'refused', response: { success: false, message: WRONG_CHAIN } };
+  }
 
   let txHash: string;
+  let receipts: ReceiptSource | undefined;
   try {
     onStage?.('Signing…');
     const signed = await signTransaction(unsignedTxToTxLike(prepared.unsignedTx), walletAddress);
     onStage?.('Broadcasting…');
-    txHash = (await broadcastTransaction(p2pChainKey(chainId), signed)).hash;
+    const sent = await broadcastTransaction(p2pChainKey(chainId), signed);
+    txHash = sent.hash;
+    // The provider that accepted it — a fallback RPC when the primary is down.
+    receipts = sent.provider ?? undefined;
   } catch (err) {
     throw new Error(mapSubmitError(errorMessage(err), TRANSFER_COPY));
   }
@@ -117,7 +149,7 @@ export async function runP2PTx<P extends { unsignedTx?: UnsignedTx | null }, C>(
   onStage?.('Confirming…');
   let mined = true;
   try {
-    await waitMined(chainId, txHash, { label: 'Transaction', timeoutMs: MINE_WAIT_MS });
+    await waitMined(chainId, txHash, { label: 'Transaction', timeoutMs: P2P_MINE_WAIT_MS, provider: receipts });
   } catch (err) {
     if (err instanceof TxRevertedError) {
       await unstash();

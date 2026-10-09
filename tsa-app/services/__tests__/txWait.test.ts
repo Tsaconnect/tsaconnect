@@ -33,3 +33,10 @@ it('times out with the caller’s label and clears its timer', async () => {
   expect(jest.getTimerCount()).toBe(0);
   jest.useRealTimers();
 });
+
+it('polls the provider that accepted the broadcast when given one', async () => {
+  const own = jest.fn().mockResolvedValue({ status: 1 });
+  await waitMined(146, '0xb', { provider: { waitForTransaction: own } });
+  expect(own).toHaveBeenCalledWith('0xb');
+  expect(mockWait).not.toHaveBeenCalled();
+});

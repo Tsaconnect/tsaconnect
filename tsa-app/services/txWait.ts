@@ -16,14 +16,25 @@ export class TxRevertedError extends Error {
   }
 }
 
+/** Anything that can wait for a receipt — e.g. the ethers provider that
+ *  accepted the broadcast (TransactionResponse.provider). */
+export interface ReceiptSource {
+  waitForTransaction(txHash: string): Promise<{ status?: number | null } | null>;
+}
+
 export async function waitMined(
   chainId: number,
   txHash: string,
-  opts: { timeoutMs?: number; label?: string } = {},
+  opts: { timeoutMs?: number; label?: string; provider?: ReceiptSource } = {},
 ): Promise<void> {
-  const provider = getProvider(p2pChainKey(chainId));
+  // Default: the chain's primary RPC. Pass the provider that took the
+  // broadcast when it may have been a fallback (primary down).
+  const provider = opts.provider ?? getProvider(p2pChainKey(chainId));
   const label = opts.label ?? 'Transaction';
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // The race only stops US waiting: ethers keeps polling for the receipt in
+  // the background after a timeout until it arrives. Harmless, but keep
+  // timeouts short rather than relying on this to cancel anything.
   try {
     const receipt = await Promise.race([
       provider.waitForTransaction(txHash),
