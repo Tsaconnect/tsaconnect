@@ -59,16 +59,20 @@ beforeEach(() => {
 });
 
 it('prepares, checks, signs with her wallet and hands the signed transfer to the refund', async () => {
-  const fetchSpy = jest.fn();
-  global.fetch = fetchSpy as unknown as typeof fetch;
-  await expect(sendPayRefund('r1', option, PAYER, OWNER)).resolves.toEqual({ id: 'r1', status: 'submitted' });
-  expect(mockPrepare).toHaveBeenCalledWith('USDT', PAYER, '12.5', 56, { tokenAddress: USDT_BSC, decimals: 18, fromAddress: OWNER });
-  expect(mockNative).toHaveBeenCalledWith('bsc', OWNER, 'mainnet');
-  expect(mockSign).toHaveBeenCalledWith(expect.objectContaining({ to: USDT_BSC, nonce: 7, chainId: 56, type: 0 }), OWNER);
-  expect(mockSubmit).toHaveBeenCalledWith('r1', { chainId: 56, tokenSymbol: 'USDT', signedTx: '0xsigned' });
-  expect(mockWalletSubmit).not.toHaveBeenCalled();
-  // Nothing in the refund path reaches the network on its own — least of all /wallet/submit-tx.
-  expect(fetchSpy).not.toHaveBeenCalled();
+  // Restored after: a replaced global.fetch would leak into every later test in this worker.
+  const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(jest.fn());
+  try {
+    await expect(sendPayRefund('r1', option, PAYER, OWNER)).resolves.toEqual({ id: 'r1', status: 'submitted' });
+    expect(mockPrepare).toHaveBeenCalledWith('USDT', PAYER, '12.5', 56, { tokenAddress: USDT_BSC, decimals: 18, fromAddress: OWNER });
+    expect(mockNative).toHaveBeenCalledWith('bsc', OWNER, 'mainnet');
+    expect(mockSign).toHaveBeenCalledWith(expect.objectContaining({ to: USDT_BSC, nonce: 7, chainId: 56, type: 0 }), OWNER);
+    expect(mockSubmit).toHaveBeenCalledWith('r1', { chainId: 56, tokenSymbol: 'USDT', signedTx: '0xsigned' });
+    expect(mockWalletSubmit).not.toHaveBeenCalled();
+    // Nothing in the refund path reaches the network on its own — least of all /wallet/submit-tx.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  } finally {
+    fetchSpy.mockRestore();
+  }
 });
 
 // Review Focus 1.

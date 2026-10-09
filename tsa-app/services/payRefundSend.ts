@@ -11,7 +11,8 @@ import { formatNativeAmount, hasGasShortfall, preparedFeeNative } from '@/utils/
 import { refundOptionChain, sameAddress, unprovenWalletMessage, wrongWalletMessage } from '@/utils/payRefunds';
 import { assertPreparedTransfer } from './paycrestDeposit';
 import { submitPayRefund, type PayRefund, type PayRefundOption } from './payMerchantApi';
-import { getSignableWallet, nativeBalance, signTransaction } from './wallet';
+import { signPreparedTransaction } from './signPreparedTransaction';
+import { getSignableWallet, nativeBalance } from './wallet';
 import { prepareSendTransaction } from './walletApi';
 
 /** The device's wallet is not the one the server says sends this refund (or holds no key). */
@@ -63,18 +64,6 @@ export async function sendPayRefund(refundId: string, option: PayRefundOption, t
     );
   }
 
-  const signedTx = await signTransaction(
-    {
-      type: 0, // legacy transaction format, as everywhere else in the app
-      to: tx.to,
-      data: tx.data,
-      value: tx.value,
-      gasLimit: tx.gasLimit,
-      gasPrice: tx.gasPrice,
-      nonce: tx.nonce,
-      chainId: tx.chainId,
-    },
-    fromAddress,
-  );
+  const signedTx = await signPreparedTransaction(tx, fromAddress);
   return submitPayRefund(refundId, { chainId: option.chainId, tokenSymbol: option.tokenSymbol, signedTx });
 }
