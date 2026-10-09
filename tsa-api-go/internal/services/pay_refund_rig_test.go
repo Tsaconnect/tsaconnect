@@ -40,9 +40,11 @@ type fakeRefundNetwork struct {
 	mu           sync.Mutex
 	sent         []*types.Transaction
 	broadcastErr error
-	nonce        uint64
-	nonceErr     error
-	decimalsErr  error
+	// sentCtxErrs is ctx.Err() as each broadcast saw it.
+	sentCtxErrs []error
+	nonce       uint64
+	nonceErr    error
+	decimalsErr error
 	// onBroadcast and onTokenDecimals, when set, run inside those calls.
 	onBroadcast     func()
 	onTokenDecimals func()
@@ -79,13 +81,14 @@ func (f *fakeRefundNetwork) TokenDecimals(_ string, token string) (int, error) {
 	}
 	return d, nil
 }
-func (f *fakeRefundNetwork) Broadcast(_ context.Context, _ string, tx *types.Transaction) error {
+func (f *fakeRefundNetwork) Broadcast(ctx context.Context, _ string, tx *types.Transaction) error {
 	if f.onBroadcast != nil {
 		f.onBroadcast()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, tx)
+	f.sentCtxErrs = append(f.sentCtxErrs, ctx.Err())
 	return f.broadcastErr
 }
 func (f *fakeRefundNetwork) ConfirmedNonce(context.Context, string, common.Address, uint64) (uint64, error) {

@@ -119,6 +119,8 @@ func (s *PayRefundService) options(ctx context.Context, p *models.PayPayment, r 
 	depositSymbol := ""
 	if src, err := s.source(ctx, p); err == nil {
 		depositChainID, depositSymbol = src.depositChainID, src.depositSymbol
+	} else {
+		log.Printf("[tsa-pay] refund %s: source of payment %s: %s", r.ID, p.ID, RedactAlertText(err.Error()))
 	}
 	for _, id := range s.network.MainnetChainIDs() {
 		chain, ok := s.network.MainnetChainNameForID(id)
@@ -155,6 +157,11 @@ func (s *PayRefundService) options(ctx context.Context, p *models.PayPayment, r 
 	}
 	return out
 }
+
+// payRefundNonceAhead is how far past the wallet's next nonce a refund
+// transfer's own may be: room for a few of the owner's transactions still
+// pending, never an unfillable gap.
+const payRefundNonceAhead = 16
 
 // PayRefundSubmit is the owner's app handing over the refund transfer it
 // signed — not yet broadcast.
@@ -241,7 +248,13 @@ func isPayRefundTxHashViolation(err error) bool {
 // clears it. The refund stays submitted either way; the confirmer sends it
 // again. The raw error is only logged, redacted: an RPC error can carry the
 // provider's URL and key.
+//
+// The send and its record outlive ctx: once the transfer may be in a mempool,
+// an owner's app hanging up must not leave the row silent about it. The
+// record only ever writes a submitted refund — one the confirmer settled in
+// the meantime keeps its record clean.
 func (s *PayRefundService) broadcast(ctx context.Context, chain string, r *models.PayRefund, tx *types.Transaction) {
+	ctx = context.WithoutCancel(ctx)
 	err := s.network.Broadcast(ctx, chain, tx)
 	if err != nil && alreadyKnownTx(err) {
 		err = nil // the node has it already: that is a send that went through
@@ -249,23 +262,58 @@ func (s *PayRefundService) broadcast(ctx context.Context, chain string, r *model
 	reason := ""
 	if err != nil {
 		reason = payRefundBroadcastReason(err)
+		if strings.Contains(strings.ToLower(err.Error()), "nonce too low") {
+			reason = s.nonceTooLowReason(ctx, chain, r, tx)
+		}
 		log.Printf("[tsa-pay] refund %s: broadcast on %s refused (%s), the confirmer sends it again: %s",
 			r.ID, chain, reason, RedactAlertText(err.Error()))
 	}
 	at := s.now()
-	if uerr := s.db.WithContext(ctx).Model(&models.PayRefund{}).Where("id = ?", r.ID).
-		UpdateColumns(map[string]any{"last_broadcast_error": reason, "last_broadcast_at": &at}).Error; uerr != nil {
-		log.Printf("[tsa-pay] refund %s: record broadcast: %s", r.ID, RedactAlertText(uerr.Error()))
+	res := s.db.WithContext(ctx).Model(&models.PayRefund{}).Where("id = ? AND status = ?", r.ID, models.PayRefundSubmitted).
+		UpdateColumns(map[string]any{"last_broadcast_error": reason, "last_broadcast_at": &at})
+	if res.Error != nil {
+		log.Printf("[tsa-pay] refund %s: record broadcast: %s", r.ID, RedactAlertText(res.Error.Error()))
 		return
 	}
-	r.LastBroadcastError, r.LastBroadcastAt = reason, &at
+	if res.RowsAffected == 1 {
+		r.LastBroadcastError, r.LastBroadcastAt = reason, &at
+	}
+}
+
+// nonceTooLowReason words a "nonce too low" answer to sending tx again. Most
+// often tx itself is what used the nonce — it is mined, so the send went
+// through (""). Only when the chain definitely doesn't know tx did another
+// transaction take its place; a chain that can't be asked is not told so.
+func (s *PayRefundService) nonceTooLowReason(ctx context.Context, chain string, r *models.PayRefund, tx *types.Transaction) string {
+	if s.verifier == nil {
+		return payRefundBroadcastUntaken
+	}
+	known, _, err := s.verifier.TransactionKnown(ctx, chain, tx.Hash().Hex())
+	switch {
+	case err != nil:
+		log.Printf("[tsa-pay] refund %s: read %s on %s: %s", r.ID, tx.Hash().Hex(), chain, RedactAlertText(err.Error()))
+		return payRefundBroadcastUntaken
+	case known:
+		return ""
+	}
+	return payRefundBroadcastNonceUsed
 }
 
 // alreadyKnownTx reports a node answering that it already has the
-// transaction: geth says "already known", nethermind "AlreadyKnown".
+// transaction: geth says "already known" (older releases "known
+// transaction"), nethermind "AlreadyKnown".
 func alreadyKnownTx(err error) bool {
-	return strings.Contains(strings.ToLower(strings.ReplaceAll(err.Error(), " ", "")), "alreadyknown")
+	msg := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
+	return strings.Contains(msg, "alreadyknown") ||
+		(strings.Contains(msg, "knowntransaction") && !strings.Contains(msg, "unknowntransaction"))
 }
+
+// The owner-safe broadcast reasons payRefundBroadcastReason does not build
+// from a match alone.
+const (
+	payRefundBroadcastUntaken   = "The network didn't take it"
+	payRefundBroadcastNonceUsed = "Another transaction from your wallet already used its place"
+)
 
 // payRefundBroadcastReason is a refused broadcast in words the owner can act
 // on. The node's own text never reaches them.
@@ -277,9 +325,9 @@ func payRefundBroadcastReason(err error) string {
 	case strings.Contains(msg, "underpriced"), strings.Contains(msg, "fee too low"), strings.Contains(msg, "less than block base fee"):
 		return "The network fee was too low"
 	case strings.Contains(msg, "nonce too low"):
-		return "Another transaction from your wallet already used its place"
+		return payRefundBroadcastNonceUsed
 	}
-	return "The network didn't take it"
+	return payRefundBroadcastUntaken
 }
 
 // checkSignedRefund decodes in.SignedTx and holds it to r, sent from the
@@ -344,6 +392,9 @@ func (s *PayRefundService) checkSignedRefund(ctx context.Context, r *models.PayR
 	}
 	if next > tx.Nonce() {
 		return nil, ErrPayRefundNonceUsed
+	}
+	if tx.Nonce()-next > payRefundNonceAhead {
+		return nil, ErrPayRefundNonceFar
 	}
 	return &payRefundSigned{tx: tx, chain: chain, symbol: symbol, tokenAddress: tokenAddr}, nil
 }

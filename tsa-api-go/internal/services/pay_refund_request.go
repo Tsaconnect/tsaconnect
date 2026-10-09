@@ -38,6 +38,8 @@ func PayRefundRefusal(err error) string {
 		return "Refunds aren't available right now — try again later"
 	case errors.Is(err, ErrPayRefundNonceUsed):
 		return "Your wallet has already sent a transaction in this one's place — sign the refund again"
+	case errors.Is(err, ErrPayRefundNonceFar):
+		return "Your wallet can't send this transaction until earlier ones go through — sign the refund again"
 	}
 	return ""
 }

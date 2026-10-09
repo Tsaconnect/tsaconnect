@@ -59,6 +59,10 @@ var (
 	// ErrPayRefundNonceUsed: the signed transfer's nonce is already used on
 	// its chain, so it can never be mined — the owner signs again (409).
 	ErrPayRefundNonceUsed = errors.New("pay refund: the transaction's nonce is already used")
+	// ErrPayRefundNonceFar: the signed transfer's nonce is so far past the
+	// wallet's next one that it would wait unmined behind transactions that
+	// don't exist — the owner signs again (409).
+	ErrPayRefundNonceFar = errors.New("pay refund: the transaction's nonce is too far ahead of the wallet's")
 )
 
 // PayRefundOverCapError: the amount asked for is more than is left to refund.

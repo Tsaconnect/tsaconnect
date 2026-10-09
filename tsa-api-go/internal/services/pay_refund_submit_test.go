@@ -561,3 +561,136 @@ func TestPayRefundSubmit_ATestRowIsNeverSentEvenWhenRequested(t *testing.T) {
 	}
 	r.assertNothingSent(t, ref)
 }
+
+// A nonce far past the wallet's next one leaves a gap that only other
+// transactions can fill: it would sit unmined. Refused before anything is
+// written, in words the owner can act on.
+func TestPayRefundSubmit_RefusesANonceFarAheadOfTheWallet(t *testing.T) {
+	r := newRefundRig(t)
+	ref := r.requested(t, "SUB-20", "1")
+	r.net.nonce = 3
+	spec := r.exactRefundTx(ref)
+	spec.nonce = 3 + payRefundNonceAhead + 1
+	raw, _ := signRefundTx(t, spec)
+	if _, err := r.s.Submit(context.Background(), r.m, ref.ID, r.ownerWallet, PayRefundSubmit{ChainID: 56, TokenSymbol: "USDT", SignedTx: raw}); !errors.Is(err, ErrPayRefundNonceFar) {
+		t.Fatalf("%v", err)
+	}
+	r.assertNothingSent(t, ref)
+	if PayRefundRefusal(ErrPayRefundNonceFar) == "" {
+		t.Fatal("the far-nonce refusal has no owner-facing words")
+	}
+	spec.nonce = 3 + payRefundNonceAhead // the furthest still taken
+	raw, _ = signRefundTx(t, spec)
+	if got, err := r.s.Submit(context.Background(), r.m, ref.ID, r.ownerWallet, PayRefundSubmit{ChainID: 56, TokenSymbol: "USDT", SignedTx: raw}); err != nil || got.Status != models.PayRefundSubmitted {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+// The owner's app may hang up mid-broadcast: the send and its record still
+// finish, so the row says how the send went.
+func TestPayRefundBroadcast_OutlivesACancelledRequest(t *testing.T) {
+	r := newRefundRig(t)
+	ref := r.requested(t, "SUB-21", "1")
+	raw, tx := signRefundTx(t, r.exactRefundTx(ref))
+	got, err := r.s.Submit(context.Background(), r.m, ref.ID, r.ownerWallet, PayRefundSubmit{ChainID: 56, TokenSymbol: "USDT", SignedTx: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.net.broadcastErr = errors.New("insufficient funds for gas * price + value")
+	r.s.broadcast(ctx, "bsc", got, tx)
+	if errs := r.net.sentCtxErrs; errs[len(errs)-1] != nil {
+		t.Fatalf("the broadcast ran on a cancelled context: %v", errs[len(errs)-1])
+	}
+	again, _ := r.s.Get(context.Background(), r.m.ID, ref.ID)
+	if again.LastBroadcastError != "Not enough gas in your wallet" {
+		t.Fatalf("the send was not recorded: %+v", again)
+	}
+}
+
+// A refund that settled while it was being sent again keeps its record clean:
+// the broadcast record only ever writes a submitted row.
+func TestPayRefundBroadcast_RecordsOnlyOnASubmittedRefund(t *testing.T) {
+	r := newRefundRig(t)
+	ref := r.requested(t, "SUB-22", "1")
+	raw, tx := signRefundTx(t, r.exactRefundTx(ref))
+	got, err := r.s.Submit(context.Background(), r.m, ref.ID, r.ownerWallet, PayRefundSubmit{ChainID: 56, TokenSymbol: "USDT", SignedTx: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.net.broadcastErr = errors.New("insufficient funds for gas * price + value")
+	r.net.onBroadcast = func() {
+		r.db.Model(&models.PayRefund{}).Where("id = ?", ref.ID).Update("status", models.PayRefundConfirmed)
+	}
+	r.s.broadcast(context.Background(), "bsc", got, tx)
+	again, _ := r.s.Get(context.Background(), r.m.ID, ref.ID)
+	if again.LastBroadcastError != "" {
+		t.Fatalf("a confirmed refund was given a broadcast error: %+v", again)
+	}
+}
+
+// "nonce too low" for our own transaction usually means it is already mined:
+// a send the chain knows is a send that went through, never "another
+// transaction used its place".
+func TestPayRefundBroadcast_NonceTooLowForOurOwnMinedTransactionIsASend(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		known bool
+		err   error
+		want  string
+	}{
+		{"ours is known", true, nil, ""},
+		{"ours is unknown", false, nil, "Another transaction from your wallet already used its place"},
+		{"unreadable", false, errors.New("dial tcp: i/o timeout"), "The network didn't take it"},
+	} {
+		r := newRefundRig(t)
+		ref := r.requested(t, "SUB-23", "1")
+		raw, tx := signRefundTx(t, r.exactRefundTx(ref))
+		got, err := r.s.Submit(context.Background(), r.m, ref.ID, r.ownerWallet, PayRefundSubmit{ChainID: 56, TokenSymbol: "USDT", SignedTx: raw})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.net.broadcastErr = errors.New("nonce too low: next nonce 1, tx nonce 0")
+		r.ver.set(nil, errors.New("verify: not found"), tc.known)
+		r.ver.knownErr = tc.err
+		r.s.broadcast(context.Background(), "bsc", got, tx)
+		again, _ := r.s.Get(context.Background(), r.m.ID, ref.ID)
+		if again.LastBroadcastError != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, again.LastBroadcastError, tc.want)
+		}
+	}
+}
+
+func TestPayRefundBroadcast_KnownTransactionIsASend(t *testing.T) {
+	for _, msg := range []string{"already known", "AlreadyKnown", "known transaction: 0xabc", "rpc: Known transaction: 0xabc"} {
+		if !alreadyKnownTx(errors.New(msg)) {
+			t.Errorf("%q is not read as already known", msg)
+		}
+	}
+	for _, msg := range []string{"unknown account", "unknown transaction", "nonce too low"} {
+		if alreadyKnownTx(errors.New(msg)) {
+			t.Errorf("%q read as already known", msg)
+		}
+	}
+}
+
+// Why a refund's sizing could not be read is logged (redacted), not dropped.
+func TestPayRefundDetail_AnUnreadableSourceIsLogged(t *testing.T) {
+	r := newRefundRig(t)
+	ref := r.requested(t, "DET-8", "1")
+	if err := r.db.Where("pay_payment_id = ?", ref.PaymentID).Delete(&models.PaycrestOrderRecord{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.Model(&models.PayPayment{}).Where("id = ?", ref.PaymentID).Update("paycrest_order_id", nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	logged := captureLog(t)
+	d, err := r.s.Detail(context.Background(), r.m, ref.ID)
+	if err != nil || len(d.Options) == 0 || !d.Options[0].IsDefault {
+		t.Fatalf("%+v %v", d, err)
+	}
+	if !strings.Contains(logged.String(), ref.ID.String()) || !strings.Contains(logged.String(), "source") {
+		t.Fatalf("log %q", logged.String())
+	}
+}
