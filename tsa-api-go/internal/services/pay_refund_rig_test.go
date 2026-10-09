@@ -42,6 +42,8 @@ type fakeRefundNetwork struct {
 	broadcastErr error
 	// sentCtxErrs is ctx.Err() as each broadcast saw it.
 	sentCtxErrs []error
+	// nonceDepths is the depth each ConfirmedNonce read asked for.
+	nonceDepths []uint64
 	nonce       uint64
 	nonceErr    error
 	decimalsErr error
@@ -91,7 +93,10 @@ func (f *fakeRefundNetwork) Broadcast(ctx context.Context, _ string, tx *types.T
 	f.sentCtxErrs = append(f.sentCtxErrs, ctx.Err())
 	return f.broadcastErr
 }
-func (f *fakeRefundNetwork) ConfirmedNonce(context.Context, string, common.Address, uint64) (uint64, error) {
+func (f *fakeRefundNetwork) ConfirmedNonce(_ context.Context, _ string, _ common.Address, depth uint64) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nonceDepths = append(f.nonceDepths, depth)
 	return f.nonce, f.nonceErr
 }
 func (f *fakeRefundNetwork) broadcasts() []*types.Transaction {
@@ -103,7 +108,9 @@ func (f *fakeRefundNetwork) broadcasts() []*types.Transaction {
 // fakeRefundVerifier answers every proof with one reading. knownAnswers, when
 // set, answers TransactionKnown in turn before falling back to known.
 type fakeRefundVerifier struct {
-	mu           sync.Mutex
+	mu sync.Mutex
+	// verified is each Verify call's (chain, txHash, token, from, to).
+	verified     [][5]string
 	payment      *StablePayment
 	err          error
 	known        bool
@@ -116,9 +123,10 @@ func (f *fakeRefundVerifier) set(p *StablePayment, err error, known bool) {
 	defer f.mu.Unlock()
 	f.payment, f.err, f.known = p, err, known
 }
-func (f *fakeRefundVerifier) Verify(context.Context, string, string, string, string, string) (*StablePayment, error) {
+func (f *fakeRefundVerifier) Verify(_ context.Context, chain, txHash, token, from, to string) (*StablePayment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.verified = append(f.verified, [5]string{chain, txHash, token, from, to})
 	return f.payment, f.err
 }
 func (f *fakeRefundVerifier) TransactionKnown(context.Context, string, string) (bool, string, error) {

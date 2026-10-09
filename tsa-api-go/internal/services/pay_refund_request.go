@@ -353,8 +353,12 @@ func (s *PayRefundService) announce(ctx context.Context, r *models.PayRefund, ki
 			publish(kind, m.UserID, "Refund needs review", "The refund to "+who+" credited less than "+amount+" "+token+" — support is reviewing it")
 			return
 		}
-		// Replaced (review I4): another transaction from the owner's wallet took
-		// its place; whether that one paid the customer is for support to check.
-		publish(kind, m.UserID, "Refund needs review", "The refund to "+who+" was replaced by another transaction from your wallet — support is checking whether it paid")
+		if r.FailureReason == payRefundReplacedReason {
+			// Replaced (review I4): another transaction from the owner's wallet took
+			// its place; whether that one paid the customer is for support to check.
+			publish(kind, m.UserID, "Refund needs review", "The refund to "+who+" was replaced by another transaction from your wallet — support is checking whether it paid")
+			return
+		}
+		publish(kind, m.UserID, "Refund needs review", "The network showed something unexpected for the refund to "+who+" — support is checking it")
 	}
 }

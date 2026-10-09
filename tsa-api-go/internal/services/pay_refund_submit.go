@@ -232,6 +232,13 @@ func (s *PayRefundService) Submit(ctx context.Context, m *models.PayMerchant, id
 		return nil, ErrPayRefundState
 	}
 	s.broadcast(ctx, signed.chain, r, signed.tx)
+	// D24: the submit also tries the confirmation once; the confirmer does the rest.
+	if r, err = s.Get(ctx, m.ID, id); err != nil {
+		return nil, err
+	}
+	if err := s.check(ctx, r, []string{models.PayRefundSubmitted}); err != nil {
+		log.Printf("[tsa-pay] refund %s: first check: %s", r.ID, RedactAlertText(err.Error()))
+	}
 	return s.Get(ctx, m.ID, id)
 }
 
