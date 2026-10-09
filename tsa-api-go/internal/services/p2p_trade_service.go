@@ -2383,6 +2383,32 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 
 // PrepareRaiseDispute prepares an on-chain raiseDispute tx and persists a dispute
 // row tied to the trade. The trade itself isn't transitioned until
+// disputePrepareStaleAfter is how long an unconfirmed dispute row is protected
+// from replacement by the counter-party.
+const disputePrepareStaleAfter = 10 * time.Minute
+
+// requireDisputeRaiserMatches checks the on-chain TradeDisputed `by` address is
+// the wallet of the party the dispute row names, so a dispute row replaced by
+// the other party cannot be confirmed with the first party's transaction. When
+// the row or the party's wallet is unknown there is nothing to compare against.
+func (s *P2PTradeService) requireDisputeRaiserMatches(ctx context.Context, tradeID uuid.UUID, ev *P2PTradeDisputedEvent) error {
+	if ev == nil {
+		return nil
+	}
+	var row models.P2PDispute
+	if err := s.db.WithContext(ctx).Where("trade_id = ?", tradeID).First(&row).Error; err != nil {
+		return nil
+	}
+	var u models.User
+	if err := s.db.WithContext(ctx).Select("wallet_address").First(&u, "id = ?", row.RaisedBy).Error; err != nil || u.WalletAddress == "" {
+		return nil
+	}
+	if common.HexToAddress(u.WalletAddress) != ev.By {
+		return fmt.Errorf("%w: dispute transaction was not sent by the party that raised it", ErrForbidden)
+	}
+	return nil
+}
+
 // ConfirmRaiseDispute verifies the receipt — the dispute row sits in `open`
 // state in the interim so the UI can surface "dispute pending broadcast".
 // Either buyer or seller (in Paid state only) may dispute.
@@ -2453,6 +2479,11 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		First(&existing).Error
 	switch {
 	case err == nil:
+		// A live prepare by one party must not be clobbered by the other: the
+		// counter-party may only replace a row that has gone stale.
+		if existing.RaisedBy != userID && s.clock.Now().Sub(existing.CreatedAt) <= disputePrepareStaleAfter {
+			return nil, ErrDisputeAlreadyOpen
+		}
 		onchain, rerr := escrow.ReadTrade(HashID(trade.ID))
 		if rerr != nil {
 			return nil, fmt.Errorf("%w: %v", ErrChainUnavailable, rerr)
@@ -2473,10 +2504,12 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		Reason:       reason,
 		EvidenceURLs: evidenceJSON,
 		Status:       models.P2PDisputeStatusOpen,
+		CreatedAt:    s.clock.Now(),
 	}
 	if replace != nil {
 		res := s.db.WithContext(ctx).Model(&models.P2PDispute{}).
-			Where("id = ? AND status = ?", replace.ID, models.P2PDisputeStatusOpen).
+			Where("id = ? AND status = ? AND raised_by = ? AND created_at = ?",
+				replace.ID, models.P2PDisputeStatusOpen, replace.RaisedBy, replace.CreatedAt).
 			Updates(map[string]any{
 				"raised_by":     userID,
 				"raised_role":   role,
@@ -2509,6 +2542,8 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	auditMeta := map[string]any{"role": role, "reason": reason}
 	if replace != nil {
 		auditMeta["replacedRaisedBy"] = replace.RaisedBy
+		auditMeta["replacedReason"] = replace.Reason
+		auditMeta["replacedEvidenceUrls"] = replace.Evidence
 	}
 	s.audit(ctx, models.P2PAuditTradeDisputed, &userID, &trade.AdID, &trade.ID, auditMeta)
 	// Notify only the raiser at prepare time. The counter-party notice and the
@@ -2546,8 +2581,12 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 	if err != nil {
 		return nil, err
 	}
-	if _, err := escrow.VerifyTradeDisputed(txHash, HashID(trade.ID)); err != nil {
+	ev, err := escrow.VerifyTradeDisputed(txHash, HashID(trade.ID))
+	if err != nil {
 		return nil, fmt.Errorf("verify on-chain dispute: %w", err)
+	}
+	if err := s.requireDisputeRaiserMatches(ctx, trade.ID, ev); err != nil {
+		return nil, err
 	}
 
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
