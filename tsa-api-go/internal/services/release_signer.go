@@ -28,8 +28,8 @@ type ReleaseSigner interface {
 	SignAndBroadcast(ctx context.Context, unsignedTx []byte) (txHash string, err error)
 }
 
-// txBroadcaster is the slice of *blockchain.EVMClient the signer needs.
-type txBroadcaster interface {
+// ReleaseBroadcaster is the slice of *blockchain.EVMClient a signer needs.
+type ReleaseBroadcaster interface {
 	SendRawTransaction(signedTx []byte) (string, error)
 	ChainID() *big.Int
 }
@@ -37,10 +37,10 @@ type txBroadcaster interface {
 // LocalKeyReleaseSigner holds the admin key in process. Dev/staging only.
 type LocalKeyReleaseSigner struct {
 	key *ecdsa.PrivateKey
-	bc  txBroadcaster
+	bc  ReleaseBroadcaster
 }
 
-func NewLocalKeyReleaseSigner(key *ecdsa.PrivateKey, bc txBroadcaster) *LocalKeyReleaseSigner {
+func NewLocalKeyReleaseSigner(key *ecdsa.PrivateKey, bc ReleaseBroadcaster) *LocalKeyReleaseSigner {
 	return &LocalKeyReleaseSigner{key: key, bc: bc}
 }
 
@@ -121,4 +121,12 @@ func (f *fakeReleaseSigner) SignAndBroadcast(_ context.Context, tx []byte) (stri
 		return "", f.err
 	}
 	return f.hash, nil
+}
+
+func (f *fakeReleaseSigner) Send(ctx context.Context, _ int64, build func() ([]byte, error)) (string, error) {
+	unsigned, err := build()
+	if err != nil {
+		return "", notBroadcast(err)
+	}
+	return f.SignAndBroadcast(ctx, unsigned)
 }

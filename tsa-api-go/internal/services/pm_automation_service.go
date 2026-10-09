@@ -115,7 +115,7 @@ type PMAutomationService struct {
 	db         *gorm.DB
 	pm         *PMService
 	trades     *P2PTradeService
-	signer     ReleaseSigner
+	signer     ChainSender
 	name       PMNameLookup
 	gateway    NombaGateway
 	senderName string
@@ -144,7 +144,7 @@ func (s *PMAutomationService) SetSettlementForwarder(f *P2PSettlementForwarder) 
 // NewPMAutomationService wires the PM buy-flow + sell-flow automation. gateway
 // is the per-PM Nomba boundary used by the sell flow to pay the user's bank.
 // senderName is the display name stamped on outgoing (sell-flow) transfers.
-func NewPMAutomationService(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ReleaseSigner, name PMNameLookup, gateway NombaGateway, senderName string) *PMAutomationService {
+func NewPMAutomationService(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ChainSender, name PMNameLookup, gateway NombaGateway, senderName string) *PMAutomationService {
 	return &PMAutomationService{db: db, pm: pm, trades: trades, signer: signer, name: name, gateway: gateway, senderName: senderName}
 }
 

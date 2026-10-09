@@ -274,13 +274,12 @@ Blockchain (wallet feature):
 - `BSC_USDT_TOKEN_ADDRESS` - USDT token contract (BSC)
 - `BSC_USDC_TOKEN_ADDRESS` - USDC token contract (BSC)
 
-P2P trading (Sonic + BSC multi-chain):
+P2P trading (Sonic) and the TSA Liquidity pool chain (BSC):
 - `SONIC_NETWORK` - `"mainnet"` | `"testnet"` (default `mainnet`) — selects the Sonic P2P preset
 - `P2P_ESCROW_ADDRESS` - Sonic P2PEscrowV2 proxy; overrides the preset (hot-fix escape hatch)
 - `P2P_ESCROW_EIP712_VERSION` - EIP-712 domain version matching the deployed Sonic contract (default from preset)
-- `BSC_NETWORK` - `"mainnet"` | `"testnet"` (default `testnet`) — selects the BSC P2P preset
-- `P2P_ESCROW_ADDRESS_BSC` - BSC P2PEscrowV2 proxy; **UNSET = BSC P2P dormant** (not added to `Config.P2PChains`)
-- `P2P_ESCROW_EIP712_VERSION_BSC` - EIP-712 domain version for BSC contract (default `"2"`)
+- `BSC_NETWORK` — `"mainnet"` | `"testnet"` (**default `mainnet`**). It selects the BSC preset row, which is the **TSA Liquidity pool** (`internal/config/p2p_presets.go`). An empty row means the pool is dormant.
+- `P2P_ESCROW_ADDRESS_BSC` / `P2P_ESCROW_EIP712_VERSION_BSC` — **retired**: boot refuses to start if either is set.
 
 P2P trade-milestone emails (opened/paid/released/cancelled/disputed/resolved/expired) are sent to both parties via `notification_service.go` (role-aware, respect `mute_email`); per-message chat does not email. No CTA link — the app is mobile-only with no universal-link setup, so the email tells the user to open the app.
 

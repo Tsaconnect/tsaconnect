@@ -92,18 +92,38 @@ func (s *ITService) convertedTreasuryFor(chain string, q *StableBuyQuote, v Payc
 		return "", fmt.Errorf("%w: a %d bps conversion budget is over the cap for %s",
 			ErrConversionUnavailable, v.MarkupBps, v.RequestedChain)
 	}
-	// T must be what this D owes at the venue's budget, and something: a
-	// budget outside [0, 100%) would open a buy that owes her nothing or more
-	// than was bought.
-	if v.Kind != models.RouteKindConverted || !strings.EqualFold(v.ChainKey, chain) || !strings.EqualFold(v.Token, q.Asset) ||
-		v.MarkupBps < 0 || v.MarkupBps >= 10_000 || ConversionOwed(q.AssetUnits, v.MarkupBps).Sign() <= 0 ||
-		v.TokenAmountBaseUnits != ConversionOwed(q.AssetUnits, v.MarkupBps).String() {
+	// T must be what this D owes at the venue's budget, in the leg's own
+	// units (S23), and something: a budget outside [0, 100%) would open a buy
+	// that owes her nothing or more than was bought.
+	legUnits, err := CanonicalToChainUnits(q.AssetUnits, venueLegDecimals(v))
+	if err != nil || v.Kind != models.RouteKindConverted || !strings.EqualFold(v.ChainKey, chain) || !strings.EqualFold(v.Token, q.Asset) ||
+		v.MarkupBps < 0 || v.MarkupBps >= 10_000 || ConversionOwed(legUnits, v.MarkupBps).Sign() <= 0 ||
+		v.TokenAmountBaseUnits != ConversionOwed(legUnits, v.MarkupBps).String() {
 		return "", fmt.Errorf("%w: the converted venue was not priced on this settlement leg", ErrConversionUnavailable)
 	}
 	if err := c.Treasury.CheckCaps(chain, StableFromBaseUnits(q.AssetUnits), 0); err != nil {
 		return "", fmt.Errorf("%w: %s", ErrConversionUnavailable, RedactAlertText(err.Error()))
 	}
 	return c.TreasuryAddress, nil
+}
+
+// venueLegDecimals is the decimals a converted venue's T is in: 6 unless the
+// pricer said otherwise.
+func venueLegDecimals(v PaycrestVenue) int {
+	if v.LegDecimals == 0 {
+		return StableAssetDecimals
+	}
+	return v.LegDecimals
+}
+
+// recordLegDecimals is what a conversion record stores for its leg: nil for
+// 6 dp, so a 6-dp record is written exactly as before the pool (nil reads as
+// 6, conversionLegDecimals).
+func recordLegDecimals(v PaycrestVenue) *int {
+	if d := venueLegDecimals(v); d != StableAssetDecimals {
+		return &d
+	}
+	return nil
 }
 
 // feeCaps is the wired cap, or the pricer's default when none is wired.
@@ -140,6 +160,7 @@ func newConversionRecord(intent *models.ITIntent, in ConvertedOpen, holder strin
 		DestinationAddress:     firstNonEmpty(v.RequestedDestination, in.WalletAddress),
 		MarkupBps:              v.MarkupBps,
 		QuotedAmount:           v.TokenAmountBaseUnits, // T, checked against this D by convertedTreasuryFor
+		LegDecimals:            recordLegDecimals(v),   // the units QuotedAmount is in
 		EstimatedAmount:        v.EstimatedAmount,
 		PromisedAmount:         v.PromisedAmount,
 		Holder:                 holder,
@@ -265,9 +286,13 @@ func (s *ITService) handoffConversion(ctx context.Context, tx *gorm.DB, intent *
 			delivered = opened
 		}
 	}
+	updates, err := handoffUpdates(rec, delivered, txHash)
+	if err != nil {
+		return err
+	}
 	res := tx.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
 		Where("id = ? AND status IN ?", rec.ID, []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending}).
-		Updates(handoffUpdates(rec, delivered, txHash))
+		Updates(updates)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -282,14 +307,28 @@ func (s *ITService) handoffConversion(ctx context.Context, tx *gorm.DB, intent *
 	return fmt.Errorf("%w: conversion record %s is %s", ErrITBadState, rec.ID, rec.Status)
 }
 
+// conversionLegDecimals is the record's leg-token decimals: 6 unless the opener
+// recorded otherwise (spec S23). Read from the record, never the wiring (N1).
+func conversionLegDecimals(rec *models.PaycrestOrderRecord) int {
+	if rec != nil && rec.LegDecimals != nil {
+		return *rec.LegDecimals
+	}
+	return StableAssetDecimals
+}
+
 // handoffUpdates turn a record into `converting` on txHash, restated from what
-// was delivered: D can be smaller than opened (live pricing), never larger (N4).
-func handoffUpdates(rec *models.PaycrestOrderRecord, delivered *big.Int, txHash string) map[string]any {
+// was delivered (canonical units): D can be smaller than opened (live
+// pricing), never larger (N4). quoted_amount is in the leg's own base units.
+func handoffUpdates(rec *models.PaycrestOrderRecord, delivered *big.Int, txHash string) (map[string]any, error) {
+	legUnits, err := CanonicalToChainUnits(delivered, conversionLegDecimals(rec))
+	if err != nil {
+		return nil, fmt.Errorf("it converted buy: record %s: %w", rec.ID, err)
+	}
 	return map[string]any{
 		"status": models.PaycrestStatusConverting, "tx_hash": txHash, "failure_reason": "",
 		"token_amount":  FormatStableUnits(delivered.String()),
-		"quoted_amount": ConversionOwed(delivered, rec.MarkupBps).String(),
-	}
+		"quoted_amount": ConversionOwed(legUnits, rec.MarkupBps).String(),
+	}, nil
 }
 
 // convertedCeiling (N4): a converted buy never delivers more than it was
@@ -582,7 +621,10 @@ func (s *ITService) AttachConversionHash(ctx context.Context, adminID, intentID 
 	if others > 0 {
 		return nil, fmt.Errorf("%w: another order already holds that hash", ErrITBadState)
 	}
-	updates := handoffUpdates(rec, delivered, hash)
+	updates, err := handoffUpdates(rec, delivered, hash)
+	if err != nil {
+		return nil, err
+	}
 	updates["fault"] = ""
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.PaycrestOrderRecord{}).

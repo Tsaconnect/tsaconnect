@@ -77,9 +77,11 @@ type quoteServiceRig struct {
 // fixtures below are unaffected; TestQuote_RefusesAVenueOnAChainWithNoTreasuryLane
 // builds its own checker that excludes one on purpose.
 type fakeTreasuryLaneChecker struct {
-	laned    map[string]bool
-	unfunded map[string]bool // lanes that cannot pay for gas
-	asked    []gasAsk
+	laned       map[string]bool
+	unfunded    map[string]bool // lanes that cannot pay for gas
+	asked       []gasAsk
+	decimals    map[string]int // "chain|TOKEN"; default 6
+	decimalsErr error
 }
 
 type gasAsk struct {
@@ -90,6 +92,16 @@ type gasAsk struct {
 func (f *fakeTreasuryLaneChecker) CanPayForGas(_ context.Context, chainKey string, units uint64) bool {
 	f.asked = append(f.asked, gasAsk{chainKey, units})
 	return f.laned[strings.ToLower(chainKey)] && !f.unfunded[strings.ToLower(chainKey)]
+}
+
+func (f *fakeTreasuryLaneChecker) TokenDecimals(chainKey, token string) (int, error) {
+	if f.decimalsErr != nil {
+		return 0, f.decimalsErr
+	}
+	if d, ok := f.decimals[strings.ToLower(chainKey)+"|"+strings.ToUpper(token)]; ok {
+		return d, nil
+	}
+	return 6, nil
 }
 
 func (f *fakeTreasuryLaneChecker) Lane(chainKey string) *TreasuryLane {

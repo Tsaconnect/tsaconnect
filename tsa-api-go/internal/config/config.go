@@ -29,6 +29,15 @@ type chainPreset struct {
 	// that disagrees with the on-chain contract makes ecrecover resolve to a
 	// wrong address and rejects every sell-ad signature.
 	eip712Version string
+	// purpose: P2PPurposeP2P (default when empty) or P2PPurposePool (TSA
+	// Liquidity, spec 2026-10-08 S36). assets are the tradeable symbols of an
+	// ordinary row; a pool row trades its pool.tokens.
+	purpose string
+	assets  []string
+	pool    *poolPreset
+	// Legacy env aliases (Sonic only): an operator hot-fix override of the
+	// escrow, its EIP-712 version and the chain id, kept exactly as before.
+	escrowEnv, versionEnv, chainIDEnv string
 }
 
 // sonicPresets holds the canonical Sonic P2P deployment for each network.
@@ -49,6 +58,15 @@ var sonicPresets = map[string]chainPreset{
 		// voucher domain version stays "2" despite the V3 contract name.
 		p2pEscrow:     "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324",
 		eip712Version: "2",
+		// assets gates NEW P2P activity only (ads, pool deposits, trade
+		// opens). MCGP was removed 2026-09-28 by owner decision: wallet MCGP
+		// must not be usable in P2P. Existing MCGP ads, pool balances and
+		// in-flight trades still settle and withdraw — those exit paths
+		// never consult this list.
+		assets:     []string{"USDT", "USDC"},
+		escrowEnv:  "P2P_ESCROW_ADDRESS",
+		versionEnv: "P2P_ESCROW_EIP712_VERSION",
+		chainIDEnv: "SONIC_CHAIN_ID",
 	},
 	"testnet": {
 		rpcURL:      "https://rpc.testnet.soniclabs.com",
@@ -60,33 +78,10 @@ var sonicPresets = map[string]chainPreset{
 		// initialized with EIP-712 domain version "2".
 		p2pEscrow:     "0x1B1ade6459623810Cf158Cd4F7D3FC8E126858f7",
 		eip712Version: "2",
-	},
-}
-
-// bscPresets mirrors sonicPresets for BSC. p2pEscrow is EMPTY until P2PEscrowV2
-// is deployed to BSC (see Plan 6) — an empty escrow keeps BSC P2P dormant (Load
-// omits it from P2PChains). mcgpAddress is intentionally empty: MCGP is Sonic-
-// only, so the fee-discount path is disabled on BSC (P2PEscrowV2 charges the
-// standard fee when mcgpToken is address(0)). Testnet token addresses are filled
-// in at deploy time via P2P_ESCROW_ADDRESS_BSC + the *_TOKEN_ADDRESS overrides.
-var bscPresets = map[string]chainPreset{
-	"mainnet": {
-		rpcURL:        "https://bsc-dataseed.binance.org",
-		chainID:       56,
-		usdcAddress:   "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
-		usdtAddress:   "0x55d398326f99059fF775485246999027B3197955",
-		mcgpAddress:   "",
-		p2pEscrow:     "", // set after the audit-gated BSC mainnet deploy
-		eip712Version: "2",
-	},
-	"testnet": {
-		rpcURL:        "https://data-seed-prebsc-1-s1.binance.org:8545",
-		chainID:       97,
-		usdcAddress:   "", // set at BSC-testnet deploy (test token addresses)
-		usdtAddress:   "",
-		mcgpAddress:   "",
-		p2pEscrow:     "", // set after the BSC testnet deploy
-		eip712Version: "2",
+		assets:        []string{"USDT", "USDC"},
+		escrowEnv:     "P2P_ESCROW_ADDRESS",
+		versionEnv:    "P2P_ESCROW_EIP712_VERSION",
+		chainIDEnv:    "SONIC_CHAIN_ID",
 	},
 }
 
@@ -99,7 +94,12 @@ type P2PChainConfig struct {
 	ChainKey      string // blockchainService key: "sonic", "bsc"
 	EscrowAddress string
 	EIP712Version string
-	Assets        []string // e.g. ["MCGP"] on Sonic, ["USDT","USDC"] on BSC
+	Assets        []string // e.g. ["USDT","USDC"] on Sonic; a pool row's pool tokens
+	// Purpose is P2PPurposeP2P or P2PPurposePool; Network names the
+	// cfg.Networks entry the chain was taken from; Pool is set only for a pool.
+	Purpose string
+	Network string
+	Pool    *PoolChainConfig
 }
 
 // FeeManagerChainConfig is the per-chain FeeManager deployment the configurable-
@@ -616,6 +616,11 @@ type Config struct {
 	// set-fee flow + drift reconciler DORMANT for that chain (dormant-by-default,
 	// like the BSC P2P escrow).
 	FeeManagerChains map[int64]FeeManagerChainConfig
+
+	// p2pNetworks is each preset chain's selected network (<CHAIN>_NETWORK),
+	// chosen once by assembleP2PChains so every later reader agrees and an
+	// unknown value alerts once (review M4).
+	p2pNetworks map[string]string
 
 	// SonicNetwork records which preset was active for this boot
 	// ("mainnet" or "testnet"). Downstream code that needs to query the
@@ -1207,84 +1212,6 @@ func Load() *Config {
 	// lockstep with P2P_ESCROW_ADDRESS; override only when overriding the addr).
 	cfg.P2PEscrowEIP712Version = getEnv("P2P_ESCROW_EIP712_VERSION", preset.eip712Version)
 
-	// ── Per-chain P2P registry ────────────────────────────────────────────
-	// Sonic is always present (its escrow is preset/overridable above). BSC is
-	// added only when its escrow address is configured (dormant-by-default).
-	cfg.P2PChains = map[int64]P2PChainConfig{
-		cfg.SonicChainID: {
-			ChainID:       cfg.SonicChainID,
-			ChainKey:      "sonic",
-			EscrowAddress: cfg.P2PEscrowAddress,
-			EIP712Version: cfg.P2PEscrowEIP712Version,
-			// Assets gates NEW P2P activity only (ads, pool deposits, trade
-			// opens). MCGP was removed 2026-09-28 by owner decision: wallet MCGP
-			// must not be usable in P2P. Existing MCGP ads, pool balances and
-			// in-flight trades still settle and withdraw — those exit paths
-			// never consult this list.
-			Assets: []string{"USDT", "USDC"},
-		},
-	}
-
-	bscNetwork := strings.ToLower(strings.TrimSpace(getEnv("BSC_NETWORK", "testnet")))
-	bscPreset, okBSC := bscPresets[bscNetwork]
-	if !okBSC {
-		log.Printf("[config] BSC_NETWORK=%q is unknown; falling back to 'testnet'", bscNetwork)
-		bscNetwork = "testnet"
-		bscPreset = bscPresets["testnet"]
-	}
-	bscEscrow := strings.TrimSpace(getEnv("P2P_ESCROW_ADDRESS_BSC", bscPreset.p2pEscrow))
-	if bscEscrow != "" {
-		cfg.P2PChains[bscPreset.chainID] = P2PChainConfig{
-			ChainID:       bscPreset.chainID,
-			ChainKey:      "bsc",
-			EscrowAddress: bscEscrow,
-			EIP712Version: getEnv("P2P_ESCROW_EIP712_VERSION_BSC", bscPreset.eip712Version),
-			Assets:        []string{"USDT", "USDC"},
-		}
-		log.Printf("[config] P2P chains enabled: sonic(%d) + bsc(%d, network=%s, escrow=%s)",
-			cfg.SonicChainID, bscPreset.chainID, bscNetwork, bscEscrow)
-	} else {
-		log.Printf("[config] P2P chains enabled: sonic(%d) only — BSC dormant (no escrow for BSC_NETWORK=%s)",
-			cfg.SonicChainID, bscNetwork)
-	}
-
-	// ── Per-chain FeeManager registry (configurable-FeeManager design §3) ──
-	// DORMANT-BY-DEFAULT: a chain is registered only when its FeeManager address
-	// is configured. Sonic uses the Sonic chainID active for this boot; BSC uses
-	// the BSC preset chainID. UNSET addresses keep the admin set-fee flow + drift
-	// reconciler dormant for that chain (the endpoints surface "not configured").
-	// A configured FEE_MANAGER_ADDRESS_* MUST be a syntactically valid, non-zero
-	// hex address. common.HexToAddress silently pads/truncates a malformed value
-	// (e.g. "0x123" → 0x0000…0123, or extra nibbles dropped), which would make the
-	// admin set-fee flow build setRate txs against the WRONG contract and the drift
-	// reconciler read a phantom rate. Fail LOUDLY at boot instead (design §6).
-	cfg.FeeManagerChains = map[int64]FeeManagerChainConfig{}
-	if fmSonic := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_SONIC", "")); fmSonic != "" {
-		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_SONIC", fmSonic); err != nil {
-			log.Fatalf("[config] %v", err)
-		}
-		cfg.FeeManagerChains[cfg.SonicChainID] = FeeManagerChainConfig{
-			ChainID:  cfg.SonicChainID,
-			ChainKey: "sonic",
-			Address:  fmSonic,
-		}
-	}
-	if fmBSC := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_BSC", "")); fmBSC != "" {
-		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_BSC", fmBSC); err != nil {
-			log.Fatalf("[config] %v", err)
-		}
-		cfg.FeeManagerChains[bscPreset.chainID] = FeeManagerChainConfig{
-			ChainID:  bscPreset.chainID,
-			ChainKey: "bsc",
-			Address:  fmBSC,
-		}
-	}
-	if len(cfg.FeeManagerChains) == 0 {
-		log.Printf("[config] FeeManager dormant: no FEE_MANAGER_ADDRESS_* configured — admin set-fee flow + drift reconciler off")
-	} else {
-		log.Printf("[config] FeeManager chains configured: %d", len(cfg.FeeManagerChains))
-	}
-
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")
 	cfg.MailjetSecretKey = os.Getenv("MAILJET_SECRET_KEY")
@@ -1537,7 +1464,7 @@ func Load() *Config {
 	if addr := getEnv("TESTNET_USDC_ADDRESS", testnetSonic.usdcAddress); addr != "" {
 		testnetTokens["sonic:USDC"] = addr
 	}
-	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "")); addr != "" {
+	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7")); addr != "" {
 		testnetTokens["bsc:USDT"] = addr
 	}
 	if addr := getEnv("BSC_TESTNET_USDC_ADDRESS", getEnv("BSC_USDC_ADDRESS", "")); addr != "" {
@@ -1582,6 +1509,18 @@ func Load() *Config {
 	cfg.Chains = mainnetChains
 	cfg.TokenAddresses = mainnetTokens
 
+	// ── Per-chain P2P + FeeManager registries (spec 2026-10-08 §5) ────────
+	// Assembled last: every row takes its chain id and tokens from cfg.Networks.
+	if err := retiredP2PEnv(); err != nil {
+		log.Fatalf("[config] %v", err)
+	}
+	if err := assembleP2PChains(cfg, p2pPresets); err != nil {
+		log.Fatalf("[config] %v", err)
+	}
+	assembleFeeManagerChains(cfg)
+	if err := checkPoolFeeManagerExcluded(cfg); err != nil {
+		log.Fatalf("[config] %v", err)
+	}
 	return cfg
 }
 

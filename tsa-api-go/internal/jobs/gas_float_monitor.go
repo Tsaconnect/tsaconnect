@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -160,5 +161,9 @@ func (w *GasFloatMonitor) Run(ctx context.Context) error {
 				w.prefix, f.Chain, f.Address, f.BalanceWei, f.FloorWei)
 		}
 	}
-	return err
+	if err != nil {
+		// The scheduler logs a tick error as is: an RPC error can carry a keyed URL.
+		return errors.New(services.RedactAlertText(err.Error()))
+	}
+	return nil
 }

@@ -76,7 +76,8 @@ This is the trickiest cross-cutting concern. The Sonic stack flips between **mai
 RPC URL, chainID, token addresses, and the P2PEscrow proxy address so they can never drift apart
 piecemeal — flipping them individually breaks the EIP-712 domain (see invariant above). Individual
 fields are still overridable via legacy env vars (`SONIC_RPC_URL`, `*_TOKEN_ADDRESS`,
-`P2P_ESCROW_ADDRESS`) as a hot-fix escape hatch.
+`P2P_ESCROW_ADDRESS`) as a hot-fix escape hatch. P2P chains come from one preset table
+(`p2pPresets`, `internal/config/p2p_presets.go`), and a new chain is one row with a `purpose`.
 
 `Config.Networks` holds a full `mainnet` and `testnet` `NetworkConfig` (chains + `"chain:symbol"`
 → address maps) for the wallet's multi-chain support (Sonic, BSC, Ethereum, Polygon, Arbitrum,

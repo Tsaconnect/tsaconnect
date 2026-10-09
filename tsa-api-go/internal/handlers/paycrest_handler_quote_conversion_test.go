@@ -104,6 +104,8 @@ func (f *fakeTreasuryLaneChecker) CanPayForGas(_ context.Context, chainKey strin
 	return f.laned[chainKey]
 }
 
+func (f *fakeTreasuryLaneChecker) TokenDecimals(string, string) (int, error) { return 6, nil }
+
 func (f *fakeTreasuryLaneChecker) Lane(chainKey string) *services.TreasuryLane {
 	if f.laned[chainKey] {
 		return &services.TreasuryLane{}

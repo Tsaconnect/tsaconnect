@@ -11,4 +11,20 @@ describe("deploy/feemanager", () => {
     const fm = await hre.ethers.getContractAt("FeeManager", proxy);
     expect(await fm.owner()).to.equal(chain.owner);
   });
+
+  it("DeployModules_DefaultsUnchanged: hands a FeeManager to a separate owner", async () => {
+    const [, second] = await hre.ethers.getSigners();
+    const chain = await testChain({ owner: second.address });
+    const { proxy } = await deploy(hre, { chain });
+    const fm = await hre.ethers.getContractAt("FeeManager", proxy);
+    expect(await fm.owner()).to.equal(second.address);
+  });
+
+  it("deferOwnership keeps the deployer as owner", async () => {
+    const [deployer, second] = await hre.ethers.getSigners();
+    const chain = await testChain({ owner: second.address });
+    const { proxy } = await deploy(hre, { chain, deferOwnership: true });
+    const fm = await hre.ethers.getContractAt("FeeManager", proxy);
+    expect(await fm.owner()).to.equal(deployer.address);
+  });
 });

@@ -107,7 +107,7 @@ type P2PTradeClaimSource struct {
 	db     *gorm.DB
 	pm     *PMService
 	trades *P2PTradeService
-	signer ReleaseSigner
+	signer ChainSender
 
 	// forwarder sweeps the merchant's proceeds onward. Optional: without it the
 	// ledger credit still happens and the money simply waits for the existing
@@ -116,7 +116,7 @@ type P2PTradeClaimSource struct {
 }
 
 // NewP2PTradeClaimSource wires the P2P product into the inbound matcher.
-func NewP2PTradeClaimSource(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ReleaseSigner) *P2PTradeClaimSource {
+func NewP2PTradeClaimSource(db *gorm.DB, pm *PMService, trades *P2PTradeService, signer ChainSender) *P2PTradeClaimSource {
 	return &P2PTradeClaimSource{db: db, pm: pm, trades: trades, signer: signer}
 }
 

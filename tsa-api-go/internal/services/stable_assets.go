@@ -16,6 +16,24 @@ import (
 // constant serve the whole ramp.
 const StableAssetDecimals = 6
 
+// CanonicalToChainUnits scales 6-dp canonical units up to a token's own base
+// units, exactly (spec 2026-10-08 S7). Fewer than 6 decimals is refused.
+func CanonicalToChainUnits(canonical *big.Int, decimals int) (*big.Int, error) {
+	if canonical == nil || decimals < StableAssetDecimals {
+		return nil, fmt.Errorf("stable units: %d decimals is below the canonical %d", decimals, StableAssetDecimals)
+	}
+	return rescaleUnits(canonical, StableAssetDecimals, decimals), nil
+}
+
+// ChainToCanonicalUnits floors a token's base units to 6-dp canonical units
+// (S7): 18 → 6 loses only dust below 10⁻⁶.
+func ChainToCanonicalUnits(chain *big.Int, decimals int) (*big.Int, error) {
+	if chain == nil || decimals < StableAssetDecimals {
+		return nil, fmt.Errorf("stable units: %d decimals is below the canonical %d", decimals, StableAssetDecimals)
+	}
+	return rescaleUnits(chain, decimals, StableAssetDecimals), nil
+}
+
 var (
 	ErrUnsupportedStableChain = errors.New("stable: unsupported chain")
 	ErrUnsupportedChainAsset  = errors.New("stable: asset not supported on this chain")

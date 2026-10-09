@@ -95,6 +95,8 @@ type escrowRate struct {
 	flatUSD      uint64 // 1e6 units, which the escrow uses as token base units
 	exempt       bool
 	active       bool
+	feeManager   common.Address
+	symbol       string // the escrow's own tokenSymbol for the token, which rateFor is keyed by
 }
 
 type rateEntry struct {
@@ -482,55 +484,5 @@ func (s *EscrowService) escrowRateFor(ctx context.Context, feature, tokenAddr st
 }
 
 func (s *EscrowService) readEscrowRate(ctx context.Context, feature, tokenAddr string) (escrowRate, error) {
-	if s.caller == nil {
-		return escrowRate{}, fmt.Errorf("blockchain client not available")
-	}
-	if !common.IsHexAddress(tokenAddr) {
-		return escrowRate{}, fmt.Errorf("token address %q not configured", tokenAddr)
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	escrow := common.HexToAddress(s.escrowAddress)
-	call := func(to common.Address, abiDef abi.ABI, method string, args ...interface{}) ([]interface{}, error) {
-		data, err := abiDef.Pack(method, args...)
-		if err != nil {
-			return nil, fmt.Errorf("pack %s: %w", method, err)
-		}
-		out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &to, Data: data}, nil)
-		if err != nil {
-			return nil, fmt.Errorf("%s call: %w", method, err)
-		}
-		vals, err := abiDef.Unpack(method, out)
-		if err != nil || len(vals) == 0 {
-			return nil, fmt.Errorf("decode %s: %v", method, err)
-		}
-		return vals, nil
-	}
-
-	vals, err := call(escrow, parsedEscrowABI, "feeManager")
-	if err != nil {
-		return escrowRate{}, err
-	}
-	feeManager, _ := vals[0].(common.Address)
-	if feeManager == (common.Address{}) {
-		return escrowRate{noFeeManager: true}, nil
-	}
-	vals, err = call(escrow, parsedEscrowABI, "tokenSymbol", common.HexToAddress(tokenAddr))
-	if err != nil {
-		return escrowRate{}, err
-	}
-	symbol, _ := vals[0].(string)
-	vals, err = call(feeManager, parsedFeeManagerABI, "rateFor", feature, symbol)
-	if err != nil {
-		return escrowRate{}, err
-	}
-	if len(vals) < 4 {
-		return escrowRate{}, fmt.Errorf("decode rateFor: %d values", len(vals))
-	}
-	bps, _ := vals[0].(uint16)
-	flat, _ := vals[1].(uint64)
-	exempt, _ := vals[2].(bool)
-	active, _ := vals[3].(bool)
-	return escrowRate{bps: int(bps), flatUSD: flat, exempt: exempt, active: active}, nil
+	return readEscrowFeeRow(ctx, s.caller, s.escrowAddress, tokenAddr, feature)
 }

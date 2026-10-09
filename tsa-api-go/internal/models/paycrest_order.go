@@ -175,6 +175,10 @@ type PaycrestOrderRecord struct {
 	RouteKind      string `gorm:"size:12;index" json:"routeKind,omitempty"`
 	RequestedToken string `gorm:"size:16" json:"requestedToken,omitempty"`
 	RequestedChain string `gorm:"size:24" json:"requestedChain,omitempty"`
+	// LegDecimals is an IT converted record's leg-token decimals ("ITC-"
+	// records only; spec 2026-10-08 S23). Nil reads as 6 — every record
+	// written before the pool. The handoff restates owed units in them.
+	LegDecimals *int `gorm:"default:null" json:"-"`
 	// RequestedChainID/RequestedTokenAddress/RequestedTokenDecimals identify
 	// the destination asset exactly, which the symbol pair above cannot: two
 	// chains can serve a token of the same name, a symbol is not unique on one

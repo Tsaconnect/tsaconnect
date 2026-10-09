@@ -38,33 +38,8 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		log.Printf("[ramp-conversion] dormant: conversion is not priced (RAMP_COMPANY_TAKE_BPS is not a usable sender fee)")
 		return nil, nil
 	}
-	if cfg.RampTreasuryPrivateKey == "" {
-		log.Printf("[ramp-conversion] dormant: RAMP_TREASURY_PRIVATE_KEY not set")
-		return nil, nil
-	}
-	// Routed through the one guard every raw-env-key signer uses, rather
-	// than comparing cfg.Env here: an inline check ignores
-	// ALLOW_RAW_SIGNER_KEYS, so the documented production rollout
-	// (ENV=production + ALLOW_RAW_SIGNER_KEYS=true, see tsa-api-go/CLAUDE.md)
-	// would keep every other signer alive and silently take THIS one dormant.
-	if !rawSignerKeyAllowed(cfg) {
-		log.Printf("[ramp-conversion] dormant: raw RAMP_TREASURY_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true, or use KMS)")
-		return nil, nil
-	}
-	alertRawSignerKeyInProduction(cfg, "RAMP_TREASURY_PRIVATE_KEY")
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampTreasuryPrivateKey, "0x"))
-	if err != nil {
-		log.Printf("[ramp-conversion] dormant: invalid RAMP_TREASURY_PRIVATE_KEY: %v", err)
-		return nil, nil
-	}
-	if err := assertDistinctKey("RAMP_TREASURY_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-	}); err != nil {
-		fatalf("[config] REFUSING TO START: %v", err)
+	key, ok := rampTreasuryKey(cfg, "[ramp-conversion]")
+	if !ok {
 		return nil, nil
 	}
 
@@ -156,9 +131,47 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	return treasury, orchestrator
 }
 
+// rampTreasuryKey is the conversion treasury's key, or (nil, false) with a
+// log line saying why. A key shared with any other signer is fatal (the
+// treasury holds user funds in transit). Shared by the conversion wiring and
+// the pool's own lane (plan P14) so the checks exist once.
+func rampTreasuryKey(cfg *config.Config, logTag string) (*ecdsa.PrivateKey, bool) {
+	if cfg.RampTreasuryPrivateKey == "" {
+		log.Printf("%s dormant: RAMP_TREASURY_PRIVATE_KEY not set", logTag)
+		return nil, false
+	}
+	// Routed through the one guard every raw-env-key signer uses, rather
+	// than comparing cfg.Env here: an inline check ignores
+	// ALLOW_RAW_SIGNER_KEYS, so the documented production rollout
+	// (ENV=production + ALLOW_RAW_SIGNER_KEYS=true, see tsa-api-go/CLAUDE.md)
+	// would keep every other signer alive and silently take THIS one dormant.
+	if !rawSignerKeyAllowed(cfg) {
+		log.Printf("%s dormant: raw RAMP_TREASURY_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true, or use KMS)", logTag)
+		return nil, false
+	}
+	alertRawSignerKeyInProduction(cfg, "RAMP_TREASURY_PRIVATE_KEY")
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampTreasuryPrivateKey, "0x"))
+	if err != nil {
+		log.Printf("%s dormant: invalid RAMP_TREASURY_PRIVATE_KEY: %v", logTag, err)
+		return nil, false
+	}
+	if err := assertDistinctKey("RAMP_TREASURY_PRIVATE_KEY", key, map[string]string{
+		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
+		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
+		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
+		"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
+		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
+	}); err != nil {
+		fatalf("[config] REFUSING TO START: %v", err)
+		return nil, false
+	}
+	return key, true
+}
+
 // treasuryLaneSpec is how one treasury's lanes are built (Decision D49).
 type treasuryLaneSpec struct {
 	chains      []string
+	network     string // "" = mainnet
 	guardPrefix string // the lane guard's namespace, so two treasuries never share a kill switch
 	logTag      string
 	metric      string
@@ -174,6 +187,10 @@ type treasuryLaneSpec struct {
 func buildTreasuryLanes(cfg *config.Config, chains *services.BlockchainService, key *ecdsa.PrivateKey, spec treasuryLaneSpec) (map[string]*services.TreasuryLane, []string) {
 	lanes := map[string]*services.TreasuryLane{}
 	var missing []string
+	network := spec.network
+	if network == "" {
+		network = "mainnet"
+	}
 	for _, chain := range spec.chains {
 		floor, skipReason := rampTreasuryLaneFloor(cfg, chain)
 		if skipReason != "" {
@@ -181,7 +198,7 @@ func buildTreasuryLanes(cfg *config.Config, chains *services.BlockchainService, 
 			missing = append(missing, chain)
 			continue
 		}
-		lane := buildSponsorLane(chains, chain, key, spec.guardPrefix+chain, services.SponsorLimits{
+		lane := buildSponsorLaneOn(chains, network, chain, key, spec.guardPrefix+chain, services.SponsorLimits{
 			BalanceFloor: floor,
 		}, nil)
 		if lane == nil {
@@ -190,6 +207,12 @@ func buildTreasuryLanes(cfg *config.Config, chains *services.BlockchainService, 
 			continue
 		}
 		chainID, idOK := chains.ChainIDForName(chain)
+		if network != "mainnet" {
+			// ChainIDForName prefers mainnet; off mainnet the lane's id is its
+			// own network's row, never the mainnet one.
+			chainID = cfg.Networks[network].Chains[chain].ChainID
+			idOK = chainID != 0
+		}
 		if !idOK {
 			log.Printf("%s skipping %s: no chain id configured", spec.logTag, chain)
 			missing = append(missing, chain)

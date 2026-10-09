@@ -29,6 +29,12 @@ function validateAddresses(cfg, network) {
   check("owner", cfg.owner);
   check("systemWallet", cfg.systemWallet);
   (cfg.admins || []).forEach((a, i) => check(`admins[${i}]`, a));
+  if (cfg.pool) {
+    check("pool.releaseAdmin", cfg.pool.releaseAdmin);
+    check("pool.systemWallet", cfg.pool.systemWallet);
+    check("pool.owner", cfg.pool.owner);
+    check("pool.ownerConfirm", cfg.pool.ownerConfirm);
+  }
 }
 
 function requireAddr(cfg, label, value) {
