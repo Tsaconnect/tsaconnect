@@ -3041,39 +3041,12 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 // permanently held the ad's reserved/remaining capacity; this cancels it and
 // restores the off-chain counters. There is nothing on chain to settle.
 func (s *P2PTradeService) reconcileOrphanOpen(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
-	now := s.clock.Now()
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Guard on status + empty open_tx_hash: if ConfirmOpenTrade landed between
-		// our read and here, RowsAffected==0 and we restore nothing (no double-credit).
-		res := tx.Model(&models.P2PTrade{}).
-			Where("id = ? AND status = ? AND open_tx_hash = ''", trade.ID, models.P2PTradeStatusPendingPayment).
-			Updates(map[string]any{
-				"status":        models.P2PTradeStatusCancelled,
-				"cancel_reason": "reconciled_orphan",
-				"updated_at":    now,
-			})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return nil
-		}
-		if err := tx.Model(&models.P2PAd{}).
-			Where("id = ?", trade.AdID).
-			Updates(map[string]any{
-				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
-				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
-				"updated_at": now,
-			}).Error; err != nil {
-			return err
-		}
-		// PM sell trade: release the held NGN payout reservation in the SAME
-		// transaction as the orphan reclaim so reserved_ngn never leaks. Non-PM /
-		// dormant PM is a clean no-op.
-		return s.releasePMSellReservationTx(ctx, tx, trade)
-	})
+	reclaimed, err := s.reclaimUnopenedTrade(ctx, trade, "reconciled_orphan")
 	if err != nil {
 		return ReconcileResult{}, err
+	}
+	if !reclaimed {
+		return ReconcileResult{}, nil
 	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": models.P2PTradeStatusPendingPayment, "to": models.P2PTradeStatusCancelled,
@@ -3081,6 +3054,40 @@ func (s *P2PTradeService) reconcileOrphanOpen(ctx context.Context, trade *models
 	})
 	return ReconcileResult{Changed: true, FromStatus: models.P2PTradeStatusPendingPayment,
 		ToStatus: models.P2PTradeStatusCancelled, Reason: "orphan open reclaimed"}, nil
+}
+
+// reclaimUnopenedTrade cancels a pending_payment trade whose open never landed
+// and restores the ad's off-chain counters, in one guarded transaction (the
+// body reconcileOrphanOpen always had); it reports whether this call reclaimed
+// it. An ordinary trade keeps today's guard (no open hash): if ConfirmOpenTrade
+// landed between the caller's read and here, nothing is restored (no
+// double-credit). A pool slice may carry the hash of a broadcast that never
+// mined (review I1): its caller has already proven the open can never land
+// (S44, or a provably unbroadcast send), so the hash does not block it.
+func (s *P2PTradeService) reclaimUnopenedTrade(ctx context.Context, trade *models.P2PTrade, reason string) (bool, error) {
+	now := s.clock.Now()
+	reclaimed := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.P2PTrade{}).
+			Where("id = ? AND status = ? AND (open_tx_hash = '' OR it_intent_id IS NOT NULL)", trade.ID, models.P2PTradeStatusPendingPayment).
+			Updates(map[string]any{"status": models.P2PTradeStatusCancelled, "cancel_reason": reason, "updated_at": now})
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		reclaimed = true
+		if err := tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(map[string]any{
+			"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
+			"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
+			"updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		// PM sell trade: release the held NGN payout reservation in the SAME
+		// transaction so reserved_ngn never leaks. Non-PM / dormant PM / a pool
+		// slice is a clean no-op.
+		return s.releasePMSellReservationTx(ctx, tx, trade)
+	})
+	return reclaimed && err == nil, err
 }
 
 func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {

@@ -273,6 +273,14 @@ type stableBuyOpen struct {
 	// insert writes the row; nil is a plain insert. The company wallet's takes
 	// its stock under the (chain, token) lock (Task 6).
 	insert func(ctx context.Context, intent *models.ITIntent) error
+	// status is the row's first status; "" means pending_payment. A pool
+	// order starts opening (S11) and becomes claimable only once every slice
+	// is locked on-chain.
+	status string
+	// deferHonour leaves RateExpiresAt NULL at insert: the honour window
+	// starts when the pay-in is shown (spec §12.2 step 6), and a failed open
+	// is then never counted as abandoned (M2).
+	deferHonour bool
 }
 
 // openStableBuy is the one write every entry point shares.
@@ -342,7 +350,7 @@ func (s *ITService) openStableBuy(
 		ID:          uuid.New(),
 		UserID:      userID,
 		Direction:   models.ITDirectionBuy,
-		Status:      models.ITStatusPendingPayment,
+		Status:      firstNonEmpty(o.status, models.ITStatusPendingPayment),
 		Provider:    o.provider,
 		Asset:       q.Asset,
 		AssetAmount: q.AssetUnits.String(),
@@ -367,7 +375,7 @@ func (s *ITService) openStableBuy(
 		PlatformKeptKobo: "0",
 		ReceivedAmount:   "0",
 	}
-	if o.routed {
+	if o.routed && !o.deferHonour {
 		honourUntil := time.Now().Add(s.stableLockTTL())
 		intent.RateExpiresAt = &honourUntil
 	}

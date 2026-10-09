@@ -34,8 +34,9 @@ type PoolDeskConfig struct {
 // (Task 10) the open. One per process; ITService holds it like the company
 // wallet.
 type PoolDesk struct {
-	c      PoolDeskConfig
-	totals *cachedReader[*big.Int]
+	c           PoolDeskConfig
+	totals      *cachedReader[*big.Int]
+	proveWindow time.Duration // poolProveWindow; tests shorten it
 }
 
 const (
@@ -87,7 +88,7 @@ func NewPoolDesk(c PoolDeskConfig) (*PoolDesk, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
-	return &PoolDesk{c: c, totals: newCachedReader[*big.Int](poolTotalsTTL, poolBalanceFailTTL)}, nil
+	return &PoolDesk{c: c, totals: newCachedReader[*big.Int](poolTotalsTTL, poolBalanceFailTTL), proveWindow: poolProveWindow}, nil
 }
 
 func (s *ITService) SetPoolDesk(d *PoolDesk) { s.poolDesk = d }

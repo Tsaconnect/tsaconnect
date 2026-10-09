@@ -1031,7 +1031,11 @@ func (s *ITService) GetIntent(ctx context.Context, id uuid.UUID) (*models.ITInte
 
 func (s *ITService) ListUserIntents(ctx context.Context, userID uuid.UUID) ([]models.ITIntent, error) {
 	var out []models.ITIntent
-	err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at DESC").Limit(100).Find(&out).Error
+	err := s.db.WithContext(ctx).Where("user_id = ?", userID).
+		// M14: she never saw a pay-in for these (spec §7.5).
+		Where("status <> ? AND NOT (status = ? AND COALESCE(failure_reason, '') = ?)",
+			models.ITStatusOpening, models.ITStatusCancelled, models.ITFailurePoolOpenFailed).
+		Order("created_at DESC").Limit(100).Find(&out).Error
 	return out, err
 }
 
