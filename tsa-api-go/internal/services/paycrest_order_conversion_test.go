@@ -55,6 +55,10 @@ type fakePaycrestConversionClient struct {
 	offrampRate string
 	// offrampSenderFee is the fee amount Paycrest reports on the order; empty reports none.
 	offrampSenderFee string
+	// offrampReportsFeeOnDeposit reports the fee the way live Paycrest does at
+	// creation — deposit × p to 4 decimals, rounded up — rather than the
+	// deposit × p/(1 + p) it actually takes. Overrides offrampSenderFee.
+	offrampReportsFeeOnDeposit bool
 	// offrampErrFirst fails only the FIRST CreateOfframpOrder, for a retry.
 	offrampErrFirst error
 	// offrampEntered/offrampGate pause the FIRST CreateOfframpOrder
@@ -115,14 +119,34 @@ func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req
 	if rate == "" {
 		rate = "1500"
 	}
+	senderFee := f.offrampSenderFee
+	if f.offrampReportsFeeOnDeposit {
+		senderFee = feeOnDeposit(req.AmountToken, req.SenderFeePercent)
+	}
 	return &PaycrestOrder{
 		ID: "pc-sell-" + req.Reference, Status: PaycrestStatusPending,
 		Rate: rate, Amount: req.AmountToken,
-		SenderFeePercent: req.SenderFeePercent, SenderFee: f.offrampSenderFee,
+		SenderFeePercent: req.SenderFeePercent, SenderFee: senderFee,
 		ProviderAccount: &PaycrestProviderAccount{
 			Institution: "Fake Bank", ReceiveAddress: "0x00000000000000000000000000000000000dep05",
 		},
 	}, nil
+}
+
+// feeOnDeposit is deposit × pct% to 4 decimals, rounded up: the senderFee
+// Paycrest reports on a new offramp (0.0385 on 3.735942 at 1.0303%, 2026-10-09).
+func feeOnDeposit(deposit, pct string) string {
+	d, ok1 := new(big.Rat).SetString(deposit)
+	p, ok2 := new(big.Rat).SetString(pct)
+	if !ok1 || !ok2 {
+		return ""
+	}
+	scaled := new(big.Rat).Mul(new(big.Rat).Mul(d, p), big.NewRat(100, 1)) // × 10_000 / 100
+	units, rem := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	if rem.Sign() > 0 {
+		units.Add(units, big.NewInt(1))
+	}
+	return new(big.Rat).SetFrac(units, big.NewInt(10_000)).FloatString(4)
 }
 
 func (f *fakePaycrestConversionClient) GetOrder(_ context.Context, id string) (*PaycrestOrder, error) {
