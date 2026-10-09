@@ -728,6 +728,19 @@ func TestParseTokenAmount(t *testing.T) {
 		{"0", 18, "", false},
 		{"-1", 18, "", false},
 		{"abc", 18, "", false},
+		// Exactness: 64-bit float math made these one base unit short.
+		{"0.13", 18, "130000000000000000", true},
+		{"0.13", 6, "130000", true},
+		{"1.5", 6, "1500000", true},
+		{"0.000001", 6, "1", true},
+		// More fractional digits than the token has is refused, never truncated.
+		{"0.0000001", 6, "", false},
+		// Policy of services.DecimalToBaseUnits: plain digits with an optional
+		// ".digits" part only; bare-dot forms, exponents and signs are malformed.
+		{"12.", 6, "", false},
+		{".5", 6, "", false},
+		{"1e3", 6, "", false},
+		{"+1", 6, "", false},
 	}
 
 	for _, tt := range tests {

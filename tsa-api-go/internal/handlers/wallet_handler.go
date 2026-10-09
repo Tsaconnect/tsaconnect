@@ -187,17 +187,11 @@ func formatTokenBalance(balance *big.Int, decimals int) string {
 	return result
 }
 
+// parseTokenAmount converts a human decimal to exact base units. It refuses
+// malformed input, more fractional digits than the token has, and amounts <= 0.
 func parseTokenAmount(amount string, decimals int) (*big.Int, bool) {
-	f, ok := new(big.Float).SetString(amount)
-	if !ok {
-		return nil, false
-	}
-	multiplier := new(big.Float).SetInt(
-		new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil),
-	)
-	f.Mul(f, multiplier)
-	result, _ := f.Int(nil)
-	if result.Sign() <= 0 {
+	result, err := services.DecimalToBaseUnits(amount, decimals)
+	if err != nil || result.Sign() <= 0 {
 		return nil, false
 	}
 	return result, true
