@@ -209,7 +209,7 @@ func (s *PayCheckoutService) PayDirect(ctx context.Context, user *models.User, i
 		AccountNo:     p.SettleAccountNumber,
 		AccountName:   p.SettleAccountName,
 		PayPaymentID:  &p.ID,
-		// The merchant is paid what they invoiced; the deposit's cushion is ours.
+		// The merchant is paid what they invoiced; our fee absorbs the drift.
 		KeepSurplus: true,
 	}, false, nil)
 	if errors.Is(err, ErrSellAttemptMayExist) {

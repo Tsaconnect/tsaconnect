@@ -232,8 +232,8 @@ func TestPaycrestTake_TSAPayPayoutIsUnchanged(t *testing.T) {
 	if _, err := direct.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, direct, "50000.00"), false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if fee, ok := parseSenderFeePercent(direct.client.lastOfframp.SenderFeePercent); !ok || fee < 1 {
-		t.Fatalf("direct payout sent fee %q, want TSA Pay's F = 1%% (KeepSurplus may only raise it)", direct.client.lastOfframp.SenderFeePercent)
+	if fee, ok := parseSenderFeePercent(direct.client.lastOfframp.SenderFeePercent); !ok || fee < 0.99 {
+		t.Fatalf("direct payout sent fee %q, want TSA Pay's F = 1%% (KeepSurplus moves it by kobo, not to the take)", direct.client.lastOfframp.SenderFeePercent)
 	}
 	if bps, ok := PayFeeBps(r.svc.pay.FeePercent); !ok || bps != 100 {
 		t.Fatalf("platform fee = %d bps, want TSA Pay's 100", bps)
