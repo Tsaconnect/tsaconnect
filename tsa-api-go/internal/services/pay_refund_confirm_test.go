@@ -635,3 +635,37 @@ func TestPayRefundAlertOnce_ForgetsARefundOncePruneAlertedPassesTheTTL(t *testin
 		t.Fatal("not forgotten after the TTL")
 	}
 }
+
+// Every way check can fail to read the chain is ErrPayRefundChainUnreadable —
+// what the admin reevaluate answers 502 on. A database error is not.
+func TestPayRefundReevaluate_ChainReadFailuresAreChainUnreadable(t *testing.T) {
+	ctx := context.Background()
+	for name, setup := range map[string]func(r *refundRig){
+		"tx lookup": func(r *refundRig) {
+			r.ver.set(nil, errors.New("verify: dial tcp: i/o timeout"), false)
+			r.ver.knownErr = errors.New("dial tcp: i/o timeout")
+		},
+		"nonce": func(r *refundRig) {
+			r.ver.set(nil, errors.New("verify: not found"), false)
+			r.net.nonceErr = errors.New("dial tcp: i/o timeout")
+		},
+		"decimals": func(r *refundRig) {
+			r.chainShows(bscAmount(1_000_000), 9)
+			r.net.decimalsErr = errors.New("dial tcp: i/o timeout")
+		},
+	} {
+		r := newRefundRig(t)
+		ref, _ := r.submitted(t, "CONF-RE-"+name, "1")
+		setup(r)
+		if _, err := r.s.Reevaluate(ctx, ref.ID); !errors.Is(err, ErrPayRefundChainUnreadable) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	r := newRefundRig(t)
+	ref, _ := r.submitted(t, "CONF-RE-DB", "1")
+	sqlDB, _ := r.db.DB()
+	sqlDB.Close()
+	if _, err := r.s.Reevaluate(ctx, ref.ID); err == nil || errors.Is(err, ErrPayRefundChainUnreadable) {
+		t.Errorf("database: %v", err)
+	}
+}

@@ -318,9 +318,12 @@ func (h *PayHandler) AdminReevaluateRefund(c *gin.Context) {
 	case errors.Is(err, services.ErrPayRefundState):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, "Only a submitted or needs-review refund can be re-checked", "refund_state")
 		return
-	case err != nil:
+	case errors.Is(err, services.ErrPayRefundChainUnreadable):
 		log.Printf("[tsa-pay] admin reevaluate refund %s: %s", id, services.RedactAlertText(err.Error()))
 		utils.ErrorResponseWithCode(c, http.StatusBadGateway, "Couldn't read the chain — try again", "chain_unreadable")
+		return
+	case err != nil:
+		payInternalFail(c, err)
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Refund re-checked", gin.H{"refund": h.refunds.View(r)})

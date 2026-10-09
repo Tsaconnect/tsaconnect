@@ -56,6 +56,10 @@ var (
 	ErrPayRefundState         = errors.New("pay refund: the refund is not in a state that allows this")
 	ErrPayRefundTxUsed        = errors.New("pay refund: that transaction is already attached to another refund")
 	ErrPayRefundUnavailable   = errors.New("pay refund: refunds are unavailable right now")
+	// ErrPayRefundChainUnreadable wraps every failure to read a refund's chain
+	// (an RPC error, a chain with no client, the endpoint moving mid-check) —
+	// never a database error. Nothing about the refund changed.
+	ErrPayRefundChainUnreadable = errors.New("pay refund: couldn't read the chain")
 	// ErrPayRefundNonceUsed: the signed transfer's nonce is already used on
 	// its chain, so it can never be mined — the owner signs again (409).
 	ErrPayRefundNonceUsed = errors.New("pay refund: the transaction's nonce is already used")

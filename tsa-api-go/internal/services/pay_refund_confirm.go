@@ -127,7 +127,8 @@ func (s *PayRefundService) Reevaluate(ctx context.Context, id uuid.UUID) (*model
 // later reading that says otherwise (a lagging or pruned node, a reorg read) is
 // a contradiction for a person — it stays needs_review with an ALERT and its
 // amount stays held against the cap. Not mined, not deep, or not readable: r
-// stays as it is (an unreadable chain is returned as an error, redacted).
+// stays as it is (an unreadable chain is returned, redacted, wrapping
+// ErrPayRefundChainUnreadable).
 //
 // The server decoded and recorded the transaction itself (D23), so no
 // NotBefore applies: when it was mined says nothing about whether it is this
@@ -138,7 +139,7 @@ func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confi
 	}
 	chain, ok := s.network.MainnetChainNameForID(r.ChainID)
 	if !ok {
-		return fmt.Errorf("chain %d has no client", r.ChainID)
+		return fmt.Errorf("%w: chain %d has no client", ErrPayRefundChainUnreadable, r.ChainID)
 	}
 	p, err := s.verifier.Verify(ctx, chain, *r.TxHash, r.TokenAddress, r.FromAddress, r.ToAddress)
 	out := ProveStableTransfer(p, err, StableTransferWant{From: r.FromAddress, MinConf: s.minConf, RevertNeedsDepth: true})
@@ -164,7 +165,7 @@ func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confi
 	}
 	known, _, err := s.verifier.TransactionKnown(ctx, chain, *r.TxHash)
 	if err != nil {
-		return fmt.Errorf("read %s on %s: %s", *r.TxHash, chain, RedactAlertText(err.Error()))
+		return fmt.Errorf("%w: read %s on %s: %s", ErrPayRefundChainUnreadable, *r.TxHash, chain, RedactAlertText(err.Error()))
 	}
 	if known {
 		s.alertUnconfirmed(r) // pending in the mempool, or mined and the receipt lags
@@ -192,7 +193,7 @@ func refundReadingName(reason StableTransferReason, err error) string {
 func (s *PayRefundService) settleProven(ctx context.Context, chain string, r *models.PayRefund, confirmFrom []string, credited *big.Int) error {
 	decimals, err := s.network.TokenDecimals(chain, r.TokenAddress)
 	if err != nil {
-		return fmt.Errorf("%s decimals on %s: %s", r.TokenSymbol, chain, RedactAlertText(err.Error()))
+		return fmt.Errorf("%w: %s decimals on %s: %s", ErrPayRefundChainUnreadable, r.TokenSymbol, chain, RedactAlertText(err.Error()))
 	}
 	want := stableForUSDMicros(big.NewInt(r.AmountMicroUSD), decimals)
 	creditedMicro, err := usdMicrosFloor(credited, decimals)
@@ -231,12 +232,12 @@ func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *
 	}
 	nonce, err := s.network.ConfirmedNonce(ctx, chain, signer, s.minConf)
 	if err != nil {
-		return fmt.Errorf("nonce of %s on %s: %s", signer.Hex(), chain, RedactAlertText(err.Error()))
+		return fmt.Errorf("%w: nonce of %s on %s: %s", ErrPayRefundChainUnreadable, signer.Hex(), chain, RedactAlertText(err.Error()))
 	}
 	if nonce > tx.Nonce() {
 		known, _, err := s.verifier.TransactionKnown(ctx, chain, *r.TxHash)
 		if err != nil {
-			return fmt.Errorf("re-read %s on %s: %s", *r.TxHash, chain, RedactAlertText(err.Error()))
+			return fmt.Errorf("%w: re-read %s on %s: %s", ErrPayRefundChainUnreadable, *r.TxHash, chain, RedactAlertText(err.Error()))
 		}
 		if known {
 			return nil // ours is the one that mined; the next look proves it

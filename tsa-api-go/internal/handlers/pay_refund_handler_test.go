@@ -750,3 +750,30 @@ func TestPayRefund_OffAnswersRefundsUnavailableOnEveryRoute(t *testing.T) {
 		t.Fatalf("payments list with refunds off: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// reevaluateStub answers Reevaluate with err; nothing else is called.
+type reevaluateStub struct {
+	payRefundAPI
+	err error
+}
+
+func (s reevaluateStub) Reevaluate(context.Context, uuid.UUID) (*models.PayRefund, error) {
+	return nil, s.err
+}
+
+// Only a chain that couldn't be read is 502 chain_unreadable; anything else —
+// a database failure — is the plain, redacted 500, never worded as the chain.
+func TestPayRefundAdmin_ReevaluateTellsAChainReadFromAnInternalFailure(t *testing.T) {
+	o := newRefundHandlerRig(t)
+	path := "/api/admin/pay/refunds/" + uuid.NewString() + "/reevaluate"
+	chain := fmt.Errorf("%w: read 0xabc on bsc: dial tcp: i/o timeout", services.ErrPayRefundChainUnreadable)
+	o.h = NewPayHandler(o.merchants, o.payments, nil, false).WithRefunds(reevaluateStub{err: chain})
+	if res := o.adminDo(models.RoleSuperAdmin, http.MethodPost, path); res.status != http.StatusBadGateway || res.code() != "chain_unreadable" {
+		t.Fatalf("chain: %d %s", res.status, res.raw)
+	}
+	o.h = NewPayHandler(o.merchants, o.payments, nil, false).WithRefunds(reevaluateStub{err: errors.New("sql: database is closed")})
+	res := o.adminDo(models.RoleSuperAdmin, http.MethodPost, path)
+	if res.status != http.StatusInternalServerError || res.code() == "chain_unreadable" || strings.Contains(res.raw, "chain") || strings.Contains(res.raw, "sql") {
+		t.Fatalf("database: %d %s", res.status, res.raw)
+	}
+}
