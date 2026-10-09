@@ -2600,19 +2600,33 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		return nil, err
 	}
 
-	prior := trade.Status
-	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status IN ?", trade.ID,
-			[]string{models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment}).
-		Updates(map[string]any{
-			"status":     models.P2PTradeStatusDisputed,
-			"updated_at": s.clock.Now(),
-		})
-	if res.Error != nil {
-		return nil, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return nil, ErrInvalidTransition
+	// The status read above predates on-chain verification; re-read it under a
+	// row lock so the alert reports the status that was actually flipped.
+	var prior string
+	flipErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var cur models.P2PTrade
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("status").
+			First(&cur, "id = ?", trade.ID).Error; err != nil {
+			return err
+		}
+		res := tx.Model(&models.P2PTrade{}).
+			Where("id = ? AND status IN ?", trade.ID,
+				[]string{models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment}).
+			Updates(map[string]any{
+				"status":     models.P2PTradeStatusDisputed,
+				"updated_at": s.clock.Now(),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrInvalidTransition
+		}
+		prior = cur.Status
+		return nil
+	})
+	if flipErr != nil {
+		return nil, flipErr
 	}
 	trade.Status = models.P2PTradeStatusDisputed
 
@@ -2633,16 +2647,19 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 	s.emit(events.P2PTradeDisputed, other, "Counter-party opened a dispute on this trade", "",
 		map[string]any{"tradeId": trade.ID})
 	s.systemMsg(ctx, trade.ID, "A dispute has been opened. Funds are frozen pending admin review.")
-	s.alertDisputeFiled(ctx, &trade, prior)
+	s.alertDisputeFiled(ctx, &trade, prior, false)
 	return &trade, nil
 }
 
 // alertDisputeFiled emails operators about a dispute that just flipped the
 // trade to disputed. The dispute row is best effort: the alert still goes out
 // without role/reason rather than being lost.
-func (s *P2PTradeService) alertDisputeFiled(ctx context.Context, trade *models.P2PTrade, from string) {
+func (s *P2PTradeService) alertDisputeFiled(ctx context.Context, trade *models.P2PTrade, from string, placeholder bool) {
 	var d models.P2PDispute
 	_ = s.db.WithContext(ctx).Where("trade_id = ?", trade.ID).First(&d).Error
+	if placeholder {
+		d.RaisedRole = "unknown (reconciler backfill)"
+	}
 	s.alert(ctx, P2PAlertDisputeFiled, trade, func(a *P2PAlert) {
 		a.FromStatus = from
 		a.RaisedRole = d.RaisedRole
@@ -3279,8 +3296,16 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 	}
 	from := trade.Status
 	now := s.clock.Now()
-	flipped := false
+	flipped, backfilled := false, false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The caller's status is a pre-read; re-read under a row lock so the
+		// audit, result and alert reflect what was actually flipped.
+		var cur models.P2PTrade
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("status").
+			First(&cur, "id = ?", trade.ID).Error; err != nil {
+			return err
+		}
+		from = cur.Status
 		res := tx.Model(&models.P2PTrade{}).
 			Where("id = ? AND status NOT IN ?", trade.ID,
 				[]string{
@@ -3314,11 +3339,13 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 			Status:     models.P2PDisputeStatusOpen,
 			CreatedAt:  now,
 		}
-		if err := tx.Where(models.P2PDispute{TradeID: trade.ID}).
+		fc := tx.Where(models.P2PDispute{TradeID: trade.ID}).
 			Attrs(placeholder).
-			FirstOrCreate(&placeholder).Error; err != nil {
-			return err
+			FirstOrCreate(&placeholder)
+		if fc.Error != nil {
+			return fc.Error
 		}
+		backfilled = fc.RowsAffected > 0
 		return nil
 	})
 	if err != nil {
@@ -3331,7 +3358,7 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 		"from": from, "to": models.P2PTradeStatusDisputed,
 		"reason": "chain Disputed",
 	})
-	s.alertDisputeFiled(ctx, trade, from)
+	s.alertDisputeFiled(ctx, trade, from, backfilled)
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusDisputed,
 		Reason: "chain Disputed"}, nil
 }

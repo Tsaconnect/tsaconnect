@@ -203,3 +203,21 @@ func TestReconcileToDisputed_BackfillAlerts(t *testing.T) {
 		t.Fatalf("alerts = %d, want 1", len(rec.got))
 	}
 }
+
+func TestReconcileToDisputed_UsesLockedStatusAndTruthfulPlaceholder(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, tradeID, _ := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
+	rec := &recordingAlerter{}
+	svc.SetAlerter(rec)
+	var stale models.P2PTrade
+	db.First(&stale, "id = ?", tradeID)
+	stale.Status = models.P2PTradeStatusPendingPayment // pre-read predates mark-paid
+	res, err := svc.reconcileToDisputed(context.Background(), &stale)
+	if err != nil || res.FromStatus != "paid" {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if len(rec.got) != 1 || rec.got[0].FromStatus != "paid" ||
+		rec.got[0].RaisedRole != "unknown (reconciler backfill)" {
+		t.Fatalf("alerts = %+v", rec.got)
+	}
+}
