@@ -1468,7 +1468,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			// refuses a second refund anyway. Creating and cancelling share one
 			// write limit; a signed transfer handed over has its own. Refund-id
 			// routes take no mode: the row has its own. Mounted always: with
-			// refunds off (TSA_PAY_REFUNDS) they answer 503.
+			// refunds unwired they answer 503.
 			refundWrite := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
 			owner.POST("/payments/:id/refunds", middleware.Idempotency(config.DB), refundWrite, payh.OwnerCreateRefund)
 			owner.GET("/payments/:id/refunds", payh.OwnerPaymentRefunds)

@@ -491,13 +491,8 @@ type Config struct {
 	// ── TSA Pay (merchant payments) ──
 	// Test mode is on until the licensing question is answered; live mode stays
 	// off until PM gives clearance on compliance.
-	TSAPayEnabled     bool
-	TSAPayLiveEnabled bool
-	// TSAPayRefundsEnabled (TSA_PAY_REFUNDS, default off) lets merchants ask
-	// for and send crypto refunds and runs the refund confirmer. Off, the
-	// refund routes answer 503 refunds_unavailable; payment views still read
-	// refunds already made.
-	TSAPayRefundsEnabled   bool
+	TSAPayEnabled          bool
+	TSAPayLiveEnabled      bool
 	TSAPayWebhookMasterKey string
 	TSAPayCheckoutBaseURL  string
 	// TSAPayFeePercent is F, TSA Pay's platform fee: what a payment is split
@@ -1142,7 +1137,6 @@ func Load() *Config {
 	// TSA Pay merchant-payments platform.
 	cfg.TSAPayEnabled = getEnvBool("TSA_PAY_ENABLED", false)
 	cfg.TSAPayLiveEnabled = getEnvBool("TSA_PAY_LIVE_ENABLED", false)
-	cfg.TSAPayRefundsEnabled = getEnvBool("TSA_PAY_REFUNDS", false)
 	cfg.TSAPayWebhookMasterKey = strings.TrimSpace(getEnv("TSA_PAY_WEBHOOK_MASTER_KEY", ""))
 	checkoutBaseURL := strings.TrimSpace(getEnv("TSA_PAY_CHECKOUT_BASE_URL", ""))
 	if checkoutBaseURL == "" {

@@ -478,14 +478,9 @@ func TestLoad_TSAPayDefaultsOff(t *testing.T) {
 	t.Setenv("TSA_PAY_ENABLED", "")
 	t.Setenv("TSA_PAY_LIVE_ENABLED", "")
 	t.Setenv("TSA_PAY_CHECKOUT_BASE_URL", "")
-	t.Setenv("TSA_PAY_REFUNDS", "")
 	cfg := Load()
-	if cfg.TSAPayEnabled || cfg.TSAPayLiveEnabled || cfg.TSAPayRefundsEnabled {
-		t.Fatal("TSA Pay must default off, live mode and refunds doubly so")
-	}
-	t.Setenv("TSA_PAY_REFUNDS", "true")
-	if !Load().TSAPayRefundsEnabled {
-		t.Fatal("TSA_PAY_REFUNDS=true must turn refunds on")
+	if cfg.TSAPayEnabled || cfg.TSAPayLiveEnabled {
+		t.Fatal("TSA Pay must default off, live mode doubly so")
 	}
 	if cfg.TSAPayCheckoutBaseURL != "https://tsaconnectworld.com/pay" {
 		t.Fatalf("checkout base = %q", cfg.TSAPayCheckoutBaseURL)

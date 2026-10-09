@@ -714,7 +714,7 @@ func TestPayRefundAdmin_PaymentsListCarriesRefundTotals(t *testing.T) {
 	}
 }
 
-// With refunds off (no WithRefunds — TSA_PAY_REFUNDS unset) every owner and
+// With refunds off (no WithRefunds — no chain registry) every owner and
 // admin refund handler answers 503 refunds_unavailable before reading anything;
 // the payment views still carry refund totals.
 func TestPayRefund_OffAnswersRefundsUnavailableOnEveryRoute(t *testing.T) {

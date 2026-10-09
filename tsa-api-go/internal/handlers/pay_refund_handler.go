@@ -17,7 +17,7 @@ import (
 )
 
 // payRefundAPI is the slice of *services.PayRefundService the refund routes
-// need. Nil — refunds off (TSA_PAY_REFUNDS) or unwired — makes every refund
+// need. Nil — refunds unwired (no chain registry) — makes every refund
 // route answer 503 refunds_unavailable (refundsOn).
 type payRefundAPI interface {
 	Request(ctx context.Context, m *models.PayMerchant, mode string, paymentID uuid.UUID, in services.PayRefundRequest) (*models.PayRefund, error)
@@ -31,8 +31,7 @@ type payRefundAPI interface {
 	View(r *models.PayRefund) services.PayRefundView
 }
 
-// WithRefunds turns the refund routes on (cmd/server does only when
-// TSA_PAY_REFUNDS is set). Pass a real service or nothing — never a typed-nil
+// WithRefunds turns the refund routes on. Pass a real service or nothing — never a typed-nil
 // pointer, which would read as wired.
 func (h *PayHandler) WithRefunds(r payRefundAPI) *PayHandler {
 	h.refunds = r
@@ -43,7 +42,7 @@ func (h *PayHandler) WithRefunds(r payRefundAPI) *PayHandler {
 func (h *PayHandler) RefundsEnabled() bool { return h != nil && h.refunds != nil }
 
 // refundsOn is false, with 503 refunds_unavailable written, while refunds are
-// off. Every refund route asks it first: the routes stay mounted either way, so
+// unwired. Every refund route asks it first: the routes stay mounted either way, so
 // a client never reads a 404 as "no such refund".
 func (h *PayHandler) refundsOn(c *gin.Context) bool {
 	if h.RefundsEnabled() {

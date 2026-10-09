@@ -68,7 +68,7 @@ func payRefundRoutesCreate(r *gin.Engine, tok, paymentID, key string) *httptest.
 	return w
 }
 
-// With refunds off (TSA_PAY_REFUNDS unset, so cmd/server never wires them)
+// With refunds off (no chain registry, so cmd/server never wires them)
 // every owner and admin refund route is still mounted and answers 503
 // refunds_unavailable — never a 404 a client would read as a missing refund.
 func TestPayRefundRoutes_OffAnswersRefundsUnavailable(t *testing.T) {
