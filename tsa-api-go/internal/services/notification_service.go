@@ -2,6 +2,7 @@ package services
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 
 	"github.com/google/uuid"
@@ -196,6 +197,17 @@ func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailServ
 	return ns
 }
 
+// actedOnByRecipient reports whether the event's recipient is the user who
+// performed the action (data.actorId). They get the in-app row and WS frame so
+// their screen refreshes, but no push or email about their own action.
+func actedOnByRecipient(event events.Event) bool {
+	raw, ok := event.Data["actorId"]
+	if !ok || raw == nil {
+		return false
+	}
+	return fmt.Sprint(raw) == event.UserID.String()
+}
+
 func (ns *NotificationService) handleEvent(event events.Event) {
 	// Determine channel. P2P trade milestones also email (via a dedicated
 	// role-aware composer below), so mark them "both" on the record too.
@@ -230,6 +242,7 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 	}
 
 	live, byEmail := deliveryChannels(event.Type, user.MuteNotifications, user.MuteEmail)
+	selfActed := actedOnByRecipient(event)
 
 	// Push via WebSocket (unless muted)
 	if live {
@@ -244,13 +257,13 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 		ns.hub.SendToUser(event.UserID, wsPayload)
 
 		// Out-of-app Expo push for the curated set (async; best-effort).
-		if ns.push != nil && pushWorthy(event.Type) {
+		if ns.push != nil && pushWorthy(event.Type) && !selfActed {
 			go ns.sendPush(event)
 		}
 	}
 
 	// Email delivery (if applicable and not muted).
-	if byEmail && user.Email != "" && ns.emailService != nil {
+	if byEmail && !selfActed && user.Email != "" && ns.emailService != nil {
 		switch {
 		case p2pTradeEmailEvents[event.Type]:
 			// Rich, role-aware P2P trade email (loads the trade + composes per

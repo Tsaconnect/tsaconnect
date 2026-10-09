@@ -118,7 +118,7 @@ func (s *P2PTradeService) noticeVoucherRenewal(ctx context.Context, ad *models.P
 	if ad.VoucherDeadline != nil && ad.VoucherDeadline.Sub(now) <= poolVoucherRenewWindow {
 		when = "by " + ad.VoucherDeadline.UTC().Format("2 January 2006")
 	}
-	s.emit(events.LiquidityVoucherExpiring, ad.SellerID, "Renew your liquidity",
+	s.emit(events.LiquidityVoucherExpiring, ad.SellerID, uuid.Nil, "Renew your liquidity",
 		fmt.Sprintf("Your TSA Connect liquidity needs renewing %s. Open the app and renew so your %s stays in the pool.", when, ad.Token),
 		map[string]any{"adId": ad.ID})
 	return true, nil

@@ -12,6 +12,9 @@ package services
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"strings"
 	"testing"
 	"time"
@@ -196,5 +199,123 @@ func TestNotificationMaps_TheLiveSwitchIsEmailedAndPushedButMutable(t *testing.T
 		if live, email := deliveryChannels(kind, true, false); live || email {
 			t.Errorf("%s ignored a mute", kind)
 		}
+	}
+}
+
+// ─── API-18: the actor of a P2P event gets no push or email ──────────────────
+
+func TestActedOnByRecipient(t *testing.T) {
+	u := uuid.New()
+	cases := []struct {
+		name string
+		ev   events.Event
+		want bool
+	}{
+		{"actor is recipient", events.Event{UserID: u, Data: map[string]any{"actorId": u.String()}}, true},
+		{"actor as uuid value", events.Event{UserID: u, Data: map[string]any{"actorId": u}}, true},
+		{"counterparty", events.Event{UserID: u, Data: map[string]any{"actorId": uuid.New().String()}}, false},
+		{"system event", events.Event{UserID: u, Data: map[string]any{"tradeId": "x"}}, false},
+		{"nil data", events.Event{UserID: u}, false},
+	}
+	for _, tc := range cases {
+		if got := actedOnByRecipient(tc.ev); got != tc.want {
+			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestP2PEvent_ActorGetsNoPushButStillGetsTheFrame(t *testing.T) {
+	db := openNotifWSTestDB(t)
+	if err := db.Exec(`CREATE TABLE device_tokens (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+		user_id TEXT, token TEXT, platform TEXT, last_seen DATETIME, created_at DATETIME, updated_at DATETIME)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	var pushes int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&pushes, 1)
+		_, _ = w.Write([]byte(`{"data":[{"status":"ok"}]}`))
+	}))
+	defer srv.Close()
+	push := NewExpoPushService("")
+	push.url = srv.URL
+
+	actor, other := uuid.New(), uuid.New()
+	for i, u := range []uuid.UUID{actor, other} {
+		if err := db.Exec(`INSERT INTO users (id, name, email, mute_notifications, mute_email) VALUES (?,?,?,0,1)`,
+			u.String(), "U", "u@test.local").Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec(`INSERT INTO device_tokens (user_id, token) VALUES (?, ?)`,
+			u.String(), "ExponentPushToken[t"+string(rune('a'+i))+"]").Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	bus := events.NewBus()
+	defer bus.Stop()
+	hub := ws.NewHub()
+	actorClient := &ws.Client{Hub: hub, UserID: actor, Send: make(chan []byte, 16)}
+	otherClient := &ws.Client{Hub: hub, UserID: other, Send: make(chan []byte, 16)}
+	hub.Register <- actorClient
+	hub.Register <- otherClient
+	time.Sleep(50 * time.Millisecond)
+	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""), push)
+
+	tradeID := uuid.New().String()
+	data := map[string]any{"tradeId": tradeID, "actorId": actor.String()}
+	bus.Publish(events.Event{Type: events.P2PTradePaid, UserID: actor, Title: "Buyer marked payment sent", Data: data})
+
+	select {
+	case raw := <-actorClient.Send:
+		var frame struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame.Data["actorId"] != actor.String() {
+			t.Fatalf("frame lacks data.actorId: %v", frame.Data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("actor still needs the WS frame to refresh")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := atomic.LoadInt32(&pushes); n != 0 {
+		t.Fatalf("actor got %d push(es)", n)
+	}
+
+	// Control: the counterparty of the same action is still pushed.
+	bus.Publish(events.Event{Type: events.P2PTradePaid, UserID: other, Title: "Buyer marked payment sent", Data: data})
+	select {
+	case <-otherClient.Send:
+	case <-time.After(2 * time.Second):
+		t.Fatal("counterparty got no WS frame")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&pushes) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := atomic.LoadInt32(&pushes); n != 1 {
+		t.Fatalf("counterparty pushes = %d, want 1", n)
+	}
+}
+
+func TestP2PTradeServiceEmit_TagsTheActor(t *testing.T) {
+	bus := &mockBus{}
+	s := &P2PTradeService{bus: bus}
+	actor, other := uuid.New(), uuid.New()
+	orig := map[string]any{"tradeId": "t1"}
+
+	s.emit(events.P2PTradePaid, other, actor, "x", "", orig)
+	s.emit(events.P2PTradeReleased, other, uuid.Nil, "y", "", map[string]any{"tradeId": "t1"})
+
+	if got := bus.published[0].Data["actorId"]; got != actor.String() {
+		t.Fatalf("actorId = %v, want %s", got, actor)
+	}
+	if _, tagged := orig["actorId"]; tagged {
+		t.Fatal("emit mutated the caller's map")
+	}
+	if _, ok := bus.published[1].Data["actorId"]; ok {
+		t.Fatalf("system event must carry no actorId: %v", bus.published[1].Data)
 	}
 }

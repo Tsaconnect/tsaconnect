@@ -190,7 +190,7 @@ func (s *P2PTradeService) createPoolAd(ctx context.Context, lp *models.PaymentMe
 	s.audit(ctx, models.P2PAuditAdCreated, &sellerID, &ad.ID, nil, map[string]any{
 		"token": ad.Token, "amount": ad.Amount, "voucherHash": ad.VoucherHash, "pool": true, "chainId": chainID,
 	})
-	s.emit(events.P2PAdCreated, sellerID, "Liquidity stock ad created", "", map[string]any{"adId": ad.ID, "status": ad.Status})
+	s.emit(events.P2PAdCreated, sellerID, sellerID, "Liquidity stock ad created", "", map[string]any{"adId": ad.ID, "status": ad.Status})
 	return &CreateAdResult{Ad: ad, TypedData: s.buildVoucherTypedData(voucher, escrow.ContractAddress(), domainChainID, version)}, nil
 }
 

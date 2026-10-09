@@ -802,7 +802,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		"rate":        ad.Rate,
 		"voucherHash": ad.VoucherHash,
 	})
-	s.emit(events.P2PAdCreated, sellerID, "P2P ad created", "", map[string]any{"adId": ad.ID, "status": ad.Status})
+	s.emit(events.P2PAdCreated, sellerID, sellerID, "P2P ad created", "", map[string]any{"adId": ad.ID, "status": ad.Status})
 
 	return &CreateAdResult{Ad: ad, TypedData: typedData}, nil
 }
@@ -932,7 +932,7 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 		"amount": ad.Amount,
 		"rate":   ad.Rate,
 	})
-	s.emit(events.P2PAdCreated, merchantID, "P2P buy ad live", "", map[string]any{"adId": ad.ID, "status": ad.Status})
+	s.emit(events.P2PAdCreated, merchantID, merchantID, "P2P buy ad live", "", map[string]any{"adId": ad.ID, "status": ad.Status})
 
 	// No typed data — buy-ads have no voucher to sign.
 	return &CreateAdResult{Ad: ad, TypedData: nil}, nil
@@ -1042,7 +1042,7 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	s.audit(ctx, models.P2PAuditAdSigned, &sellerID, &ad.ID, nil, map[string]any{
 		"voucherHash": ad.VoucherHash,
 	})
-	s.emit(events.P2PAdCreated, sellerID, "P2P ad live", "", map[string]any{"adId": ad.ID, "status": "active"})
+	s.emit(events.P2PAdCreated, sellerID, sellerID, "P2P ad live", "", map[string]any{"adId": ad.ID, "status": "active"})
 	return &ad, nil
 }
 
@@ -1154,7 +1154,7 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 	ad.Status = models.P2PAdStatusCancelled
 	ad.Remaining = "0"
 	s.audit(ctx, models.P2PAuditAdClosed, &sellerID, &ad.ID, nil, map[string]any{"txHash": txHash})
-	s.emit(events.P2PAdClosed, sellerID, "P2P ad closed", "", map[string]any{"adId": ad.ID})
+	s.emit(events.P2PAdClosed, sellerID, sellerID, "P2P ad closed", "", map[string]any{"adId": ad.ID})
 	return &ad, nil
 }
 
@@ -1211,7 +1211,7 @@ func (s *P2PTradeService) CancelBuyAd(ctx context.Context, adID, merchantID uuid
 	ad.Status = models.P2PAdStatusCancelled
 	ad.Remaining = "0"
 	s.audit(ctx, models.P2PAuditAdClosed, &merchantID, &ad.ID, nil, map[string]any{"side": "buy"})
-	s.emit(events.P2PAdClosed, merchantID, "P2P buy ad cancelled", "", map[string]any{"adId": ad.ID})
+	s.emit(events.P2PAdClosed, merchantID, merchantID, "P2P buy ad cancelled", "", map[string]any{"adId": ad.ID})
 	return &ad, nil
 }
 
@@ -1255,7 +1255,7 @@ func (s *P2PTradeService) flipAdStatus(ctx context.Context, adID, sellerID uuid.
 		return fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
 	}
 	s.audit(ctx, action, &sellerID, &ad.ID, nil, nil)
-	s.emit(event, sellerID, "", "", map[string]any{"adId": ad.ID})
+	s.emit(event, sellerID, sellerID, "", "", map[string]any{"adId": ad.ID})
 	return nil
 }
 
@@ -1470,10 +1470,10 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		"tokenAmount": trade.TokenAmount,
 		"fiatAmount":  trade.FiatAmount,
 	})
-	s.emit(events.P2PTradeOpened, buyerID, "P2P trade opened", "", map[string]any{
+	s.emit(events.P2PTradeOpened, buyerID, buyerID, "P2P trade opened", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID,
 	})
-	s.emit(events.P2PTradeOpened, ad.SellerID, "Buyer opened a trade on your ad", "", map[string]any{
+	s.emit(events.P2PTradeOpened, ad.SellerID, buyerID, "Buyer opened a trade on your ad", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID,
 	})
 	s.systemMsg(ctx, trade.ID, fmt.Sprintf(
@@ -1670,10 +1670,10 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		"tokenAmount": trade.TokenAmount,
 		"fiatAmount":  trade.FiatAmount,
 	})
-	s.emit(events.P2PTradeOpened, openerID, "P2P trade opened", "", map[string]any{
+	s.emit(events.P2PTradeOpened, openerID, openerID, "P2P trade opened", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID, "side": "buy",
 	})
-	s.emit(events.P2PTradeOpened, ad.SellerID, "A user opened a trade on your buy ad", "", map[string]any{
+	s.emit(events.P2PTradeOpened, ad.SellerID, openerID, "A user opened a trade on your buy ad", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID, "side": "buy",
 	})
 	s.systemMsg(ctx, trade.ID, fmt.Sprintf(
@@ -1895,8 +1895,8 @@ func (s *P2PTradeService) markPaidCore(ctx context.Context, t *models.P2PTrade, 
 	t.MarkedPaidAt = &now
 	t.UpdatedAt = now
 	s.audit(ctx, models.P2PAuditTradeMarkedPaid, actor, &t.AdID, &t.ID, meta)
-	s.emit(events.P2PTradePaid, t.BuyerID, "Buyer marked payment sent", "", map[string]any{"tradeId": t.ID})
-	s.emit(events.P2PTradePaid, t.SellerID, "Buyer marked payment sent — please confirm", "", map[string]any{"tradeId": t.ID})
+	s.emit(events.P2PTradePaid, t.BuyerID, actorOf(actor), "Buyer marked payment sent", "", map[string]any{"tradeId": t.ID})
+	s.emit(events.P2PTradePaid, t.SellerID, actorOf(actor), "Buyer marked payment sent — please confirm", "", map[string]any{"tradeId": t.ID})
 	s.systemMsg(ctx, t.ID, "Buyer marked payment as sent. Seller — verify your bank and release.")
 	return true, nil
 }
@@ -1950,7 +1950,7 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 			return nil, ErrInvalidTransition
 		}
 		s.audit(ctx, models.P2PAuditTradeReleasing, &sellerID, &trade.AdID, &trade.ID, nil)
-		s.emit(events.P2PTradeReleasing, sellerID, "Releasing USDT…", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleasing, sellerID, sellerID, "Releasing USDT…", "", map[string]any{"tradeId": trade.ID})
 		// Notify the buyer too — they should know their funds are on the way as
 		// soon as the seller starts releasing, not only once it confirms. (The
 		// other lifecycle steps already notify both parties; release-start was
@@ -1960,7 +1960,7 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 		if trade.Funding == models.P2PTradeFundingDepositedByTaker {
 			buyerReleasingMsg = "The seller is releasing the crypto — it should arrive shortly."
 		}
-		s.emit(events.P2PTradeReleasing, trade.BuyerID, "Release in progress", buyerReleasingMsg, map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleasing, trade.BuyerID, sellerID, "Release in progress", buyerReleasingMsg, map[string]any{"tradeId": trade.ID})
 	} else {
 		// Retry path: trade was already Releasing. Bump updated_at so the
 		// chain reconciler's stale-release rollback window resets — protects
@@ -2096,13 +2096,13 @@ func (s *P2PTradeService) confirmReleaseCore(ctx context.Context, trade *models.
 		"amountToBuyer": ev.AmountToBuyer.String(),
 		"feeToSystem":   ev.FeeToSystem.String(),
 	})
-	s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released", "", map[string]any{"tradeId": trade.ID})
+	s.emit(events.P2PTradeReleased, trade.SellerID, actorOf(auditActor), "Trade released", "", map[string]any{"tradeId": trade.ID})
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received in your wallet", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "Crypto received in your wallet", "", map[string]any{"tradeId": trade.ID})
 		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to merchant; %s in platform fee.",
 			ev.AmountToBuyer, ev.FeeToSystem))
 	} else {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received in your wallet", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "USDT received in your wallet", "", map[string]any{"tradeId": trade.ID})
 		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to buyer; %s in platform fee.",
 			ev.AmountToBuyer, ev.FeeToSystem))
 	}
@@ -2400,18 +2400,18 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
 		// On a buy-ad the SellerID is the depositing user (crypto returned to
 		// their wallet); the BuyerID is the merchant.
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled — crypto returned to your wallet",
+		s.emit(events.P2PTradeCancelled, trade.SellerID, userID, "Trade cancelled — crypto returned to your wallet",
 			"", map[string]any{"tradeId": trade.ID})
 		if trade.BuyerID != trade.SellerID {
-			s.emit(events.P2PTradeCancelled, trade.BuyerID, "Trade cancelled (timed out)",
+			s.emit(events.P2PTradeCancelled, trade.BuyerID, userID, "Trade cancelled (timed out)",
 				"", map[string]any{"tradeId": trade.ID})
 		}
 		s.systemMsg(ctx, trade.ID, "Trade cancelled after 30-minute payment window expired. Crypto returned to the seller's wallet.")
 	} else {
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled — funds returned to your ad",
+		s.emit(events.P2PTradeCancelled, trade.SellerID, userID, "Trade cancelled — funds returned to your ad",
 			"", map[string]any{"tradeId": trade.ID})
 		if trade.BuyerID != trade.SellerID {
-			s.emit(events.P2PTradeCancelled, trade.BuyerID, "Trade cancelled (timed out)",
+			s.emit(events.P2PTradeCancelled, trade.BuyerID, userID, "Trade cancelled (timed out)",
 				"", map[string]any{"tradeId": trade.ID})
 		}
 		s.systemMsg(ctx, trade.ID, "Trade cancelled after 30-minute payment window expired. Funds returned to seller's ad.")
@@ -2600,7 +2600,7 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	// "funds frozen" chat message fire in ConfirmRaiseDispute — after the dispute
 	// is actually on chain — so a never-broadcast prepare can't signal the
 	// counter-party or freeze the trade chat.
-	s.emit(events.P2PTradeDisputed, userID, "Dispute prepared — sign to submit", "", map[string]any{
+	s.emit(events.P2PTradeDisputed, userID, userID, "Dispute prepared — sign to submit", "", map[string]any{
 		"tradeId": trade.ID, "role": role,
 	})
 
@@ -2675,7 +2675,7 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 	// settle, making it hard to investigate disputes after the fact.
 	s.audit(ctx, models.P2PAuditTradeDisputeConfirmed, &userID, &trade.AdID, &trade.ID,
 		map[string]any{"txHash": txHash})
-	s.emit(events.P2PTradeDisputed, userID, "Dispute confirmed on chain", "",
+	s.emit(events.P2PTradeDisputed, userID, userID, "Dispute confirmed on chain", "",
 		map[string]any{"tradeId": trade.ID})
 	// Now that the dispute is on chain, notify the counter-party and freeze the
 	// trade chat (deferred from PrepareRaiseDispute).
@@ -2683,7 +2683,7 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 	if userID == trade.SellerID {
 		other = trade.BuyerID
 	}
-	s.emit(events.P2PTradeDisputed, other, "Counter-party opened a dispute on this trade", "",
+	s.emit(events.P2PTradeDisputed, other, userID, "Counter-party opened a dispute on this trade", "",
 		map[string]any{"tradeId": trade.ID})
 	s.systemMsg(ctx, trade.ID, "A dispute has been opened. Funds are frozen pending admin review.")
 	s.alertDisputeFiled(ctx, &trade, prior, false)
@@ -2892,9 +2892,9 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 		"amountMoved":     ev.AmountMoved.String(),
 		"feeToSystem":     ev.FeeToSystem.String(),
 	})
-	s.emit(events.P2PTradeResolved, trade.BuyerID, "Dispute resolved", "",
+	s.emit(events.P2PTradeResolved, trade.BuyerID, adminID, "Dispute resolved", "",
 		map[string]any{"tradeId": trade.ID, "releasedToBuyer": ev.ReleasedToBuyer})
-	s.emit(events.P2PTradeResolved, trade.SellerID, "Dispute resolved", "",
+	s.emit(events.P2PTradeResolved, trade.SellerID, adminID, "Dispute resolved", "",
 		map[string]any{"tradeId": trade.ID, "releasedToBuyer": ev.ReleasedToBuyer})
 	buyAd := trade.Funding == models.P2PTradeFundingDepositedByTaker
 	switch {
@@ -3194,11 +3194,11 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 		"funding": funding,
 		"reason":  "chain Released",
 	})
-	s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	s.emit(events.P2PTradeReleased, trade.SellerID, uuid.Nil, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
 	if funding == models.P2PTradeFundingDepositedByTaker {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleased, trade.BuyerID, uuid.Nil, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
 	} else {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleased, trade.BuyerID, uuid.Nil, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusReleased,
 		Reason: "chain Released"}, nil
@@ -3271,9 +3271,9 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 	})
 	if funding == models.P2PTradeFundingDepositedByTaker {
 		// SellerID is the depositing user — crypto returned to their wallet.
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeCancelled, trade.SellerID, uuid.Nil, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
 	} else {
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeCancelled, trade.SellerID, uuid.Nil, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
 	}
 	if from == models.P2PTradeStatusPaid || from == models.P2PTradeStatusReleasing {
 		s.alert(ctx, P2PAlertPaidTradeCancelled, trade, func(a *P2PAlert) { a.FromStatus = from })
@@ -4340,7 +4340,7 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 		"chainId": chainID,
 	})
 	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
-	s.emit(events.P2PDepositConfirmed, sellerID, "Deposit confirmed", "",
+	s.emit(events.P2PDepositConfirmed, sellerID, sellerID, "Deposit confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil
 }
@@ -4420,7 +4420,7 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 		"chainId": chainID,
 	})
 	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
-	s.emit(events.P2PWithdrawConfirmed, sellerID, "Withdrawal confirmed", "",
+	s.emit(events.P2PWithdrawConfirmed, sellerID, sellerID, "Withdrawal confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil
 }
@@ -4597,9 +4597,30 @@ func (s *P2PTradeService) audit(ctx context.Context, action string, actorID *uui
 	}
 }
 
-func (s *P2PTradeService) emit(eventType string, userID uuid.UUID, title, message string, data map[string]any) {
+// actorOf is the acting user of an audit-style *uuid.UUID, uuid.Nil when the
+// transition was driven by the system (reconciler).
+func actorOf(actor *uuid.UUID) uuid.UUID {
+	if actor == nil {
+		return uuid.Nil
+	}
+	return *actor
+}
+
+// emit publishes a P2P bus event to userID. actorID is the user who performed
+// the action (uuid.Nil for system/reconciler events); it rides in
+// data["actorId"] so the notification router can skip push/email for the actor
+// and the app can tell its own actions from the counterparty's.
+func (s *P2PTradeService) emit(eventType string, userID, actorID uuid.UUID, title, message string, data map[string]any) {
 	if s.bus == nil {
 		return
+	}
+	if actorID != uuid.Nil {
+		tagged := make(map[string]any, len(data)+1)
+		for k, v := range data {
+			tagged[k] = v
+		}
+		tagged["actorId"] = actorID.String()
+		data = tagged
 	}
 	s.bus.Publish(events.Event{
 		Type:    eventType,
