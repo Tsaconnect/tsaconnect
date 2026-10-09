@@ -347,12 +347,7 @@ const AdDetailScreen: React.FC = () => {
 
       setSubmitStage('Confirming on chain…');
       const confirmRes = await tradesApi.confirmOpen(trade.id, txHash, buyerAddress);
-      if (!confirmRes.success) {
-        throw new Error(
-          (confirmRes.message || 'Confirm failed') +
-            ' — the chain reconciler will catch up automatically.'
-        );
-      }
+      if (!confirmRes.success) openStillConfirming(confirmRes.message);
 
       router.replace(`/p2p/trade/${trade.id}`);
     } catch (err: any) {
@@ -508,12 +503,7 @@ const AdDetailScreen: React.FC = () => {
 
       setSubmitStage('Confirming on chain…');
       const confirmRes = await tradesApi.confirmOpen(trade.id, txHash, sellerAddress);
-      if (!confirmRes.success) {
-        throw new Error(
-          (confirmRes.message || 'Confirm failed') +
-            ' — the chain reconciler will catch up automatically.',
-        );
-      }
+      if (!confirmRes.success) openStillConfirming(confirmRes.message);
 
       router.replace(`/p2p/trade/${trade.id}`);
     } catch (err: any) {
@@ -928,5 +918,20 @@ const AdDetailScreen: React.FC = () => {
     </SafeAreaView>
   );
 };
+
+// The open is broadcast but the confirm didn't record it. The trade exists, so
+// the caller still lands on it: the API backfills a lost open from the chain,
+// and the trade screen shows it confirming. Only a reverted receipt means no
+// escrow — that one throws to the caller's "Could not open trade".
+function openStillConfirming(message: string | undefined): void {
+  if (/transaction reverted on chain/i.test(message ?? '')) {
+    throw new Error('The network rejected the escrow transaction, so nothing was locked. Try again.');
+  }
+  Alert.alert(
+    'Trade opened — still confirming',
+    'Your escrow transaction was sent but isn’t recorded yet. It should be picked up shortly — ' +
+      'don’t open the trade again.',
+  );
+}
 
 export default AdDetailScreen;

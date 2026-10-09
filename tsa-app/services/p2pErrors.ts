@@ -51,6 +51,14 @@ const RULES: [RegExp, string][] = [
   [/ad has open trades/i, 'This ad has trades in progress. Wait for them to finish first.'],
 ];
 
+// The escrow's party checks, as a revert from the server's gas estimate (the
+// estimate runs as the signing wallet): V1/V2 strings "Only buyer"/"Only
+// seller", V3 custom errors OnlyBuyer()/OnlySeller()/NotAParty() by name or
+// selector. On a trade it means the active wallet is not the one that opened it.
+const WRONG_WALLET = /\bonly ?(buyer|seller)\b|\bNotAParty\b|0x86efbb55|0x85d1f726|0xc749b689/i;
+const WRONG_WALLET_COPY =
+  'This trade belongs to a different wallet. Switch to the wallet you used for this trade and try again.';
+
 function rateBandCopy(data: unknown): string {
   const { minRate, maxRate } = (data ?? {}) as { minRate?: unknown; maxRate?: unknown };
   if (minRate != null && maxRate != null) return `Rate must be between ${minRate} and ${maxRate}.`;
@@ -72,6 +80,7 @@ export function p2pErrorMessage(
       ? "You've hit the daily limit for gas top-ups. Try again tomorrow."
       : 'Too many requests. Wait a moment and try again.';
   }
+  if (/revert/i.test(raw) && WRONG_WALLET.test(raw)) return WRONG_WALLET_COPY;
   for (const [re, copy] of RULES) if (re.test(raw)) return copy;
   if (r.status == null && CLIENT_TIMEOUT.test(raw)) return TIMEOUT_COPY;
   if (decodeRevertError(raw)) {

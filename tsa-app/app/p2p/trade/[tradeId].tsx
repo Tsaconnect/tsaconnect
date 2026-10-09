@@ -75,12 +75,23 @@ import {
   type P2PTrade,
   type UnsignedTx,
 } from '../../../services/p2p';
-import { runP2PTx, txOutcomeAlert } from '../../../services/p2pTx';
+import { retryStashedConfirm, runP2PTx, txOutcomeAlert, type RunP2PTxResult } from '../../../services/p2pTx';
+import { listPendingForTrade, removePending, type PendingTradeTx } from '../../../services/p2pPending';
 import { p2pErrorMessage, p2pKycCode } from '../../../services/p2pErrors';
 import { getActiveWallet } from '../../../services/wallet';
 import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { confirmAsync } from '../../../utils/confirmAsync';
-import { RELEASE_CONFIRM_TITLE, releaseConfirmMessage, tradeActions, tradeFeeLines, tradeTxFollowUp } from '../../../utils/p2pTradeView';
+import {
+  markPaidConfirmMessage,
+  pendingTradeTxCopy,
+  RELEASE_CONFIRM_TITLE,
+  releaseConfirmMessage,
+  splitPendingTradeTxs,
+  tradeActions,
+  tradeFeeLines,
+  tradeTxFollowUp,
+  type TradeActions,
+} from '../../../utils/p2pTradeView';
 import { getAuthHeaders } from '../../../services/walletApi';
 
 // Slow safety reconcile — the fast path is WS events (useTradeRealtime). This
@@ -110,6 +121,13 @@ const TradeDetailScreen: React.FC = () => {
   // Dispute for this trade — fetched lazily on a resolved trade so we can show
   // the on-chain resolution tx (resolveTxHash lives on the dispute, not trade).
   const [dispute, setDispute] = useState<P2PDispute | null>(null);
+  // A trade tx this device sent whose confirm was lost (runP2PTx `stash`):
+  // shown with a retry instead of re-offering the action.
+  const [pendingTx, setPendingTx] = useState<PendingTradeTx | null>(null);
+  // Proof uploaded per trade this session, so a retried mark-paid doesn't
+  // re-pick or re-upload it.
+  const proofUrlsRef = useRef<Record<string, string>>({});
+  const toast = useToast();
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   // Chat is collapsed by default — it's secondary to the trade actions. The
@@ -292,6 +310,28 @@ const TradeDetailScreen: React.FC = () => {
     };
   }, [trade?.status, tradeId]);
 
+  // Re-read this trade's stash on every refresh: a failed action stashes
+  // before its reload lands, the trade moving past a stashed tx (confirm,
+  // retry, reconciler or backfill) drops it, and a stale one ages out.
+  useEffect(() => {
+    if (!trade) return;
+    let cancelled = false;
+    (async () => {
+      const { active, settled } = splitPendingTradeTxs(await listPendingForTrade(trade.id), trade, Date.now());
+      for (const rec of settled) {
+        try {
+          await removePending(rec.txHash);
+        } catch (err) {
+          console.warn('[trade] drop settled stash failed', err);
+        }
+      }
+      if (!cancelled) setPendingTx(active);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [trade]);
+
   if (loading || !trade) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -331,19 +371,34 @@ const TradeDetailScreen: React.FC = () => {
 
   const tokenDecimals = p2pTokenDecimals(trade.chainId, trade.token);
   const feeLines = tradeFeeLines(trade, role, tokenDecimals);
+  const view = tradeActions(trade, role, Date.now(), pendingTx?.mode);
+  const pendingCopy = pendingTx ? pendingTradeTxCopy(pendingTx) : null;
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
+  // Holds the action slot from the tap — before any dialog or await — so a fast
+  // double tap can't start a second flow (React state would still read the old
+  // value). Every user action on this trade goes through it.
+  const withActing = async (fn: () => Promise<void>) => {
+    if (actingRef.current) return;
+    actingRef.current = 'Starting…';
+    try {
+      await fn();
+    } finally {
+      stopActing();
+    }
+  };
+
   // One path for every on-chain trade action (gas → prepare → sign →
   // broadcast → wait mined → confirm). Once broadcast, only a reverted receipt
-  // reads as "failed" — anything else is "sent, still confirming".
+  // reads as "failed" — anything else is "sent, still confirming", and the
+  // stashed hash puts the confirming card (with a retry) in place of the action.
   const runTradeTx = async (
     label: string,
     action: 'mark_paid' | 'release' | 'cancel_trade',
     prepare: (wallet: string) => Promise<ApiResponse<{ unsignedTx: UnsignedTx | null }>>,
     confirm: (txHash: string) => Promise<ApiResponse<P2PTrade>>,
-  ) => {
-    let keepActing = false;
+  ): Promise<RunP2PTxResult<unknown, P2PTrade>['status'] | undefined> => {
     try {
       startActing('Loading wallet…');
       const wallet = await getActiveWallet();
@@ -356,81 +411,106 @@ const TradeDetailScreen: React.FC = () => {
         onStage: startActing,
         prepare: () => prepare(wallet),
         confirm: (txHash) => confirm(txHash),
+        stash: () => ({ mode: action, tradeId: trade.id, token: trade.token, amount: trade.tokenAmount }),
       });
-      if (r.status === 'refused' && promptKycRefusal(p2pKycCode(r.response), r.response.message)) return;
+      if (r.status === 'refused' && promptKycRefusal(p2pKycCode(r.response), r.response.message)) return r.status;
       const next = tradeTxFollowUp(r);
-      keepActing = next.keepActing;
       if (next.trade) setTrade(next.trade);
       const alert = txOutcomeAlert(label, r);
       if (alert) Alert.alert(alert.title, alert.message);
       if (next.reload) load();
+      return r.status;
     } catch (err: any) {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
       Alert.alert(`${label} failed`, p2pErrorMessage(err?.message));
-    } finally {
-      if (!keepActing) stopActing();
+      return undefined;
     }
   };
 
-  const handleMarkPaid = async () => {
-    if (acting) return;
-    // Guardrail: marking paid is irreversible and signals the seller to release.
-    const confirmed = await confirmAsync(
-      'Confirm fiat payment',
-      `Only tap "I have paid" after the transfer is sent. The seller will release your ${trade.token} ` +
-        'based on your confirmation, and this cannot be undone.',
-      'I have paid',
-      'Not yet',
-      true,
-    );
-    if (!confirmed) return;
+  const handleMarkPaid = () =>
+    withActing(async () => {
+      // Guardrail: marking paid is irreversible and signals the seller to release.
+      const windowEnded = new Date(trade.expiresAt).getTime() < Date.now();
+      const confirmed = await confirmAsync(
+        'Confirm fiat payment',
+        markPaidConfirmMessage(trade.token, windowEnded),
+        'I have paid',
+        'Not yet',
+        true,
+      );
+      if (!confirmed) return;
 
-    // The payer must upload payment proof before flipping state.
-    const proofUrl = await pickAndUploadImage(startActing);
-    if (!proofUrl) {
-      stopActing();
-      return;
-    }
-    // R1: markPaid(tradeId) is signed by the fiat payer (the chain buyer) so the
-    // seller can no longer cancelByTimeout. The signing wallet goes as
-    // callerAddress: on a buy-ad the payer's chain buyer is the ad's seller
-    // address, not their registered wallet. The DB flips to paid only after the
-    // server sees the receipt and the TradePaid log.
-    await runTradeTx(
-      'Mark paid',
-      'mark_paid',
-      (w) => tradesApi.prepareMarkPaid(trade.id, proofUrl, w),
-      (h) => tradesApi.confirmMarkPaid(trade.id, h),
-    );
-  };
+      // The payer must upload payment proof before flipping state.
+      let proofUrl: string | null = proofUrlsRef.current[trade.id] ?? null;
+      if (!proofUrl) {
+        proofUrl = await pickAndUploadImage(startActing);
+        if (!proofUrl) return;
+        proofUrlsRef.current[trade.id] = proofUrl;
+      }
+      const url = proofUrl;
+      // R1: markPaid(tradeId) is signed by the fiat payer (the chain buyer) so
+      // the seller can no longer cancelByTimeout. The signing wallet goes as
+      // callerAddress: on a buy-ad the payer's chain buyer is the ad's seller
+      // address, not their registered wallet. The DB flips to paid only after
+      // the server sees the receipt and the TradePaid log.
+      const status = await runTradeTx(
+        'Mark paid',
+        'mark_paid',
+        (w) => tradesApi.prepareMarkPaid(trade.id, url, w),
+        (h) => tradesApi.confirmMarkPaid(trade.id, h),
+      );
+      if (status === 'confirmed') delete proofUrlsRef.current[trade.id];
+    });
 
-  const handleRelease = async () => {
-    if (acting) return;
-    const ok = await confirmAsync(
-      RELEASE_CONFIRM_TITLE,
-      releaseConfirmMessage(trade, tokenDecimals),
-      'Yes, release',
-      'Not yet',
-      true,
-    );
-    if (!ok) return;
-    await runTradeTx(
-      'Release',
-      'release',
-      (w) => tradesApi.prepareRelease(trade.id, w),
-      (h) => tradesApi.confirmRelease(trade.id, h),
-    );
-  };
+  const handleRelease = () =>
+    withActing(async () => {
+      const ok = await confirmAsync(
+        RELEASE_CONFIRM_TITLE,
+        releaseConfirmMessage(trade, tokenDecimals),
+        'Yes, release',
+        'Not yet',
+        true,
+      );
+      if (!ok) return;
+      await runTradeTx(
+        'Release',
+        'release',
+        (w) => tradesApi.prepareRelease(trade.id, w),
+        (h) => tradesApi.confirmRelease(trade.id, h),
+      );
+    });
 
-  const handleCancel = async () => {
-    if (acting) return;
-    await runTradeTx(
-      'Cancel',
-      'cancel_trade',
-      (w) => tradesApi.prepareCancel(trade.id, w),
-      (h) => tradesApi.confirmCancel(trade.id, h),
-    );
-  };
+  const handleCancel = () =>
+    withActing(async () => {
+      await runTradeTx(
+        'Cancel',
+        'cancel_trade',
+        (w) => tradesApi.prepareCancel(trade.id, w),
+        (h) => tradesApi.confirmCancel(trade.id, h),
+      );
+    });
+
+  // Re-send the lost confirm with the stashed hash — nothing is signed again.
+  const handleRetryConfirm = () =>
+    withActing(async () => {
+      const rec = pendingTx;
+      if (!rec) return;
+      const { label } = pendingTradeTxCopy(rec);
+      startActing('Checking the network…');
+      const r = await retryStashedConfirm(rec);
+      if (r.status === 'confirmed') {
+        setPendingTx(null);
+        if (r.data) setTrade(r.data);
+        toast.success(`${label} confirmed`);
+      } else if (r.status === 'reverted') {
+        setPendingTx(null);
+        const a = txOutcomeAlert(label, { status: 'reverted', txHash: rec.txHash, prepared: null });
+        if (a) Alert.alert(a.title, a.message);
+      } else {
+        Alert.alert('Still confirming', r.message);
+      }
+      load();
+    });
 
   const handleSendMessage = async () => {
     if (composerImage) {
@@ -565,11 +645,37 @@ const TradeDetailScreen: React.FC = () => {
             )}
           </Card>
 
+          {view.openUnconfirmed && (
+            <AccentCard railColor={colors.warning} padding="md" style={{ marginTop: spacing.lg, gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700">
+                Escrow still confirming
+              </Text>
+              <Text variant="bodySm" color="textSecondary">
+                {pendingTx?.mode === 'open' && pendingCopy
+                  ? pendingCopy.body
+                  : 'Waiting for the network to confirm the escrow. This usually takes under a minute and updates on its own.'}
+              </Text>
+              {pendingTx?.mode === 'open' && (
+                <Button
+                  title="Retry confirm"
+                  size="sm"
+                  fullWidth={false}
+                  loading={!!acting}
+                  disabled={!!acting}
+                  onPress={handleRetryConfirm}
+                />
+              )}
+            </AccentCard>
+          )}
+
           {!isTerminal && (
             <ActionPanel
               role={role}
               trade={trade}
+              view={view}
               acting={acting}
+              confirming={view.confirmingTx ? pendingCopy : null}
+              onRetryConfirm={handleRetryConfirm}
               onMarkPaid={handleMarkPaid}
               onRelease={handleRelease}
               onCancel={handleCancel}
@@ -855,16 +961,19 @@ const StatusTimeline: React.FC<{ status: P2PTrade['status'] }> = ({ status }) =>
 const ActionPanel: React.FC<{
   role: 'buyer' | 'seller';
   trade: P2PTrade;
+  /** tradeActions for this trade and viewer. PM trades are automated (the
+   *  backend drives markPaid + release); a dormant PM falls back to manual. */
+  view: TradeActions;
   acting: string;
+  /** A sent action still confirming: shown in place of the action buttons. */
+  confirming: { title: string; body: string } | null;
+  onRetryConfirm: () => void;
   onMarkPaid: () => void;
   onRelease: () => void;
   onCancel: () => void;
   onDispute: () => void;
-}> = ({ role, trade, acting, onMarkPaid, onRelease, onCancel, onDispute }) => {
+}> = ({ role, trade, view: a, acting, confirming, onRetryConfirm, onMarkPaid, onRelease, onCancel, onDispute }) => {
   const { colors, spacing } = useTheme();
-  // PM trades are automated (the backend drives markPaid + release); a dormant
-  // PM (no inbound account) falls back to the manual flow. See tradeActions.
-  const a = tradeActions(trade, role, Date.now());
   return (
     <View style={{ marginTop: spacing.lg }}>
       {acting ? (
@@ -908,6 +1017,17 @@ const ActionPanel: React.FC<{
             <Text variant="caption" color="textMuted" align="center">
               Automated settlement unavailable — proceed manually.
             </Text>
+          )}
+          {confirming && (
+            <AccentCard railColor={colors.warning} padding="md" style={{ gap: spacing.sm }}>
+              <Text variant="bodyMed" weight="700">
+                {confirming.title}
+              </Text>
+              <Text variant="bodySm" color="textSecondary">
+                {confirming.body}
+              </Text>
+              <Button title="Retry confirm" size="sm" fullWidth={false} onPress={onRetryConfirm} />
+            </AccentCard>
           )}
           {a.sellerAwaitingPayment && (
             <Text variant="bodySm" color="textSecondary" align="center">

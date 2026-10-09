@@ -25,6 +25,7 @@ import {
   addPending,
   findPendingOpen,
   listPending,
+  listPendingForTrade,
   removePending,
   type PendingEscrowConfirm,
 } from '../p2pPending';
@@ -150,5 +151,18 @@ describe("mode 'open' (a trade open whose confirm was lost)", () => {
     expect((await findPendingOpen('trade-1'))?.txHash).toBe('0xopen');
     expect(await findPendingOpen('trade-2')).toBeNull();
     expect((await listPending('deposit', '0xWALLET')).map((r) => r.txHash)).toEqual(['0xdep']);
+  });
+});
+
+describe('trade-action modes (lost mark-paid / release / cancel confirms)', () => {
+  it('lists every stashed tx for one trade and keeps them out of deposit/withdraw lists', async () => {
+    await addPending(rec({ mode: 'open', txHash: '0xopen', tradeId: 'trade-1' }));
+    await addPending(rec({ mode: 'mark_paid', txHash: '0xpaid', tradeId: 'trade-1' }));
+    await addPending(rec({ mode: 'release', txHash: '0xrel', tradeId: 'trade-2' }));
+    await addPending(rec({ mode: 'deposit', txHash: '0xdep' }));
+    expect((await listPendingForTrade('trade-1')).map((r) => r.txHash)).toEqual(['0xopen', '0xpaid']);
+    expect(await listPendingForTrade('trade-3')).toEqual([]);
+    expect((await listPending('deposit', '0xWALLET')).map((r) => r.txHash)).toEqual(['0xdep']);
+    expect((await findPendingOpen('trade-1'))?.txHash).toBe('0xopen');
   });
 });

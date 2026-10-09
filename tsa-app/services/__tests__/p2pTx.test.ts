@@ -12,9 +12,17 @@ jest.mock('../wallet', () => ({
   signTransaction: (...a: any[]) => mockSign(...a),
   broadcastTransaction: (...a: any[]) => mockBroadcast(...a),
 }));
+const mockTradesApi = {
+  confirmOpen: jest.fn(),
+  confirmMarkPaid: jest.fn(),
+  confirmRelease: jest.fn(),
+  confirmCancel: jest.fn(),
+};
 jest.mock('../p2p', () => ({
   p2pChainKey: (id: number) => `chain-${id}`,
   unsignedTxToTxLike: (tx: any) => ({ __txLike: true, ...tx }),
+  // A getter: the factory runs before the const above is initialised.
+  get tradesApi() { return mockTradesApi; },
 }));
 const mockWaitMined = jest.fn();
 jest.mock('../txWait', () => ({
@@ -29,7 +37,7 @@ jest.mock('../p2pPending', () => ({
 }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { P2P_MINE_WAIT_MS, runP2PTx, txOutcomeAlert } from '../p2pTx';
+import { P2P_MINE_WAIT_MS, retryStashedConfirm, runP2PTx, txOutcomeAlert } from '../p2pTx';
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import { TxRevertedError } from '../txWait';
 
@@ -324,5 +332,42 @@ describe('txOutcomeAlert', () => {
     expect(a?.title).toBe('Release failed');
     expect(a?.message).toMatch(/nothing changed/i);
     expect(a?.message).toMatch(/try again/i);
+  });
+});
+
+describe('retryStashedConfirm (the trade screen\'s retry for a lost confirm)', () => {
+  const HASH = '0x' + 'b'.repeat(64);
+  const base = { token: 'USDT', chainId: 146, amount: '1', txHash: HASH, walletAddress: W, tradeId: 't1', createdAt: 0 };
+  const trade = { id: 't1', status: 'paid' };
+
+  it.each([
+    ['open', 'confirmOpen', ['t1', HASH, W]],
+    ['mark_paid', 'confirmMarkPaid', ['t1', HASH]],
+    ['release', 'confirmRelease', ['t1', HASH]],
+    ['cancel_trade', 'confirmCancel', ['t1', HASH]],
+  ] as const)('%s → %s with the stashed hash, then unstashes', async (mode, fn, args) => {
+    mockTradesApi[fn].mockResolvedValue({ success: true, data: trade });
+    await expect(retryStashedConfirm({ ...base, mode })).resolves.toEqual({ status: 'confirmed', data: trade });
+    expect(mockTradesApi[fn]).toHaveBeenCalledWith(...args);
+    expect(mockRemovePending).toHaveBeenCalledWith(HASH);
+  });
+  it('a server-side revert unstashes and says so', async () => {
+    mockTradesApi.confirmMarkPaid.mockResolvedValue({ success: false, message: 'p2p: transaction reverted on chain' });
+    await expect(retryStashedConfirm({ ...base, mode: 'mark_paid' })).resolves.toEqual({ status: 'reverted' });
+    expect(mockRemovePending).toHaveBeenCalledWith(HASH);
+  });
+  it('anything else keeps the stash for the next retry', async () => {
+    mockTradesApi.confirmRelease.mockResolvedValue({ success: false, status: 503, message: 'p2p: blockchain temporarily unavailable' });
+    const r = await retryStashedConfirm({ ...base, mode: 'release' });
+    expect(r).toEqual({ status: 'pending', message: 'The network is busy right now. Try again in a minute.' });
+    expect(mockRemovePending).not.toHaveBeenCalled();
+  });
+  it('a thrown request is still "pending", never a crash', async () => {
+    mockTradesApi.confirmCancel.mockRejectedValue(new Error('Network request failed'));
+    expect((await retryStashedConfirm({ ...base, mode: 'cancel_trade' })).status).toBe('pending');
+  });
+  it('refuses a record that is not a trade tx', async () => {
+    expect((await retryStashedConfirm({ ...base, mode: 'deposit' })).status).toBe('pending');
+    expect(mockRemovePending).not.toHaveBeenCalled();
   });
 });

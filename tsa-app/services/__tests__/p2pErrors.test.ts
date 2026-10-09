@@ -107,3 +107,20 @@ describe('p2pErrorMessage: API codes', () => {
     expect(msg).not.toMatch(/fail/i);
   });
 });
+
+describe('wrong active wallet for this trade', () => {
+  const copy = 'This trade belongs to a different wallet. Switch to the wallet you used for this trade and try again.';
+  it.each([
+    'estimate gas (would revert): execution reverted: Only buyer',
+    'estimate gas (would revert): execution reverted: Only seller',
+    'estimate gas (would revert): execution reverted: OnlyBuyer()',
+    'estimate gas (would revert): execution reverted: custom error 0x86efbb55',
+    'execution reverted 0x85d1f726',
+    'estimate gas (would revert): execution reverted: NotAParty()',
+  ])('%s', (message) => {
+    expect(p2pErrorMessage({ status: 422, message })).toBe(copy);
+  });
+  it('leaves other reverts alone', () => {
+    expect(p2pErrorMessage({ message: 'execution reverted: NotPending()' })).toMatch(/would reject this transaction/);
+  });
+});

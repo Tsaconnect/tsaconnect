@@ -14,7 +14,7 @@
 // wallet}`): a double tap that slips past a screen's own `acting` flag gets
 // { status: 'busy' } before any gas, prepare or signing, instead of a second
 // tx that reverts and reads as "failed".
-import { p2pChainKey, unsignedTxToTxLike, type ApiResponse, type UnsignedTx } from './p2p';
+import { p2pChainKey, tradesApi, unsignedTxToTxLike, type ApiResponse, type P2PTrade, type UnsignedTx } from './p2p';
 import { broadcastTransaction, signTransaction } from './wallet';
 import { ensureP2PGas } from './p2pGas';
 import { mapSubmitError, TRANSFER_COPY } from './submitErrors';
@@ -207,4 +207,56 @@ export function txOutcomeAlert(
     default:
       return null;
   }
+}
+
+export type StashedConfirmResult =
+  | { status: 'confirmed'; data?: P2PTrade }
+  /** The server saw a status-0 receipt: nothing changed, the action can be sent again. */
+  | { status: 'reverted' }
+  /** Not recorded yet; the stash stays for the next retry. */
+  | { status: 'pending'; message: string };
+
+const NOT_A_TRADE_TX = 'This transaction is not a trade action.';
+
+/** The confirm endpoint for a stashed trade tx; null for a deposit/withdraw. */
+function confirmStashed(rec: PendingEscrowConfirm, tradeId: string): Promise<ApiResponse<P2PTrade>> | null {
+  switch (rec.mode) {
+    case 'open':
+      return tradesApi.confirmOpen(tradeId, rec.txHash, rec.walletAddress);
+    case 'mark_paid':
+      return tradesApi.confirmMarkPaid(tradeId, rec.txHash);
+    case 'release':
+      return tradesApi.confirmRelease(tradeId, rec.txHash);
+    case 'cancel_trade':
+      return tradesApi.confirmCancel(tradeId, rec.txHash);
+    default:
+      return null;
+  }
+}
+
+/** Re-send the confirm for a trade tx runP2PTx stashed (R4 and the lost
+ *  mark-paid/release/cancel confirms) with its original hash — nothing is
+ *  signed or broadcast again. Unstashes once the server records it or reports
+ *  the revert; never throws. */
+export async function retryStashedConfirm(rec: PendingEscrowConfirm): Promise<StashedConfirmResult> {
+  const pending = (message: string): StashedConfirmResult => ({ status: 'pending', message });
+  const tradeId = rec.tradeId;
+  if (!tradeId) return pending(NOT_A_TRADE_TX);
+  let conf: ApiResponse<P2PTrade>;
+  try {
+    const call = confirmStashed(rec, tradeId);
+    if (!call) return pending(NOT_A_TRADE_TX);
+    conf = await call;
+  } catch (err) {
+    conf = { success: false, message: errorMessage(err) };
+  }
+  if (conf.success) {
+    await bestEffort('unstash', () => removePending(rec.txHash));
+    return { status: 'confirmed', data: conf.data };
+  }
+  if (SERVER_REVERT.test(conf.message ?? '')) {
+    await bestEffort('unstash', () => removePending(rec.txHash));
+    return { status: 'reverted' };
+  }
+  return pending(p2pErrorMessage(conf, 'The server could not record it yet.'));
 }
