@@ -506,7 +506,7 @@ func TestPayRefundConfirm_AStaleReadingCannotMoveASettledRefund(t *testing.T) {
 			return r.s.markFailed(ctx, stale, payRefundRevertedReason)
 		},
 		"needs_review": func(r *refundRig, stale *models.PayRefund) error {
-			return r.s.markNeedsReview(ctx, stale, 1, "Credited 0.000001 of 12.50", "pay_refund_needs_review")
+			return r.s.markNeedsReview(ctx, stale, 1, "Credited 0.000001 of 12.50", payRefundReviewShort)
 		},
 	} {
 		r := newRefundRig(t)
@@ -524,4 +524,93 @@ func TestPayRefundConfirm_AStaleReadingCannotMoveASettledRefund(t *testing.T) {
 			t.Errorf("%s: the owner was told: %+v", name, r.alerts()[before:])
 		}
 	}
+}
+
+// Task 8 review: a needs_review refund re-read the same way it was parked is no
+// contradiction — no ALERT. "Replaced" again still is (preflight P8): the
+// replacing transaction's effect is still unknown.
+func TestPayRefundReevaluate_TheSameReviewReadingAgainIsNoContradiction(t *testing.T) {
+	ctx := context.Background()
+	for name, c := range map[string]struct {
+		read  func(r *refundRig)
+		alert bool
+	}{
+		"credited less": {read: func(r *refundRig) { r.chainShows(bscAmount(12_000_000), 9) }},
+		"unexpected":    {read: func(r *refundRig) { r.ver.set(nil, fmt.Errorf("%w: 0xabc", ErrTransferWrongRecipient), true) }},
+		"replaced":      {read: func(r *refundRig) { r.ver.set(nil, errors.New("verify: not found"), false); r.net.nonce = 1 }, alert: true},
+	} {
+		r := newRefundRig(t)
+		ref, _ := r.submitted(t, "CONF-26", "12.50")
+		c.read(r)
+		r.s.ConfirmDue(ctx)
+		parked := r.status(t, ref.ID)
+		if parked.Status != models.PayRefundNeedsReview {
+			t.Fatalf("%s: setup: %+v", name, parked)
+		}
+		logged := captureLog(t)
+		got, err := r.s.Reevaluate(ctx, ref.ID)
+		if err != nil || got.Status != models.PayRefundNeedsReview || got.FailureReason != parked.FailureReason {
+			t.Errorf("%s: %+v %v", name, got, err)
+		}
+		if alerted := strings.Contains(logged.String(), "ALERT pay_refund_review_contradicted=1"); alerted != c.alert {
+			t.Errorf("%s: contradiction alert %v, want %v: %q", name, alerted, c.alert, logged.String())
+		}
+		if len(r.alertsOf(events.PayRefundNeedsReview)) != 1 {
+			t.Errorf("%s: the owner was told again: %+v", name, r.alerts())
+		}
+	}
+}
+
+// A credit too small to show at cents (it floors to 0.00) is still a partial
+// credit: money moved, and the owner is told it credited less.
+func TestPayRefundConfirm_ADustCreditIsCreditedLess(t *testing.T) {
+	r := newRefundRig(t)
+	ref, _ := r.submitted(t, "CONF-27", "12.50")
+	logged := captureLog(t)
+	r.chainShows(big.NewInt(1), 9) // one wei of 18-decimal USDT
+	r.s.ConfirmDue(context.Background())
+	got := r.status(t, ref.ID)
+	if got.Status != models.PayRefundNeedsReview || got.CreditedMicroUSD != 0 || got.FailureReason != "Credited 0.00 of 12.50" {
+		t.Fatalf("%+v", got)
+	}
+	review := r.alertsOf(events.PayRefundNeedsReview)
+	if len(review) != 1 || !strings.Contains(review[0].Message, "credited less than 12.50 USDT") {
+		t.Fatalf("notices %+v", r.alerts())
+	}
+	if !strings.Contains(logged.String(), "ALERT pay_refund_needs_review=1") {
+		t.Fatalf("log %q", logged.String())
+	}
+}
+
+// A refund whose recorded transaction or credit can't be read ALERTs once per
+// process, like pay_refund_unconfirmed — not every 30 s tick.
+func TestPayRefundConfirm_UnreadableRawTxAndCreditAlertOnce(t *testing.T) {
+	ctx := context.Background()
+	t.Run("raw tx", func(t *testing.T) {
+		r := newRefundRig(t)
+		ref, _ := r.submitted(t, "CONF-28", "1")
+		r.db.Model(&models.PayRefund{}).Where("id = ?", ref.ID).Update("raw_tx", "0x00")
+		r.ver.set(nil, errors.New("verify: not found"), false)
+		logged := captureLog(t)
+		r.s.ConfirmDue(ctx)
+		r.s.ConfirmDue(ctx)
+		if n := strings.Count(logged.String(), "ALERT pay_refund_raw_tx_unreadable=1"); n != 1 {
+			t.Fatalf("%d alerts: %q", n, logged.String())
+		}
+	})
+	t.Run("credit", func(t *testing.T) {
+		r := newRefundRig(t)
+		ref, _ := r.submitted(t, "CONF-29", "1")
+		huge, _ := new(big.Int).SetString("1"+strings.Repeat("0", 40), 10)
+		r.chainShows(huge, 9)
+		logged := captureLog(t)
+		r.s.ConfirmDue(ctx)
+		r.s.ConfirmDue(ctx)
+		if n := strings.Count(logged.String(), "ALERT pay_refund_credit_unreadable=1"); n != 1 {
+			t.Fatalf("%d alerts: %q", n, logged.String())
+		}
+		if r.status(t, ref.ID).Status != models.PayRefundSubmitted {
+			t.Fatal("an unreadable credit moved the refund")
+		}
+	})
 }

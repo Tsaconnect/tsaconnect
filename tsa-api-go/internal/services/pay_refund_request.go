@@ -300,65 +300,94 @@ func (s *PayRefundService) payerFirstName(ctx context.Context, p *models.PayPaym
 	return ""
 }
 
-// announce tells the people a refund concerns what just happened to it — the
-// owner at every step, the payer when money reached her. Called only after the
-// change committed; a failed read is logged, never returned (the refund has
-// already moved).
-func (s *PayRefundService) announce(ctx context.Context, r *models.PayRefund, kind string) {
+// payRefundNotice is what every notice about one refund is built from.
+type payRefundNotice struct {
+	s      *PayRefundService
+	r      *models.PayRefund
+	p      *models.PayPayment
+	m      *models.PayMerchant
+	who    string // the payer's first name, else "your customer"
+	amount string
+	token  string
+	prefix string // "Test: " in test mode — no money moved
+}
+
+// notice reads what a notice about r needs. Called only after the change
+// committed; a failed read is logged, never returned (the refund has already
+// moved). false: no bus, or the read failed.
+func (s *PayRefundService) notice(ctx context.Context, r *models.PayRefund) (*payRefundNotice, bool) {
 	if s.events == nil {
-		return
+		return nil, false
 	}
 	p, err := s.payments.Get(ctx, r.PaymentID)
 	if err != nil {
 		log.Printf("[tsa-pay] refund %s notice: %v", r.ID, err)
-		return
+		return nil, false
 	}
 	m, err := s.merchants.Get(ctx, r.MerchantID)
 	if err != nil {
 		log.Printf("[tsa-pay] refund %s notice: %v", r.ID, err)
+		return nil, false
+	}
+	n := &payRefundNotice{s: s, r: r, p: p, m: m, who: s.payerFirstName(ctx, p), amount: FormatMicroUSD(r.AmountMicroUSD), token: r.TokenSymbol}
+	if n.who == "" {
+		n.who = "your customer"
+	}
+	if n.token == "" {
+		n.token = "USD"
+	}
+	if r.Mode == models.PayModeTest {
+		n.prefix = "Test: "
+	}
+	return n, true
+}
+
+func (n *payRefundNotice) publish(kind string, to uuid.UUID, title, message string) {
+	n.s.events.Publish(events.Event{Type: kind, UserID: to, Title: n.prefix + title, Message: n.prefix + message,
+		Data: map[string]any{"refundId": n.r.ID.String(), "paymentId": n.r.PaymentID.String()}})
+}
+
+// announce tells the people a refund concerns that it was requested,
+// confirmed or failed — the owner at every step, the payer when money reached
+// her. needs_review is announceReview's.
+func (s *PayRefundService) announce(ctx context.Context, r *models.PayRefund, kind string) {
+	n, ok := s.notice(ctx, r)
+	if !ok {
 		return
 	}
-	who := s.payerFirstName(ctx, p)
-	if who == "" {
-		who = "your customer"
-	}
-	amount, token := FormatMicroUSD(r.AmountMicroUSD), r.TokenSymbol
-	if token == "" {
-		token = "USD"
-	}
-	prefix := ""
-	if r.Mode == models.PayModeTest {
-		prefix = "Test: " // no money moved
-	}
-	publish := func(kind string, to uuid.UUID, title, message string) {
-		s.events.Publish(events.Event{Type: kind, UserID: to, Title: prefix + title, Message: prefix + message,
-			Data: map[string]any{"refundId": r.ID.String(), "paymentId": r.PaymentID.String()}})
-	}
+	owner := n.m.UserID
 	switch kind {
 	case events.PayRefundRequested:
-		publish(kind, m.UserID, "Refund requested", "Refund of "+amount+" USD to "+who+" requested — approve it in TSA Connect")
+		n.publish(kind, owner, "Refund requested", "Refund of "+n.amount+" USD to "+n.who+" requested — approve it in TSA Connect")
 	case events.PayRefundConfirmed:
-		if p.PayerUserID != nil {
-			publish(events.PayRefundReceived, *p.PayerUserID, "Refund received", "You received a "+amount+" "+token+" refund from "+m.BusinessName)
+		if n.p.PayerUserID != nil {
+			n.publish(events.PayRefundReceived, *n.p.PayerUserID, "Refund received", "You received a "+n.amount+" "+n.token+" refund from "+n.m.BusinessName)
 		}
-		publish(kind, m.UserID, "Refund confirmed", "Refund to "+who+" confirmed")
+		n.publish(kind, owner, "Refund confirmed", "Refund to "+n.who+" confirmed")
 	case events.PayRefundFailed:
 		why := r.FailureReason
 		if why == "" {
 			why = payRefundFailedFallback
 		}
-		publish(kind, m.UserID, "Refund failed", "Refund to "+who+" failed: "+why+". You can request it again.")
-	case events.PayRefundNeedsReview:
-		if r.CreditedMicroUSD > 0 {
-			publish(kind, m.UserID, "Refund needs review", "The refund to "+who+" credited less than "+amount+" "+token+" — support is reviewing it")
-			return
-		}
-		if r.FailureReason == payRefundReplacedReason {
-			// Replaced (review I4): another transaction from the owner's wallet took
-			// its place; whether that one paid the customer is for support to check.
-			publish(kind, m.UserID, "Refund needs review", "The refund to "+who+" was replaced by another transaction from your wallet — support is checking whether it paid")
-			return
-		}
-		publish(kind, m.UserID, "Refund needs review", "The network showed something unexpected for the refund to "+who+" — support is checking it")
+		n.publish(kind, owner, "Refund failed", "Refund to "+n.who+" failed: "+why+". You can request it again.")
+	}
+}
+
+// announceReview tells the owner r was parked for support, worded by why.
+func (s *PayRefundService) announceReview(ctx context.Context, r *models.PayRefund, review payRefundReview) {
+	n, ok := s.notice(ctx, r)
+	if !ok {
+		return
+	}
+	const kind, title = events.PayRefundNeedsReview, "Refund needs review"
+	switch review {
+	case payRefundReviewShort:
+		n.publish(kind, n.m.UserID, title, "The refund to "+n.who+" credited less than "+n.amount+" "+n.token+" — support is reviewing it")
+	case payRefundReviewReplaced:
+		// Replaced (review I4): another transaction from the owner's wallet took
+		// its place; whether that one paid the customer is for support to check.
+		n.publish(kind, n.m.UserID, title, "The refund to "+n.who+" was replaced by another transaction from your wallet — support is checking whether it paid")
+	default:
+		n.publish(kind, n.m.UserID, title, "The network showed something unexpected for the refund to "+n.who+" — support is checking it")
 	}
 }

@@ -104,7 +104,7 @@ type PayRefundService struct {
 	minConf   uint64
 	now       func() time.Time
 	events    *events.Bus
-	// alerted: refund ids already ALERTed as unconfirmed by this process.
+	// alerted: the payRefundAlertKeys this process has already ALERTed.
 	alerted sync.Map
 }
 

@@ -29,6 +29,27 @@ const (
 	payRefundUnexpectedReason = "The network showed something unexpected for this transaction — support is checking it"
 )
 
+// payRefundReview is why a refund was parked in needs_review. It picks the
+// ALERT and the owner's notice; the reason words are stored on the row.
+type payRefundReview int
+
+const (
+	payRefundReviewShort      payRefundReview = iota + 1 // credited less than the refund (even 0.00 of it)
+	payRefundReviewReplaced                              // another transaction took its nonce
+	payRefundReviewUnexpected                            // any other refuting reading
+)
+
+// alert is the ALERT name for parking a refund for review.
+func (k payRefundReview) alert() string {
+	switch k {
+	case payRefundReviewShort:
+		return "pay_refund_needs_review"
+	case payRefundReviewReplaced:
+		return "pay_refund_replaced"
+	}
+	return "pay_refund_unexpected_reading"
+}
+
 // Reasons a refund failed — proven to have paid nothing.
 const (
 	payRefundRevertedReason    = "The transaction failed on-chain"
@@ -133,7 +154,7 @@ func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confi
 			reading += ": " + RedactAlertText(err.Error())
 		}
 		log.Printf("[tsa-pay] refund %s: unexpected reading of %s on %s: %s", r.ID, *r.TxHash, chain, reading)
-		return s.markNeedsReview(ctx, r, 0, payRefundUnexpectedReason, "pay_refund_unexpected_reading")
+		return s.markNeedsReview(ctx, r, 0, payRefundUnexpectedReason, payRefundReviewUnexpected)
 	}
 	if out.Reason != StableReasonUnreadable {
 		return nil // mined, not deep enough yet
@@ -173,12 +194,14 @@ func (s *PayRefundService) settleProven(ctx context.Context, chain string, r *mo
 	want := stableForUSDMicros(big.NewInt(r.AmountMicroUSD), decimals)
 	creditedMicro, err := usdMicrosFloor(credited, decimals)
 	if err != nil {
-		log.Printf("[tsa-pay] ALERT pay_refund_credit_unreadable=1 refund=%s payment=%s tx=%s err=%q", r.ID, r.PaymentID, *r.TxHash, err)
+		if s.alertOnce(r.ID, "pay_refund_credit_unreadable") {
+			log.Printf("[tsa-pay] ALERT pay_refund_credit_unreadable=1 refund=%s payment=%s tx=%s err=%q", r.ID, r.PaymentID, *r.TxHash, err)
+		}
 		return fmt.Errorf("credited by %s: %w", *r.TxHash, err)
 	}
 	if credited.Cmp(want) < 0 {
 		why := "Credited " + FormatMicroUSD(creditedMicro) + " of " + FormatMicroUSD(r.AmountMicroUSD)
-		return s.markNeedsReview(ctx, r, creditedMicro, why, "pay_refund_needs_review")
+		return s.markNeedsReview(ctx, r, creditedMicro, why, payRefundReviewShort)
 	}
 	if credited.Cmp(want) > 0 {
 		log.Printf("[tsa-pay] ALERT pay_refund_over_credited=1 refund=%s payment=%s credited=%s want=%s tx=%s",
@@ -198,7 +221,9 @@ func (s *PayRefundService) settleProven(ctx context.Context, chain string, r *mo
 func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *models.PayRefund) error {
 	tx, signer, err := blockchain.DecodeSignedTx(r.RawTx)
 	if err != nil {
-		log.Printf("[tsa-pay] ALERT pay_refund_raw_tx_unreadable=1 refund=%s err=%q", r.ID, err)
+		if s.alertOnce(r.ID, "pay_refund_raw_tx_unreadable") {
+			log.Printf("[tsa-pay] ALERT pay_refund_raw_tx_unreadable=1 refund=%s err=%q", r.ID, err)
+		}
 		return nil
 	}
 	nonce, err := s.network.ConfirmedNonce(ctx, chain, signer, s.minConf)
@@ -213,7 +238,7 @@ func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *
 		if known {
 			return nil // ours is the one that mined; the next look proves it
 		}
-		return s.markNeedsReview(ctx, r, 0, payRefundReplacedReason, "pay_refund_replaced")
+		return s.markNeedsReview(ctx, r, 0, payRefundReplacedReason, payRefundReviewReplaced)
 	}
 	s.broadcast(ctx, chain, r, tx)
 	s.alertUnconfirmed(r)
@@ -239,13 +264,11 @@ func (s *PayRefundService) markFailed(ctx context.Context, r *models.PayRefund, 
 	return nil
 }
 
-// markNeedsReview parks a submitted refund for a person — credited only part
-// (alert pay_refund_needs_review), replaced (alert pay_refund_replaced,
-// credited 0), or read some other unexpected way (alert
-// pay_refund_unexpected_reading, credited 0) — and tells the owner. Its amount
-// stays held against the cap. A refund already in needs_review stays as it is
-// (see alertContradicted).
-func (s *PayRefundService) markNeedsReview(ctx context.Context, r *models.PayRefund, creditedMicro int64, why, alert string) error {
+// markNeedsReview parks a submitted refund for a person — credited only part,
+// replaced (credited 0), or read some other unexpected way (credited 0) — ALERTs
+// review's name and tells the owner. Its amount stays held against the cap. A
+// refund already in needs_review stays as it is (see alertContradicted).
+func (s *PayRefundService) markNeedsReview(ctx context.Context, r *models.PayRefund, creditedMicro int64, why string, review payRefundReview) error {
 	if r.Status != models.PayRefundSubmitted {
 		s.alertContradicted(r, why)
 		return nil
@@ -257,16 +280,21 @@ func (s *PayRefundService) markNeedsReview(ctx context.Context, r *models.PayRef
 	}
 	r.Status, r.CreditedMicroUSD, r.FailureReason = models.PayRefundNeedsReview, creditedMicro, why
 	log.Printf("[tsa-pay] ALERT %s=1 refund=%s payment=%s credited=%s amount=%s chain=%d tx=%s",
-		alert, r.ID, r.PaymentID, FormatMicroUSD(creditedMicro), FormatMicroUSD(r.AmountMicroUSD), r.ChainID, *r.TxHash)
-	s.announce(ctx, r, events.PayRefundNeedsReview)
+		review.alert(), r.ID, r.PaymentID, FormatMicroUSD(creditedMicro), FormatMicroUSD(r.AmountMicroUSD), r.ChainID, *r.TxHash)
+	s.announceReview(ctx, r, review)
 	return nil
 }
 
 // alertContradicted: a re-check of a needs_review refund read something other
 // than a full credit. It already moved money, or may have, so nothing changes —
 // its amount stays held and the owner is not told again — and support is
-// ALERTed with the new reading.
+// ALERTed with the new reading. The very reading it was parked on is no
+// contradiction, except "replaced" (preflight P8): whether the replacing
+// transaction paid is still open, so each look says so again.
 func (s *PayRefundService) alertContradicted(r *models.PayRefund, reading string) {
+	if r.Status == models.PayRefundNeedsReview && reading == r.FailureReason && reading != payRefundReplacedReason {
+		return
+	}
 	log.Printf("[tsa-pay] ALERT pay_refund_review_contradicted=1 refund=%s payment=%s status=%s reason=%q reading=%q tx=%s",
 		r.ID, r.PaymentID, r.Status, r.FailureReason, reading, *r.TxHash)
 }
@@ -277,9 +305,22 @@ func (s *PayRefundService) alertUnconfirmed(r *models.PayRefund) {
 	if r.SubmittedAt == nil || s.now().Sub(*r.SubmittedAt) < payRefundUnconfirmedAfter {
 		return
 	}
-	if _, seen := s.alerted.LoadOrStore(r.ID, true); seen {
+	if !s.alertOnce(r.ID, "pay_refund_unconfirmed") {
 		return
 	}
 	log.Printf("[tsa-pay] ALERT pay_refund_unconfirmed=1 refund=%s payment=%s chain=%d tx=%s submitted_at=%s last_broadcast_error=%q",
 		r.ID, r.PaymentID, r.ChainID, *r.TxHash, r.SubmittedAt.Format(time.RFC3339), r.LastBroadcastError)
+}
+
+// payRefundAlertKey is one ALERT about one refund.
+type payRefundAlertKey struct {
+	refund uuid.UUID
+	alert  string
+}
+
+// alertOnce reports whether this process has not yet raised alert for the
+// refund, and marks it raised.
+func (s *PayRefundService) alertOnce(refund uuid.UUID, alert string) bool {
+	_, seen := s.alerted.LoadOrStore(payRefundAlertKey{refund, alert}, true)
+	return !seen
 }
