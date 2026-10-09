@@ -1271,6 +1271,13 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	if ad.SellerID == buyerID {
 		return nil, nil, ErrSelfTrade
 	}
+	// Browse hides a suspended seller's ads; a stale screen or deep link must
+	// not open one. Before the buy-ad branch so both sides are covered.
+	if blocked, err := s.sellerBlocked(ctx, ad.SellerID); err != nil {
+		return nil, nil, err
+	} else if blocked {
+		return nil, nil, ErrAdNotActive
+	}
 	// An ad that was live before its asset was delisted can't take new trades
 	// (browse hides it, but a stale screen or deep link can still reach here).
 	// Before the buy-ad branch so the JIT-deposit path is covered too.
@@ -3583,10 +3590,27 @@ type AdFilter struct {
 	// from); leave it off for the owner's own list, where they must still see
 	// such an ad to cancel it and withdraw the pool behind it.
 	ExcludeDelisted bool
+	// ExcludeSuspended hides ads whose seller's account is suspended or
+	// deleted. Set it wherever ExcludeDelisted is set (browse, express, seller
+	// profile); the owner's own list leaves it off.
+	ExcludeSuspended bool
 	// ViewerID is the caller. LP stock ads (S29) are listed only on the
 	// caller's own list (SellerID == ViewerID, ListMyAds); every other read
 	// hides them whatever the other filters say.
 	ViewerID uuid.UUID
+}
+
+// blockedAccountStatuses are the account states whose ads are neither listed
+// nor openable (suspend blocks login; delete is terminal).
+var blockedAccountStatuses = []string{models.AccountStatusSuspended, models.AccountStatusDeleted}
+
+// sellerBlocked reports whether the user's account is suspended or deleted. A
+// missing users row is not blocked.
+func (s *P2PTradeService) sellerBlocked(ctx context.Context, id uuid.UUID) (bool, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Table("users").
+		Where("id = ? AND account_status IN ?", id, blockedAccountStatuses).Count(&n).Error
+	return n > 0, err
 }
 
 func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2PAd, error) {
@@ -3631,6 +3655,9 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 		if clause, args := s.delistedAdsClause(); clause != "" {
 			q = q.Where(clause, args...)
 		}
+	}
+	if f.ExcludeSuspended {
+		q = q.Where("seller_id NOT IN (SELECT id FROM users WHERE account_status IN ?)", blockedAccountStatuses)
 	}
 	if ownList := f.SellerID != uuid.Nil && f.SellerID == f.ViewerID; !ownList {
 		var err error
@@ -3681,7 +3708,7 @@ func (s *P2PTradeService) ExpressMatch(ctx context.Context, p ExpressMatchParams
 
 	cands, err := s.ListAds(ctx, AdFilter{
 		Side: adSide, Token: p.Token, FiatCurrency: p.FiatCurrency,
-		Status: models.P2PAdStatusActive, Limit: 100, ExcludeDelisted: true,
+		Status: models.P2PAdStatusActive, Limit: 100, ExcludeDelisted: true, ExcludeSuspended: true,
 	})
 	if err != nil {
 		return nil, err

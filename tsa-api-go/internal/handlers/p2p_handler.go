@@ -1045,7 +1045,8 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 		Offset:       offset,
 		// Marketplace browse: nobody may open a trade on an ad in a delisted
 		// asset, so don't offer one. The owner sees theirs via ListMyAds.
-		ExcludeDelisted: true,
+		ExcludeDelisted:  true,
+		ExcludeSuspended: true,
 	}
 	if seller := c.Query("sellerId"); seller != "" {
 		if sid, err := uuid.Parse(seller); err == nil {
@@ -1850,7 +1851,7 @@ func (h *P2PHandler) GetSellerProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ads, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{SellerID: id, Status: models.P2PAdStatusActive, ExcludeDelisted: true})
+	ads, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{SellerID: id, Status: models.P2PAdStatusActive, ExcludeDelisted: true, ExcludeSuspended: true})
 	if err != nil {
 		ads = nil // non-fatal
 	}

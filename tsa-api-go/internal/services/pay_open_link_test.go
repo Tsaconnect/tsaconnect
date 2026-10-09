@@ -364,10 +364,6 @@ func collectPayAlerts(bus *events.Bus) func() []events.Event {
 func TestPayReceived_EachPaymentIsAnnouncedOnceToItsOwner(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
-	// The column the payer's name is read beside.
-	if err := s.db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
-		t.Fatal(err)
-	}
 	bus := events.NewBus()
 	seen := collectPayAlerts(bus)
 	s.SetEvents(bus)
@@ -799,9 +795,6 @@ func TestPayOpenLink_AnEditLeavesOutWhatItDoesNotChange(t *testing.T) {
 func TestPayReceived_TheCustomersNoteIsQuotedAndDefanged(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
-	if err := s.db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
-		t.Fatal(err)
-	}
 	bus := events.NewBus()
 	seen := collectPayAlerts(bus)
 	s.SetEvents(bus)
@@ -828,9 +821,6 @@ func TestPayReceived_TheCustomersNoteIsQuotedAndDefanged(t *testing.T) {
 func TestPayReceived_ADeletedPayerIsACustomer(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
-	if err := s.db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
-		t.Fatal(err)
-	}
 	bus := events.NewBus()
 	seen := collectPayAlerts(bus)
 	s.SetEvents(bus)

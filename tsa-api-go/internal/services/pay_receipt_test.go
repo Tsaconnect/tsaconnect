@@ -14,9 +14,6 @@ import (
 func newPayReceiptRig(t *testing.T) (*PayPaymentService, *models.PayMerchant) {
 	t.Helper()
 	s, m := newPayPaymentRig(t)
-	if err := s.db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
-		t.Fatal(err)
-	}
 	return s, m
 }
 

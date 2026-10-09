@@ -29,6 +29,7 @@ const testUsersDDL = `CREATE TABLE users (
 	phone_number TEXT,
 	wallet_address TEXT,
 	verification_status TEXT DEFAULT 'pending',
+	account_status TEXT DEFAULT 'active',
 	verified_legal_name TEXT,
 	verified_legal_name_at DATETIME,
 	suspension_reason TEXT,

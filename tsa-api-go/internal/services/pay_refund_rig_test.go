@@ -178,9 +178,6 @@ type refundRig struct {
 func newRefundRig(t *testing.T) *refundRig {
 	t.Helper()
 	db := newPayTestDB(t)
-	if err := db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
-		t.Fatal(err)
-	}
 	return newRefundRigOn(t, db)
 }
 

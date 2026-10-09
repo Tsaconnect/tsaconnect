@@ -349,7 +349,8 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			suspended_at DATETIME,
 			suspended_by TEXT,
 			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME,
-			verification_status TEXT DEFAULT 'pending'
+			verification_status TEXT DEFAULT 'pending',
+			account_status TEXT DEFAULT 'active'
 		)`,
 	}
 	for _, s := range stmts {
