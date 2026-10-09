@@ -32,9 +32,9 @@ import {
   signTransaction,
   broadcastTransaction,
   ensureGas,
-  getProvider,
 } from './wallet';
 import { addPending } from './p2pPending';
+import { waitMined } from './txWait';
 
 export interface EnsureFundingParams {
   token: string;
@@ -61,29 +61,6 @@ export type EnsureFundingResult =
   | { status: 'funded'; deposited: string }
   | { status: 'pending-confirm'; txHash: string; deposited: string }
   | { status: 'aborted'; reason: string };
-
-// Cap on how long we wait for the approve tx to mine before broadcasting the
-// deposit. The deposit's transferFrom needs the allowance in place; mirrors the
-// 90s confirmation budget used elsewhere (services/transaction.ts).
-const APPROVE_WAIT_MS = 90_000;
-
-/**
- * Wait for a broadcast tx to mine, with a timeout so a stuck RPC can't hang the
- * whole publish flow. Uses provider.waitForTransaction on the chain's primary
- * RPC. Known limitation: if that endpoint is unreachable for reads the race
- * rejects on the timeout and the publish aborts — but that fails safe (an
- * approve moves no funds) and a retry finds the allowance already in place, so
- * the deposit then skips straight past the approve.
- */
-async function waitMined(chainId: number, txHash: string): Promise<void> {
-  const provider = getProvider(p2pChainKey(chainId));
-  await Promise.race([
-    provider.waitForTransaction(txHash),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Approve confirmation timed out')), APPROVE_WAIT_MS),
-    ),
-  ]);
-}
 
 /**
  * Top up the seller's on-chain `available` balance so it covers `amountBaseUnits`
@@ -163,7 +140,11 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
     const approveResp = await broadcastTransaction(chainKey, signedApprove);
     // Poll until the approve mines so the deposit's transferFrom can't race it.
     onStage?.('Waiting for approve…');
-    await waitMined(chainId, approveResp.hash);
+    // Known limitation: if the chain's primary RPC is unreachable for reads the
+    // wait times out and the publish aborts — that fails safe (an approve moves
+    // no funds) and a retry finds the allowance already in place. A reverted
+    // approve throws TxRevertedError before the deposit is prepared.
+    await waitMined(chainId, approveResp.hash, { label: 'Approve' });
   }
 
   // Deposit the shortfall into the seller's `available` balance.

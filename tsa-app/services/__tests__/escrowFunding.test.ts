@@ -78,7 +78,7 @@ function arrangeHappyChain() {
   mockEnsureGas.mockResolvedValue(true);
   mockSignTransaction.mockResolvedValue('0xsigned');
   mockBroadcastTransaction.mockImplementation(async () => ({ hash: '0xdeposit' }));
-  mockWaitForTransaction.mockResolvedValue({});
+  mockWaitForTransaction.mockResolvedValue({ status: 1 });
   mockPrepareApprove.mockResolvedValue({ success: true, data: { unsignedTx: { to: '0xtok' } } });
   mockPrepareDeposit.mockResolvedValue({ success: true, data: { unsignedTx: { to: '0xescrow' } } });
 }
@@ -194,7 +194,7 @@ describe('ensureEscrowFunding — allowance handling', () => {
     });
     mockWaitForTransaction.mockImplementation(async () => {
       order.push('waitMined');
-      return {};
+      return { status: 1 };
     });
     mockPrepareDeposit.mockImplementation(async () => {
       order.push('prepareDeposit');
@@ -208,6 +208,16 @@ describe('ensureEscrowFunding — allowance handling', () => {
     // approve broadcast -> mined -> deposit prepared -> deposit broadcast.
     expect(order).toEqual(['broadcast', 'waitMined', 'prepareDeposit', 'broadcast']);
     expect(mockConfirmDeposit).toHaveBeenCalledWith(TOKEN, '60', '0xdeposit', WALLET, CHAIN_ID);
+  });
+
+  it('stops before the deposit when the approve reverted on chain', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockWaitForTransaction.mockResolvedValue({ status: 0 });
+
+    await expect(ensureEscrowFunding(params({ amountBaseUnits: '100' }))).rejects.toThrow(/failed on chain/);
+    expect(mockPrepareDeposit).not.toHaveBeenCalled();
   });
 
   it('treats a non-numeric allowance as 0 and runs the approve', async () => {
