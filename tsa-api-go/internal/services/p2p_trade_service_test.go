@@ -43,6 +43,8 @@ type mockEscrow struct {
 	verifyReleasedErr  error
 	verifyTradeCanErr  error
 	verifyDisputedErr  error
+	raiseDisputeErr    error // PrepareRaiseDispute build failure
+	readTradeErr       error // ReadTrade failure injection
 	verifyPaidErr      error
 	prepareMarkPaidErr error
 	verifyResolvedErr  error
@@ -185,6 +187,9 @@ func (m *mockEscrow) PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]
 	return []byte(`{"tx":"cancelByTimeout"}`), nil
 }
 func (m *mockEscrow) PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, error) {
+	if m.raiseDisputeErr != nil {
+		return nil, m.raiseDisputeErr
+	}
 	return []byte(`{"tx":"raiseDispute"}`), nil
 }
 func (m *mockEscrow) PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, admin string) ([]byte, error) {
@@ -271,7 +276,9 @@ func (m *mockEscrow) VerifyTradeDisputed(txHash string, tradeId [32]byte) (*P2PT
 	if m.disputedEvent != nil {
 		return m.disputedEvent, nil
 	}
-	return &P2PTradeDisputedEvent{TradeID: tradeId, By: common.HexToAddress("0xb000")}, nil
+	// Zero By matches the default ReadTrade (zero buyer/seller) so tests that do
+	// not care about the raiser pass the confirm raiser check.
+	return &P2PTradeDisputedEvent{TradeID: tradeId}, nil
 }
 func (m *mockEscrow) VerifyTradeResolved(txHash string, tradeId [32]byte) (*P2PTradeResolvedEvent, error) {
 	if m.verifyResolvedErr != nil {
@@ -284,6 +291,9 @@ func (m *mockEscrow) VerifyTradeResolved(txHash string, tradeId [32]byte) (*P2PT
 		AmountMoved: big.NewInt(99), FeeToSystem: big.NewInt(1)}, nil
 }
 func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
+	if m.readTradeErr != nil {
+		return nil, m.readTradeErr
+	}
 	if m.onChainTrade != nil {
 		return m.onChainTrade, nil
 	}

@@ -32,8 +32,10 @@ type P2PDispute struct {
 	Resolution      string     `gorm:"type:text" json:"resolution,omitempty"`
 	RefundedToBuyer *bool      `json:"refundedToBuyer,omitempty"`
 	ResolveTxHash   string     `gorm:"size:66" json:"resolveTxHash,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	ResolvedAt      *time.Time `json:"resolvedAt,omitempty"`
+	// CreatedAt is "last prepared" while the row is unconfirmed: each replacing
+	// retry resets it, and it gates the counter-party's right to replace.
+	CreatedAt  time.Time  `json:"createdAt"`
+	ResolvedAt *time.Time `json:"resolvedAt,omitempty"`
 }
 
 func (P2PDispute) TableName() string {

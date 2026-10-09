@@ -2382,37 +2382,47 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 
 // ─── Dispute lifecycle (Step 8) ─────────────────────────────────────────────
 
-// PrepareRaiseDispute prepares an on-chain raiseDispute tx and persists a dispute
-// row tied to the trade. The trade itself isn't transitioned until
 // disputePrepareStaleAfter is how long an unconfirmed dispute row is protected
 // from replacement by the counter-party.
 const disputePrepareStaleAfter = 10 * time.Minute
 
-// requireDisputeRaiserMatches checks the on-chain TradeDisputed `by` address is
-// the wallet of the party the dispute row names, so a dispute row replaced by
-// the other party cannot be confirmed with the first party's transaction. When
-// the row or the party's wallet is unknown there is nothing to compare against.
-func (s *P2PTradeService) requireDisputeRaiserMatches(ctx context.Context, tradeID uuid.UUID, ev *P2PTradeDisputedEvent) error {
-	if ev == nil {
-		return nil
+// requireDisputeRaiserMatches checks the TradeDisputed `by` address is the
+// on-chain buyer or seller matching the role on the dispute row, so a row
+// replaced by the other party cannot be confirmed with the first party's tx.
+// The contract guarantees by is the trade's buyer or seller, so there is no
+// "unknown" case: a failed chain read is ErrChainUnavailable, never a skip.
+func (s *P2PTradeService) requireDisputeRaiserMatches(ctx context.Context, escrow P2PEscrowAdapter, trade *models.P2PTrade, confirmer uuid.UUID, ev *P2PTradeDisputedEvent) error {
+	role := models.P2PDisputeRoleSeller
+	if confirmer == trade.BuyerID {
+		role = models.P2PDisputeRoleBuyer
 	}
 	var row models.P2PDispute
-	if err := s.db.WithContext(ctx).Where("trade_id = ?", tradeID).First(&row).Error; err != nil {
-		return nil
+	if err := s.db.WithContext(ctx).Where("trade_id = ?", trade.ID).First(&row).Error; err == nil {
+		role = row.RaisedRole
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
 	}
-	var u models.User
-	if err := s.db.WithContext(ctx).Select("wallet_address").First(&u, "id = ?", row.RaisedBy).Error; err != nil || u.WalletAddress == "" {
-		return nil
+	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrChainUnavailable, err)
 	}
-	if common.HexToAddress(u.WalletAddress) != ev.By {
+	want := onchain.Seller
+	if role == models.P2PDisputeRoleBuyer {
+		want = onchain.Buyer
+	}
+	if ev.By != want {
 		return fmt.Errorf("%w: dispute transaction was not sent by the party that raised it", ErrForbidden)
 	}
 	return nil
 }
 
+// PrepareRaiseDispute prepares an on-chain raiseDispute tx and persists a dispute
+// row tied to the trade. The trade itself isn't transitioned until
 // ConfirmRaiseDispute verifies the receipt — the dispute row sits in `open`
 // state in the interim so the UI can surface "dispute pending broadcast".
-// Either buyer or seller (in Paid state only) may dispute.
+// Either buyer or seller (in Paid state only) may dispute. An unconfirmed row
+// is replaced by a retry: always by the same raiser, by the other party only
+// once it is older than disputePrepareStaleAfter.
 func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, callerAddress, reason string, evidenceURLs []string) ([]byte, error) {
 	if strings.TrimSpace(reason) == "" {
 		return nil, fmt.Errorf("%w: reason required", ErrInvalidParams)
@@ -2497,16 +2507,14 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		return nil, err
 	}
 
-	dispute := &models.P2PDispute{
-		ID:           uuid.New(),
-		TradeID:      trade.ID,
-		RaisedBy:     userID,
-		RaisedRole:   role,
-		Reason:       reason,
-		EvidenceURLs: evidenceJSON,
-		Status:       models.P2PDisputeStatusOpen,
-		CreatedAt:    s.clock.Now(),
+	// Build the unsigned tx BEFORE touching the row: a build failure (RPC nonce
+	// or gas) must not destroy a replaced dispute's reason/evidence or hand the
+	// replacer a fresh stale-lock.
+	unsignedTx, err := escrow.PrepareRaiseDispute(HashID(trade.ID), callerAddress)
+	if err != nil {
+		return nil, fmt.Errorf("prepare raiseDispute: %w", err)
 	}
+
 	if replace != nil {
 		res := s.db.WithContext(ctx).Model(&models.P2PDispute{}).
 			Where("id = ? AND status = ? AND raised_by = ? AND created_at = ?",
@@ -2526,18 +2534,20 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		if res.RowsAffected == 0 {
 			return nil, ErrDisputeAlreadyOpen
 		}
-	} else if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
-		return nil, fmt.Errorf("persist dispute: %w", err)
-	}
-
-	unsignedTx, err := escrow.PrepareRaiseDispute(HashID(trade.ID), callerAddress)
-	if err != nil {
-		// Roll back only a row created by this call; a replaced row stays and
-		// the next retry replaces it again.
-		if replace == nil {
-			_ = s.db.WithContext(ctx).Delete(&models.P2PDispute{}, "id = ?", dispute.ID).Error
+	} else {
+		dispute := &models.P2PDispute{
+			ID:           uuid.New(),
+			TradeID:      trade.ID,
+			RaisedBy:     userID,
+			RaisedRole:   role,
+			Reason:       reason,
+			EvidenceURLs: evidenceJSON,
+			Status:       models.P2PDisputeStatusOpen,
+			CreatedAt:    s.clock.Now(),
 		}
-		return nil, fmt.Errorf("prepare raiseDispute: %w", err)
+		if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
+			return nil, fmt.Errorf("persist dispute: %w", err)
+		}
 	}
 
 	auditMeta := map[string]any{"role": role, "reason": reason}
@@ -2586,7 +2596,7 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain dispute: %w", err)
 	}
-	if err := s.requireDisputeRaiserMatches(ctx, trade.ID, ev); err != nil {
+	if err := s.requireDisputeRaiserMatches(ctx, escrow, &trade, userID, ev); err != nil {
 		return nil, err
 	}
 

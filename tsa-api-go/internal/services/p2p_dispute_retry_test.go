@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
@@ -88,16 +89,74 @@ func TestPrepareRaiseDispute_SameRaiserReplacesAnytime(t *testing.T) {
 	}
 }
 
-func TestConfirmRaiseDispute_RefusesAMismatchedRaiser(t *testing.T) {
-	svc, esc, tr := preparedDisputeFixture(t)
-	seedUserAt(t, svc.db, tr.SellerID, models.VerificationStatusVerified)
-	svc.db.Exec("UPDATE users SET wallet_address = ? WHERE id = ?", "0x000000000000000000000000000000000000a001", tr.SellerID)
-	esc.disputedEvent = &P2PTradeDisputedEvent{TradeID: HashID(tr.ID), By: common.HexToAddress("0x000000000000000000000000000000000000b002")}
+func TestConfirmRaiseDispute_RaiserMustBeTheOnChainParty(t *testing.T) {
+	svc, esc, tr := preparedDisputeFixture(t) // seller raised
+	sellerAddr := common.HexToAddress("0x000000000000000000000000000000000000a001")
+	buyerAddr := common.HexToAddress("0x000000000000000000000000000000000000b002")
+	esc.onChainTrade.Seller, esc.onChainTrade.Buyer = sellerAddr, buyerAddr
+	// users.wallet_address is irrelevant: the chain is the authority.
+	esc.disputedEvent = &P2PTradeDisputedEvent{TradeID: HashID(tr.ID), By: buyerAddr}
 	if _, err := svc.ConfirmRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xdisp"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("mismatch: err = %v", err)
+	}
+	esc.disputedEvent.By = sellerAddr
+	if _, err := svc.ConfirmRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xdisp"); err != nil {
+		t.Fatalf("matching on-chain party: %v", err)
+	}
+}
+
+func TestConfirmRaiseDispute_ChainReadErrorIsUnavailableNotSkipped(t *testing.T) {
+	svc, esc, tr := preparedDisputeFixture(t)
+	esc.readTradeErr = errors.New("rpc down")
+	if _, err := svc.ConfirmRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xdisp"); !errors.Is(err, ErrChainUnavailable) {
 		t.Fatalf("err = %v", err)
 	}
-	esc.disputedEvent.By = common.HexToAddress("0x000000000000000000000000000000000000a001")
-	if _, err := svc.ConfirmRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xdisp"); err != nil {
-		t.Fatalf("matching raiser: %v", err)
+}
+
+func TestPrepareRaiseDispute_ReplaceChainReadErrorIsUnavailable(t *testing.T) {
+	svc, esc, tr := preparedDisputeFixture(t)
+	esc.readTradeErr = errors.New("rpc down")
+	if _, err := svc.PrepareRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xa", "retry", nil); !errors.Is(err, ErrChainUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	var row models.P2PDispute
+	svc.db.First(&row, "trade_id = ?", tr.ID)
+	if row.Reason != "first try" {
+		t.Fatalf("row changed: %+v", row)
+	}
+}
+
+func TestPrepareRaiseDispute_ReplaceRaceIs409(t *testing.T) {
+	svc, _, tr := preparedDisputeFixture(t)
+	// Another request replaced the row between our read and write: simulate by
+	// bumping created_at from a callback after the read.
+	svc.db.Callback().Query().After("gorm:query").Register("race", func(d *gorm.DB) {
+		if d.Statement.Table == "p2p_disputes" {
+			d.Session(&gorm.Session{NewDB: true}).Exec("UPDATE p2p_disputes SET raised_by = ? WHERE trade_id = ?", tr.BuyerID, tr.ID)
+			svc.db.Callback().Query().Remove("race")
+		}
+	})
+	if _, err := svc.PrepareRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xa", "retry", nil); !errors.Is(err, ErrDisputeAlreadyOpen) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestPrepareRaiseDispute_BuildFailureLeavesRowAndAuditUnchanged(t *testing.T) {
+	svc, esc, tr := preparedDisputeFixture(t)
+	var before models.P2PDispute
+	svc.db.First(&before, "trade_id = ?", tr.ID)
+	var auditsBefore int64
+	svc.db.Model(&models.P2PAuditLog{}).Count(&auditsBefore)
+	esc.raiseDisputeErr = errors.New("nonce too low")
+	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 14, 0, 0, 0, time.UTC)})
+	if _, err := svc.PrepareRaiseDispute(context.Background(), tr.ID, tr.BuyerID, "0xb", "late", nil); err == nil {
+		t.Fatal("expected build failure")
+	}
+	var after models.P2PDispute
+	svc.db.First(&after, "trade_id = ?", tr.ID)
+	var auditsAfter int64
+	svc.db.Model(&models.P2PAuditLog{}).Count(&auditsAfter)
+	if after.RaisedBy != before.RaisedBy || after.Reason != before.Reason || !after.CreatedAt.Equal(before.CreatedAt) || auditsAfter != auditsBefore {
+		t.Fatalf("changed: %+v -> %+v audits %d -> %d", before, after, auditsBefore, auditsAfter)
 	}
 }
