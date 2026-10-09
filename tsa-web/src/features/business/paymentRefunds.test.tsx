@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { json, link, merchant, mountAt, ok, payment, stubFetch } from '@/test/harness';
+import { QueryClient } from '@tanstack/react-query';
+import { fail, json, link, merchant, mountAt, ok, payment, stubFetch } from '@/test/harness';
 import type { Payment, PaymentRefunds, Refund } from './api';
 
 const HASH = `0x${'ab'.repeat(32)}`;
@@ -41,6 +42,10 @@ describe('refunds in the payment drawer', () => {
     await user.click(await within(drawer).findByRole('button', { name: 'Refund' }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Refund this payment' });
+    // The same rule the docs state: the merchant pays, up to what the customer paid (fee included), to their TSA wallet.
+    expect(dialog).toHaveAccessibleDescription(
+      "You, the merchant, pay it from your own TSA wallet in the TSA Connect app, in USDT or USDC, to your customer's TSA Connect wallet. " +
+        'You can refund in part or in full, up to what your customer actually paid (which includes any fee they paid); TSA does not return its own fee.');
     const amount = within(dialog).getByLabelText('Amount (USD)');
     expect(amount).toHaveValue('15.00');
     expect(within(dialog).getByText(/about ₦85,353\.54 at this payment's rate/)).toBeInTheDocument();
@@ -104,6 +109,37 @@ describe('refunds in the payment drawer', () => {
     await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
   });
 
+  // A test refund confirms at once and changes the period's refund totals.
+  it('marks the reconciliation summary stale after a refund', async () => {
+    const user = userEvent.setup();
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    const testPayment: Payment = { ...payment, mode: 'test' };
+    stub(testPayment, refunds({ cap: '56.90', remaining: '56.90' }), refund({ mode: 'test', status: 'confirmed', chainId: undefined, txHash: undefined, tokenSymbol: undefined }));
+    mountAt(`/business/test/payments/${payment.id}`);
+    await user.click(await within(await screen.findByRole('dialog')).findByRole('button', { name: 'Simulate refund' }));
+    await user.click(within(await screen.findByRole('dialog', { name: 'Refund this payment' })).getByRole('button', { name: 'Simulate refund' }));
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['payment-summary', 'test'] }));
+    invalidate.mockRestore();
+  });
+
+  it('a refunds read that failed offers to try again', async () => {
+    let failing = true;
+    const p = payment;
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/payments': ok({ items: [p], total: 1, page: 1, limit: 20 }),
+      [`/api/pay/merchant/payments/${p.id}`]: ok({ payment: p, payer: { name: 'Ada Obi' }, deliveries: [] }),
+      [`/api/pay/merchant/payments/${p.id}/refunds`]: () => (failing ? fail(404, 'Not found') : ok(refunds())),
+    });
+    const user = userEvent.setup();
+    mountAt(`/business/live/payments/${p.id}`);
+    const drawer = await screen.findByRole('dialog');
+    expect(await within(drawer).findByText("Couldn't load refunds")).toBeInTheDocument();
+    failing = false;
+    await user.click(within(drawer).getByRole('button', { name: 'Try again' }));
+    expect(await within(drawer).findByRole('button', { name: 'Refund' })).toBeInTheDocument();
+  });
+
   it('a payment that can\'t be refunded says why and offers no button', async () => {
     stub(payment, refunds({ refundable: false, notRefundableReason: "Refunds aren't available for this payment" }));
     mountAt(`/business/live/payments/${payment.id}`);
@@ -149,7 +185,7 @@ describe('refunds in the payment drawer', () => {
     const drawer = await screen.findByRole('dialog');
     expect(await within(drawer).findByText('Refunded')).toBeInTheDocument();
     expect(within(drawer).getByText(/USDT on BNB Chain/)).toBeInTheDocument();
-    expect(within(drawer).getByRole('link', { name: /view transaction/i })).toHaveAttribute('href', `https://bscscan.com/tx/${HASH}`);
+    expect(within(drawer).getByRole('link', { name: 'View transaction 0xabab…abab' })).toHaveAttribute('href', `https://bscscan.com/tx/${HASH}`);
   });
 
   it('a simulated test refund shows no network and no link', async () => {

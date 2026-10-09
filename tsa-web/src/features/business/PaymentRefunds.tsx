@@ -13,12 +13,13 @@ import { Input } from '@/components/ui/input';
 import { Note } from '@/components/ui/note';
 import { SectionHeading } from '@/components/ui/section-heading';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/ui/states';
 import { RefundStatusPill } from '@/components/ui/status-pill';
 import { toast } from '@/components/ui/toaster';
 import { createRefund, listPaymentRefunds, type Mode, type Payment, type PaymentRefunds as RefundsAnswer, type Refund } from './api';
-import { chainLabelById, txExplorerUrl } from './display';
+import { chainLabelById, txExplorerUrl, txLinkLabel } from './display';
 import { queryKeys } from './queryKeys';
-import { formatUsd, isOpenRefund, microOf, nairaForRefund, parseUsd, refundAmountError, refundAmountLabel, waitingNote } from './refunds';
+import { formatUsd, isOpenRefund, microOf, nairaForRefund, parseUsd, REFUND_TERMS, refundAmountError, refundAmountLabel, waitingNote } from './refunds';
 import { useIdempotencyKey } from './useIdempotencyKey';
 
 function network(r: Refund): string {
@@ -37,8 +38,8 @@ function RefundItem({ r }: { r: Refund }) {
         <p className="text-caption text-text-secondary">{network(r)} · {dateTime(r.confirmedAt ?? r.createdAt)}</p>
         {r.reason && <p className="break-words text-caption text-text-secondary">{r.reason}</p>}
         {r.failureReason && <p className="mt-1 break-words text-caption text-danger-strong">{r.failureReason}</p>}
-        {url && (
-          <a href={url} target="_blank" rel="noopener noreferrer" className="mt-1 inline-flex items-center gap-1 text-caption font-semibold text-accent-strong hover:underline">
+        {url && r.txHash && (
+          <a href={url} target="_blank" rel="noopener noreferrer" aria-label={txLinkLabel(r.txHash)} className="mt-1 inline-flex items-center gap-1 text-caption font-semibold text-accent-strong hover:underline">
             View transaction<ExternalLink className="size-3.5" aria-hidden />
           </a>
         )}
@@ -87,6 +88,8 @@ function RefundDialog({ payment: p, mode, data, onClose }: { payment: Payment; m
       void queryClient.invalidateQueries({ queryKey: queryKeys.payment(mode, p.id) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.refunds(mode) });
       void queryClient.invalidateQueries({ queryKey: queryKeys.list('payments', mode) });
+      // A test refund confirms at once and moves the reconciliation summary's refund totals.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.summaries(mode) });
     },
   });
 
@@ -103,7 +106,7 @@ function RefundDialog({ payment: p, mode, data, onClose }: { payment: Payment; m
       title="Refund this payment"
       description={test
         ? 'Test mode: nothing is sent. The refund is done at once and a test payment.refunded webhook is sent.'
-        : "Approve and send it in the TSA Connect app: it goes from your TSA wallet in USDT or USDC to the wallet your customer paid from. The fee they paid isn't returned."}
+        : REFUND_TERMS}
       focusFirstField
       footer={
         <>
@@ -148,7 +151,7 @@ export function PaymentRefunds({ payment: p, mode }: { payment: Payment; mode: M
       ) : q.isPending ? (
         <Skeleton className="h-10 w-full" />
       ) : (
-        <p role="alert" className="text-body-sm text-danger-strong">{q.error?.message}</p>
+        <ErrorState title="Couldn't load refunds" body={q.error?.message} onRetry={() => void q.refetch()} />
       )}
       {/* Mounted only while open: each opening starts from what is left now. */}
       {asking && q.data && <RefundDialog payment={p} mode={mode} data={q.data} onClose={() => setAsking(false)} />}

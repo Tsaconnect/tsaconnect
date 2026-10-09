@@ -68,7 +68,9 @@ describe('refunds list (reconciliation)', () => {
     });
     mount();
     expect(await screen.findByText('Not enough BNB for gas')).toBeInTheDocument();
-    const links = screen.getAllByRole('link', { name: 'View transaction' });
+    // Each link names its own transaction, so a table of them reads apart.
+    const links = screen.getAllByRole('link', { name: /^View transaction/ });
+    expect(links[0]).toHaveAccessibleName('View transaction 0xabab…abab');
     expect(links).toHaveLength(1);
     expect(links[0]).toHaveAttribute('href', `https://bscscan.com/tx/${HASH}`);
   });

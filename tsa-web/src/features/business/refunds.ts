@@ -48,8 +48,20 @@ const OPEN: readonly RefundStatus[] = ['requested', 'submitted', 'needs_review']
 /** Still moving: at most one per payment, and nothing else can be asked for meanwhile. */
 export const isOpenRefund = (s: RefundStatus) => OPEN.includes(s);
 
+/**
+ * Who pays a refund, from where, to where, and how much — said once, in the docs and in the
+ * refund dialog alike. The cap is what left the customer, fee included (spec D16).
+ */
+export const REFUND_TERMS =
+  "You, the merchant, pay it from your own TSA wallet in the TSA Connect app, in USDT or USDC, to your customer's TSA Connect wallet. " +
+  'You can refund in part or in full, up to what your customer actually paid (which includes any fee they paid); TSA does not return its own fee.';
+
+/** The API's owner-safe reason for a broadcast refused for gas (payRefundBroadcastReason) — the one topping up fixes. */
+export const NO_GAS_REASON = 'Not enough gas in your wallet';
+
 /** A refused broadcast, in the words every client uses (plans review I6). */
-export const broadcastNote = (reason: string) => `Couldn't broadcast: ${reason} — top up gas; we retry automatically.`;
+export const broadcastNote = (reason: string) =>
+  `Couldn't broadcast: ${reason} — ${reason === NO_GAS_REASON ? 'top up gas; ' : ''}we retry automatically.`;
 
 /** What an open refund is waiting for, in one line. */
 export function waitingNote(r: Refund): string {

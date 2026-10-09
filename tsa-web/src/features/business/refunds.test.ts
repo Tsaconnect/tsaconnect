@@ -1,4 +1,4 @@
-import { formatUsd, isOpenRefund, microOf, nairaForRefund, parseUsd, refundAmountError, waitingNote } from './refunds';
+import { broadcastNote, formatUsd, isOpenRefund, microOf, nairaForRefund, parseUsd, refundAmountError, waitingNote } from './refunds';
 import type { Refund } from './api';
 
 describe('refund money', () => {
@@ -52,5 +52,12 @@ describe('refund wording', () => {
     expect(waitingNote({ ...r('submitted'), lastBroadcastError: 'Not enough gas in your wallet' })).toBe(
       "A refund of 12.50 USDT hasn't reached the network yet. Couldn't broadcast: Not enough gas in your wallet — top up gas; we retry automatically.");
     expect(waitingNote({ ...r('submitted'), lastBroadcastError: '' })).toBe('A refund of 12.50 USDT is on its way — waiting for the network to confirm it.');
+  });
+  // Topping up gas only helps when gas is what was missing (the API's exact owner-safe reason).
+  it('asks for gas only when gas is what the network refused it for', () => {
+    expect(broadcastNote('The network fee was too low')).toBe("Couldn't broadcast: The network fee was too low — we retry automatically.");
+    expect(broadcastNote('Another transaction from your wallet already used its place')).toBe(
+      "Couldn't broadcast: Another transaction from your wallet already used its place — we retry automatically.");
+    expect(broadcastNote("The network didn't take it")).toBe("Couldn't broadcast: The network didn't take it — we retry automatically.");
   });
 });

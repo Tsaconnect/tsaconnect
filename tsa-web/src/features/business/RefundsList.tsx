@@ -15,7 +15,7 @@ import { RefundStatusPill, type RefundStatus } from '@/components/ui/status-pill
 import { refundStatusLabel } from '@/components/ui/refund-status';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 import { listRefunds, type Mode } from './api';
-import { chainLabelById, txExplorerUrl } from './display';
+import { chainLabelById, txExplorerUrl, txLinkLabel } from './display';
 import { queryKeys } from './queryKeys';
 import { refundAmountLabel } from './refunds';
 
@@ -110,8 +110,8 @@ export function RefundsList({ mode, from, to }: RefundsListProps) {
                     <TD>
                       <RefundStatusPill status={r.status} />
                       {r.lastBroadcastError && <p className="mt-1 max-w-[220px] text-caption text-danger-strong">{r.lastBroadcastError}</p>}
-                      {txUrl && (
-                        <a href={txUrl} target="_blank" rel="noopener noreferrer" className="mt-1 block text-caption font-semibold text-accent-strong hover:underline">
+                      {txUrl && r.txHash && (
+                        <a href={txUrl} target="_blank" rel="noopener noreferrer" aria-label={txLinkLabel(r.txHash)} className="mt-1 block text-caption font-semibold text-accent-strong hover:underline">
                           View transaction
                         </a>
                       )}

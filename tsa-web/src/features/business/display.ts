@@ -123,6 +123,9 @@ export const optionLabel = (o: SettlementOption) => `${o.symbol} on ${chainLabel
 /** A wallet as the owner should compare it: first six and last four (0x5290…9EE7). */
 export const shortAddress = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a);
 
+/** A transaction link's accessible name: each one in a list reads apart ("View transaction 0xabab…abab"). */
+export const txLinkLabel = (hash: string) => `View transaction ${shortAddress(hash)}`;
+
 export const bankName = (code: string | undefined, banks: Bank[] | undefined) => banks?.find((b) => b.code === code)?.name;
 
 /** "USDC on Base to 0x5290…9EE7" — the chain named from the settlement options when known. */

@@ -5,6 +5,7 @@ import { DEFAULT_HOME } from '@/session/context';
 import { Brand } from '@/components/shell/Brand';
 import { Note } from '@/components/ui/note';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
+import { REFUND_TERMS } from '@/features/business/refunds';
 import { CodeBlock } from './CodeBlock';
 import {
   BASE_URL, createCurl, createNode, createResponse, errorBody, expressNode, findByReferenceCurl, retrieveCurl, verifyNode, webhookBody, refundWebhookBody,
@@ -227,10 +228,8 @@ export function Docs() {
             <CodeBlock title="Event body" code={webhookBody} />
             <H3>Refunds</H3>
             <P>
-              You ask for a refund from a succeeded payment in your dashboard. You, the merchant, pay it from your own TSA wallet in the TSA
-              Connect app, in USDT or USDC, to your customer's TSA Connect wallet. You can refund in part or in full, up to what your customer
-              actually paid (which includes any fee they paid); TSA does not return its own fee. <C>payment.refunded</C> is sent once the transfer
-              is confirmed. Refunds can't be created with an API key yet.
+              You ask for a refund from a succeeded payment in your dashboard. {REFUND_TERMS} <C>payment.refunded</C> is sent once the
+              transfer is confirmed. Refunds can't be created with an API key yet.
             </P>
             <CodeBlock title="payment.refunded event body" code={refundWebhookBody} />
             <Reference

@@ -7,6 +7,8 @@ export type ListKind = 'payments' | 'links' | 'open-links';
 
 export const queryKeys = {
   summary: (mode: Mode, from: string, to: string) => ['payment-summary', mode, from, to] as const,
+  /** Every period's summary in a mode. */
+  summaries: (mode: Mode) => ['payment-summary', mode] as const,
   list: (kind: ListKind, mode: Mode, filter?: PaymentFilter) => (filter ? [kind, mode, filter] : [kind, mode]) as readonly unknown[],
   payment: (mode: Mode, id: string) => ['payment', mode, id] as const,
   openLink: (mode: Mode, id: string) => ['open-link', mode, id] as const,
