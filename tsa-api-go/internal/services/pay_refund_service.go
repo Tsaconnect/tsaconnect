@@ -37,6 +37,9 @@ type PayRefundNetwork interface {
 	// transaction's own nonce means some transaction with that nonce is mined at
 	// least that deep.
 	ConfirmedNonce(ctx context.Context, chain string, account common.Address, depth uint64) (uint64, error)
+	// Endpoint is the chain's client — the one every refund read goes through —
+	// as an RPCEndpoint (endpointSteady), or nil when the chain has none.
+	Endpoint(chain string) RPCEndpoint
 }
 
 // PayRefundVerifier proves a refund transfer. *StableTransferVerifier is the

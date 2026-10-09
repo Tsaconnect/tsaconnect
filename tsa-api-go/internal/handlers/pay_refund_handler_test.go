@@ -62,6 +62,13 @@ func (*refundHandlerNet) ConfirmedNonce(context.Context, string, common.Address,
 	return 0, nil
 }
 
+func (*refundHandlerNet) Endpoint(string) services.RPCEndpoint { return refundHandlerEndpoint{} }
+
+// refundHandlerEndpoint never fails over.
+type refundHandlerEndpoint struct{}
+
+func (refundHandlerEndpoint) EndpointGeneration() uint64 { return 0 }
+
 // refundHandlerVerifier: nothing is mined yet, but the node has it.
 type refundHandlerVerifier struct{}
 

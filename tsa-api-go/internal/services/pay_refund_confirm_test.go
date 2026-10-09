@@ -288,6 +288,37 @@ func TestPayRefundConfirm_ReplacedByAnotherTransactionNeedsReview(t *testing.T) 
 	}
 }
 
+// The RPC client failed over to another endpoint while "replaced" was being
+// read: the reads may come from nodes at different heights (ours mined deep on
+// one, unknown to a lagging other). Nothing is decided — the refund stays
+// submitted, the tick fails as unreadable and the next one reads again.
+func TestPayRefundConfirm_ReplacedIsNotDecidedAcrossAnEndpointChange(t *testing.T) {
+	r := newRefundRig(t)
+	ref, _ := r.submitted(t, "CONF-8B", "1")
+	logged := captureLog(t)
+	r.ver.set(nil, errors.New("verify: not found"), false)
+	r.net.nonce = 1
+	r.net.onConfirmedNonce = func() { r.net.mu.Lock(); r.net.generation++; r.net.mu.Unlock() }
+	if err := r.s.ConfirmDue(context.Background()); err == nil || !strings.Contains(err.Error(), "endpoint changed") {
+		t.Fatalf("err %v", err)
+	}
+	if _, err := r.s.Reevaluate(context.Background(), ref.ID); !errors.Is(err, ErrPayRefundChainUnreadable) {
+		t.Fatalf("reevaluate err %v", err)
+	}
+	if got := r.status(t, ref.ID); got.Status != models.PayRefundSubmitted || got.FailureReason != "" {
+		t.Fatalf("%+v", got)
+	}
+	if strings.Contains(logged.String(), "pay_refund_replaced") || len(r.alertsOf(events.PayRefundNeedsReview)) != 0 {
+		t.Fatalf("replaced was decided: %q", logged.String())
+	}
+	// Steady again: the same reading now parks it.
+	r.net.onConfirmedNonce = nil
+	r.s.ConfirmDue(context.Background())
+	if got := r.status(t, ref.ID); got.Status != models.PayRefundNeedsReview || got.FailureReason != payRefundReplacedReason {
+		t.Fatalf("%+v", got)
+	}
+}
+
 // Review focus 2: a lagging node said "unknown", but asked again the chain has
 // it — it is ours that mined. Never failed.
 func TestPayRefundConfirm_NonceMovedButOurTransactionIsKnownOnRecheckWaits(t *testing.T) {

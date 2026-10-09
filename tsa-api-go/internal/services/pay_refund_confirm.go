@@ -138,9 +138,11 @@ func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confi
 		return nil
 	}
 	chain, ok := s.network.MainnetChainNameForID(r.ChainID)
-	if !ok {
+	endpoint := s.network.Endpoint(chain)
+	if !ok || endpoint == nil {
 		return fmt.Errorf("%w: chain %d has no client", ErrPayRefundChainUnreadable, r.ChainID)
 	}
+	gen := endpoint.EndpointGeneration() // "replaced" is decided only on reads from one endpoint
 	p, err := s.verifier.Verify(ctx, chain, *r.TxHash, r.TokenAddress, r.FromAddress, r.ToAddress)
 	out := ProveStableTransfer(p, err, StableTransferWant{From: r.FromAddress, MinConf: s.minConf, RevertNeedsDepth: true})
 	switch out.Verdict {
@@ -171,7 +173,7 @@ func (s *PayRefundService) check(ctx context.Context, r *models.PayRefund, confi
 		s.alertUnconfirmed(r) // pending in the mempool, or mined and the receipt lags
 		return nil
 	}
-	return s.unknownToChain(ctx, chain, r, resend)
+	return s.unknownToChain(ctx, chain, r, endpoint, gen, resend)
 }
 
 // refundReadingName names a refuting reading for the log.
@@ -220,9 +222,13 @@ func (s *PayRefundService) settleProven(ctx context.Context, chain string, r *mo
 // know ours, ours can never mine — but the one that took its place may have
 // paid the customer (the same key in another wallet app re-sent or sped it
 // up), or the node may have pruned our transaction's index. So it is parked
-// in needs_review, never failed (review I4). Otherwise, when resend, send it
-// again (idempotent — the same signed bytes), recording any refusal on the row.
-func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *models.PayRefund, resend bool) error {
+// in needs_review, never failed (review I4) — but only when every read behind
+// that verdict came from one RPC endpoint (endpointSteady from gen): after a
+// failover, "unknown" may be a lagging node's answer about a transaction mined
+// deep on another, so nothing is decided and the next tick reads again.
+// Otherwise, when resend, send it again (idempotent — the same signed bytes),
+// recording any refusal on the row.
+func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *models.PayRefund, endpoint RPCEndpoint, gen uint64, resend bool) error {
 	tx, signer, err := blockchain.DecodeSignedTx(r.RawTx)
 	if err != nil {
 		if s.alertOnce(r.ID, "pay_refund_raw_tx_unreadable") {
@@ -241,6 +247,9 @@ func (s *PayRefundService) unknownToChain(ctx context.Context, chain string, r *
 		}
 		if known {
 			return nil // ours is the one that mined; the next look proves it
+		}
+		if err := endpointSteady(endpoint, gen); err != nil {
+			return fmt.Errorf("%w: %s on %s: %s", ErrPayRefundChainUnreadable, *r.TxHash, chain, err)
 		}
 		return s.markNeedsReview(ctx, r, 0, payRefundReplacedReason, payRefundReviewReplaced)
 	}

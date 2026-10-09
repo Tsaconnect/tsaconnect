@@ -47,9 +47,13 @@ type fakeRefundNetwork struct {
 	nonce       uint64
 	nonceErr    error
 	decimalsErr error
-	// onBroadcast and onTokenDecimals, when set, run inside those calls.
-	onBroadcast     func()
-	onTokenDecimals func()
+	// onBroadcast, onTokenDecimals and onConfirmedNonce, when set, run inside
+	// those calls.
+	onBroadcast      func()
+	onTokenDecimals  func()
+	onConfirmedNonce func()
+	// generation is the RPC endpoint generation every chain reports.
+	generation uint64
 }
 
 func (f *fakeRefundNetwork) MainnetChainNameForID(id int64) (string, bool) {
@@ -94,11 +98,25 @@ func (f *fakeRefundNetwork) Broadcast(ctx context.Context, _ string, tx *types.T
 	return f.broadcastErr
 }
 func (f *fakeRefundNetwork) ConfirmedNonce(_ context.Context, _ string, _ common.Address, depth uint64) (uint64, error) {
+	if f.onConfirmedNonce != nil {
+		f.onConfirmedNonce()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nonceDepths = append(f.nonceDepths, depth)
 	return f.nonce, f.nonceErr
 }
+func (f *fakeRefundNetwork) Endpoint(string) RPCEndpoint { return fakeRefundEndpoint{f} }
+
+// fakeRefundEndpoint reports the fake network's endpoint generation.
+type fakeRefundEndpoint struct{ f *fakeRefundNetwork }
+
+func (e fakeRefundEndpoint) EndpointGeneration() uint64 {
+	e.f.mu.Lock()
+	defer e.f.mu.Unlock()
+	return e.f.generation
+}
+
 func (f *fakeRefundNetwork) broadcasts() []*types.Transaction {
 	f.mu.Lock()
 	defer f.mu.Unlock()

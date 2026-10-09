@@ -67,6 +67,14 @@ func (n *BlockchainRefundNetwork) Broadcast(ctx context.Context, chain string, t
 	return c.Client.SendTransaction(ctx, tx)
 }
 
+func (n *BlockchainRefundNetwork) Endpoint(chain string) RPCEndpoint {
+	c, err := n.client(chain)
+	if err != nil {
+		return nil // never a typed-nil *EVMClient
+	}
+	return c
+}
+
 func (n *BlockchainRefundNetwork) ConfirmedNonce(ctx context.Context, chain string, account common.Address, depth uint64) (uint64, error) {
 	c, err := n.client(chain)
 	if err != nil {
