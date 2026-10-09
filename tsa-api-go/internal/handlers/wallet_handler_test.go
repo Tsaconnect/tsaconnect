@@ -735,10 +735,13 @@ func TestParseTokenAmount(t *testing.T) {
 		{"0.000001", 6, "1", true},
 		// More fractional digits than the token has is refused, never truncated.
 		{"0.0000001", 6, "", false},
-		// Policy of services.DecimalToBaseUnits: plain digits with an optional
-		// ".digits" part only; bare-dot forms, exponents and signs are malformed.
-		{"12.", 6, "", false},
-		{".5", 6, "", false},
+		// ".5" and "12." are normalised (older app versions send them); exponents,
+		// signs and bare "." are malformed.
+		{"12.", 6, "12000000", true},
+		{".5", 6, "500000", true},
+		{" 1 ", 6, "1000000", true},
+		{".", 6, "", false},
+		{"", 6, "", false},
 		{"1e3", 6, "", false},
 		{"+1", 6, "", false},
 	}
