@@ -163,12 +163,28 @@ type MessageFilter struct {
 }
 
 // List returns messages for a trade in chronological order. Requestor must
-// be a trade participant (buyer or seller). Admin reads go through a
-// dedicated admin path (not exposed here in Phase 1).
+// be a trade participant (buyer or seller); operators use AdminList.
 func (m *P2PMessageService) List(ctx context.Context, tradeID, requestor uuid.UUID, f MessageFilter) ([]models.P2PMessage, error) {
 	if err := m.assertParticipant(ctx, tradeID, requestor); err != nil {
 		return nil, err
 	}
+	return m.listThread(ctx, tradeID, f)
+}
+
+// AdminList is List without the participant check, for dispute review. The
+// handler route must be admin-gated.
+func (m *P2PMessageService) AdminList(ctx context.Context, tradeID uuid.UUID, f MessageFilter) ([]models.P2PMessage, error) {
+	var n int64
+	if err := m.db.WithContext(ctx).Model(&models.P2PTrade{}).Where("id = ?", tradeID).Count(&n).Error; err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, ErrTradeNotFound
+	}
+	return m.listThread(ctx, tradeID, f)
+}
+
+func (m *P2PMessageService) listThread(ctx context.Context, tradeID uuid.UUID, f MessageFilter) ([]models.P2PMessage, error) {
 	limit := f.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 100

@@ -894,6 +894,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminP2P.GET("/disputes", p2p.AdminListDisputes)
 			adminP2P.GET("/disputes/:id", p2p.AdminGetDispute)
+			adminP2P.GET("/trades/:id", p2p.AdminGetTrade)
+			adminP2P.GET("/trades/:id/messages", p2p.AdminListTradeMessages)
 			adminP2P.POST("/disputes/:id/resolve", idem, p2p.AdminResolveDispute)
 			adminP2P.POST("/disputes/:id/resolve/confirm", idem, p2p.ConfirmAdminResolveDispute)
 		}

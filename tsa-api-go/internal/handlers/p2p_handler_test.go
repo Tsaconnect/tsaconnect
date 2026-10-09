@@ -310,7 +310,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE p2p_disputes (
 			id TEXT PRIMARY KEY, trade_id TEXT NOT NULL UNIQUE,
 			raised_by TEXT NOT NULL, raised_role TEXT NOT NULL,
-			reason TEXT NOT NULL,
+			reason TEXT NOT NULL, evidence_urls TEXT,
 			status TEXT NOT NULL DEFAULT 'open',
 			resolved_by TEXT, resolution TEXT,
 			refunded_to_buyer INTEGER, resolve_tx_hash TEXT,
@@ -348,7 +348,8 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME,
+			verification_status TEXT DEFAULT 'pending'
 		)`,
 	}
 	for _, s := range stmts {
