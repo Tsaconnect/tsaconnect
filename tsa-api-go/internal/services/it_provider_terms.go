@@ -102,11 +102,6 @@ func poolProviders() []string {
 	return out
 }
 
-func isPoolBuy(i *models.ITIntent) bool {
-	t, err := providerTerms(i)
-	return err == nil && t.pool
-}
-
 func isCompanyWalletBuy(i *models.ITIntent) bool {
 	t, err := providerTerms(i)
 	return err == nil && t.companyWallet

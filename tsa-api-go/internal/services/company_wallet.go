@@ -219,7 +219,15 @@ func (w *CompanyWallet) Treasury() *Treasury { return w.treasury }
 // IsConversionTreasury: addr is the conversion treasury — a sale there is a
 // converted buy's settlement leg and needs its record (N1).
 func (w *CompanyWallet) IsConversionTreasury(addr string) bool {
-	return w != nil && w.conversionTreasury != "" && strings.EqualFold(strings.TrimSpace(addr), w.conversionTreasury)
+	return w != nil && SameEVMAddress(addr, w.conversionTreasury)
+}
+
+// SameEVMAddress: a and b are one 20-byte EVM address however spelled (case,
+// 0x prefix, surrounding space). Anything that is not an address is never the
+// same (review M-1: a string compare let "abc…" past a guard on "0xABC…").
+func SameEVMAddress(a, b string) bool {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	return common.IsHexAddress(a) && common.IsHexAddress(b) && common.HexToAddress(a) == common.HexToAddress(b)
 }
 
 // Chains are the chains with at least one offered token, sorted.

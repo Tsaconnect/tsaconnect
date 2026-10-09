@@ -69,11 +69,10 @@ func (s *ITService) CheckPoolDailyCap(ctx context.Context, userID uuid.UUID, uni
 // wallet (spec §12.2).
 func (s *ITService) OpenPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPrice, destAddress string) (*models.ITIntent, *StableBuyInstructions, error) {
 	if d := s.poolDesk; d != nil {
-		dest := strings.TrimSpace(destAddress)
-		for _, own := range []string{s.converted.TreasuryAddress, d.c.Treasury.Address()} {
-			if own != "" && strings.EqualFold(dest, own) {
-				return nil, nil, fmt.Errorf("%w: that address cannot receive a purchase", ErrBadDeliveryAddress) // N1, as the company wallet
-			}
+		// N1, as the company wallet; parsed, never string-compared (review M-1).
+		if s.wallet.IsConversionTreasury(destAddress) || SameEVMAddress(destAddress, s.converted.TreasuryAddress) ||
+			SameEVMAddress(destAddress, d.c.Treasury.Address()) {
+			return nil, nil, fmt.Errorf("%w: that address cannot receive a purchase", ErrBadDeliveryAddress)
 		}
 	}
 	return s.openPoolBuy(ctx, userID, p, destAddress, nil)

@@ -45,7 +45,7 @@ func (s *ITService) poolQuoteAt(asset, currency string, fiatMinor *big.Int, mid 
 	if err != nil {
 		return nil, err
 	}
-	base := new(big.Rat).Mul(mid, big.NewRat(10_000+set.SpreadBps, 10_000))
+	base := poolBaseRate(mid, set)
 	p := priceInHouseBuy(fiatMinor, base, set.TakeBps, []passThroughCost{funding})
 	if p.net.Sign() <= 0 || p.net.Cmp(set.MinSliceUnits) < 0 {
 		return nil, fmt.Errorf("%w: minimum is %g %s", ErrStableBuyBelowMinimum, StableFromBaseUnits(set.MinSliceUnits), asset)
@@ -64,6 +64,11 @@ func (s *ITService) poolQuoteAt(asset, currency string, fiatMinor *big.Int, mid 
 		MidMinor: floorRatMinor(mid), LPRateMinor: floorRatMinor(base),
 		FundingBps: funding.bps, Settings: set,
 	}, nil
+}
+
+// poolBaseRate is the LP's rate the pool prices on: M × (1 + pool_spread).
+func poolBaseRate(mid *big.Rat, set PoolSettings) *big.Rat {
+	return new(big.Rat).Mul(mid, big.NewRat(10_000+set.SpreadBps, 10_000))
 }
 
 // QuotePoolBuy prices fiatMajor naira of asset on pool terms at mid. Pure; the
@@ -89,6 +94,8 @@ func PoolLPPayoutKobo(units, lpRateMinor *big.Int) *big.Int {
 }
 
 // PoolTakeKobo is the nominal take: fiat − floor(fiat × 10000 / (10000 + t)).
+// Plan C2's settlement arithmetic (the company's share of an order); no C1
+// path calls it yet — the worked-example tests pin it ahead of C2 (review M-4).
 func PoolTakeKobo(fiatMinor *big.Int, takeBps int64) *big.Int {
 	net := new(big.Int).Mul(fiatMinor, big.NewInt(10_000))
 	net.Quo(net, big.NewInt(10_000+takeBps))

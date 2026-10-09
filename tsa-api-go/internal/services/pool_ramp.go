@@ -119,8 +119,7 @@ func (s *ITService) PoolCard(ctx context.Context) (*PoolCard, error) {
 	if err != nil {
 		return card, nil
 	}
-	base := new(big.Rat).Mul(mid, big.NewRat(10_000+set.SpreadBps, 10_000))
-	display := floorRatMinor(new(big.Rat).Mul(base, big.NewRat(10_000+set.TakeBps, 10_000)))
+	display := inHouseDisplayRate(poolBaseRate(mid, set), set.TakeBps) // the quote's own rate (review M-2)
 	free, err := d.FreeTopN(ctx, set)
 	if err != nil || free.Cmp(set.MinSliceUnits) < 0 {
 		return card, nil

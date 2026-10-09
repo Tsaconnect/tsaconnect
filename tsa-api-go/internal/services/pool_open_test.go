@@ -250,3 +250,37 @@ func TestPoolOpen_DuplicateTradeIdNeverLocksTwice(t *testing.T) {
 
 // hexOf is a tradeId as slices store it (HashIDHex), without the 0x.
 func hexOf(b [32]byte) string { return strings.TrimPrefix(common.BytesToHash(b[:]).Hex(), "0x") }
+
+// Review M-1: the own-address refusal compares parsed addresses, so the
+// treasury spelled without 0x or in another case is still refused.
+func TestOpenPoolBuy_RefusesTheTreasuryHoweverSpelled(t *testing.T) {
+	r := newPoolOpenRig(t)
+	r.addLP(t, 50)
+	own := r.it.poolDesk.c.Treasury.Address()
+	if own == "" {
+		t.Fatal("the rig's treasury has no address")
+	}
+	for _, spelled := range []string{own, strings.ToLower(own), strings.TrimPrefix(strings.ToLower(own), "0x"), strings.ToUpper(own[2:])} {
+		if _, _, err := r.it.OpenPoolBuy(context.Background(), r.userID, r.price(t, "5000"), spelled); !errors.Is(err, ErrBadDeliveryAddress) {
+			t.Fatalf("%q: err = %v, want ErrBadDeliveryAddress", spelled, err)
+		}
+	}
+}
+
+func TestSameEVMAddress(t *testing.T) {
+	a := "0x7E5a000000000000000000000000000000000001"
+	for _, c := range []struct {
+		x, y string
+		want bool
+	}{
+		{a, strings.ToLower(a), true},
+		{a, strings.TrimPrefix(strings.ToLower(a), "0x"), true},
+		{a, "0x7E5a000000000000000000000000000000000002", false},
+		{"", "", false},
+		{"not-hex", "not-hex", false},
+	} {
+		if got := SameEVMAddress(c.x, c.y); got != c.want {
+			t.Errorf("SameEVMAddress(%q, %q) = %v, want %v", c.x, c.y, got, c.want)
+		}
+	}
+}

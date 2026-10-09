@@ -402,6 +402,13 @@ type inHousePrice struct {
 	fees                    []StableBuyFee
 }
 
+// inHouseDisplayRate is the rate an in-house buy shows: the base rate grossed
+// up by the company take, floored to a kobo. The quote and the pool card both
+// read it here (review M-2), so they cannot drift.
+func inHouseDisplayRate(baseRate *big.Rat, takeBps int64) *big.Int {
+	return floorRatMinor(new(big.Rat).Mul(baseRate, big.NewRat(10_000+takeBps, 10_000)))
+}
+
 // priceInHouseBuy is the one price of both in-house providers — the company
 // wallet and Flutterwave — for a quote, an open and every live re-price alike.
 // The display rate is the base rate (the market, or Flutterwave's own) grossed
@@ -413,7 +420,7 @@ type inHousePrice struct {
 func priceInHouseBuy(fiatMinor *big.Int, baseRate *big.Rat, takeBps int64, costs []passThroughCost) inHousePrice {
 	p := inHousePrice{
 		gross:       grossStableUnits(fiatMinor, baseRate),
-		displayRate: floorRatMinor(new(big.Rat).Mul(baseRate, big.NewRat(10_000+takeBps, 10_000))),
+		displayRate: inHouseDisplayRate(baseRate, takeBps),
 	}
 	if p.displayRate.Sign() <= 0 {
 		p.net = new(big.Int)
