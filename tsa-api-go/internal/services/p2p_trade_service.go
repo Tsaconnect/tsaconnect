@@ -1664,7 +1664,9 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	if opener != openerID {
 		return nil, ErrForbidden
 	}
-	if trade.OpenTxHash == txHash && trade.OpenTxHash != "" {
+	// Replay of the same confirm, or a retry after the open was already
+	// recorded (e.g. backfilled from chain) and the trade has moved on.
+	if trade.OpenTxHash != "" && (trade.OpenTxHash == txHash || trade.Status != models.P2PTradeStatusPendingPayment) {
 		return &trade, nil
 	}
 	if trade.Status != models.P2PTradeStatusPendingPayment {
@@ -1710,14 +1712,12 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		}
 	}
 
-	openUpdates := map[string]any{"open_tx_hash": txHash, "updated_at": s.clock.Now()}
-	// Re-anchor the off-chain deadline to the ON-CHAIN createdAt: the contract
-	// enforces cancelByTimeout at createdAt+paymentWindow, but expires_at was set
-	// at intent time and drifts earlier if the open mined late — which would nudge
-	// a timeout-cancel the contract reverts. Best-effort: keep intent-time on read failure.
-	if onchain, rerr := escrow.ReadTrade(HashID(trade.ID)); rerr == nil && onchain.CreatedAt != nil && onchain.CreatedAt.Sign() > 0 {
-		openUpdates["expires_at"] = time.Unix(onchain.CreatedAt.Int64(), 0).UTC().Add(p2pPaymentWindow)
+	// Best-effort read: on failure the intent-time expires_at is kept.
+	onchain, rerr := escrow.ReadTrade(HashID(trade.ID))
+	if rerr != nil {
+		onchain = nil
 	}
+	openUpdates := s.openRecordUpdates(txHash, onchain)
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ?", trade.ID).
 		Updates(openUpdates).Error; err != nil {
@@ -1725,18 +1725,6 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	}
 	trade.OpenTxHash = txHash
 	return &trade, nil
-}
-
-// markPaidOpenGate refuses mark-paid on a trade whose escrow is not yet known
-// to be funded. OpenTxHash is set solely by ConfirmOpenTrade, so a
-// never-broadcast open can't be flipped to `paid` — a state the watchdog and
-// reconciler can't clear and which blocks the seller from cancelling the ad.
-// The one place that decides "open on-chain" for the payer's mark-paid.
-func markPaidOpenGate(t *models.P2PTrade) error {
-	if strings.TrimSpace(t.OpenTxHash) == "" {
-		return fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
-	}
-	return nil
 }
 
 // PrepareMarkPaid builds the on-chain markPaid tx for the fiat payer. The
@@ -1767,11 +1755,11 @@ func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID 
 	if !common.IsHexAddress(payerAddress) {
 		return nil, nil, fmt.Errorf("%w: invalid payer address", ErrInvalidParams)
 	}
-	if err := markPaidOpenGate(&trade); err != nil {
-		return nil, nil, err
-	}
 	escrow, _, _, err := s.resolve(trade.ChainID)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.requireOpenOnChain(ctx, &trade, escrow); err != nil {
 		return nil, nil, err
 	}
 	// Build the tx before saving anything so a refused prepare changes nothing.
@@ -2441,28 +2429,28 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		return nil, fmt.Errorf("%w: trade status=%s (only pending or paid trades can dispute)",
 			ErrInvalidTransition, trade.Status)
 	}
+	// Resolve the trade's chain BEFORE persisting the dispute row so an
+	// unconfigured chain fails loud without leaving an orphan dispute.
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
+	}
 	// A never-opened-on-chain trade has no escrowed funds to dispute; refuse so a
-	// phantom trade can't be escalated to `disputed` and pull in an admin.
-	if strings.TrimSpace(trade.OpenTxHash) == "" {
-		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
+	// phantom trade can't be escalated to `disputed` and pull in an admin. An
+	// open whose confirm was lost is backfilled from chain here.
+	if err := s.requireOpenOnChain(ctx, &trade, escrow); err != nil {
+		return nil, err
 	}
 	// Reject duplicate open dispute. Unique constraint on TradeID makes the
 	// race unlikely; this is the friendly-error path.
 	var existing models.P2PDispute
-	err := s.db.WithContext(ctx).
+	err = s.db.WithContext(ctx).
 		Where("trade_id = ? AND status = ?", trade.ID, models.P2PDisputeStatusOpen).
 		First(&existing).Error
 	if err == nil {
 		return nil, ErrDisputeAlreadyOpen
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-
-	// Resolve the trade's chain BEFORE persisting the dispute row so an
-	// unconfigured chain fails loud without leaving an orphan dispute.
-	escrow, _, _, err := s.resolve(trade.ChainID)
-	if err != nil {
 		return nil, err
 	}
 
@@ -2892,6 +2880,19 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// for both fundings, but recording the authoritative value matters for
 	// auditing and side-aware messaging.
 	funding := onchain.Funding
+
+	// The open is on chain but its confirm-open never reached us (app killed
+	// after broadcast): record it so mark-paid and dispute are allowed. A
+	// mismatch is logged as an ALERT and left for an operator. When the chain
+	// has moved past Pending, the switch below still applies that transition.
+	if strings.TrimSpace(trade.OpenTxHash) == "" {
+		if ok, err := s.recordOpenFromChain(ctx, &trade, onchain); err != nil {
+			log.Printf("[p2p reconcile] open backfill refused: trade=%s err=%v", trade.ID, err)
+		} else if ok && onchain.Status == OnChainP2PStatusPending {
+			return ReconcileResult{Changed: true, FromStatus: trade.Status, ToStatus: trade.Status,
+				Reason: "open backfilled"}, nil
+		}
+	}
 
 	// Realized on-chain fee for the release/resolve paths. The reconciler has no
 	// TradeReleased event to read FeeToSystem from, so derive it from the view:
