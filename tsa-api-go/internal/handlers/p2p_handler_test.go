@@ -53,6 +53,7 @@ type mockEscrow struct {
 	disputedEvent      *services.P2PTradeDisputedEvent
 	resolvedEvent      *services.P2PTradeResolvedEvent
 	onChainTrade       *services.OnChainP2PTrade
+	prepareMarkPaidErr error
 	hashFn             func(services.AdVoucher) [32]byte
 	// Captured args so handler tests can assert the deposit path was taken
 	// with the right roles/addresses.
@@ -112,6 +113,9 @@ func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string,
 	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
 }
 func (m *mockEscrow) PrepareMarkPaid(_ [32]byte, _ string) ([]byte, error) {
+	if m.prepareMarkPaidErr != nil {
+		return nil, m.prepareMarkPaidErr
+	}
 	return []byte(`{"tx":"markPaid"}`), nil
 }
 func (m *mockEscrow) PrepareRelease(_ [32]byte, _ string) ([]byte, error) {
@@ -434,6 +438,9 @@ func mountP2PRoutes(r *gin.Engine, h *P2PHandler) {
 	g.GET("/payment-providers", h.ListPaymentProviders)
 	g.GET("/sellers/:id", h.GetSellerProfile)
 	g.POST("/trades/:id/rate", h.RateTrade)
+	g.POST("/trades/:id/mark-paid", h.MarkPaidRetired)
+	g.POST("/trades/:id/mark-paid/prepare", h.PrepareMarkPaid)
+	g.POST("/trades/:id/mark-paid/confirm", h.ConfirmMarkPaid)
 	g.GET("/trades/:id", h.GetTrade)
 	g.GET("/ads/:id", h.GetAd)
 }
@@ -1474,5 +1481,82 @@ func TestAdResponses_NeverCarryVoucherSecrets(t *testing.T) {
 		if !strings.Contains(rec.Body.String(), `"voucherHash"`) {
 			t.Errorf("voucherHash should stay")
 		}
+	}
+}
+
+// seedPayerTrade seeds a pending_payment trade whose fiat payer (BuyerID) is
+// the rig user and whose open is confirmed on-chain.
+func seedPayerTrade(t *testing.T, r *rig, buyerID uuid.UUID) uuid.UUID {
+	t.Helper()
+	adID := uuid.New()
+	r.db.Create(&models.P2PAd{ID: adID, SellerID: uuid.New(), Side: "sell", Token: "USDT", FiatCurrency: "NGN",
+		Amount: "0", Remaining: "0", Reserved: "0", Rate: "1500", Status: "active"})
+	tradeID := uuid.New()
+	r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: buyerID, SellerID: uuid.New(), Token: "USDT",
+		ChainID: 146, OnChainTradeID: tradeID.String(), TokenAmount: "1000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500", OpenTxHash: "0xopen",
+		ExpiresAt: time.Now().Add(time.Hour), Status: models.P2PTradeStatusPendingPayment})
+	return tradeID
+}
+
+func TestMarkPaid_PrepareThenConfirm(t *testing.T) {
+	r := newRig(t)
+	tradeID := seedPayerTrade(t, r, r.sellerID)
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid/prepare", map[string]any{"proofImageUrl": "https://p/x.png"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prepare = %d %s", rec.Code, rec.Body.String())
+	}
+	data := decode(t, rec)["data"].(map[string]any)
+	if data["unsignedTx"] == nil || data["trade"].(map[string]any)["status"] != "pending_payment" {
+		t.Fatalf("data = %v", data)
+	}
+	rec = doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid/confirm", map[string]any{"txHash": "0xpaid"})
+	if rec.Code != http.StatusOK || decode(t, rec)["data"].(map[string]any)["status"] != "paid" {
+		t.Fatalf("confirm = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMarkPaidPrepare_StatusMapping(t *testing.T) {
+	r := newRig(t)
+	body := map[string]any{"proofImageUrl": "https://p/x.png"}
+
+	notPayer := seedPayerTrade(t, r, uuid.New())
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+notPayer.String()+"/mark-paid/prepare", body); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-payer = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+
+	unopened := seedPayerTrade(t, r, r.sellerID)
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", unopened).Update("open_tx_hash", "")
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+unopened.String()+"/mark-paid/prepare", body); rec.Code != http.StatusConflict {
+		t.Fatalf("open not on-chain = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+
+	reverting := seedPayerTrade(t, r, r.sellerID)
+	r.escrow.prepareMarkPaidErr = errors.New("execution reverted: Not buyer")
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+reverting.String()+"/mark-paid/prepare", body); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("would revert = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The pre-launch app's "I've paid" called this route and flipped the trade
+// to paid in the DB only. It must now refuse with a code the app can route on
+// and leave the trade exactly as it was.
+func TestMarkPaid_OldRouteRetired(t *testing.T) {
+	r := newRig(t)
+	tradeID := seedPayerTrade(t, r, r.sellerID)
+	var before models.P2PTrade
+	r.db.First(&before, "id = ?", tradeID)
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid", map[string]any{"proofImageUrl": "https://p/x.png"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("old mark-paid = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	if body["success"] != false || body["code"] != "app_update_required" {
+		t.Fatalf("body = %v", body)
+	}
+	var after models.P2PTrade
+	r.db.First(&after, "id = ?", tradeID)
+	if after.Status != models.P2PTradeStatusPendingPayment || after.ProofImageURL != before.ProofImageURL ||
+		after.MarkedPaidAt != nil || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("old route changed the trade: %+v", after)
 	}
 }

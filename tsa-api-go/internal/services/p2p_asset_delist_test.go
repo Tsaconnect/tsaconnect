@@ -308,9 +308,7 @@ func TestDelistedAsset_ExistingPositionsStillExit(t *testing.T) {
 		if _, err := svc.ConfirmOpenTrade(ctx, tr.ID, buyerID, "", "0xopen"); err != nil {
 			t.Fatalf("ConfirmOpenTrade: %v", err)
 		}
-		if _, err := svc.MarkPaid(ctx, tr.ID, buyerID, "https://proof/x.png"); err != nil {
-			t.Fatalf("MarkPaid: %v", err)
-		}
+		markPaidViaChain(t, svc, tr.ID, buyerID)
 		if _, err := svc.PrepareRelease(ctx, tr.ID, sellerID, sellerAddr); err != nil {
 			t.Fatalf("PrepareRelease: %v", err)
 		}

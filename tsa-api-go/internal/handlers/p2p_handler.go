@@ -1304,9 +1304,24 @@ func (h *P2PHandler) ConfirmOpenTrade(c *gin.Context) {
 
 type markPaidRequest struct {
 	ProofImageURL string `json:"proofImageUrl" binding:"required"`
+	CallerAddress string `json:"callerAddress"`
 }
 
-func (h *P2PHandler) MarkPaid(c *gin.Context) {
+// MarkPaidRetired answers the pre-on-chain "I've paid" route. It flipped the
+// trade to paid in the DB only, leaving the escrow Pending so the crypto could
+// be clawed back by cancelByTimeout after the payer had sent fiat. An app that
+// still calls it is told to update; the trade is left untouched.
+func (h *P2PHandler) MarkPaidRetired(c *gin.Context) {
+	c.JSON(http.StatusConflict, gin.H{
+		"success": false,
+		"message": "Please update the app to mark this payment as sent.",
+		"code":    "app_update_required",
+	})
+}
+
+// PrepareMarkPaid returns the payer's unsigned on-chain markPaid tx and saves
+// the proof. The trade stays pending_payment until ConfirmMarkPaid.
+func (h *P2PHandler) PrepareMarkPaid(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
 		return
@@ -1320,7 +1335,36 @@ func (h *P2PHandler) MarkPaid(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	trade, err := h.trade.MarkPaid(c.Request.Context(), id, user.ID, req.ProofImageURL)
+	payerAddr := req.CallerAddress
+	if payerAddr == "" {
+		payerAddr = user.WalletAddress
+	}
+	trade, raw, err := h.trade.PrepareMarkPaid(c.Request.Context(), id, user.ID, payerAddr, req.ProofImageURL)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"unsignedTx": unsignedTxJSON(raw), "trade": trade},
+	})
+}
+
+// ConfirmMarkPaid flips the trade to paid once the markPaid receipt verifies.
+func (h *P2PHandler) ConfirmMarkPaid(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req confirmTxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	trade, err := h.trade.ConfirmMarkPaid(c.Request.Context(), id, user.ID, req.TxHash)
 	if mapServiceError(c, err) {
 		return
 	}

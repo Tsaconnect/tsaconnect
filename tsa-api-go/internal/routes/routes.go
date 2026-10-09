@@ -855,7 +855,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.GET("/trades", p2p.ListTrades)
 			p2pGroup.GET("/trades/:id", p2p.GetTrade)
 			p2pGroup.POST("/trades/:id/open/confirm", idem, p2p.ConfirmOpenTrade)
-			p2pGroup.POST("/trades/:id/mark-paid", idem, p2p.MarkPaid)
+			// Retired: answers 409 app_update_required (DB-only mark-paid left the escrow cancellable).
+			p2pGroup.POST("/trades/:id/mark-paid", p2p.MarkPaidRetired)
+			p2pGroup.POST("/trades/:id/mark-paid/prepare", idem, p2p.PrepareMarkPaid)
+			p2pGroup.POST("/trades/:id/mark-paid/confirm", idem, p2p.ConfirmMarkPaid)
 			p2pGroup.POST("/trades/:id/release", idem, p2p.PrepareRelease)
 			p2pGroup.POST("/trades/:id/release/confirm", idem, p2p.ConfirmRelease)
 			p2pGroup.POST("/trades/:id/cancel", idem, p2p.PrepareCancel)

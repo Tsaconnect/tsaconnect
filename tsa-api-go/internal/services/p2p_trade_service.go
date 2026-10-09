@@ -1727,10 +1727,82 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	return &trade, nil
 }
 
-func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UUID, proofURL string) (*models.P2PTrade, error) {
-	if strings.TrimSpace(proofURL) == "" {
-		return nil, fmt.Errorf("%w: proof URL required", ErrInvalidParams)
+// markPaidOpenGate refuses mark-paid on a trade whose escrow is not yet known
+// to be funded. OpenTxHash is set solely by ConfirmOpenTrade, so a
+// never-broadcast open can't be flipped to `paid` — a state the watchdog and
+// reconciler can't clear and which blocks the seller from cancelling the ad.
+// The one place that decides "open on-chain" for the payer's mark-paid.
+func markPaidOpenGate(t *models.P2PTrade) error {
+	if strings.TrimSpace(t.OpenTxHash) == "" {
+		return fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
 	}
+	return nil
+}
+
+// PrepareMarkPaid builds the on-chain markPaid tx for the fiat payer. The
+// payer is always trade.BuyerID — the on-chain buyer, on either ad side (the
+// taker on a sell-ad, the merchant on a buy-ad). The proof is saved now so it
+// survives an app restart between signing and confirming, but the trade stays
+// pending_payment: only a verified TradePaid receipt (ConfirmMarkPaid) or the
+// reconciler seeing chain Paid moves it, because until markPaid lands on-chain
+// anyone may cancelByTimeout and claw the crypto back.
+func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID uuid.UUID, payerAddress, proofURL string) (*models.P2PTrade, []byte, error) {
+	proofURL = strings.TrimSpace(proofURL)
+	if proofURL == "" || !strings.HasPrefix(strings.ToLower(proofURL), "http") {
+		return nil, nil, fmt.Errorf("%w: proof URL required", ErrInvalidParams)
+	}
+	var trade models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, ErrTradeNotFound
+		}
+		return nil, nil, err
+	}
+	if trade.BuyerID != payerID {
+		return nil, nil, ErrForbidden
+	}
+	if trade.Status != models.P2PTradeStatusPendingPayment {
+		return nil, nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
+	}
+	if !common.IsHexAddress(payerAddress) {
+		return nil, nil, fmt.Errorf("%w: invalid payer address", ErrInvalidParams)
+	}
+	if err := markPaidOpenGate(&trade); err != nil {
+		return nil, nil, err
+	}
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Build the tx before saving anything so a refused prepare changes nothing.
+	unsignedTx, err := escrow.PrepareMarkPaid(HashID(trade.ID), payerAddress)
+	if err != nil {
+		log.Printf("[p2p PrepareMarkPaid] prepare failed: trade=%s payer=%s err=%v", trade.ID, payerAddress, err)
+		if isChainRevert(err) {
+			return nil, nil, fmt.Errorf("%w: %v", ErrTradePrepareReverted, err)
+		}
+		return nil, nil, fmt.Errorf("%w: %v", ErrChainUnavailable, err)
+	}
+	now := s.clock.Now()
+	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Updates(map[string]any{"proof_image_url": proofURL, "updated_at": now})
+	if res.Error != nil {
+		return nil, nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, nil, ErrInvalidTransition
+	}
+	trade.ProofImageURL = proofURL
+	trade.UpdatedAt = now
+	return &trade, unsignedTx, nil
+}
+
+// ConfirmMarkPaid flips pending_payment → paid once the payer's markPaid tx is
+// verified on-chain (receipt status 1 + TradePaid for this trade). A replay, or
+// a confirm that arrives after the reconciler or a later step already moved the
+// trade on, returns the trade unchanged.
+func (s *P2PTradeService) ConfirmMarkPaid(ctx context.Context, tradeID, payerID uuid.UUID, txHash string) (*models.P2PTrade, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1738,42 +1810,66 @@ func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UU
 		}
 		return nil, err
 	}
-	if trade.BuyerID != buyerID {
+	if trade.BuyerID != payerID {
 		return nil, ErrForbidden
 	}
-	if trade.Status != models.P2PTradeStatusPendingPayment {
+	switch trade.Status {
+	case models.P2PTradeStatusPendingPayment:
+	case models.P2PTradeStatusPaid, models.P2PTradeStatusReleasing, models.P2PTradeStatusReleased,
+		models.P2PTradeStatusDisputed, models.P2PTradeStatusResolved:
+		return &trade, nil
+	default:
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
-	// The escrow is only funded once the open is confirmed on-chain (OpenTxHash is
-	// set solely by ConfirmOpenTrade). Refuse mark-paid on a never-broadcast open
-	// so a phantom trade can't be flipped to `paid` — a state the watchdog and
-	// reconciler can't clear and which blocks the seller from cancelling the ad.
-	if strings.TrimSpace(trade.OpenTxHash) == "" {
-		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
+	escrow, _, _, err := s.resolve(trade.ChainID)
+	if err != nil {
+		return nil, err
 	}
+	if _, err := escrow.VerifyTradePaid(txHash, HashID(trade.ID)); err != nil {
+		return nil, fmt.Errorf("verify on-chain markPaid: %w", err)
+	}
+	flipped, err := s.markPaidCore(ctx, &trade, &payerID, map[string]any{"txHash": txHash, "proofUrl": trade.ProofImageURL})
+	if err != nil {
+		return nil, err
+	}
+	if !flipped {
+		// Lost the race (reconciler or a concurrent confirm got there first).
+		if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
+			return nil, err
+		}
+	}
+	return &trade, nil
+}
+
+// markPaidCore is the pending_payment → paid transition shared by the payer's
+// verified confirm and the reconciler's chain-Paid backfill: the guarded
+// update, audit, both parties' notifications and the system chat message. It
+// reports false (no error) when the trade was no longer pending_payment.
+// SystemMarkPaid (PM) keeps its own body — it stamps a provenance ref into
+// proof_image_url and posts different copy.
+func (s *P2PTradeService) markPaidCore(ctx context.Context, t *models.P2PTrade, actor *uuid.UUID, meta map[string]any) (bool, error) {
 	now := s.clock.Now()
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Where("id = ? AND status = ?", t.ID, models.P2PTradeStatusPendingPayment).
 		Updates(map[string]any{
-			"status":          models.P2PTradeStatusPaid,
-			"marked_paid_at":  now,
-			"proof_image_url": proofURL,
-			"updated_at":      now,
+			"status":         models.P2PTradeStatusPaid,
+			"marked_paid_at": now,
+			"updated_at":     now,
 		})
 	if res.Error != nil {
-		return nil, res.Error
+		return false, res.Error
 	}
 	if res.RowsAffected == 0 {
-		return nil, ErrInvalidTransition
+		return false, nil
 	}
-	trade.Status = models.P2PTradeStatusPaid
-	trade.MarkedPaidAt = &now
-	trade.ProofImageURL = proofURL
-	s.audit(ctx, models.P2PAuditTradeMarkedPaid, &buyerID, &trade.AdID, &trade.ID, map[string]any{"proofUrl": proofURL})
-	s.emit(events.P2PTradePaid, buyerID, "Buyer marked payment sent", "", map[string]any{"tradeId": trade.ID})
-	s.emit(events.P2PTradePaid, trade.SellerID, "Buyer marked payment sent — please confirm", "", map[string]any{"tradeId": trade.ID})
-	s.systemMsg(ctx, trade.ID, "Buyer marked payment as sent. Seller — verify your bank and release.")
-	return &trade, nil
+	t.Status = models.P2PTradeStatusPaid
+	t.MarkedPaidAt = &now
+	t.UpdatedAt = now
+	s.audit(ctx, models.P2PAuditTradeMarkedPaid, actor, &t.AdID, &t.ID, meta)
+	s.emit(events.P2PTradePaid, t.BuyerID, "Buyer marked payment sent", "", map[string]any{"tradeId": t.ID})
+	s.emit(events.P2PTradePaid, t.SellerID, "Buyer marked payment sent — please confirm", "", map[string]any{"tradeId": t.ID})
+	s.systemMsg(ctx, t.ID, "Buyer marked payment as sent. Seller — verify your bank and release.")
+	return true, nil
 }
 
 func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID uuid.UUID, sellerAddress string) (*ReleaseResult, error) {
@@ -2814,26 +2910,22 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	case OnChainP2PStatusDisputed:
 		return s.reconcileToDisputed(ctx, &trade)
 	case OnChainP2PStatusPaid:
-		// Chain Paid + DB pending_payment → someone called on-chain markPaid
-		// outside our normal off-chain flow. Surface it.
+		// Chain Paid + DB pending_payment → the payer's markPaid landed but its
+		// confirm never reached us (e.g. app killed after broadcast). Backfill
+		// through the same transition a confirm uses, so the audit, both
+		// parties' notifications and the chat message still happen.
 		if trade.Status == models.P2PTradeStatusPendingPayment {
-			now := s.clock.Now()
-			res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-				Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
-				Updates(map[string]any{
-					"status":         models.P2PTradeStatusPaid,
-					"marked_paid_at": now,
-					"updated_at":     now,
-				})
-			if res.Error != nil {
-				return ReconcileResult{}, res.Error
+			fromStatus := trade.Status
+			flipped, err := s.markPaidCore(ctx, &trade, nil, map[string]any{"source": "reconciler", "reason": "chain status Paid"})
+			if err != nil {
+				return ReconcileResult{}, err
 			}
-			if res.RowsAffected > 0 {
+			if flipped {
 				s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 					"from": "pending_payment", "to": "paid",
 					"reason": "chain status Paid",
 				})
-				return ReconcileResult{Changed: true, FromStatus: trade.Status,
+				return ReconcileResult{Changed: true, FromStatus: fromStatus,
 					ToStatus: models.P2PTradeStatusPaid, Reason: "chain Paid"}, nil
 			}
 		}

@@ -44,6 +44,7 @@ type mockEscrow struct {
 	verifyTradeCanErr  error
 	verifyDisputedErr  error
 	verifyPaidErr      error
+	prepareMarkPaidErr error
 	verifyResolvedErr  error
 
 	// Event fixtures the verify methods return on success.
@@ -172,6 +173,9 @@ func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string,
 	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
 }
 func (m *mockEscrow) PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error) {
+	if m.prepareMarkPaidErr != nil {
+		return nil, m.prepareMarkPaidErr
+	}
 	return []byte(`{"tx":"markPaid"}`), nil
 }
 func (m *mockEscrow) PrepareRelease(tradeId [32]byte, seller string) ([]byte, error) {
@@ -1532,9 +1536,7 @@ func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 	// MarkPaid now requires the open to be confirmed on-chain.
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 	// MarkPaid is by the BuyerID = merchant (the fiat sender).
-	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err != nil {
-		t.Fatalf("MarkPaid(merchant): %v", err)
-	}
+	markPaidViaChain(t, svc, trade.ID, merchantID)
 	// Release is by the SellerID = user (crypto provider). Set the released
 	// event to split the trade amount.
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
@@ -1666,9 +1668,7 @@ func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 	}
 
 	// Merchant (BuyerID) marks fiat paid.
-	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err != nil {
-		t.Fatalf("MarkPaid(merchant): %v", err)
-	}
+	markPaidViaChain(t, svc, trade.ID, merchantID)
 
 	// Set up mock release event — escrow releases to the merchant.
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
@@ -1800,8 +1800,8 @@ func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 		t.Fatalf("OpenTrade: %v", err)
 	}
 	// No ConfirmOpenTrade → OpenTxHash empty → mark-paid must be rejected.
-	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err == nil {
-		t.Fatalf("MarkPaid on an unconfirmed open should be rejected")
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), trade.ID, merchantID, testPayerAddr, "https://proof/x.png"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("PrepareMarkPaid on an unconfirmed open: want ErrInvalidTransition, got %v", err)
 	}
 }
 
