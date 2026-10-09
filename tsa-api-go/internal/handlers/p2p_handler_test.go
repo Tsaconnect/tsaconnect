@@ -198,6 +198,9 @@ func (m *mockEscrow) ReadTrade(_ [32]byte) (*services.OnChainP2PTrade, error) {
 	}
 	return &services.OnChainP2PTrade{Status: services.OnChainP2PStatusNone}, nil
 }
+func (m *mockEscrow) ReadTradeFeeSnapshot(_ [32]byte) (uint16, uint16, bool) {
+	return 0, 0, false
+}
 func (m *mockEscrow) ReadTradePlatformFeeBps(_ [32]byte) (uint16, bool) {
 	return 0, false // pre-V3 default: no platform snapshot → accrual no-op
 }
@@ -297,7 +300,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
-			marked_paid_at DATETIME, released_at DATETIME,
+			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
@@ -1649,5 +1652,27 @@ func TestGetAd_PaymentMethodsAreMasked(t *testing.T) {
 	m := pms[0].(map[string]any)
 	if m["accountNumber"] != "******7890" || m["accountNumberLast4"] != "7890" || m["id"] == nil {
 		t.Fatalf("pm = %v", m)
+	}
+}
+
+func TestGetTrade_FeeAmountAndBuyerNet(t *testing.T) {
+	r := newRig(t)
+	adID := uuid.New()
+	if err := r.db.Create(&models.P2PAd{ID: adID, SellerID: uuid.New(), Side: models.P2PAdSideSell,
+		Token: "USDT", FiatCurrency: "NGN", Amount: "0", Remaining: "0", Reserved: "0", Rate: "1500",
+		Status: models.P2PAdStatusActive}).Error; err != nil {
+		t.Fatalf("seed ad: %v", err)
+	}
+	bps := 50
+	tradeID := uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: r.sellerID, SellerID: uuid.New(),
+		Token: "USDT", TokenAmount: "100000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500", FeeBps: &bps,
+		ExpiresAt: time.Now().Add(time.Hour), Status: models.P2PTradeStatusPendingPayment}).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/trades/"+tradeID.String(), nil)
+	data, _ := decode(t, rec)["data"].(map[string]any)
+	if data["feeBps"] != float64(50) || data["feeAmount"] != "500000" || data["buyerNetAmount"] != "99500000" {
+		t.Fatalf("fee fields wrong; body=%s", rec.Body.String())
 	}
 }

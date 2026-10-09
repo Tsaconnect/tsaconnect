@@ -408,3 +408,94 @@ func TestConfirmOpenTrade_UnreadableEscrowIsRetryable(t *testing.T) {
 		})
 	}
 }
+
+func feeBpsOf(t *testing.T, db *gorm.DB, id uuid.UUID) *int {
+	t.Helper()
+	var row models.P2PTrade
+	if err := db.First(&row, "id = ?", id).Error; err != nil {
+		t.Fatal(err)
+	}
+	return row.FeeBps
+}
+
+// ConfirmOpenTrade and the backfill both record the escrow's fee snapshot
+// (platform + gas), through the one openRecordUpdates.
+func TestOpenRecord_StoresSnapshottedFeeBps(t *testing.T) {
+	t.Run("confirm", func(t *testing.T) {
+		svc, esc, tr, db, _ := lostOpen(t, 30)
+		esc.feeSnapshotPlatform, esc.feeSnapshotGas, esc.feeSnapshotFound = 150, 40, true
+		if _, err := confirmAsOpener(svc, tr); err != nil {
+			t.Fatal(err)
+		}
+		if got := feeBpsOf(t, db, tr.ID); got == nil || *got != 190 {
+			t.Fatalf("fee_bps = %v, want 190", got)
+		}
+	})
+	t.Run("backfill", func(t *testing.T) {
+		svc, esc, tr, db, _ := lostOpen(t, 30)
+		esc.feeSnapshotPlatform, esc.feeSnapshotFound = 50, true
+		if _, err := svc.ReconcileTrade(context.Background(), tr.ID); err != nil {
+			t.Fatal(err)
+		}
+		if got := feeBpsOf(t, db, tr.ID); got == nil || *got != 50 {
+			t.Fatalf("fee_bps = %v, want 50", got)
+		}
+	})
+	t.Run("a zero snapshot is a real zero", func(t *testing.T) {
+		svc, esc, tr, db, _ := lostOpen(t, 30)
+		esc.feeSnapshotFound = true
+		if _, err := confirmAsOpener(svc, tr); err != nil {
+			t.Fatal(err)
+		}
+		if got := feeBpsOf(t, db, tr.ID); got == nil || *got != 0 {
+			t.Fatalf("fee_bps = %v, want 0", got)
+		}
+	})
+	t.Run("unreadable snapshot leaves it unset", func(t *testing.T) {
+		svc, _, tr, db, _ := lostOpen(t, 30)
+		if _, err := confirmAsOpener(svc, tr); err != nil {
+			t.Fatal(err)
+		}
+		if got := feeBpsOf(t, db, tr.ID); got != nil {
+			t.Fatalf("fee_bps = %d, want unset", *got)
+		}
+	})
+}
+
+// A trade with a recorded snapshot carries the fee and the receiver's net; the
+// ad carries the live rate and drops it when the chain cannot be read.
+func TestTradeAndAdFeeFields(t *testing.T) {
+	svc, _, tr, db, _ := lostOpen(t, 30)
+	bps := 50
+	db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Updates(map[string]any{"fee_bps": bps, "token_amount": "100000000"})
+	got, err := svc.GetTrade(context.Background(), tr.ID, tr.BuyerID)
+	if err != nil || got.FeeAmount != "500000" || got.BuyerNetAmount != "99500000" {
+		t.Fatalf("trade = %+v err=%v", got, err)
+	}
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", tr.AdID)
+
+	svc.SetFeeView(newFeeViewOn(&feeViewChain{legacy: 50}))
+	live, err := svc.GetAd(context.Background(), ad.ID)
+	if err != nil || live.FeeBps == nil || *live.FeeBps != 50 {
+		t.Fatalf("ad fee = %v err=%v", live.FeeBps, err)
+	}
+	svc.SetFeeView(newFeeViewFailing(t))
+	down, err := svc.GetAd(context.Background(), ad.ID)
+	if err != nil || down.FeeBps != nil {
+		t.Fatalf("ad fee must be omitted when the chain is unreadable, got %v err=%v", down.FeeBps, err)
+	}
+}
+
+func TestChainsCarryLiveFeeBpsPerAsset(t *testing.T) {
+	svc := &P2PTradeService{feeView: newFeeViewOn(&feeViewChain{legacy: 50})}
+	out := svc.withLiveFees(context.Background(), []P2PChainInfo{{ChainID: 146, Assets: []string{"USDT", "USDC"}}})
+	if out[0].FeeBps["USDT"] != 50 || out[0].FeeBps["USDC"] != 50 {
+		t.Fatalf("feeBps = %v", out[0].FeeBps)
+	}
+	svc.feeView = newFeeViewFailing(t)
+	out = svc.withLiveFees(context.Background(), []P2PChainInfo{{ChainID: 146, Assets: []string{"USDT"}}})
+	if out[0].FeeBps != nil {
+		t.Fatalf("unreadable chain must yield no feeBps, got %v", out[0].FeeBps)
+	}
+}

@@ -59,6 +59,9 @@ type mockEscrow struct {
 	disputedEvent  *P2PTradeDisputedEvent
 	resolvedEvent  *P2PTradeResolvedEvent
 	onChainTrade   *OnChainP2PTrade
+	// feeSnapshot*: what ReadTradeFeeSnapshot answers.
+	feeSnapshotPlatform, feeSnapshotGas uint16
+	feeSnapshotFound                    bool
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -299,6 +302,11 @@ func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
 	}
 	return &OnChainP2PTrade{Status: OnChainP2PStatusNone}, nil
 }
+// ReadTradeFeeSnapshot returns the configured snapshot (feeSnapshotFound false
+// by default: a pre-V3 escrow, so no fee_bps is recorded).
+func (m *mockEscrow) ReadTradeFeeSnapshot(tradeId [32]byte) (uint16, uint16, bool) {
+	return m.feeSnapshotPlatform, m.feeSnapshotGas, m.feeSnapshotFound
+}
 func (m *mockEscrow) ReadTradePlatformFeeBps(tradeId [32]byte) (uint16, bool) {
 	if m.platformFeeBpsSnapshot != 0 {
 		return m.platformFeeBpsSnapshot, true
@@ -402,7 +410,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
-			marked_paid_at DATETIME, released_at DATETIME,
+			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,

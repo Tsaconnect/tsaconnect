@@ -39,6 +39,7 @@ func (s *P2PTradeService) AdminTradeDetail(ctx context.Context, tradeID uuid.UUI
 		}
 		return nil, err
 	}
+	fillTradeFee(&t)
 	var side string
 	if err := s.db.WithContext(ctx).Table("p2p_ads").Select("side").Where("id = ?", t.AdID).Scan(&side).Error; err != nil {
 		return nil, err

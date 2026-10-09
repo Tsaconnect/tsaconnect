@@ -156,7 +156,7 @@ func (s *P2PTradeService) checkLPDeposit(ctx context.Context, lp *models.Payment
 // never gated (review I1), so a paused LP must still reach its balance to
 // withdraw. New money stays active-only (openableFor).
 func (s *P2PTradeService) ChainsFor(ctx context.Context, userID uuid.UUID) []P2PChainInfo {
-	chains := s.EnabledChains()
+	chains := s.withLiveFees(ctx, s.EnabledChains())
 	pool, ok := s.escrows.PoolChain()
 	if !ok || !s.lpBoundTo(ctx, userID, pool.ChainID) {
 		return chains

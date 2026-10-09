@@ -148,6 +148,9 @@ type P2PChainInfo struct {
 	Assets   []string       `json:"assets"`
 	Purpose  string         `json:"purpose"`
 	Decimals map[string]int `json:"decimals,omitempty"`
+	// FeeBps is each asset's live on-chain fee (platform + gas bps), keyed by
+	// symbol; an asset whose chain read failed is absent, never guessed.
+	FeeBps map[string]int `json:"feeBps,omitempty"`
 }
 
 // Chains lists the chains open to ordinary P2P (chainID + tradeable assets),

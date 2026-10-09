@@ -1267,6 +1267,7 @@ func main() {
 			log.Printf("[p2p tokenResolver] chainID=%d symbol=%s -> %s", chainID, symbol, addr)
 			return addr
 		})
+		p2pTradeSvc.SetFeeView(services.NewP2PFeeViewForConfig(blockchainService, cfg))
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
 		p2pTradeSvc.SetFixedRateBandBps(cfg.P2PFixedRateBandBps)
 		// Wire the fee/TP engine (SP3) — P2P is a fee-settled integration.

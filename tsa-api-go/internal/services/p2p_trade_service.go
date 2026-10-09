@@ -130,6 +130,9 @@ type P2PEscrowAdapter interface {
 	// trade (design §8). Returns 0/false on a pre-V3 escrow or a V2-opened trade
 	// (no snapshot) — the documented no-op signal for accrueP2PReleaseFee.
 	ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool)
+	// ReadTradeFeeSnapshot is the same read with the gas leg too; found=false
+	// when the read failed or the escrow predates V3.
+	ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, gasBps uint16, found bool)
 	ReadBalance(seller, token string) (*OnChainBalance, error)
 	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
 	ReadVoucherCancelled(voucherHash [32]byte) (bool, error)
@@ -164,6 +167,8 @@ var SystemClock Clock = realClock{}
 
 type P2PTradeService struct {
 	db *gorm.DB
+	// feeView reads the live on-chain fee bps (nil: fee fields stay unset).
+	feeView *P2PFeeView
 	// escrows resolves the per-chain escrow adapter + EIP-712 domain (chainId,
 	// version) from an entity's ChainID. There is deliberately NO single
 	// escrow/chainID/version scalar: every escrow-touching method resolves from
@@ -252,6 +257,12 @@ func (s *P2PTradeService) WithClock(c Clock) *P2PTradeService {
 	cp := *s
 	cp.clock = c
 	return &cp
+}
+
+// SetFeeView wires the live on-chain fee reader. Optional: without it ads and
+// chains carry no fee (the field is omitted, never defaulted).
+func (s *P2PTradeService) SetFeeView(v *P2PFeeView) {
+	s.feeView = v
 }
 
 // SetTokenResolver wires a (chainID, symbol) → address function. Called at
@@ -1747,7 +1758,7 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	if err := s.verifyOpenOnChain(ctx, "confirm", &trade, onchain); err != nil {
 		return nil, err
 	}
-	openUpdates := s.openRecordUpdates(txHash, onchain)
+	openUpdates := s.openRecordUpdates(txHash, escrow, &trade, onchain)
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ?", trade.ID).
 		Updates(openUpdates).Error; err != nil {
@@ -3031,7 +3042,7 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// Disputed must never reach our row; only Cancelled is applied, as it just
 	// returns the capacity our row reserved. The rest waits for an operator.
 	if strings.TrimSpace(trade.OpenTxHash) == "" {
-		if ok, err := s.recordOpenFromChain(ctx, &trade, onchain); err != nil {
+		if ok, err := s.recordOpenFromChain(ctx, escrow, &trade, onchain); err != nil {
 			if !errors.Is(err, ErrInvalidTransition) && !errors.Is(err, ErrUnsupportedToken) {
 				return ReconcileResult{}, fmt.Errorf("backfill open: %w", err)
 			}
@@ -3630,6 +3641,7 @@ func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2
 		}
 		return nil, err
 	}
+	s.fillAdFee(ctx, &ad)
 	return &ad, nil
 }
 
@@ -3682,6 +3694,9 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 	var out []models.P2PAd
 	if err := q.Find(&out).Error; err != nil {
 		return nil, err
+	}
+	for i := range out {
+		s.fillAdFee(ctx, &out[i])
 	}
 	return out, nil
 }
@@ -3877,6 +3892,7 @@ func (s *P2PTradeService) GetTrade(ctx context.Context, tradeID, requestor uuid.
 	if trade.BuyerID != requestor && trade.SellerID != requestor {
 		return nil, ErrForbidden
 	}
+	fillTradeFee(&trade)
 	return &trade, nil
 }
 
@@ -3901,6 +3917,9 @@ func (s *P2PTradeService) ListTrades(ctx context.Context, f TradeFilter) ([]mode
 	var out []models.P2PTrade
 	if err := q.Find(&out).Error; err != nil {
 		return nil, err
+	}
+	for i := range out {
+		fillTradeFee(&out[i])
 	}
 	return out, nil
 }

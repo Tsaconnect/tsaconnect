@@ -92,6 +92,10 @@ type P2PTrade struct {
 	ResolvedByAdmin        *uuid.UUID `gorm:"type:uuid" json:"resolvedByAdmin,omitempty"`
 	MarkedPaidAt           *time.Time `json:"markedPaidAt,omitempty"`
 	ReleasedAt             *time.Time `json:"releasedAt,omitempty"`
+	// FeeBps is the fee (platform + gas bps) the escrow snapshotted when the open
+	// was recorded; the crypto receiver nets amount minus floor(amount*bps/10000).
+	// Nil until the snapshot was read; never guessed.
+	FeeBps    *int       `gorm:"column:fee_bps" json:"feeBps,omitempty"`
 	ExpiresAt              time.Time  `gorm:"index;not null" json:"expiresAt"`
 	// ExpiredNotifiedAt — set by the timeout watchdog when it first detects
 	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
@@ -110,6 +114,9 @@ type P2PTrade struct {
 	// Payee is where the fiat payer sends money in a direct (non-PM) trade.
 	// Set by GetTrade only while the trade is live; never persisted.
 	Payee *P2PPayee `gorm:"-" json:"payee,omitempty"`
+	// FeeAmount / BuyerNetAmount (token base units) are derived from FeeBps.
+	FeeAmount      string `gorm:"-" json:"feeAmount,omitempty"`
+	BuyerNetAmount string `gorm:"-" json:"buyerNetAmount,omitempty"`
 }
 
 // P2PPayee is the fiat destination of a direct trade (virtual; not persisted).

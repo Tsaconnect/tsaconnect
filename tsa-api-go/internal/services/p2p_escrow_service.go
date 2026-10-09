@@ -47,6 +47,7 @@ const p2pEscrowABI = `[
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"}],"name":"hashVoucher","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"feeBps","outputs":[{"type":"uint16"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"paymentWindow","outputs":[{"type":"uint40"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"mcgpToken","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Deposited","type":"event"},

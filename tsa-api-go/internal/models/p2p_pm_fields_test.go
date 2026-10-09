@@ -75,7 +75,7 @@ func TestP2PPMFields_Persist(t *testing.T) {
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
 			marked_paid_at DATETIME,
-			released_at DATETIME,
+			released_at DATETIME, fee_bps INTEGER,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
 			payment_ref TEXT,

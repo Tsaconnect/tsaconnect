@@ -130,6 +130,10 @@ type P2PAd struct {
 	CreatedAt        time.Time      `json:"createdAt"`
 	UpdatedAt        time.Time      `json:"updatedAt"`
 	DeletedAt        *time.Time     `gorm:"index" json:"deletedAt,omitempty"`
+
+	// FeeBps is the live on-chain fee a trade on this ad would snapshot (virtual,
+	// never persisted). Absent when the chain could not be read.
+	FeeBps *int `gorm:"-" json:"feeBps,omitempty"`
 }
 
 func (P2PAd) TableName() string {
