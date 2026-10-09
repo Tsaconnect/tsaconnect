@@ -18,7 +18,7 @@ import { toast } from '@/components/ui/toaster';
 import { createRefund, listPaymentRefunds, type Mode, type Payment, type PaymentRefunds as RefundsAnswer, type Refund } from './api';
 import { chainLabelById, txExplorerUrl } from './display';
 import { queryKeys } from './queryKeys';
-import { formatUsd, isOpenRefund, microOf, nairaForRefund, parseUsd, refundAmountError, waitingNote } from './refunds';
+import { formatUsd, isOpenRefund, microOf, nairaForRefund, parseUsd, refundAmountError, refundAmountLabel, waitingNote } from './refunds';
 import { useIdempotencyKey } from './useIdempotencyKey';
 
 function network(r: Refund): string {
@@ -33,7 +33,7 @@ function RefundItem({ r }: { r: Refund }) {
     <li className="flex items-start gap-3 px-4 py-3">
       <RefundStatusPill status={r.status} />
       <div className="min-w-0 flex-1">
-        <p className="font-semibold tabular">{r.amount} USD</p>
+        <p className="font-semibold tabular">{refundAmountLabel(r)}</p>
         <p className="text-caption text-text-secondary">{network(r)} · {dateTime(r.confirmedAt ?? r.createdAt)}</p>
         {r.reason && <p className="break-words text-caption text-text-secondary">{r.reason}</p>}
         {r.failureReason && <p className="mt-1 break-words text-caption text-danger-strong">{r.failureReason}</p>}

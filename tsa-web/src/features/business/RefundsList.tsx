@@ -17,6 +17,7 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 import { listRefunds, type Mode } from './api';
 import { chainLabelById, txExplorerUrl } from './display';
 import { queryKeys } from './queryKeys';
+import { refundAmountLabel } from './refunds';
 
 /** What the reconciliation page passes: its period, `YYYY-MM-DD` (WAT, `to` inclusive). */
 export type RefundsListProps = { mode: Mode; from: string; to: string };
@@ -92,7 +93,9 @@ export function RefundsList({ mode, from, to }: RefundsListProps) {
               </TR>
             </THead>
             <TBody>
-              {data.refunds.map((r) => (
+              {data.refunds.map((r) => {
+                const txUrl = r.txHash && r.chainId ? txExplorerUrl(r.txHash, r.chainId) : undefined;
+                return (
                 <TR key={r.id}>
                   <TD className="whitespace-nowrap text-text-secondary">{dateTime(r.createdAt)}</TD>
                   <TD>
@@ -102,19 +105,20 @@ export function RefundsList({ mode, from, to }: RefundsListProps) {
                     {r.description && <p className="max-w-[240px] truncate text-caption text-text-secondary">{r.description}</p>}
                   </TD>
                   <TD>{r.customerName || '—'}</TD>
-                  <TD className="whitespace-nowrap text-right font-semibold tabular">{r.amount} USD</TD>
+                  <TD className="whitespace-nowrap text-right font-semibold tabular">{refundAmountLabel(r)}</TD>
                   <TD className="whitespace-nowrap">{r.chainId ? `${r.tokenSymbol ?? ''} on ${chainLabelById(r.chainId)}`.trim() : '—'}</TD>
                   <TD>
                     <RefundStatusPill status={r.status} />
                     {r.lastBroadcastError && <p className="mt-1 max-w-[220px] text-caption text-danger-strong">{r.lastBroadcastError}</p>}
-                    {r.txHash && r.chainId && txExplorerUrl(r.txHash, r.chainId) && (
-                      <a href={txExplorerUrl(r.txHash, r.chainId)} target="_blank" rel="noopener noreferrer" className="mt-1 block text-caption font-semibold text-accent-strong hover:underline">
+                    {txUrl && (
+                      <a href={txUrl} target="_blank" rel="noopener noreferrer" className="mt-1 block text-caption font-semibold text-accent-strong hover:underline">
                         View transaction
                       </a>
                     )}
                   </TD>
                 </TR>
-              ))}
+                );
+              })}
             </TBody>
           </Table>
           <div className="flex flex-wrap items-center gap-2 border-t border-hairline px-5 py-3">

@@ -40,6 +40,9 @@ export function refundAmountError(text: string, remaining: bigint): string | nul
   return null;
 }
 
+/** "12.50 USD" until a token is chosen at send time, then "12.50 USDT" / "12.50 USDC". */
+export const refundAmountLabel = (r: Pick<Refund, 'amount' | 'tokenSymbol'>) => `${r.amount} ${r.tokenSymbol || 'USD'}`;
+
 const OPEN: readonly RefundStatus[] = ['requested', 'submitted', 'needs_review'];
 
 /** Still moving: at most one per payment, and nothing else can be asked for meanwhile. */
