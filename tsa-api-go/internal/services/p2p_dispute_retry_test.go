@@ -160,3 +160,46 @@ func TestPrepareRaiseDispute_BuildFailureLeavesRowAndAuditUnchanged(t *testing.T
 		t.Fatalf("changed: %+v -> %+v audits %d -> %d", before, after, auditsBefore, auditsAfter)
 	}
 }
+
+func TestDisputeFiled_AlertsOnceFromConfirmOrReconciler(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, tradeID, _ := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
+	db.Model(&models.P2PTrade{}).Where("id = ?", tradeID).Update("open_tx_hash", "0xopen")
+	var tr models.P2PTrade
+	db.First(&tr, "id = ?", tradeID)
+	rec := &recordingAlerter{}
+	svc.SetAlerter(rec)
+	esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusPaid, Exists: true, Amount: big.NewInt(30), Funding: 1}
+	ctx := context.Background()
+	if _, err := svc.PrepareRaiseDispute(ctx, tradeID, tr.SellerID, "0xa", "no fiat received", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.got) != 0 {
+		t.Fatalf("prepare must not alert, got %+v", rec.got)
+	}
+	if _, err := svc.ConfirmRaiseDispute(ctx, tradeID, tr.SellerID, "0xdisp"); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = svc.ConfirmRaiseDispute(ctx, tradeID, tr.SellerID, "0xdisp")
+	esc.onChainTrade.Status = OnChainP2PStatusDisputed
+	_, _ = svc.ReconcileTrade(ctx, tradeID)
+	if len(rec.got) != 1 || rec.got[0].Kind != P2PAlertDisputeFiled || rec.got[0].RaisedRole != "seller" ||
+		rec.got[0].Reason != "no fiat received" || rec.got[0].FromStatus != "paid" {
+		t.Fatalf("alerts = %+v", rec.got)
+	}
+}
+
+func TestReconcileToDisputed_BackfillAlerts(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, tradeID, _ := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
+	// A trade with no open_tx_hash goes down the open-backfill path instead.
+	db.Model(&models.P2PTrade{}).Where("id = ?", tradeID).Update("open_tx_hash", "0xopen")
+	rec := &recordingAlerter{}
+	svc.SetAlerter(rec)
+	esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusDisputed, Exists: true, Amount: big.NewInt(30), Funding: 1}
+	_, _ = svc.ReconcileTrade(context.Background(), tradeID)
+	_, _ = svc.ReconcileTrade(context.Background(), tradeID)
+	if len(rec.got) != 1 {
+		t.Fatalf("alerts = %d, want 1", len(rec.got))
+	}
+}

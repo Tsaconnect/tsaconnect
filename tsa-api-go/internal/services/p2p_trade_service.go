@@ -2600,6 +2600,7 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		return nil, err
 	}
 
+	prior := trade.Status
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ? AND status IN ?", trade.ID,
 			[]string{models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment}).
@@ -2632,7 +2633,21 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 	s.emit(events.P2PTradeDisputed, other, "Counter-party opened a dispute on this trade", "",
 		map[string]any{"tradeId": trade.ID})
 	s.systemMsg(ctx, trade.ID, "A dispute has been opened. Funds are frozen pending admin review.")
+	s.alertDisputeFiled(ctx, &trade, prior)
 	return &trade, nil
+}
+
+// alertDisputeFiled emails operators about a dispute that just flipped the
+// trade to disputed. The dispute row is best effort: the alert still goes out
+// without role/reason rather than being lost.
+func (s *P2PTradeService) alertDisputeFiled(ctx context.Context, trade *models.P2PTrade, from string) {
+	var d models.P2PDispute
+	_ = s.db.WithContext(ctx).Where("trade_id = ?", trade.ID).First(&d).Error
+	s.alert(ctx, P2PAlertDisputeFiled, trade, func(a *P2PAlert) {
+		a.FromStatus = from
+		a.RaisedRole = d.RaisedRole
+		a.Reason = d.Reason
+	})
 }
 
 // PrepareAdminResolveDispute prepares the on-chain adminResolve tx. Admin can side
@@ -3264,6 +3279,7 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 	}
 	from := trade.Status
 	now := s.clock.Now()
+	flipped := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.P2PTrade{}).
 			Where("id = ? AND status NOT IN ?", trade.ID,
@@ -3283,6 +3299,7 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 		if res.RowsAffected == 0 {
 			return nil
 		}
+		flipped = true
 		// Back-fill a dispute row if none exists yet. FirstOrCreate avoids
 		// the unique-index race when a phantom row from a failed RaiseDispute
 		// already sits in the table (best-effort delete can fail silently).
@@ -3307,10 +3324,14 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if !flipped {
+		return ReconcileResult{}, nil
+	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusDisputed,
 		"reason": "chain Disputed",
 	})
+	s.alertDisputeFiled(ctx, trade, from)
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusDisputed,
 		Reason: "chain Disputed"}, nil
 }
