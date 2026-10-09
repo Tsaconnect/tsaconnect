@@ -25,7 +25,9 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export type EscrowMode = 'deposit' | 'withdraw';
+// 'open' is a trade open (P2P runP2PTx stash): trades are reconciled
+// server-side too, but the stash lets the trade screen record it right away.
+export type EscrowMode = 'deposit' | 'withdraw' | 'open';
 
 export interface PendingEscrowConfirm {
   mode: EscrowMode;
@@ -35,6 +37,8 @@ export interface PendingEscrowConfirm {
   amount: string;
   txHash: string;
   walletAddress: string;
+  /** mode 'open' only: the trade this broadcast opened. */
+  tradeId?: string;
   /** Epoch milliseconds the record was stashed. */
   createdAt: number;
 }
@@ -108,4 +112,10 @@ export async function removePending(txHash: string): Promise<void> {
   if (next.length !== all.length) {
     await writeAll(next);
   }
+}
+
+/** The stashed open broadcast for a trade, if its confirm was lost. */
+export async function findPendingOpen(tradeId: string): Promise<PendingEscrowConfirm | null> {
+  const all = await readAll();
+  return all.find((r) => r.mode === 'open' && r.tradeId === tradeId) ?? null;
 }

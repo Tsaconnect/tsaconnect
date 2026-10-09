@@ -23,6 +23,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 // eslint-disable-next-line import/first -- jest.mock must be hoisted above this import.
 import {
   addPending,
+  findPendingOpen,
   listPending,
   removePending,
   type PendingEscrowConfirm,
@@ -139,5 +140,15 @@ describe('corrupt / empty storage', () => {
     mockStore['p2p.pendingEscrowConfirms.v1'] = '{not json';
     const list = await listPending('deposit', '0xWALLET');
     expect(list).toEqual([]);
+  });
+});
+
+describe("mode 'open' (a trade open whose confirm was lost)", () => {
+  it('finds the stash by trade id and keeps it out of deposit/withdraw lists', async () => {
+    await addPending(rec({ mode: 'open', txHash: '0xopen', tradeId: 'trade-1' }));
+    await addPending(rec({ mode: 'deposit', txHash: '0xdep' }));
+    expect((await findPendingOpen('trade-1'))?.txHash).toBe('0xopen');
+    expect(await findPendingOpen('trade-2')).toBeNull();
+    expect((await listPending('deposit', '0xWALLET')).map((r) => r.txHash)).toEqual(['0xdep']);
   });
 });
