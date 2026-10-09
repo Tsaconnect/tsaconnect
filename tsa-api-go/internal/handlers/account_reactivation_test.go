@@ -52,7 +52,7 @@ func setupReactivationTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE p2p_trades (
 			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT,
-			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME
 		)`,
 		`CREATE TABLE orders (
 			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT

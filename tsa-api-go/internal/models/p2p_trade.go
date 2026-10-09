@@ -116,8 +116,14 @@ type P2PTrade struct {
 	// ordinary trade it is the canceller's legacy-scope decision (P15): no
 	// system or buyer payment path may take the trade any more.
 	DroppedAt *time.Time `json:"-"`
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
+	// PayoutStartedAt is committed under the row lock BEFORE the sell payout's
+	// gateway call (review C-1, the nonce-before-broadcast rule for naira):
+	// once set, naira may have left even if the payout id never reached the
+	// DB, so the expiry canceller refuses the trade unless the payout is
+	// recorded failed, and no second payout is ever started.
+	PayoutStartedAt *time.Time `json:"-"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 
 	// ── Virtual PM-detail fields (gorm:"-": serialized, never persisted) ───
 	// Populated by the GetTrade handler when the trade's ad is a PM ad, so the

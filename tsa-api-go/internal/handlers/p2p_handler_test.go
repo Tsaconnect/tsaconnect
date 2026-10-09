@@ -293,7 +293,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			marked_paid_at DATETIME, released_at DATETIME,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
-			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
 			CHECK (buyer_id <> seller_id)
 		)`,

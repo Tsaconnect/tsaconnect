@@ -152,3 +152,37 @@ func pmLegacyPG(t *testing.T) *fwdRig {
 	src := NewP2PTradeClaimSource(db, NewPMService(db), trades, signer)
 	return &fwdRig{db: db, pm: pm, trade: trade, src: src, signer: signer, esc: esc}
 }
+
+// Review C-1: the payout commits its started marker under the row lock the
+// canceller decides under before the gateway is asked, so a decision taken
+// while the money moves sees it — never a refund after the naira left.
+func TestLegacyCancelWaitsForAnInFlightPayout_Postgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "liq_c1_payout_", &models.PaymentMerchant{}, &models.PMBalance{}, &models.P2PAd{},
+		&models.P2PTrade{}, &models.P2PAuditLog{}, &models.P2PSettlementForward{})
+	svc, _, _ := newService(t, db)
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00")
+	notified := time.Now().Add(-31 * time.Minute)
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("expired_notified_at", notified)
+	trade.ExpiredNotifiedAt = &notified
+	decided := make(chan bool, 1)
+	gw := &fakeNombaGateway{payoutID: "po_race"}
+	gw.onCall = func() {
+		go func() {
+			ok, err := svc.decideLegacyCancel(context.Background(), trade, time.Now())
+			if err != nil {
+				t.Errorf("decide: %v", err)
+			}
+			decided <- ok
+		}()
+		time.Sleep(300 * time.Millisecond) // the decision is taken while the money moves
+	}
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+	if _, err := auto.InitiateSellPayout(context.Background(), trade.ID); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	if <-decided {
+		db.First(&got, "id = ?", trade.ID)
+		t.Fatalf("the canceller decided a trade whose payout was in flight (dropped=%v payout=%q)", got.DroppedAt, got.NombaPayoutID)
+	}
+}

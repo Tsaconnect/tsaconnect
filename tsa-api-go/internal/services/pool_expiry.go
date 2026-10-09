@@ -303,11 +303,11 @@ func (s *ITService) decideSliceCancel(ctx context.Context, slice *models.P2PTrad
 
 // decideLegacyCancel is the legacy scope's decision (S24), taken under the
 // trade's row lock: still pending_payment, its expiry notice 30 minutes old,
-// and no central-account credit has claimed it (a p2p_settlement_forwards row
-// lands before the trade is marked paid). It records the decision in
-// dropped_at in the same transaction. Every payment path refuses a trade with
-// dropped_at set — the credit (which takes the same lock), the operator's and
-// the buyer's mark-paid, and the release — so whoever locks the row first wins.
+// and no naira has moved for it off-chain (legacyMoneyMoved). It records the
+// decision in dropped_at in the same transaction. Every payment path refuses a
+// trade with dropped_at set — the credit (which takes the same lock), the sell
+// payout (which commits its started marker under it before the gateway call), the operator's and the
+// buyer's mark-paid, and the release — so whoever locks the row first wins.
 func (s *P2PTradeService) decideLegacyCancel(ctx context.Context, tr *models.P2PTrade, now time.Time) (bool, error) {
 	cancel := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -319,12 +319,16 @@ func (s *P2PTradeService) decideLegacyCancel(ctx context.Context, tr *models.P2P
 			cur.ExpiredNotifiedAt == nil || !cur.ExpiredNotifiedAt.Before(now.Add(-expiryLegacyAfterNotice)) {
 			return nil
 		}
-		var credited int64
-		if err := tx.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", cur.ID).Count(&credited).Error; err != nil {
+		leg, err := legacyMoneyMoved(tx, &cur)
+		if err != nil {
 			return err
 		}
-		if credited > 0 {
-			log.Printf("[p2p-expiry] trade=%s expired but a credit has claimed it; not cancelled", cur.ID)
+		if leg != "" {
+			metric := "p2p_expiry_money_moved"
+			if leg == "payout" {
+				metric = "p2p_expiry_payout_in_flight"
+			}
+			log.Printf("[p2p-expiry] ALERT %s trade=%s leg=%s: expired but naira has moved; not cancelled", metric, cur.ID, leg)
 			return nil
 		}
 		cancel = true
@@ -334,6 +338,36 @@ func (s *P2PTradeService) decideLegacyCancel(ctx context.Context, tr *models.P2P
 		return tx.Model(&models.P2PTrade{}).Where("id = ?", cur.ID).Update("dropped_at", now).Error
 	})
 	return cancel, err
+}
+
+// legacyMoneyMoved is the legacy scope's one positive predicate (review C-1):
+// has naira moved — or started to move — for this ordinary trade off-chain?
+// It names the leg, or "" when none has. cancelByTimeout refunds the crypto,
+// so any of these refuses it:
+//   - payout: the sell payout to the user's bank was started — its marker is
+//     committed before the gateway call, so this holds even when the payout
+//     id was never recorded — unless the failure handler recorded it failed
+//     (then nothing left and the deposit is owed back);
+//   - inbound: a merchant-account inbound was matched to the trade;
+//   - forward: a central-account credit claimed the trade (the forward row
+//     lands before the trade is marked paid).
+//
+// A new off-chain leg belongs here.
+func legacyMoneyMoved(tx *gorm.DB, tr *models.P2PTrade) (string, error) {
+	if (tr.NombaPayoutID != "" || tr.PayoutStartedAt != nil) && !strings.HasPrefix(tr.CancelReason, pmPayoutFailedReason) {
+		return "payout", nil
+	}
+	if tr.NombaInboundEventID != "" {
+		return "inbound", nil
+	}
+	var credited int64
+	if err := tx.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", tr.ID).Count(&credited).Error; err != nil {
+		return "", err
+	}
+	if credited > 0 {
+		return "forward", nil
+	}
+	return "", nil
 }
 
 // SweepStaleOpening is F3: an opening order older than 2 minutes was left by a

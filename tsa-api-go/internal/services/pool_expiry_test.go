@@ -304,3 +304,34 @@ func TestExpiry_LegacyDecidedTradeTakesNoPayment(t *testing.T) {
 		t.Fatalf("release: %v", err)
 	}
 }
+
+// Review C-1: a sell trade whose payout has started (or succeeded) is never
+// cancelled — cancelByTimeout would refund the deposit after the naira left.
+// A payout recorded as failed is the one exception: nothing left, so refund.
+// A matched inbound is money moved too.
+func TestExpiry_LegacyNeverCancelsATradeWithAPayoutInFlight(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		set    map[string]any
+		cancel bool
+	}{
+		{"payout in flight", map[string]any{"nomba_payout_id": "po_1"}, false},
+		{"payout started, id lost", map[string]any{"payout_started_at": time.Now().Add(-40 * time.Minute)}, false},
+		{"payout failed", map[string]any{"nomba_payout_id": "po_1", "cancel_reason": pmPayoutFailedReason + " (nomba payout=po_1); routed to manual"}, true},
+		{"inbound matched", map[string]any{"nomba_inbound_event_id": "evt_1"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newPoolRig(t)
+			sender := releaseSender()
+			tr := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-31*time.Minute))
+			r.db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Updates(c.set)
+			r.sonic.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, CreatedAt: big.NewInt(time.Now().Add(-2 * time.Hour).Unix())}
+			tick, err := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: sender}).RunOnce(context.Background())
+			var got models.P2PTrade
+			r.db.First(&got, "id = ?", tr.ID)
+			if err != nil || (tick.Legacy == 1) != c.cancel || (len(sender.sendChains) == 1) != c.cancel || (got.DroppedAt != nil) != c.cancel {
+				t.Fatalf("tick=%+v err=%v sends=%v dropped=%v, want cancel=%v", tick, err, sender.sendChains, got.DroppedAt, c.cancel)
+			}
+		})
+	}
+}

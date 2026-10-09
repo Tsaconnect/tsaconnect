@@ -509,3 +509,115 @@ func TestInitiateSellPayout_EmptyGatewayID_Errors(t *testing.T) {
 		t.Errorf("nomba_payout_id = %q, want empty (must not persist empty payout id)", persisted.NombaPayoutID)
 	}
 }
+
+// Review C-1: once the expiry canceller has decided a trade, no payout may start.
+func TestInitiateSellPayout_RefusesATradeTheCancellerDecided(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, _, _ := newService(t, db)
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00")
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("dropped_at", time.Now())
+	gw := &fakeNombaGateway{payoutID: "po_1"}
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+	if _, err := auto.InitiateSellPayout(context.Background(), trade.ID); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("err = %v, want ErrInvalidTransition", err)
+	}
+	if len(gw.calls) != 0 {
+		t.Fatalf("gateway called %d times on a decided trade", len(gw.calls))
+	}
+}
+
+// expiredSellTrade is a deposited sell trade 31 minutes past its expiry notice,
+// with a gateway whose id write the test can make fail (the DB lost after the
+// money moved).
+func expiredSellTrade(t *testing.T) (*gorm.DB, *P2PTradeService, *models.P2PTrade, *fakeNombaGateway, *PMAutomationService, *bool) {
+	t.Helper()
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	createSettlementForwardTable(t, db)
+	svc, _, _ := newService(t, db)
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00")
+	notified := time.Now().Add(-31 * time.Minute)
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("expired_notified_at", notified)
+	trade.ExpiredNotifiedAt = &notified
+	failIDWrite := new(bool)
+	if err := db.Callback().Update().Before("gorm:update").Register("test:lose_payout_id", func(tx *gorm.DB) {
+		if m, ok := tx.Statement.Dest.(map[string]any); ok && *failIDWrite {
+			if _, ok := m["nomba_payout_id"]; ok {
+				tx.AddError(errors.New("connection reset"))
+			}
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gw := &fakeNombaGateway{payoutID: "po_lost"}
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, gw, nameMap(nil))
+	return db, svc, trade, gw, auto, failIDWrite
+}
+
+// Review C-1 (nonce-before-broadcast for naira): the gateway sent the money,
+// then the payout id never reached the DB. The durable "started" marker,
+// committed before the gateway was asked, still refuses the canceller.
+func TestInitiateSellPayout_LostIDWriteStillBlocksTheCanceller(t *testing.T) {
+	_, svc, trade, gw, auto, failIDWrite := expiredSellTrade(t)
+	*failIDWrite = true
+	if _, err := auto.InitiateSellPayout(context.Background(), trade.ID); err == nil {
+		t.Fatal("the id write failed but the payout reported success")
+	}
+	if len(gw.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1", len(gw.calls))
+	}
+	if ok, err := svc.decideLegacyCancel(context.Background(), trade, time.Now()); ok || err != nil {
+		t.Fatalf("decide = %v %v: the canceller would refund a trade whose naira left", ok, err)
+	}
+}
+
+// ...and a retry never asks the gateway for a second payout: the outcome is
+// the webhook's to record (it matches on the trade-id reference).
+func TestInitiateSellPayout_RetryAfterLostIDSendsNoSecondPayout(t *testing.T) {
+	_, _, trade, gw, auto, failIDWrite := expiredSellTrade(t)
+	*failIDWrite = true
+	_, _ = auto.InitiateSellPayout(context.Background(), trade.ID)
+	*failIDWrite = false
+	if _, err := auto.InitiateSellPayout(context.Background(), trade.ID); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("retry = %v, want ErrInvalidTransition (payout already started)", err)
+	}
+	if len(gw.calls) != 1 {
+		t.Fatalf("gateway called %d times, want 1 — a second payout", len(gw.calls))
+	}
+}
+
+// A provider refusal moved no money: the started marker comes off, and the
+// operator may try again.
+func TestInitiateSellPayout_ProviderRefusalAllowsARetry(t *testing.T) {
+	_, _, trade, gw, auto, _ := expiredSellTrade(t)
+	gw.err = &ProviderRejectedError{Err: errors.New("insufficient balance")}
+	if _, err := auto.InitiateSellPayout(context.Background(), trade.ID); err == nil {
+		t.Fatal("a refused payout reported success")
+	}
+	gw.err = nil
+	if id, err := auto.InitiateSellPayout(context.Background(), trade.ID); err != nil || id != "po_lost" || len(gw.calls) != 2 {
+		t.Fatalf("retry = %q %v calls=%d, want the payout sent", id, err, len(gw.calls))
+	}
+}
+
+// The success webhook records a payout id the initiating call lost, and settles.
+func TestHandlePayoutStatus_SuccessRecordsALostPayoutID(t *testing.T) {
+	db := setupTradeDB(t)
+	createPaymentMerchantsTable(t, db)
+	svc, esc, _ := newService(t, db)
+	trade := seedSellTradeOnAd(t, db, uuid.New(), uuid.New(), "1500.00")
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("payout_started_at", time.Now())
+	setReleasedEvent(esc, trade)
+	auto, _ := newPMAutomationServiceWithGateway(t, db, svc, &fakeNombaGateway{}, nameMap(nil))
+	if err := auto.HandlePayoutStatus(context.Background(), PayoutStatus{
+		EventID: "evt_lost", MerchantTxRef: trade.ID.String(), PayoutID: "po_from_webhook", Status: "success",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	db.First(&got, "id = ?", trade.ID)
+	if got.NombaPayoutID != "po_from_webhook" || got.Status != models.P2PTradeStatusReleased {
+		t.Fatalf("payout id %q status %s, want the webhook's id recorded and released", got.NombaPayoutID, got.Status)
+	}
+}
