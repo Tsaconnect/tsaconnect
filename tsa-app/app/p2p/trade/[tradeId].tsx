@@ -19,10 +19,10 @@
 // can be dropped/missed, and system messages emit no event).
 //
 // Restyled onto the TSA Signature design system (@/theme + @/components/ui).
-// Chat, countdown, and all markPaid/release/cancel action handlers (incl.
-// post-broadcast error handling) are preserved verbatim; only the refresh
-// transport changed (5s poll → events + safety poll). The dispute button
-// navigates to /p2p/dispute/<tradeId> (the old inline modal is gone).
+// markPaid, release and cancel are all on-chain txs that go through
+// runTradeTx → services/p2pTx.runP2PTx (sponsored gas, prepare, sign,
+// broadcast, wait mined, confirm). Refresh is events + a slow safety poll. The
+// dispute button navigates to /p2p/dispute/<tradeId>.
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useIsFocused } from '@react-navigation/native';
@@ -66,17 +66,21 @@ import { useNotifications } from '../../../contexts/NotificationContext';
 import {
   formatTokenAmount,
   messagesApi,
-  p2pChainKey,
   p2pTokenDecimals,
   ratingsApi,
   tradesApi,
-  unsignedTxToTxLike,
+  type ApiResponse,
   type P2PDispute,
   type P2PMessage,
   type P2PTrade,
   type UnsignedTx,
 } from '../../../services/p2p';
-import { broadcastTransaction, ensureGas, getActiveWallet, signTransaction } from '../../../services/wallet';
+import { runP2PTx, txOutcomeAlert } from '../../../services/p2pTx';
+import { p2pErrorMessage, p2pKycCode } from '../../../services/p2pErrors';
+import { getActiveWallet } from '../../../services/wallet';
+import { promptKycRefusal } from '../../../utils/kycRefusal';
+import { confirmAsync } from '../../../utils/confirmAsync';
+import { RELEASE_CONFIRM_TITLE, releaseConfirmMessage, tradeTxFollowUp } from '../../../utils/p2pTradeView';
 import { getAuthHeaders } from '../../../services/walletApi';
 
 // Slow safety reconcile — the fast path is WS events (useTradeRealtime). This
@@ -329,112 +333,102 @@ const TradeDetailScreen: React.FC = () => {
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
+  // One path for every on-chain trade action (gas → prepare → sign →
+  // broadcast → wait mined → confirm). Once broadcast, only a reverted receipt
+  // reads as "failed" — anything else is "sent, still confirming".
+  const runTradeTx = async (
+    label: string,
+    action: 'mark_paid' | 'release' | 'cancel_trade',
+    prepare: (wallet: string) => Promise<ApiResponse<{ unsignedTx: UnsignedTx | null }>>,
+    confirm: (txHash: string) => Promise<ApiResponse<P2PTrade>>,
+  ) => {
+    let keepActing = false;
+    try {
+      startActing('Loading wallet…');
+      const wallet = await getActiveWallet();
+      if (!wallet) throw new Error('No wallet found. Set one up from the wallet screen first.');
+      const r = await runP2PTx({
+        chainId: trade.chainId,
+        walletAddress: wallet,
+        action,
+        tradeId: trade.id,
+        onStage: startActing,
+        prepare: () => prepare(wallet),
+        confirm: (txHash) => confirm(txHash),
+      });
+      if (r.status === 'refused' && promptKycRefusal(p2pKycCode(r.response), r.response.message)) return;
+      const next = tradeTxFollowUp(r);
+      keepActing = next.keepActing;
+      if (next.trade) setTrade(next.trade);
+      const alert = txOutcomeAlert(label, r);
+      if (alert) Alert.alert(alert.title, alert.message);
+      if (next.reload) load();
+    } catch (err: any) {
+      // Wallet lookup, signing or broadcast: nothing reached the chain.
+      Alert.alert(`${label} failed`, p2pErrorMessage(err?.message));
+    } finally {
+      if (!keepActing) stopActing();
+    }
+  };
+
   const handleMarkPaid = async () => {
     if (acting) return;
     // Guardrail: marking paid is irreversible and signals the seller to release.
-    // Force buyer to explicitly confirm they actually transferred the fiat.
-    const confirmed = await new Promise<boolean>((resolve) => {
-      Alert.alert(
-        'Confirm fiat payment',
-        'Only tap "I have paid" after the bank transfer is sent. The seller will release your ' +
-          trade.token +
-          ' based on your confirmation, and this cannot be undone.',
-        [
-          { text: 'Not yet', style: 'cancel', onPress: () => resolve(false) },
-          { text: 'I have paid', style: 'destructive', onPress: () => resolve(true) },
-        ],
-      );
-    });
+    const confirmed = await confirmAsync(
+      'Confirm fiat payment',
+      `Only tap "I have paid" after the transfer is sent. The seller will release your ${trade.token} ` +
+        'based on your confirmation, and this cannot be undone.',
+      'I have paid',
+      'Not yet',
+      true,
+    );
     if (!confirmed) return;
 
-    // Buyer must upload payment proof before flipping state.
+    // The payer must upload payment proof before flipping state.
     const proofUrl = await pickAndUploadImage(startActing);
     if (!proofUrl) {
       stopActing();
       return;
     }
-    startActing('Marking as paid…');
-    // @ts-expect-error APP-8 replaces markPaid with prepare/confirm mark-paid
-    const res = await tradesApi.markPaid(trade.id, proofUrl);
-    if (res.success && res.data) {
-      setTrade(res.data);
-      load();
-    } else {
-      Alert.alert('Could not mark paid', res.message || 'Server rejected the action');
-    }
-    stopActing();
+    // R1: markPaid(tradeId) is signed by the fiat payer (the chain buyer) so the
+    // seller can no longer cancelByTimeout. The signing wallet goes as
+    // callerAddress: on a buy-ad the payer's chain buyer is the ad's seller
+    // address, not their registered wallet. The DB flips to paid only after the
+    // server sees the receipt and the TradePaid log.
+    await runTradeTx(
+      'Mark paid',
+      'mark_paid',
+      (w) => tradesApi.prepareMarkPaid(trade.id, proofUrl, w),
+      (h) => tradesApi.confirmMarkPaid(trade.id, h),
+    );
   };
 
   const handleRelease = async () => {
     if (acting) return;
-    let broadcastHash: string | null = null;
-    try {
-      startActing('Loading wallet…');
-      const sellerAddress = await getActiveWallet();
-      if (!sellerAddress) throw new Error('No wallet found');
-
-      // Task 7: Gas guard before broadcasting release tx.
-      startActing('Checking gas…');
-      const hasGas = await ensureGas(p2pChainKey(trade.chainId), sellerAddress);
-      if (!hasGas) { stopActing(); return; }
-
-      startActing('Preparing release tx…');
-      const prep = await tradesApi.prepareRelease(trade.id, sellerAddress);
-      if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
-
-      startActing('Signing…');
-      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), sellerAddress);
-
-      startActing('Broadcasting…');
-      const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
-      broadcastHash = resp.hash;
-
-      startActing('Confirming…');
-      const conf = await tradesApi.confirmRelease(trade.id, resp.hash);
-      if (!conf.success) throw new Error(conf.message || 'Confirm failed');
-      setTrade(conf.data ?? trade);
-      load();
-    } catch (err: any) {
-      handlePostBroadcastError('Release', broadcastHash, err);
-    } finally {
-      stopActing();
-    }
+    const ok = await confirmAsync(
+      RELEASE_CONFIRM_TITLE,
+      releaseConfirmMessage(trade, tokenDecimals),
+      'Yes, release',
+      'Not yet',
+      true,
+    );
+    if (!ok) return;
+    await runTradeTx(
+      'Release',
+      'release',
+      (w) => tradesApi.prepareRelease(trade.id, w),
+      (h) => tradesApi.confirmRelease(trade.id, h),
+    );
   };
 
   const handleCancel = async () => {
     if (acting) return;
-    let broadcastHash: string | null = null;
-    try {
-      startActing('Loading wallet…');
-      const callerAddress = await getActiveWallet();
-      if (!callerAddress) throw new Error('No wallet found');
-
-      // Task 7: Gas guard before broadcasting cancel tx.
-      startActing('Checking gas…');
-      const hasGasCancel = await ensureGas(p2pChainKey(trade.chainId), callerAddress);
-      if (!hasGasCancel) { stopActing(); return; }
-
-      startActing('Preparing cancel…');
-      const prep = await tradesApi.prepareCancel(trade.id, callerAddress);
-      if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
-
-      startActing('Signing…');
-      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), callerAddress);
-
-      startActing('Broadcasting…');
-      const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
-      broadcastHash = resp.hash;
-
-      startActing('Confirming…');
-      const conf = await tradesApi.confirmCancel(trade.id, resp.hash);
-      if (!conf.success) throw new Error(conf.message || 'Confirm failed');
-      setTrade(conf.data ?? trade);
-      load();
-    } catch (err: any) {
-      handlePostBroadcastError('Cancel', broadcastHash, err);
-    } finally {
-      stopActing();
-    }
+    await runTradeTx(
+      'Cancel',
+      'cancel_trade',
+      (w) => tradesApi.prepareCancel(trade.id, w),
+      (h) => tradesApi.confirmCancel(trade.id, h),
+    );
   };
 
   const handleSendMessage = async () => {
@@ -446,7 +440,7 @@ const TradeDetailScreen: React.FC = () => {
         if (res.success && res.data) {
           setMessages((prev) => [...prev, res.data!]);
         } else {
-          Alert.alert('Send failed', res.message || 'Server rejected the message');
+          Alert.alert('Send failed', p2pErrorMessage(res));
         }
       }
       setComposerImage(null);
@@ -459,7 +453,7 @@ const TradeDetailScreen: React.FC = () => {
     if (res.success && res.data) {
       setMessages((prev) => [...prev, res.data!]);
     } else {
-      Alert.alert('Send failed', res.message || 'Server rejected the message');
+      Alert.alert('Send failed', p2pErrorMessage(res));
       setComposerText(text); // restore so user doesn't lose their message
     }
   };
@@ -876,8 +870,8 @@ const ActionPanel: React.FC<{
   const canMarkPaid = !pmActive && role === 'buyer' && trade.status === 'pending_payment';
   // Gate the Release button on the buyer's markPaid (status === 'paid'). The
   // contract + backend deliberately ALSO allow a seller to release straight from
-  // pending_payment — the seller's signature is the real gate, since markPaid is
-  // an unverifiable off-chain claim — but the intended flow is buyer-pays →
+  // pending_payment — the seller's signature is the real gate, since markPaid only
+  // records the buyer's claim — but the intended flow is buyer-pays →
   // buyer-marks-paid → seller-releases, so the button only surfaces once the
   // buyer has marked the trade paid. (Both sell-ad and buy-ad map to role here:
   // on a buy-ad the depositing user is the seller and the merchant is the buyer.)
@@ -1168,28 +1162,6 @@ const SummaryLine: React.FC<{ label: string; children: React.ReactNode }> = ({
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-// Distinguish failures that happen BEFORE the tx hits the chain (safe to retry)
-// from failures that happen AFTER (tx may have settled — DO NOT just retry).
-// Without this, a server-side confirm error looks identical to a prepare error
-// and users double-spend by retrying.
-function handlePostBroadcastError(
-  action: string,
-  broadcastHash: string | null,
-  err: unknown,
-): void {
-  const detail = (err as { message?: string } | undefined)?.message || String(err);
-  if (broadcastHash) {
-    Alert.alert(
-      `${action} submitted, server confirm failed`,
-      `Tx ${broadcastHash} was broadcast on chain. The server could not record it ` +
-        `(${detail}). Don't retry — wait a minute and the reconciler will pick it up. ` +
-        `If status doesn't update, contact support with this tx hash.`,
-    );
-    return;
-  }
-  Alert.alert(`${action} failed`, detail);
-}
 
 async function uploadImage(
   uri: string,
