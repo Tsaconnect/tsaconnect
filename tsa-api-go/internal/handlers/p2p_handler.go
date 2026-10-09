@@ -852,7 +852,7 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 		// whole detail view.
 		log.Printf("[p2p GetAd] LoadAdPaymentMethods failed for ad=%s: %v", ad.ID, err)
 	} else {
-		detail.PaymentMethods = pms
+		detail.PaymentMethods = services.PublicPaymentMethods(pms)
 	}
 	// PM enrichment: if this ad is backed by a payment merchant, attach its
 	// static Nomba inbound account so the buy screen can show the pay-to card.
@@ -938,7 +938,7 @@ type adListItem struct {
 // numbers (avoids broadcasting account info to anyone scraping the feed).
 type adDetailItem struct {
 	adListItem
-	PaymentMethods []models.P2PPaymentMethod `json:"paymentMethods,omitempty"`
+	PaymentMethods []services.PublicPaymentMethod `json:"paymentMethods,omitempty"`
 	// PM-detail fields: when the ad is a PM ad, the buy screen renders a
 	// "pay to this Nomba account" card from PmPayTo. Nil/false for manual ads.
 	IsPm    bool            `json:"isPm"`
@@ -1755,6 +1755,13 @@ func (h *P2PHandler) GetTrade(c *gin.Context) {
 		return
 	}
 	h.enrichTradeWithPM(c.Request.Context(), trade, user.ID)
+	if !trade.IsPM {
+		if p, err := h.trade.TradePayee(c.Request.Context(), trade); err != nil {
+			log.Printf("[p2p GetTrade] payee lookup failed for trade=%s: %v", trade.ID, err)
+		} else {
+			trade.Payee = p
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
 }
 

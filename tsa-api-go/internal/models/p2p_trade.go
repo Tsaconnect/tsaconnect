@@ -107,6 +107,17 @@ type P2PTrade struct {
 	IsPM      bool     `gorm:"-" json:"isPm"`
 	PmPayTo   *PmPayTo `gorm:"-" json:"pmPayTo,omitempty"`
 	PayerName string   `gorm:"-" json:"payerName,omitempty"`
+	// Payee is where the fiat payer sends money in a direct (non-PM) trade.
+	// Set by GetTrade only while the trade is live; never persisted.
+	Payee *P2PPayee `gorm:"-" json:"payee,omitempty"`
+}
+
+// P2PPayee is the fiat destination of a direct trade (virtual; not persisted).
+type P2PPayee struct {
+	Provider      string `json:"provider"`
+	BankName      string `json:"bankName"`
+	AccountNumber string `json:"accountNumber"`
+	AccountName   string `json:"accountName"`
 }
 
 // PmPayTo is the PM's static fiat destination shown to a buyer (virtual; not persisted).

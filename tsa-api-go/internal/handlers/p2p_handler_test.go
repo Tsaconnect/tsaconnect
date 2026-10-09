@@ -33,6 +33,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/datatypes"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -1558,5 +1559,69 @@ func TestMarkPaid_OldRouteRetired(t *testing.T) {
 	if after.Status != models.P2PTradeStatusPendingPayment || after.ProofImageURL != before.ProofImageURL ||
 		after.MarkedPaidAt != nil || !after.UpdatedAt.Equal(before.UpdatedAt) {
 		t.Fatalf("old route changed the trade: %+v", after)
+	}
+}
+
+func seedSellAdTrade(t *testing.T, r *rig, status, openTx string) (tradeID, adID uuid.UUID) {
+	t.Helper()
+	seller := uuid.New()
+	pm := seedPaymentMethod(t, r.db, seller, "NGN") // 1234567890 / "Test" / "Test"
+	adID = uuid.New()
+	if err := r.db.Create(&models.P2PAd{ID: adID, SellerID: seller, Side: "sell", Token: "USDT", ChainID: 146, FiatCurrency: "NGN",
+		Amount: "100", Remaining: "100", Reserved: "0", Rate: "1300", RateType: "fixed", FloatAnchor: "bybit_sell", Status: "active",
+		PaymentMethodIDs: datatypes.JSONSlice[string]{pm.String()}}).Error; err != nil {
+		t.Fatal(err)
+	}
+	tradeID = uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: r.sellerID, SellerID: seller, Token: "USDT",
+		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300", PaymentMethodID: pm, OpenTxHash: openTx,
+		ExpiresAt: time.Now().Add(time.Hour), Status: status}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+func TestGetTrade_PayeeVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		status, open string
+		want         bool
+	}{
+		{"pending_payment", "0xopen", true}, {"pending_payment", "reconciled", true}, {"pending_payment", "", false},
+		{"paid", "0xopen", true}, {"releasing", "0xopen", true},
+		{"disputed", "0xopen", true}, {"released", "0xopen", false}, {"cancelled", "0xopen", false},
+	} {
+		r := newRig(t)
+		id, _ := seedSellAdTrade(t, r, tc.status, tc.open)
+		rec := doJSON(t, r, http.MethodGet, "/api/p2p/trades/"+id.String(), nil)
+		data := decode(t, rec)["data"].(map[string]any)
+		p, has := data["payee"].(map[string]any)
+		if has != tc.want {
+			t.Fatalf("%s/%q: payee present=%v body=%s", tc.status, tc.open, has, rec.Body.String())
+		}
+		if has && (p["accountNumber"] != "1234567890" || p["accountName"] != "Test" || p["bankName"] != "Test") {
+			t.Fatalf("payee = %v", p)
+		}
+	}
+}
+
+func TestGetAd_PaymentMethodsAreMasked(t *testing.T) {
+	r := newRig(t)
+	_, adID := seedSellAdTrade(t, r, "pending_payment", "0xopen")
+	if err := r.db.Model(&models.P2PPaymentMethod{}).Where("account_number = ?", "1234567890").
+		Update("account_name", "Adaeze Holder").Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/ads/"+adID.String(), nil)
+	body := rec.Body.String()
+	if strings.Contains(body, "1234567890") {
+		t.Fatalf("full account number on a public ad: %s", body)
+	}
+	if strings.Contains(body, "Adaeze Holder") || strings.Contains(body, "accountName") {
+		t.Fatalf("account holder name on a public ad: %s", body)
+	}
+	pms := decode(t, rec)["data"].(map[string]any)["paymentMethods"].([]any)
+	m := pms[0].(map[string]any)
+	if m["accountNumber"] != "******7890" || m["accountNumberLast4"] != "7890" || m["id"] == nil {
+		t.Fatalf("pm = %v", m)
 	}
 }
