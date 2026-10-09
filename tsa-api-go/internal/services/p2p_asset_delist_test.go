@@ -24,6 +24,8 @@ import (
 const (
 	delistTestUSDT = "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
 	delistTestMCGP = "0x7a1b2C3d4E5f60718293a4B5c6D7e8F901234567"
+	// delistTestMaker is the seeded sell-ad's wallet: the on-chain seller.
+	delistTestMaker = "0x000000000000000000000000000000000000a11c"
 )
 
 // delistTestService returns a trade service on chain 146 whose registry starts
@@ -265,7 +267,7 @@ func seedMCGPTrade(t *testing.T, db *gorm.DB, sellerID, buyerID uuid.UUID, statu
 		FiatCurrency: "NGN", Rate: "30", RateType: models.P2PAdRateTypeFixed,
 		FloatAnchor: models.P2PAdFloatAnchorBybitSell,
 		Amount:      "1000", Remaining: "900", Reserved: "100",
-		Status: models.P2PAdStatusActive,
+		Status: models.P2PAdStatusActive, SellerAddress: delistTestMaker,
 	}).Error; err != nil {
 		t.Fatalf("seed ad: %v", err)
 	}
@@ -305,9 +307,13 @@ func TestDelistedAsset_ExistingPositionsStillExit(t *testing.T) {
 		sellerID, buyerID := uuid.New(), uuid.New()
 		// Prepared before the delist, broadcast after: the confirm must land.
 		tr := seedMCGPTrade(t, db, sellerID, buyerID, models.P2PTradeStatusPendingPayment, "", later)
+		esc.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending,
+			Funding: models.P2PTradeFundingPooled, Seller: common.HexToAddress(delistTestMaker),
+			Token: common.HexToAddress(delistTestMCGP), Amount: big.NewInt(100)}
 		if _, err := svc.ConfirmOpenTrade(ctx, tr.ID, buyerID, "", "0xopen"); err != nil {
 			t.Fatalf("ConfirmOpenTrade: %v", err)
 		}
+		esc.onChainTrade = nil
 		markPaidViaChain(t, svc, tr.ID, buyerID)
 		if _, err := svc.PrepareRelease(ctx, tr.ID, sellerID, sellerAddr); err != nil {
 			t.Fatalf("PrepareRelease: %v", err)

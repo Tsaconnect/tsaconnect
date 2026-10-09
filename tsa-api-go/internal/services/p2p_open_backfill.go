@@ -2,11 +2,15 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
 	"strings"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
@@ -30,8 +34,8 @@ func openDeadlineFromChain(onchain *OnChainP2PTrade) (time.Time, bool) {
 // recorded — by ConfirmOpenTrade (real tx hash) and by the backfill (marker).
 // The off-chain deadline is re-anchored to the on-chain createdAt because
 // expires_at was set at intent time and drifts early if the open mined late,
-// which would nudge a timeout-cancel the contract reverts. onchain may be nil
-// (best-effort read failed): the intent-time deadline is then kept.
+// which would nudge a timeout-cancel the contract reverts. With no on-chain
+// createdAt the intent-time deadline is kept.
 func (s *P2PTradeService) openRecordUpdates(openTxHash string, onchain *OnChainP2PTrade) map[string]any {
 	updates := map[string]any{"open_tx_hash": openTxHash, "updated_at": s.clock.Now()}
 	if deadline, ok := openDeadlineFromChain(onchain); ok {
@@ -40,17 +44,89 @@ func (s *P2PTradeService) openRecordUpdates(openTxHash string, onchain *OnChainP
 	return updates
 }
 
-// recordOpenFromChain records a trade's open from the escrow's view when the
-// confirm-open was lost. It refuses an on-chain trade whose amount or funding
-// disagrees with the row — that is not the open we prepared. Reports true only
-// when this call wrote the open; false when one was already recorded (t is
-// refreshed from the row in that case).
-func (s *P2PTradeService) recordOpenFromChain(ctx context.Context, t *models.P2PTrade, onchain *OnChainP2PTrade) (bool, error) {
+// onChainOpenMatches decides whether the escrow's trade under HashID(t.ID) is
+// the open we prepared for t on ad. The contract lets the opener choose the
+// token (any accepted one) and, on openTradeWithDeposit, the merchant (the
+// on-chain buyer) freely — so an opener naming their own second wallet as
+// merchant could later cancelByTimeout and keep both the crypto and the fiat
+// the real merchant paid. Amount alone is therefore never enough: the token
+// and the ad's own wallet on its side of the trade must match too.
+//
+// Sell-ad (pooled, openTrade): the ad's wallet signed the voucher, so it is
+// the on-chain seller. Buy-ad (JIT, openTradeWithDeposit): the prepare passes
+// ad.SellerAddress as merchant, so it is the on-chain buyer. PM ads are
+// ordinary sell/buy ads whose SellerAddress is the PM maker wallet.
+func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, onchain *OnChainP2PTrade) error {
+	mismatch := func(what string) error {
+		return fmt.Errorf("%w: on-chain trade does not match this trade's %s", ErrInvalidTransition, what)
+	}
+	if onchain == nil || !onchain.Exists {
+		return fmt.Errorf("%w: trade not opened on-chain", ErrInvalidTransition)
+	}
 	expected, ok := new(big.Int).SetString(t.TokenAmount, 10)
-	if !ok || onchain.Amount == nil || onchain.Amount.Cmp(expected) != 0 || onchain.Funding != t.Funding {
-		log.Printf("[p2p] ALERT p2p_open_backfill_mismatch_total=1 trade=%s chainAmount=%v dbAmount=%s chainFunding=%d dbFunding=%d",
-			t.ID, onchain.Amount, t.TokenAmount, onchain.Funding, t.Funding)
-		return false, fmt.Errorf("%w: on-chain trade does not match this trade's amount or funding", ErrInvalidTransition)
+	if !ok || onchain.Amount == nil || onchain.Amount.Cmp(expected) != 0 {
+		return mismatch("amount")
+	}
+	if ad == nil || ad.ID != t.AdID {
+		return fmt.Errorf("%w: trade's ad not found", ErrInvalidTransition)
+	}
+	wantFunding, adSide := models.P2PTradeFundingPooled, onchain.Seller
+	if ad.Side == models.P2PAdSideBuy {
+		wantFunding, adSide = models.P2PTradeFundingDepositedByTaker, onchain.Buyer
+	}
+	if onchain.Funding != wantFunding || t.Funding != wantFunding {
+		return mismatch("funding")
+	}
+	if !common.IsHexAddress(tokenAddr) || !strings.EqualFold(onchain.Token.Hex(), tokenAddr) {
+		return mismatch("token")
+	}
+	// No recorded wallet means nothing to check against: refuse, never skip.
+	if !common.IsHexAddress(ad.SellerAddress) {
+		return fmt.Errorf("%w: the trade's ad has no wallet recorded", ErrInvalidTransition)
+	}
+	if adSide != common.HexToAddress(ad.SellerAddress) {
+		return mismatch("counterparty")
+	}
+	return nil
+}
+
+// verifyOpenOnChain loads what onChainOpenMatches needs for t (its ad and
+// the token's configured address) and applies it. Every refusal is logged as
+// an ALERT (path = "confirm" or "backfill"): a mismatch is either a bug or an
+// opener tampering with the open.
+func (s *P2PTradeService) verifyOpenOnChain(ctx context.Context, path string, t *models.P2PTrade, onchain *OnChainP2PTrade) error {
+	var ad *models.P2PAd
+	var row models.P2PAd
+	err := s.db.WithContext(ctx).First(&row, "id = ?", t.AdID).Error
+	switch {
+	case err == nil:
+		ad = &row
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return err
+	}
+	tokenAddr, err := s.resolveTokenAddress(t.ChainID, t.Token)
+	if err != nil {
+		return err
+	}
+	if err := onChainOpenMatches(t, ad, tokenAddr, onchain); err != nil {
+		if onchain != nil && onchain.Exists {
+			log.Printf("[p2p] ALERT p2p_open_backfill_mismatch_total=1 path=%s trade=%s err=%v chainAmount=%v dbAmount=%s chainFunding=%d dbFunding=%d chainToken=%s token=%s chainSeller=%s chainBuyer=%s",
+				path, t.ID, err, onchain.Amount, t.TokenAmount, onchain.Funding, t.Funding,
+				onchain.Token.Hex(), tokenAddr, onchain.Seller.Hex(), onchain.Buyer.Hex())
+		}
+		return err
+	}
+	return nil
+}
+
+// recordOpenFromChain records a trade's open from the escrow's view when the
+// confirm-open was lost. It refuses an on-chain trade that onChainOpenMatches
+// rejects — that is not the open we prepared. Reports true only when this
+// call wrote the open; false when one was already recorded (t is refreshed
+// from the row in that case).
+func (s *P2PTradeService) recordOpenFromChain(ctx context.Context, t *models.P2PTrade, onchain *OnChainP2PTrade) (bool, error) {
+	if err := s.verifyOpenOnChain(ctx, "backfill", t, onchain); err != nil {
+		return false, err
 	}
 	updates := s.openRecordUpdates(openTxReconciled, onchain)
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).

@@ -1507,6 +1507,10 @@ func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 		Buyer:   common.HexToAddress(merchantAddr),
 		Amount:  tokenAmt,
 	}
+	esc.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending,
+		Funding: models.P2PTradeFundingDepositedByTaker,
+		Seller:  common.HexToAddress(userAddr), Buyer: common.HexToAddress(merchantAddr),
+		Token: common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"), Amount: tokenAmt}
 	// The opener (user/seller) confirms — not the merchant.
 	got, err := svc.ConfirmOpenTrade(context.Background(), trade.ID, userID, userAddr, "0xopen")
 	if err != nil {

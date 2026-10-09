@@ -1674,8 +1674,6 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
-	expected, _ := new(big.Int).SetString(trade.TokenAmount, 10)
-
 	// Resolve the trade's chain so the open receipt is verified against the
 	// escrow the trade was actually opened on — never a default chain.
 	escrow, _, _, err := s.resolve(trade.ChainID)
@@ -1683,13 +1681,12 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		return nil, err
 	}
 
+	// The receipt proves txHash opened this trade id; what was opened (amount,
+	// token, funding, counterparty) is checked against the escrow's view below.
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
 		ev, err := escrow.VerifyTradeOpenedWithDeposit(txHash, HashID(trade.ID))
 		if err != nil {
 			return nil, fmt.Errorf("verify on-chain open (deposit): %w", err)
-		}
-		if ev.Amount.Cmp(expected) != 0 {
-			return nil, fmt.Errorf("on-chain amount %s does not match db %s", ev.Amount, trade.TokenAmount)
 		}
 		// On a buy-ad the on-chain seller is the depositing user (opener) and
 		// the on-chain buyer is the merchant (trade.BuyerID). Cross-check the
@@ -1702,9 +1699,6 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		if err != nil {
 			return nil, fmt.Errorf("verify on-chain open: %w", err)
 		}
-		if ev.Amount.Cmp(expected) != 0 {
-			return nil, fmt.Errorf("on-chain amount %s does not match db %s", ev.Amount, trade.TokenAmount)
-		}
 		// Cross-check the on-chain buyer matches the caller's wallet. tradeId is
 		// server-owned (keccak of UUID); this guard catches a future bug where
 		// the verify-receipt path misses a topic-shift.
@@ -1713,10 +1707,17 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		}
 	}
 
-	// Best-effort read: on failure the intent-time expires_at is kept.
-	onchain, rerr := escrow.ReadTrade(HashID(trade.ID))
-	if rerr != nil {
-		onchain = nil
+	// The receipt is mined, so the trade exists; a read that fails or doesn't
+	// see it yet is a lagging node — retryable, not a refusal.
+	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read on-chain trade: %v", ErrChainUnavailable, err)
+	}
+	if !onchain.Exists {
+		return nil, fmt.Errorf("%w: opened trade not yet visible on-chain", ErrChainUnavailable)
+	}
+	if err := s.verifyOpenOnChain(ctx, "confirm", &trade, onchain); err != nil {
+		return nil, err
 	}
 	openUpdates := s.openRecordUpdates(txHash, onchain)
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
