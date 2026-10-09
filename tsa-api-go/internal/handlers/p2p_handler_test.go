@@ -1454,3 +1454,22 @@ func TestIsISO2Country(t *testing.T) {
 		}
 	}
 }
+
+func TestAdResponses_NeverCarryVoucherSecrets(t *testing.T) {
+	r := newRig(t)
+	adID := createSignedAd(t, r)
+	for _, path := range []string{"/api/p2p/ads/" + adID} {
+		rec := doJSON(t, r, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d", path, rec.Code)
+		}
+		for _, k := range []string{"voucherSignature", "voucherNonce", "voucherDeadline"} {
+			if strings.Contains(rec.Body.String(), `"`+k+`"`) {
+				t.Errorf("%s leaks %s: %s", path, k, rec.Body.String())
+			}
+		}
+		if !strings.Contains(rec.Body.String(), `"voucherHash"`) {
+			t.Errorf("voucherHash should stay")
+		}
+	}
+}
