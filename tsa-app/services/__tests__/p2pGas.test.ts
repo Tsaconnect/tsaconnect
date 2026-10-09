@@ -94,3 +94,37 @@ it('empty wallet with no sponsor refusal keeps the original ensureGas alert', as
   await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't', onAlert });
   expect(onAlert).toHaveBeenCalledWith('Not enough gas', 'You need S on Sonic');
 });
+
+const emptySigner = () =>
+  mockEnsureGas.mockImplementation(async (_c: string, _w: string, alert: any) => {
+    alert('Not enough gas', 'You need S on Sonic to cover the transaction fee.');
+    return false;
+  });
+
+it.each(['gas_not_needed', 'gas_topup_unused', 'sponsorship_in_progress'])(
+  'signer empty + %s keeps ensureGas\'s own message',
+  async (code) => {
+    const onAlert = jest.fn();
+    mockTopUp.mockResolvedValue({ success: false, status: 409, code });
+    emptySigner();
+    await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't', onAlert });
+    expect(onAlert).toHaveBeenCalledWith('Not enough gas', 'You need S on Sonic to cover the transaction fee.');
+  },
+);
+
+it('signer empty + gas_unavailable shows the refusal copy', async () => {
+  const onAlert = jest.fn();
+  mockTopUp.mockResolvedValue({ success: false, status: 503, code: 'gas_unavailable' });
+  emptySigner();
+  await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't', onAlert });
+  expect(onAlert).toHaveBeenCalledWith('Not enough gas', expect.stringMatching(/unavailable/i));
+});
+
+it('a thrown network error shows friendly text, never the raw message', async () => {
+  const onAlert = jest.fn();
+  mockTopUp.mockRejectedValue(new Error('TypeError: Network request failed at fetch'));
+  emptySigner();
+  await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't', onAlert });
+  const msg = onAlert.mock.calls[0][1];
+  expect(msg).not.toMatch(/TypeError|fetch/);
+});

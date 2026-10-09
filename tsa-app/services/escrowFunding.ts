@@ -118,7 +118,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
       : ensureGas(chainKey, walletAddress, alert);
   if (!gasAction) {
     onStage?.('Checking gas…');
-    if (!(await checkGas('deposit'))) return { status: 'aborted', reason: 'no gas' };
+    if (!(await ensureGas(chainKey, walletAddress, alert))) return { status: 'aborted', reason: 'no gas' };
   }
 
   // Approve the escrow for the shortfall if the current allowance is short.

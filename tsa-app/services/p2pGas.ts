@@ -10,9 +10,18 @@ import { Alert } from 'react-native';
 import { gasApi, p2pChainKey, SONIC_GAS_SPONSOR_CHAIN_IDS, type P2PGasAction } from './p2p';
 import { ensureGas } from './wallet';
 import { waitMined } from './txWait';
+import { KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
 import { p2pErrorMessage, type P2PErrorLike } from './p2pErrors';
 
 const TOPUP_WAIT_MS = 60_000;
+
+// Refusals that explain why sponsorship did not help. gas_not_needed,
+// gas_topup_unused and sponsorship_in_progress describe the PROVEN wallet, which
+// may differ from the signer, so for those ensureGas's own message stands.
+function explainsEmptySigner(r: P2PErrorLike): boolean {
+  if (r.status === 429) return /used today's gas top-ups/i.test(r.message ?? '');
+  return r.code === 'gas_unavailable' || r.code === 'WALLET_PROOF_REQUIRED' || r.code === KYC_VERIFICATION_REQUIRED;
+}
 
 export interface EnsureP2PGasParams {
   chainId: number;
@@ -39,7 +48,7 @@ export async function ensureP2PGas(p: EnsureP2PGasParams): Promise<boolean> {
       const hash = res.success
         ? (res.data && !res.data.skipped ? res.data.txHash : undefined)
         : (res.data as { txHash?: string } | undefined)?.txHash;
-      if (!res.success) refusal = res;
+      if (!res.success && explainsEmptySigner(res)) refusal = res;
       if (hash) {
         onStage?.('Adding the network fee to your wallet…');
         try {
@@ -52,7 +61,7 @@ export async function ensureP2PGas(p: EnsureP2PGasParams): Promise<boolean> {
       }
     } catch (err) {
       console.warn('[p2pGas] top-up request failed', err);
-      refusal = { message: err instanceof Error ? err.message : undefined };
+      refusal = { code: 'gas_unavailable' };
     }
   }
 
