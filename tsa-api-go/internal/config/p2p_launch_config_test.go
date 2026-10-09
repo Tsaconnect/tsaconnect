@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoad_P2PLaunchDefaults(t *testing.T) {
-	for _, k := range []string{"P2P_PAID_UNRELEASED_ALERT_AFTER", "P2P_FIXED_RATE_BAND_BPS"} {
+	for _, k := range []string{"P2P_PAID_UNRELEASED_ALERT_AFTER", "P2P_FIXED_RATE_BAND_BPS", "P2P_GAS_TOPUPS_PER_DAY"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -16,5 +16,8 @@ func TestLoad_P2PLaunchDefaults(t *testing.T) {
 	}
 	if cfg := Load(); cfg.P2PFixedRateBandBps != 2000 {
 		t.Fatalf("band = %d", cfg.P2PFixedRateBandBps)
+	}
+	if cfg := Load(); cfg.P2PGasTopUpsPerDay != 6 {
+		t.Fatalf("gas top-ups/day = %d", cfg.P2PGasTopUpsPerDay)
 	}
 }

@@ -838,6 +838,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.POST("/withdrawals", idem, p2p.PrepareWithdraw)
 			p2pGroup.POST("/withdrawals/confirm", idem, p2p.ConfirmWithdraw)
 
+			// Gas: S for the caller's next P2P tx on Sonic, to her proven wallet.
+			p2pGroup.POST("/gas/top-up", idem, p2p.GasTopUp)
+
 			p2pGroup.GET("/ads", p2p.ListAds)
 			p2pGroup.GET("/ads/my", p2p.ListMyAds)
 			p2pGroup.GET("/ads/:id", p2p.GetAd)

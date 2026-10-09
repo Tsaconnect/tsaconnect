@@ -1837,9 +1837,19 @@ func main() {
 	// funded by swap has no Paycrest leg at all.
 	// The source-chain top-ups a funding may need come from the ramp's own
 	// sponsor lanes (built for intents only when Paycrest is off). The Sonic
-	// top-up is the funding's own lane (MARKETPLACE_SONIC_GAS), never a ramp
-	// lane, so turning it on changes nothing for sells; its float is watched
-	// only when it exists.
+	// top-up comes from the ONE Sonic lane on the sponsor key, never a ramp
+	// lane, so turning it on changes nothing for sells. P2P uses that lane
+	// whenever it exists; the funding only while MARKETPLACE_SONIC_GAS is on.
+	// Built once (two lanes on one key would race its nonce), its float watched
+	// once.
+	sonicShared := buildSonicGasSponsorship(cfg, blockchainService)
+	if sonicShared != nil {
+		scheduler.Register(jobs.NewGasFloatMonitorNamed("marketplace_sonic_gas", sonicShared, 10*time.Minute))
+	}
+	if p2pGas := services.NewP2PGasSponsor(sonicShared, cfg.P2PGasTopUpsPerDay, nil); p2pGas != nil {
+		// Only a live sponsor: a nil *P2PGasSponsor in the interface would be non-nil.
+		p2pHandler.SetGasSponsor(p2pGas)
+	}
 	var sonicGas *services.RampSponsorship
 	if cfg.MarketplaceFundingEnabled {
 		if rampSponsor == nil {
@@ -1847,9 +1857,7 @@ func main() {
 				scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
 			}
 		}
-		if sonicGas = buildMarketplaceSonicGas(cfg, blockchainService); sonicGas != nil {
-			scheduler.Register(jobs.NewGasFloatMonitorNamed("marketplace_sonic_gas", sonicGas, 10*time.Minute))
-		}
+		sonicGas = marketplaceSonicGas(cfg, sonicShared)
 	}
 	if funding := buildMarketplaceFunding(cfg, blockchainService, payQuoter, paySellers, rampSponsor, sonicGas, feeDistributionService); funding != nil {
 		funding.SetOrderPulls(ch)

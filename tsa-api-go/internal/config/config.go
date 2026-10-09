@@ -686,6 +686,10 @@ type Config struct {
 	// A trade paid but not released for this long pages the operators once.
 	P2PPaidUnreleasedAlertAfter time.Duration
 
+	// P2PGasTopUpsPerDay caps the S top-ups one user is sent for P2P txs per
+	// rolling 24h (POST /api/p2p/gas/top-up). Skips do not count.
+	P2PGasTopUpsPerDay int
+
 	// Nomba — used for Nigerian bank directory + account name enquiry today,
 	// and the auto-payout path in Phase 2. Falls back to "feature disabled"
 	// when credentials aren't set so dev environments work without them.
@@ -1277,6 +1281,7 @@ func Load() *Config {
 	cfg.P2PFloatOffsetMaxBps = int(getEnvInt64("P2P_FLOAT_OFFSET_MAX_BPS", 1000))
 	cfg.P2PFixedRateBandBps = int(getEnvInt64("P2P_FIXED_RATE_BAND_BPS", 2000))
 	cfg.P2PPaidUnreleasedAlertAfter = getEnvDuration("P2P_PAID_UNRELEASED_ALERT_AFTER", 2*time.Hour)
+	cfg.P2PGasTopUpsPerDay = int(getEnvInt64("P2P_GAS_TOPUPS_PER_DAY", 6))
 
 	// Nomba — sandbox by default. Production should set NOMBA_BASE_URL to
 	// https://api.nomba.com and provide live credentials.

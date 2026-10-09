@@ -114,27 +114,26 @@ func newIntentSponsorship(orders *services.PaycrestOrderService, lanes map[strin
 	return services.NewRampSponsorship(nil, store, lanes, unusedCap, 30*time.Second, nil)
 }
 
-// buildMarketplaceSonicGas builds the marketplace funding's own Sonic gas lane
-// (MARKETPLACE_SONIC_GAS), or nil with a line saying why. It is a separate
-// sponsorship holding ONLY the Sonic lane, so enabling it can never give a
-// sale or a TSA Pay intent from Sonic a source-chain top-up. It signs with the
-// ramp sponsor key under its own guard, floor and ceiling.
-func buildMarketplaceSonicGas(cfg *config.Config, chains *services.BlockchainService) *services.RampSponsorship {
-	if !cfg.MarketplaceSonicGasEnabled {
-		log.Printf("[marketplace-funding] sonic gas dormant: MARKETPLACE_SONIC_GAS is off — a buyer with no S is refused before signing")
-		return nil
-	}
+// buildSonicGasSponsorship builds THE Sonic gas lane on the ramp sponsor key,
+// or nil with a line saying why. There is exactly one: P2P top-ups use it
+// whenever it exists and the marketplace funding while MARKETPLACE_SONIC_GAS
+// is on (marketplaceSonicGas). A second lane on the same key would hold its
+// own send lock and could hand two txs the same nonce. It is a separate
+// sponsorship holding ONLY the Sonic lane, so it can never give a sale or a
+// TSA Pay intent from Sonic a source-chain top-up. Its floor, ceiling and
+// guard name are the ones the funding's own lane had.
+func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainService) *services.RampSponsorship {
 	if cfg.RampSponsorPrivateKey == "" || chains == nil {
-		log.Printf("[marketplace-funding] sonic gas dormant: RAMP_SPONSOR_PRIVATE_KEY not set")
+		log.Printf("[sonic-gas] dormant: RAMP_SPONSOR_PRIVATE_KEY not set — a P2P user or buyer with no S is told to add some")
 		return nil
 	}
 	if !rawSignerKeyAllowed(cfg) {
-		log.Printf("[marketplace-funding] sonic gas dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production")
+		log.Printf("[sonic-gas] dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
 		return nil
 	}
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampSponsorPrivateKey, "0x"))
 	if err != nil {
-		log.Printf("[marketplace-funding] sonic gas dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
+		log.Printf("[sonic-gas] dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
 		return nil
 	}
 	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
@@ -151,20 +150,36 @@ func buildMarketplaceSonicGas(cfg *config.Config, chains *services.BlockchainSer
 	topUpMax := bigFromDecimal(cfg.MarketplaceSonicGasTopUpMaxWei)
 	budget := bigFromDecimal(cfg.RampSponsorDailyGasBudget)
 	if floor == nil || topUpMax == nil || budget == nil {
-		log.Printf("[marketplace-funding] ALERT marketplace_sonic_gas_skipped_total=1 reason=invalid MARKETPLACE_SONIC_GAS_FLOOR_WEI / _TOPUP_MAX_WEI / RAMP_SPONSOR_DAILY_GAS_BUDGET")
+		log.Printf("[sonic-gas] ALERT marketplace_sonic_gas_skipped_total=1 reason=invalid MARKETPLACE_SONIC_GAS_FLOOR_WEI / _TOPUP_MAX_WEI / RAMP_SPONSOR_DAILY_GAS_BUDGET")
 		return nil
 	}
 	lane := buildSponsorLane(chains, "sonic", key, "marketplace_sonic_gas", services.SponsorLimits{
 		DailyGasBudget: budget, BalanceFloor: floor,
 	}, topUpMax)
 	if lane == nil {
-		log.Printf("[marketplace-funding] sonic gas dormant: no sonic mainnet client")
+		log.Printf("[sonic-gas] dormant: no sonic mainnet client")
 		return nil
 	}
+	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
 	sponsor := newIntentSponsorship(nil, map[string]*services.SponsorLane{"sonic": lane}, cfg.RampSponsorTopUpUnusedDailyCap)
 	sponsor.SetChainRegistry(chains)
-	log.Printf("[marketplace-funding] sonic gas lane enabled sponsor=%s floor=%s max=%s", lane.Signer.Address(), floor, topUpMax)
+	log.Printf("[sonic-gas] lane enabled sponsor=%s floor=%s max=%s", lane.Signer.Address(), floor, topUpMax)
 	return sponsor
+}
+
+// marketplaceSonicGas is the shared Sonic lane as the marketplace funding sees
+// it: there only while MARKETPLACE_SONIC_GAS is on, exactly as when the
+// funding built a lane of its own.
+func marketplaceSonicGas(cfg *config.Config, shared *services.RampSponsorship) *services.RampSponsorship {
+	if !cfg.MarketplaceSonicGasEnabled {
+		log.Printf("[marketplace-funding] sonic gas dormant: MARKETPLACE_SONIC_GAS is off — a buyer with no S is refused before signing")
+		return nil
+	}
+	if shared == nil {
+		log.Printf("[marketplace-funding] sonic gas dormant: no shared sonic gas lane (see [sonic-gas])")
+		return nil
+	}
+	return shared
 }
 
 // rampSponsorLaneLimits validates a chain's eligibility for a sponsor lane and
