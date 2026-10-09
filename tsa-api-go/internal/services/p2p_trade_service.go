@@ -1654,6 +1654,9 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	// The opener is the party who funds + broadcasts the open: buyer on a
 	// pooled sell-ad, seller (depositor) on a JIT buy-ad.
 	opener := trade.BuyerID
@@ -1737,6 +1740,9 @@ func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UU
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	if trade.BuyerID != buyerID {
 		return nil, ErrForbidden
 	}
@@ -1781,6 +1787,9 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.SellerID != sellerID {
@@ -1866,6 +1875,9 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.SellerID != sellerID {
@@ -2113,6 +2125,9 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	if trade.BuyerID != userID && trade.SellerID != userID {
 		return nil, ErrForbidden
 	}
@@ -2142,8 +2157,8 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 // dormant PM ledger (s.pm == nil) is a no-op. The reserved amount equals the
 // trade's FiatAmount (what was reserved at open).
 func (s *P2PTradeService) releasePMSellReservationTx(ctx context.Context, tx *gorm.DB, trade *models.P2PTrade) error {
-	if s.pm == nil {
-		return nil
+	if s.pm == nil || trade.IsPoolSlice() {
+		return nil // a slice never reserved NGN: writeSlices takes no ReserveInTx (its "fiat" is the LP's payout, settled by C2)
 	}
 	// Idempotency guard: the failed-payout handler releases the reservation but
 	// leaves the trade in pending_payment for the watchdog, setting this marker.
@@ -2185,6 +2200,9 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.BuyerID != userID && trade.SellerID != userID {
@@ -2326,6 +2344,9 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	var role string
 	switch userID {
 	case trade.BuyerID:
@@ -2413,6 +2434,9 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.BuyerID != userID && trade.SellerID != userID {
@@ -2938,11 +2962,13 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 		"funding": funding,
 		"reason":  "chain Released",
 	})
-	s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
-	if funding == models.P2PTradeFundingDepositedByTaker {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
-	} else {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	if !trade.IsPoolSlice() { // an LP sees pool events (C2), never a P2P trade push
+		s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		if funding == models.P2PTradeFundingDepositedByTaker {
+			s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		} else {
+			s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		}
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusReleased,
 		Reason: "chain Released"}, nil
@@ -2998,11 +3024,13 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 		"funding": funding,
 		"reason":  "chain Cancelled",
 	})
-	if funding == models.P2PTradeFundingDepositedByTaker {
-		// SellerID is the depositing user — crypto returned to their wallet.
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
-	} else {
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	if !trade.IsPoolSlice() { // an LP sees pool events (C2), never a P2P trade push
+		if funding == models.P2PTradeFundingDepositedByTaker {
+			// SellerID is the depositing user — crypto returned to their wallet.
+			s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
+		} else {
+			s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		}
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusCancelled,
 		Reason: "chain Cancelled"}, nil
@@ -3258,6 +3286,7 @@ func (s *P2PTradeService) ClaimExpiredPendingTrades(ctx context.Context, limit i
 	// cost is acceptable for Phase 1 single-instance.
 	var candidates []models.P2PTrade
 	if err := s.db.WithContext(ctx).
+		Scopes(notPoolSlice).
 		Where("status = ? AND expires_at < ? AND expired_notified_at IS NULL",
 			models.P2PTradeStatusPendingPayment, now).
 		Order("expires_at ASC").
@@ -3291,6 +3320,7 @@ func (s *P2PTradeService) ListExpiredPendingTrades(ctx context.Context, limit in
 	}
 	var out []models.P2PTrade
 	if err := s.db.WithContext(ctx).
+		Scopes(notPoolSlice).
 		Where("status = ? AND expires_at < ?",
 			models.P2PTradeStatusPendingPayment, s.clock.Now()).
 		Order("expires_at ASC").
@@ -3575,6 +3605,9 @@ func (s *P2PTradeService) GetTrade(ctx context.Context, tradeID, requestor uuid.
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	if trade.BuyerID != requestor && trade.SellerID != requestor {
 		return nil, ErrForbidden
 	}
@@ -3582,7 +3615,7 @@ func (s *P2PTradeService) GetTrade(ctx context.Context, tradeID, requestor uuid.
 }
 
 func (s *P2PTradeService) ListTrades(ctx context.Context, f TradeFilter) ([]models.P2PTrade, error) {
-	q := s.db.WithContext(ctx).Model(&models.P2PTrade{})
+	q := notPoolSlice(s.db.WithContext(ctx).Model(&models.P2PTrade{}))
 	switch f.Role {
 	case "buyer":
 		q = q.Where("buyer_id = ?", f.UserID)

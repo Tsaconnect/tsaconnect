@@ -239,6 +239,7 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 	var rows []inboundCandidateRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id, p2p_trades.buyer_id, p2p_trades.fiat_amount").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id = ?", pm.ID).
@@ -375,6 +376,7 @@ func (s *PMAutomationService) RecoverStuckTrades(ctx context.Context, olderThan 
 	var rows []recoverStuckRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
@@ -780,6 +782,7 @@ func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQ
 	var rows []manualQueueRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id, p2p_trades.ad_id, p2p_trades.buyer_id, p2p_trades.token, p2p_trades.token_amount, p2p_trades.fiat_amount, p2p_trades.created_at").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
@@ -862,6 +865,12 @@ func (s *PMAutomationService) tradeUSDForCap(ctx context.Context, tradeID uuid.U
 // operator performing the release (for the ref/audit trail). ErrInvalidTransition
 // on markPaid is tolerated (already paid) and execution continues to release.
 func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminID uuid.UUID) (*models.P2PTrade, error) {
+	var probe models.P2PTrade
+	if err := s.db.WithContext(ctx).Select("id", "it_intent_id").First(&probe, "id = ?", tradeID).Error; err == nil {
+		if err := hideSlice(&probe); err != nil {
+			return nil, err
+		}
+	}
 	// Daily-cap gate (operator path). Reach the PM via the trade's ad's pm_id. If
 	// the trade belongs to a PM with a daily cap, an over-cap release returns a
 	// clear error so the operator sees it (we never silently release over cap). A

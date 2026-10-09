@@ -1820,7 +1820,8 @@ func (h *P2PHandler) RateTrade(c *gin.Context) {
 		return
 	}
 	var trade models.P2PTrade
-	if err := h.db.First(&trade, "id = ?", tradeID).Error; err != nil {
+	// A pool slice answers exactly as a missing trade: no user rates pool money.
+	if err := h.db.First(&trade, "id = ?", tradeID).Error; err != nil || trade.IsPoolSlice() {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "trade not found"})
 		return
 	}

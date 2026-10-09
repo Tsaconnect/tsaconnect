@@ -199,6 +199,9 @@ func (m *P2PMessageService) assertParticipant(ctx context.Context, tradeID, user
 		}
 		return err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return err
+	}
 	if trade.BuyerID != userID && trade.SellerID != userID {
 		return ErrForbidden
 	}
