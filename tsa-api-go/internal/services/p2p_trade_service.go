@@ -128,6 +128,9 @@ type P2PEscrowAdapter interface {
 	// trade (design §8). Returns 0/false on a pre-V3 escrow or a V2-opened trade
 	// (no snapshot) — the documented no-op signal for accrueP2PReleaseFee.
 	ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool)
+	// ReadTradeFeeSnapshot is a trade's snapshotted platform and gas fee bps
+	// (V3 trades() getter). A pool slice must read (0, 0) (spec §6.2, F15).
+	ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, gasBps uint16, found bool)
 	ReadBalance(seller, token string) (*OnChainBalance, error)
 	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
 	ReadVoucherCancelled(voucherHash [32]byte) (bool, error)

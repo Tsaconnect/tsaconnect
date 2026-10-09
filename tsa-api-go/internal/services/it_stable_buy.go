@@ -331,7 +331,7 @@ func (s *ITService) openStableBuy(
 		}
 	}
 	// Find-then-Create is not atomic: the partial unique index
-	// uq_it_intents_open_stable_buy (config/database.go) closes the race on
+	// uq_it_intents_open_stable_buy_v2 (config/database.go) closes the race on
 	// Postgres and is translated below. SQLite has none, hence the find.
 
 	display := q.RatePerUnitMinor
@@ -387,13 +387,13 @@ func (s *ITService) openStableBuy(
 	return intent, payInto, nil
 }
 
-// findOpenStableBuy is the user's stablecoin purchase awaiting payment, of any
-// provider, or nil.
+// findOpenStableBuy is the user's stablecoin purchase awaiting payment, or a
+// pool order still opening (S11), of any provider, or nil.
 func (s *ITService) findOpenStableBuy(ctx context.Context, userID uuid.UUID) (*models.ITIntent, error) {
 	var rows []models.ITIntent
 	if err := s.db.WithContext(ctx).
-		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ?",
-			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
+		Where("user_id = ? AND direction = ? AND status IN ? AND asset IN ?",
+			userID, models.ITDirectionBuy, []string{models.ITStatusPendingPayment, models.ITStatusOpening},
 			[]string{models.ITAssetUSDC, models.ITAssetUSDT}).
 		Order("created_at DESC").Limit(1).Find(&rows).Error; err != nil {
 		return nil, err

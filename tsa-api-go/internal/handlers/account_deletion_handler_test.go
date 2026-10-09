@@ -57,7 +57,8 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 			created_at DATETIME, updated_at DATETIME
 		)`,
 		`CREATE TABLE p2p_trades (
-			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT
+			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME
 		)`,
 		`CREATE TABLE orders (
 			id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, status TEXT

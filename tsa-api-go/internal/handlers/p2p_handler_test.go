@@ -193,6 +193,7 @@ func (m *mockEscrow) ReadTrade(_ [32]byte) (*services.OnChainP2PTrade, error) {
 func (m *mockEscrow) ReadTradePlatformFeeBps(_ [32]byte) (uint16, bool) {
 	return 0, false // pre-V3 default: no platform snapshot → accrual no-op
 }
+func (m *mockEscrow) ReadTradeFeeSnapshot(_ [32]byte) (uint16, uint16, bool) { return 0, 0, true }
 func (m *mockEscrow) ReadBalance(_, _ string) (*services.OnChainBalance, error) {
 	avail := m.balance.Available
 	if avail == nil {
@@ -292,6 +293,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			marked_paid_at DATETIME, released_at DATETIME,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
 			CHECK (buyer_id <> seller_id)
 		)`,

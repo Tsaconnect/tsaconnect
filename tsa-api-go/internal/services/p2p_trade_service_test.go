@@ -74,6 +74,9 @@ type mockEscrow struct {
 	// trade → accrueP2PReleaseFee no-ops. platformFeeFound toggles the found flag.
 	platformFeeBpsSnapshot uint16
 	platformFeeFound       bool
+	// Pool slices: the V3 fee snapshot ReadTradeFeeSnapshot answers with.
+	snapPlatform, snapGas uint16
+	snapMissing           bool
 }
 
 type depositArgs struct {
@@ -284,6 +287,9 @@ func (m *mockEscrow) ReadTradePlatformFeeBps(tradeId [32]byte) (uint16, bool) {
 	}
 	return 0, m.platformFeeFound
 }
+func (m *mockEscrow) ReadTradeFeeSnapshot(tradeId [32]byte) (uint16, uint16, bool) {
+	return m.snapPlatform, m.snapGas, !m.snapMissing
+}
 func (m *mockEscrow) ReadBalance(seller, token string) (*OnChainBalance, error) {
 	if m.balanceErr != nil {
 		return nil, m.balanceErr
@@ -384,6 +390,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			marked_paid_at DATETIME, released_at DATETIME,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
 			CHECK (buyer_id <> seller_id)
 		)`,
