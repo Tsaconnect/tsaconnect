@@ -78,6 +78,9 @@ const STABLE_ASSETS = new Set(['USDC', 'USDT']);
 
 function statusLabel(status: string): string {
   switch (status) {
+    // A pool buy whose slices are still being locked; its poll moves it on.
+    case 'opening':
+      return 'Setting up your order';
     case 'pending_payment':
       return 'Awaiting transfer';
     case 'processing':
