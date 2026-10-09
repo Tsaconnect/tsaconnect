@@ -14,6 +14,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // LP stock-ad voucher terms (spec S28).
@@ -52,9 +53,9 @@ var liveStockAdStatuses = []string{models.P2PAdStatusPending, models.P2PAdStatus
 
 // liveStockAds are the LP's pending, active and paused stock ads on one chain
 // and token, newest first.
-func (s *P2PTradeService) liveStockAds(ctx context.Context, lpID uuid.UUID, chainID int64, token string) ([]models.P2PAd, error) {
+func (s *P2PTradeService) liveStockAds(ctx context.Context, db *gorm.DB, lpID uuid.UUID, chainID int64, token string) ([]models.P2PAd, error) {
 	var ads []models.P2PAd
-	err := s.db.WithContext(ctx).
+	err := db.WithContext(ctx).
 		Where("pm_id = ? AND chain_id = ? AND token = ? AND side = ? AND status IN ?",
 			lpID, chainID, strings.ToUpper(token), models.P2PAdSideSell, liveStockAdStatuses).
 		Order("created_at DESC").Find(&ads).Error
@@ -63,7 +64,13 @@ func (s *P2PTradeService) liveStockAds(ctx context.Context, lpID uuid.UUID, chai
 
 // LatestStockAd is the LP's newest active or paused stock ad; (nil, nil) if none.
 func (s *P2PTradeService) LatestStockAd(ctx context.Context, lp *models.PaymentMerchant, chainID int64, token string) (*models.P2PAd, error) {
-	ads, err := s.liveStockAds(ctx, lp.ID, chainID, token)
+	return s.latestStockAdIn(ctx, s.db, lp, chainID, token)
+}
+
+// latestStockAdIn is LatestStockAd on a caller's handle: the pool allocator
+// reads inside its lock's transaction (plan C1 review C2).
+func (s *P2PTradeService) latestStockAdIn(ctx context.Context, db *gorm.DB, lp *models.PaymentMerchant, chainID int64, token string) (*models.P2PAd, error) {
+	ads, err := s.liveStockAds(ctx, db, lp.ID, chainID, token)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +145,7 @@ func (s *P2PTradeService) createPoolAd(ctx context.Context, lp *models.PaymentMe
 		return nil, ErrAmountOverflow
 	}
 	now := s.clock.Now()
-	live, err := s.liveStockAds(ctx, lp.ID, chainID, token)
+	live, err := s.liveStockAds(ctx, s.db, lp.ID, chainID, token)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +211,7 @@ func (s *P2PTradeService) closeSupersededStockAds(ctx context.Context, fresh *mo
 	if fresh.PMID == nil {
 		return
 	}
-	ads, err := s.liveStockAds(ctx, *fresh.PMID, fresh.ChainID, fresh.Token)
+	ads, err := s.liveStockAds(ctx, s.db, *fresh.PMID, fresh.ChainID, fresh.Token)
 	if err != nil {
 		log.Printf("[p2p pool] superseded stock ads of %s not read: %v", fresh.ID, err)
 		return

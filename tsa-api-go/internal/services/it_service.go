@@ -136,6 +136,9 @@ type ITService struct {
 
 	// wallet is the company wallet (spec 2.3 #1). Nil: the provider is dormant.
 	wallet *CompanyWallet
+	// poolDesk is the TSA Liquidity pool (spec 2026-10-08; plan C1 P4). Nil:
+	// the pool is dormant (no pool chain, or not wired).
+	poolDesk *PoolDesk
 	// converted gates OPENING converted buys and the attach-hash pre-check
 	// (spec §15.5). Nothing that settles, sends or hands off reads it (N1).
 	converted ConvertedBuys
