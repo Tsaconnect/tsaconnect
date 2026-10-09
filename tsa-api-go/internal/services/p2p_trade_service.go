@@ -120,6 +120,7 @@ type P2PEscrowAdapter interface {
 	VerifyTradeReleased(txHash string, expectedTradeId [32]byte) (*P2PTradeReleasedEvent, error)
 	VerifyTradeCancelled(txHash string, expectedTradeId [32]byte) (*P2PTradeCancelledEvent, error)
 	VerifyTradeDisputed(txHash string, expectedTradeId [32]byte) (*P2PTradeDisputedEvent, error)
+	VerifyTradePaid(txHash string, expectedTradeId [32]byte) (*P2PTradePaidEvent, error)
 	VerifyTradeResolved(txHash string, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error)
 
 	// Views — used by reconciler + voucher-state checks.

@@ -43,6 +43,7 @@ type mockEscrow struct {
 	verifyReleasedErr  error
 	verifyTradeCanErr  error
 	verifyDisputedErr  error
+	verifyPaidErr      error
 	verifyResolvedErr  error
 
 	// Event fixtures the verify methods return on success.
@@ -252,6 +253,12 @@ func (m *mockEscrow) VerifyTradeCancelled(txHash string, tradeId [32]byte) (*P2P
 		return m.tradeCancelled, nil
 	}
 	return &P2PTradeCancelledEvent{TradeID: tradeId, Amount: big.NewInt(100), ReturnedToPool: true}, nil
+}
+func (m *mockEscrow) VerifyTradePaid(txHash string, tradeId [32]byte) (*P2PTradePaidEvent, error) {
+	if m.verifyPaidErr != nil {
+		return nil, m.verifyPaidErr
+	}
+	return &P2PTradePaidEvent{TradeID: tradeId}, nil
 }
 func (m *mockEscrow) VerifyTradeDisputed(txHash string, tradeId [32]byte) (*P2PTradeDisputedEvent, error) {
 	if m.verifyDisputedErr != nil {

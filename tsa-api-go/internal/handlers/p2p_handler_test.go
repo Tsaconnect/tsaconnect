@@ -171,6 +171,9 @@ func (m *mockEscrow) VerifyTradeCancelled(_ string, id [32]byte) (*services.P2PT
 	}
 	return &services.P2PTradeCancelledEvent{TradeID: id, Amount: big.NewInt(100), ReturnedToPool: true}, nil
 }
+func (m *mockEscrow) VerifyTradePaid(_ string, id [32]byte) (*services.P2PTradePaidEvent, error) {
+	return &services.P2PTradePaidEvent{TradeID: id}, nil
+}
 func (m *mockEscrow) VerifyTradeDisputed(_ string, id [32]byte) (*services.P2PTradeDisputedEvent, error) {
 	if m.disputedEvent != nil {
 		return m.disputedEvent, nil

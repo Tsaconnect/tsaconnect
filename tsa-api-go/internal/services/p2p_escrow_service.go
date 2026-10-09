@@ -201,6 +201,9 @@ type P2PTradeDisputedEvent struct {
 	By      common.Address
 }
 
+// P2PTradePaidEvent captures TradePaid — emitted by markPaid (buyer attests fiat sent).
+type P2PTradePaidEvent struct{ TradeID [32]byte }
+
 // P2PTradeResolvedEvent captures TradeResolved — emitted by adminResolve.
 type P2PTradeResolvedEvent struct {
 	TradeID         [32]byte
@@ -778,6 +781,15 @@ func (s *P2PEscrowService) VerifyTradeDisputed(txHash string, expectedTradeId [3
 	return parseTradeDisputedFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
 }
 
+// VerifyTradePaid parses TradePaid for the expected trade from this escrow.
+func (s *P2PEscrowService) VerifyTradePaid(txHash string, expectedTradeId [32]byte) (*P2PTradePaidEvent, error) {
+	receipt, err := s.fetchReceiptAndCheckOK(txHash)
+	if err != nil {
+		return nil, err
+	}
+	return parseTradePaidFromReceipt(receipt, common.HexToAddress(s.contractAddress), expectedTradeId)
+}
+
 // VerifyTradeResolved parses TradeResolved (emitted by adminResolve).
 func (s *P2PEscrowService) VerifyTradeResolved(txHash string, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error) {
 	receipt, err := s.fetchReceiptAndCheckOK(txHash)
@@ -911,6 +923,21 @@ func parseTradeDisputedFromReceipt(receipt *types.Receipt, contractAddr common.A
 		return &P2PTradeDisputedEvent{TradeID: got, By: by}, nil
 	}
 	return nil, fmt.Errorf("TradeDisputed event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
+}
+
+func parseTradePaidFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradePaidEvent, error) {
+	sigID := parsedP2PEscrowABI.Events["TradePaid"].ID
+	for _, lg := range receipt.Logs {
+		if lg.Address != contractAddr || len(lg.Topics) < 2 || lg.Topics[0] != sigID {
+			continue
+		}
+		var got [32]byte
+		copy(got[:], lg.Topics[1].Bytes())
+		if got == expectedTradeId {
+			return &P2PTradePaidEvent{TradeID: got}, nil
+		}
+	}
+	return nil, fmt.Errorf("TradePaid event for tradeId 0x%s not found in receipt", common.Bytes2Hex(expectedTradeId[:]))
 }
 
 func parseTradeResolvedFromReceipt(receipt *types.Receipt, contractAddr common.Address, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error) {
