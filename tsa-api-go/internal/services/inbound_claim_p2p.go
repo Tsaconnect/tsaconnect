@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // P2P trades as a source of inbound naira claims, plus the instant forward of
@@ -165,6 +166,7 @@ func (s *P2PTradeClaimSource) OpenClaims(ctx context.Context, currency string) (
 		Where("p2p_ads.pm_id IS NOT NULL").
 		Where("p2p_ads.side = ?", models.P2PAdSideSell).
 		Where("p2p_trades.status = ?", models.P2PTradeStatusPendingPayment).
+		Where("p2p_trades.dropped_at IS NULL"). // the expiry canceller has decided (plan C1 P15)
 		Where("p2p_trades.funding = ?", models.P2PTradeFundingPooled).
 		Where("p2p_trades.open_tx_hash <> ?", "").
 		Where("p2p_trades.fiat_currency = ?", cur).
@@ -428,6 +430,18 @@ func (s *P2PTradeClaimSource) claimAndCredit(
 
 	fresh := true
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The expiry canceller decides under this same row lock (plan C1
+		// P15): either it has already decided and no credit may land, or this
+		// forward row commits first and the canceller refuses the trade.
+		var cur models.P2PTrade
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "dropped_at").
+			First(&cur, "id = ?", trade.ID).Error; err != nil {
+			return err
+		}
+		if cur.DroppedAt != nil {
+			return fmt.Errorf("%w: trade %s expired and is being cancelled; credit %s must not settle it",
+				ErrInvalidTransition, trade.ID, ref)
+		}
 		if err := tx.Create(forward).Error; err != nil {
 			if isUniqueViolation(err) {
 				// Re-read on provider_ref ALONE. trade_id is unique too, so

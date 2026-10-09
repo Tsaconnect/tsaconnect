@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -59,6 +60,7 @@ type InboundCreditPoller struct {
 	// button cannot outrun Flutterwave's statement rate limit.
 	checkCooldown time.Duration
 	now           func() time.Time
+	lastOK        atomic.Int64 // unix nanos of the last fetch that succeeded
 }
 
 // NewInboundCreditPoller builds the worker. A non-positive interval falls back
@@ -93,6 +95,16 @@ func (w *InboundCreditPoller) SetCheckCooldown(d time.Duration) {
 func (w *InboundCreditPoller) Name() string            { return "inbound-credit-poller" }
 func (w *InboundCreditPoller) Interval() time.Duration { return w.interval }
 
+// LastIngestOK is when the statement was last fetched successfully (zero:
+// never). The expiry canceller defers while it is older than 10 minutes, so a
+// Flutterwave outage never turns an in-window payment into a cancel (M1).
+func (w *InboundCreditPoller) LastIngestOK() time.Time {
+	if n := w.lastOK.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
+
 func (w *InboundCreditPoller) Run(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -118,7 +130,9 @@ func (w *InboundCreditPoller) tick(ctx context.Context) error {
 	var errs []error
 
 	res, err := w.ingestor.RunOnce(ctx)
-	if err != nil {
+	if err == nil {
+		w.lastOK.Store(w.now().UnixNano())
+	} else {
 		errs = append(errs, err)
 	}
 	// Only log a tick that did something. At 30s the quiet ticks vastly

@@ -1762,8 +1762,9 @@ func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UU
 		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
 	}
 	now := s.clock.Now()
+	// dropped_at: the expiry canceller has decided this trade (plan C1 P15).
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Where("id = ? AND status = ? AND dropped_at IS NULL", trade.ID, models.P2PTradeStatusPendingPayment).
 		Updates(map[string]any{
 			"status":          models.P2PTradeStatusPaid,
 			"marked_paid_at":  now,
@@ -2018,8 +2019,9 @@ func (s *P2PTradeService) SystemMarkPaid(ctx context.Context, tradeID uuid.UUID,
 		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
 	}
 	now := s.clock.Now()
+	// dropped_at: the expiry canceller has decided this trade (plan C1 P15).
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Where("id = ? AND status = ? AND dropped_at IS NULL", trade.ID, models.P2PTradeStatusPendingPayment).
 		Updates(map[string]any{
 			"status":          models.P2PTradeStatusPaid,
 			"marked_paid_at":  now,
@@ -2067,9 +2069,11 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	// Capture the pre-flip status so a post-flip failure can roll it back.
 	priorStatus := trade.Status
 	if trade.Status != models.P2PTradeStatusReleasing {
+		// A pending_payment trade the expiry canceller has decided
+		// (dropped_at, plan C1 P15) is never released by the system.
 		res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-			Where("id = ? AND status IN ?", trade.ID,
-				[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+			Where("id = ? AND (status = ? OR (status = ? AND dropped_at IS NULL))", trade.ID,
+				models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment).
 			Updates(map[string]any{"status": models.P2PTradeStatusReleasing, "updated_at": s.clock.Now()})
 		if res.Error != nil {
 			return nil, res.Error

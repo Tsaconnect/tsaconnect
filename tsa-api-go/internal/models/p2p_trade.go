@@ -112,7 +112,9 @@ type P2PTrade struct {
 	Generation int `gorm:"not null;default:1" json:"-"`
 	// DroppedAt: the order no longer needs this slice (S18 unselected, a failed
 	// open, a deterministic park, an F21 resolve to the LP, or the canceller's
-	// decision); the expiry canceller may free it on-chain (plan C1 P1).
+	// decision); the expiry canceller may free it on-chain (plan C1 P1). On an
+	// ordinary trade it is the canceller's legacy-scope decision (P15): no
+	// system or buyer payment path may take the trade any more.
 	DroppedAt *time.Time `json:"-"`
 	CreatedAt time.Time  `json:"createdAt"`
 	UpdatedAt time.Time  `json:"updatedAt"`
