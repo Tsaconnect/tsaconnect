@@ -393,3 +393,42 @@ describe('P2P gas sponsor (gasAction)', () => {
     expect(order).toEqual(['gas:approve', 'broadcast', 'gas:deposit', 'broadcast']);
   });
 });
+
+describe('KYC refusals reach the caller with their code', () => {
+  const kyc = { success: false, status: 403, code: 'kyc_verification_required', message: 'Identity verification required' };
+
+  it('a KYC 403 on the balance read stops before any gas check', async () => {
+    mockBalance.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+    expect(mockEnsureGas).not.toHaveBeenCalled();
+    expect(mockEnsureP2PGas).not.toHaveBeenCalled();
+  });
+
+  it('a KYC 403 on the allowance read is not read as a zero allowance', async () => {
+    arrangeHappyChain();
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0' } });
+    mockAllowance.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required' });
+    expect(mockPrepareApprove).not.toHaveBeenCalled();
+  });
+
+  it('keeps code and status when prepareApprove or prepareDeposit refuses', async () => {
+    arrangeHappyChain();
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0' } });
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockPrepareApprove.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockPrepareDeposit.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+  });
+
+  it('a non-KYC balance failure still reads as zero', async () => {
+    arrangeHappyChain();
+    mockBalance.mockResolvedValue({ success: false, status: 500, message: 'boom' });
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockConfirmDeposit.mockResolvedValue({ success: true });
+    await expect(ensureEscrowFunding(params())).resolves.toMatchObject({ status: 'funded' });
+  });
+});

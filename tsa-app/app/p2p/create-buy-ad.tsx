@@ -5,7 +5,7 @@
 //
 //   - No pool deposit required — the ad is a binding intent to buy.
 //   - No EIP-712 voucher to sign — just create and it goes active.
-//   - The `amount` field specifies the total crypto the merchant wants to buy.
+//   - The `amount` field specifies the total crypto the poster wants to buy.
 //
 // Flow:
 //   1. Fill form (token, fiatCurrency, rate, limits, payment methods, amount)
@@ -470,7 +470,7 @@ const CreateBuyAdScreen: React.FC = () => {
           >
             <Icon name="info" size={16} color={colors.info} />
             <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-              A 1% platform fee is charged to you (the merchant) only when a trade completes — on
+              A 1% platform fee is charged to you (the ad poster) only when a trade completes — on
               USDT and USDC alike. It is split instantly into the system fee, cashback to the
               buyer and their direct upline, and Trade Points.
             </Text>

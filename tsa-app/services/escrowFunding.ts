@@ -23,6 +23,7 @@
 // told funds are already on-chain — there is no server-side deposit reconciler,
 // so recovery is user-initiated.
 
+import { p2pKycCode } from './p2pErrors';
 import {
   poolApi,
   p2pChainKey,
@@ -63,6 +64,17 @@ export interface EnsureFundingParams {
   gasAction?: 'deposit';
 }
 
+/** Keep the machine code and status on a refusal so the screen can route a KYC
+ *  403 to the Verify prompt (a bare Error drops them). */
+function refusalError(res: { message?: string; status?: number; code?: string }, fallback: string): Error {
+  return Object.assign(new Error(res.message || fallback), { code: p2pKycCode(res) ?? res.code, status: res.status });
+}
+
+/** A KYC refusal on a read must stop the flow, not read as an empty balance. */
+function throwIfKycRefused(res: { success: boolean; message?: string; status?: number; code?: string }): void {
+  if (!res.success && p2pKycCode(res)) throw refusalError(res, 'Identity verification required');
+}
+
 export type EnsureFundingResult =
   | { status: 'already-funded' }
   | { status: 'funded'; deposited: string }
@@ -86,6 +98,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   // How much the ad needs vs. what the seller already has available on-chain.
   onStage?.('Checking balance…');
   const balRes = await poolApi.balance(token, walletAddress, chainId);
+  throwIfKycRefused(balRes);
   const available = balRes.success && balRes.data ? balRes.data.available : '0';
 
   const need = BigInt(amountBaseUnits);
@@ -125,6 +138,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   // (transferFrom inside deposit() draws from this allowance.)
   onStage?.('Checking allowance…');
   const allowRes = await poolApi.allowance(token, walletAddress, chainId);
+  throwIfKycRefused(allowRes);
   let allowance = 0n;
   if (allowRes.success && allowRes.data) {
     try {
@@ -141,7 +155,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
     onStage?.('Preparing approve…');
     const aPrep = await poolApi.prepareApprove(token, shortfall.toString(), walletAddress, chainId);
     if (!aPrep.success || !aPrep.data) {
-      throw new Error(aPrep.message || 'Prepare approve failed');
+      throw refusalError(aPrep, 'Prepare approve failed');
     }
     onStage?.('Signing approve…');
     const signedApprove = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx), walletAddress);
@@ -161,7 +175,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   onStage?.('Preparing deposit…');
   const dPrep = await poolApi.prepareDeposit(token, shortfall.toString(), walletAddress, chainId);
   if (!dPrep.success || !dPrep.data) {
-    throw new Error(dPrep.message || 'Prepare deposit failed');
+    throw refusalError(dPrep, 'Prepare deposit failed');
   }
   onStage?.('Signing deposit…');
   const signedDeposit = await signTransaction(unsignedTxToTxLike(dPrep.data.unsignedTx), walletAddress);
