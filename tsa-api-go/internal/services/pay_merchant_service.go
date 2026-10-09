@@ -449,15 +449,7 @@ func (s *PayMerchantService) Get(ctx context.Context, id uuid.UUID) (*models.Pay
 // List returns a page of merchants, newest first, as the admin console's
 // read shape (parsed return domains, key presence booleans, no hashes).
 func (s *PayMerchantService) List(ctx context.Context, page, limit int) ([]PayMerchantView, int64, error) {
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 20
-	}
-	if limit > 100 {
-		limit = 100
-	}
+	page, limit = payPage(page, limit)
 
 	var total int64
 	if err := s.db.WithContext(ctx).Model(&models.PayMerchant{}).Count(&total).Error; err != nil {

@@ -62,9 +62,10 @@ func TestPayPaymentViews_CarryRefundTotals(t *testing.T) {
 	if v := r.pay.View(a); v.RefundedAmount != "0.00" || v.RefundStatus != PayRefundStatusNone {
 		t.Errorf("View: %q %q", v.RefundedAmount, v.RefundStatus)
 	}
-	full := r.pay.ViewWithRefunds(a, PayRefundAgg{RefundedMicroUSD: 33_000_000, CapMicroUSD: 33_000_000, Status: PayRefundStatusFull})
+	full := r.pay.View(a)
+	full.withRefunds(PayRefundAgg{RefundedMicroUSD: 33_000_000, CapMicroUSD: 33_000_000, Status: PayRefundStatusFull})
 	if full.RefundedAmount != "33.00" || full.RefundStatus != PayRefundStatusFull || full.Status != models.PayStatusSucceeded {
-		t.Errorf("ViewWithRefunds: %+v", full)
+		t.Errorf("withRefunds: %+v", full)
 	}
 }
 

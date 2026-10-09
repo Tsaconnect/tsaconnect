@@ -449,17 +449,18 @@ type PayListFilter struct {
 	Page, Limit                 int
 }
 
+// payPage is the page and page size every TSA Pay list reads: page from 1,
+// 20 a page unless asked, never more than 100.
+func payPage(page, limit int) (int, int) {
+	if limit < 1 {
+		limit = 20
+	}
+	return max(page, 1), min(limit, 100)
+}
+
 // List is one page of payments, newest first, with the total that matched.
 func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models.PayPayment, int64, error) {
-	if f.Page < 1 {
-		f.Page = 1
-	}
-	if f.Limit < 1 {
-		f.Limit = 20
-	}
-	if f.Limit > 100 {
-		f.Limit = 100
-	}
+	f.Page, f.Limit = payPage(f.Page, f.Limit)
 	filter := func(q *gorm.DB) *gorm.DB {
 		if f.MerchantID != nil {
 			q = q.Where("merchant_id = ?", *f.MerchantID)

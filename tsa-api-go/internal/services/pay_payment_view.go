@@ -223,14 +223,6 @@ func (v *PayPaymentView) withRefunds(agg PayRefundAgg) {
 	}
 }
 
-// ViewWithRefunds is View with p's refund totals, read by the caller (Views
-// for a page, a webhook inside its own transaction).
-func (s *PayPaymentService) ViewWithRefunds(p *models.PayPayment, agg PayRefundAgg) PayPaymentView {
-	v := s.View(p)
-	v.withRefunds(agg)
-	return v
-}
-
 // RefundsWired reports whether refunds exist on this server (an aggregator is set).
 func (s *PayPaymentService) RefundsWired() bool { return s.refundAgg != nil }
 

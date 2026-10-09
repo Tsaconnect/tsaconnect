@@ -40,19 +40,9 @@ type PayRefundListItem struct {
 	Description  string `json:"description"`
 }
 
-func payPageLimit(page, limit int) (int, int) {
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 {
-		limit = 20
-	}
-	return page, min(limit, 100)
-}
-
 // List is one page of the merchant's refunds, open first, then newest.
 func (s *PayRefundService) List(ctx context.Context, f PayRefundFilter) ([]PayRefundListItem, int64, error) {
-	f.Page, f.Limit = payPageLimit(f.Page, f.Limit)
+	f.Page, f.Limit = payPage(f.Page, f.Limit)
 	scope := func() *gorm.DB {
 		q := s.db.WithContext(ctx).Model(&models.PayRefund{}).Where("merchant_id = ? AND mode = ?", f.MerchantID, f.Mode)
 		if f.Status != "" {
@@ -75,7 +65,7 @@ func (s *PayRefundService) List(ctx context.Context, f PayRefundFilter) ([]PayRe
 	out := make([]PayRefundListItem, len(rows))
 	for i := range rows {
 		p := payments[rows[i].PaymentID]
-		out[i] = PayRefundListItem{PayRefundView: s.View(&rows[i]), PaymentCode: payCodeOf(p), CustomerName: p.CustomerName, Description: p.Description}
+		out[i] = PayRefundListItem{PayRefundView: s.View(&rows[i]), PaymentCode: formatStoredPayCode(p.PayCode), CustomerName: p.CustomerName, Description: p.Description}
 	}
 	return out, total, nil
 }
@@ -98,14 +88,6 @@ func (s *PayRefundService) paymentsOf(ctx context.Context, rows []models.PayRefu
 		out[p.ID] = p
 	}
 	return out, nil
-}
-
-// payCodeOf is p's payment code as shown, "" while it has none.
-func payCodeOf(p models.PayPayment) string {
-	if p.PayCode == nil {
-		return ""
-	}
-	return FormatPayCode(*p.PayCode)
 }
 
 // PayPaymentRefunds is a payment's refunds with what is left to refund and
@@ -184,7 +166,7 @@ type PayRefundAdminItem struct {
 
 // AdminList is one page of every merchant's refunds, open first, then newest.
 func (s *PayRefundService) AdminList(ctx context.Context, f PayRefundAdminFilter) ([]PayRefundAdminItem, int64, error) {
-	f.Page, f.Limit = payPageLimit(f.Page, f.Limit)
+	f.Page, f.Limit = payPage(f.Page, f.Limit)
 	scope := func() *gorm.DB {
 		q := s.db.WithContext(ctx).Model(&models.PayRefund{})
 		if f.Status != "" {
@@ -226,7 +208,7 @@ func (s *PayRefundService) AdminList(ctx context.Context, f PayRefundAdminFilter
 	}
 	out := make([]PayRefundAdminItem, len(rows))
 	for i := range rows {
-		out[i] = PayRefundAdminItem{PayRefundView: s.View(&rows[i]), MerchantName: names[rows[i].MerchantID], PaymentCode: payCodeOf(payments[rows[i].PaymentID])}
+		out[i] = PayRefundAdminItem{PayRefundView: s.View(&rows[i]), MerchantName: names[rows[i].MerchantID], PaymentCode: formatStoredPayCode(payments[rows[i].PaymentID].PayCode)}
 	}
 	return out, total, nil
 }
