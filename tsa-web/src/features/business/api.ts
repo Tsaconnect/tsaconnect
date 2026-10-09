@@ -2,8 +2,10 @@
 // Field names match the Go json tags exactly.
 import { api } from '@/lib/api';
 import type { Mode } from '@/components/shell/mode';
+import type { RefundStatus } from '@/components/ui/status-pill';
 
 export type { Mode };
+export type { RefundStatus };
 
 export type OwnMerchant = {
   id: string;
@@ -77,6 +79,10 @@ export type Payment = {
   settlementRef?: string;
   failureReason?: string;
   succeededAt?: string;
+  /** Confirmed refunds so far, in US dollars ("0.00" when none). An older API leaves it out. */
+  refundedAmount?: string;
+  /** none, partial or full — the payment's status stays succeeded either way. */
+  refundStatus?: 'none' | 'partial' | 'full';
   createdAt: string;
 };
 
@@ -137,6 +143,66 @@ export type PaymentDetail = { payment: Payment; payer: Payer | null; deliveries:
 
 export const getPayment = (mode: Mode, id: string, signal?: AbortSignal) =>
   api<PaymentDetail>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });
+
+// Refunds. The merchant asks here; the business owner approves and sends each one from
+// their TSA wallet in the TSA Connect app (USDT or USDC). Amounts are decimal US dollars ("12.50").
+export type Refund = {
+  id: string;
+  paymentId: string;
+  mode: Mode;
+  status: RefundStatus;
+  amount: string;
+  /** What could be refunded in all when it was asked for. */
+  cap: string;
+  /** What actually arrived, once confirmed. */
+  credited?: string;
+  reason?: string;
+  toAddress: string;
+  /** Set once it is sent: the owner's wallet, the network and the token. */
+  fromAddress?: string;
+  chainId?: number;
+  tokenSymbol?: string;
+  tokenAddress?: string;
+  txHash?: string;
+  failureReason?: string;
+  /** The network refused the last send, in words for the owner; "" once a send went through. The refund stays submitted and is retried. */
+  lastBroadcastError?: string;
+  lastBroadcastAt?: string | null;
+  requestedVia: 'web' | 'app';
+  createdAt: string;
+  submittedAt?: string | null;
+  confirmedAt?: string | null;
+};
+
+/** A payment's refunds and what is left to refund; one that can't be refunded says why. */
+export type PaymentRefunds = { refunds: Refund[]; cap: string; remaining: string; refundable: boolean; notRefundableReason: string };
+
+/** A refunds-list row: the refund and the payment it returns. */
+export type RefundRow = Refund & { paymentCode?: string; customerName?: string; description?: string };
+export type RefundPage = { refunds: RefundRow[]; total: number; page: number; limit: number };
+/** `from`/`to`: YYYY-MM-DD (WAT, `to` inclusive); empty is unbounded. */
+export type RefundFilter = { status?: string; from?: string; to?: string; page?: number; limit?: number };
+
+export const listPaymentRefunds = (mode: Mode, paymentId: string, signal?: AbortSignal) =>
+  api<PaymentRefunds>(`/pay/merchant/payments/${encodeURIComponent(paymentId)}/refunds?mode=${mode}`, { signal });
+
+/** Like a link, one Idempotency-Key per request body. A test payment's refund comes back done. */
+export const createRefund = (mode: Mode, paymentId: string, body: { amount: string; reason: string }, idempotencyKey: string) =>
+  api<{ refund: Refund }>(`/pay/merchant/payments/${encodeURIComponent(paymentId)}/refunds?mode=${mode}`, {
+    method: 'POST',
+    body,
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+
+export const listRefunds = (mode: Mode, f: RefundFilter, signal?: AbortSignal) =>
+  api<RefundPage>(`/pay/merchant/refunds?${new URLSearchParams({
+    mode,
+    ...(f.status ? { status: f.status } : {}),
+    ...(f.from ? { from: f.from } : {}),
+    ...(f.to ? { to: f.to } : {}),
+    page: String(f.page ?? 1),
+    ...(f.limit ? { limit: String(f.limit) } : {}),
+  })}`, { signal });
 
 // Guarded actions: password → emailed code → confirm.
 export type Pending = { id: string; kind: 'settlement' | 'keys' | 'endpoints' | 'webhook_secret' | 'business_name'; expiresAt: string; sentTo: string };
