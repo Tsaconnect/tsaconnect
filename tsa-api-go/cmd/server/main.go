@@ -1268,6 +1268,7 @@ func main() {
 			return addr
 		})
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
+		p2pTradeSvc.SetFixedRateBandBps(cfg.P2PFixedRateBandBps)
 		// Wire the fee/TP engine (SP3) — P2P is a fee-settled integration.
 		// Every release transition (ConfirmRelease, reconciler auto-release,
 		// adminResolve→buyer) accrues the realized on-chain fee through a single

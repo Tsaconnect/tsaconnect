@@ -167,6 +167,14 @@ func mapServiceError(c *gin.Context, err error) bool {
 		})
 		return true
 	}
+	var band *services.RateBandError
+	if errors.As(err, &band) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+			"success": false, "message": err.Error(), "code": "rate_out_of_band",
+			"data": gin.H{"referenceRate": band.ReferenceRate, "minRate": band.MinRate, "maxRate": band.MaxRate, "bandBps": band.BandBps},
+		})
+		return true
+	}
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, services.ErrAdNotFound), errors.Is(err, services.ErrTradeNotFound),

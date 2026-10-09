@@ -175,6 +175,8 @@ type P2PTradeService struct {
 	// (approve/deposit/withdraw/allowance/balance). Sonic in production.
 	defaultChainID int64
 	rates          RateProvider
+	// fixedRateBandBps bounds fixed-rate ads around the market reference; see p2p_rate_band.go.
+	fixedRateBandBps int
 	bus            EventPublisher
 	clock          Clock
 	tokenResolver  func(chainID int64, symbol string) string
@@ -645,6 +647,11 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 	if err := s.requireFreshRate(params.FiatCurrency); err != nil {
 		return nil, err
 	}
+	if sellerPM == nil {
+		if err := s.checkFixedRateBand(params); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := s.validatePaymentMethodsOwned(sellerID, params.PaymentMethodIDs, params.FiatCurrency); err != nil {
 		return nil, err
@@ -827,6 +834,11 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 
 	if err := s.requireFreshRate(params.FiatCurrency); err != nil {
 		return nil, err
+	}
+	if merchantPM == nil {
+		if err := s.checkFixedRateBand(params); err != nil {
+			return nil, err
+		}
 	}
 	// The PMs on a buy-ad are the MERCHANT's accounts — where they'll send
 	// fiat to the user once the user deposits crypto. Same ownership +

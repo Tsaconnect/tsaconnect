@@ -680,6 +680,8 @@ type Config struct {
 	// publishing float-rate ads pick an offset within ±this value relative
 	// to the reference feed. Tune via env to widen/tighten platform-wide.
 	P2PFloatOffsetMaxBps int
+	// P2PFixedRateBandBps: fixed-rate ads must price within this many bps of the market reference.
+	P2PFixedRateBandBps int
 
 	// A trade paid but not released for this long pages the operators once.
 	P2PPaidUnreleasedAlertAfter time.Duration
@@ -1273,6 +1275,7 @@ func Load() *Config {
 	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
 	// P2P's typical platform-wide deviation cap.
 	cfg.P2PFloatOffsetMaxBps = int(getEnvInt64("P2P_FLOAT_OFFSET_MAX_BPS", 1000))
+	cfg.P2PFixedRateBandBps = int(getEnvInt64("P2P_FIXED_RATE_BAND_BPS", 2000))
 	cfg.P2PPaidUnreleasedAlertAfter = getEnvDuration("P2P_PAID_UNRELEASED_ALERT_AFTER", 2*time.Hour)
 
 	// Nomba — sandbox by default. Production should set NOMBA_BASE_URL to

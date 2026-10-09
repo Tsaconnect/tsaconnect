@@ -788,6 +788,24 @@ func TestCreateAd_InsufficientBalance_400(t *testing.T) {
 	}
 }
 
+func TestCreateAd_FixedRateOutsideBand_400(t *testing.T) {
+	r := newRig(t)
+	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeCreateAdBody(pmID)
+	body["sellerAddress"] = r.user.WalletAddress
+	body["rate"] = "2000"
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	out := decode(t, rec)
+	data, _ := out["data"].(map[string]any)
+	if out["code"] != "rate_out_of_band" || data["minRate"] != "1040" {
+		t.Fatalf("body = %v", out)
+	}
+}
+
 func TestSignAd_RequiresSellerAddress(t *testing.T) {
 	r := newRig(t)
 	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
