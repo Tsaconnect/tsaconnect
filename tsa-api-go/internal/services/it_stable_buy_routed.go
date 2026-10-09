@@ -910,6 +910,8 @@ func (s *ITService) quoteRoutedLiveFor(ctx context.Context, intent *models.ITInt
 		return nil, err
 	case terms.companyWallet:
 		return s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, true, ch)
+	case terms.pool:
+		return nil, errPoolPricedUnderLock
 	case terms.flutterwaveFulfils:
 		return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency, ch)
 	default:
@@ -957,12 +959,15 @@ func creditArrival(credit *models.InboundCredit, now time.Time) time.Time {
 func isDeterministicPricingError(err error) bool {
 	return errors.Is(err, ErrStableBuyBelowMinimum) || errors.Is(err, ErrStableNotAnAsset) ||
 		errors.Is(err, ErrStableBuyAboveMaximum) || errors.Is(err, ErrStableRateImplausible) ||
-		errors.Is(err, ErrConvertedOverpaid) || errors.Is(err, ErrUnknownITProvider)
+		errors.Is(err, ErrConvertedOverpaid) || errors.Is(err, ErrUnknownITProvider) ||
+		errors.Is(err, errPoolNotRouted)
 }
 
 // parkReasonOf names a park for the ramp_treasury_parked metric.
 func parkReasonOf(err error) string {
 	switch {
+	case errors.Is(err, errPoolNotRouted):
+		return "pool_unrouted"
 	case errors.Is(err, ErrUnknownITProvider):
 		return "unknown_provider"
 	case errors.Is(err, ErrConvertedOverpaid):
@@ -1003,6 +1008,9 @@ func (s *ITService) quoteForIntent(ctx context.Context, intent *models.ITIntent,
 	terms, err := providerTerms(intent)
 	if err != nil {
 		return nil, err
+	}
+	if terms.pool {
+		return nil, errPoolPricedUnderLock // never Flutterwave's old endpoint, routed or not
 	}
 	if !IsRoutedStableBuy(intent) {
 		return s.QuoteStableBuy(ctx, intent.Asset, fiatMinor, intent.Currency)

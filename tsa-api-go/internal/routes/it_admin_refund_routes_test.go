@@ -44,7 +44,7 @@ func TestITAdminRefundRoute_SuperAdminOnlyWithoutCompanyWallet(t *testing.T) {
 	buyer := payRoutesUser(t, db, models.RoleUser)
 	intent := &models.ITIntent{
 		ID: uuid.New(), UserID: buyer.ID, Direction: models.ITDirectionBuy, Status: models.ITStatusBuyAwaitingRate,
-		Provider: "tsa_pool", Asset: models.ITAssetUSDC, AssetAmount: "7278150", Currency: "NGN",
+		Provider: "bogus", Asset: models.ITAssetUSDC, AssetAmount: "7278150", Currency: "NGN",
 		NgnKobo: "1000000", AmountMinor: "1000000", McgpAmount: "0", FeeNgnKobo: "0", NetNgnKobo: "1000000",
 		PlatformKeptKobo: "0", ReceivedAmount: "1000000", PaymentRef: "chg_parked",
 		FailureReason: "could not price at settlement: the intent's provider has no terms",

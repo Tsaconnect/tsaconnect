@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -44,9 +43,9 @@ func TestFWPath_RefusesPoolIntent_Convert(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	conv := &stubConverter{}
 	s.SetStableConverter(conv, "merchant_fixture")
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPaymentReceived)
-	if err := s.ConvertStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrUnknownITProvider) {
-		t.Fatalf("err = %v, want ErrUnknownITProvider", err)
+	intent := seedProviderIntent(t, s, userID, models.ITProviderPool, models.ITStatusPaymentReceived)
+	if err := s.ConvertStableBuy(context.Background(), intent.ID); !isPoolRefusal(err) {
+		t.Fatalf("err = %v, want the pool's own refusal", err)
 	}
 	if len(conv.converted) != 0 {
 		t.Fatalf("converted %d times at Flutterwave, want 0", len(conv.converted))
@@ -57,9 +56,9 @@ func TestFWPath_RefusesPoolIntent_Deliver(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	d := &stubDeliverer{id: "trf_never"}
 	s.SetStableDeliverer(d)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusDelivering)
-	if err := s.DeliverStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrUnknownITProvider) {
-		t.Fatalf("err = %v, want ErrUnknownITProvider", err)
+	intent := seedProviderIntent(t, s, userID, models.ITProviderPool, models.ITStatusDelivering)
+	if err := s.DeliverStableBuy(context.Background(), intent.ID); !isPoolRefusal(err) {
+		t.Fatalf("err = %v, want the pool's own refusal", err)
 	}
 	if d.calls != 0 {
 		t.Fatalf("Flutterwave sent %d times, want 0", d.calls)
@@ -82,10 +81,10 @@ func TestFWPath_RefusesPoolIntent_FinalizeConversion(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	ct := &countingTransfers{}
 	s.SetStableTransfers(ct)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusConverting)
+	intent := seedProviderIntent(t, s, userID, models.ITProviderPool, models.ITStatusConverting)
 	s.db.Model(intent).Update("conversion_id", "trf_c")
-	if err := s.FinalizeBuyConversion(context.Background(), intent.ID); !errors.Is(err, ErrUnknownITProvider) {
-		t.Fatalf("err = %v, want ErrUnknownITProvider", err)
+	if err := s.FinalizeBuyConversion(context.Background(), intent.ID); !isPoolRefusal(err) {
+		t.Fatalf("err = %v, want the pool's own refusal", err)
 	}
 	if ct.calls != 0 {
 		t.Fatalf("asked Flutterwave %d times, want 0", ct.calls)
@@ -96,10 +95,10 @@ func TestFWPath_RefusesPoolIntent_FinalizeDelivery(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	ct := &countingTransfers{}
 	s.SetStableTransfers(ct)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusDelivering)
+	intent := seedProviderIntent(t, s, userID, models.ITProviderPool, models.ITStatusDelivering)
 	s.db.Model(intent).Update("delivery_id", "trf_d")
-	if err := s.FinalizeBuyDelivery(context.Background(), intent.ID); !errors.Is(err, ErrUnknownITProvider) {
-		t.Fatalf("err = %v, want ErrUnknownITProvider", err)
+	if err := s.FinalizeBuyDelivery(context.Background(), intent.ID); !isPoolRefusal(err) {
+		t.Fatalf("err = %v, want the pool's own refusal", err)
 	}
 	if ct.calls != 0 {
 		t.Fatalf("asked Flutterwave %d times, want 0", ct.calls)

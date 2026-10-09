@@ -27,11 +27,15 @@ type itProviderTerms struct {
 	// wins stock under the lock, a re-price runs only under that lock, and a
 	// refund waits for secondPaymentGate.
 	companyWallet bool
+	// pool: TSA Liquidity — LP escrow slices opened by the conversion treasury
+	// (spec 2026-10-08). Live-priced only under the pool lock (S18); never a
+	// Flutterwave or company-wallet step. C1 opens and claims it; C2 settles it.
+	pool bool
 }
 
 // knownITProviders is every provider providerTerms answers for. A new provider
 // is a case below plus an entry here, and nowhere else.
-var knownITProviders = []string{models.ITProviderFlutterwave, models.ITProviderTreasury}
+var knownITProviders = []string{models.ITProviderFlutterwave, models.ITProviderTreasury, models.ITProviderPool}
 
 // providerTerms is the one branch on an intent's provider. Its default is an
 // error, never another provider's terms.
@@ -41,10 +45,20 @@ func providerTerms(i *models.ITIntent) (itProviderTerms, error) {
 		return itProviderTerms{provider: p, label: "Flutterwave", metric: "fw", flutterwaveFulfils: true}, nil
 	case models.ITProviderTreasury:
 		return itProviderTerms{provider: p, label: "company-wallet", metric: "treasury", companyWallet: true}, nil
+	case models.ITProviderPool:
+		return itProviderTerms{provider: p, label: "TSA pool", metric: "pool", pool: true}, nil
 	default:
 		return itProviderTerms{}, fmt.Errorf("%w: %q", ErrUnknownITProvider, p)
 	}
 }
+
+// errPoolPricedUnderLock: a pool buy is priced live only by S18 under its pool
+// lock (plan C1 Task 11), never by a generic re-price path.
+var errPoolPricedUnderLock = fmt.Errorf("%w: a TSA pool buy is priced live only under its pool lock", ErrITBadState)
+
+// errPoolNotRouted: a pool row without a routed quote can never price at the
+// old endpoint. Deterministic (review M4): the claim parks it, never retries.
+var errPoolNotRouted = fmt.Errorf("%w: a TSA pool buy has no routed quote to price against", ErrITBadState)
 
 // requireFlutterwaveFulfils guards every Flutterwave driver step: a buy
 // Flutterwave does not fulfil is refused, with the refusal text the company
@@ -74,6 +88,23 @@ func flutterwaveFulfilledProviders() []string {
 		}
 	}
 	return out
+}
+
+// poolProviders is the provider column values a pool query lists — the one
+// pool filter the P7 lint accepts.
+func poolProviders() []string {
+	var out []string
+	for _, p := range knownITProviders {
+		if t, err := providerTerms(&models.ITIntent{Provider: p}); err == nil && t.pool {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func isPoolBuy(i *models.ITIntent) bool {
+	t, err := providerTerms(i)
+	return err == nil && t.pool
 }
 
 func isCompanyWalletBuy(i *models.ITIntent) bool {

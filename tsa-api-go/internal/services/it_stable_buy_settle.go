@@ -181,8 +181,10 @@ func (s *ITService) claimAndPriceStableBuy(
 	)
 	if routed {
 		arrival, qErr = s.priceRoutedArrival(ctx, candidate, amountMinor, arrivedAt, ch)
-	} else if _, terr := providerTerms(candidate); terr != nil {
+	} else if t, terr := providerTerms(candidate); terr != nil {
 		qErr = terr // review M1: never priced at Flutterwave's old endpoint
+	} else if t.pool {
+		qErr = errPoolNotRouted // an unrouted pool row is never a Flutterwave quote; parks at once
 	} else {
 		q, qErr = s.QuoteStableBuy(ctx, candidate.Asset, amountMinor, candidate.Currency)
 	}
@@ -428,6 +430,9 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 	if terms.companyWallet {
 		// D3: market + take, the maximum, and stock won under the lock.
 		return s.repriceTreasuryParked(ctx, intent, false, nil)
+	}
+	if terms.pool {
+		return nil, fmt.Errorf("%w: a TSA pool buy is re-priced only by re-delivery", ErrITBadState)
 	}
 	if !terms.flutterwaveFulfils {
 		return nil, fmt.Errorf("%w: %s has no re-price", ErrUnknownITProvider, terms.provider)

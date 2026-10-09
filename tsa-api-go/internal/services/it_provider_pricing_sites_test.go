@@ -14,7 +14,7 @@ import (
 // Review Focus 2 / P4: exact and on time, still never priced (the claim parks it).
 func TestPriceRoutedArrival_UnknownProviderNeverHonoured(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPendingPayment)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusPendingPayment)
 	a, err := s.priceRoutedArrival(context.Background(), intent, intent.AmountMinor, time.Now(), PayInCentral)
 	if !errors.Is(err, ErrUnknownITProvider) || a != nil {
 		t.Fatalf("arrival = %+v err = %v, want ErrUnknownITProvider and nothing priced", a, err)
@@ -36,7 +36,7 @@ func TestPriceRoutedArrival_KnownProvidersUnchanged(t *testing.T) {
 // provider must PARK, not return an error the matcher retries every 30 s.
 func TestClaim_UnknownProviderParksForOperator_Central(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPendingPayment)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusPendingPayment)
 	logs := captureLog(t)
 	claimed, err := s.claimAndPriceStableBuy(context.Background(), intent, "chg_unknown_central", intent.AmountMinor, time.Now(), false, PayInCentral)
 	if err != nil || !claimed {
@@ -47,7 +47,7 @@ func TestClaim_UnknownProviderParksForOperator_Central(t *testing.T) {
 
 func TestClaim_UnknownProviderParksForOperator_VA(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPendingPayment)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusPendingPayment)
 	logs := captureLog(t)
 	claimed, err := s.claimAndPriceStableBuy(context.Background(), intent, "chg_unknown_va", intent.AmountMinor, time.Now(), true, PayInVA)
 	if err != nil || !claimed {
@@ -77,7 +77,7 @@ func assertUnknownProviderPark(t *testing.T, s *ITService, intent *models.ITInte
 
 func TestQuoteRoutedLiveFor_UnknownProviderRefused(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPendingPayment)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusPendingPayment)
 	if q, err := s.quoteRoutedLiveFor(context.Background(), intent, big.NewInt(1_000_000), PayInCentral); !errors.Is(err, ErrUnknownITProvider) || q != nil {
 		t.Fatalf("quote = %+v err = %v", q, err)
 	}
@@ -85,7 +85,7 @@ func TestQuoteRoutedLiveFor_UnknownProviderRefused(t *testing.T) {
 
 func TestQuoteForIntent_UnknownProviderRefused(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusBuyAwaitingRate)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusBuyAwaitingRate)
 	if q, err := s.quoteForIntent(context.Background(), intent, "1000000"); !errors.Is(err, ErrUnknownITProvider) || q != nil {
 		t.Fatalf("quote = %+v err = %v", q, err)
 	}
@@ -103,7 +103,7 @@ func TestQuoteForIntent_CompanyWalletRefusalTextUnchanged(t *testing.T) {
 
 func TestRepriceParkedStableBuy_UnknownProviderRefused(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusBuyAwaitingRate)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusBuyAwaitingRate)
 	if _, err := s.RepriceParkedStableBuy(context.Background(), intent.ID); !errors.Is(err, ErrUnknownITProvider) {
 		t.Fatalf("err = %v, want ErrUnknownITProvider", err)
 	}
@@ -115,7 +115,7 @@ func TestRepriceParkedStableBuy_UnknownProviderRefused(t *testing.T) {
 }
 
 func TestRoutedMetric_NeverAttributesUnknownToFlutterwave(t *testing.T) {
-	for p, want := range map[string]string{"": "fw", "flutterwave": "fw", "treasury": "treasury", "tsa_pool": "unknown", "bogus": "unknown"} {
+	for p, want := range map[string]string{"": "fw", "flutterwave": "fw", "treasury": "treasury", "bogus": "unknown"} {
 		if got := routedMetric(&models.ITIntent{Provider: p}); got != want {
 			t.Fatalf("routedMetric(%q) = %q, want %q", p, got, want)
 		}
@@ -125,7 +125,7 @@ func TestRoutedMetric_NeverAttributesUnknownToFlutterwave(t *testing.T) {
 func TestRoutedDeliveryAmounts_OnlyFlutterwaveHoldsTheSendFee(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	units := big.NewInt(7_278_150)
-	for _, p := range []string{"tsa_pool", models.ITProviderTreasury} {
+	for _, p := range []string{"bogus", models.ITProviderTreasury} {
 		intent := seedProviderIntent(t, s, userID, p, models.ITStatusDelivering)
 		send, hold := s.routedDeliveryAmounts(intent, units)
 		if send.Cmp(units) != 0 || hold.Cmp(units) != 0 {
@@ -136,7 +136,7 @@ func TestRoutedDeliveryAmounts_OnlyFlutterwaveHoldsTheSendFee(t *testing.T) {
 
 func TestDeliverParkedTreasuryBuy_UnknownProviderRefused(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusBuyAwaitingRate)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusBuyAwaitingRate)
 	if _, err := s.DeliverParkedTreasuryBuy(context.Background(), userID, intent.ID, "note"); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("err = %v, want ErrITBadState", err)
 	}
@@ -144,7 +144,7 @@ func TestDeliverParkedTreasuryBuy_UnknownProviderRefused(t *testing.T) {
 
 func TestGetStableBuyForUser_UnknownProviderMatchesNoKnownName(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusPendingPayment)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusPendingPayment)
 	for _, p := range knownITProviders {
 		if _, err := s.GetStableBuyForUser(context.Background(), userID, intent.ID, p); !errors.Is(err, ErrStableIntentNotFound) {
 			t.Fatalf("as %q: err = %v, want ErrStableIntentNotFound", p, err)

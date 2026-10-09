@@ -20,7 +20,7 @@ func migrateIntentAudit(t *testing.T, s *ITService) {
 func TestMarkStableBuyRefunded_UnknownProviderParkRefundable(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	migrateIntentAudit(t, s)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusBuyAwaitingRate)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusBuyAwaitingRate)
 	got, err := s.MarkStableBuyRefunded(context.Background(), uuid.New(), intent.ID, "returned by bank transfer")
 	if err != nil || got.Status != models.ITStatusRefunded {
 		t.Fatalf("intent = %+v err = %v, want refunded", got, err)
@@ -37,7 +37,7 @@ func TestMarkStableBuyRefunded_UnknownProviderParkRefundable(t *testing.T) {
 func TestMarkStableBuyRefunded_UnknownProviderSecondRefundRefused(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	migrateIntentAudit(t, s)
-	intent := seedProviderIntent(t, s, userID, "tsa_pool", models.ITStatusBuyAwaitingRate)
+	intent := seedProviderIntent(t, s, userID, "bogus", models.ITStatusBuyAwaitingRate)
 	if _, err := s.MarkStableBuyRefunded(context.Background(), uuid.New(), intent.ID, "returned"); err != nil {
 		t.Fatalf("first refund: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestMarkStableBuyRefunded_UnknownProviderNonParkRefused(t *testing.T) {
 	s, userID := newRoutedBuyService(t)
 	migrateIntentAudit(t, s)
 	for _, st := range []string{models.ITStatusDelivering, models.ITStatusPaymentReceived, models.ITStatusSettled} {
-		intent := seedProviderIntent(t, s, userID, "tsa_pool", st)
+		intent := seedProviderIntent(t, s, userID, "bogus", st)
 		if _, err := s.MarkStableBuyRefunded(context.Background(), uuid.New(), intent.ID, "note"); !errors.Is(err, ErrITBadState) {
 			t.Fatalf("%s: err = %v, want ErrITBadState", st, err)
 		}
