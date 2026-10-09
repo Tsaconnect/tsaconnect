@@ -247,11 +247,7 @@ func lockUserRow(tx *gorm.DB, userID uuid.UUID) error {
 
 // walletProven reports whether the account has ever proven it owns address.
 func walletProven(db *gorm.DB, userID uuid.UUID, address string) (bool, error) {
-	var n int64
-	err := db.Model(&models.WalletLinkChallenge{}).
-		Where("user_id = ? AND address = ? AND used_at IS NOT NULL", userID, strings.ToLower(address)).
-		Count(&n).Error
-	return n > 0, err
+	return services.WalletProven(db, userID, address)
 }
 
 // consumeWalletProof checks proof against the stored challenge — this account,

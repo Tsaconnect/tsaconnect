@@ -143,6 +143,13 @@ func newRefundRig(t *testing.T) *refundRig {
 	if err := db.Exec(`ALTER TABLE users ADD COLUMN account_status TEXT DEFAULT 'active'`).Error; err != nil {
 		t.Fatal(err)
 	}
+	return newRefundRigOn(t, db)
+}
+
+// newRefundRigOn is newRefundRig over db, which already has the pay tables and
+// a users table with account_status (SQLite or Postgres).
+func newRefundRigOn(t *testing.T, db *gorm.DB) *refundRig {
+	t.Helper()
 	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}, &models.RampSellIntent{}, &models.WalletLinkChallenge{}); err != nil {
 		t.Fatal(err)
 	}
