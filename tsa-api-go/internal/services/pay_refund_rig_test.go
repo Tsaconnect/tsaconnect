@@ -43,6 +43,9 @@ type fakeRefundNetwork struct {
 	nonce        uint64
 	nonceErr     error
 	decimalsErr  error
+	// onBroadcast and onTokenDecimals, when set, run inside those calls.
+	onBroadcast     func()
+	onTokenDecimals func()
 }
 
 func (f *fakeRefundNetwork) MainnetChainNameForID(id int64) (string, bool) {
@@ -64,6 +67,9 @@ func (f *fakeRefundNetwork) ChainName(chain string) string {
 	return map[string]string{"bsc": "BNB Smart Chain", "base": "Base"}[chain]
 }
 func (f *fakeRefundNetwork) TokenDecimals(_ string, token string) (int, error) {
+	if f.onTokenDecimals != nil {
+		f.onTokenDecimals()
+	}
 	if f.decimalsErr != nil {
 		return 0, f.decimalsErr
 	}
@@ -74,6 +80,9 @@ func (f *fakeRefundNetwork) TokenDecimals(_ string, token string) (int, error) {
 	return d, nil
 }
 func (f *fakeRefundNetwork) Broadcast(_ context.Context, _ string, tx *types.Transaction) error {
+	if f.onBroadcast != nil {
+		f.onBroadcast()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, tx)

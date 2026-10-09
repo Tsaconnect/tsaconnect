@@ -56,6 +56,9 @@ var (
 	ErrPayRefundState         = errors.New("pay refund: the refund is not in a state that allows this")
 	ErrPayRefundTxUsed        = errors.New("pay refund: that transaction is already attached to another refund")
 	ErrPayRefundUnavailable   = errors.New("pay refund: refunds are unavailable right now")
+	// ErrPayRefundNonceUsed: the signed transfer's nonce is already used on
+	// its chain, so it can never be mined — the owner signs again (409).
+	ErrPayRefundNonceUsed = errors.New("pay refund: the transaction's nonce is already used")
 )
 
 // PayRefundOverCapError: the amount asked for is more than is left to refund.

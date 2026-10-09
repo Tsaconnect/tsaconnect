@@ -36,6 +36,8 @@ func PayRefundRefusal(err error) string {
 		return "The customer's account was deleted, so this payment can't be refunded"
 	case errors.Is(err, ErrPayRefundUnavailable):
 		return "Refunds aren't available right now — try again later"
+	case errors.Is(err, ErrPayRefundNonceUsed):
+		return "Your wallet has already sent a transaction in this one's place — sign the refund again"
 	}
 	return ""
 }
