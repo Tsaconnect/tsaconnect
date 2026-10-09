@@ -1458,6 +1458,20 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.GET("", payh.OwnerMerchant)
 			owner.GET("/payments", payh.OwnerPayments)
 			owner.GET("/payments/:id", payh.OwnerPayment)
+			if payh.RefundsEnabled() {
+				// Refunds (merchant-funded, in USDT/USDC). A create resent with the
+				// same Idempotency-Key replays the first answer; the one-open rule
+				// refuses a second refund anyway. Creating and cancelling share one
+				// write limit; a signed transfer handed over has its own. Refund-id
+				// routes take no mode: the row has its own.
+				refundWrite := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
+				owner.POST("/payments/:id/refunds", middleware.Idempotency(config.DB), refundWrite, payh.OwnerCreateRefund)
+				owner.GET("/payments/:id/refunds", payh.OwnerPaymentRefunds)
+				owner.GET("/refunds", payh.OwnerRefunds)
+				owner.GET("/refunds/:id", payh.OwnerRefund)
+				owner.POST("/refunds/:id/cancel", refundWrite, payh.OwnerCancelRefund)
+				owner.POST("/refunds/:id/submit", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerSubmitRefund)
+			}
 			// Reconciliation reads. Static segments beside /payments/:id (Gin 1.10
 			// matches the static route first).
 			owner.GET("/payments/summary", payh.OwnerPaymentSummary)

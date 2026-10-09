@@ -64,6 +64,17 @@ const payRoutesUsersDDL = `CREATE TABLE users (
 // anything passed into SetupRoutes.
 func newPayRoutesRig(t *testing.T) (*gin.Engine, *config.Config, *gorm.DB, *handlers.PayHandler) {
 	t.Helper()
+	return newPayRoutesRigWith(t, nil)
+}
+
+// payRoutesWiring turns on more of the handler before the routes are set up,
+// as cmd/server does for an optional feature.
+type payRoutesWiring func(db *gorm.DB, merchants *services.PayMerchantService, payments *services.PayPaymentService, payh *handlers.PayHandler)
+
+// newPayRoutesRigWith is newPayRoutesRig with wire (nil: none) run on the
+// handler before SetupRoutes.
+func newPayRoutesRigWith(t *testing.T, wire payRoutesWiring) (*gin.Engine, *config.Config, *gorm.DB, *handlers.PayHandler) {
+	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -80,6 +91,9 @@ func newPayRoutesRig(t *testing.T) (*gin.Engine, *config.Config, *gorm.DB, *hand
 	merchants := services.NewPayMerchantService(db, nil, nil, []byte(strings.Repeat("k", 32)), now)
 	payments := services.NewPayPaymentService(db, merchants, 100, "https://tsaconnectworld.com/pay", now)
 	payh := handlers.NewPayHandler(merchants, payments, nil, false).WithOpenLinks(payments)
+	if wire != nil {
+		wire(db, merchants, payments, payh)
+	}
 
 	cfg := &config.Config{JWTSecret: "pay-routes-test-secret"}
 	gin.SetMode(gin.TestMode)
