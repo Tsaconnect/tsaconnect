@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
@@ -161,5 +165,103 @@ func TestExecuteRoute_CannotCallTheEscrow(t *testing.T) {
 	r.To, r.ApprovalAddress = escrowCallTarget, ""
 	if _, _, err := tr.ExecuteRoute(context.Background(), lane, "USDC", big.NewInt(1), r); !errors.Is(err, ErrTreasuryInvalidRoute) {
 		t.Fatalf("route to the escrow: %v", err)
+	}
+}
+
+// nonceBroadcaster records the nonce of every raw transaction a real local
+// signer hands it, and answers with err.
+type nonceBroadcaster struct {
+	nonces []uint64
+	err    error
+}
+
+func (b *nonceBroadcaster) ChainID() *big.Int { return big.NewInt(8453) }
+func (b *nonceBroadcaster) SendRawTransaction(raw []byte) (string, error) {
+	var tx types.Transaction
+	if err := rlp.DecodeBytes(raw, &tx); err != nil {
+		return "", err
+	}
+	b.nonces = append(b.nonces, tx.Nonce())
+	if b.err != nil {
+		return "", fmt.Errorf("failed to send transaction: %w", b.err)
+	}
+	return tx.Hash().Hex(), nil
+}
+
+// treasuryLaneOnNode puts a real local signer on the lane, over a node that
+// answers with bc.err, and an RPC whose pending view stays at 7.
+func treasuryLaneOnNode(t *testing.T) (*Treasury, *TreasuryLane, *nonceBroadcaster) {
+	t.Helper()
+	tr, lane, native, _ := newTestTreasuryWithFakes(t)
+	lane.EscrowCalls = []common.Address{common.HexToAddress(escrowCallTarget)}
+	key, _ := crypto.GenerateKey()
+	bc := &nonceBroadcaster{}
+	lane.Signer = NewLocalKeyReleaseSigner(key, bc)
+	lane.Native = signableTransfers{native}
+	return tr, lane, bc
+}
+
+// signableTransfers prepares a transfer a real signer accepts, at the RPC's
+// pending nonce 7.
+type signableTransfers struct{ *fakeSponsorNative }
+
+func (signableTransfers) PrepareERC20Transfer(token, _, _ string, _ *big.Int) ([]byte, error) {
+	return json.Marshal(blockchain.UnsignedTx{Nonce: 7, To: token, Value: "0", GasPrice: "1", GasLimit: 60_000, ChainID: "8453", Data: "a9059cbb"})
+}
+
+func (b *nonceBroadcaster) last(t *testing.T) uint64 {
+	t.Helper()
+	if len(b.nonces) == 0 {
+		t.Fatal("nothing broadcast")
+	}
+	return b.nonces[len(b.nonces)-1]
+}
+
+// Pre-merge review M-1 (a): the floor holds for every send on the lane. A
+// transfer right after a pool slice, while the RPC's pending view still lags
+// at the slice's nonce, signs the next nonce — never a replacement of the
+// slice, which would then never land.
+func TestTreasury_TransferAfterASliceNeverReusesItsNonce(t *testing.T) {
+	tr, lane, bc := treasuryLaneOnNode(t)
+	ctx := context.Background()
+	if _, _, err := tr.CallEscrowRecorded(ctx, lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 7), nil); err != nil {
+		t.Fatalf("slice: %v", err)
+	}
+	if _, _, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	if len(bc.nonces) != 2 || bc.nonces[0] != 7 || bc.nonces[1] != 8 {
+		t.Fatalf("nonces %v, want the slice at 7 and the transfer at 8", bc.nonces)
+	}
+}
+
+// M-1 (b): a send the node definitely refused (here: underpriced) is not
+// broadcast, so its nonce is handed back and the next send within the floor's
+// TTL reuses it — no gap for later sends to queue behind.
+func TestTreasury_DefiniteRejectionHandsTheNonceBack(t *testing.T) {
+	tr, lane, bc := treasuryLaneOnNode(t)
+	ctx := context.Background()
+	bc.err = errors.New("transaction underpriced")
+	if _, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); attempted || !errors.Is(err, ErrTxNotBroadcast) {
+		t.Fatalf("underpriced: attempted=%v err=%v, want not broadcast", attempted, err)
+	}
+	bc.err = nil
+	if _, _, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil || bc.last(t) != 7 {
+		t.Fatalf("next send: nonce %d err=%v, want 7 again", bc.last(t), err)
+	}
+}
+
+// M-1 (c): an uncertain broadcast (a timeout: the node may hold it) keeps
+// its nonce taken — the next send signs the one after it.
+func TestTreasury_UncertainBroadcastKeepsTheFloor(t *testing.T) {
+	tr, lane, bc := treasuryLaneOnNode(t)
+	ctx := context.Background()
+	bc.err = errors.New("context deadline exceeded")
+	if _, attempted, _ := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); !attempted {
+		t.Fatal("a timeout must stay attempted")
+	}
+	bc.err = nil
+	if _, _, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil || bc.last(t) != 8 {
+		t.Fatalf("next send: nonce %d err=%v, want 8", bc.last(t), err)
 	}
 }
