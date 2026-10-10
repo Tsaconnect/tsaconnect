@@ -259,6 +259,27 @@ func TestCheckPoolUnconfigure_FatalWithLiveSlicesOffThePoolChain_Postgres(t *tes
 	}
 }
 
+// Pre-merge review M-5: a read error is not a finding. An unreadable slice
+// table (a transient DB error, or a binary started before -migrate) must not
+// crash-loop the whole API; it is an ALERT and boot goes on. Only a read that
+// finds live slices off the pool chain refuses (the test above).
+func TestCheckPoolUnconfigure_ReadErrorAlertsAndBoots(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{}) // no p2p_trades table
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	cfg := &config.Config{P2PChains: map[int64]config.P2PChainConfig{}}
+	if err := checkPoolUnconfigure(db, cfg, services.NewP2PEscrowRegistryFromMap(nil, "2")); err != nil {
+		t.Fatalf("a read error refused boot: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_unconfigure_unchecked") {
+		t.Fatalf("no alert for the unreadable check:\n%s", buf.String())
+	}
+}
+
 type fakeSender struct{}
 
 func (fakeSender) Address() string                                          { return "0x00000000000000000000000000000000000000a1" }

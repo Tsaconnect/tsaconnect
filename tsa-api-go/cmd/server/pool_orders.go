@@ -174,7 +174,8 @@ func registerExpiryCanceller(scheduler *jobs.Scheduler, trades *services.P2PTrad
 // the pool (its preset row was removed). It decides from cfg, never from the
 // runtime registry (review I-6): a pool RPC that fails to dial at boot keeps
 // the chain out of the registry, and refusing then would restart-loop every
-// product until the RPC came back. That case is a warning.
+// product until the RPC came back. That case is a warning, and so is a slice
+// table it cannot read (an ALERT).
 func checkPoolUnconfigure(db *gorm.DB, cfg *config.Config, reg *services.P2PEscrowRegistry) error {
 	if db == nil || cfg == nil {
 		return nil
@@ -183,7 +184,12 @@ func checkPoolUnconfigure(db *gorm.DB, cfg *config.Config, reg *services.P2PEscr
 	if err := db.Model(&models.P2PTrade{}).
 		Where("it_intent_id IS NOT NULL AND status NOT IN ?", []string{models.P2PTradeStatusReleased, models.P2PTradeStatusCancelled, models.P2PTradeStatusResolved}).
 		Distinct("chain_id").Pluck("chain_id", &chains).Error; err != nil {
-		return fmt.Errorf("liquidity: read live slices: %w", err)
+		// Pre-merge review M-5: only a positive finding refuses boot. A read
+		// error (transient DB, or a binary started before -migrate) would
+		// crash-loop every product; the slices, if any, wait either way.
+		log.Printf("[liquidity] ALERT liquidity_pool_unconfigure_unchecked err=%s — boot goes on; re-check live pool slices by hand",
+			services.RedactAlertText(err.Error()))
+		return nil
 	}
 	for _, id := range chains {
 		if cfg.P2PChains[id].Purpose != config.P2PPurposePool {
