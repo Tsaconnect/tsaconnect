@@ -365,6 +365,7 @@ func (e *ExpiryCanceller) legacyScope(ctx context.Context, now time.Time, budget
 			legacy++
 			budget[tr.ChainID]++
 			log.Printf("[p2p-expiry] METRIC p2p_expiry_cancelled scope=legacy chain=%d trade=%s", tr.ChainID, tr.ID)
+			e.c.Trades.alertHeldCreditOnCancel(ctx, tr)
 		}
 	}
 	return legacy, failed, nil
@@ -475,6 +476,36 @@ func (s *P2PTradeService) alertUnresolvedPayouts(ctx context.Context, now time.T
 			r.ID, r.ChainID, r.NombaPayoutID)
 	}
 	return nil
+}
+
+// alertHeldCreditOnCancel is pre-merge review M-2. The canceller cannot see a
+// central-account credit the matcher held (O-C1-2: ops refund it rather than
+// bind it to a cancelled trade), so when it cancels a merchant buy trade it
+// names any held or unmatched credit of the trade's amount that arrived since
+// the trade opened. Ids and the hold code only: never the payer's name.
+func (s *P2PTradeService) alertHeldCreditOnCancel(ctx context.Context, tr *models.P2PTrade) {
+	kobo, ok := ngnToKobo(tr.FiatAmount)
+	if !ok || kobo <= 0 {
+		return
+	}
+	var merchant int64
+	if err := s.db.WithContext(ctx).Model(&models.P2PAd{}).
+		Where("id = ? AND pm_id IS NOT NULL AND side = ?", tr.AdID, models.P2PAdSideSell).Count(&merchant).Error; err != nil || merchant == 0 {
+		return
+	}
+	var credits []models.InboundCredit
+	if err := s.db.WithContext(ctx).Select("id", "status", "hold_reason_code").
+		Where("status IN ? AND currency = ? AND gross_kobo IN ? AND transaction_date >= ?",
+			[]string{models.InboundCreditHeld, models.InboundCreditUnmatched}, normaliseCurrency(tr.FiatCurrency),
+			[]int64{kobo, RoundKoboToNaira(kobo)}, tr.CreatedAt).
+		Limit(5).Find(&credits).Error; err != nil {
+		log.Printf("[p2p-expiry] trade=%s held-credit check failed: %s", tr.ID, RedactAlertText(err.Error()))
+		return
+	}
+	for _, c := range credits {
+		log.Printf("[p2p-expiry] ALERT p2p_expiry_cancelled_with_held_credit trade=%s credit=%s status=%s hold=%s — the trade was cancelled with a credit of its amount waiting; refund the credit, never assign it to this trade",
+			tr.ID, c.ID, c.Status, c.HoldReasonCode)
+	}
 }
 
 // undoLegacyDecision is review M-7: the cancel this tick decided provably

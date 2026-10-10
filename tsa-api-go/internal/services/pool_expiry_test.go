@@ -548,3 +548,34 @@ func TestClaimRunAt_AlreadyClaimedIsQuiet(t *testing.T) {
 		t.Fatalf("an already-claimed run logged an error:\n%s", buf.String())
 	}
 }
+
+// Pre-merge review M-2: O-C1-2 lets ops refund (not bind) a payment that
+// arrives for a trade the canceller decided. The canceller now names such a
+// held or unmatched credit when it cancels the trade, so ops do not learn of
+// it only from a failed assign. A credit of another amount is not named.
+func TestExpiry_LegacyCancelAlertsAMatchingHeldCredit(t *testing.T) {
+	r := pmLegacy(t)
+	createInboundCreditsTable(t, r.db)
+	held := p2pInboundCredit("999000000090", "1500.00")
+	held.Status, held.HoldReasonCode = models.InboundCreditHeld, "trade_not_within_merchant_cap"
+	other := p2pInboundCredit("999000000091", "1499.00")
+	for _, c := range []*models.InboundCredit{held, other} {
+		c.TransactionDate, c.SeenAt = time.Now(), time.Now()
+		if err := r.db.Create(c).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	tick, err := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.src.trades, Signer: releaseSender()}).RunOnce(context.Background())
+	if err != nil || tick.Legacy != 1 {
+		t.Fatalf("tick=%+v err=%v, want the trade cancelled", tick, err)
+	}
+	out := buf.String()
+	if strings.Count(out, "ALERT p2p_expiry_cancelled_with_held_credit") != 1 ||
+		!strings.Contains(out, "trade="+r.trade.ID.String()) || !strings.Contains(out, "credit="+held.ID.String()) ||
+		strings.Contains(out, other.ID.String()) || strings.Contains(out, "JOHN DOE") {
+		t.Fatalf("want one alert linking the trade to the held credit, no name:\n%s", out)
+	}
+}
