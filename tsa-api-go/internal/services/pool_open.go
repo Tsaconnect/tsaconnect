@@ -2,15 +2,18 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -34,7 +37,63 @@ const (
 	poolHonourSafety = 10 * time.Minute
 )
 
+// The failed-open brake (pre-merge review I-1): poolOpenFailLimit failed opens
+// in a row that each sent at least one slice, inside poolOpenFailWindow, close
+// the pool's gates. Code constants, not settings (decision 17).
+const (
+	poolOpenFailLimit  = 3
+	poolOpenFailWindow = 10 * time.Minute
+)
+
 var errPoolFailSkipped = errors.New("liquidity pool: fail skipped, the order is not opening")
+
+// poolOpenBreaker counts consecutive failed opens that sent slices. Each one
+// locks LP stock for the slice window and spends treasury gas, so a run of
+// them (an RPC slowdown past PoolOpenCap) would drain the pool's free stock
+// with nothing to show. Its zero value is ready; safe for concurrent opens.
+type poolOpenBreaker struct {
+	mu    sync.Mutex
+	fails []time.Time
+}
+
+// record notes one open's outcome and reports whether the brake trips. An
+// opened order clears the count; a failure that sent nothing neither counts
+// nor clears it.
+func (b *poolOpenBreaker) record(opened bool, sent int, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if opened {
+		b.fails = nil
+		return false
+	}
+	if sent == 0 {
+		return false
+	}
+	kept := b.fails[:0]
+	for _, at := range b.fails {
+		if now.Sub(at) <= poolOpenFailWindow {
+			kept = append(kept, at)
+		}
+	}
+	b.fails = append(kept, now)
+	if len(b.fails) < poolOpenFailLimit {
+		return false
+	}
+	b.fails = nil
+	return true
+}
+
+// noteOpenOutcome feeds the brake. Tripped, it closes the gates through the
+// same latch as a fee-snapshot breach: closed until a restart re-runs every
+// gate (PoolChainGates.Close).
+func (d *PoolDesk) noteOpenOutcome(opened bool, sent int, now time.Time) {
+	if !d.breaker.record(opened, sent, now) {
+		return
+	}
+	log.Printf("[liquidity] ALERT liquidity_pool_open_failing failed_opens=%d window=%s — %d opens in a row sent slices and failed (slow RPC?); the pool is closed until a restart",
+		poolOpenFailLimit, poolOpenFailWindow, poolOpenFailLimit)
+	d.c.Gates.Close(fmt.Sprintf("%d failed opens that sent slices within %s", poolOpenFailLimit, poolOpenFailWindow))
+}
 
 // PoolHonourFits (review I4): IT_STABLE_RATE_LOCK_SECONDS and
 // RAMP_HONOUR_GRACE_SECONDS are env values. If they grow until an honoured
@@ -58,11 +117,21 @@ func scopePoolBuys(db *gorm.DB) *gorm.DB {
 	return db.Model(&models.ITIntent{}).Where("provider IN ?", poolProviders())
 }
 
+// poolFailedOpenSent (pre-merge review I-1) is a failed open that sent at
+// least one slice: a slice with its open nonce recorded (written just before
+// the broadcast) that was not reclaimed as provably never sent.
+const poolFailedOpenSent = `status = ? AND failure_reason = ? AND EXISTS (SELECT 1 FROM p2p_trades t
+	WHERE t.it_intent_id = it_intents.id AND t.open_nonce IS NOT NULL AND COALESCE(t.cancel_reason, '') <> ?)`
+
 // CheckPoolDailyCap refuses when units would take her past pool_user_daily_max.
+// A failed open that sent slices counts: it locked LP stock for the slice
+// window as a live order does, so retrying from the card cannot drain the pool.
 func (s *ITService) CheckPoolDailyCap(ctx context.Context, userID uuid.UUID, units *big.Int, set PoolSettings) error {
 	return s.checkDailyBuyCap(ctx, s.db, userID, units, uuid.Nil, dailyBuyCap{
 		scope: scopePoolBuys, limit: set.UserDailyMaxUnits, reached: ErrPoolDailyCapReached, metric: "ramp_pool_daily_cap_hit",
 		logTag: "liquidity", who: "liquidity pool",
+		alsoCounts:     poolFailedOpenSent,
+		alsoCountsArgs: []any{models.ITStatusCancelled, models.ITFailurePoolOpenFailed, models.ITFailurePoolOpenFailed},
 	})
 }
 
@@ -148,6 +217,7 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 	}
 	log.Printf("[liquidity] METRIC ramp_pool_open outcome=%s slices=%d repicks=%d reason=%q latency_ms=%d",
 		outcome, len(opens), repicks, reason, d.now().Sub(started).Milliseconds())
+	d.noteOpenOutcome(outcome == "opened", sentCount(opens), d.now())
 	if outcome != "opened" {
 		d.fail(wctx, intent, opens)
 		return nil, nil, fmt.Errorf("%w (%s)", ErrPoolCannotFill, reason)
@@ -304,30 +374,56 @@ func (d *PoolDesk) opensFor(ctx context.Context, slices []models.P2PTrade) []*sl
 	return out
 }
 
-// broadcast opens each slice from the conversion treasury through
-// CallEscrowRecorded: EscrowCalls enforced, nonce written on the slice before
+// broadcast opens each slice from the conversion treasury through one
+// EscrowBurst: EscrowCalls enforced, nonce written on the slice before
 // broadcast (once: a second attempt finds it set and sends nothing), and the
-// whole burst on one RPC endpoint generation (S43).
+// whole burst on one RPC endpoint generation (S43). Pre-merge review I-1: the
+// reads come first — the burst's gas once, every slice's open prepared
+// (gas price, estimate) in parallel — so each send under the lane lock is
+// only its nonce read, record and broadcast.
 func (d *PoolDesk) broadcast(ctx context.Context, opens []*sliceOpen) {
-	lane := d.c.Treasury.Lane(d.ChainKey())
-	gen := d.c.Generation()
+	var todo []*sliceOpen
 	for _, o := range opens {
-		if o.failed || o.sent {
-			continue
+		if !o.failed && !o.sent {
+			todo = append(todo, o)
 		}
+	}
+	if len(todo) == 0 {
+		return
+	}
+	burst, err := d.c.Treasury.StartEscrowBurst(ctx, d.c.Treasury.Lane(d.ChainKey()), d.c.EscrowAddr, len(todo))
+	if err != nil {
+		for _, o := range todo {
+			o.failed = true
+		}
+		log.Printf("[liquidity] burst of %d opens not sent: %s", len(todo), RedactAlertText(err.Error()))
+		return
+	}
+	gen := d.c.Generation()
+	prepared := d.prepareOpens(todo)
+	treasury := common.HexToAddress(d.c.Treasury.Address())
+	for i, o := range todo {
 		if d.c.Generation() != gen {
 			o.failed = true
 			log.Printf("[liquidity] METRIC ramp_pool_open_burst_aborted slice=%s reason=endpoint_changed", o.slice.ID)
 			continue
 		}
-		voucher, verr := d.c.Trades.adVoucher(&o.ad, o.ad.SellerAddress)
-		sig, serr := decodeHexSig(o.ad.VoucherSignature)
-		if verr != nil || serr != nil || o.units == nil {
+		pre := prepared[i]
+		if pre.err != nil {
 			o.failed = true
+			log.Printf("[liquidity] slice=%s open not sent: %s", o.slice.ID, RedactAlertText(pre.err.Error()))
 			continue
 		}
-		hash, attempted, err := d.c.Treasury.CallEscrowRecorded(ctx, lane, d.c.EscrowAddr, func() ([]byte, error) {
-			return d.c.Escrow.PrepareOpenTradeWithVoucher(HashID(o.slice.ID), voucher, sig, d.c.Treasury.Address(), o.units)
+		hash, attempted, err := burst.Call(ctx, func() ([]byte, error) {
+			// Under the lane lock, per slice: the chain's pending nonce, which
+			// the lane's floor then raises past a slice the RPC has not seen.
+			n, err := d.c.Probe.PendingNonceAt(ctx, treasury)
+			if err != nil {
+				return nil, fmt.Errorf("read the treasury nonce: %w", err)
+			}
+			u := pre.tx
+			u.Nonce = n
+			return json.Marshal(u)
 		}, func(nonce uint64) error {
 			res := d.c.DB.WithContext(ctx).Model(&models.P2PTrade{}).
 				Where("id = ? AND open_nonce IS NULL", o.slice.ID).Update("open_nonce", int64(nonce))
@@ -352,6 +448,39 @@ func (d *PoolDesk) broadcast(ctx context.Context, opens []*sliceOpen) {
 			cancel()
 		}
 	}
+}
+
+// preparedOpen is one slice's open, prepared ahead of the burst's sends.
+type preparedOpen struct {
+	tx  blockchain.UnsignedTx
+	err error
+}
+
+// prepareOpens builds every slice's openTrade in parallel, outside the lane
+// lock: its voucher, gas price and estimate (an estimate that reverts is a
+// slice provably never sent). The nonce each one read is replaced at send.
+func (d *PoolDesk) prepareOpens(opens []*sliceOpen) []preparedOpen {
+	out := make([]preparedOpen, len(opens))
+	var wg sync.WaitGroup
+	for i, o := range opens {
+		voucher, verr := d.c.Trades.adVoucher(&o.ad, o.ad.SellerAddress)
+		sig, serr := decodeHexSig(o.ad.VoucherSignature)
+		if verr != nil || serr != nil || o.units == nil {
+			out[i].err = errors.New("unusable voucher or amount")
+			continue
+		}
+		wg.Add(1)
+		go func(i int, o *sliceOpen) {
+			defer wg.Done()
+			raw, err := d.c.Escrow.PrepareOpenTradeWithVoucher(HashID(o.slice.ID), voucher, sig, d.c.Treasury.Address(), o.units)
+			if err == nil {
+				err = json.Unmarshal(raw, &out[i].tx)
+			}
+			out[i].err = err
+		}(i, o)
+	}
+	wg.Wait()
+	return out
 }
 
 // prove polls each sent slice until it is Pending on-chain exactly as
@@ -457,6 +586,17 @@ func (d *PoolDesk) repick(ctx context.Context, intent *models.ITIntent, p *PoolP
 		return nil, err
 	}
 	return d.opensFor(ctx, written), nil
+}
+
+// sentCount is how many slices left this process (their fate is the chain's).
+func sentCount(opens []*sliceOpen) int {
+	n := 0
+	for _, o := range opens {
+		if o.sent {
+			n++
+		}
+	}
+	return n
 }
 
 // allProven: every live slice is proven and they cover the order exactly.

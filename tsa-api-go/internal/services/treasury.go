@@ -713,20 +713,54 @@ const treasuryEscrowCallGas uint64 = 300_000
 //   - the prepared transaction must target escrow with zero value on this
 //     lane's chain, so a build that went wrong is refused, never signed.
 func (t *Treasury) CallEscrowRecorded(ctx context.Context, lane *TreasuryLane, escrow string, build func() ([]byte, error), onPrepared func(nonce uint64) error) (string, bool, error) {
+	b, err := t.StartEscrowBurst(ctx, lane, escrow, 1)
+	if err != nil {
+		return "", false, err
+	}
+	return b.Call(ctx, build, onPrepared)
+}
+
+// EscrowBurst is a run of escrow calls on one lane — a pool order's slice
+// opens (pre-merge review I-1): the lane, the escrow allowlist and the gas
+// for every call in it are checked once, so each call is only its nonce,
+// record and broadcast under the lane lock.
+type EscrowBurst struct {
+	lane   *TreasuryLane
+	escrow string
+}
+
+// StartEscrowBurst checks what CallEscrowRecorded checks, once, for calls
+// escrow calls: the kill switch, EscrowCalls and that the lane can pay all
+// of their gas.
+func (t *Treasury) StartEscrowBurst(ctx context.Context, lane *TreasuryLane, escrow string, calls int) (*EscrowBurst, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
-		return "", false, ErrSponsorNotAvailable
+		return nil, ErrSponsorNotAvailable
 	}
 	if lane.Guard.Killed() {
-		return "", false, ErrTreasuryKilled
+		return nil, ErrTreasuryKilled
 	}
 	// routerAllowed is the generic strict address-list match; the LIST is
 	// EscrowCalls, separate from Routers by design (S21).
 	if !routerAllowed(lane.EscrowCalls, escrow) {
 		log.Printf("[ramp-conversion] ALERT ramp_treasury_escrow_call_refused_total=1 chain=%s to=%s", lane.ChainKey, escrow)
-		return "", false, fmt.Errorf("%w: %s is not an escrow this lane may call", ErrTreasuryInvalidRoute, escrow)
+		return nil, fmt.Errorf("%w: %s is not an escrow this lane may call", ErrTreasuryInvalidRoute, escrow)
 	}
-	if err := t.requireGas(ctx, lane, treasuryEscrowCallGas); err != nil {
-		return "", false, err
+	if calls < 1 {
+		calls = 1
+	}
+	if err := t.requireGas(ctx, lane, treasuryEscrowCallGas*uint64(calls)); err != nil {
+		return nil, err
+	}
+	return &EscrowBurst{lane: lane, escrow: escrow}, nil
+}
+
+// Call sends one escrow call of the burst: the kill switch again (in memory),
+// then the prepared tx's guards, the lane's nonce floor, onPrepared and the
+// broadcast under the lane's send lock. Same contract as CallEscrowRecorded.
+func (b *EscrowBurst) Call(ctx context.Context, build func() ([]byte, error), onPrepared func(nonce uint64) error) (string, bool, error) {
+	lane, escrow := b.lane, b.escrow
+	if lane.Guard.Killed() {
+		return "", false, ErrTreasuryKilled
 	}
 	// The escrow guards run on the prepared tx first; then pinnedBuild takes
 	// the nonce from the lane's floor, not the escrow client's pending view

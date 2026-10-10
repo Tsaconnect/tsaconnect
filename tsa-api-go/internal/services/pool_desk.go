@@ -38,6 +38,7 @@ type PoolDesk struct {
 	c           PoolDeskConfig
 	totals      *cachedReader[*big.Int]
 	proveWindow time.Duration // poolProveWindow; tests shorten it
+	breaker     poolOpenBreaker
 }
 
 const (

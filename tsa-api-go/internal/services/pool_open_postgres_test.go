@@ -123,3 +123,45 @@ func TestPoolSlices_SystemOpenerNotLimitedPerAd_Postgres(t *testing.T) {
 		t.Fatalf("slices with a NULL opener = %d", n)
 	}
 }
+
+// Pre-merge review I-1 (2) on Postgres: the failed-open clause of the pool's
+// daily cap (an EXISTS over the order's slices) is valid SQL there and counts
+// only a failed open whose slice was sent, never one reclaimed unsent.
+func TestPoolDailyCap_CountsFailedOpensThatSentSlices_Postgres(t *testing.T) {
+	r := newPoolOpenRigPG(t)
+	ctx := context.Background()
+	set := specPoolSettings()
+	user := uuid.New()
+	failedOpen := func(units string, nonce *int64, reason string) {
+		t.Helper()
+		in := &models.ITIntent{ID: uuid.New(), UserID: user, Direction: models.ITDirectionBuy, Status: models.ITStatusCancelled,
+			FailureReason: models.ITFailurePoolOpenFailed, Provider: models.ITProviderPool, Asset: "USDT", AssetAmount: units,
+			Currency: "NGN", DestChain: "BSC", DestAddress: testRoutedEVM, LockedRate: "1", DisplayRate: "1", NgnKobo: "1",
+			AmountMinor: "1", RateKobo: "1", RateMinor: "1", McgpAmount: "0", FeeNgnKobo: "0", NetNgnKobo: "1",
+			PlatformKeptKobo: "0", ReceivedAmount: "0"}
+		if err := r.db.Create(in).Error; err != nil {
+			t.Fatal(err)
+		}
+		id := in.ID
+		sl := models.P2PTrade{ID: uuid.New(), AdID: uuid.New(), BuyerID: r.buyer, SellerID: uuid.New(), Token: "USDT", ChainID: 97,
+			Funding: models.P2PTradeFundingPooled, TokenAmount: "1", FiatAmount: "1", FiatCurrency: "NGN", Rate: "1",
+			Status: models.P2PTradeStatusCancelled, CancelReason: reason, ITIntentID: &id, OpenNonce: nonce}
+		sl.OnChainTradeID = HashIDHex(sl.ID)
+		if err := r.db.Create(&sl).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := int64(4)
+	failedOpen("500000000", &n, models.ITFailurePoolOpenFailed) // reclaimed unsent: not counted
+	failedOpen("600000000", nil, "")                            // never reached a nonce: not counted
+	if err := r.it.CheckPoolDailyCap(ctx, user, set.UserDailyMaxUnits, set); err != nil {
+		t.Fatalf("unsent failed opens counted: %v", err)
+	}
+	failedOpen("700000000", &n, "") // sent
+	if err := r.it.CheckPoolDailyCap(ctx, user, big.NewInt(1_300_000_001), set); !errors.Is(err, ErrPoolDailyCapReached) {
+		t.Fatalf("700 sent + 1300.000001 = %v, want the cap reached", err)
+	}
+	if err := r.it.CheckPoolDailyCap(ctx, user, big.NewInt(1_300_000_000), set); err != nil {
+		t.Fatalf("700 sent + 1300 = %v, want allowed", err)
+	}
+}

@@ -235,6 +235,11 @@ type dailyBuyCap struct {
 	// logTag and who keep each provider's own log prefix and error prefix
 	// (review M-10: dashboards grep "[it treasury buy]").
 	logTag, who string
+	// alsoCounts, when set, is a condition (with its args) under which a
+	// cancelled or refunded row still counts (the pool: a failed open that
+	// sent slices, pre-merge review I-1).
+	alsoCounts     string
+	alsoCountsArgs []any
 }
 
 // scopeCompanyWalletBuys is the company wallet's rows (a positive constant
@@ -263,10 +268,13 @@ func (s *ITService) checkTreasuryDailyCap(ctx context.Context, db *gorm.DB, user
 // rolling 24h, leaving out exclude (an order priced live counts once).
 func (s *ITService) checkDailyBuyCap(ctx context.Context, db *gorm.DB, userID uuid.UUID, units *big.Int, exclude uuid.UUID, c dailyBuyCap) error {
 	var amounts []string
+	counted := db.Session(&gorm.Session{NewDB: true}).Where("status NOT IN ?", []string{models.ITStatusCancelled, models.ITStatusRefunded})
+	if c.alsoCounts != "" {
+		counted = counted.Or(c.alsoCounts, c.alsoCountsArgs...)
+	}
 	q := c.scope(db.WithContext(ctx)).
-		Where("user_id = ? AND direction = ? AND status NOT IN ? AND created_at >= ?",
-			userID, models.ITDirectionBuy,
-			[]string{models.ITStatusCancelled, models.ITStatusRefunded}, time.Now().Add(-24*time.Hour))
+		Where("user_id = ? AND direction = ? AND created_at >= ?", userID, models.ITDirectionBuy, time.Now().Add(-24*time.Hour)).
+		Where(counted)
 	if exclude != uuid.Nil {
 		q = q.Where("id <> ?", exclude)
 	}

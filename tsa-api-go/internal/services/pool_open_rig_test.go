@@ -34,7 +34,7 @@ type poolOpenChain struct {
 	trades        map[[32]byte]*OnChainP2PTrade
 	snaps         map[[32]byte][2]uint16
 	receipts      map[common.Hash]uint64
-	opens         map[uint64]pendingOpen // by nonce
+	opens         map[[32]byte]pendingOpen // by tradeId (the open's calldata)
 	head          uint64
 	depth         uint64 // blocks the head runs ahead of a receipt (1 → 2 deep)
 	nextNonce     uint64
@@ -46,6 +46,7 @@ type poolOpenChain struct {
 	neverLand     map[string]bool  // lowercase seller wallet → broadcast but never mined
 	failBroadcast map[string]bool  // lowercase seller wallet → broadcast errors (attempted, hash unknown)
 	onBroadcast   func(nonce uint64, tradeID [32]byte)
+	onPrepare     func()
 	// Release-key calls (Tasks 12, 13). The release sender in those tests
 	// always broadcasts, so the fake mines a cancel or a resolve when it is
 	// prepared.
@@ -64,12 +65,15 @@ type pendingOpen struct {
 
 func newPoolOpenChain() *poolOpenChain {
 	return &poolOpenChain{trades: map[[32]byte]*OnChainP2PTrade{}, snaps: map[[32]byte][2]uint16{},
-		receipts: map[common.Hash]uint64{}, opens: map[uint64]pendingOpen{}, head: 1000, depth: 1, nextNonce: 10, latest: 10,
+		receipts: map[common.Hash]uint64{}, opens: map[[32]byte]pendingOpen{}, head: 1000, depth: 1, nextNonce: 10, latest: 10,
 		prepareErr: map[string]error{}, neverLand: map[string]bool{}, failBroadcast: map[string]bool{}}
 }
 
 // ── escrow ──
 func (f *poolOpenChain) PrepareOpenTradeWithVoucher(tradeID [32]byte, v AdVoucher, _ []byte, buyer string, amount *big.Int) ([]byte, error) {
+	if hook := f.onPrepare; hook != nil {
+		hook()
+	}
 	f.cmu.Lock()
 	defer f.cmu.Unlock()
 	seller := strings.ToLower(v.Seller.Hex())
@@ -79,9 +83,9 @@ func (f *poolOpenChain) PrepareOpenTradeWithVoucher(tradeID [32]byte, v AdVouche
 	if _, exists := f.trades[tradeID]; exists {
 		return nil, errors.New("estimate gas (would revert): execution reverted: TradeExists")
 	}
+	// The RPC's pending view: a prepare reads it, a broadcast moves it.
 	n := f.nextNonce
-	f.nextNonce++
-	f.opens[n] = pendingOpen{tradeID: tradeID, seller: v.Seller, buyer: buyer, token: v.Token, amount: new(big.Int).Set(amount)}
+	f.opens[tradeID] = pendingOpen{tradeID: tradeID, seller: v.Seller, buyer: buyer, token: v.Token, amount: new(big.Int).Set(amount)}
 	return json.Marshal(blockchain.UnsignedTx{Nonce: n, To: poolTestEscrow, Value: "0", GasPrice: "1", GasLimit: 200_000,
 		ChainID: "97", Data: hex.EncodeToString(tradeID[:])})
 }
@@ -156,10 +160,17 @@ func (f *poolOpenChain) SignAndBroadcast(_ context.Context, unsigned []byte) (st
 	if err := json.Unmarshal(unsigned, &u); err != nil {
 		return "", err
 	}
+	var id [32]byte
+	if raw, err := hex.DecodeString(u.Data); err == nil && len(raw) == 32 {
+		copy(id[:], raw)
+	}
 	f.cmu.Lock()
-	po := f.opens[u.Nonce]
+	po := f.opens[id]
 	hook := f.onBroadcast
 	f.broadcasts++
+	if u.Nonce+1 > f.nextNonce {
+		f.nextNonce = u.Nonce + 1
+	}
 	if f.bumpAfter > 0 && f.broadcasts == f.bumpAfter {
 		f.gen.Add(1)
 	}
