@@ -34,7 +34,8 @@ const (
 	// expiryPayoutSweepEvery (re-review N-2): the backstop for a payout with
 	// no outcome that has left the legacy window.
 	expiryPayoutSweepEvery = 24 * time.Hour
-	expiryZombieWindow     = 2 * time.Hour // cancelled slices re-checked every minute
+	expiryPayoutSweepRun   = "p2p-payout-unresolved-alert" // its job_run_markers row
+	expiryZombieWindow     = 2 * time.Hour                 // cancelled slices re-checked every minute
 	expiryZombieSweep      = 7 * 24 * time.Hour
 	expiryZombieEvery      = 24 * time.Hour
 	expiryOpeningAfter     = 2 * time.Minute
@@ -78,7 +79,6 @@ type ExpiryCanceller struct {
 	legacyAbsent                     map[uuid.UUID]time.Time
 	deferredSince, deferredAlertedAt time.Time
 	moneyMovedAlerts                 alertThrottle
-	lastPayoutSweep                  time.Time
 }
 
 // alertThrottle is the scheduler's re-alert rule (jobs: alert on the first
@@ -166,8 +166,9 @@ func (e *ExpiryCanceller) RunOnce(ctx context.Context) (ExpiryTick, error) {
 		tick.Opening = n
 		errs = append(errs, err)
 	}
-	if now.Sub(e.lastPayoutSweep) >= expiryPayoutSweepEvery {
-		e.lastPayoutSweep = now
+	// Pre-merge review M-4: claimed in job_run_markers, so a deploy or restart
+	// does not re-alert every historical row.
+	if claimRunAt(ctx, e.c.Trades.db, expiryPayoutSweepRun, expiryPayoutSweepEvery, now) {
 		errs = append(errs, e.c.Trades.alertUnresolvedPayouts(ctx, now))
 	}
 	if e.c.Fresh != nil {

@@ -128,22 +128,28 @@ func alertf(key, format string, args ...any) {
 // name, and records the run. Persisted (models.JobRunMarker) so a restart does
 // not repeat it and two instances cannot both run it.
 func claimDailyRun(ctx context.Context, db *gorm.DB, name string, every time.Duration) bool {
+	return claimRunAt(ctx, db, name, every, time.Now())
+}
+
+// claimRunAt is claimDailyRun on a caller's clock (the expiry canceller's
+// injected Now).
+func claimRunAt(ctx context.Context, db *gorm.DB, name string, every time.Duration, now time.Time) bool {
 	if db == nil {
 		return false
 	}
-	now := time.Now()
 	res := db.WithContext(ctx).Model(&models.JobRunMarker{}).
 		Where("name = ? AND last_run_at <= ?", name, now.Add(-every)).
 		Update("last_run_at", now)
 	if res.Error == nil && res.RowsAffected == 1 {
 		return true
 	}
-	// No row yet: the first run creates it. A duplicate-key error means another
-	// instance created it first, which is a "someone else ran it" answer.
-	if err := db.WithContext(ctx).Create(&models.JobRunMarker{Name: name, LastRunAt: now}).Error; err != nil {
-		return false
-	}
-	return true
+	// No row yet: the first run creates it. A row that already exists (claimed
+	// inside the interval, or another instance created it first) is a quiet
+	// "someone else ran it" — never a duplicate-key error logged every tick
+	// (re-review N-4).
+	res = db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&models.JobRunMarker{Name: name, LastRunAt: now})
+	return res.Error == nil && res.RowsAffected == 1
 }
 
 // olderThanExpr builds a dialect-appropriate "column is older than d" test so

@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type fixedFresh struct{ at time.Time }
@@ -456,6 +458,9 @@ func TestExpiry_PayoutInFlightAlertIsHourly(t *testing.T) {
 // legacy window is never silent — a daily sweep alerts it.
 func TestExpiry_PayoutWithNoOutcomePastTheWindowAlertsDaily(t *testing.T) {
 	r := newPoolRig(t)
+	if err := r.db.AutoMigrate(&models.JobRunMarker{}); err != nil {
+		t.Fatal(err)
+	}
 	old := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-30*time.Hour))
 	r.db.Model(&models.P2PTrade{}).Where("id = ?", old.ID).Update("payout_started_at", time.Now().Add(-31*time.Hour))
 	failed := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-30*time.Hour))
@@ -480,5 +485,66 @@ func TestExpiry_PayoutWithNoOutcomePastTheWindowAlertsDaily(t *testing.T) {
 	ec.RunOnce(context.Background())
 	if count() != 2 {
 		t.Fatalf("no daily repeat: %d", count())
+	}
+}
+
+// Pre-merge review M-4: the daily unresolved-payout sweep is claimed in the
+// database (job_run_markers), so a deploy or restart does not re-alert every
+// historical row; the day's schedule carries over to the new process.
+func TestExpiry_PayoutUnresolvedAlertDoesNotRefireOnRestart(t *testing.T) {
+	r := newPoolRig(t)
+	if err := r.db.AutoMigrate(&models.JobRunMarker{}); err != nil {
+		t.Fatal(err)
+	}
+	old := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-30*time.Hour))
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", old.ID).Update("payout_started_at", time.Now().Add(-31*time.Hour))
+	now := time.Now()
+	boot := func() *ExpiryCanceller {
+		return NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: releaseSender(), Now: func() time.Time { return now }})
+	}
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	count := func() int { return strings.Count(buf.String(), "ALERT p2p_payout_outcome_unresolved") }
+	boot().RunOnce(context.Background())
+	if count() != 1 {
+		t.Fatalf("first boot: %d alerts", count())
+	}
+	now = now.Add(10 * time.Minute)
+	boot().RunOnce(context.Background()) // a restart
+	if count() != 1 {
+		t.Fatalf("a restart re-fired the daily alert: %d", count())
+	}
+	now = now.Add(24 * time.Hour)
+	boot().RunOnce(context.Background())
+	if count() != 2 {
+		t.Fatalf("no alert a day later: %d", count())
+	}
+}
+
+// Re-review N-4: the canceller asks for the day's claim every minute, so an
+// already-claimed day is a quiet no-op — never a duplicate-key error in the
+// log each tick.
+func TestClaimRunAt_AlreadyClaimedIsQuiet(t *testing.T) {
+	r := newPoolRig(t)
+	if err := r.db.AutoMigrate(&models.JobRunMarker{}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	db := r.db.Session(&gorm.Session{Logger: logger.New(log.New(&buf, "", 0), logger.Config{LogLevel: logger.Warn})})
+	now := time.Now()
+	ctx := context.Background()
+	if !claimRunAt(ctx, db, "n4-test", time.Hour, now) {
+		t.Fatal("the first claim must run")
+	}
+	// Another instance created the row first: the create path conflicts.
+	if claimRunAt(ctx, db, "n4-test", time.Hour, now.Add(time.Minute)) || claimRunAt(ctx, db, "n4-test", time.Hour, now.Add(2*time.Minute)) {
+		t.Fatal("a claimed run ran again inside its interval")
+	}
+	if !claimRunAt(ctx, db, "n4-test", time.Hour, now.Add(time.Hour+time.Second)) {
+		t.Fatal("no claim after the interval")
+	}
+	if strings.Contains(strings.ToLower(buf.String()), "unique") || strings.Contains(strings.ToLower(buf.String()), "duplicate") {
+		t.Fatalf("an already-claimed run logged an error:\n%s", buf.String())
 	}
 }
