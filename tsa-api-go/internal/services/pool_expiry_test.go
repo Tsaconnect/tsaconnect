@@ -66,8 +66,21 @@ func TestExpiry_CancelsAbandonedPoolSliceAfterWindow(t *testing.T) {
 	var got models.P2PTrade
 	r.db.First(&got, "id = ?", sl.ID)
 	b, _ := r.chain.ReadBalance(r.chain.trades[HashID(sl.ID)].Seller.Hex(), "")
-	if got.Status != models.P2PTradeStatusCancelled || got.DroppedAt == nil || b.Locked.Sign() != 0 {
-		t.Fatalf("slice=%s dropped=%v locked=%s, want cancelled and the LP's stock back", got.Status, got.DroppedAt, b.Locked)
+	if b.Locked.Sign() != 0 || got.DroppedAt == nil {
+		t.Fatalf("dropped=%v locked=%s, want decided and the LP's stock back on-chain", got.DroppedAt, b.Locked)
+	}
+	// Pre-merge review M-6: the canceller only sends. A reconcile right after
+	// the send always ran before the cancel mined; the chain reconciler moves
+	// the row once it has.
+	if got.Status != models.P2PTradeStatusPendingPayment {
+		t.Fatalf("slice=%s right after the send, want the row left to the reconciler", got.Status)
+	}
+	if _, err := r.trades.ReconcileTrade(context.Background(), sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.db.First(&got, "id = ?", sl.ID)
+	if got.Status != models.P2PTradeStatusCancelled {
+		t.Fatalf("slice=%s after the reconciler, want cancelled", got.Status)
 	}
 }
 

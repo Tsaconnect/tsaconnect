@@ -577,7 +577,7 @@ func TestInitiateSellPayout_LostIDWriteStillBlocksTheCanceller(t *testing.T) {
 	if len(gw.calls) != 1 {
 		t.Fatalf("gateway called %d times, want 1", len(gw.calls))
 	}
-	if ok, err := svc.decideLegacyCancel(context.Background(), trade, time.Now()); ok || err != nil {
+	if ok, _, err := svc.decideLegacyCancelLeg(context.Background(), trade, time.Now()); ok || err != nil {
 		t.Fatalf("decide = %v %v: the canceller would refund a trade whose naira left", ok, err)
 	}
 }
@@ -649,7 +649,7 @@ func TestInitiateSellPayout_UnknownOutcomeKeepsTheMarker(t *testing.T) {
 		if len(gw.calls) != 1 {
 			t.Fatalf("%v: gateway called %d times, want 1", gwErr, len(gw.calls))
 		}
-		if ok, err := svc.decideLegacyCancel(context.Background(), trade, time.Now()); ok || err != nil {
+		if ok, _, err := svc.decideLegacyCancelLeg(context.Background(), trade, time.Now()); ok || err != nil {
 			t.Fatalf("%v: decide = %v %v, want the refund refused", gwErr, ok, err)
 		}
 	}

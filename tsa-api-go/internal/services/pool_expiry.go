@@ -216,8 +216,9 @@ func (e *ExpiryCanceller) windowFor(chainID int64) time.Duration {
 }
 
 // cancelOnChain sends cancelByTimeout through the release key's per-chain
-// lock (S8, S24) once the trade is Pending past its window, then lets the
-// reconciler move the row (idempotent; a second cancel reverts NotPending).
+// lock (S8, S24) once the trade is Pending past its window; the chain
+// reconciler moves the row once it mines (idempotent; a second cancel reverts
+// NotPending).
 // decide (nil for a zombie, whose row is already cancelled) runs last, just
 // before the send: it takes the row lock the payment paths take and records
 // the decision, so a payment and the cancel can never both win.
@@ -266,10 +267,9 @@ func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade
 		}
 		return false, fmt.Errorf("cancel %s: %s", tr.ID, RedactAlertText(err.Error()))
 	}
+	// Pre-merge review M-6: no reconcile here — it would always run before the
+	// cancel mines. The chain reconciler (30 s) moves the row once it has.
 	log.Printf("[p2p-expiry] trade=%s cancelByTimeout sent tx=%s", tr.ID, hash)
-	if _, err := e.c.Trades.ReconcileTrade(ctx, tr.ID); err != nil {
-		log.Printf("[p2p-expiry] trade=%s cancelled on-chain, reconcile deferred: %s", tr.ID, RedactAlertText(err.Error()))
-	}
 	return true, nil
 }
 
@@ -307,7 +307,7 @@ func (e *ExpiryCanceller) poolScope(ctx context.Context, now, zombieSince time.T
 			} else {
 				pool++
 			}
-			log.Printf("[p2p-expiry] METRIC p2p_expiry_cancelled scope=%s chain=%d trade=%s", scope, tr.ChainID, tr.ID)
+			log.Printf("[p2p-expiry] METRIC p2p_expiry_cancel_sent scope=%s chain=%d trade=%s", scope, tr.ChainID, tr.ID)
 		}
 	}
 	return pool, zombies, failed, nil
@@ -364,7 +364,7 @@ func (e *ExpiryCanceller) legacyScope(ctx context.Context, now time.Time, budget
 		case sent:
 			legacy++
 			budget[tr.ChainID]++
-			log.Printf("[p2p-expiry] METRIC p2p_expiry_cancelled scope=legacy chain=%d trade=%s", tr.ChainID, tr.ID)
+			log.Printf("[p2p-expiry] METRIC p2p_expiry_cancel_sent scope=legacy chain=%d trade=%s", tr.ChainID, tr.ID)
 			e.c.Trades.alertHeldCreditOnCancel(ctx, tr)
 		}
 	}
@@ -414,20 +414,15 @@ func (s *ITService) decideSliceCancel(ctx context.Context, slice *models.P2PTrad
 	return cancel, err
 }
 
-// decideLegacyCancel is the legacy scope's decision (S24), taken under the
+// decideLegacyCancelLeg is the legacy scope's decision (S24), taken under the
 // trade's row lock: still pending_payment, its expiry notice 30 minutes old,
 // and no naira has moved for it off-chain (legacyMoneyMoved). It records the
 // decision in dropped_at in the same transaction. Every payment path refuses a
 // trade with dropped_at set — the credit (which takes the same lock), the sell
-// payout (which commits its started marker under it before the gateway call), the operator's and the
-// buyer's mark-paid, and the release — so whoever locks the row first wins.
-func (s *P2PTradeService) decideLegacyCancel(ctx context.Context, tr *models.P2PTrade, now time.Time) (bool, error) {
-	cancel, _, err := s.decideLegacyCancelLeg(ctx, tr, now)
-	return cancel, err
-}
-
-// decideLegacyCancelLeg is decideLegacyCancel, also naming the off-chain leg
-// that refused it ("" when none did), for the canceller's throttled alert.
+// payout (which commits its started marker under it before the gateway call),
+// the operator's and the buyer's mark-paid, and the release — so whoever locks
+// the row first wins. It also names the off-chain leg that refused the cancel
+// ("" when none did), for the canceller's throttled alert.
 func (s *P2PTradeService) decideLegacyCancelLeg(ctx context.Context, tr *models.P2PTrade, now time.Time) (bool, string, error) {
 	cancel, moved := false, ""
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

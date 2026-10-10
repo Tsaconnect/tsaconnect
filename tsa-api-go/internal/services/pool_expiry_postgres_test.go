@@ -123,7 +123,7 @@ func TestLegacyClaimVsExpiry_Race_Postgres(t *testing.T) {
 			// gates before it reaches the credit's lock.
 			for t0 := time.Now(); time.Since(t0) < time.Duration(round)*10*time.Microsecond; {
 			} // a spin: time.Sleep cannot wait less than about a millisecond
-			decided, _ = r.src.trades.decideLegacyCancel(ctx, r.trade, now)
+			decided, _, _ = r.src.trades.decideLegacyCancelLeg(ctx, r.trade, now)
 		}()
 		close(start)
 		wg.Wait()
@@ -212,7 +212,7 @@ func TestLegacyCancelWaitsForAnInFlightPayout_Postgres(t *testing.T) {
 	gw := &fakeNombaGateway{payoutID: "po_race"}
 	gw.onCall = func() {
 		go func() {
-			ok, err := svc.decideLegacyCancel(context.Background(), trade, time.Now())
+			ok, _, err := svc.decideLegacyCancelLeg(context.Background(), trade, time.Now())
 			if err != nil {
 				t.Errorf("decide: %v", err)
 			}
