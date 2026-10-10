@@ -6,6 +6,7 @@ import { PaymentLinks } from './PaymentLinks';
 import { PaymentDrawer } from './PaymentDrawer';
 import { Payments } from './Payments';
 import { Payouts } from './Payouts';
+import { Reconciliation } from './Reconciliation';
 import { OpenLinkDrawer } from './OpenLinkDrawer';
 import { OpenLinkPoster } from './OpenLinkPoster';
 
@@ -34,6 +35,7 @@ export function BusinessRoutes() {
         {/* The poster is a page of its own (no app frame), laid out to print. */}
         <Route path="links/open/:id/poster" element={<OpenLinkPoster />} />
         <Route path="payouts" element={<Payouts />} />
+        <Route path="reconciliation" element={<Reconciliation />} />
         <Route path="developers" element={<Developers />} />
         <Route path="*" element={<Navigate to="overview" replace />} />
       </Route>

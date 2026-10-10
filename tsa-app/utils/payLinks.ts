@@ -5,6 +5,8 @@
 // as, the times and money it shows, the amount she types — and, for a reusable
 // link, its share message, amount rule and range.
 import type { OpenLink, OpenLinkNotTakingReason, OpenLinkRange, PayLink } from '@/services/payMerchantApi';
+import { strictHttpsHost } from '@/utils/strictHttpsHost';
+import { TSA_SITE_HOSTS } from '@/utils/payCode';
 import { formatKobo, koboFromNaira } from '@/utils/stableSellQuote';
 
 /** How long a link stays open; the server takes exactly these. */
@@ -23,6 +25,25 @@ export function payLinkShareMessage(businessName: string, link: Pick<PayLink, 'c
 /** A reusable link's share: whom it pays, what for, and its address. */
 export const openLinkShareMessage = (businessName: string, link: Pick<OpenLink, 'label' | 'url'>): string =>
   `Pay ${businessName} — ${link.label}: ${link.url}`;
+
+/** What "Share receipt" sends: who was paid, how much, the code, and the page that verifies it. */
+export function payReceiptShareMessage(p: { merchantName: string; customerTotal: number; payCode?: string; receiptUrl?: string }): string {
+  const code = p.payCode ? ` · ${p.payCode}` : '';
+  return `Receipt: ${formatKobo(String(p.customerTotal))} paid to ${p.merchantName}${code}. Verify it: ${p.receiptUrl ?? ''}`;
+}
+
+
+/** A receipt link is ours or it is nothing: https on our own domain, under /r/ — a tampered response must not open elsewhere. */
+export function safeReceiptUrl(raw: string | undefined): string | undefined {
+  const host = raw ? strictHttpsHost(raw) : null;
+  if (!raw || !host || !TSA_SITE_HOSTS.includes(host)) return undefined;
+  try {
+    const { pathname } = new URL(raw);
+    return pathname.startsWith('/r/') && pathname.length > 3 ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * What a customer may pay through a reusable link, in words — the effective

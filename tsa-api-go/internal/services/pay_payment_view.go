@@ -20,6 +20,7 @@ import (
 type PayPaymentView struct {
 	ID            uuid.UUID  `json:"id"`
 	Reference     string     `json:"reference"`
+	PayCode       string     `json:"payCode,omitempty"` // TSA-XXXXX-XXXXX: what the customer sees and types
 	Mode          string     `json:"mode"`
 	Status        string     `json:"status"`
 	Cancelled     bool       `json:"cancelled,omitempty"`
@@ -41,32 +42,40 @@ type PayPaymentView struct {
 	AppURL        string     `json:"appUrl"`
 	CheckoutURL   string     `json:"checkoutUrl"`
 	CreatedAt     time.Time  `json:"createdAt"`
+	// RefundedAmount is what the merchant has refunded (confirmed refunds, USD
+	// as a decimal string), and RefundStatus whether that is none, part or all
+	// of what can be. The payment's status stays succeeded either way.
+	RefundedAmount string `json:"refundedAmount"`
+	RefundStatus   string `json:"refundStatus"`
 }
 
 // PayCheckoutView is what the app's checkout screen reads: the payment plus
 // whether THIS viewer may pay it right now, and why not when they can't.
 type PayCheckoutView struct {
-	ID                 uuid.UUID `json:"id"`
-	MerchantName       string    `json:"merchantName"`
-	Mode               string    `json:"mode"`
-	Source             string    `json:"source"` // api, link or open: an open payment's description is the payer's own note
-	Status             string    `json:"status"`
-	Amount             int64     `json:"amount"`
-	CustomerTotal      int64     `json:"customerTotal"`
-	Fee                int64     `json:"fee"`
-	MerchantNet        int64     `json:"merchantNet"`
-	Currency           string    `json:"currency"`
-	Description        string    `json:"description"`
-	CustomerName       string    `json:"customerName,omitempty"`
-	LinkLabel          string    `json:"linkLabel,omitempty"` // open-link payments: the link paid through (the note, the description, is often empty)
-	ExpiresAt          time.Time `json:"expiresAt"`
-	SettlementMode     string    `json:"settlementMode"`
-	SettleTokenSymbol  string    `json:"settleTokenSymbol,omitempty"`
-	SettleTokenAddress string    `json:"settleTokenAddress,omitempty"`
-	SettleChainID      int64     `json:"settleChainId,omitempty"`
-	ReturnURL          string    `json:"returnUrl,omitempty"`
-	Payable            bool      `json:"payable"`
-	NotPayableWhy      string    `json:"notPayableWhy,omitempty"`
+	ID                 uuid.UUID  `json:"id"`
+	PayCode            string     `json:"payCode,omitempty"` // shown under the merchant's name; the receipt's number
+	MerchantName       string     `json:"merchantName"`
+	Mode               string     `json:"mode"`
+	Source             string     `json:"source"` // api, link or open: an open payment's description is the payer's own note
+	Status             string     `json:"status"`
+	Amount             int64      `json:"amount"`
+	CustomerTotal      int64      `json:"customerTotal"`
+	Fee                int64      `json:"fee"`
+	MerchantNet        int64      `json:"merchantNet"`
+	Currency           string     `json:"currency"`
+	Description        string     `json:"description"`
+	CustomerName       string     `json:"customerName,omitempty"`
+	LinkLabel          string     `json:"linkLabel,omitempty"` // open-link payments: the link paid through (the note, the description, is often empty)
+	ExpiresAt          time.Time  `json:"expiresAt"`
+	SettlementMode     string     `json:"settlementMode"`
+	SettleTokenSymbol  string     `json:"settleTokenSymbol,omitempty"`
+	SettleTokenAddress string     `json:"settleTokenAddress,omitempty"`
+	SettleChainID      int64      `json:"settleChainId,omitempty"`
+	ReturnURL          string     `json:"returnUrl,omitempty"`
+	SucceededAt        *time.Time `json:"succeededAt,omitempty"` // when it was paid, for the receipt
+	ReceiptURL         string     `json:"receiptUrl,omitempty"`  // the public page verifying it: live payments, once succeeded
+	Payable            bool       `json:"payable"`
+	NotPayableWhy      string     `json:"notPayableWhy,omitempty"`
 	// NotPayableCode is set when the payer can fix the block themselves: one
 	// of the KYC refusal codes, so the app can offer the next step.
 	NotPayableCode string `json:"notPayableCode,omitempty"`
@@ -84,6 +93,10 @@ type PayCheckoutView struct {
 	// FailureReason says why her payment failed — written for her ("support is
 	// reviewing it") — and only to her.
 	FailureReason string `json:"failureReason,omitempty"`
+	// MerchantRefund is what the merchant refunded her (USD stablecoin), only
+	// to the payer; absent when nothing was (omitempty keeps the existing
+	// exact key-set tests valid). Distinct from a returned attempt.
+	MerchantRefund *PayMerchantRefund `json:"merchantRefund,omitempty"`
 }
 
 // PayPublicView is the unauthenticated status page a customer's browser (or
@@ -97,6 +110,7 @@ type PayCheckoutView struct {
 // id.
 type PayPublicView struct {
 	ID            uuid.UUID  `json:"id"`
+	PayCode       string     `json:"payCode,omitempty"` // to copy, or type in the app; the receipt's number
 	MerchantName  string     `json:"merchantName"`
 	Mode          string     `json:"mode"`
 	Source        string     `json:"source"`
@@ -105,13 +119,14 @@ type PayPublicView struct {
 	Amount        int64      `json:"amount"`
 	CustomerTotal int64      `json:"customerTotal"`
 	Currency      string     `json:"currency"`
-	Description   string     `json:"description,omitempty"`  // links and open links only
+	Description   string     `json:"description,omitempty"`  // payPublicPurpose: links and open links only
 	CustomerName  string     `json:"customerName,omitempty"` // links only
 	LinkLabel     string     `json:"linkLabel,omitempty"`    // open links only: the link it was paid through
 	OpenLinkURL   string     `json:"openLinkUrl,omitempty"`  // open links only, while that link takes payments
 	ExpiresAt     time.Time  `json:"expiresAt"`
 	SucceededAt   *time.Time `json:"succeededAt,omitempty"`
-	ReturnURL     string     `json:"returnUrl,omitempty"` // only once succeeded
+	ReturnURL     string     `json:"returnUrl,omitempty"`  // only once succeeded
+	ReceiptURL    string     `json:"receiptUrl,omitempty"` // live payments, once succeeded
 	AppURL        string     `json:"appUrl"`
 }
 
@@ -123,7 +138,8 @@ func payCancelled(p *models.PayPayment) bool {
 
 // Views is View for each of ps, with each open-link payment's LinkLabel filled
 // in (one query) — its description is the customer's note, often empty, so the
-// label is what says what it was for.
+// label is what says what it was for — and, with refunds wired, each payment's
+// refund totals (one more query).
 func (s *PayPaymentService) Views(ctx context.Context, ps []models.PayPayment) ([]PayPaymentView, error) {
 	var ids []uuid.UUID
 	for i := range ps {
@@ -142,6 +158,20 @@ func (s *PayPaymentService) Views(ctx context.Context, ps []models.PayPayment) (
 			views[i].LinkLabel = labels[*ps[i].OpenLinkID]
 		}
 	}
+	// Every page's refund totals in one grouped query, not one per row.
+	if s.refundAgg != nil && len(ps) > 0 {
+		ids := make([]uuid.UUID, len(ps))
+		for i := range ps {
+			ids[i] = ps[i].ID
+		}
+		aggs, err := s.refundAgg.AggregateByPayment(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range ps {
+			views[i].withRefunds(aggs[ps[i].ID])
+		}
+	}
 	return views, nil
 }
 
@@ -153,37 +183,53 @@ func (s *PayPaymentService) CheckoutURL(id uuid.UUID) string {
 // View builds the merchant-facing read shape for p from the row alone, so it
 // leaves LinkLabel empty: that needs the open link. Views fills it in for a
 // page of payments with one query; a caller already holding the link sets it
-// itself. The webhook payload is a View.
+// itself. It reads no refunds either, so it says "never refunded": Views and
+// the webhook payload (webhookData) add the refund totals.
 func (s *PayPaymentService) View(p *models.PayPayment) PayPaymentView {
 	return PayPaymentView{
-		ID:            p.ID,
-		Reference:     p.Reference,
-		Mode:          p.Mode,
-		Status:        p.Status,
-		Cancelled:     payCancelled(p),
-		Source:        p.Source,
-		Amount:        p.AmountKobo,
-		CustomerTotal: p.CustomerTotalKobo,
-		MerchantNet:   p.MerchantNetKobo,
-		Fee:           p.CustomerTotalKobo - p.MerchantNetKobo,
-		Currency:      p.Currency,
-		Description:   p.Description,
-		CustomerName:  p.CustomerName,
-		OpenLinkID:    p.OpenLinkID,
-		ReturnURL:     p.ReturnURL,
-		ExpiresAt:     p.ExpiresAt,
-		SettlementRef: p.SettlementRef,
-		FailureReason: p.FailureReason,
-		SucceededAt:   p.SucceededAt,
-		AppURL:        "tsaconnect://pay?id=" + p.ID.String(),
-		CheckoutURL:   s.CheckoutURL(p.ID),
-		CreatedAt:     p.CreatedAt,
+		ID:             p.ID,
+		Reference:      p.Reference,
+		PayCode:        formatStoredPayCode(p.PayCode),
+		Mode:           p.Mode,
+		Status:         p.Status,
+		Cancelled:      payCancelled(p),
+		Source:         p.Source,
+		Amount:         p.AmountKobo,
+		CustomerTotal:  p.CustomerTotalKobo,
+		MerchantNet:    p.MerchantNetKobo,
+		Fee:            p.CustomerTotalKobo - p.MerchantNetKobo,
+		Currency:       p.Currency,
+		Description:    p.Description,
+		CustomerName:   p.CustomerName,
+		OpenLinkID:     p.OpenLinkID,
+		ReturnURL:      p.ReturnURL,
+		ExpiresAt:      p.ExpiresAt,
+		SettlementRef:  p.SettlementRef,
+		FailureReason:  p.FailureReason,
+		SucceededAt:    p.SucceededAt,
+		AppURL:         "tsaconnect://pay?id=" + p.ID.String(),
+		CheckoutURL:    s.CheckoutURL(p.ID),
+		CreatedAt:      p.CreatedAt,
+		RefundedAmount: FormatMicroUSD(0),
+		RefundStatus:   PayRefundStatusNone,
 	}
 }
 
+// withRefunds sets v's refund fields from agg (zero agg: never refunded).
+func (v *PayPaymentView) withRefunds(agg PayRefundAgg) {
+	v.RefundedAmount = FormatMicroUSD(agg.RefundedMicroUSD)
+	if agg.Status != "" {
+		v.RefundStatus = agg.Status
+	}
+}
+
+// RefundsWired reports whether refunds exist on this server (an aggregator is set).
+func (s *PayPaymentService) RefundsWired() bool { return s.refundAgg != nil }
+
 // CheckoutView builds the app checkout screen's read shape for id: the
-// payment, plus whether THIS user may pay it right now. It never mutates
-// state — Lock is the only thing that does.
+// payment, plus whether THIS user may pay it right now. It never changes a
+// payment's state — Lock is the only thing that does; it only gives a succeeded
+// payment from before codes its code (EnsurePayCode).
 func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User, id uuid.UUID, liveEnabled bool) (*PayCheckoutView, error) {
 	p, err := s.Get(ctx, id)
 	if err != nil {
@@ -211,6 +257,8 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 
 	v := &PayCheckoutView{
 		ID:                 p.ID,
+		PayCode:            s.payCodeFor(ctx, p),
+		SucceededAt:        p.SucceededAt,
 		MerchantName:       m.BusinessName,
 		Mode:               p.Mode,
 		Source:             p.Source,
@@ -254,12 +302,16 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 			v.OrderStatus = order.Status
 		}
 	}
+	if isPayer && p.Status == models.PayStatusSucceeded {
+		v.MerchantRefund = s.merchantRefundsFor(ctx, []uuid.UUID{p.ID})[p.ID]
+	}
 	// A return URL often carries the merchant's own order token, so it is
 	// shown only once the payment has succeeded — like PublicView — not to
 	// whoever merely holds the payment id.
 	if p.Status == models.PayStatusSucceeded {
 		v.ReturnURL = p.ReturnURL
 	}
+	v.ReceiptURL = s.receiptURL(p)
 	return v, nil
 }
 
@@ -310,6 +362,7 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID, liveEn
 	}
 	v := &PayPublicView{
 		ID:            p.ID,
+		PayCode:       s.payCodeFor(ctx, p),
 		MerchantName:  m.BusinessName,
 		Mode:          p.Mode,
 		Source:        p.Source,
@@ -322,11 +375,17 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID, liveEn
 		SucceededAt:   p.SucceededAt,
 		AppURL:        "tsaconnect://pay?id=" + p.ID.String(),
 	}
+	description, kind, err := s.payPublicPurpose(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if kind != payPurposeLinkLabel { // the open link is named in LinkLabel instead
+		v.Description = description
+	}
 	switch p.Source {
 	case models.PaySourceLink:
-		v.Description, v.CustomerName = p.Description, p.CustomerName
+		v.CustomerName = p.CustomerName
 	case models.PaySourceOpen:
-		v.Description = p.Description // the customer's own note, if any
 		if p.OpenLinkID != nil {
 			var l models.PayOpenLink
 			if err := s.db.WithContext(ctx).First(&l, "id = ?", *p.OpenLinkID).Error; err != nil {
@@ -340,6 +399,7 @@ func (s *PayPaymentService) PublicView(ctx context.Context, id uuid.UUID, liveEn
 	if p.Status == models.PayStatusSucceeded {
 		v.ReturnURL = p.ReturnURL
 	}
+	v.ReceiptURL = s.receiptURL(p)
 	return v, nil
 }
 
@@ -395,6 +455,7 @@ func (s *PayPaymentService) Payer(ctx context.Context, p *models.PayPayment) (*P
 // hers — except to reach a refund (OrderID), which lives on that order.
 type PayHistoryItem struct {
 	ID            uuid.UUID  `json:"id"`
+	PayCode       string     `json:"payCode,omitempty"`
 	MerchantName  string     `json:"merchantName"`
 	Description   string     `json:"description,omitempty"`
 	Status        string     `json:"status"`
@@ -406,6 +467,9 @@ type PayHistoryItem struct {
 	// any report of it, are on that order. The payment itself may have been
 	// paid since, or be payable again, so it is not this row's receipt.
 	OrderID *uuid.UUID `json:"orderId,omitempty"`
+	// MerchantRefund: the merchant's refund of this payment to her (paid rows
+	// only); absent when there is none.
+	MerchantRefund *PayMerchantRefund `json:"merchantRefund,omitempty"`
 }
 
 // PayHistoryRefunded is the Status of a refunded past attempt. Not a payment
@@ -427,6 +491,7 @@ const payHistoryCap = 50
 func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) ([]PayHistoryItem, error) {
 	type row struct {
 		ID                uuid.UUID
+		PayCode           *string
 		OrderID           *uuid.UUID
 		BusinessName      string
 		Description       string
@@ -448,7 +513,7 @@ func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) 
 	var current []row
 	err := s.db.WithContext(ctx).
 		Table("pay_payments AS p").
-		Select("p.id, m.business_name, p.description, p.status, p.customer_total_kobo, p.currency, "+
+		Select("p.id, p.pay_code, m.business_name, p.description, p.status, p.customer_total_kobo, p.currency, "+
 			"p.locked_at, p.created_at, p.succeeded_at").
 		Joins("JOIN pay_merchants AS m ON m.id = p.merchant_id").
 		Where("p.payer_user_id = ? AND p.mode = ?", userID, models.PayModeLive).
@@ -461,7 +526,7 @@ func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) 
 	var refunded []row
 	err = s.db.WithContext(ctx).
 		Table("paycrest_order_records AS o").
-		Select("p.id, o.id AS order_id, m.business_name, p.description, ? AS status, p.customer_total_kobo, p.currency, "+
+		Select("p.id, p.pay_code, o.id AS order_id, m.business_name, p.description, ? AS status, p.customer_total_kobo, p.currency, "+
 			"o.created_at", PayHistoryRefunded).
 		Joins("JOIN pay_payments AS p ON p.id = o.pay_payment_id").
 		Joins("JOIN pay_merchants AS m ON m.id = p.merchant_id").
@@ -483,9 +548,21 @@ func (s *PayPaymentService) PayerHistory(ctx context.Context, userID uuid.UUID) 
 	out := make([]PayHistoryItem, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, PayHistoryItem{
-			ID: r.ID, OrderID: r.OrderID, MerchantName: r.BusinessName, Description: r.Description, Status: r.Status,
+			ID: r.ID, PayCode: formatStoredPayCode(r.PayCode), OrderID: r.OrderID, MerchantName: r.BusinessName, Description: r.Description, Status: r.Status,
 			CustomerTotal: r.CustomerTotalKobo, Currency: r.Currency, PaidAt: paidAt(r), SucceededAt: r.SucceededAt,
 		})
+	}
+	var paid []uuid.UUID
+	for _, it := range out {
+		if it.Status == models.PayStatusSucceeded {
+			paid = append(paid, it.ID)
+		}
+	}
+	refunds := s.merchantRefundsFor(ctx, paid)
+	for i := range out {
+		if out[i].Status == models.PayStatusSucceeded {
+			out[i].MerchantRefund = refunds[out[i].ID]
+		}
 	}
 	return out, nil
 }

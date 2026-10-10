@@ -94,8 +94,14 @@ type TreasuryTxProbe interface {
 // blocks it has not seen. Nothing is decided; the next tick reads again.
 var errRPCEndpointChanged = errors.New("the RPC endpoint changed while the chain was read, so the answers may come from different nodes — not decided; the next tick reads again")
 
+// RPCEndpoint is a chain client whose RPC endpoint changes are counted
+// (blockchain.EVMClient, blockchain.ProbeClient).
+type RPCEndpoint interface {
+	EndpointGeneration() uint64
+}
+
 // endpointSteady is nil while probe is still on the endpoint it was on at gen.
-func endpointSteady(probe TreasuryTxProbe, gen uint64) error {
+func endpointSteady(probe RPCEndpoint, gen uint64) error {
 	if probe.EndpointGeneration() != gen {
 		return errRPCEndpointChanged
 	}

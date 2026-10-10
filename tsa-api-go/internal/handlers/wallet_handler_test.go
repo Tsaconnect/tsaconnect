@@ -728,6 +728,32 @@ func TestParseTokenAmount(t *testing.T) {
 		{"0", 18, "", false},
 		{"-1", 18, "", false},
 		{"abc", 18, "", false},
+		// Exactness: 64-bit float math made these one base unit short.
+		{"0.13", 18, "130000000000000000", true},
+		{"0.13", 6, "130000", true},
+		{"1.5", 6, "1500000", true},
+		{"0.000001", 6, "1", true},
+		// Digits beyond the token's decimals are floored, not refused.
+		{"0.1234567", 6, "123456", true},
+		{"1.239", 2, "123", true},
+		{"1.9", 0, "1", true},
+		{"0.001", 2, "", false},
+		{"0.0000001", 6, "", false},
+		// ".5" and "12." are normalised (older app versions send them); exponents,
+		// signs and bare "." are malformed.
+		{"12.", 6, "12000000", true},
+		{".5", 6, "500000", true},
+		{" 1 ", 6, "1000000", true},
+		{".", 6, "", false},
+		{"", 6, "", false},
+		{"1e3", 6, "", false},
+		{"+1", 6, "", false},
+		// Malformed input is refused before any digits are dropped.
+		{"1.2.3", 1, "", false},
+		{"1.5e3", 1, "", false},
+		{"1.x", 0, "", false},
+		{"1..5", 0, "", false},
+		{"1.5e", 1, "", false},
 	}
 
 	for _, tt := range tests {

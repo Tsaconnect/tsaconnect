@@ -27,7 +27,7 @@ export const PENDING_PAY_KEY = 'tsapay.pendingPayment';
 /** How long a payment is remembered when its expiry isn't known. */
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 /** The longest a payment is ever remembered, whatever its expiry says. */
-const MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** `until` is when to stop replaying it; a record from an older build has none. */
 type Pending = { id: string; savedAt: number; until?: number };

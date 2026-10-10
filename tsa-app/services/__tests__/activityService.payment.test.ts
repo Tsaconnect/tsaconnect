@@ -85,4 +85,14 @@ describe('activity feed: TSA Pay source', () => {
     expect(await pager.next()).toEqual([]);
     expect(pager.hasMore()).toBe(false);
   });
+
+  it('a payment the merchant refunded says so under it, not as a refunded attempt', async () => {
+    (listMyPayments as jest.Mock).mockResolvedValue([
+      { ...payment, merchantRefund: { status: 'full', amount: '12.50', tokenSymbol: 'USDT' } },
+      { ...payment, id: 'p2', merchantRefund: null },
+    ]);
+    const items = await createActivityPager(['payment'], 20).next();
+    expect(items[0]).toMatchObject({ subtitle: 'Refunded 12.50 USDT', statusVisual: { label: 'Paid', tone: 'success' }, href: '/pay?id=p1' });
+    expect(items[1].subtitle).toBe('LOS-ABV 12 Oct');
+  });
 });

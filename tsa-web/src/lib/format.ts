@@ -41,3 +41,6 @@ export function initials(name: string): string {
   const letters = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
   return letters || '?';
 }
+
+/** A decimal USD string from the API ("12.50") → "$12.50". */
+export const usd = (amount: string) => `$${amount}`;

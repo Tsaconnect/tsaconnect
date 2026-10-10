@@ -14,12 +14,20 @@ import (
 // the panic value and the stack — and never the request itself: gin's own
 // Recovery (gin.Default, gin.CustomRecovery) dumps every header, the web
 // session Cookie included, into the log.
+//
+// http.ErrAbortHandler is passed on, not recovered: a handler panics with it to
+// cut a response it has already started (a CSV export failing part-way), and
+// only net/http can abort the connection so the client sees the body end early
+// instead of a clean, complete-looking end. net/http logs no stack for it.
 func Recover() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			v := recover()
 			if v == nil {
 				return
+			}
+			if v == http.ErrAbortHandler {
+				panic(v)
 			}
 			user := "-"
 			if u := userFromContext(c); u != nil {

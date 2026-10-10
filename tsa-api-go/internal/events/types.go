@@ -85,6 +85,16 @@ const (
 	PayBusinessNameApproved  = "pay_business_name_approved"
 	PayBusinessNameRejected  = "pay_business_name_rejected"
 
+	// TSA Pay refunds. Requested (owner: approve it in the app — not sent when
+	// they asked in the app), received (payer: money reached their wallet),
+	// confirmed / failed / needs review (owner). Data carries refundId and
+	// paymentId. Test refunds are prefixed "Test: ".
+	PayRefundRequested   = "pay_refund_requested"
+	PayRefundReceived    = "pay_refund_received"
+	PayRefundConfirmed   = "pay_refund_confirmed"
+	PayRefundFailed      = "pay_refund_failed"
+	PayRefundNeedsReview = "pay_refund_needs_review"
+
 	// Name change by re-verification: started (fee paid), applied, held for an
 	// admin because the evidence was not strong enough to apply itself,
 	// refused by that admin, or run out of attempts or time. Data carries

@@ -314,8 +314,9 @@ func TestPay_AReleasedThenRetriedPaymentSucceedsWithoutTheOldReason(t *testing.T
 	r := newPayCheckoutRig(t)
 	withWebhooks(t, r.pay, r.m)
 	first := r.startedOrder(t, models.PaycrestStatusRefunded, nil)
-	if got := r.tickAt(t, time.Minute); got.Status != models.PayStatusPending || !strings.Contains(got.FailureReason, "refunded") {
-		t.Fatalf("after the release: %+v", got)
+	released := r.tickAt(t, time.Minute)
+	if released.Status != models.PayStatusPending || !strings.Contains(released.FailureReason, "refunded") {
+		t.Fatalf("after the release: %+v", released)
 	}
 	bob := payUser(t, r.pay, true)
 	second, err := r.svc.PayDirect(context.Background(), bob, r.p.ID, PayDirectInput{ChainKey: "base", Token: "USDC"})
@@ -336,7 +337,8 @@ func TestPay_AReleasedThenRetriedPaymentSucceedsWithoutTheOldReason(t *testing.T
 	}
 	ds := deliveries(t, r.pay)
 	last := ds[len(ds)-1]
-	if last.Event != models.PayEventSucceeded || strings.Contains(last.Payload, "refunded") || strings.Contains(last.Payload, first.ID.String()) {
+	// The old reason itself, not the word: every body now carries refundedAmount.
+	if last.Event != models.PayEventSucceeded || strings.Contains(last.Payload, released.FailureReason) || strings.Contains(last.Payload, first.ID.String()) {
 		t.Fatalf("payment.succeeded payload = %s", last.Payload)
 	}
 }

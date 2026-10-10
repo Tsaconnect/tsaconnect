@@ -18,8 +18,9 @@ import {
   type SponsorshipOffer,
 } from './gasSponsorship';
 import { PaycrestError } from './paycrestApi';
+import { signPreparedTransaction } from './signPreparedTransaction';
 import { txHashOrThrow, TRANSFER_COPY } from './submitErrors';
-import { signTransaction, signTypedData } from './wallet';
+import { signTypedData } from './wallet';
 import {
   prepareSendTransaction,
   sendPreparedTransaction,
@@ -254,19 +255,7 @@ export async function sendPaycrestDeposit(
         assertPreparedTransfer(tx, { tokenAddress: order.tokenAddress, to, amountBaseUnits: order.amountBaseUnits, chainId });
       }
       assertGasAffordable(tx.gasPrice, tx.gasLimit, nativeBalance, nativeCurrency.symbol, order.chain);
-      return signTransaction(
-        {
-          type: 0, // legacy transaction format, as everywhere else in the app
-          to: tx.to,
-          data: tx.data,
-          value: tx.value,
-          gasLimit: tx.gasLimit,
-          gasPrice: tx.gasPrice,
-          nonce: tx.nonce,
-          chainId: tx.chainId,
-        },
-        fromAddress,
-      );
+      return signPreparedTransaction(tx, fromAddress);
     },
     submit: async (signed) => {
       await opts.beforeBroadcast?.();

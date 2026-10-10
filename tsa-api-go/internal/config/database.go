@@ -227,6 +227,7 @@ func AutoMigrate() error {
 		// TSA Pay (merchant payments)
 		&models.PayMerchant{},
 		&models.PayPayment{},
+		&models.PayRefund{},
 		&models.PayWebhookDelivery{},
 		&models.PayAuditEvent{},
 		&models.PayOwnerAction{},

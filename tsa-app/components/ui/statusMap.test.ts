@@ -71,4 +71,12 @@ describe('P2P status map', () => {
   it('releasing maps to the escrow tone (off-chain intermediate)', () => {
     expect(getStatusVisual('trade', 'releasing').tone).toBe('escrow');
   });
+
+  it('covers every refund status', () => {
+    expect(Object.keys(STATUS_MAP.payRefund).sort()).toEqual(
+      ['cancelled', 'confirmed', 'failed', 'needs_review', 'requested', 'submitted'],
+    );
+    expect(getStatusVisual('payRefund', 'requested').label).toBe('Waiting for you');
+    expect(getStatusVisual('payRefund', 'confirmed').tone).toBe('success');
+  });
 });

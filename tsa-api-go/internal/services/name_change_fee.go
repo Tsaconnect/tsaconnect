@@ -6,12 +6,6 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
-	"strings"
-	"time"
-
-	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 )
 
 // The re-verification fee's money legs. MCGP is taken as an operator debit hold
@@ -98,54 +92,20 @@ type stableFeeRail interface {
 	TransactionKnown(ctx context.Context, chain, txHash string) (known bool, sender string, err error)
 }
 
-// StablePayment is what one fee transaction proved.
-type StablePayment struct {
-	// Credited is what the Transfer logs moved from the payer to the treasury.
-	Credited *big.Int
-	// Sender signed the transaction. A fee must be sent by the proven wallet
-	// itself, not moved out of it by some contract it once approved.
-	Sender string
-	// BlockTime dates the transaction: a transfer from before the change was
-	// opened cannot have been made for it.
-	BlockTime time.Time
-	// Confirmations is how deep the transaction is.
-	Confirmations uint64
-}
-
-// FeeTxReader is the slice of an Ethereum client a fee proof needs;
-// *ethclient.Client satisfies it.
-type FeeTxReader interface {
-	TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error)
-	TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error)
-	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
-	BlockNumber(ctx context.Context) (uint64, error)
-}
-
 // TreasuryFeeRail takes stablecoin fees into the ramp treasury, on the chains it
 // has lanes for, and refunds out of the same lanes. It needs no key or float of
 // its own: an unwired treasury simply means the stablecoin method is unavailable.
+// Proving a fee is the shared StableTransferVerifier's job.
 type TreasuryFeeRail struct {
-	treasury  *Treasury
-	verifiers map[string]ERC20TransferVerifier
-	readers   map[string]FeeTxReader
+	*StableTransferVerifier
+	treasury *Treasury
 }
 
 // NewTreasuryFeeRail wires the treasury, the per-chain transfer verifiers (the
 // same map converted buys prove their deliveries with) and a transaction reader
 // per chain for the sender, time and depth of a payment.
 func NewTreasuryFeeRail(treasury *Treasury, verifiers map[string]ERC20TransferVerifier, readers map[string]FeeTxReader) *TreasuryFeeRail {
-	return &TreasuryFeeRail{treasury: treasury, verifiers: verifiers, readers: readers}
-}
-
-// FeeTxReaders is a transaction reader for each chain key that has a client.
-func FeeTxReaders(chains *BlockchainService, keys []string) map[string]FeeTxReader {
-	out := map[string]FeeTxReader{}
-	for _, k := range keys {
-		if c := chains.ClientForChain(k); c != nil && c.Client != nil {
-			out[strings.ToLower(k)] = c.Client
-		}
-	}
-	return out
+	return &TreasuryFeeRail{StableTransferVerifier: NewStableTransferVerifier(verifiers, readers), treasury: treasury}
 }
 
 func (r *TreasuryFeeRail) Available() bool {
@@ -202,47 +162,7 @@ func (r *TreasuryFeeRail) PrepareTransfer(chain, tokenAddress, from string, amou
 }
 
 func (r *TreasuryFeeRail) VerifyPayment(ctx context.Context, chain, txHash, tokenAddress, from, to string) (*StablePayment, error) {
-	key := strings.ToLower(strings.TrimSpace(chain))
-	v, ok := r.verifiers[key].(ERC20SourcedTransferVerifier)
-	reader := r.readers[key]
-	if !ok || reader == nil {
-		return nil, fmt.Errorf("%w: no verifier for %s", ErrTransferNotFound, chain)
-	}
-	credited, verr := v.VerifyTransferFrom(ctx, txHash, tokenAddress, from, to)
-	if verr != nil && !errors.Is(verr, ErrTransferNoMatch) {
-		return nil, verr
-	}
-	hash := common.HexToHash(txHash)
-	tx, _, err := reader.TransactionByHash(ctx, hash)
-	if err != nil {
-		return nil, fmt.Errorf("verify: read transaction: %w", err)
-	}
-	sender, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
-	if err != nil {
-		return nil, fmt.Errorf("verify: recover sender: %w", err)
-	}
-	receipt, err := reader.TransactionReceipt(ctx, hash)
-	if err != nil || receipt == nil || receipt.BlockNumber == nil {
-		return nil, fmt.Errorf("verify: read receipt: %v", err)
-	}
-	header, err := reader.HeaderByNumber(ctx, receipt.BlockNumber)
-	if err != nil {
-		return nil, fmt.Errorf("verify: read block: %w", err)
-	}
-	head, err := reader.BlockNumber(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("verify: read chain head: %w", err)
-	}
-	var depth uint64
-	if n := receipt.BlockNumber.Uint64(); head >= n {
-		depth = head - n + 1
-	}
-	p := &StablePayment{Credited: credited, Sender: sender.Hex(), BlockTime: time.Unix(int64(header.Time), 0).UTC(), Confirmations: depth}
-	if verr != nil {
-		p.Credited = new(big.Int)
-		return p, verr
-	}
-	return p, nil
+	return r.Verify(ctx, chain, txHash, tokenAddress, from, to)
 }
 
 func (r *TreasuryFeeRail) Refund(ctx context.Context, chain, token, to string, amount *big.Int, usd float64) (string, bool, error) {
@@ -257,37 +177,4 @@ func (r *TreasuryFeeRail) Refund(ctx context.Context, chain, token, to string, a
 		return "", false, err
 	}
 	return r.treasury.TransferToken(ctx, lane, token, to, amount)
-}
-
-func (r *TreasuryFeeRail) TransactionKnown(ctx context.Context, chain, txHash string) (bool, string, error) {
-	reader, err := r.reader(chain)
-	if err != nil {
-		return false, "", err
-	}
-	tx, _, err := reader.TransactionByHash(ctx, common.HexToHash(txHash))
-	switch {
-	case errors.Is(err, ethereum.NotFound):
-		return false, "", nil
-	case err != nil:
-		return false, "", err
-	}
-	// The signer is readable while the transaction is still pending — which is
-	// what lets a hash named by someone other than its sender be told apart
-	// before it mines.
-	if tx == nil {
-		return true, "", nil
-	}
-	sender, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
-	if err != nil {
-		return true, "", nil
-	}
-	return true, sender.Hex(), nil
-}
-
-func (r *TreasuryFeeRail) reader(chain string) (FeeTxReader, error) {
-	reader := r.readers[strings.ToLower(strings.TrimSpace(chain))]
-	if reader == nil {
-		return nil, fmt.Errorf("no transaction reader for %s", chain)
-	}
-	return reader, nil
 }

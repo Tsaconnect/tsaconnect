@@ -2,8 +2,10 @@
 // Field names match the Go json tags exactly.
 import { api } from '@/lib/api';
 import type { Mode } from '@/components/shell/mode';
+import type { RefundStatus } from '@/components/ui/status-pill';
 
 export type { Mode };
+export type { RefundStatus };
 
 export type OwnMerchant = {
   id: string;
@@ -52,6 +54,8 @@ export type PaymentSource = 'api' | 'link' | 'open';
 export type Payment = {
   id: string;
   reference: string;
+  /** The customer's code, "TSA-XXXXX-XXXXX": shown on their checkout and receipt, typed in the app to pay. Absent on payments from before codes. */
+  payCode?: string;
   mode: Mode;
   status: PaymentStatus;
   amount: number;
@@ -75,6 +79,10 @@ export type Payment = {
   settlementRef?: string;
   failureReason?: string;
   succeededAt?: string;
+  /** Confirmed refunds so far, in US dollars ("0.00" when none). An older API leaves it out. */
+  refundedAmount?: string;
+  /** none, partial or full — the payment's status stays succeeded either way. */
+  refundStatus?: 'none' | 'partial' | 'full';
   createdAt: string;
 };
 
@@ -93,7 +101,8 @@ export type Delivery = {
 
 export type Page<T> = { items: T[]; total: number; page: number; limit: number };
 export type PaymentPage = Page<Payment>;
-export type PaymentFilter = { status?: string; q?: string; page?: number; limit?: number };
+/** `from`/`to`: YYYY-MM-DD days in WAT, the end included; sent only as a pair. */
+export type PaymentFilter = { status?: string; q?: string; page?: number; limit?: number; from?: string; to?: string };
 
 // Reads take TanStack Query's signal, so a query it drops is cancelled on the wire.
 export const getMerchant = (signal?: AbortSignal) => api<OwnMerchant>('/pay/merchant', { signal });
@@ -102,6 +111,7 @@ const pageQuery = (mode: Mode, p: PaymentFilter) => new URLSearchParams({
   mode,
   ...(p.status ? { status: p.status } : {}),
   ...(p.q ? { q: p.q } : {}),
+  ...(p.from && p.to ? { from: p.from, to: p.to } : {}),
   page: String(p.page ?? 1),
   ...(p.limit ? { limit: String(p.limit) } : {}),
 });
@@ -133,6 +143,66 @@ export type PaymentDetail = { payment: Payment; payer: Payer | null; deliveries:
 
 export const getPayment = (mode: Mode, id: string, signal?: AbortSignal) =>
   api<PaymentDetail>(`/pay/merchant/payments/${encodeURIComponent(id)}?mode=${mode}`, { signal });
+
+// Refunds. The merchant asks here; the business owner approves and sends each one from
+// their TSA wallet in the TSA Connect app (USDT or USDC). Amounts are decimal US dollars ("12.50").
+export type Refund = {
+  id: string;
+  paymentId: string;
+  mode: Mode;
+  status: RefundStatus;
+  amount: string;
+  /** What could be refunded in all when it was asked for. */
+  cap: string;
+  /** What actually arrived, once confirmed. */
+  credited?: string;
+  reason?: string;
+  toAddress: string;
+  /** Set once it is sent: the owner's wallet, the network and the token. */
+  fromAddress?: string;
+  chainId?: number;
+  tokenSymbol?: string;
+  tokenAddress?: string;
+  txHash?: string;
+  failureReason?: string;
+  /** The network refused the last send, in words for the owner; "" once a send went through. The refund stays submitted and is retried. */
+  lastBroadcastError?: string;
+  lastBroadcastAt?: string | null;
+  requestedVia: 'web' | 'app';
+  createdAt: string;
+  submittedAt?: string | null;
+  confirmedAt?: string | null;
+};
+
+/** A payment's refunds and what is left to refund; one that can't be refunded says why. */
+export type PaymentRefunds = { refunds: Refund[]; cap: string; remaining: string; refundable: boolean; notRefundableReason: string };
+
+/** A refunds-list row: the refund and the payment it returns. */
+export type RefundRow = Refund & { paymentCode?: string; customerName?: string; description?: string };
+export type RefundPage = { refunds: RefundRow[]; total: number; page: number; limit: number };
+/** `from`/`to`: YYYY-MM-DD (WAT, `to` inclusive); empty is unbounded. */
+export type RefundFilter = { status?: string; from?: string; to?: string; page?: number; limit?: number };
+
+export const listPaymentRefunds = (mode: Mode, paymentId: string, signal?: AbortSignal) =>
+  api<PaymentRefunds>(`/pay/merchant/payments/${encodeURIComponent(paymentId)}/refunds?mode=${mode}`, { signal });
+
+/** Like a link, one Idempotency-Key per request body. A test payment's refund comes back done. */
+export const createRefund = (mode: Mode, paymentId: string, body: { amount: string; reason: string }, idempotencyKey: string) =>
+  api<{ refund: Refund }>(`/pay/merchant/payments/${encodeURIComponent(paymentId)}/refunds?mode=${mode}`, {
+    method: 'POST',
+    body,
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+
+export const listRefunds = (mode: Mode, f: RefundFilter, signal?: AbortSignal) =>
+  api<RefundPage>(`/pay/merchant/refunds?${new URLSearchParams({
+    mode,
+    ...(f.status ? { status: f.status } : {}),
+    ...(f.from ? { from: f.from } : {}),
+    ...(f.to ? { to: f.to } : {}),
+    page: String(f.page ?? 1),
+    ...(f.limit ? { limit: String(f.limit) } : {}),
+  })}`, { signal });
 
 // Guarded actions: password → emailed code → confirm.
 export type Pending = { id: string; kind: 'settlement' | 'keys' | 'endpoints' | 'webhook_secret' | 'business_name'; expiresAt: string; sentTo: string };
@@ -256,3 +326,33 @@ export const updateOpenLink = (mode: Mode, id: string, change: OpenLinkChange) =
 /** A new address for the same link (same id); the old one, and every poster of it, stops taking payments. */
 export const replaceOpenLink = (mode: Mode, id: string) =>
   api<OpenLink>(`/pay/merchant/open-links/${encodeURIComponent(id)}/replace?mode=${mode}`, { method: 'POST' });
+
+/**
+ * A period's totals (GET /payments/summary). `succeeded` is the payments paid in
+ * it, by the day they were paid, in kobo. `byStatus` is the payments made in it,
+ * by how they ended ('cancelled' apart from 'expired'). `refunds` is the refunds
+ * confirmed in it; its amount is a decimal USD string ("12.50").
+ */
+export type PaymentSummary = {
+  succeeded: { count: number; customerTotal: number; merchantNet: number };
+  byStatus: Record<string, number>;
+  refunds: { count: number; amount: string };
+};
+
+export const getPaymentSummary = (mode: Mode, from: string, to: string, signal?: AbortSignal) =>
+  api<PaymentSummary>(`/pay/merchant/payments/summary?${new URLSearchParams({ mode, from, to })}`, { signal });
+
+/** Most rows, and days, one export holds: the API refuses more. */
+export const EXPORT_MAX_ROWS = 10_000;
+export const EXPORT_MAX_DAYS = 366;
+
+/** The CSV of payments paid from `from` to `to`. It is a plain download, so it carries the session cookie itself. */
+export const paymentsExportUrl = (mode: Mode, from: string, to: string) =>
+  `/api/pay/merchant/payments/export?${new URLSearchParams({ mode, from, to })}`;
+
+/**
+ * Sends a webhook again. One that hasn't arrived is retried now. One that has is
+ * sent anew, with a new delivery id and the payment as it is now; its record stays.
+ */
+export const resendDelivery = (mode: Mode, id: string) =>
+  api<{ delivery: Delivery }>(`/pay/merchant/deliveries/${encodeURIComponent(id)}/resend?mode=${mode}`, { method: 'POST' });

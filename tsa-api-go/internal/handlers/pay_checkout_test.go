@@ -64,7 +64,7 @@ func TestPayCheckout_PublicStatusKeySetAndReturnURL(t *testing.T) {
 	}
 	// An API payment's description is the merchant's own (a PNR here) and never
 	// reaches the public page.
-	pendingKeys := []string{"id", "merchantName", "mode", "source", "status", "amount", "customerTotal", "currency", "expiresAt", "appUrl"}
+	pendingKeys := []string{"id", "payCode", "merchantName", "mode", "source", "status", "amount", "customerTotal", "currency", "expiresAt", "appUrl"}
 	if len(resp.Data) != len(pendingKeys) {
 		t.Fatalf("pending key set = %v", resp.Data)
 	}
@@ -178,7 +178,7 @@ func TestPayCheckout_TestOutcomeKeySetMatchesCheckoutView(t *testing.T) {
 	}
 
 	wantKeys := []string{
-		"id", "merchantName", "mode", "source", "status", "amount", "customerTotal", "fee",
+		"id", "payCode", "succeededAt", "merchantName", "mode", "source", "status", "amount", "customerTotal", "fee",
 		"merchantNet", "currency", "description", "expiresAt", "settlementMode",
 		"returnUrl", "payable", "notPayableWhy", "youArePaying",
 	}

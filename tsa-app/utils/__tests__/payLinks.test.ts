@@ -15,6 +15,7 @@ import type { PayLink } from '@/services/payMerchantApi';
 import {
   koboFromNairaInput, nairaFieldText, nairaInputError, openLinkAmountRule, openLinkNotTakingWhy, openLinkRangeFrom, openLinkReceived,
   openLinkShareMessage, openLinkStatus, openPaymentPurpose, payLinkCounts, payLinkReceives, payLinkShareMessage, payLinkStatus, payLinkTimeRow,
+  safeReceiptUrl,
 } from '../payLinks';
 
 it('reads the amount field as whole kobo', () => {
@@ -125,4 +126,26 @@ it('says what is wrong with an amount: nothing, zero, or not plain naira', () =>
   expect(nairaInputError('0')).toBe('Enter an amount more than ₦0.');
   expect(nairaInputError('0.00')).toBe('Enter an amount more than ₦0.');
   expect(nairaInputError('5,000')).toContain('Enter naira with a point for kobo');
+});
+
+// The server builds the receipt URL from its checkout base, which may be the
+// apex or www. — both are our own receipt page (the landing accepts both too).
+it.each([
+  'https://tsaconnectworld.com/r/TSA-7K2QF-M9XWD',
+  'https://www.tsaconnectworld.com/r/TSA-7K2QF-M9XWD',
+  'https://WWW.TSAConnectWorld.com/r/TSA-7K2QF-M9XWD',
+])('trusts our own receipt page at %s', (url) => {
+  expect(safeReceiptUrl(url)).toBe(url);
+});
+
+it.each([
+  'https://pay.tsaconnectworld.com/r/TSA-7K2QF-M9XWD',
+  'https://wwww.tsaconnectworld.com/r/TSA-7K2QF-M9XWD',
+  'https://www.tsaconnectworld.com.evil.example/r/TSA-7K2QF-M9XWD',
+  'https://evil.com#@www.tsaconnectworld.com/r/TSA-7K2QF-M9XWD',
+  'http://www.tsaconnectworld.com/r/TSA-7K2QF-M9XWD',
+  'https://www.tsaconnectworld.com/login',
+  'https://www.tsaconnectworld.com/r/',
+])('refuses %s', (url) => {
+  expect(safeReceiptUrl(url)).toBeUndefined();
 });

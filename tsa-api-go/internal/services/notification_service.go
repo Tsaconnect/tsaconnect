@@ -57,6 +57,11 @@ var emailEvents = map[string]bool{
 	events.PayBusinessNameRequested: true,
 	events.PayBusinessNameApproved:  true,
 	events.PayBusinessNameRejected:  true,
+	// The merchant's own refund notices; the payer's PayRefundReceived is push and in-app only.
+	events.PayRefundRequested:   true,
+	events.PayRefundConfirmed:   true,
+	events.PayRefundFailed:      true,
+	events.PayRefundNeedsReview: true,
 	// A change to the name on the account — the one payouts are matched
 	// against — goes to the account's email at every step that matters, so a
 	// change the owner did not start is seen out of the app.
@@ -119,6 +124,11 @@ var pushEvents = map[string]bool{
 	events.PayBusinessNameRequested:     true,
 	events.PayBusinessNameApproved:      true,
 	events.PayBusinessNameRejected:      true,
+	events.PayRefundRequested:           true,
+	events.PayRefundConfirmed:           true,
+	events.PayRefundFailed:              true,
+	events.PayRefundNeedsReview:         true,
+	events.PayRefundReceived:            true,
 	events.NameChangeStarted:            true,
 	events.NameChangeApproved:           true,
 	events.NameChangeHeld:               true,

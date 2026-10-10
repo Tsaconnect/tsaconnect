@@ -29,6 +29,12 @@ const (
 	PayEventFailed    = "payment.failed"
 	PayEventExpired   = "payment.expired"
 
+	// PayEventRefunded: a refund the merchant sent on a succeeded payment was
+	// confirmed on-chain. The payment stays succeeded; `data` is the payment
+	// with its refund totals; the refund itself is the top-level `refund`
+	// beside `data`.
+	PayEventRefunded = "payment.refunded"
+
 	// PaySourceAPI is a payment a merchant's own server created with its API
 	// key; PaySourceLink is a one-time payment link the owner made by hand in
 	// the app or on the web, for one customer; PaySourceOpen is a payment a
@@ -160,10 +166,15 @@ func (m *PayMerchant) WebhookURLFor(mode string) string {
 // one). AttemptedAt is when a payer first locked it: unlike LockedAt it is
 // never cleared, so a payment someone tried and gave up on stays tried.
 type PayPayment struct {
-	ID                      uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	MerchantID              uuid.UUID  `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1" json:"merchantId"`
-	Mode                    string     `gorm:"size:8;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:2;index:idx_pay_payments_merchant_mode_created,priority:2" json:"mode"`
-	Reference               string     `gorm:"size:128;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:3" json:"reference"`
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	MerchantID uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:1;index:idx_pay_payments_merchant_mode_created,priority:1;index:idx_pay_payments_merchant_mode_succeeded,priority:1" json:"merchantId"`
+	Mode       string    `gorm:"size:8;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:2;index:idx_pay_payments_merchant_mode_created,priority:2;index:idx_pay_payments_merchant_mode_succeeded,priority:2" json:"mode"`
+	Reference  string    `gorm:"size:128;not null;uniqueIndex:uq_pay_payments_merchant_ref,priority:3" json:"reference"`
+	// PayCode is the short code a payer reads off a page or an invoice and
+	// types into the app (spec D7): ten Crockford base32 characters, bare and
+	// upper case; services.FormatPayCode shows it as TSA-XXXXX-XXXXX. Nil only
+	// on a payment made before codes existed, until EnsurePayCode gives it one.
+	PayCode                 *string    `gorm:"size:10;uniqueIndex:idx_pay_payments_pay_code" json:"-"`
 	AmountKobo              int64      `gorm:"not null" json:"amount"`
 	Currency                string     `gorm:"size:3;not null" json:"currency"`
 	Description             string     `gorm:"size:255" json:"description"`
@@ -193,7 +204,7 @@ type PayPayment struct {
 	PaycrestOrderID         *uuid.UUID `gorm:"type:uuid;uniqueIndex" json:"-"`
 	SettlementRef           string     `gorm:"size:128" json:"settlementRef,omitempty"`
 	FailureReason           string     `gorm:"size:255" json:"failureReason,omitempty"`
-	SucceededAt             *time.Time `json:"succeededAt,omitempty"`
+	SucceededAt             *time.Time `gorm:"index:idx_pay_payments_merchant_mode_succeeded,priority:3" json:"succeededAt,omitempty"`
 	CreatedAt               time.Time  `gorm:"index:idx_pay_payments_merchant_mode_created,priority:3;index:idx_pay_payments_open_link_created,priority:2" json:"createdAt"`
 	UpdatedAt               time.Time  `json:"updatedAt"`
 }

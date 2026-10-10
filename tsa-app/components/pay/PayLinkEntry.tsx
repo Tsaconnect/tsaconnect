@@ -1,7 +1,7 @@
 // components/pay/PayLinkEntry.tsx
 //
 // Where a TSA Pay merchant starts a payment link: a Request payment action and
-// a Payment links row. The same pair sits on Payment Settings and on the
+// a Payment links row (and her Refunds). The same pair sits on Payment Settings and on the
 // merchant dashboard's TSA Pay card; the card also carries the Payment settings
 // row, since it is an approved merchant's one way back to where she is paid.
 import React from 'react';
@@ -9,7 +9,7 @@ import { View } from 'react-native';
 import { router, type Href } from 'expo-router';
 import { useTheme } from '@/theme';
 import { Button, Icon, PressableScale, Text, type IconName } from '@/components/ui';
-import { PAY_LINK_NEW, PAY_LINKS, PAY_SETTINGS } from '@/constants/routes';
+import { PAY_LINK_NEW, PAY_LINKS, PAY_REFUNDS, PAY_SETTINGS } from '@/constants/routes';
 
 /**
  * `canRequest` is false for a suspended merchant: she may still read her links.
@@ -23,6 +23,7 @@ export function PayLinkEntry({ canRequest = true, withSettings = false }: { canR
         <Button title="Request payment" leftIcon="send" onPress={() => router.push(PAY_LINK_NEW)} />
       ) : null}
       <EntryRow icon="list" label="Payment links" href={PAY_LINKS} />
+      <EntryRow icon="refresh" label="Refunds" href={PAY_REFUNDS} />
       {withSettings ? <EntryRow icon="bank" label="Payment settings" href={PAY_SETTINGS} /> : null}
     </View>
   );

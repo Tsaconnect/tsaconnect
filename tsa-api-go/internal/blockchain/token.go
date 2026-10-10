@@ -218,7 +218,7 @@ func (c *EVMClient) PrepareERC20Transfer(tokenAddress, from, to string, amount *
 	tokenAddr := common.HexToAddress(tokenAddress)
 	fromAddr := common.HexToAddress(from)
 
-	data, err := parsedERC20ABI.Pack("transfer", toAddr, amount)
+	data, err := ERC20TransferData(toAddr, amount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack transfer call: %w", err)
 	}

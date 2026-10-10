@@ -864,3 +864,35 @@ func TestPayPayment_ExpirePendingForMerchantCanBeLimitedToLive(t *testing.T) {
 		t.Fatalf("deliveries = %+v", ds)
 	}
 }
+
+func TestPayPayment_GetByReferenceIsExactAndScopedToMerchantAndMode(t *testing.T) {
+	ctx := context.Background()
+	s, m := newPayPaymentRig(t)
+	p, _, err := s.Create(ctx, m, models.PayModeLive, payIn()) // PNR-ABC123
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"PNR-ABC123", "  PNR-ABC123 "} {
+		if got, err := s.GetByReference(ctx, m.ID, models.PayModeLive, ref); err != nil || got.ID != p.ID {
+			t.Fatalf("%q: %v %v", ref, got, err)
+		}
+	}
+	other := seedPayMerchant(t, s.db)
+	for name, c := range map[string]struct {
+		merchant  uuid.UUID
+		mode, ref string
+	}{
+		"case":     {m.ID, models.PayModeLive, "pnr-abc123"},
+		"prefix":   {m.ID, models.PayModeLive, "PNR-ABC"},
+		"wildcard": {m.ID, models.PayModeLive, "PNR-ABC12%"},
+		"mode":     {m.ID, models.PayModeTest, "PNR-ABC123"},
+		"merchant": {other.ID, models.PayModeLive, "PNR-ABC123"},
+		"empty":    {m.ID, models.PayModeLive, "  "},
+		"nul":      {m.ID, models.PayModeLive, "PNR\x00"},
+		"too long": {m.ID, models.PayModeLive, strings.Repeat("x", 129)},
+	} {
+		if _, err := s.GetByReference(ctx, c.merchant, c.mode, c.ref); !errors.Is(err, ErrPayPaymentNotFound) {
+			t.Fatalf("%s: err %v", name, err)
+		}
+	}
+}

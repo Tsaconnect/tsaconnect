@@ -5,17 +5,22 @@
 // do not add a second unlock path), and nothing runs until the payer actually
 // authorizes. usePayTest, usePayNaira and usePayCrypto each hand it what to do
 // once they have; the modal props they spread are this hook's `authorization`.
+// An optional `description` says what is being authorized (the refund screen
+// names the amount, token, network and the customer's wallet before she signs).
 import { useCallback, useState } from 'react';
 
 export type AuthorizationProps = {
   visible: boolean;
   title: string;
+  /** What is being authorized, in words (the refund screen names amount, token, network and wallet). */
+  description?: string;
   onAuthorized(): void;
   onCancel(): void;
 };
 
 export function usePayAuthorization<T>(opts: {
   title: (pending: T | null) => string;
+  description?: (pending: T | null) => string | undefined;
   onAuthorized: (pending: T) => void;
 }): { request(pending: T): void; authorization: AuthorizationProps } {
   const [visible, setVisible] = useState(false);
@@ -41,6 +46,12 @@ export function usePayAuthorization<T>(opts: {
 
   return {
     request,
-    authorization: { visible, title: opts.title(pending?.value ?? null), onAuthorized, onCancel },
+    authorization: {
+      visible,
+      title: opts.title(pending?.value ?? null),
+      description: opts.description?.(pending?.value ?? null),
+      onAuthorized,
+      onCancel,
+    },
   };
 }

@@ -1370,6 +1370,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminPay.GET("/payments", payh.AdminListPayments)
 			adminPay.GET("/payments/:id/deliveries", payh.AdminPaymentDeliveries)
 			adminPay.POST("/deliveries/:id/resend", payh.AdminResendWebhook)
+			// Refunds across merchants; re-reading the chain to close a
+			// needs_review refund is super_admin, like IT sell reevaluate.
+			// Mounted always: with refunds off they answer 503.
+			adminPay.GET("/refunds", payh.AdminListRefunds)
+			adminPay.POST("/refunds/:id/reevaluate", middleware.RequireSuperAdmin(), payh.AdminReevaluateRefund)
 		}
 
 		// TSA Pay merchant API — its own top-level group, deliberately NOT
@@ -1387,6 +1392,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			middleware.RateLimiterBy(120, time.Minute, middleware.PayMerchantRateKey))
 		{
 			merchantAPI.POST("/payments", payh.CreatePayment)
+			merchantAPI.GET("/payments", payh.FindPaymentByReference) // ?reference= exact
 			merchantAPI.GET("/payments/:id", payh.GetPayment)
 			merchantAPI.POST("/payments/:id/cancel", payh.CancelPayment)
 		}
@@ -1395,6 +1401,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// (not the merchant-key limiter above, which a customer's browser
 		// never authenticates against).
 		payRoot.GET("/public/:id", middleware.RateLimiter(120, time.Minute), payh.Public)
+
+		// A succeeded live payment's public receipt, for the verify page its QR
+		// opens (tsaconnectworld.com/r/<code>). No auth; never cached; 30 a
+		// minute per address; a code no payment could have is answered as an
+		// unknown one before any lookup.
+		payRoot.GET("/public/receipt/:code", middleware.NoStore(), middleware.RateLimiter(30, time.Minute),
+			handlers.PayCodeGuard, payh.PublicReceipt)
 
 		// An open link's payer page: no auth. A :slug no link could have is
 		// answered not found before anything keyed on it or any lookup.
@@ -1442,6 +1455,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// never cached.
 		api.GET("/pay/history", middleware.NoStore(), auth, middleware.RateLimiterBy(60, time.Minute, perUserRateKey), payh.History)
 
+		// A payment code typed into the app (Wallet -> TSA Pay): only the id, so
+		// the app opens the checkout it already has. Guessing is what to stop:
+		// 60 a minute per address before auth (it counts every try), 20 a
+		// minute per user after it, and a code no payment could have is
+		// answered exactly as an unknown one, before any lookup.
+		api.GET("/pay/code/:code", middleware.NoStore(), middleware.RateLimiter(60, time.Minute), auth,
+			middleware.RateLimiterBy(20, time.Minute, perUserRateKey), handlers.PayCodeGuard, payh.CodeLookup)
+
 		// A merchant's own account, from the app and the web: JWT user auth.
 		// Every guarded request (payouts, keys, webhooks, the webhook secret)
 		// re-checks the password in-handler and has its own tight limit — a
@@ -1454,6 +1475,26 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			owner.GET("", payh.OwnerMerchant)
 			owner.GET("/payments", payh.OwnerPayments)
 			owner.GET("/payments/:id", payh.OwnerPayment)
+			// Refunds (merchant-funded, in USDT/USDC). A create resent with the
+			// same Idempotency-Key replays the first answer; the one-open rule
+			// refuses a second refund anyway. Creating and cancelling share one
+			// write limit; a signed transfer handed over has its own. Refund-id
+			// routes take no mode: the row has its own. Mounted always: with
+			// refunds unwired they answer 503.
+			refundWrite := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
+			owner.POST("/payments/:id/refunds", middleware.Idempotency(config.DB), refundWrite, payh.OwnerCreateRefund)
+			owner.GET("/payments/:id/refunds", payh.OwnerPaymentRefunds)
+			owner.GET("/refunds", payh.OwnerRefunds)
+			owner.GET("/refunds/:id", payh.OwnerRefund)
+			owner.POST("/refunds/:id/cancel", refundWrite, payh.OwnerCancelRefund)
+			owner.POST("/refunds/:id/submit", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerSubmitRefund)
+			// Reconciliation reads. Static segments beside /payments/:id (Gin 1.10
+			// matches the static route first).
+			owner.GET("/payments/summary", payh.OwnerPaymentSummary)
+			// The CSV reads up to 10,000 rows: its own tight limit.
+			owner.GET("/payments/export", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerExportPayments)
+			// A webhook sent again: scoped to the owner's merchant and mode in-handler.
+			owner.POST("/deliveries/:id/resend", middleware.RateLimiterBy(10, time.Minute, perUserRateKey), payh.OwnerResendDelivery)
 			// Payment links. A create resent with the same Idempotency-Key (a
 			// retry after a lost answer) replays the first link rather than
 			// making a second; it does not hold back a second request already in

@@ -305,3 +305,15 @@ func TestRampSellRouters_ReusesTheTreasuryAllowlistByChainID(t *testing.T) {
 		t.Fatalf("routers = %v, want only bsc (56) with the diamond", got)
 	}
 }
+
+// A chain that exists only on testnet is never a verification lane; one on
+// both networks appears once.
+func TestEVMChainKeys_ExcludesTestnetOnlyChains(t *testing.T) {
+	cfg := &config.Config{Networks: map[string]config.NetworkConfig{
+		"mainnet": {Chains: map[string]config.ChainConfig{"bsc": {}}},
+		"testnet": {Chains: map[string]config.ChainConfig{"bsc": {}, "bsc-testnet": {}, "sepolia": {}}},
+	}}
+	if got := strings.Join(evmChainKeys(cfg), ","); got != "bsc" {
+		t.Fatalf("keys = %s, want only bsc", got)
+	}
+}

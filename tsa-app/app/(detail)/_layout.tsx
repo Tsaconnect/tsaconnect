@@ -55,6 +55,9 @@ export default function DetailLayout() {
       <Stack.Screen name="multiswap" options={{ title: 'Multi-Asset Swap' }} />
       <Stack.Screen name="transfer" options={{ title: 'Transfer' }} />
 
+      {/* TSA Pay by code — the wallet tab's TSA Pay tile. */}
+      <Stack.Screen name="pay-code" options={{ title: 'TSA Pay' }} />
+
       {/* Rewards trio — linked from Home, the services hub, the marketplace
           tab strip and the profile menu. */}
       <Stack.Screen name="trade" options={{ title: 'Trade & Earn' }} />

@@ -134,12 +134,14 @@ func rejectedDefinitely(err error) bool {
 			return false
 		}
 	}
+	if rejectedForFunds(err) {
+		return true
+	}
 	msg := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
 	if strings.Contains(msg, "replacementtransactionunderpriced") {
 		return false
 	}
 	for _, definite := range []string{
-		"insufficientfunds",
 		"transactionunderpriced",
 		"exceedstheconfiguredcap",
 		"lessthanblockbasefee",
@@ -150,6 +152,13 @@ func rejectedDefinitely(err error) bool {
 		}
 	}
 	return false
+}
+
+// rejectedForFunds reports the node refusing a send its sender cannot pay
+// for (geth/erigon "insufficient funds", nethermind "InsufficientFunds").
+func rejectedForFunds(err error) bool {
+	msg := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
+	return strings.Contains(msg, "insufficientfunds")
 }
 
 // fakeReleaseSigner records calls for tests and returns a canned hash.

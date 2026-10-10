@@ -35,6 +35,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Camera } from 'expo-camera';
 import { WebView } from 'react-native-webview';
 import { useTheme } from '@/theme';
+import { strictHttpsHost } from '@/utils/strictHttpsHost';
 
 /** Ask for the camera; explain and offer Settings when refused. */
 export async function requestCameraPermission(): Promise<boolean> {
@@ -55,31 +56,14 @@ export async function requestCameraPermission(): Promise<boolean> {
 /** The domain Didit's hosted flow is served from (verify.didit.me and its siblings). */
 const DIDIT_HOSTS = ['didit.me'];
 
-/** The authority of an https URL, read strictly: a plain host name and an optional port, nothing else. */
-const STRICT_HTTPS_HOST = /^https:\/\/([a-z0-9.-]+)(?::\d{1,5})?(?:[/?#]|$)/i;
-
 /**
  * An https page on a Didit host — the only pages the session WebView shows.
  *
- * Parsed with URL, and held to agreeing with a strict reading of the
- * authority: React Native's own URL is a set of regexes that does not validate
- * (it reads "https://evil.com#@verify.didit.me" as Didit's), while a browser
- * reads a backslash as a slash ("https://evil.com\@verify.didit.me" is
- * evil.com). So a backslash, whitespace, a user name or password, or any
- * disagreement between the two readings is refused.
+ * Held to the strict host reading in utils/strictHttpsHost (RN's URL does not validate).
  */
 export function isDiditOrigin(raw: string): boolean {
-  if (/[\\\s]/.test(raw)) return false;
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return false;
-  }
-  const strict = STRICT_HTTPS_HOST.exec(raw);
-  const host = url.hostname.toLowerCase();
-  if (url.protocol !== 'https:' || url.username || url.password || !strict || strict[1].toLowerCase() !== host) return false;
-  return DIDIT_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
+  const host = strictHttpsHost(raw);
+  return host !== null && DIDIT_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
 }
 
 /** A frame's own blank document (about:blank, about:srcdoc) — no origin of its own to load. */

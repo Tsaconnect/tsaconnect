@@ -91,6 +91,11 @@ func TestCreateSellForFiat_KeepSurplusPaysTheInvoiceWithinTheMarginAtEverySize(t
 			slack := new(big.Rat).Mul(big.NewRat(2, 10_000), rate)
 			slack.Add(slack, new(big.Rat).Mul(new(big.Rat).Mul(tokens, rate), big.NewRat(1, 1_000_000)))
 			slack.Add(slack, big.NewRat(1, 100))
+			// And what the fee is chosen to leave for Paycrest's reported fee
+			// (paycrestReportedSellFee) over the one it takes: tokens × p²/(1 + p).
+			p := new(big.Rat).Quo(naira(sent.SenderFeePercent), big.NewRat(100, 1))
+			over := new(big.Rat).Quo(new(big.Rat).Mul(tokens, new(big.Rat).Mul(p, p)), new(big.Rat).Add(big.NewRat(1, 1), p))
+			slack.Add(slack, new(big.Rat).Mul(over, rate))
 			most := new(big.Rat).Add(new(big.Rat).Add(owed, payMerchantMargin(tokens)), slack)
 			for _, rounding := range []feeRounding{roundDown, roundHalfUp, roundUp} {
 				paid := paycrestPaysFor(t, sent.AmountToken, sent.SenderFeePercent, tc.rate, rounding)
@@ -134,12 +139,14 @@ func TestCreateSellForFiat_KeepSurplusNeverTouchesAConvertedSell(t *testing.T) {
 func TestCreateSellForFiat_KeepSurplusAbsorbsATickButRefusesARealMove(t *testing.T) {
 	tick := newOrderServiceWithFakes(t)
 	withRate(tick, "1500")
+	tick.client.offrampReportsFeeOnDeposit = true
 	tick.client.offrampRate = "1499.995"
 	if _, err := tick.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, tick, "500000.00"), false, nil); err != nil {
 		t.Fatalf("a half-kobo tick refused a ₦500k order: %v", err)
 	}
 	moved := newOrderServiceWithFakes(t)
 	withRate(moved, "1500")
+	moved.client.offrampReportsFeeOnDeposit = true
 	moved.client.offrampRate = "1499.95"
 	if _, err := moved.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, moved, "500000.00"), false, nil); !errors.Is(err, ErrSellRateMoved) {
 		t.Fatalf("err = %v, want ErrSellRateMoved: a 5-kobo move is past the budget", err)
@@ -154,6 +161,28 @@ func TestCreateSellForFiat_KeepSurplusChecksAgainstTheFeePaycrestReports(t *test
 	r.client.offrampSenderFee = "0.5" // far more than 1.x% of the deposit
 	if _, err := r.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, r, "1000.00"), false, nil); !errors.Is(err, ErrSellRateMoved) {
 		t.Fatalf("err = %v: an order whose reported fee leaves the merchant short must be refused", err)
+	}
+}
+
+// Paycrest reports deposit × p at creation, more than the deposit × p/(1 + p)
+// it takes by deposit × p²/(1 + p) — past the drift margin from about ₦3k. An
+// order at the very rate it was quoted must still open: from 2026-10-09 every
+// ₦5,000 TSA Pay payment was refused as "the rate moved" with the rate unmoved.
+func TestCreateSellForFiat_KeepSurplusClearsTheFeePaycrestReportsAtEverySize(t *testing.T) {
+	for _, tc := range []struct{ fiat, rate string }{
+		{"1000.00", "1362.66"},
+		{"5000.00", "1352.22"}, // the refused live payment
+		{"50000.00", "1500"},
+		{"5000000.00", "1500"},
+	} {
+		t.Run(tc.fiat, func(t *testing.T) {
+			r := newOrderServiceWithFakes(t)
+			withRate(r, tc.rate)
+			r.client.offrampReportsFeeOnDeposit = true
+			if _, err := r.svc.CreateSellForFiat(context.Background(), keepSurplusReq(t, r, tc.fiat), false, nil); err != nil {
+				t.Fatalf("₦%s at an unmoved %s: %v", tc.fiat, tc.rate, err)
+			}
+		})
 	}
 }
 
@@ -191,7 +220,7 @@ func TestKeepSurplusFeePercent_TakesTheHighestStepThatStillClears(t *testing.T) 
 	}
 	target := new(big.Rat).Add(owed, payMerchantMargin(tokens))
 	clears := func(s int) bool {
-		f, _ := paycrestSellFee(tokens, stepsToFeePercent(s, surplusFeeStepsPerPercent))
+		f, _ := paycrestReportedSellFee(tokens, stepsToFeePercent(s, surplusFeeStepsPerPercent))
 		return paycrestSellPayout(tokens, f, naira("1500")).Cmp(target) >= 0
 	}
 	if !clears(steps) || clears(steps+1) {

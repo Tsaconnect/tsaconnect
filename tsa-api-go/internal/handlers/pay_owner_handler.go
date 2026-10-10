@@ -374,7 +374,7 @@ func payOwnerMode(c *gin.Context) (string, bool) {
 	return mode, true
 }
 
-// GET /api/pay/merchant/payments?mode&status&source&q&page&limit — the owner's
+// GET /api/pay/merchant/payments?mode&status&source&q&from&to&page&limit — the owner's
 // payments in one mode, newest first: all of them, or only those their server
 // made (source=api), they sent as one-time links (source=link), or customers
 // started through their open links (source=open). status=cancelled is
@@ -402,9 +402,14 @@ func (h *PayHandler) ownerPaymentList(c *gin.Context, source string) {
 	if !ok {
 		return
 	}
+	start, end, ok := payOwnerDateRange(c)
+	if !ok {
+		return
+	}
 	page, limit := payOwnerPage(c)
 	rows, total, err := h.payments.List(c.Request.Context(), services.PayListFilter{MerchantID: &m.ID, Mode: mode,
-		Status: strings.TrimSpace(c.Query("status")), HideUntriedOpen: true, Source: source, Query: c.Query("q"), Page: page, Limit: limit})
+		Status: strings.TrimSpace(c.Query("status")), HideUntriedOpen: true, Source: source, Query: c.Query("q"),
+		From: start, To: end, Page: page, Limit: limit})
 	if err != nil {
 		payOwnerFail(c, err)
 		return
@@ -475,8 +480,7 @@ func (h *PayHandler) OwnerPayment(c *gin.Context) {
 	}
 	views := make([]payOwnerDeliveryView, len(deliveries))
 	for i, d := range deliveries {
-		views[i] = payOwnerDeliveryView{ID: d.ID, Event: d.Event, Attempts: d.Attempts, LastStatusCode: d.LastStatusCode,
-			LastError: d.LastError, NextAttemptAt: d.NextAttemptAt, DeliveredAt: d.DeliveredAt, FailedAt: d.FailedAt, CreatedAt: d.CreatedAt}
+		views[i] = payOwnerDelivery(d)
 	}
 	payment, err := h.payments.Views(c.Request.Context(), []models.PayPayment{*p})
 	if err != nil {
@@ -498,6 +502,11 @@ type payOwnerDeliveryView struct {
 	DeliveredAt    *time.Time `json:"deliveredAt,omitempty"`
 	FailedAt       *time.Time `json:"failedAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
+}
+
+func payOwnerDelivery(d models.PayWebhookDelivery) payOwnerDeliveryView {
+	return payOwnerDeliveryView{ID: d.ID, Event: d.Event, Attempts: d.Attempts, LastStatusCode: d.LastStatusCode,
+		LastError: d.LastError, NextAttemptAt: d.NextAttemptAt, DeliveredAt: d.DeliveredAt, FailedAt: d.FailedAt, CreatedAt: d.CreatedAt}
 }
 
 // payOwnerBind is the signed-in owner with the request body read into req.
@@ -689,7 +698,14 @@ func payOwnerFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPayCodeInvalid):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "That code isn't right", "code_invalid")
 	default:
-		log.Printf("[tsa-pay] owner request failed: %s %s: %v", c.Request.Method, c.FullPath(), err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Request failed")
+		payInternalFail(c, err)
 	}
+}
+
+// payInternalFail answers an unrecognised error on a Pay route: the error is
+// logged redacted (a database or RPC error can carry a provider URL or key)
+// and the caller gets a plain 500, never the error's words.
+func payInternalFail(c *gin.Context, err error) {
+	log.Printf("[tsa-pay] request failed: %s %s: %s", c.Request.Method, c.FullPath(), services.RedactAlertText(err.Error()))
+	utils.ErrorResponse(c, http.StatusInternalServerError, "Something went wrong")
 }

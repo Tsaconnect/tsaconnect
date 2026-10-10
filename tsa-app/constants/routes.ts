@@ -44,5 +44,11 @@ export const PAY_SETTINGS = '/merchants/pay-settings' satisfies Href;
 export const PAY_LINKS = '/merchants/pay-links' satisfies Href;
 export const PAY_LINK_NEW = '/merchants/pay-links/new' satisfies Href;
 
+/** TSA Pay by code: the payer types the code a business gave her (wallet tab → TSA Pay). */
+export const PAY_CODE = '/pay-code' satisfies Href;
+
 /** A verified user's name change: pay, verify again with her ID, and its outcome. */
 export const NAME_CHANGE = '/profile/name-change' satisfies Href;
+
+/** A TSA Pay merchant's refunds, each approved and sent from her TSA wallet. */
+export const PAY_REFUNDS = '/merchants/refunds' satisfies Href;

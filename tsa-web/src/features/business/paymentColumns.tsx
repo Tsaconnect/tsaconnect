@@ -74,6 +74,7 @@ export const paymentColumns: PaymentColumn[] = [
             {rowLink(href, p.reference)}
             {tag && <Badge tone="neutral">{tag}</Badge>}
           </span>
+          {p.payCode && <p className="font-mono text-caption text-text-secondary">{p.payCode}</p>}
           {line && <p className="max-w-[320px] truncate text-caption text-text-secondary">{line}</p>}
         </>
       );
