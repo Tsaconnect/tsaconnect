@@ -323,7 +323,7 @@ func TestExpiry_LegacyNeverCancelsATradeWithAPayoutInFlight(t *testing.T) {
 	}{
 		{"payout in flight", map[string]any{"nomba_payout_id": "po_1"}, false},
 		{"payout started, id lost", map[string]any{"payout_started_at": time.Now().Add(-40 * time.Minute)}, false},
-		{"payout failed", map[string]any{"nomba_payout_id": "po_1", "cancel_reason": pmPayoutFailedReason + " (nomba payout=po_1); routed to manual"}, true},
+		{"payout failed", map[string]any{"nomba_payout_id": "po_1", "cancel_reason": pmPayoutFailedReason + " (payout=po_1); deposit will be refunded automatically"}, true},
 		{"inbound matched", map[string]any{"nomba_inbound_event_id": "evt_1"}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {

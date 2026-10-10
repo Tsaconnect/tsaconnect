@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,6 +269,14 @@ func TestHandlePayoutStatus_Failed_NoRelease(t *testing.T) {
 	// A failure marker is recorded so the manual queue / operator can see it.
 	if persisted.CancelReason == "" {
 		t.Errorf("CancelReason empty, want a payout-failure marker")
+	}
+	// Pre-merge review M-3: the expiry canceller refunds the deposit, so the
+	// marker must never invite a hand payout (both would reach the user), and
+	// it names no provider.
+	r := strings.ToLower(persisted.CancelReason)
+	if !strings.HasPrefix(persisted.CancelReason, pmPayoutFailedReason) || strings.Contains(r, "manual") ||
+		strings.Contains(r, "nomba") || !strings.Contains(r, "refunded automatically") {
+		t.Errorf("CancelReason = %q, want the failed prefix, the automatic refund, no manual route, no provider", persisted.CancelReason)
 	}
 }
 

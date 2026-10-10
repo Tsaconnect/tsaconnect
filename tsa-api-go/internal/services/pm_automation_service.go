@@ -751,7 +751,7 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 				return fmt.Errorf("release PM ledger on payout failure (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
 			}
 		}
-		log.Printf("[pm automation] WARN payout FAILED for trade=%s payout=%s (event=%s); leaving pending_payment for watchdog/manual", trade.ID, p.PayoutID, p.EventID)
+		log.Printf("[pm automation] WARN payout FAILED for trade=%s payout=%s (event=%s); leaving pending_payment for the expiry canceller to refund — never pay it by hand", trade.ID, p.PayoutID, p.EventID)
 		// Mark the reservation as already released so the later cancel path
 		// (timeout watchdog / ConfirmCancel) does NOT release it a second time —
 		// a double-release would steal another live trade's reservation or hard-
@@ -759,7 +759,9 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// Only set the marker when there was a PM reservation to release (pm != nil);
 		// a non-PM trade never reserved, so leave the marker false.
 		updates := map[string]any{
-			"cancel_reason": pmPayoutFailedReason + " (nomba payout=" + p.PayoutID + "); routed to manual",
+			// Pre-merge review M-3: the expiry canceller refunds the deposit, so
+			// the marker must never read as an invitation to pay by hand.
+			"cancel_reason": pmPayoutFailedReason + " (payout=" + p.PayoutID + "); deposit will be refunded automatically",
 		}
 		if pm != nil {
 			updates["ngn_reservation_released"] = true
