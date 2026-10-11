@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
+import { useAuth } from '../AuthContext/AuthContext';
+import { isOwnAction } from '../hooks/notificationFilter';
 
 export interface Notification {
   id: string;
@@ -41,6 +43,13 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
   const [unreadCount, setUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [connected, setConnected] = useState(false);
+  // NotificationProvider sits inside AppProvider. Ref so the socket callback
+  // sees the current user without re-binding.
+  const { currentUser } = useAuth();
+  const userIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    userIdRef.current = currentUser?.id;
+  }, [currentUser?.id]);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>();
   const reconnectDelay = useRef(1000);
@@ -89,8 +98,12 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     ws.onmessage = (event) => {
       try {
         const notification: Notification = JSON.parse(event.data);
-        setNotifications((prev) => [notification, ...prev]);
-        setUnreadCount((prev) => prev + 1);
+        // Own actions still refresh screens via the listeners below, but are
+        // not inbox/badge news.
+        if (!isOwnAction(notification, userIdRef.current)) {
+          setNotifications((prev) => [notification, ...prev]);
+          setUnreadCount((prev) => prev + 1);
+        }
         // Fan out to raw-frame subscribers (cockpit, etc.). Guard each so one
         // throwing listener can't break notification delivery to the rest.
         listenersRef.current.forEach((listener) => {
