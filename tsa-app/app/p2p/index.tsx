@@ -348,7 +348,7 @@ const P2PMarketScreen: React.FC = () => {
           <SkeletonGroup shape="adCard" count={4} />
         ) : error ? (
           error.kycCode ? (
-            <KycRequiredState code={error.kycCode} purpose="market" />
+            <KycRequiredState code={error.kycCode} />
           ) : (
             <ErrorState subtitle={error.message} onRetry={() => { setLoading(true); load(); }} />
           )

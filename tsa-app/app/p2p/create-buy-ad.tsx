@@ -34,7 +34,7 @@ import { getActiveWallet } from '../../services/wallet';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import { feeBpsFor, formatFeePct } from '../../services/p2pFee';
-import { p2pKycCode } from '../../services/p2pErrors';
+import { p2pErrorMessage, p2pKycCode } from '../../services/p2pErrors';
 import { promptKycRefusal } from '../../utils/kycRefusal';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import CurrencySelector from '../../components/currency/CurrencySelector';
@@ -241,7 +241,8 @@ const CreateBuyAdScreen: React.FC = () => {
       if (!createRes.success || !createRes.data) {
         // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
         if (promptKycRefusal(p2pKycCode(createRes), createRes.message, 'p2p')) return;
-        throw new Error(createRes.message || 'Server rejected the buy ad');
+        // rate_out_of_band carries min/max in data → "Rate must be between X and Y".
+        throw new Error(p2pErrorMessage(createRes, 'Server rejected the buy ad'));
       }
 
       // Buy-ads don't require voucher signing — navigate directly to my-ads.
@@ -481,8 +482,8 @@ const CreateBuyAdScreen: React.FC = () => {
             <Icon name="info" size={16} color={colors.info} />
             <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
               {feePct
-                ? `A ${feePct} platform fee comes out of the ${token.symbol} you receive when a trade completes.`
-                : `A platform fee comes out of the ${token.symbol} you receive when a trade completes. The exact rate shows on each trade.`}
+                ? `A ${feePct} fee comes out of the ${token.symbol} you receive when a trade completes.`
+                : `A fee comes out of the ${token.symbol} you receive when a trade completes. The exact rate shows on each trade.`}
             </Text>
           </View>
 

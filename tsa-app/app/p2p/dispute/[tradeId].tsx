@@ -236,6 +236,9 @@ const DisputeWizardScreen: React.FC = () => {
         tradeId: trade.id,
         prepare: () => tradesApi.raiseDispute(trade.id, reasonStr, callerAddress, evidenceUrls),
         confirm: (h) => tradesApi.confirmRaiseDispute(trade.id, h),
+        // A lost confirm: the trade screen shows "Confirming…" with a retry
+        // instead of re-offering the dispute, until the trade shows disputed.
+        stash: () => ({ mode: 'dispute', tradeId: trade.id, token: trade.token, amount: trade.tokenAmount }),
       });
 
       if (r.status === 'refused') {

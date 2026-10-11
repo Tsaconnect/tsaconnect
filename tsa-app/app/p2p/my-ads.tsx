@@ -15,7 +15,8 @@ import {
   type P2PAd,
 } from '../../services/p2p';
 import { p2pErrorMessage } from '../../services/p2pErrors';
-import { runP2PTx, txOutcomeAlert } from '../../services/p2pTx';
+import { runP2PTx } from '../../services/p2pTx';
+import { adCancelFollowUp } from '../../utils/p2pAdCancel';
 import { getActiveWallet } from '../../services/wallet';
 import { useTheme } from '@/theme';
 import {
@@ -54,12 +55,16 @@ const MyAdsScreen: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [acting, setActing] = useState<string>(''); // adId currently undergoing an action
+  // Ads whose cancel was broadcast but not recorded yet: shown as sent, not
+  // offered for cancel again until a later reload still shows them open.
+  const [cancelSent, setCancelSent] = useState<ReadonlySet<string>>(new Set());
 
   const load = useCallback(async () => {
     const res = await adsApi.listMine(filter === 'all' ? {} : { status: filter });
     if (res.success && res.data) {
       setAds(res.data);
       setLoadError(null);
+      setCancelSent(new Set());
     } else {
       // Keep the existing list visible (don't clobber on a transient fail)
       // but surface a retry banner so the user knows their view is stale.
@@ -113,6 +118,7 @@ const MyAdsScreen: React.FC = () => {
   };
 
   const doCancel = async (ad: P2PAd) => {
+    let reload = true;
     try {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
@@ -126,17 +132,16 @@ const MyAdsScreen: React.FC = () => {
         prepare: () => adsApi.prepareCancel(ad.id, sellerAddress),
         confirm: (h) => adsApi.confirmCancel(ad.id, h),
       });
-      if (r.status === 'confirmed' || r.status === 'no-tx') {
-        toast.success('Ad cancelled');
-      } else {
-        const a = txOutcomeAlert('Cancel', r);
-        if (a) Alert.alert(a.title, a.message);
-      }
+      const next = adCancelFollowUp(r);
+      if (next.toast) toast.success(next.toast);
+      if (next.alert) Alert.alert(next.alert.title, next.alert.message);
+      if (next.cancelSent) setCancelSent((prev) => new Set(prev).add(ad.id));
+      reload = next.reload;
     } catch (err: any) {
       toast.error(p2pErrorMessage(err?.message));
     } finally {
       setActing('');
-      load();
+      if (reload) load();
     }
   };
 
@@ -246,6 +251,7 @@ const MyAdsScreen: React.FC = () => {
                 key={ad.id}
                 ad={ad}
                 busy={acting === ad.id}
+                cancelSent={cancelSent.has(ad.id)}
                 onTogglePause={onTogglePause}
                 onCancel={onCancel}
               />
@@ -260,9 +266,10 @@ const MyAdsScreen: React.FC = () => {
 const AdCard: React.FC<{
   ad: P2PAd;
   busy: boolean;
+  cancelSent: boolean;
   onTogglePause: (ad: P2PAd) => void;
   onCancel: (ad: P2PAd) => void;
-}> = ({ ad, busy, onTogglePause, onCancel }) => {
+}> = ({ ad, busy, cancelSent, onTogglePause, onCancel }) => {
   const { spacing } = useTheme();
   const decimals = p2pTokenDecimals(ad.chainId, ad.token);
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
@@ -338,7 +345,12 @@ const AdCard: React.FC<{
                 onPress={() => onTogglePause(ad)}
               />
             )}
-            {canCancel && (
+            {canCancel && cancelSent && (
+              <Text variant="caption" color="textMuted" style={{ alignSelf: 'center' }}>
+                Cancel sent — updating once recorded
+              </Text>
+            )}
+            {canCancel && !cancelSent && (
               <Button
                 title="Cancel ad"
                 leftIcon="close"

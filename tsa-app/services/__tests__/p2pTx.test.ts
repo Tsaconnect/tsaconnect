@@ -17,6 +17,7 @@ const mockTradesApi = {
   confirmMarkPaid: jest.fn(),
   confirmRelease: jest.fn(),
   confirmCancel: jest.fn(),
+  confirmRaiseDispute: jest.fn(),
 };
 jest.mock('../p2p', () => ({
   p2pChainKey: (id: number) => `chain-${id}`,
@@ -345,6 +346,7 @@ describe('retryStashedConfirm (the trade screen\'s retry for a lost confirm)', (
     ['mark_paid', 'confirmMarkPaid', ['t1', HASH]],
     ['release', 'confirmRelease', ['t1', HASH]],
     ['cancel_trade', 'confirmCancel', ['t1', HASH]],
+    ['dispute', 'confirmRaiseDispute', ['t1', HASH]],
   ] as const)('%s → %s with the stashed hash, then unstashes', async (mode, fn, args) => {
     mockTradesApi[fn].mockResolvedValue({ success: true, data: trade });
     await expect(retryStashedConfirm({ ...base, mode })).resolves.toEqual({ status: 'confirmed', data: trade });

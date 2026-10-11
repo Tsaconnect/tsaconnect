@@ -4,13 +4,15 @@
 // never moves funds, it only creates the ad and signs its voucher (no gas).
 import { adsApi, type CreateAdInput, type P2PAd } from './p2p';
 import { signTypedData } from './wallet';
-import { p2pKycCode } from './p2pErrors';
+import { p2pKycCode, type P2PErrorLike } from './p2pErrors';
 
 export async function createAndSignAd(p: {
   payload: CreateAdInput;
   sellerAddress: string;
   onStage?: (s: string) => void;
-  statusError: (status?: number, message?: string) => string;
+  /** `res` is the whole refusal, for copy that needs its code or data
+   *  (rate_out_of_band's min/max). */
+  statusError: (status?: number, message?: string, res?: P2PErrorLike) => string;
 }): Promise<P2PAd> {
   // The server creates the ad `pending` and returns the EIP-712 voucher.
   p.onStage?.('Building voucher…');
@@ -18,9 +20,10 @@ export async function createAndSignAd(p: {
   if (!createRes.success || !createRes.data) {
     // Keep the machine code on the error so the screen can route a KYC refusal
     // to the Verify prompt instead of showing the message as a dead end.
-    throw Object.assign(new Error(p.statusError(createRes.status, createRes.message)), {
+    throw Object.assign(new Error(p.statusError(createRes.status, createRes.message, createRes)), {
       code: p2pKycCode(createRes) ?? createRes.code,
       status: createRes.status,
+      data: createRes.data,
     });
   }
   const { ad, typedData } = createRes.data;
@@ -33,7 +36,7 @@ export async function createAndSignAd(p: {
 
   p.onStage?.('Activating ad…');
   const signRes = await adsApi.sign(ad.id, signature, p.sellerAddress);
-  if (!signRes.success || !signRes.data) throw new Error(p.statusError(signRes.status, signRes.message));
+  if (!signRes.success || !signRes.data) throw new Error(p.statusError(signRes.status, signRes.message, signRes));
   // A 2xx is not proof the ad went live (a server regression could leave it
   // pending); confirm before the caller says it did.
   if (signRes.data.status !== 'active') {

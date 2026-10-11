@@ -85,9 +85,11 @@ import { confirmAsync } from '../../../utils/confirmAsync';
 import {
   markPaidConfirmMessage,
   OPEN_REVERTED_ALERT,
+  OPEN_UNCONFIRMED_COPY,
   pendingTradeTxCopy,
   RELEASE_CONFIRM_TITLE,
   releaseConfirmMessage,
+  timeoutCancelConfirm,
   tradeActions,
   tradeFeeLines,
   tradeTxFollowUp,
@@ -476,6 +478,11 @@ const TradeDetailScreen: React.FC = () => {
 
   const handleCancel = () =>
     withActing(async () => {
+      // Cancelling returns the crypto to the seller; a fiat payer who already
+      // sent the money would lose it, so say so before anything is signed.
+      const c = timeoutCancelConfirm(role);
+      const ok = await confirmAsync(c.title, c.message, 'Cancel trade', 'Keep trade', true);
+      if (!ok) return;
       await runTradeTx(
         'Cancel',
         'cancel_trade',
@@ -650,7 +657,7 @@ const TradeDetailScreen: React.FC = () => {
               <Text variant="bodySm" color="textSecondary">
                 {pendingTx?.mode === 'open' && pendingCopy
                   ? pendingCopy.body
-                  : 'Waiting for the network to confirm the escrow. This usually takes under a minute and updates on its own.'}
+                  : OPEN_UNCONFIRMED_COPY}
               </Text>
               {pendingTx?.mode === 'open' && (
                 <Button
@@ -1041,13 +1048,7 @@ const ActionPanel: React.FC<{
             />
           )}
           {a.canRelease && (
-            <Button
-              title={a.releasingDisabled ? 'Releasing…' : `Release ${trade.token}`}
-              leftIcon="lock"
-              loading={a.releasingDisabled}
-              disabled={a.releasingDisabled}
-              onPress={onRelease}
-            />
+            <Button title={`Release ${trade.token}`} leftIcon="lock" onPress={onRelease} />
           )}
           {(a.canCancel || a.canDispute) && (
             <View style={{ flexDirection: 'row', gap: spacing.sm }}>

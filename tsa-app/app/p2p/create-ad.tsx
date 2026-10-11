@@ -41,7 +41,8 @@ import {
 } from '../../services/p2p';
 import { ensureEscrowFunding } from '../../services/escrowFunding';
 import { feeBpsFor, feeSplit, formatFeePct } from '../../services/p2pFee';
-import { p2pKycCode } from '../../services/p2pErrors';
+import { p2pErrorMessage, p2pKycCode, type P2PErrorLike } from '../../services/p2pErrors';
+import { fixedRateBandRefusal } from '../../utils/p2pRateBand';
 import { promptKycRefusal } from '../../utils/kycRefusal';
 import { fundingPreflight, publishActionForFunding } from '../../services/createAdFunding';
 import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
@@ -600,6 +601,19 @@ const CreateAdScreen: React.FC = () => {
       // (spec "Review fixes" §2) — selectedChainId is undefined for a
       // single-chain token or before /p2p/chains lands; in either case we'd be
       // about to deposit something, so block until a chain is resolved.
+      // A fixed rate far off the market would sell at a loss (or never fill):
+      // stop before the deposit moves any crypto. The server re-checks on
+      // create; PM ads are exempt there too.
+      if (rateType === 'fixed' && !isPm) {
+        const refusal = fixedRateBandRefusal({
+          token: token.symbol,
+          rate: rateInput.trim(),
+          reference: suggestedRate,
+          referenceStale: rateStale,
+        });
+        if (refusal) throw new Error(refusal);
+      }
+
       const preflight = fundingPreflight({
         amountBaseUnits: tokenAmount,
         available: poolAvailable,
@@ -697,6 +711,9 @@ const CreateAdScreen: React.FC = () => {
         body =
           `The deposit can't go through right now — your wallet may be missing the ${token.symbol} ` +
           `or the network gas needed. Check your balances and try again.`;
+      } else if (/confirmation timed out/i.test(raw)) {
+        // The approve wait (escrowFunding) gave up; the approve may still land.
+        body = p2pErrorMessage(raw);
       } else {
         body = raw;
       }
@@ -782,7 +799,8 @@ const CreateAdScreen: React.FC = () => {
         );
       }
     } catch (err: any) {
-      Alert.alert('Could not add liquidity', err?.message || String(err));
+      const raw = err?.message || String(err);
+      Alert.alert('Could not add liquidity', /confirmation timed out/i.test(raw) ? p2pErrorMessage(raw) : raw);
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -793,17 +811,18 @@ const CreateAdScreen: React.FC = () => {
 
   // LP-specific HTTP copy (review M4): a 503 here is the pool closing or the
   // chain being unreachable, never a stale rate.
-  function lpStatusError(status?: number, message?: string): string {
+  function lpStatusError(status?: number, message?: string, res?: P2PErrorLike): string {
     if (status === 503) return 'The pool is closed or the network is busy right now. Your funds are safe; try again later.';
     if (status === 409) return message || 'You already have a live pool ad.';
-    return createAdStatusError(status, message);
+    return createAdStatusError(status, message, res);
   }
 
   // createAdStatusError turns the backend's HTTP status into actionable user
   // guidance. 410 (Gone) is the Phase 2B migration sentinel for stale clients
   // calling removed legacy endpoints; 503 fires when the rate feed is stale
-  // mid-publish (float ads need a fresh feed). Anything else passes through.
-  function createAdStatusError(status: number | undefined, message: string | undefined): string {
+  // mid-publish (float ads need a fresh feed). Anything else goes through the
+  // shared P2P copy (e.g. rate_out_of_band → "Rate must be between X and Y").
+  function createAdStatusError(status: number | undefined, message: string | undefined, res?: P2PErrorLike): string {
     if (status === 410) {
       return 'Your app version is out of date — please update and retry.';
     }
@@ -823,7 +842,7 @@ const CreateAdScreen: React.FC = () => {
         'seed phrase, then retry. (Server message: ' + message + ')'
       );
     }
-    return message || 'Server rejected the request';
+    return p2pErrorMessage(res ?? { status, message }, 'Server rejected the request');
   }
 
   return (
@@ -1260,7 +1279,7 @@ const CreateAdScreen: React.FC = () => {
                     value={`${symbol}${previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
                   />
                   <SummaryRow
-                    label={feePct ? `Platform fee (${feePct})` : 'Platform fee'}
+                    label={feePct ? `Fee (${feePct})` : 'Fee'}
                     value={previewFee
                       ? `${formatTokenAmount(previewFee.fee, adDecimals, 4)} ${token.symbol}`
                       : 'Shown on each trade'}
@@ -1288,8 +1307,8 @@ const CreateAdScreen: React.FC = () => {
                   <Icon name="info" size={16} color={colors.info} />
                   <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
                     {feePct
-                      ? `A ${feePct} platform fee comes out of the ${token.symbol} the buyer receives when a trade completes. You are not charged on top.`
-                      : `A platform fee comes out of the ${token.symbol} the buyer receives when a trade completes. The exact rate shows on each trade.`}
+                      ? `A ${feePct} fee comes out of the ${token.symbol} the buyer receives when a trade completes. You are not charged on top.`
+                      : `A fee comes out of the ${token.symbol} the buyer receives when a trade completes. The exact rate shows on each trade.`}
                   </Text>
                 </View>
               </Card>

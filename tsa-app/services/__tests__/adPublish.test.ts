@@ -45,6 +45,19 @@ it('refuses an ad the server left pending', async () => {
   await expect(createAndSignAd({ payload, sellerAddress: '0xabc', statusError })).rejects.toThrow(/pending/);
 });
 
+it('keeps the refusal data and hands the whole response to statusError (rate_out_of_band min/max)', async () => {
+  const refusal = {
+    success: false, status: 400, code: 'rate_out_of_band', message: 'p2p: rate out of band',
+    data: { referenceRate: '1500', minRate: '1200', maxRate: '1800', bandBps: 2000 },
+  };
+  mockCreate.mockResolvedValue(refusal);
+  const seen = jest.fn((s?: number, m?: string) => `E${s}:${m}`);
+  await expect(createAndSignAd({ payload, sellerAddress: '0xabc', statusError: seen })).rejects.toMatchObject({
+    code: 'rate_out_of_band', status: 400, data: refusal.data,
+  });
+  expect(seen).toHaveBeenCalledWith(400, 'p2p: rate out of band', refusal);
+});
+
 it('keeps the KYC refusal code on the error so the screen can prompt Verify', async () => {
   mockCreate.mockResolvedValue({ success: false, status: 403, code: 'kyc_verification_required', message: 'Identity verification required' });
   await expect(createAndSignAd({ payload, sellerAddress: '0xabc', statusError })).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });

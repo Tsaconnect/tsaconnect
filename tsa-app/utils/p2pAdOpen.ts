@@ -6,13 +6,16 @@ import {
   parseTokenAmount,
   poolApi,
   hasSufficientAllowance,
+  tradesApi,
   type ApiResponse,
+  type P2PAd,
   type P2PTrade,
   type UnsignedTx,
 } from '@/services/p2p';
 import { feeSplit, formatFeePct } from '@/services/p2pFee';
 import { p2pErrorMessage, p2pKycCode } from '@/services/p2pErrors';
 import type { RunP2PTxResult } from '@/services/p2pTx';
+import { OPEN_ABANDONED_NEXT } from '@/utils/p2pTradeView';
 
 /** What POST /p2p/ads/:id/trades returns. */
 export type OpenPrep = { trade: P2PTrade; unsignedTx: UnsignedTx | null };
@@ -21,6 +24,15 @@ export const OPEN_FAILED = 'Could not open trade';
 
 // ErrRateStale (p2p_trade_service.go): "p2p: rate source is stale; cannot quote".
 const STALE_RATE = /rate source is stale/i;
+
+// ErrActiveTradeExists (p2p_trade_service.go): "p2p: you already have an
+// active trade on this ad". The server inserts the trade at prepare, so a
+// reverted or abandoned open still holds this slot until it expires.
+const ACTIVE_TRADE_EXISTS = /already have an active trade on this ad/i;
+
+export const ACTIVE_TRADE_TITLE = 'You already have a trade on this ad';
+export const ACTIVE_TRADE_WITH_LINK = 'Finish it, or wait for it to expire, before opening another.';
+export const ACTIVE_TRADE_NO_LINK = 'You already have a trade on this ad — find it in My trades.';
 
 /** A refusal the screen routes to promptKycRefusal (utils/kycRefusal). */
 export interface KycDecision {
@@ -31,7 +43,11 @@ export interface KycDecision {
 export type OpenFollowUp =
   | { kind: 'none' }
   | ({ kind: 'kyc' } & KycDecision)
-  | { kind: 'alert'; title: string; message: string; reload: boolean }
+  /** `tradeId`: the trade the server kept for this attempt — offer "View trade". */
+  | { kind: 'alert'; title: string; message: string; reload: boolean; tradeId?: string }
+  /** The server refused because this user already holds a trade on the ad;
+   *  the screen looks it up (findMyActiveTradeOnAd) to offer a link. */
+  | { kind: 'active-trade' }
   /** Land on the trade. A lost confirm lands there too: its R4 banner retries
    *  from the stashed hash and the reconciler backfills it. */
   | { kind: 'trade'; tradeId: string; notice?: string };
@@ -43,11 +59,15 @@ export function openFollowUp(r: RunP2PTxResult<OpenPrep, P2PTrade>): OpenFollowU
     case 'confirm-failed':
       return { kind: 'trade', tradeId: r.prepared.trade.id, notice: 'Trade opened — still confirming the escrow.' };
     case 'reverted':
+      // The trade row stays until the watchdog expires it, so "try again" on
+      // this ad would be refused as an active trade.
       return {
         kind: 'alert',
         title: OPEN_FAILED,
-        message: 'The network rejected the escrow transaction, so nothing was locked (only the network fee was spent). Try again.',
+        message: 'The network rejected the escrow transaction, so nothing was locked (only the network fee was spent). ' +
+          OPEN_ABANDONED_NEXT,
         reload: true,
+        tradeId: r.prepared.trade.id,
       };
     case 'no-tx':
       return {
@@ -70,6 +90,7 @@ export function openFollowUp(r: RunP2PTxResult<OpenPrep, P2PTrade>): OpenFollowU
       }
       const code = p2pKycCode(res);
       if (code) return { kind: 'kyc', code, message: res.message };
+      if (ACTIVE_TRADE_EXISTS.test(res.message ?? '')) return { kind: 'active-trade' };
       // 409: the ad closed or its seller was suspended; 503: the ad may now
       // show as stale or paused — refresh what we show.
       return {
@@ -82,6 +103,38 @@ export function openFollowUp(r: RunP2PTxResult<OpenPrep, P2PTrade>): OpenFollowU
     default:
       // aborted (the gas alert has been shown) or busy (another run owns it).
       return { kind: 'none' };
+  }
+}
+
+/** A sign or broadcast failure (runP2PTx threw): nothing reached the chain.
+ *  When the prepare had already succeeded the server holds a trade row for
+ *  this attempt until it expires, so say that instead of inviting a retry
+ *  that would be refused. */
+export function openThrownFollowUp(message: string | undefined, preparedTradeId?: string): OpenFollowUp {
+  const reason = p2pErrorMessage(message);
+  if (!preparedTradeId) return { kind: 'alert', title: OPEN_FAILED, message: reason, reload: false };
+  return {
+    kind: 'alert',
+    title: OPEN_FAILED,
+    message: `${reason}\n\nNothing was locked. ${OPEN_ABANDONED_NEXT}`,
+    reload: true,
+    tradeId: preparedTradeId,
+  };
+}
+
+const LIVE_TRADE_STATUSES: readonly P2PTrade['status'][] = ['pending_payment', 'paid', 'releasing', 'disputed'];
+
+/** The caller's live trade on `ad`, to link from the active-trade refusal.
+ *  The opener is the buyer on a sell-ad and the seller on a buy-ad. Best
+ *  effort: null when it can't be found; never throws. */
+export async function findMyActiveTradeOnAd(ad: Pick<P2PAd, 'id' | 'side'>): Promise<string | null> {
+  try {
+    const res = await tradesApi.list({ role: ad.side === 'buy' ? 'seller' : 'buyer', limit: 50 });
+    if (!res.success || !res.data) return null;
+    const hit = res.data.find((t) => t.adId === ad.id && LIVE_TRADE_STATUSES.includes(t.status));
+    return hit?.id ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -155,7 +208,7 @@ export async function waitForAllowance(
 }
 
 const NEUTRAL_RECEIVE_NOTE =
-  'A platform fee is deducted from the crypto you receive; the exact amount shows on the trade.';
+  'A fee is deducted from the crypto you receive; the exact amount shows on the trade.';
 
 /** "You receive" on a sell-ad: the buyer receives the crypto, so the fee comes
  *  out of it. `grossText` is the decimal token preview. Unknown rate → the
@@ -175,14 +228,14 @@ export function sellAdReceivePreview(
   }
   if (!split || !pct) return { amount: grossText, note: NEUTRAL_RECEIVE_NOTE };
   const amount = formatTokenAmount(split.net, decimals, 4);
-  if (feeBps === 0) return { amount, note: 'No platform fee on this ad.' };
-  return { amount, note: `After the ${pct} platform fee (${formatTokenAmount(split.fee, decimals, 4)} ${token}).` };
+  if (feeBps === 0) return { amount, note: 'No fee on this ad.' };
+  return { amount, note: `After the ${pct} fee (${formatTokenAmount(split.fee, decimals, 4)} ${token}).` };
 }
 
 /** On a buy-ad the ad poster receives the crypto and pays the fee. */
 export function buyAdFeeNote(feeBps: number | null | undefined): string {
   const pct = formatFeePct(feeBps);
   return pct
-    ? `The buyer pays the ${pct} platform fee out of the crypto they receive.`
-    : 'The buyer pays the platform fee out of the crypto they receive.';
+    ? `The buyer pays the ${pct} fee out of the crypto they receive.`
+    : 'The buyer pays the fee out of the crypto they receive.';
 }

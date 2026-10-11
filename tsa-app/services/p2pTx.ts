@@ -229,13 +229,15 @@ function confirmStashed(rec: PendingEscrowConfirm, tradeId: string): Promise<Api
       return tradesApi.confirmRelease(tradeId, rec.txHash);
     case 'cancel_trade':
       return tradesApi.confirmCancel(tradeId, rec.txHash);
+    case 'dispute':
+      return tradesApi.confirmRaiseDispute(tradeId, rec.txHash);
     default:
       return null;
   }
 }
 
 /** Re-send the confirm for a trade tx runP2PTx stashed (R4 and the lost
- *  mark-paid/release/cancel confirms) with its original hash — nothing is
+ *  mark-paid/release/cancel/dispute confirms) with its original hash — nothing is
  *  signed or broadcast again. Unstashes once the server records it or reports
  *  the revert; never throws. */
 export async function retryStashedConfirm(rec: PendingEscrowConfirm): Promise<StashedConfirmResult> {

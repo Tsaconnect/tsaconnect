@@ -53,6 +53,21 @@ export function markPaidConfirmMessage(token: string, windowEnded: boolean): str
     : base;
 }
 
+/** The timed-out cancel's guardrail. The fiat payer (always the trade's
+ *  buyer) loses their money if they cancel after paying; the seller gets the
+ *  crypto back, which is only fair if the buyer never paid. */
+export function timeoutCancelConfirm(role: 'buyer' | 'seller'): { title: string; message: string } {
+  return role === 'buyer'
+    ? {
+        title: 'Cancel this trade?',
+        message: "Only cancel if you have NOT sent the money. If you have, tap I've paid or open a dispute.",
+      }
+    : {
+        title: 'Cancel this trade?',
+        message: "This returns the crypto to you. Only cancel if the buyer hasn't paid.",
+      };
+}
+
 export interface TradeActions {
   pmActive: boolean;
   pmDormant: boolean;
@@ -69,7 +84,6 @@ export interface TradeActions {
   confirmingTx: boolean;
   canCancel: boolean;
   canDispute: boolean;
-  releasingDisabled: boolean;
 }
 
 /** Which cards and buttons the cockpit shows for this trade and viewer.
@@ -110,7 +124,6 @@ export function tradeActions(
     confirmingTx,
     canCancel: expired && pending && !confirmingTx,
     canDispute: (pending || trade.status === 'paid') && !confirmingTx,
-    releasingDisabled: trade.status === 'releasing',
   };
 }
 
@@ -121,13 +134,16 @@ export interface TradeFeeLines {
   receiveValue: string;
 }
 
-/** Fee comes out of the crypto receiver, who is always the trade's buyer. */
+/** Fee comes out of the crypto receiver, who is always the trade's buyer. The
+ *  bps is platform + gas, so it is labelled "Fee". PM trades keep their own
+ *  screen as it was: no fee lines. */
 export function tradeFeeLines(trade: P2PTrade, role: 'buyer' | 'seller', decimals: number): TradeFeeLines | null {
+  if (trade.isPm) return null;
   const fee = tradeFee(trade);
   if (!fee) return null;
   const pct = formatFeePct(trade.feeBps);
   return {
-    feeLabel: pct ? `Platform fee (${pct})` : 'Platform fee',
+    feeLabel: pct ? `Fee (${pct})` : 'Fee',
     feeValue: `${formatTokenAmount(fee.fee, decimals, 4)} ${trade.token}`,
     receiveLabel: role === 'buyer' ? 'You receive' : 'They receive',
     receiveValue: `${formatTokenAmount(fee.net, decimals, 4)} ${trade.token}`,
@@ -152,6 +168,9 @@ function pendingTradeTxSettled(rec: PendingTradeTx, trade: Pick<P2PTrade, 'statu
       return trade.status !== 'pending_payment';
     case 'release':
       return trade.status !== 'paid' && trade.status !== 'releasing';
+    case 'dispute':
+      // Cleared once the dispute is recorded (or the trade ended another way).
+      return trade.status !== 'pending_payment' && trade.status !== 'paid';
   }
 }
 
@@ -179,6 +198,7 @@ const PENDING_TX_COPY: Record<TradeTxMode, { label: string; sent: string }> = {
   mark_paid: { label: 'Mark paid', sent: 'Your “I’ve paid” transaction was sent' },
   release: { label: 'Release', sent: 'Your release was sent' },
   cancel_trade: { label: 'Cancel', sent: 'Your cancel was sent' },
+  dispute: { label: 'Dispute', sent: 'Your dispute was sent' },
 };
 
 /** Card copy for a stashed trade tx. `label` titles the outcome alerts. A
@@ -207,10 +227,21 @@ export function pendingTradeTxCopy(
   };
 }
 
+/** What happens to a trade whose open never landed: the server keeps the row
+ *  until the expiry watchdog cancels it, and only then can the user open
+ *  another trade on the same ad. */
+export const OPEN_ABANDONED_NEXT = 'This trade will expire and cancel on its own; then you can open a new one.';
+
+/** The escrow card while an open is unrecorded and this device has no stash
+ *  to retry (another device opened it, or the stash was lost). */
+export const OPEN_UNCONFIRMED_COPY =
+  'Waiting for the network to confirm the escrow. If the open went through, it will be recorded here ' +
+  'shortly. If it didn’t, nothing was locked. ' + OPEN_ABANDONED_NEXT;
+
 /** A retried open the server saw revert: no escrow, and the watchdog ends the
  *  trade — there is nothing for the user to redo here. */
 export const OPEN_REVERTED_ALERT = {
   title: 'Escrow failed',
-  message: 'The network rejected the escrow transaction, so nothing is locked. ' +
-    'This trade will expire and cancel on its own.',
+  message: 'The network rejected the escrow transaction, so nothing was locked. ' +
+    OPEN_ABANDONED_NEXT,
 };

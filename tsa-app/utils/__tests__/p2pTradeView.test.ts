@@ -3,11 +3,13 @@ import type { PendingEscrowConfirm } from '@/services/p2pPending';
 import {
   markPaidConfirmMessage,
   OPEN_REVERTED_ALERT,
+  OPEN_UNCONFIRMED_COPY,
   PENDING_TRADE_TX_STALE_MS,
   pendingTradeTxCopy,
   RELEASE_CONFIRM_TITLE,
   releaseConfirmMessage,
   splitPendingTradeTxs,
+  timeoutCancelConfirm,
   tradeActions,
   tradeFeeLines,
   tradeTxFollowUp,
@@ -93,6 +95,11 @@ describe('tradeActions — direct trades', () => {
     expect(tradeActions(t({ openTxHash: '' }), 'buyer', NOW).openUnconfirmed).toBe(true);
     expect(tradeActions(t({ openTxHash: 'reconciled' }), 'buyer', NOW).openUnconfirmed).toBe(false);
   });
+  it('no releasingDisabled flag: Release is only offered while paid', () => {
+    const r = tradeActions(t({ status: 'releasing' }), 'seller', NOW);
+    expect(r.canRelease).toBe(false);
+    expect('releasingDisabled' in r).toBe(false);
+  });
   it('cancel only after expiry', () => {
     expect(tradeActions(t(), 'buyer', NOW).canCancel).toBe(false);
     expect(tradeActions(t({ expiresAt: '2026-10-09T11:00:00Z' }), 'buyer', NOW).canCancel).toBe(true);
@@ -115,8 +122,15 @@ describe('tradeFeeLines', () => {
   const fee = { feeBps: 50, feeAmount: '500000', buyerNetAmount: '99500000' };
   it('the crypto receiver (buyer) sees "You receive" with the fee', () => {
     expect(tradeFeeLines(t(fee), 'buyer', 6)).toEqual({
-      feeLabel: 'Platform fee (0.5%)', feeValue: '0.5 USDT', receiveLabel: 'You receive', receiveValue: '99.5 USDT',
+      feeLabel: 'Fee (0.5%)', feeValue: '0.5 USDT', receiveLabel: 'You receive', receiveValue: '99.5 USDT',
     });
+  });
+  it('labelled "Fee" (the bps is platform + gas) even when the rate is unknown', () => {
+    expect(tradeFeeLines(t({ feeBps: undefined, feeAmount: '500000', buyerNetAmount: '99500000' }), 'buyer', 6)?.feeLabel)
+      .not.toMatch(/platform/i);
+  });
+  it('PM trades show no fee lines (PM screen unchanged)', () => {
+    expect(tradeFeeLines(t({ ...fee, isPm: true }), 'buyer', 6)).toBeNull();
   });
   it('the other party sees "They receive"', () => {
     expect(tradeFeeLines(t(fee), 'seller', 6)?.receiveLabel).toBe('They receive');
@@ -141,6 +155,13 @@ describe('tradeActions — a sent trade action still confirming', () => {
     const r = tradeActions(t({ status: 'paid' }), 'seller', NOW, 'release');
     expect(r).toMatchObject({ confirmingTx: true, canRelease: false, canDispute: false });
     expect(tradeActions(t(expired), 'seller', NOW, 'cancel_trade').sellerAwaitingPayment).toBe(false);
+  });
+  it('a sent dispute shows "Confirming…" instead of re-offering the actions', () => {
+    const a = tradeActions(t({ status: 'paid' }), 'buyer', NOW, 'dispute');
+    expect(a).toMatchObject({ confirmingTx: true, canDispute: false, canCancel: false });
+    expect(pendingTradeTxCopy({ mode: 'dispute', txHash: '0x' + 'cd'.repeat(32) })).toMatchObject({
+      label: 'Dispute', title: 'Confirming 0xcdcd…cdcd',
+    });
   });
   it('a lost open is the R4 banner, not a confirming action', () => {
     const a = tradeActions(t({ openTxHash: '', ...expired }), 'buyer', NOW, 'open');
@@ -168,6 +189,12 @@ describe('splitPendingTradeTxs', () => {
     expect(splitPendingTradeTxs([mp], t(), NOW).active).toBe(mp);
     expect(splitPendingTradeTxs([mp, c], t({ status: 'paid' }), NOW)).toEqual({ active: null, settled: [mp, c], stale: false });
     expect(splitPendingTradeTxs([c], t({ status: 'cancelled' }), NOW).settled).toEqual([c]);
+  });
+  it('dispute: unresolved while pending or paid, cleared once disputed', () => {
+    const d = stash({ mode: 'dispute' });
+    expect(splitPendingTradeTxs([d], t(), NOW).active).toBe(d);
+    expect(splitPendingTradeTxs([d], t({ status: 'paid' }), NOW).active).toBe(d);
+    expect(splitPendingTradeTxs([d], t({ status: 'disputed' }), NOW).settled).toEqual([d]);
   });
   it('release: unresolved while paid or releasing', () => {
     const rel = stash({ mode: 'release' });
@@ -233,9 +260,28 @@ describe('markPaidConfirmMessage', () => {
 });
 
 describe('OPEN_REVERTED_ALERT (a retried open that reverted)', () => {
-  it('says nothing is locked and the trade ends on its own — no "try again"', () => {
-    expect(OPEN_REVERTED_ALERT.message).toMatch(/nothing is locked/);
-    expect(OPEN_REVERTED_ALERT.message).toMatch(/cancel on its own/);
+  it('says nothing was locked and the trade ends on its own — no "try again"', () => {
+    expect(OPEN_REVERTED_ALERT.message).toMatch(/nothing was locked/);
+    expect(OPEN_REVERTED_ALERT.message).toMatch(/cancel on its own; then you can open a new one/);
     expect(OPEN_REVERTED_ALERT.message).not.toMatch(/try again|pull down/i);
+  });
+});
+
+describe('OPEN_UNCONFIRMED_COPY (escrow card with nothing to retry)', () => {
+  it('qualifies "recorded": only if the open went through; otherwise it expires on its own', () => {
+    expect(OPEN_UNCONFIRMED_COPY).toMatch(/If the open went through, it will be recorded/);
+    expect(OPEN_UNCONFIRMED_COPY).toMatch(/nothing was locked\. This trade will expire and cancel on its own/);
+    expect(OPEN_UNCONFIRMED_COPY).not.toMatch(/updates on its own/);
+  });
+});
+
+describe('timeoutCancelConfirm (Cancel (timed out) guardrail)', () => {
+  it('the fiat payer is told not to cancel after paying', () => {
+    expect(timeoutCancelConfirm('buyer').message).toBe(
+      "Only cancel if you have NOT sent the money. If you have, tap I've paid or open a dispute.",
+    );
+  });
+  it('the seller is told it returns the crypto and only fits an unpaid trade', () => {
+    expect(timeoutCancelConfirm('seller').message).toBe("This returns the crypto to you. Only cancel if the buyer hasn't paid.");
   });
 });

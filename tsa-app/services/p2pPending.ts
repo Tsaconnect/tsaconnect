@@ -29,10 +29,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // 'open'). Trades are reconciled server-side too, but the stash lets the trade
 // screen retry the confirm right away and show "confirming" instead of
 // re-offering an action that is already on its way.
-export type TradeTxMode = 'open' | 'mark_paid' | 'release' | 'cancel_trade';
+export type TradeTxMode = 'open' | 'mark_paid' | 'release' | 'cancel_trade' | 'dispute';
 export type EscrowMode = 'deposit' | 'withdraw' | TradeTxMode;
 
-const TRADE_TX_MODES: readonly EscrowMode[] = ['open', 'mark_paid', 'release', 'cancel_trade'];
+const TRADE_TX_MODES: readonly EscrowMode[] = ['open', 'mark_paid', 'release', 'cancel_trade', 'dispute'];
 
 export function isTradeTxMode(mode: EscrowMode): mode is TradeTxMode {
   return TRADE_TX_MODES.includes(mode);

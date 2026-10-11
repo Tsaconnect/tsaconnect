@@ -41,7 +41,10 @@ const RULES: [RegExp, string][] = [
   [/amount outside ad min\/max/i, "That amount is outside this ad's limits."],
   [/exceeds ad remaining|available balance can no longer cover/i, "This ad can't cover that amount any more. Try a smaller amount or another ad."],
   [/cannot open a trade on their own ad/i, "You can't trade on your own ad."],
-  [/already have an active trade on this ad/i, 'You already have an open trade on this ad. Finish it first.'],
+  [/already have an active trade on this ad/i, 'You already have a trade on this ad — find it in My trades.'],
+  // services/txWait.ts's waitMined label for the escrow approve. A timeout is
+  // not a failure: the approve may still land, and a retry finds the allowance.
+  [/approve confirmation timed out/i, "Your approval was sent but hasn't confirmed yet. It may still go through — wait a moment and try again; you may not need to approve again."],
   [/invalid state transition/i, 'This trade has already moved on. Pull down to refresh.'],
   [/already has an open dispute/i, 'A dispute is already open or being raised for this trade — check back in a few minutes.'],
   [/not authorized for this action/i, "You can't do that on this trade."],
@@ -98,10 +101,4 @@ export function p2pKycCode(res: P2PErrorLike | null | undefined): string | undef
   if (res.code === KYC_VERIFICATION_REQUIRED || res.code === KYC_LEGAL_NAME_MISSING) return res.code;
   if (res.status === 403 && /verification required/i.test(res.message ?? '')) return KYC_VERIFICATION_REQUIRED;
   return undefined;
-}
-
-/** Posting ads needs a verified identity. Unknown status (profile not loaded)
- *  does not block — the server's 403 is the backstop. */
-export function kycBlocksPosting(verificationStatus: string | null | undefined): boolean {
-  return !!verificationStatus && verificationStatus !== 'verified';
 }

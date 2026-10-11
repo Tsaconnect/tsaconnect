@@ -4,8 +4,10 @@ import {
   allowanceReadFollowUp,
   approveFollowUp,
   buyAdFeeNote,
+  findMyActiveTradeOnAd,
   OPEN_FAILED,
   openFollowUp,
+  openThrownFollowUp,
   sellAdReceivePreview,
   waitForAllowance,
   type OpenPrep,
@@ -36,10 +38,20 @@ describe('openFollowUp (every runP2PTx outcome of an open)', () => {
     }
   });
 
-  it('reverted: stays on the ad, says nothing was locked, reloads', () => {
+  it('reverted: nothing was locked, the kept trade expires on its own, offers View trade — no "try again"', () => {
     const f = openFollowUp({ status: 'reverted', txHash: hash, prepared });
-    expect(f).toMatchObject({ kind: 'alert', title: OPEN_FAILED, reload: true });
-    expect(f.kind === 'alert' && f.message).toMatch(/nothing was locked/);
+    expect(f).toMatchObject({ kind: 'alert', title: OPEN_FAILED, reload: true, tradeId: 't1' });
+    const msg = f.kind === 'alert' ? f.message : '';
+    expect(msg).toMatch(/nothing was locked/);
+    expect(msg).toMatch(/This trade will expire and cancel on its own; then you can open a new one\./);
+    expect(msg).not.toMatch(/try again/i);
+  });
+
+  it('refused because a trade on this ad is still live: the screen looks it up to link it', () => {
+    expect(openFollowUp({
+      status: 'refused',
+      response: { success: false, status: 409, message: 'p2p: you already have an active trade on this ad' },
+    })).toEqual({ kind: 'active-trade' });
   });
 
   it('aborted and busy: nothing to do (the gas alert or the first run covers it)', () => {
@@ -204,28 +216,63 @@ describe('allowanceReadFollowUp (a failed read never starts an approve)', () => 
   });
 });
 
+describe('openThrownFollowUp (sign/broadcast threw — nothing reached the chain)', () => {
+  it('before any prepare: just the reason, no trade link', () => {
+    expect(openThrownFollowUp('No wallet found. Please set up a wallet first.')).toEqual({
+      kind: 'alert', title: OPEN_FAILED, message: 'No wallet found. Please set up a wallet first.', reload: false,
+    });
+  });
+  it('after a successful prepare: the kept trade expires on its own, with View trade', () => {
+    const f = openThrownFollowUp('User rejected the request', 't9');
+    expect(f).toMatchObject({ kind: 'alert', title: OPEN_FAILED, reload: true, tradeId: 't9' });
+    expect(f.kind === 'alert' && f.message).toMatch(
+      /Nothing was locked\. This trade will expire and cancel on its own; then you can open a new one\./,
+    );
+  });
+});
+
+describe('findMyActiveTradeOnAd', () => {
+  const row = (id: string, adId: string, status: P2PTrade['status']) => ({ id, adId, status }) as P2PTrade;
+  it('asks as the opener (buyer on a sell-ad, seller on a buy-ad) and returns the live trade on this ad', async () => {
+    const list = jest.spyOn(p2p.tradesApi, 'list').mockResolvedValue({
+      success: true,
+      data: [row('old', 'ad1', 'cancelled'), row('other', 'ad2', 'pending_payment'), row('live', 'ad1', 'paid')],
+    });
+    expect(await findMyActiveTradeOnAd({ id: 'ad1', side: 'sell' })).toBe('live');
+    expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ role: 'buyer' }));
+    await findMyActiveTradeOnAd({ id: 'ad1', side: 'buy' });
+    expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ role: 'seller' }));
+  });
+  it('null when none is live or the lookup fails (never throws)', async () => {
+    jest.spyOn(p2p.tradesApi, 'list').mockResolvedValueOnce({ success: true, data: [row('x', 'ad1', 'released')] });
+    expect(await findMyActiveTradeOnAd({ id: 'ad1', side: 'sell' })).toBeNull();
+    jest.spyOn(p2p.tradesApi, 'list').mockRejectedValueOnce(new Error('offline'));
+    expect(await findMyActiveTradeOnAd({ id: 'ad1', side: 'sell' })).toBeNull();
+  });
+});
+
 describe('sellAdReceivePreview (fee comes out of the crypto the buyer receives)', () => {
   it('known rate: net amount and the fee line', () => {
     // 100 USDT gross at 50 bps → 0.5 fee, 99.5 net.
     expect(sellAdReceivePreview('100.0000', 6, 50, 'USDT')).toEqual({
       amount: '99.5',
-      note: 'After the 0.5% platform fee (0.5 USDT).',
+      note: 'After the 0.5% fee (0.5 USDT).',
     });
   });
 
   it('uses the chain decimals (BSC 18)', () => {
     expect(sellAdReceivePreview('10', 18, 100, 'USDT')).toEqual({
       amount: '9.9',
-      note: 'After the 1% platform fee (0.1 USDT).',
+      note: 'After the 1% fee (0.1 USDT).',
     });
   });
 
   it('zero rate: gross amount, no fee', () => {
-    expect(sellAdReceivePreview('10', 6, 0, 'USDT')).toEqual({ amount: '10', note: 'No platform fee on this ad.' });
+    expect(sellAdReceivePreview('10', 6, 0, 'USDT')).toEqual({ amount: '10', note: 'No fee on this ad.' });
   });
 
   it('unknown rate: gross amount and the neutral note — never a guessed number', () => {
-    const neutral = 'A platform fee is deducted from the crypto you receive; the exact amount shows on the trade.';
+    const neutral = 'A fee is deducted from the crypto you receive; the exact amount shows on the trade.';
     expect(sellAdReceivePreview('12.3456', 6, undefined, 'USDT')).toEqual({ amount: '12.3456', note: neutral });
     expect(sellAdReceivePreview('12.3456', 6, 1.5, 'USDT')).toEqual({ amount: '12.3456', note: neutral });
   });
@@ -237,9 +284,9 @@ describe('sellAdReceivePreview (fee comes out of the crypto the buyer receives)'
 
 describe('buyAdFeeNote (the ad poster receives the crypto and pays the fee)', () => {
   it('names the rate when known', () => {
-    expect(buyAdFeeNote(75)).toBe('The buyer pays the 0.75% platform fee out of the crypto they receive.');
+    expect(buyAdFeeNote(75)).toBe('The buyer pays the 0.75% fee out of the crypto they receive.');
   });
   it('neutral when unknown', () => {
-    expect(buyAdFeeNote(undefined)).toBe('The buyer pays the platform fee out of the crypto they receive.');
+    expect(buyAdFeeNote(undefined)).toBe('The buyer pays the fee out of the crypto they receive.');
   });
 });

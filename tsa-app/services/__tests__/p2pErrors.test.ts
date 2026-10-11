@@ -2,7 +2,7 @@ jest.mock('expo-router', () => ({ router: { push: jest.fn() } }));
 jest.mock('react-native', () => ({ Alert: { alert: jest.fn() } }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { kycBlocksPosting, p2pErrorMessage, p2pKycCode } from '../p2pErrors';
+import { p2pErrorMessage, p2pKycCode } from '../p2pErrors';
 
 describe('p2pKycCode', () => {
   it('passes the API code through', () => {
@@ -24,7 +24,7 @@ describe('p2pErrorMessage', () => {
     ["p2p: seller's available balance can no longer cover this trade", /can't cover that amount/],
     ['p2p: invalid state transition', /already moved on/],
     ['p2p: seller cannot open a trade on their own ad', /your own ad/],
-    ['p2p: you already have an active trade on this ad', /already have an open trade/],
+    ['p2p: you already have an active trade on this ad', /already have a trade on this ad.*My trades/],
     ['p2p: ad is not active', /no longer available/],
     ['p2p: rate source is stale; cannot quote', /live rate is unavailable/],
     ['p2p: blockchain temporarily unavailable, please retry', /network is busy/],
@@ -57,12 +57,15 @@ describe('p2pErrorMessage', () => {
   });
 });
 
-describe('kycBlocksPosting', () => {
-  it('blocks only a known, non-verified status', () => {
-    expect(kycBlocksPosting('pending')).toBe(true);
-    expect(kycBlocksPosting('rejected')).toBe(true);
-    expect(kycBlocksPosting('verified')).toBe(false);
-    expect(kycBlocksPosting(undefined)).toBe(false); // profile not loaded yet: let the server decide
+describe('p2pErrorMessage: final-review copy', () => {
+  it('points an active-trade refusal at My trades', () => {
+    expect(p2pErrorMessage({ status: 409, message: 'p2p: you already have an active trade on this ad' }))
+      .toBe('You already have a trade on this ad — find it in My trades.');
+  });
+  it('turns the approve wait timeout into "may still go through" copy', () => {
+    const msg = p2pErrorMessage('Approve confirmation timed out');
+    expect(msg).toMatch(/may still go through/);
+    expect(msg).not.toMatch(/timed out/);
   });
 });
 

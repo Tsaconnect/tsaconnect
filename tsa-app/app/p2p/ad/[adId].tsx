@@ -41,6 +41,7 @@ import {
   exceedsCapacity,
   withinFiatLimits,
   TOKEN_DECIMALS as P2P_TOKEN_DECIMALS,
+  type ApiResponse,
   type P2PAd,
   type P2PAdPaymentMethod,
   type P2PPaymentMethod,
@@ -53,20 +54,25 @@ import {
 } from '../../../services/ngBanks';
 import { getActiveWallet } from '../../../services/wallet';
 import { runP2PTx, type RunP2PTxResult } from '../../../services/p2pTx';
-import { p2pErrorMessage } from '../../../services/p2pErrors';
 import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
 import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { confirmAsync } from '@/utils/confirmAsync';
 import {
+  ACTIVE_TRADE_NO_LINK,
+  ACTIVE_TRADE_TITLE,
+  ACTIVE_TRADE_WITH_LINK,
   allowanceReadFollowUp,
   approveFollowUp,
   buyAdFeeNote,
+  findMyActiveTradeOnAd,
   openFollowUp,
+  openThrownFollowUp,
   sellAdReceivePreview,
   waitForAllowance,
   type ApproveFollowUp,
+  type OpenFollowUp,
   type OpenPrep,
 } from '@/utils/p2pAdOpen';
 import { useTheme } from '@/theme';
@@ -290,23 +296,53 @@ const AdDetailScreen: React.FC = () => {
   // One landing for both open paths. A lost confirm still lands on the trade:
   // runP2PTx stashed the hash before the confirm, so the trade screen's R4
   // banner can retry it; if it never shows, the trade appears once the server picks it up.
-  const finishOpen = (r: RunP2PTxResult<OpenPrep, P2PTrade>) => {
-    const next = openFollowUp(r);
+  const viewTrade = (tradeId: string) => router.replace(`/p2p/trade/${tradeId}`);
+
+  const showOpenFollowUp = async (next: OpenFollowUp) => {
     switch (next.kind) {
       case 'none':
         return;
       case 'kyc':
         promptKycRefusal(next.code, next.message, 'p2p');
         return;
-      case 'alert':
-        Alert.alert(next.title, next.message);
+      case 'alert': {
+        const tradeId = next.tradeId;
+        Alert.alert(
+          next.title,
+          next.message,
+          tradeId ? [{ text: 'OK', style: 'cancel' }, { text: 'View trade', onPress: () => viewTrade(tradeId) }] : undefined,
+        );
         if (next.reload) load();
         return;
+      }
+      case 'active-trade': {
+        const tradeId = ad ? await findMyActiveTradeOnAd(ad) : null;
+        if (tradeId) {
+          Alert.alert(ACTIVE_TRADE_TITLE, ACTIVE_TRADE_WITH_LINK, [
+            { text: 'Close', style: 'cancel' },
+            { text: 'View trade', onPress: () => viewTrade(tradeId) },
+          ]);
+        } else {
+          Alert.alert(ACTIVE_TRADE_TITLE, ACTIVE_TRADE_NO_LINK);
+        }
+        return;
+      }
       case 'trade':
         if (next.notice) toast.info(next.notice);
-        router.replace(`/p2p/trade/${next.tradeId}`);
+        viewTrade(next.tradeId);
     }
   };
+
+  const finishOpen = (r: RunP2PTxResult<OpenPrep, P2PTrade>) => showOpenFollowUp(openFollowUp(r));
+
+  // The prepare inserts the trade server-side, so a sign/broadcast failure
+  // after it leaves a trade the user must know about (openThrownFollowUp).
+  const trackPrepared = (holder: { tradeId?: string }, call: () => Promise<ApiResponse<OpenPrep>>) =>
+    async () => {
+      const res = await call();
+      if (res.success && res.data?.trade?.id) holder.tradeId = res.data.trade.id;
+      return res;
+    };
 
   const stopForApproval = (next: ApproveFollowUp) => {
     if (next.kyc) promptKycRefusal(next.kyc.code, next.kyc.message, 'p2p');
@@ -323,6 +359,7 @@ const AdDetailScreen: React.FC = () => {
   const handleOpenSellAd = async () => {
     if (!ad || submitting) return;
     setSubmitting(true);
+    const prepared: { tradeId?: string } = {};
     try {
       setSubmitStage('Loading wallet…');
       const buyerAddress = await getActiveWallet();
@@ -346,18 +383,18 @@ const AdDetailScreen: React.FC = () => {
         action: 'open_trade',
         adId: ad.id,
         onStage: setSubmitStage,
-        prepare: () => tradesApi.open(ad.id, {
+        prepare: trackPrepared(prepared, () => tradesApi.open(ad.id, {
           fiatAmount: amountInput.trim(),
           paymentMethodId: selectedPmId,
           buyerAddress,
-        }),
+        })),
         confirm: (txHash, prep) => tradesApi.confirmOpen(prep.trade.id, txHash, buyerAddress),
         stash: openStash,
       });
-      finishOpen(r);
+      await finishOpen(r);
     } catch (err: any) {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
-      Alert.alert('Could not open trade', p2pErrorMessage(err?.message));
+      await showOpenFollowUp(openThrownFollowUp(err?.message, prepared.tradeId));
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -381,6 +418,7 @@ const AdDetailScreen: React.FC = () => {
     }
 
     setSubmitting(true);
+    const prepared: { tradeId?: string } = {};
     try {
       setSubmitStage('Loading wallet…');
       const sellerAddress = await getActiveWallet();
@@ -453,7 +491,7 @@ const AdDetailScreen: React.FC = () => {
         action: 'open_trade',
         adId: ad.id,
         onStage: setSubmitStage,
-        prepare: () => tradesApi.open(ad.id, {
+        prepare: trackPrepared(prepared, () => tradesApi.open(ad.id, {
           sellerAddress,
           tokenAmount: tokenBaseUnits,
           fiatAmount: fiatPreview,
@@ -467,13 +505,13 @@ const AdDetailScreen: React.FC = () => {
                 payoutAccountName,
               }
             : {}),
-        }),
+        })),
         confirm: (txHash, prep) => tradesApi.confirmOpen(prep.trade.id, txHash, sellerAddress),
         stash: openStash,
       });
-      finishOpen(r);
+      await finishOpen(r);
     } catch (err: any) {
-      Alert.alert('Could not open trade', p2pErrorMessage(err?.message));
+      await showOpenFollowUp(openThrownFollowUp(err?.message, prepared.tradeId));
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -659,9 +697,11 @@ const AdDetailScreen: React.FC = () => {
                 </Text>
                 <AmountText value={fiatPreview} currency={ad.fiatCurrency} variant="title3" color="textPrimary" />
               </View>
-              <Text variant="caption" color="textMuted">
-                {buyAdFeeNote(ad.feeBps)}
-              </Text>
+              {!ad.isPm && (
+                <Text variant="caption" color="textMuted">
+                  {buyAdFeeNote(ad.feeBps)}
+                </Text>
+              )}
             </View>
           ) : (
             <View style={{ marginTop: spacing.lg, gap: spacing.md }}>
@@ -696,15 +736,21 @@ const AdDetailScreen: React.FC = () => {
                   You receive
                 </Text>
                 <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                  <AmountText value={receivePreview.amount} variant="title3" color="textPrimary" />
+                  <AmountText
+                    value={ad.isPm ? tokenPreview : receivePreview.amount}
+                    variant="title3"
+                    color="textPrimary"
+                  />
                   <Text variant="bodySm" color="textMuted">
                     {ad.token}
                   </Text>
                 </View>
               </View>
-              <Text variant="caption" color="textMuted">
-                {receivePreview.note}
-              </Text>
+              {!ad.isPm && (
+                <Text variant="caption" color="textMuted">
+                  {receivePreview.note}
+                </Text>
+              )}
             </View>
           )}
 
