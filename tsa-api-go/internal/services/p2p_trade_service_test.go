@@ -48,10 +48,10 @@ type mockEscrow struct {
 	// onPrepareRaiseDispute runs inside PrepareRaiseDispute: between the
 	// service's dispute-row read and its write (simulates a concurrent retry).
 	onPrepareRaiseDispute func()
-	readTradeErr       error  // ReadTrade failure injection
-	verifyPaidErr      error
-	prepareMarkPaidErr error
-	verifyResolvedErr  error
+	readTradeErr          error // ReadTrade failure injection
+	verifyPaidErr         error
+	prepareMarkPaidErr    error
+	verifyResolvedErr     error
 
 	// Event fixtures the verify methods return on success.
 	depositedEvent *P2PDepositedEvent
@@ -63,9 +63,11 @@ type mockEscrow struct {
 	disputedEvent  *P2PTradeDisputedEvent
 	resolvedEvent  *P2PTradeResolvedEvent
 	onChainTrade   *OnChainP2PTrade
-	// feeSnapshot*: what ReadTradeFeeSnapshot answers.
+	// feeSnapshot*: what ReadTradeFeeSnapshot answers; feeSnapshotReads counts
+	// the calls.
 	feeSnapshotPlatform, feeSnapshotGas uint16
 	feeSnapshotFound                    bool
+	feeSnapshotReads                    int
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -79,12 +81,6 @@ type mockEscrow struct {
 	// Buy-ad / JIT verify fixtures + error injection.
 	verifyOpenedDepositErr error
 	openedDepositEvent     *P2PTradeOpenedWithDepositEvent
-
-	// platformFeeBpsSnapshot is the V3-snapshotted platform-fee bps returned by
-	// ReadTradePlatformFeeBps. 0 (the default) models a pre-V3 escrow / V2-opened
-	// trade → accrueP2PReleaseFee no-ops. platformFeeFound toggles the found flag.
-	platformFeeBpsSnapshot uint16
-	platformFeeFound       bool
 }
 
 type depositArgs struct {
@@ -317,13 +313,8 @@ func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
 // ReadTradeFeeSnapshot returns the configured snapshot (feeSnapshotFound false
 // by default: a pre-V3 escrow, so no fee_bps is recorded).
 func (m *mockEscrow) ReadTradeFeeSnapshot(tradeId [32]byte) (uint16, uint16, bool) {
+	m.feeSnapshotReads++
 	return m.feeSnapshotPlatform, m.feeSnapshotGas, m.feeSnapshotFound
-}
-func (m *mockEscrow) ReadTradePlatformFeeBps(tradeId [32]byte) (uint16, bool) {
-	if m.platformFeeBpsSnapshot != 0 {
-		return m.platformFeeBpsSnapshot, true
-	}
-	return 0, m.platformFeeFound
 }
 func (m *mockEscrow) ReadBalance(seller, token string) (*OnChainBalance, error) {
 	if m.balanceErr != nil {
@@ -422,7 +413,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
-			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, opener_address TEXT,
+			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, fee_platform_bps INTEGER, fee_gas_bps INTEGER, opener_address TEXT,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,

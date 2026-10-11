@@ -103,8 +103,13 @@ type P2PTrade struct {
 	// FeeBps is the fee (platform + gas bps) the escrow snapshotted when the open
 	// was recorded; the crypto receiver nets amount minus floor(amount*bps/10000).
 	// Nil until the snapshot was read; never guessed.
-	FeeBps    *int      `gorm:"column:fee_bps" json:"feeBps,omitempty"`
-	ExpiresAt time.Time `gorm:"index;not null" json:"expiresAt"`
+	FeeBps *int `gorm:"column:fee_bps" json:"feeBps,omitempty"`
+	// FeePlatformBps and FeeGasBps are FeeBps's two legs, from the same
+	// snapshot read (release accrual reads the platform leg from here before
+	// asking the chain). Nil for trades recorded before the columns existed.
+	FeePlatformBps *int      `gorm:"column:fee_platform_bps" json:"-"`
+	FeeGasBps      *int      `gorm:"column:fee_gas_bps" json:"-"`
+	ExpiresAt      time.Time `gorm:"index;not null" json:"expiresAt"`
 	// ExpiredNotifiedAt — set by the timeout watchdog when it first detects
 	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
 	// expired-notification fires exactly once per trade.

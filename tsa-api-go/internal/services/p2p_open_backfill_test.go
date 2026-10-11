@@ -412,39 +412,55 @@ func TestConfirmOpenTrade_UnreadableEscrowIsRetryable(t *testing.T) {
 
 func feeBpsOf(t *testing.T, db *gorm.DB, id uuid.UUID) *int {
 	t.Helper()
+	return feeSplitOf(t, db, id).FeeBps
+}
+
+func feeSplitOf(t *testing.T, db *gorm.DB, id uuid.UUID) models.P2PTrade {
+	t.Helper()
 	var row models.P2PTrade
 	if err := db.First(&row, "id = ?", id).Error; err != nil {
 		t.Fatal(err)
 	}
-	return row.FeeBps
+	return row
 }
 
-// ConfirmOpenTrade and the backfill both record the escrow's fee snapshot
-// (platform + gas), through the one openRecordUpdates.
+func intPtrIs(p *int, want int) bool { return p != nil && *p == want }
+
+// ConfirmOpenTrade and the backfill both record the escrow's fee snapshot —
+// the total and its platform and gas legs — from the one trade read they
+// already make (no separate snapshot RPC), through openRecordUpdates.
 func TestOpenRecord_StoresSnapshottedFeeBps(t *testing.T) {
 	t.Run("confirm", func(t *testing.T) {
 		svc, esc, tr, db, _ := lostOpen(t, 30)
-		esc.feeSnapshotPlatform, esc.feeSnapshotGas, esc.feeSnapshotFound = 150, 40, true
+		esc.onChainTrade.PlatformFeeBps, esc.onChainTrade.GasFeeBps, esc.onChainTrade.FeeSnapshotFound = 150, 40, true
 		if _, err := confirmAsOpener(svc, tr); err != nil {
 			t.Fatal(err)
 		}
-		if got := feeBpsOf(t, db, tr.ID); got == nil || *got != 190 {
-			t.Fatalf("fee_bps = %v, want 190", got)
+		row := feeSplitOf(t, db, tr.ID)
+		if !intPtrIs(row.FeeBps, 190) || !intPtrIs(row.FeePlatformBps, 150) || !intPtrIs(row.FeeGasBps, 40) {
+			t.Fatalf("fee = %v / %v / %v, want 190 / 150 / 40", row.FeeBps, row.FeePlatformBps, row.FeeGasBps)
+		}
+		if esc.feeSnapshotReads != 0 {
+			t.Fatalf("confirm made %d extra snapshot reads", esc.feeSnapshotReads)
 		}
 	})
 	t.Run("backfill", func(t *testing.T) {
 		svc, esc, tr, db, _ := lostOpen(t, 30)
-		esc.feeSnapshotPlatform, esc.feeSnapshotFound = 50, true
+		esc.onChainTrade.PlatformFeeBps, esc.onChainTrade.FeeSnapshotFound = 50, true
 		if _, err := svc.ReconcileTrade(context.Background(), tr.ID); err != nil {
 			t.Fatal(err)
 		}
-		if got := feeBpsOf(t, db, tr.ID); got == nil || *got != 50 {
-			t.Fatalf("fee_bps = %v, want 50", got)
+		row := feeSplitOf(t, db, tr.ID)
+		if !intPtrIs(row.FeeBps, 50) || !intPtrIs(row.FeePlatformBps, 50) || !intPtrIs(row.FeeGasBps, 0) {
+			t.Fatalf("fee = %v / %v / %v, want 50 / 50 / 0", row.FeeBps, row.FeePlatformBps, row.FeeGasBps)
+		}
+		if esc.feeSnapshotReads != 0 {
+			t.Fatalf("backfill made %d extra snapshot reads", esc.feeSnapshotReads)
 		}
 	})
 	t.Run("a zero snapshot is a real zero", func(t *testing.T) {
 		svc, esc, tr, db, _ := lostOpen(t, 30)
-		esc.feeSnapshotFound = true
+		esc.onChainTrade.FeeSnapshotFound = true
 		if _, err := confirmAsOpener(svc, tr); err != nil {
 			t.Fatal(err)
 		}

@@ -126,12 +126,11 @@ type P2PEscrowAdapter interface {
 
 	// Views — used by reconciler + voucher-state checks.
 	ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
-	// ReadTradePlatformFeeBps reads the V3-snapshotted platform-fee bps for a
-	// trade (design §8). Returns 0/false on a pre-V3 escrow or a V2-opened trade
-	// (no snapshot) — the documented no-op signal for accrueP2PReleaseFee.
-	ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool)
-	// ReadTradeFeeSnapshot is the same read with the gas leg too; found=false
-	// when the read failed or the escrow predates V3.
+	// ReadTradeFeeSnapshot reads a trade's V3-snapshotted platform and gas fee
+	// bps; found=false when the read failed or the escrow predates V3. Only
+	// release accrual's fallback uses it (a trade recorded before
+	// p2p_trades.fee_platform_bps existed): ReadTrade already carries the
+	// snapshot on V3.
 	ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, gasBps uint16, found bool)
 	ReadBalance(seller, token string) (*OnChainBalance, error)
 	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
@@ -409,13 +408,13 @@ func (s *P2PTradeService) applyPMAdTag(pm *models.PaymentMerchant, walletAddress
 // TP/cashback comes from the SEPARATE 1% PLATFORM fee, which P2PEscrowV3
 // SNAPSHOTS into the trade as platformFeeBpsSnapshot at openTrade.
 //
-// This reads that snapshot from the escrow (ReadTradePlatformFeeBps), computes
+// This reads that snapshot (tradePlatformFeeBps: the trade row, else the chain), computes
 // the platform-fee USD from the trade's token amount, and settles it under
 // FeatureP2PPlatform (the carved {0.50,0.15,0.15,0.00,0.20} split) for the buyer
 // (gen0 — the party that receives crypto and bears the fee). The on-chain gas
 // fee (feeBaseUnits) is deliberately NOT accrued.
 //
-// SAFE TO MERGE BEFORE V3: until V3 is deployed, ReadTradePlatformFeeBps returns
+// SAFE TO MERGE BEFORE V3: until V3 is deployed, the snapshot reads
 // 0 (pre-V3 escrow / V2-opened trade) → this is a documented no-op, exactly as
 // before. The flag check + the wiring fire real accrual the moment V3 lands.
 //
@@ -448,8 +447,8 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 		return
 	}
 
-	// Read the V3-snapshotted platform-fee bps. 0 ⇒ pre-V3 / V2 trade ⇒ no-op.
-	platformBps, found := esc.ReadTradePlatformFeeBps(HashID(trade.ID))
+	// The V3-snapshotted platform-fee bps. 0 ⇒ pre-V3 / V2 trade ⇒ no-op.
+	platformBps, found := tradePlatformFeeBps(esc, trade)
 	if !found || platformBps == 0 {
 		return
 	}
@@ -477,6 +476,17 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 		SourceType: "p2p_release",
 		SourceID:   trade.ID,
 	})
+}
+
+// tradePlatformFeeBps is the trade's snapshotted platform-fee bps: the value
+// recorded at open, else (a trade recorded before the column existed, or whose
+// snapshot read failed then) one read of the escrow.
+func tradePlatformFeeBps(esc P2PEscrowAdapter, trade *models.P2PTrade) (int, bool) {
+	if trade.FeePlatformBps != nil {
+		return *trade.FeePlatformBps, true
+	}
+	p, _, found := esc.ReadTradeFeeSnapshot(HashID(trade.ID))
+	return int(p), found
 }
 
 // onChainTradeFee derives the platform fee (base units) from a view-read trade:

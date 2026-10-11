@@ -38,14 +38,15 @@ func openDeadlineFromChain(onchain *OnChainP2PTrade) (time.Time, bool) {
 // createdAt the intent-time deadline is kept.
 //
 // fee_bps is the trade's snapshotted platform+gas bps (the fee the escrow takes
-// at release); an unreadable snapshot leaves it unset.
+// at release), stored with its platform and gas legs, all from the trade read
+// the caller already made; a read with no snapshot (pre-V3) leaves them unset.
 func (s *P2PTradeService) openRecordUpdates(openTxHash string, escrow P2PEscrowAdapter, t *models.P2PTrade, onchain *OnChainP2PTrade) map[string]any {
 	updates := map[string]any{"open_tx_hash": openTxHash, "updated_at": s.clock.Now()}
-	if escrow != nil {
-		p, g, found := escrow.ReadTradeFeeSnapshot(HashID(t.ID))
-		if bps, ok := feeBpsFromSnapshot(p, g, found); ok {
-			updates["fee_bps"] = bps
-			t.FeeBps = &bps
+	if escrow != nil && onchain != nil {
+		if bps, ok := feeBpsFromSnapshot(onchain.PlatformFeeBps, onchain.GasFeeBps, onchain.FeeSnapshotFound); ok {
+			platform, gas := int(onchain.PlatformFeeBps), int(onchain.GasFeeBps)
+			updates["fee_bps"], updates["fee_platform_bps"], updates["fee_gas_bps"] = bps, platform, gas
+			t.FeeBps, t.FeePlatformBps, t.FeeGasBps = &bps, &platform, &gas
 		}
 	}
 	if deadline, ok := openDeadlineFromChain(onchain); ok {

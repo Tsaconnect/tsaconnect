@@ -147,25 +147,25 @@ const (
 // up to MaxAmount across many trades (bounded per-trade by Min/MaxPerTrade
 // when non-zero).
 type AdVoucher struct {
-	Seller       common.Address `abi:"seller"`
-	Token        common.Address `abi:"token"`
-	MaxAmount    *big.Int       `abi:"maxAmount"`
-	MinPerTrade  *big.Int       `abi:"minPerTrade"`
-	MaxPerTrade  *big.Int       `abi:"maxPerTrade"`
-	Deadline     *big.Int       `abi:"deadline"`
-	Nonce        [32]byte       `abi:"nonce"`
+	Seller      common.Address `abi:"seller"`
+	Token       common.Address `abi:"token"`
+	MaxAmount   *big.Int       `abi:"maxAmount"`
+	MinPerTrade *big.Int       `abi:"minPerTrade"`
+	MaxPerTrade *big.Int       `abi:"maxPerTrade"`
+	Deadline    *big.Int       `abi:"deadline"`
+	Nonce       [32]byte       `abi:"nonce"`
 }
 
 // OnChainP2PTrade is the decoded result of getTrade(tradeId) under the pool
 // model. Trades are self-contained — no ad pointer because ads live entirely
 // off-chain as signed vouchers.
 type OnChainP2PTrade struct {
-	Seller        common.Address
-	Buyer         common.Address
-	Token         common.Address
-	Amount        *big.Int
-	CreatedAt     *big.Int
-	Status        OnChainP2PTradeStatus
+	Seller    common.Address
+	Buyer     common.Address
+	Token     common.Address
+	Amount    *big.Int
+	CreatedAt *big.Int
+	Status    OnChainP2PTradeStatus
 	// Funding mirrors P2PEscrowV2's Funding enum (0=PooledFromMaker,
 	// 1=DepositedByTaker). The reconciler reads this off-chain truth to pick
 	// the correct refund branch (pool-credit vs wallet-return).
@@ -174,6 +174,10 @@ type OnChainP2PTrade struct {
 	AutoReleaseAt *big.Int
 	VoucherHash   [32]byte
 	Exists        bool // false when Status == None
+	// PlatformFeeBps / GasFeeBps are the V3 fee snapshot (trades getter);
+	// FeeSnapshotFound is false on a pre-V3 escrow, whose read has none.
+	PlatformFeeBps, GasFeeBps uint16
+	FeeSnapshotFound          bool
 }
 
 // OnChainBalance is the decoded result of balanceOf(seller, token).
@@ -592,10 +596,19 @@ func (s *P2PEscrowService) ReadVoucherCancelled(voucherHash [32]byte) (bool, err
 }
 
 // ReadTrade returns the on-chain Trade record. Exists=false when the trade
-// slot is empty (Status == None).
+// slot is empty (Status == None). On a V3 escrow it is one trades(bytes32)
+// read, which also carries the fee snapshot; an escrow whose trades getter has
+// the older layout falls back to getTrade (no snapshot).
 func (s *P2PEscrowService) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
 	if err := s.requireConfigured(); err != nil {
 		return nil, err
+	}
+	if data, err := parsedP2PEscrowABI.Pack("trades", tradeId); err == nil {
+		if out, err := s.callContract(data); err == nil {
+			if t, ok := decodeTradesGetter(out); ok {
+				return t, nil
+			}
+		}
 	}
 	data, err := parsedP2PEscrowABI.Pack("getTrade", tradeId)
 	if err != nil {
@@ -629,34 +642,42 @@ func (s *P2PEscrowService) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
 	return t, nil
 }
 
-// ReadTradePlatformFeeBps reads the trade's SNAPSHOTTED platform-fee bps from the
-// V3 escrow's public `trades(bytes32)` mapping getter (design §8 / §7.1). V3
-// snapshots platformFeeBps at openTrade; getTrade still returns only the legacy
-// feeBps for ABI back-compat, so the snapshot is read here from the struct getter.
-//
-// Returns 0 when:
-//   - the escrow PREDATES V3 (the `trades` getter has the old field layout and
-//     the decode returns no snapshot slot), OR
-//   - the trade was opened by V2 (snapshot bytes are zero).
-//
-// A 0 result is the documented "no platform accrual" signal: accrueP2PReleaseFee
-// stays a no-op until V3 is deployed and a trade carries a non-zero snapshot.
-// found=false means the read failed (RPC/decode) — the caller treats it as 0.
-func (s *P2PEscrowService) ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool) {
-	p, _, ok := s.ReadTradeFeeSnapshot(tradeId)
-	return p, ok
-}
-
-// decodeTradeFeeSnapshot reads the V3 trades(bytes32) getter's platform and
-// gas snapshots (indexes 9 and 10; see TestTradesGetter_DecodesV3SnapshotLayout).
-func decodeTradeFeeSnapshot(out []byte) (platformBps, gasBps uint16, ok bool) {
+// decodeTradesGetter decodes the V3 public trades(bytes32) getter. Its fields
+// are in struct DECLARATION order — seller, buyer, token, amount(uint96),
+// createdAt(uint40), autoReleaseAt(uint40), status, funding, feeBps,
+// platformFeeBpsSnapshot, gasFeeBpsSnapshot, voucherHash — which differs from
+// getTrade's (see TestTradesGetter_DecodesV3SnapshotLayout). ok=false for any
+// other layout (a pre-V3 escrow).
+func decodeTradesGetter(out []byte) (*OnChainP2PTrade, bool) {
 	vals, err := parsedP2PEscrowABI.Unpack("trades", out)
 	if err != nil || len(vals) != 12 {
-		return 0, 0, false
+		return nil, false
 	}
-	p, okP := vals[9].(uint16)
-	g, okG := vals[10].(uint16)
-	return p, g, okP && okG
+	seller, ok0 := vals[0].(common.Address)
+	buyer, ok1 := vals[1].(common.Address)
+	token, ok2 := vals[2].(common.Address)
+	amount, ok3 := vals[3].(*big.Int)
+	createdAt, ok4 := vals[4].(*big.Int) // uint40 decodes to *big.Int
+	autoReleaseAt, ok5 := vals[5].(*big.Int)
+	status, ok6 := vals[6].(uint8)
+	funding, ok7 := vals[7].(uint8)
+	feeBps, ok8 := vals[8].(uint16)
+	platform, ok9 := vals[9].(uint16)
+	gas, ok10 := vals[10].(uint16)
+	voucherHash, ok11 := vals[11].([32]byte)
+	if !(ok0 && ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11) {
+		return nil, false
+	}
+	t := &OnChainP2PTrade{
+		Seller: seller, Buyer: buyer, Token: token, Amount: amount,
+		CreatedAt:     createdAt,
+		AutoReleaseAt: autoReleaseAt,
+		Status:        OnChainP2PTradeStatus(status),
+		Funding:       funding, FeeBps: feeBps, VoucherHash: voucherHash,
+		PlatformFeeBps: platform, GasFeeBps: gas, FeeSnapshotFound: true,
+	}
+	t.Exists = t.Status != OnChainP2PStatusNone
+	return t, true
 }
 
 // ReadTradeFeeSnapshot is a trade's snapshotted platform and gas fee bps
@@ -674,7 +695,11 @@ func (s *P2PEscrowService) ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, 
 	if err != nil {
 		return 0, 0, false
 	}
-	return decodeTradeFeeSnapshot(out)
+	t, ok := decodeTradesGetter(out)
+	if !ok {
+		return 0, 0, false
+	}
+	return t.PlatformFeeBps, t.GasFeeBps, true
 }
 
 // HashVoucher delegates to the contract's `hashVoucher` view to compute the

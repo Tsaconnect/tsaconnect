@@ -411,7 +411,7 @@ func TestDelistedAsset_RegistryDelistedVsUnconfigured(t *testing.T) {
 func TestP2PFee_NonStableToken_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db)
-	esc.platformFeeBpsSnapshot = 100 // V3 trade: a 1% platform fee WOULD accrue for a stable
+	esc.feeSnapshotPlatform, esc.feeSnapshotFound = 100, true // V3 trade: a 1% platform fee WOULD accrue for a stable
 
 	buyer := mkP2PUser(t, db, "mcgpbuyer", nil)
 	seller := mkP2PUser(t, db, "mcgpseller", nil)

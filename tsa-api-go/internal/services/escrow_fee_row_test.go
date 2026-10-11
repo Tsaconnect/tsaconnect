@@ -36,11 +36,11 @@ func TestDecodeTradeFeeSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pack: %v", err)
 	}
-	p, g, ok := decodeTradeFeeSnapshot(out)
-	if !ok || p != 7 || g != 3 {
-		t.Fatalf("snapshot = (%d, %d, %v), want (7, 3, true)", p, g, ok)
+	tr, ok := decodeTradesGetter(out)
+	if !ok || tr.PlatformFeeBps != 7 || tr.GasFeeBps != 3 || !tr.FeeSnapshotFound {
+		t.Fatalf("snapshot = %+v, %v, want (7, 3)", tr, ok)
 	}
-	if _, _, ok := decodeTradeFeeSnapshot([]byte{1, 2, 3}); ok {
+	if _, ok := decodeTradesGetter([]byte{1, 2, 3}); ok {
 		t.Fatal("garbage must not decode")
 	}
 }

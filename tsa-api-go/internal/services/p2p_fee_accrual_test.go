@@ -126,7 +126,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 			payment_method_id TEXT, payment_ref TEXT, nomba_inbound_event_id TEXT, nomba_payout_id TEXT, payout_account_number TEXT, payout_bank TEXT, payout_account_name TEXT, on_chain_trade_id TEXT, open_tx_hash TEXT, release_tx_hash TEXT,
 			status TEXT DEFAULT 'pending_payment', proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
-			resolved_by_admin TEXT, marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, opener_address TEXT,
+			resolved_by_admin TEXT, marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, fee_platform_bps INTEGER, fee_gas_bps INTEGER, opener_address TEXT,
 			expires_at DATETIME NOT NULL, expired_notified_at DATETIME,
 			created_at DATETIME, updated_at DATETIME
 		)`,
@@ -355,7 +355,7 @@ func TestP2PFee_PlatformSnapshot_Accrues(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db)
 	// V3 escrow reports a 100-bps (1%) platform snapshot for the trade.
-	esc.platformFeeBpsSnapshot = 100
+	esc.feeSnapshotPlatform, esc.feeSnapshotFound = 100, true
 
 	upline := mkP2PUser(t, db, "psupline", nil)
 	buyer := mkP2PUser(t, db, "psbuyer", &upline.ID) // buyer = gen0, upline = gen1
@@ -403,6 +403,43 @@ func TestP2PFee_PlatformSnapshot_Accrues(t *testing.T) {
 	}
 }
 
+// The platform bps snapshotted at open (p2p_trades.fee_platform_bps) is
+// read before the chain: a stored value accrues with no chain read, and a
+// stored zero wins over whatever the chain would say.
+func TestP2PFee_PlatformBpsReadFromTheTradeRowFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stored   int
+		wantRows int64
+	}{
+		{"stored 1%", 100, 1},
+		{"stored zero", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupP2PFeeDB(t)
+			svc, esc, _ := newP2PFeeService(t, db)
+			// The chain would answer the opposite of the row.
+			esc.feeSnapshotPlatform, esc.feeSnapshotFound = uint16(100-tc.stored), true
+
+			buyer := mkP2PUser(t, db, "rowbuyer", nil)
+			seller := mkP2PUser(t, db, "rowseller", nil)
+			adID := seedAd(t, db, seller.ID, "0", "1000000")
+			trade := seedPaidTrade(t, db, adID, buyer.ID, seller.ID, "1000000")
+			db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("fee_platform_bps", tc.stored)
+			var row models.P2PTrade
+			db.First(&row, "id = ?", trade.ID)
+
+			svc.accrueP2PReleaseFee(&row, big.NewInt(0))
+			if got := waitForGuard(t, db, trade.ID, tc.wantRows); got != tc.wantRows {
+				t.Fatalf("guard rows = %d, want %d", got, tc.wantRows)
+			}
+			if esc.feeSnapshotReads != 0 {
+				t.Fatalf("read the chain %d times with the bps on the row", esc.feeSnapshotReads)
+			}
+		})
+	}
+}
+
 // (f) The reconciler auto-release path with a non-zero snapshot accrues once,
 //
 //	and the chain reconciler must NOT re-accrue (idempotent on (p2p_release,
@@ -410,7 +447,7 @@ func TestP2PFee_PlatformSnapshot_Accrues(t *testing.T) {
 func TestP2PFee_PlatformSnapshot_ReconcilerNoReAccrue(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db)
-	esc.platformFeeBpsSnapshot = 100 // 1% V3 snapshot
+	esc.feeSnapshotPlatform, esc.feeSnapshotFound = 100, true // 1% V3 snapshot
 
 	buyer := mkP2PUser(t, db, "rcpsbuyer", nil)
 	seller := mkP2PUser(t, db, "rcpsseller", nil)
