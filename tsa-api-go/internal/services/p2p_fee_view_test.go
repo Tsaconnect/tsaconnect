@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,11 +26,11 @@ type feeViewChain struct {
 	rates      map[string][4]interface{} // feature → bps, flat, exempt, active
 	legacy     uint16
 	fail       bool
-	calls      int
+	calls      atomic.Int32
 }
 
 func (f *feeViewChain) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
-	f.calls++
+	f.calls.Add(1)
 	if f.fail {
 		return nil, errors.New("rpc down")
 	}
@@ -149,7 +150,7 @@ func TestLiveFeeBps_CachesPerChainAndToken(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first := chain.calls
+	first := chain.calls.Load()
 	if first == 0 {
 		t.Fatal("expected chain reads")
 	}
@@ -157,7 +158,7 @@ func TestLiveFeeBps_CachesPerChainAndToken(t *testing.T) {
 	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err != nil {
 		t.Fatal(err)
 	}
-	if chain.calls == first {
+	if chain.calls.Load() == first {
 		t.Fatal("cache must expire after 60s so a setRates is followed")
 	}
 }

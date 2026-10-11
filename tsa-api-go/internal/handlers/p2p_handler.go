@@ -846,6 +846,7 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
+	h.trade.FillAdFees(c.Request.Context(), ad)
 	// Detail page benefits from the same effective-rate / staleness signal
 	// as the browse list — let the FE disable Open Trade when the feed is stale.
 	decorated := h.decorateAdsWithEffectiveRate(c.Request.Context(), []models.P2PAd{*ad})[0]
@@ -951,6 +952,16 @@ type adDetailItem struct {
 	// "pay to this Nomba account" card from PmPayTo. Nil/false for manual ads.
 	IsPm    bool            `json:"isPm"`
 	PmPayTo *models.PmPayTo `json:"pmPayTo,omitempty"`
+}
+
+// fillAdFees sets the live fee on an ad screen's rows (bounded; see
+// P2PTradeService.FillAdFees). Internal ad reads never pay for it.
+func (h *P2PHandler) fillAdFees(ctx context.Context, rows []models.P2PAd) {
+	ptrs := make([]*models.P2PAd, len(rows))
+	for i := range rows {
+		ptrs[i] = &rows[i]
+	}
+	h.trade.FillAdFees(ctx, ptrs...)
 }
 
 // decorateAdsWithEffectiveRate computes effective rate per row for the list
@@ -1070,6 +1081,7 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
+	h.fillAdFees(c.Request.Context(), rows)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(c.Request.Context(), rows)})
 }
 
@@ -1090,6 +1102,7 @@ func (h *P2PHandler) ListMyAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
+	h.fillAdFees(c.Request.Context(), rows)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(c.Request.Context(), rows)})
 }
 
@@ -1853,6 +1866,7 @@ func (h *P2PHandler) GetSellerProfile(c *gin.Context) {
 	if err != nil {
 		ads = nil // non-fatal
 	}
+	h.fillAdFees(c.Request.Context(), ads)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
 		"userId": profile.UserID, "stats": profile.Stats,
 		"recentRatings": profile.RecentRatings, "activeAds": ads,

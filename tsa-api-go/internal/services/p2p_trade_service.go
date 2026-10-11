@@ -169,6 +169,8 @@ type P2PTradeService struct {
 	db *gorm.DB
 	// feeView reads the live on-chain fee bps (nil: fee fields stay unset).
 	feeView *P2PFeeView
+	// adFeeBudget bounds how long an ad list waits on fee reads (FillAdFees).
+	adFeeBudget time.Duration
 	// escrows resolves the per-chain escrow adapter + EIP-712 domain (chainId,
 	// version) from an entity's ChainID. There is deliberately NO single
 	// escrow/chainID/version scalar: every escrow-touching method resolves from
@@ -232,6 +234,7 @@ func NewP2PTradeService(db *gorm.DB, escrows *P2PEscrowRegistry, rates RateProvi
 		bus:            bus,
 		clock:          SystemClock,
 		defaultChainID: defaultChainID,
+		adFeeBudget:    p2pAdFeeBudget,
 	}
 }
 
@@ -3663,7 +3666,6 @@ func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2
 		}
 		return nil, err
 	}
-	s.fillAdFee(ctx, &ad)
 	return &ad, nil
 }
 
@@ -3716,9 +3718,6 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 	var out []models.P2PAd
 	if err := q.Find(&out).Error; err != nil {
 		return nil, err
-	}
-	for i := range out {
-		s.fillAdFee(ctx, &out[i])
 	}
 	return out, nil
 }

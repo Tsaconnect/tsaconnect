@@ -22,6 +22,9 @@ const (
 	// The shared read is detached from the first caller's request (whose
 	// cancel would fail every waiter and cache the failure) and bounded here.
 	p2pFeeViewReadTimeout = 10 * time.Second
+	// An ad screen waits at most this long for fees; a slower read leaves the
+	// field unset (it still lands in the cache for the next request).
+	p2pAdFeeBudget = 2 * time.Second
 	// Contract ceilings (P2PEscrowV3 MAX_*_FEE_BPS). A rate above them is one
 	// the escrow reverts on at open, so it is never shown as the fee.
 	p2pMaxPlatformFeeBps = 300
@@ -185,43 +188,111 @@ func fillTradeFee(t *models.P2PTrade) {
 	t.FeeAmount, t.BuyerNetAmount = fee, net
 }
 
-// fillAdFee sets the ad's live fee; on a chain read error the field stays nil.
-func (s *P2PTradeService) fillAdFee(ctx context.Context, ad *models.P2PAd) {
-	if s.feeView == nil || ad == nil {
+// feeKey is one (chain, token) live-fee read.
+type feeKey struct {
+	chainID int64
+	token   string
+}
+
+// liveFees reads each key's live fee in parallel (a cold read is a few RPC
+// calls) and returns what finished within budget; failed or late keys are
+// absent. A late read keeps running detached and fills the cache.
+func (s *P2PTradeService) liveFees(ctx context.Context, keys []feeKey, budget time.Duration) map[feeKey]int {
+	out := map[feeKey]int{}
+	if s.feeView == nil || len(keys) == 0 {
+		return out
+	}
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		done = make(chan struct{})
+	)
+	for _, k := range keys {
+		wg.Add(1)
+		go func(k feeKey) {
+			defer wg.Done()
+			if bps, err := s.feeView.LiveFeeBps(ctx, k.chainID, k.token); err == nil {
+				mu.Lock()
+				out[k] = bps
+				mu.Unlock()
+			}
+		}(k)
+	}
+	go func() { wg.Wait(); close(done) }()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	finished := make(map[feeKey]int, len(out))
+	for k, v := range out {
+		finished[k] = v
+	}
+	return finished
+}
+
+// FillAdFees sets each ad's live fee for an ad screen: one read per distinct
+// (chain, token), bounded by adFeeBudget. Plain ad reads (GetAd, ListAds) never
+// touch the chain; only the browse, detail and seller-profile handlers call
+// this. A fee that could not be read in time stays nil, never guessed.
+func (s *P2PTradeService) FillAdFees(ctx context.Context, ads ...*models.P2PAd) {
+	if s.feeView == nil {
 		return
 	}
-	if bps, err := s.feeView.LiveFeeBps(ctx, ad.ChainID, ad.Token); err == nil {
-		ad.FeeBps = &bps
+	seen := map[feeKey]bool{}
+	var keys []feeKey
+	for _, ad := range ads {
+		if ad == nil {
+			continue
+		}
+		k := adFeeKey(ad)
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	fees := s.liveFees(ctx, keys, s.adFeeBudget)
+	for _, ad := range ads {
+		if ad == nil {
+			continue
+		}
+		if bps, ok := fees[adFeeKey(ad)]; ok {
+			ad.FeeBps = &bps
+		}
 	}
 }
 
+func adFeeKey(ad *models.P2PAd) feeKey {
+	return feeKey{chainID: ad.ChainID, token: strings.ToUpper(strings.TrimSpace(ad.Token))}
+}
+
 // withLiveFees adds each ordinary chain's per-asset live fee. The pool chain is
-// not in this list; reads run in parallel (cold, each is a few RPC calls).
+// not in this list.
 func (s *P2PTradeService) withLiveFees(ctx context.Context, chains []P2PChainInfo) []P2PChainInfo {
 	if s.feeView == nil {
 		return chains
 	}
-	var wg sync.WaitGroup
-	for i := range chains {
-		var mu sync.Mutex
-		fees := map[string]int{}
-		for _, sym := range chains[i].Assets {
-			wg.Add(1)
-			go func(chainID int64, sym string) {
-				defer wg.Done()
-				if bps, err := s.feeView.LiveFeeBps(ctx, chainID, sym); err == nil {
-					mu.Lock()
-					fees[sym] = bps
-					mu.Unlock()
-				}
-			}(chains[i].ChainID, sym)
+	var keys []feeKey
+	for _, c := range chains {
+		for _, sym := range c.Assets {
+			keys = append(keys, feeKey{chainID: c.ChainID, token: sym})
 		}
-		chains[i].FeeBps = fees
 	}
-	wg.Wait()
+	// Each read is already capped at p2pFeeViewReadTimeout, so this waits for all.
+	fees := s.liveFees(ctx, keys, p2pFeeViewReadTimeout)
 	for i := range chains {
-		if len(chains[i].FeeBps) == 0 {
-			chains[i].FeeBps = nil
+		chains[i].FeeBps = nil
+		for _, sym := range chains[i].Assets {
+			if bps, ok := fees[feeKey{chainID: chains[i].ChainID, token: sym}]; ok {
+				if chains[i].FeeBps == nil {
+					chains[i].FeeBps = map[string]int{}
+				}
+				chains[i].FeeBps[sym] = bps
+			}
 		}
 	}
 	return chains

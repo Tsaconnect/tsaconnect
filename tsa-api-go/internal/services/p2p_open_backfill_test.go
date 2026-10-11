@@ -478,11 +478,13 @@ func TestTradeAndAdFeeFields(t *testing.T) {
 
 	svc.SetFeeView(newFeeViewOn(&feeViewChain{legacy: 50}))
 	live, err := svc.GetAd(context.Background(), ad.ID)
+	svc.FillAdFees(context.Background(), live)
 	if err != nil || live.FeeBps == nil || *live.FeeBps != 50 {
 		t.Fatalf("ad fee = %v err=%v", live.FeeBps, err)
 	}
 	svc.SetFeeView(newFeeViewFailing(t))
 	down, err := svc.GetAd(context.Background(), ad.ID)
+	svc.FillAdFees(context.Background(), down)
 	if err != nil || down.FeeBps != nil {
 		t.Fatalf("ad fee must be omitted when the chain is unreadable, got %v err=%v", down.FeeBps, err)
 	}
