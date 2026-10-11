@@ -1073,17 +1073,8 @@ func (s *P2PTradeService) PrepareCancelAd(ctx context.Context, adID, sellerID uu
 	if ad.Side == models.P2PAdSideBuy {
 		return nil, ErrNotApplicableForBuyAd
 	}
-	if ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused {
-		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
-	}
-	var openCount int64
-	s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("ad_id = ? AND status IN ?", ad.ID,
-			[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-				models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed}).
-		Count(&openCount)
-	if openCount > 0 {
-		return nil, ErrAdHasOpenTrades
+	if err := s.cancelAdPreflight(ctx, &ad, sellerID); err != nil {
+		return nil, err
 	}
 	voucher, err := s.adVoucher(&ad, sellerAddress)
 	if err != nil {
@@ -1183,17 +1174,8 @@ func (s *P2PTradeService) CancelBuyAd(ctx context.Context, adID, merchantID uuid
 	if ad.Status == models.P2PAdStatusCancelled {
 		return &ad, nil
 	}
-	if ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused {
-		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
-	}
-	var openCount int64
-	s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("ad_id = ? AND status IN ?", ad.ID,
-			[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-				models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed}).
-		Count(&openCount)
-	if openCount > 0 {
-		return nil, ErrAdHasOpenTrades
+	if err := s.cancelAdPreflight(ctx, &ad, merchantID); err != nil {
+		return nil, err
 	}
 
 	res := s.db.WithContext(ctx).Model(&models.P2PAd{}).
@@ -1272,30 +1254,8 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		}
 		return nil, nil, err
 	}
-	// An LP stock ad is opened only by the pool's own order path (Plan C1),
-	// never by a buyer at another price (spec §9.4).
-	if pool, err := s.isPoolAd(ctx, &ad); err != nil {
-		return nil, nil, err
-	} else if pool {
-		return nil, nil, ErrAdNotActive
-	}
-	if ad.Status != models.P2PAdStatusActive {
-		return nil, nil, ErrAdNotActive
-	}
-	if ad.SellerID == buyerID {
-		return nil, nil, ErrSelfTrade
-	}
-	// Browse hides a suspended seller's ads; a stale screen or deep link must
-	// not open one. Before the buy-ad branch so both sides are covered.
-	if blocked, err := s.sellerBlocked(ctx, ad.SellerID); err != nil {
-		return nil, nil, err
-	} else if blocked {
-		return nil, nil, ErrAdNotActive
-	}
-	// An ad that was live before its asset was delisted can't take new trades
-	// (browse hides it, but a stale screen or deep link can still reach here).
-	// Before the buy-ad branch so the JIT-deposit path is covered too.
-	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
+	// Before the buy-ad branch so both sides are covered, KYC tier included.
+	if err := s.openTradePreflight(ctx, &ad, buyerID); err != nil {
 		return nil, nil, err
 	}
 
@@ -1306,15 +1266,8 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return s.openTradeWithDeposit(ctx, &ad, buyerID, buyerAddress, params)
 	}
 
-	// Below the buy-ad branch on purpose. From here down `buyerID` really is
-	// the buyer: they are about to send fiat, so the stricter money-in gate
-	// (verified AND a legal name) applies. The buy-ad opener above only needs
-	// to be verified (openTradeWithDeposit); they have not deposited yet when
-	// that gate runs, so refusing traps nothing.
-	if err := requireVerifiedForMoneyIn(ctx, s.db, buyerID); err != nil {
-		return nil, nil, err
-	}
-	// The buyer's wallet becomes the on-chain buyer and is the only opener
+	// From here down `buyerID` really is the buyer (the preflight held them to
+	// the money-in KYC tier). The buyer's wallet becomes the on-chain buyer and is the only opener
 	// confirm/backfill will accept, so it must be a real address.
 	if !common.IsHexAddress(buyerAddress) {
 		return nil, nil, fmt.Errorf("%w: buyer address", ErrInvalidParams)
@@ -1511,14 +1464,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	if ad.SellerAddress == "" || !common.IsHexAddress(ad.SellerAddress) {
 		return nil, nil, fmt.Errorf("%w: buy-ad missing merchant wallet", ErrInvalidTransition)
 	}
-	// Non-PM buy-ads: anyone may post one now, so the user selling into it must
-	// be verified. Before any tx build or capacity mutation. PM buy-ads keep
-	// their existing behaviour.
-	if ad.PMID == nil {
-		if err := requireKYCVerified(ctx, s.db, openerID); err != nil {
-			return nil, nil, err
-		}
-	}
+	// The opener's KYC tier was checked by OpenTrade's preflight.
 
 	// PM buy-ad: the PM automation will pay the user fiat after release, so a
 	// payout bank account is mandatory. Validate BEFORE building any on-chain
@@ -1791,11 +1737,8 @@ func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID 
 		}
 		return nil, nil, err
 	}
-	if trade.BuyerID != payerID {
-		return nil, nil, ErrForbidden
-	}
-	if trade.Status != models.P2PTradeStatusPendingPayment {
-		return nil, nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
+	if err := canMarkPaid(payerID, &trade); err != nil {
+		return nil, nil, err
 	}
 	if !common.IsHexAddress(payerAddress) {
 		return nil, nil, fmt.Errorf("%w: invalid payer address", ErrInvalidParams)
@@ -1918,19 +1861,11 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 		}
 		return nil, err
 	}
-	if trade.SellerID != sellerID {
-		return nil, ErrForbidden
+	if err := canRelease(sellerID, &trade); err != nil {
+		return nil, err
 	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: invalid sellerAddress", ErrInvalidParams)
-	}
-	// Allow Release from pending_payment OR paid OR releasing (retry).
-	// Symmetric with the contract relax: seller's signature is the gate,
-	// not the buyer's (unverifiable) off-chain markPaid claim.
-	if trade.Status != models.P2PTradeStatusPendingPayment &&
-		trade.Status != models.P2PTradeStatusPaid &&
-		trade.Status != models.P2PTradeStatusReleasing {
-		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
 	// Resolve the trade's chain BEFORE the status flip so an unconfigured chain
@@ -2248,19 +2183,8 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 		}
 		return nil, err
 	}
-	if trade.BuyerID != userID && trade.SellerID != userID {
-		return nil, ErrForbidden
-	}
-	if trade.Status != models.P2PTradeStatusPendingPayment {
-		return nil, fmt.Errorf("%w: trade status=%s (only pending_payment can be timed out)",
-			ErrInvalidTransition, trade.Status)
-	}
-	// Contract enforces `block.timestamp >= createdAt + TIMEOUT`. We
-	// pre-check off-chain so callers get a clear error instead of a chain
-	// revert ("Timeout not elapsed") at gas-estimation time.
-	if !s.clock.Now().After(trade.ExpiresAt) {
-		return nil, fmt.Errorf("%w: trade has not yet expired (expires_at=%s)",
-			ErrInvalidTransition, trade.ExpiresAt.Format(time.RFC3339))
+	if err := canCancelByTimeout(userID, &trade, s.clock.Now()); err != nil {
+		return nil, err
 	}
 	escrow, _, _, err := s.resolve(trade.ChainID)
 	if err != nil {
@@ -2497,23 +2421,9 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		}
 		return nil, err
 	}
-	var role string
-	switch userID {
-	case trade.BuyerID:
-		role = models.P2PDisputeRoleBuyer
-	case trade.SellerID:
-		role = models.P2PDisputeRoleSeller
-	default:
-		return nil, ErrForbidden
-	}
-	// Disputes are allowed from pending_payment OR paid — symmetric with
-	// the contract (P2PEscrow.sol relax). A buyer who actually paid fiat but
-	// didn't call markPaid still needs a dispute path; rejecting them here
-	// would force them to call raiseDispute on chain directly and rely on
-	// the reconciler back-fill, defeating the API design.
-	if trade.Status != models.P2PTradeStatusPaid && trade.Status != models.P2PTradeStatusPendingPayment {
-		return nil, fmt.Errorf("%w: trade status=%s (only pending or paid trades can dispute)",
-			ErrInvalidTransition, trade.Status)
+	role, err := canDispute(userID, &trade)
+	if err != nil {
+		return nil, err
 	}
 	// Resolve the trade's chain BEFORE persisting the dispute row so an
 	// unconfigured chain fails loud without leaving an orphan dispute.

@@ -11,21 +11,23 @@ import (
 )
 
 // RequireP2PGasNeed is the P2PGasNeed the gas top-up asks before it sends: the
-// caller really has this tx to sign on the Sonic escrow, now. It mirrors the
-// gates of the Prepare* call that builds that tx (party, status, expiry), so
-// a drip is only ever backed by real trade or ad state.
+// caller really has this tx to sign on the Sonic escrow, now. It runs the same
+// gate as the Prepare* call that builds that tx (p2p_preconditions.go), so a
+// drip is only ever backed by real trade or ad state.
 //
 //   - approve / deposit: no state beyond the KYC every top-up already
 //     requires (any verified user may fund the pool to post ads or open a
 //     buy-ad trade); the per-user cap and the unused-drip rule bound it.
 //   - withdraw: a non-zero available pool balance in some listed asset.
 //   - cancel_ad: adId of her own active/paused sell ad with no open trade.
-//   - open_trade: adId of an active, openable ad that is not hers.
-//   - mark_paid: tradeId; she is the buyer and it is pending_payment.
+//   - open_trade: adId of an active, openable ad that is not hers, and she
+//     clears OpenTrade's KYC tier for its side.
+//   - mark_paid: tradeId; she is the buyer, it is pending_payment and its
+//     open is on chain.
 //   - release: tradeId; she is the seller and it is pending_payment, paid or
 //     releasing (a retry), as PrepareRelease allows.
 //   - cancel_trade: tradeId; she is a party, pending_payment, past expiry.
-//   - dispute: tradeId; she is a party, pending_payment or paid.
+//   - dispute: tradeId; she is a party, pending_payment or paid, open on chain.
 //
 // Returns ErrInvalidParams for a missing or unknown id, ErrP2PGasNotNeeded
 // when it is not her turn (or not on Sonic), and any other error unwrapped
@@ -50,7 +52,7 @@ func (s *P2PTradeService) RequireP2PGasNeed(ctx context.Context, user *models.Us
 		if err != nil {
 			return err
 		}
-		return s.gasNeedTradeTurn(user.ID, req.Action, trade)
+		return s.gasNeedTradeTurn(ctx, user.ID, req.Action, trade)
 	}
 	return fmt.Errorf("%w: unknown gas action %q", ErrInvalidParams, req.Action)
 }
@@ -89,64 +91,59 @@ func (s *P2PTradeService) gasNeedTrade(ctx context.Context, id uuid.UUID) (*mode
 	return &trade, nil
 }
 
-func (s *P2PTradeService) gasNeedTradeTurn(userID uuid.UUID, action P2PGasAction, t *models.P2PTrade) error {
-	party := userID == t.BuyerID || userID == t.SellerID
-	ok := false
+// gasNeedTradeTurn applies the same gate as the action's Prepare* call; mark
+// paid and dispute also need the open on chain (requireOpenOnChain), as theirs do.
+func (s *P2PTradeService) gasNeedTradeTurn(ctx context.Context, userID uuid.UUID, action P2PGasAction, t *models.P2PTrade) error {
+	var err error
 	switch action {
 	case P2PGasMarkPaid:
-		ok = userID == t.BuyerID && t.Status == models.P2PTradeStatusPendingPayment
+		err = canMarkPaid(userID, t)
 	case P2PGasRelease:
-		ok = userID == t.SellerID && (t.Status == models.P2PTradeStatusPendingPayment ||
-			t.Status == models.P2PTradeStatusPaid || t.Status == models.P2PTradeStatusReleasing)
+		err = canRelease(userID, t)
 	case P2PGasCancelTrade:
-		ok = party && t.Status == models.P2PTradeStatusPendingPayment && s.clock.Now().After(t.ExpiresAt)
+		err = canCancelByTimeout(userID, t, s.clock.Now())
 	case P2PGasDispute:
-		ok = party && (t.Status == models.P2PTradeStatusPendingPayment || t.Status == models.P2PTradeStatusPaid)
+		_, err = canDispute(userID, t)
 	}
-	if !ok {
-		return fmt.Errorf("%w: %s on trade %s (status %s)", ErrP2PGasNotNeeded, action, t.ID, t.Status)
+	if err == nil && (action == P2PGasMarkPaid || action == P2PGasDispute) {
+		err = s.gasNeedOpenOnChain(ctx, t)
 	}
-	return nil
+	return gasNotNeeded(err, fmt.Sprintf("%s on trade %s (status %s)", action, t.ID, t.Status))
+}
+
+// gasNeedOpenOnChain is requireOpenOnChain for the gas check: "not opened" (or
+// an on-chain trade that is not ours) is a refusal, a failed read is not.
+func (s *P2PTradeService) gasNeedOpenOnChain(ctx context.Context, t *models.P2PTrade) error {
+	escrow, _, _, err := s.resolve(t.ChainID)
+	if err != nil {
+		return err
+	}
+	err = s.requireOpenOnChain(ctx, t, escrow)
+	if errors.Is(err, ErrInvalidTransition) {
+		return refuse(err)
+	}
+	return err
+}
+
+// gasNotNeeded turns a gate refusal into ErrP2PGasNotNeeded and passes a
+// failed read through unchanged.
+func gasNotNeeded(err error, what string) error {
+	if isRefusal(err) {
+		return fmt.Errorf("%w: %s: %v", ErrP2PGasNotNeeded, what, err)
+	}
+	return err
 }
 
 func (s *P2PTradeService) gasNeedCancelAd(ctx context.Context, userID uuid.UUID, ad *models.P2PAd) error {
-	// A buy-ad has no voucher on-chain: cancelling it is DB-only (PrepareCancelAd).
-	if ad.SellerID != userID || ad.Side == models.P2PAdSideBuy ||
-		(ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused) {
-		return fmt.Errorf("%w: cancel_ad on ad %s", ErrP2PGasNotNeeded, ad.ID)
+	// A buy-ad has no voucher on-chain: cancelling it is DB-only (CancelBuyAd).
+	if ad.Side == models.P2PAdSideBuy {
+		return fmt.Errorf("%w: cancel_ad on buy ad %s", ErrP2PGasNotNeeded, ad.ID)
 	}
-	var open int64
-	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("ad_id = ? AND status IN ?", ad.ID, []string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-			models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed}).
-		Count(&open).Error; err != nil {
-		return err
-	}
-	if open > 0 {
-		return fmt.Errorf("%w: ad %s has open trades", ErrP2PGasNotNeeded, ad.ID)
-	}
-	return nil
+	return gasNotNeeded(s.cancelAdPreflight(ctx, ad, userID), fmt.Sprintf("cancel_ad on ad %s", ad.ID))
 }
 
 func (s *P2PTradeService) gasNeedOpenTrade(ctx context.Context, userID uuid.UUID, ad *models.P2PAd) error {
-	if ad.Status != models.P2PAdStatusActive || ad.SellerID == userID {
-		return fmt.Errorf("%w: open_trade on ad %s", ErrP2PGasNotNeeded, ad.ID)
-	}
-	// The same refusals OpenTrade makes before building the tx.
-	if pool, err := s.isPoolAd(ctx, ad); err != nil {
-		return err
-	} else if pool {
-		return fmt.Errorf("%w: pool ad %s", ErrP2PGasNotNeeded, ad.ID)
-	}
-	if blocked, err := s.sellerBlocked(ctx, ad.SellerID); err != nil {
-		return err
-	} else if blocked {
-		return fmt.Errorf("%w: ad %s seller is blocked", ErrP2PGasNotNeeded, ad.ID)
-	}
-	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
-		return fmt.Errorf("%w: %v", ErrP2PGasNotNeeded, err)
-	}
-	return nil
+	return gasNotNeeded(s.openTradePreflight(ctx, ad, userID), fmt.Sprintf("open_trade on ad %s", ad.ID))
 }
 
 // gasNeedWithdraw: something in her pool to withdraw, in any asset listed on

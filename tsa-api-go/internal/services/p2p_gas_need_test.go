@@ -16,7 +16,7 @@ import (
 const gasNeedWallet = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A"
 
 // gasNeedFixture: a Sonic (146) service whose USDT is listed, one sell ad by
-// seller, and helpers to seed trades on it. The clock is newService's
+// seller, and helpers to seed trades on it (open recorded). The clock is newService's
 // 2026-05-23 12:00 UTC.
 type gasNeedFixture struct {
 	svc           *P2PTradeService
@@ -66,7 +66,7 @@ func (f *gasNeedFixture) seedTrade(t *testing.T, status string, expiresIn time.D
 	tr := &models.P2PTrade{
 		ID: id, OnChainTradeID: fmt.Sprintf("0x%x", id[:]), AdID: f.adID, BuyerID: f.buyer, SellerID: f.seller, Token: "USDT", ChainID: chainID,
 		TokenAmount: "10", FiatAmount: "15000", FiatCurrency: "NGN", Rate: "1500", PaymentMethodID: uuid.New(),
-		Status: status, ExpiresAt: f.now.Add(expiresIn), CreatedAt: f.now, UpdatedAt: f.now,
+		Status: status, ExpiresAt: f.now.Add(expiresIn), CreatedAt: f.now, UpdatedAt: f.now, OpenTxHash: "0xopen",
 	}
 	if err := f.db.Create(tr).Error; err != nil {
 		t.Fatalf("seed trade: %v", err)
