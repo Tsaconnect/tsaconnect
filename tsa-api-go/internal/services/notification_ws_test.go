@@ -14,8 +14,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -297,6 +297,26 @@ func TestP2PEvent_ActorGetsNoPushButStillGetsTheFrame(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&pushes); n != 1 {
 		t.Fatalf("counterparty pushes = %d, want 1", n)
+	}
+
+	// The actor's own row is kept but stored read, so the unread badge
+	// (/notifications/unread-count) does not count it; the counterparty's does.
+	ns := &NotificationService{db: db}
+	var actorRow struct {
+		IsRead bool
+		ReadAt *time.Time
+	}
+	if err := db.Raw(`SELECT is_read, read_at FROM notifications WHERE user_id = ?`, actor.String()).Scan(&actorRow).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !actorRow.IsRead || actorRow.ReadAt == nil {
+		t.Fatalf("actor's own row = %+v, want stored read with read_at", actorRow)
+	}
+	if n, err := ns.GetUnreadCount(actor); err != nil || n != 0 {
+		t.Fatalf("actor unread = %d (%v), want 0", n, err)
+	}
+	if n, err := ns.GetUnreadCount(other); err != nil || n != 1 {
+		t.Fatalf("counterparty unread = %d (%v), want 1", n, err)
 	}
 }
 

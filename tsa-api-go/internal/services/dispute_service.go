@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
@@ -31,17 +30,8 @@ const (
 	disputeEvidenceURLMax = 512
 )
 
-// disputeEvidenceHost is the host the upload endpoints actually return —
-// Cloudinary's SecureURL (see handlers/upload_handler.go). Evidence is
-// rendered in the admin console as an <img> inside an <a>, so an unscreened
-// URL there is a javascript: href in the DOM and a request from every
-// reviewing admin's browser to a host the reporter picked. Pinning the host is
-// the only check that actually prevents the second one.
-const disputeEvidenceHost = "res.cloudinary.com"
-
-// validateEvidence screens uploaded-image URLs. The existing p2p dispute flow
-// (PrepareRaiseDispute) requires an http prefix; this is deliberately stricter,
-// because these render in an operator's browser.
+// validateEvidence screens uploaded-image URLs (isUploadedImageURL), because
+// these render in an operator's browser.
 func validateEvidence(urls []string) ([]string, error) {
 	if len(urls) == 0 {
 		return nil, nil
@@ -58,10 +48,7 @@ func validateEvidence(urls []string) ([]string, error) {
 		if len(u) > disputeEvidenceURLMax {
 			return nil, fmt.Errorf("%w: evidence url too long", ErrDisputeBadRequest)
 		}
-		parsed, err := url.Parse(u)
-		// Hostname() is exact, so a lookalike like res.cloudinary.com.evil.tld
-		// fails where a prefix or suffix test would pass it.
-		if err != nil || parsed.Scheme != "https" || parsed.Hostname() != disputeEvidenceHost {
+		if !isUploadedImageURL(u) {
 			return nil, fmt.Errorf("%w: evidence must be an uploaded image", ErrDisputeBadRequest)
 		}
 		out = append(out, u)

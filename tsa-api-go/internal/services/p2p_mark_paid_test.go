@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -17,7 +18,7 @@ const testPayerAddr = "0x000000000000000000000000000000000000d00d"
 // prepare the on-chain markPaid, then confirm on its TradePaid receipt.
 func markPaidViaChain(t *testing.T, svc *P2PTradeService, tradeID, payerID uuid.UUID) {
 	t.Helper()
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tradeID, payerID, testPayerAddr, "https://proof/x.png"); err != nil {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tradeID, payerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/proof.png"); err != nil {
 		t.Fatalf("PrepareMarkPaid: %v", err)
 	}
 	if _, err := svc.ConfirmMarkPaid(context.Background(), tradeID, payerID, "0xpaid"); err != nil {
@@ -37,19 +38,19 @@ func openedBuyAdTrade(t *testing.T, status string) (*P2PTradeService, *mockEscro
 
 func TestPrepareMarkPaid_ReturnsTxKeepsPendingStoresProof(t *testing.T) {
 	svc, _, tr, db := openedBuyAdTrade(t, models.P2PTradeStatusPendingPayment)
-	got, raw, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://proof/x.png")
+	got, raw, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/proof.png")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(raw) != `{"tx":"markPaid"}` || got.Status != models.P2PTradeStatusPendingPayment {
 		t.Fatalf("raw=%s status=%s", raw, got.Status)
 	}
-	if got.ProofImageURL != "https://proof/x.png" {
+	if got.ProofImageURL != "https://res.cloudinary.com/tsa/image/upload/proof.png" {
 		t.Fatalf("returned trade proof = %q", got.ProofImageURL)
 	}
 	var after models.P2PTrade
 	db.First(&after, "id = ?", tr.ID)
-	if after.Status != models.P2PTradeStatusPendingPayment || after.ProofImageURL != "https://proof/x.png" {
+	if after.Status != models.P2PTradeStatusPendingPayment || after.ProofImageURL != "https://res.cloudinary.com/tsa/image/upload/proof.png" {
 		t.Fatalf("after = %s / %q", after.Status, after.ProofImageURL)
 	}
 	if after.MarkedPaidAt != nil {
@@ -59,10 +60,10 @@ func TestPrepareMarkPaid_ReturnsTxKeepsPendingStoresProof(t *testing.T) {
 
 func TestPrepareMarkPaid_OnlyTheFiatPayer(t *testing.T) {
 	svc, _, tr, _ := openedBuyAdTrade(t, models.P2PTradeStatusPendingPayment)
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.SellerID, testPayerAddr, "https://p/x.png"); !errors.Is(err, ErrForbidden) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.SellerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("crypto provider must not mark paid: %v", err)
 	}
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, uuid.New(), testPayerAddr, "https://p/x.png"); !errors.Is(err, ErrForbidden) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, uuid.New(), testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("a stranger must not mark paid: %v", err)
 	}
 	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, ""); !errors.Is(err, ErrInvalidParams) {
@@ -71,14 +72,14 @@ func TestPrepareMarkPaid_OnlyTheFiatPayer(t *testing.T) {
 	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "file:///x.png"); !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("proof must be an http(s) URL: %v", err)
 	}
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, "not-an-address", "https://p/x.png"); !errors.Is(err, ErrInvalidParams) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, "not-an-address", "https://res.cloudinary.com/tsa/image/upload/p.png"); !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("payer address must be a hex address: %v", err)
 	}
 }
 
 func TestPrepareMarkPaid_RefusedOutsidePendingPayment(t *testing.T) {
 	svc, _, tr, _ := openedBuyAdTrade(t, models.P2PTradeStatusPaid)
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://p/x.png"); !errors.Is(err, ErrInvalidTransition) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("already-paid trade: %v", err)
 	}
 }
@@ -86,11 +87,11 @@ func TestPrepareMarkPaid_RefusedOutsidePendingPayment(t *testing.T) {
 func TestPrepareMarkPaid_RevertMapsTo422AndSavesNothing(t *testing.T) {
 	svc, esc, tr, db := openedBuyAdTrade(t, models.P2PTradeStatusPendingPayment)
 	esc.prepareMarkPaidErr = errors.New("execution reverted: Not buyer")
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://p/x.png"); !errors.Is(err, ErrTradePrepareReverted) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); !errors.Is(err, ErrTradePrepareReverted) {
 		t.Fatalf("revert must map to ErrTradePrepareReverted: %v", err)
 	}
 	esc.prepareMarkPaidErr = errors.New("dial tcp: connection refused")
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://p/x.png"); !errors.Is(err, ErrChainUnavailable) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); !errors.Is(err, ErrChainUnavailable) {
 		t.Fatalf("transport failure must map to ErrChainUnavailable: %v", err)
 	}
 	var after models.P2PTrade
@@ -103,7 +104,7 @@ func TestPrepareMarkPaid_RevertMapsTo422AndSavesNothing(t *testing.T) {
 func TestConfirmMarkPaid_VerifiesReceiptThenFlips(t *testing.T) {
 	svc, esc, tr, db := openedBuyAdTrade(t, models.P2PTradeStatusPendingPayment)
 	ctx := context.Background()
-	if _, _, err := svc.PrepareMarkPaid(ctx, tr.ID, tr.BuyerID, testPayerAddr, "https://p/x.png"); err != nil {
+	if _, _, err := svc.PrepareMarkPaid(ctx, tr.ID, tr.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.ConfirmMarkPaid(ctx, tr.ID, tr.SellerID, "0xpaid"); !errors.Is(err, ErrForbidden) {
@@ -123,7 +124,7 @@ func TestConfirmMarkPaid_VerifiesReceiptThenFlips(t *testing.T) {
 	if err != nil || got.Status != models.P2PTradeStatusPaid || got.MarkedPaidAt == nil {
 		t.Fatalf("got %+v err %v", got, err)
 	}
-	if got.ProofImageURL != "https://p/x.png" {
+	if got.ProofImageURL != "https://res.cloudinary.com/tsa/image/upload/p.png" {
 		t.Fatalf("confirm must keep the proof saved at prepare: %q", got.ProofImageURL)
 	}
 	if _, err := svc.ConfirmMarkPaid(ctx, tr.ID, tr.BuyerID, "0xpaid"); err != nil {
@@ -223,5 +224,27 @@ func TestReconcileToCancelled_AlreadyTerminalIsNoOp(t *testing.T) {
 	db.Model(&models.P2PAuditLog{}).Count(&after)
 	if after != before || len(rec.got) != 0 {
 		t.Fatalf("audit %d->%d alerts=%d", before, after, len(rec.got))
+	}
+}
+
+// Defence in depth: ConfirmMarkPaid re-checks the open against chain before
+// flipping. An open that was never recorded and whose on-chain trade is not
+// the one we prepared (another wallet opened under our id) must not go paid.
+func TestConfirmMarkPaid_RequiresTheMatchedOpen(t *testing.T) {
+	svc, esc, tr, db, _ := lostOpen(t, 30)
+	esc.onChainTrade.Seller = common.HexToAddress(openTestAttacker) // front-run open
+	if _, err := svc.ConfirmMarkPaid(context.Background(), tr.ID, tr.BuyerID, "0xpaid"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("err = %v, want ErrInvalidTransition", err)
+	}
+	var after models.P2PTrade
+	db.First(&after, "id = ?", tr.ID)
+	if after.Status != models.P2PTradeStatusPendingPayment || after.OpenTxHash != "" {
+		t.Fatalf("after = %s / %q, want untouched", after.Status, after.OpenTxHash)
+	}
+	// The matching open is backfilled and the confirm then flips paid.
+	esc.onChainTrade.Seller = common.HexToAddress(openTestUser)
+	got, err := svc.ConfirmMarkPaid(context.Background(), tr.ID, tr.BuyerID, "0xpaid")
+	if err != nil || got.Status != models.P2PTradeStatusPaid {
+		t.Fatalf("got %+v err %v", got, err)
 	}
 }

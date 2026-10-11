@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -219,7 +220,11 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 	// Marshal data
 	dataJSON, _ := json.Marshal(event.Data)
 
-	// Create notification record (always, even if muted)
+	// Create notification record (always, even if muted). A row about the
+	// recipient's own action is stored already read: it keeps the history and
+	// the WS frame still refreshes their screen, but it must not raise the
+	// unread badge for something they just did.
+	selfActed := actedOnByRecipient(event)
 	notification := models.Notification{
 		UserID:  event.UserID,
 		Type:    event.Type,
@@ -227,6 +232,11 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 		Message: event.Message,
 		Data:    dataJSON,
 		Channel: channel,
+	}
+	if selfActed {
+		now := time.Now()
+		notification.IsRead = true
+		notification.ReadAt = &now
 	}
 
 	if err := ns.db.Create(&notification).Error; err != nil {
@@ -242,7 +252,6 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 	}
 
 	live, byEmail := deliveryChannels(event.Type, user.MuteNotifications, user.MuteEmail)
-	selfActed := actedOnByRecipient(event)
 
 	// Push via WebSocket (unless muted)
 	if live {

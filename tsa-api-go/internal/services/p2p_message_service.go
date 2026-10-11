@@ -19,7 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,18 +33,12 @@ import (
 var (
 	ErrMessageEmpty    = errors.New("p2p chat: message body required")
 	ErrMessageTooLong  = errors.New("p2p chat: message exceeds maximum length")
-	ErrImageURLInvalid = errors.New("p2p chat: image URL invalid")
+	ErrImageURLInvalid = errors.New("p2p chat: image must be uploaded in the app")
 )
 
 // maxBodyLen caps text messages to a sensible width. Larger payloads should
 // be uploads.
 const maxBodyLen = 4000
-
-// allowedImageHost is the Cloudinary CDN host all chat-image URLs must
-// originate from. Locks the upload pipeline to the platform's vetted CDN —
-// arbitrary attacker-controlled hosts (tracking pixels, SSRF, malware
-// disguised as images) are refused at the service layer.
-const allowedImageHost = "res.cloudinary.com"
 
 type P2PMessageService struct {
 	db    *gorm.DB
@@ -101,11 +95,9 @@ func (m *P2PMessageService) SendImage(ctx context.Context, tradeID, senderID uui
 	if imageURL == "" {
 		return nil, ErrImageURLInvalid
 	}
-	// Validate the URL is HTTPS and the hostname matches the platform's
-	// Cloudinary CDN. Hostname() strips any `:port` suffix so an explicit
-	// `:443` doesn't accidentally fail the check.
-	u, err := url.Parse(imageURL)
-	if err != nil || u.Scheme != "https" || u.Hostname() != allowedImageHost {
+	// Only images from the platform's upload CDN: arbitrary hosts would be
+	// tracking pixels or worse in the counterparty's app.
+	if !isUploadedImageURL(imageURL) {
 		return nil, ErrImageURLInvalid
 	}
 	if err := m.assertParticipant(ctx, tradeID, senderID); err != nil {
@@ -171,8 +163,10 @@ func (m *P2PMessageService) List(ctx context.Context, tradeID, requestor uuid.UU
 	return m.listThread(ctx, tradeID, f)
 }
 
-// AdminList is List without the participant check, for dispute review. The
-// handler route must be admin-gated.
+// AdminList is List without the participant check, for dispute review: the
+// NEWEST `limit` messages (a long thread's latest messages are what a
+// reviewer needs), returned oldest-first for display. The handler route must
+// be admin-gated.
 func (m *P2PMessageService) AdminList(ctx context.Context, tradeID uuid.UUID, f MessageFilter) ([]models.P2PMessage, error) {
 	var n int64
 	if err := m.db.WithContext(ctx).Model(&models.P2PTrade{}).Where("id = ?", tradeID).Count(&n).Error; err != nil {
@@ -181,17 +175,31 @@ func (m *P2PMessageService) AdminList(ctx context.Context, tradeID uuid.UUID, f 
 	if n == 0 {
 		return nil, ErrTradeNotFound
 	}
-	return m.listThread(ctx, tradeID, f)
+	out, err := m.queryThread(ctx, tradeID, f, "created_at DESC, id DESC")
+	if err != nil {
+		return nil, err
+	}
+	slices.Reverse(out)
+	return out, nil
 }
 
+// listThread is the participant view: the oldest `limit` messages after
+// f.Since, oldest-first, so a poll with since=<last seen> pages forward.
 func (m *P2PMessageService) listThread(ctx context.Context, tradeID uuid.UUID, f MessageFilter) ([]models.P2PMessage, error) {
+	return m.queryThread(ctx, tradeID, f, "created_at ASC, id ASC")
+}
+
+// queryThread reads up to f.Limit (default 100, max 200) of a trade's
+// messages after f.Since in the given order. The id tiebreak keeps messages
+// written in the same instant in a stable order across pages.
+func (m *P2PMessageService) queryThread(ctx context.Context, tradeID uuid.UUID, f MessageFilter, order string) ([]models.P2PMessage, error) {
 	limit := f.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
 	q := m.db.WithContext(ctx).Model(&models.P2PMessage{}).
 		Where("trade_id = ?", tradeID).
-		Order("created_at ASC").
+		Order(order).
 		Limit(limit)
 	if f.Since != nil {
 		q = q.Where("created_at > ?", *f.Since)

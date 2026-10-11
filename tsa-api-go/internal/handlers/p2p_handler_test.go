@@ -1531,7 +1531,7 @@ func seedPayerTrade(t *testing.T, r *rig, buyerID uuid.UUID) uuid.UUID {
 func TestMarkPaid_PrepareThenConfirm(t *testing.T) {
 	r := newRig(t)
 	tradeID := seedPayerTrade(t, r, r.sellerID)
-	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid/prepare", map[string]any{"proofImageUrl": "https://p/x.png"})
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid/prepare", map[string]any{"proofImageUrl": "https://res.cloudinary.com/tsa/image/upload/p.png"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("prepare = %d %s", rec.Code, rec.Body.String())
 	}
@@ -1547,7 +1547,7 @@ func TestMarkPaid_PrepareThenConfirm(t *testing.T) {
 
 func TestMarkPaidPrepare_StatusMapping(t *testing.T) {
 	r := newRig(t)
-	body := map[string]any{"proofImageUrl": "https://p/x.png"}
+	body := map[string]any{"proofImageUrl": "https://res.cloudinary.com/tsa/image/upload/p.png"}
 
 	notPayer := seedPayerTrade(t, r, uuid.New())
 	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+notPayer.String()+"/mark-paid/prepare", body); rec.Code != http.StatusForbidden {
@@ -1575,7 +1575,7 @@ func TestMarkPaid_OldRouteRetired(t *testing.T) {
 	tradeID := seedPayerTrade(t, r, r.sellerID)
 	var before models.P2PTrade
 	r.db.First(&before, "id = ?", tradeID)
-	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid", map[string]any{"proofImageUrl": "https://p/x.png"})
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid", map[string]any{"proofImageUrl": "https://res.cloudinary.com/tsa/image/upload/p.png"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("old mark-paid = %d, want 409: %s", rec.Code, rec.Body.String())
 	}

@@ -16,6 +16,12 @@ import (
 
 const (
 	p2pFeeViewTTL = 60 * time.Second
+	// A failed read is retried after this, not after the full TTL: one RPC
+	// blip must not hide the fee from every screen for a minute.
+	p2pFeeViewFailTTL = 10 * time.Second
+	// The shared read is detached from the first caller's request (whose
+	// cancel would fail every waiter and cache the failure) and bounded here.
+	p2pFeeViewReadTimeout = 10 * time.Second
 	// Contract ceilings (P2PEscrowV3 MAX_*_FEE_BPS). A rate above them is one
 	// the escrow reverts on at open, so it is never shown as the fee.
 	p2pMaxPlatformFeeBps = 300
@@ -40,7 +46,7 @@ func NewP2PFeeView(chain func(int64) (contractCaller, string, error), tokenAddr 
 	return &P2PFeeView{
 		chain:     chain,
 		tokenAddr: tokenAddr,
-		cache:     newCachedReader[int](p2pFeeViewTTL, p2pFeeViewTTL),
+		cache:     newCachedReader[int](p2pFeeViewTTL, p2pFeeViewFailTTL),
 		now:       time.Now,
 	}
 }
@@ -72,7 +78,9 @@ func (v *P2PFeeView) LiveFeeBps(ctx context.Context, chainID int64, token string
 	key := fmt.Sprintf("%d|%s", chainID, sym)
 	now := v.now()
 	return v.cache.Get(key, now, func() (int, error) {
-		bps, err := v.read(ctx, chainID, sym)
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p2pFeeViewReadTimeout)
+		defer cancel()
+		bps, err := v.read(rctx, chainID, sym)
 		v.cache.Put(key, v.now(), bps, err)
 		return bps, err
 	})

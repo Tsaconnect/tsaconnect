@@ -25,7 +25,7 @@ func TestPrepareRaiseDispute_ReplacesAnUnconfirmedDispute(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC).Add(disputePrepareStaleAfter + time.Second)})
-	if _, err := svc.PrepareRaiseDispute(ctx, tradeID, tr.BuyerID, "0xb", "second try", []string{"https://cdn.test/e.jpg"}); err != nil {
+	if _, err := svc.PrepareRaiseDispute(ctx, tradeID, tr.BuyerID, "0xb", "second try", []string{"https://res.cloudinary.com/tsa/image/upload/e.jpg"}); err != nil {
 		t.Fatalf("an unbroadcast dispute must not block a retry: %v", err)
 	}
 	var rows []models.P2PDispute
@@ -219,5 +219,45 @@ func TestReconcileToDisputed_UsesLockedStatusAndTruthfulPlaceholder(t *testing.T
 	if len(rec.got) != 1 || rec.got[0].FromStatus != "paid" ||
 		rec.got[0].RaisedRole != "unknown (reconciler backfill)" {
 		t.Fatalf("alerts = %+v", rec.got)
+	}
+}
+
+// A verified dispute confirm that loses its flip to the reconciler (which
+// already set disputed from chain) is the same outcome: return the trade like
+// a replay, not a 409, and don't notify or audit a second time.
+func TestConfirmRaiseDispute_IdempotentWhenReconcilerFlippedFirst(t *testing.T) {
+	svc, esc, tr := preparedDisputeFixture(t) // seller raised
+	sellerAddr := common.HexToAddress("0x000000000000000000000000000000000000a001")
+	esc.onChainTrade.Seller = sellerAddr
+	esc.disputedEvent = &P2PTradeDisputedEvent{TradeID: HashID(tr.ID), By: sellerAddr}
+	esc.onVerifyDisputed = func() {
+		svc.db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Update("status", models.P2PTradeStatusDisputed)
+	}
+	got, err := svc.ConfirmRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xdisp")
+	if err != nil {
+		t.Fatalf("lost race must be idempotent, got %v", err)
+	}
+	if got.Status != models.P2PTradeStatusDisputed {
+		t.Fatalf("status = %s, want disputed", got.Status)
+	}
+	var audits int64
+	svc.db.Model(&models.P2PAuditLog{}).Where("trade_id = ? AND action = ?", tr.ID, models.P2PAuditTradeDisputeConfirmed).Count(&audits)
+	if audits != 0 {
+		t.Fatalf("dispute_confirmed audits = %d, the winner already recorded it", audits)
+	}
+}
+
+// A flip lost to anything other than disputed (e.g. the trade was cancelled)
+// is still a refusal.
+func TestConfirmRaiseDispute_LostFlipToAnotherStateIsRefused(t *testing.T) {
+	svc, esc, tr := preparedDisputeFixture(t)
+	sellerAddr := common.HexToAddress("0x000000000000000000000000000000000000a001")
+	esc.onChainTrade.Seller = sellerAddr
+	esc.disputedEvent = &P2PTradeDisputedEvent{TradeID: HashID(tr.ID), By: sellerAddr}
+	esc.onVerifyDisputed = func() {
+		svc.db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Update("status", models.P2PTradeStatusCancelled)
+	}
+	if _, err := svc.ConfirmRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xdisp"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("err = %v, want ErrInvalidTransition", err)
 	}
 }

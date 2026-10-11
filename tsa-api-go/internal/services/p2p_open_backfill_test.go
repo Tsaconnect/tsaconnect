@@ -276,7 +276,7 @@ func TestReconcile_LostOpenThenChainPaidStillFlipsToPaid(t *testing.T) {
 
 func TestPrepareMarkPaid_AcceptsOpenConfirmedOnChain(t *testing.T) {
 	svc, _, tr, db, _ := lostOpen(t, 30)
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://p/x.png"); err != nil {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); err != nil {
 		t.Fatalf("open is on chain, mark-paid must be allowed: %v", err)
 	}
 	var after models.P2PTrade
@@ -289,7 +289,7 @@ func TestPrepareMarkPaid_AcceptsOpenConfirmedOnChain(t *testing.T) {
 func TestPrepareMarkPaid_RefusesWhenOpenNotOnChain(t *testing.T) {
 	svc, esc, tr, _, _ := lostOpen(t, 30)
 	esc.onChainTrade = nil
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://p/x.png"); !errors.Is(err, ErrInvalidTransition) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), tr.ID, tr.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/p.png"); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("err = %v", err)
 	}
 }

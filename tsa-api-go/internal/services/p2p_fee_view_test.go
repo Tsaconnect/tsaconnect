@@ -162,6 +162,66 @@ func TestLiveFeeBps_CachesPerChainAndToken(t *testing.T) {
 	}
 }
 
+// A failed read is retried after ~10s, not the 60s success TTL.
+func TestLiveFeeBps_FailureCachedBriefly(t *testing.T) {
+	chain := &feeViewChain{legacy: 50, fail: true}
+	v := newFeeViewOn(chain)
+	now := time.Now()
+	v.now = func() time.Time { return now }
+	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err == nil {
+		t.Fatal("want error on unreadable chain")
+	}
+	chain.fail = false
+	now = now.Add(5 * time.Second)
+	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err == nil {
+		t.Fatal("a failure is still served from cache within its short TTL")
+	}
+	now = now.Add(6 * time.Second) // 11s after the failure
+	if bps, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err != nil || bps != 50 {
+		t.Fatalf("after the failure TTL the chain is read again: bps=%d err=%v", bps, err)
+	}
+}
+
+// The shared read does not inherit the first caller's cancellation: a client
+// that hung up must not fail (and cache a failure for) everyone else.
+func TestLiveFeeBps_ReadSurvivesCallerCancel(t *testing.T) {
+	v := newFeeViewOn(&feeViewChain{legacy: 50})
+	var seen ctxSeen
+	inner := v.chain
+	v.chain = func(id int64) (contractCaller, string, error) {
+		c, addr, err := inner(id)
+		return ctxRecorder{c, &seen}, addr, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if bps, err := v.LiveFeeBps(ctx, 146, "USDT"); err != nil || bps != 50 {
+		t.Fatalf("bps=%d err=%v", bps, err)
+	}
+	if seen.err != nil {
+		t.Fatalf("read ran under the caller's cancelled context: %v", seen.err)
+	}
+	if !seen.hasDeadline {
+		t.Fatal("the detached read must still be bounded by its own timeout")
+	}
+}
+
+// ctxSeen is the read context's state at the moment of the chain call.
+type ctxSeen struct {
+	err         error
+	hasDeadline bool
+}
+
+type ctxRecorder struct {
+	contractCaller
+	seen *ctxSeen
+}
+
+func (r ctxRecorder) CallContract(ctx context.Context, call ethereum.CallMsg, n *big.Int) ([]byte, error) {
+	_, hasDeadline := ctx.Deadline()
+	*r.seen = ctxSeen{err: ctx.Err(), hasDeadline: hasDeadline}
+	return r.contractCaller.CallContract(ctx, call, n)
+}
+
 func TestSplitFee_FloorsLikeContract(t *testing.T) {
 	for _, c := range []struct {
 		amt      string

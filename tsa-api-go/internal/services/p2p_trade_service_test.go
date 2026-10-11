@@ -43,8 +43,9 @@ type mockEscrow struct {
 	verifyReleasedErr  error
 	verifyTradeCanErr  error
 	verifyDisputedErr  error
-	raiseDisputeErr    error // PrepareRaiseDispute build failure
-	readTradeErr       error // ReadTrade failure injection
+	onVerifyDisputed   func() // runs inside VerifyTradeDisputed (simulates a concurrent writer)
+	raiseDisputeErr    error  // PrepareRaiseDispute build failure
+	readTradeErr       error  // ReadTrade failure injection
 	verifyPaidErr      error
 	prepareMarkPaidErr error
 	verifyResolvedErr  error
@@ -273,6 +274,9 @@ func (m *mockEscrow) VerifyTradePaid(txHash string, tradeId [32]byte) (*P2PTrade
 	return &P2PTradePaidEvent{TradeID: tradeId}, nil
 }
 func (m *mockEscrow) VerifyTradeDisputed(txHash string, tradeId [32]byte) (*P2PTradeDisputedEvent, error) {
+	if m.onVerifyDisputed != nil {
+		m.onVerifyDisputed()
+	}
 	if m.verifyDisputedErr != nil {
 		return nil, m.verifyDisputedErr
 	}
@@ -1850,7 +1854,7 @@ func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 		t.Fatalf("OpenTrade: %v", err)
 	}
 	// No ConfirmOpenTrade → OpenTxHash empty → mark-paid must be rejected.
-	if _, _, err := svc.PrepareMarkPaid(context.Background(), trade.ID, merchantID, testPayerAddr, "https://proof/x.png"); !errors.Is(err, ErrInvalidTransition) {
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), trade.ID, merchantID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/proof.png"); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("PrepareMarkPaid on an unconfirmed open: want ErrInvalidTransition, got %v", err)
 	}
 }
@@ -1948,7 +1952,7 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 	}
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 
-	urls := []string{"https://cdn.test/ev1.jpg", "https://cdn.test/ev2.jpg"}
+	urls := []string{"https://res.cloudinary.com/tsa/image/upload/ev1.jpg", "https://res.cloudinary.com/tsa/image/upload/ev2.jpg"}
 	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, userID, "0xuser", "no crypto released", urls); err != nil {
 		t.Fatalf("PrepareRaiseDispute with evidence: %v", err)
 	}
@@ -1962,7 +1966,7 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 
 	tooMany := make([]string, 7)
 	for i := range tooMany {
-		tooMany[i] = "https://cdn.test/x.jpg"
+		tooMany[i] = "https://res.cloudinary.com/tsa/image/upload/x.jpg"
 	}
 	if _, err := svc.PrepareRaiseDispute(context.Background(), uuid.New(), uuid.New(), "0xz", "r", tooMany); err == nil {
 		t.Errorf("expected rejection for >6 evidence images")

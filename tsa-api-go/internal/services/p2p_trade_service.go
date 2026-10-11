@@ -1774,8 +1774,12 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 // anyone may cancelByTimeout and claw the crypto back.
 func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID uuid.UUID, payerAddress, proofURL string) (*models.P2PTrade, []byte, error) {
 	proofURL = strings.TrimSpace(proofURL)
-	if proofURL == "" || !strings.HasPrefix(strings.ToLower(proofURL), "http") {
+	if proofURL == "" {
 		return nil, nil, fmt.Errorf("%w: proof URL required", ErrInvalidParams)
+	}
+	// The proof renders in the seller's app and the admin console.
+	if !isUploadedImageURL(proofURL) {
+		return nil, nil, fmt.Errorf("%w: payment proof must be an image uploaded in the app", ErrInvalidParams)
 	}
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
@@ -1853,6 +1857,11 @@ func (s *P2PTradeService) ConfirmMarkPaid(ctx context.Context, tradeID, payerID 
 	}
 	if _, err := escrow.VerifyTradePaid(txHash, HashID(trade.ID)); err != nil {
 		return nil, fmt.Errorf("verify on-chain markPaid: %w", err)
+	}
+	// Defence in depth: the prepare already required a recorded open, but the
+	// row may have changed since; never flip paid on an open we haven't matched.
+	if err := s.requireOpenOnChain(ctx, &trade, escrow); err != nil {
+		return nil, err
 	}
 	flipped, err := s.markPaidCore(ctx, &trade, &payerID, map[string]any{"txHash": txHash, "proofUrl": trade.ProofImageURL})
 	if err != nil {
@@ -2464,15 +2473,15 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		return nil, fmt.Errorf("%w: reason required", ErrInvalidParams)
 	}
 	// Evidence is optional: image URLs uploaded client-side (Cloudinary). Cap the
-	// count and require http(s) URLs; store as JSON on the dispute row.
+	// count and accept only the upload host; store as JSON on the dispute row.
 	evidenceJSON := ""
 	if len(evidenceURLs) > 0 {
 		if len(evidenceURLs) > 6 {
 			return nil, fmt.Errorf("%w: at most 6 evidence images", ErrInvalidParams)
 		}
 		for _, u := range evidenceURLs {
-			if t := strings.TrimSpace(u); t == "" || !strings.HasPrefix(t, "http") {
-				return nil, fmt.Errorf("%w: evidence must be http(s) image URLs", ErrInvalidParams)
+			if !isUploadedImageURL(u) {
+				return nil, fmt.Errorf("%w: evidence must be images uploaded in the app", ErrInvalidParams)
 			}
 		}
 		b, _ := json.Marshal(evidenceURLs)
@@ -2606,6 +2615,10 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 
 // ConfirmRaiseDispute verifies the on-chain TradeDisputed event and
 // transitions the trade to Disputed. Idempotent across retries.
+// errDisputeAlreadyRecorded is ConfirmRaiseDispute's internal signal that the
+// conditional flip lost to a writer that had already set disputed.
+var errDisputeAlreadyRecorded = errors.New("p2p: dispute already recorded")
+
 func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, txHash string) (*models.P2PTrade, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
@@ -2656,11 +2669,23 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
+			if cur.Status == models.P2PTradeStatusDisputed {
+				return errDisputeAlreadyRecorded
+			}
 			return ErrInvalidTransition
 		}
 		prior = cur.Status
 		return nil
 	})
+	if errors.Is(flipErr, errDisputeAlreadyRecorded) {
+		// The reconciler (or a concurrent confirm) recorded this verified
+		// dispute between our read and the flip: same outcome, so answer like
+		// a replay. It already audited, notified and alerted.
+		if err := s.db.WithContext(ctx).First(&trade, "id = ?", trade.ID).Error; err != nil {
+			return nil, err
+		}
+		return &trade, nil
+	}
 	if flipErr != nil {
 		return nil, flipErr
 	}

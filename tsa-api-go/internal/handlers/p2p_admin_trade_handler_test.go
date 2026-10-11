@@ -24,7 +24,7 @@ func TestAdminGetTradeAndMessages(t *testing.T) {
 	r.db.Exec(`INSERT INTO users (id, name, username, verification_status, verified_legal_name) VALUES (?,?,?,?,?)`, tr.BuyerID, "Ada Buyer", "ada", "verified", "ADA BUYER")
 	r.db.Exec(`INSERT INTO users (id, name, username, verification_status) VALUES (?,?,?,?)`, tr.SellerID, "Sam Seller", "sam", "verified")
 	r.db.Create(&models.P2PDispute{ID: uuid.New(), TradeID: tradeID, RaisedBy: tr.BuyerID, RaisedRole: "buyer", Reason: "not released",
-		EvidenceURLs: `["https://cdn.test/e1.jpg"]`, Status: "open"})
+		EvidenceURLs: `["https://res.cloudinary.com/tsa/image/upload/e1.jpg"]`, Status: "open"})
 	r.db.Create(&models.P2PMessage{ID: uuid.New(), TradeID: tradeID, Type: "system", Body: "Trade opened.", CreatedAt: time.Now().Add(-2 * time.Minute)})
 	r.db.Create(&models.P2PMessage{ID: uuid.New(), TradeID: tradeID, SenderID: &tr.BuyerID, Type: "text", Body: "sent", CreatedAt: time.Now().Add(-time.Minute)})
 
@@ -40,7 +40,7 @@ func TestAdminGetTradeAndMessages(t *testing.T) {
 	if d["side"] != "sell" || trade["proofImageUrl"] != "https://p/proof.png" || trade["markedPaidAt"] == nil ||
 		buyer["name"] != "Ada Buyer" || buyer["verificationStatus"] != "verified" || buyer["legalName"] != "ADA BUYER" ||
 		d["seller"].(map[string]any)["name"] != "Sam Seller" || payee["accountNumber"] != "1234567890" ||
-		disp["reason"] != "not released" || disp["evidenceUrls"].([]any)[0] != "https://cdn.test/e1.jpg" {
+		disp["reason"] != "not released" || disp["evidenceUrls"].([]any)[0] != "https://res.cloudinary.com/tsa/image/upload/e1.jpg" {
 		t.Fatalf("data = %v", d)
 	}
 	for _, k := range []string{"email", "phone", "bvn"} {
