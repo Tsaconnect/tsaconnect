@@ -802,17 +802,18 @@ export const tradesApi = {
 
 // ─── Gas sponsorship ────────────────────────────────────────────────────────
 
-export type P2PGasAction =
-  | 'approve' | 'deposit' | 'withdraw' | 'cancel_ad'
-  | 'open_trade' | 'mark_paid' | 'release' | 'cancel_trade' | 'dispute';
-
-/** approve/deposit/withdraw take no id; open_trade and cancel_ad take adId;
+/** The gas sponsor sizes each action for one entity, so the id is required
+ *  where the API needs it (POST /p2p/gas/top-up 400s without it):
+ *  approve/deposit/withdraw take no id; open_trade and cancel_ad take adId;
  *  mark_paid, release, cancel_trade and dispute take tradeId. */
-export interface P2PGasTopUpRequest {
-  action: P2PGasAction;
-  tradeId?: string;
-  adId?: string;
-}
+export type P2PGasTarget =
+  | { action: 'approve' | 'deposit' | 'withdraw'; adId?: undefined; tradeId?: undefined }
+  | { action: 'open_trade' | 'cancel_ad'; adId: string; tradeId?: undefined }
+  | { action: 'mark_paid' | 'release' | 'cancel_trade' | 'dispute'; tradeId: string; adId?: undefined };
+
+export type P2PGasAction = P2PGasTarget['action'];
+
+export type P2PGasTopUpRequest = P2PGasTarget;
 
 export interface P2PGasTopUp {
   txHash?: string;

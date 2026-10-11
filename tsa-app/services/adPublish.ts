@@ -4,7 +4,7 @@
 // never moves funds, it only creates the ad and signs its voucher (no gas).
 import { adsApi, type CreateAdInput, type P2PAd } from './p2p';
 import { signTypedData } from './wallet';
-import { P2PCopyError, p2pKycCode, type P2PErrorLike } from './p2pErrors';
+import { P2PCopyError, p2pRefusalError, type P2PErrorLike } from './p2pErrors';
 
 export async function createAndSignAd(p: {
   payload: CreateAdInput;
@@ -21,11 +21,7 @@ export async function createAndSignAd(p: {
   if (!createRes.success || !createRes.data) {
     // Keep the machine code on the error so the screen can route a KYC refusal
     // to the Verify prompt instead of showing the message as a dead end.
-    throw Object.assign(new P2PCopyError(p.statusError(createRes.status, createRes.message, createRes)), {
-      code: p2pKycCode(createRes) ?? createRes.code,
-      status: createRes.status,
-      data: createRes.data,
-    });
+    throw p2pRefusalError(createRes, p.statusError(createRes.status, createRes.message, createRes));
   }
   const { ad, typedData } = createRes.data;
 

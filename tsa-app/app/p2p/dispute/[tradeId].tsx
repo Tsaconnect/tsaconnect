@@ -38,7 +38,7 @@ import {
 import { useTheme } from '@/theme';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { tradesApi, type P2PTrade } from '../../../services/p2p';
-import { p2pErrorMessage } from '../../../services/p2pErrors';
+import { errorMessage, p2pErrorMessage } from '../../../services/p2pErrors';
 import { p2pTxFollowUp, runP2PTx } from '../../../services/p2pTx';
 import { getActiveWallet } from '../../../services/wallet';
 import { safeProofUrl } from '../../../utils/payInto';
@@ -255,9 +255,9 @@ const DisputeWizardScreen: React.FC = () => {
         }),
         { toast, navigate: leave },
       );
-    } catch (err: any) {
+    } catch (err) {
       // Only reached before anything is broadcast (no wallet, sign/broadcast failure).
-      toast.error(p2pErrorMessage(err?.message));
+      toast.error(p2pErrorMessage(errorMessage(err)));
     } finally {
       setSubmitting(false);
     }

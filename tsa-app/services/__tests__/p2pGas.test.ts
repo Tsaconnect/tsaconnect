@@ -12,7 +12,7 @@ jest.mock('react-native', () => ({ Alert: { alert: jest.fn() } }));
 jest.mock('expo-router', () => ({ router: { push: jest.fn() } }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { ensureP2PGas } from '../p2pGas';
+import { ensureP2PGas, type EnsureP2PGasParams } from '../p2pGas';
 
 const W = '0xSIGNER';
 beforeEach(() => {
@@ -138,4 +138,13 @@ it('a thrown network error shows friendly text, never the raw message', async ()
   await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't', onAlert });
   const msg = onAlert.mock.calls[0][1];
   expect(msg).not.toMatch(/TypeError|fetch/);
+});
+
+it('the action\'s entity id is required by the type (tsc checks this file)', () => {
+  // @ts-expect-error release needs its tradeId
+  const noTrade: EnsureP2PGasParams = { chainId: 146, walletAddress: W, action: 'release' };
+  // @ts-expect-error open_trade takes an adId, not a tradeId
+  const wrongId: EnsureP2PGasParams = { chainId: 146, walletAddress: W, action: 'open_trade', tradeId: 't' };
+  const ok: EnsureP2PGasParams = { chainId: 146, walletAddress: W, action: 'approve' };
+  expect([noTrade.action, wrongId.action, ok.action]).toEqual(['release', 'open_trade', 'approve']);
 });

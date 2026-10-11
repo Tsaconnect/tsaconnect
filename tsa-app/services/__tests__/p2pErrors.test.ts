@@ -2,7 +2,7 @@ jest.mock('expo-router', () => ({ router: { push: jest.fn() } }));
 jest.mock('react-native', () => ({ Alert: { alert: jest.fn() } }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { P2PCopyError, p2pCaughtMessage, p2pErrorMessage, p2pKycCode } from '../p2pErrors';
+import { errorMessage, P2PCopyError, p2pCaughtMessage, p2pErrorMessage, p2pKycCode, p2pRefusalError } from '../p2pErrors';
 
 describe('p2pKycCode', () => {
   it('passes the API code through', () => {
@@ -139,5 +139,26 @@ describe('p2pCaughtMessage', () => {
   });
   it('keeps the code an error carries', () => {
     expect(p2pCaughtMessage(Object.assign(new Error('x'), { code: 'gas_unavailable' }))).toMatch(/gas top-up is unavailable/);
+  });
+});
+
+describe('p2pRefusalError', () => {
+  it('throws the copy as-is and keeps the code, status and data a screen routes on', () => {
+    const e = p2pRefusalError({ status: 400, code: 'rate_out_of_band', message: 'raw', data: { minRate: '1' } }, 'Copy.');
+    expect(e).toBeInstanceOf(P2PCopyError);
+    expect(e).toMatchObject({ message: 'Copy.', code: 'rate_out_of_band', status: 400, data: { minRate: '1' } });
+    expect(p2pCaughtMessage(e)).toBe('Copy.');
+  });
+  it('normalises an older code-less KYC 403 to the KYC code', () => {
+    expect(p2pRefusalError({ status: 403, message: 'Identity verification required' }, 'x'))
+      .toMatchObject({ code: 'kyc_verification_required', status: 403 });
+  });
+});
+
+describe('errorMessage', () => {
+  it('reads an Error, a refusal or anything else', () => {
+    expect(errorMessage(new Error('boom'))).toBe('boom');
+    expect(errorMessage({ message: 'm' })).toBe('m');
+    expect(errorMessage('s')).toBe('s');
   });
 });

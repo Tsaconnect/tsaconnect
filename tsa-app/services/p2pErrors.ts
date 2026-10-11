@@ -111,6 +111,13 @@ export class P2PCopyError extends Error {
   }
 }
 
+/** A refusal to throw: `message` is copy (shown as-is), and the error keeps
+ *  the machine fields a screen routes on — the KYC code, status and data
+ *  (rate_out_of_band's min/max). A bare Error would drop them. */
+export function p2pRefusalError(res: P2PErrorLike, message: string): P2PCopyError {
+  return Object.assign(new P2PCopyError(message), { code: p2pKycCode(res) ?? res.code, status: res.status, data: res.data });
+}
+
 /** What a catch shows: app copy as-is, anything else through p2pErrorMessage
  *  (a raw server, RPC or library message never reaches the screen). */
 export function p2pCaughtMessage(err: unknown, fallback?: string): string {

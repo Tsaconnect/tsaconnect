@@ -14,7 +14,15 @@
 // wallet}`): a double tap that slips past a screen's own `acting` flag gets
 // { status: 'busy' } before any gas, prepare or signing, instead of a second
 // tx that reverts and reads as "failed".
-import { p2pChainKey, tradesApi, unsignedTxToTxLike, type ApiResponse, type P2PTrade, type UnsignedTx } from './p2p';
+import {
+  p2pChainKey,
+  tradesApi,
+  unsignedTxToTxLike,
+  type ApiResponse,
+  type P2PGasTarget,
+  type P2PTrade,
+  type UnsignedTx,
+} from './p2p';
 import { broadcastTransaction, signTransaction } from './wallet';
 import { ensureP2PGas } from './p2pGas';
 import { mapSubmitError, TRANSFER_COPY } from './submitErrors';
@@ -31,13 +39,6 @@ const inFlight = new Set<string>();
 // What the confirm endpoints report when the receipt has status 0
 // (p2p_escrow_service.go fetchReceiptAndCheckOK).
 const SERVER_REVERT = /transaction reverted on chain/i;
-
-/** The gas sponsor sizes each action for one entity, so the id is required
- *  where the API needs it (POST /p2p/gas/top-up 400s without it). */
-export type P2PGasTarget =
-  | { action: 'approve' | 'deposit' | 'withdraw'; adId?: undefined; tradeId?: undefined }
-  | { action: 'open_trade' | 'cancel_ad'; adId: string; tradeId?: undefined }
-  | { action: 'mark_paid' | 'release' | 'cancel_trade' | 'dispute'; tradeId: string; adId?: undefined };
 
 /** The caller's part of a lost-confirm record; runP2PTx adds the hash, chain,
  *  wallet and time. */
@@ -121,9 +122,9 @@ export async function runP2PTx<P extends { unsignedTx?: UnsignedTx | null }, C>(
 async function run<P extends { unsignedTx?: UnsignedTx | null }, C>(
   p: RunP2PTxParams<P, C>,
 ): Promise<RunP2PTxResult<P, C>> {
-  const { chainId, walletAddress, action, adId, tradeId, prepare, confirm, onStage, onGasAlert, stash } = p;
+  const { chainId, walletAddress, prepare, confirm, onStage, onGasAlert, stash } = p;
   if (!p.skipGas) {
-    const hasGas = await ensureP2PGas({ chainId, walletAddress, action, adId, tradeId, onStage, onAlert: onGasAlert });
+    const hasGas = await ensureP2PGas({ ...p, onAlert: onGasAlert });
     if (!hasGas) return { status: 'aborted' };
   }
 

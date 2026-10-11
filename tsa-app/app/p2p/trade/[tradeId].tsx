@@ -78,7 +78,7 @@ import {
   type UnsignedTx,
 } from '../../../services/p2p';
 import { P2P_TX_COPY, p2pTxFollowUp, retryStashedConfirm, runP2PTx, type RunP2PTxResult } from '../../../services/p2pTx';
-import { p2pErrorMessage } from '../../../services/p2pErrors';
+import { errorMessage, p2pErrorMessage } from '../../../services/p2pErrors';
 import { getActiveWallet } from '../../../services/wallet';
 import { confirmAsync } from '../../../utils/confirmAsync';
 import { applyFollowUp } from '../../../utils/p2pFollowUp';
@@ -412,9 +412,9 @@ const TradeDetailScreen: React.FC = () => {
       if (r.status === 'confirmed' && r.data) setTrade(r.data);
       applyFollowUp(p2pTxFollowUp(r, { label }), { reload: load });
       return r.status;
-    } catch (err: any) {
+    } catch (err) {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
-      Alert.alert(P2P_TX_COPY.failedTitle(label), p2pErrorMessage(err?.message));
+      Alert.alert(P2P_TX_COPY.failedTitle(label), p2pErrorMessage(errorMessage(err)));
       return undefined;
     }
   };
@@ -1219,8 +1219,8 @@ async function uploadImage(
     if (json?.success && json.data?.url) return json.data.url as string;
     Alert.alert('Upload failed', json?.message || 'Cloudinary rejected the upload');
     return null;
-  } catch (err: any) {
-    Alert.alert('Upload failed', err?.message || String(err));
+  } catch (err) {
+    Alert.alert('Upload failed', errorMessage(err));
     return null;
   }
 }

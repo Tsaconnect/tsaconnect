@@ -323,6 +323,17 @@ describe('ensureEscrowFunding — prepare failures surface as throws (funds-safe
   });
 });
 
+describe('ensureEscrowFunding — a prepare refusal is mapped copy', () => {
+  it('never throws a raw server body', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockPrepareDeposit.mockResolvedValue({ success: false, status: 502, message: '<html>502 Bad Gateway</html>' });
+
+    await expect(ensureEscrowFunding(params())).rejects.toThrow('Prepare deposit failed');
+  });
+});
+
 describe('ensureEscrowFunding — sign/broadcast failures are mapped like runP2PTx', () => {
   it('maps a raw approve signing error', async () => {
     mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });

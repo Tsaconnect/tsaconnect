@@ -14,7 +14,7 @@ import {
   p2pTokenDecimals,
   type P2PAd,
 } from '../../services/p2p';
-import { p2pErrorMessage } from '../../services/p2pErrors';
+import { errorMessage, p2pErrorMessage } from '../../services/p2pErrors';
 import { runP2PTx, type P2PFollowUp } from '../../services/p2pTx';
 import { adCancelFollowUp } from '../../utils/p2pAdCancel';
 import { applyFollowUp } from '../../utils/p2pFollowUp';
@@ -135,8 +135,8 @@ const MyAdsScreen: React.FC = () => {
       });
       next = adCancelFollowUp(r);
       if (next.cancelSent) setCancelSent((prev) => new Set(prev).add(ad.id));
-    } catch (err: any) {
-      next = { toast: { type: 'error', message: p2pErrorMessage(err?.message) }, reload: true };
+    } catch (err) {
+      next = { toast: { type: 'error', message: p2pErrorMessage(errorMessage(err)) }, reload: true };
     } finally {
       setActing('');
       applyFollowUp(next, { toast, reload: load });

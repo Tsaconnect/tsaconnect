@@ -54,6 +54,7 @@ import {
 } from '../../../services/ngBanks';
 import { getActiveWallet } from '../../../services/wallet';
 import { runP2PTx, type P2PFollowUp, type RunP2PTxResult } from '../../../services/p2pTx';
+import { errorMessage } from '../../../services/p2pErrors';
 import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
@@ -350,7 +351,7 @@ const AdDetailScreen: React.FC = () => {
         stash: openStash,
       });
       await finishOpen(r);
-    } catch (err: any) {
+    } catch (err) {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
       showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
@@ -388,8 +389,8 @@ const AdDetailScreen: React.FC = () => {
       let tokenBaseUnits: string;
       try {
         tokenBaseUnits = parseTokenAmount(amountInput.trim(), tokenDecimals);
-      } catch (e: any) {
-        throw new Error(`Invalid token amount: ${e?.message}`);
+      } catch (e) {
+        throw new Error(`Invalid token amount: ${errorMessage(e)}`);
       }
       if (tokenBaseUnits === '0') {
         throw new Error('Token amount must be greater than zero.');
@@ -468,7 +469,7 @@ const AdDetailScreen: React.FC = () => {
         stash: openStash,
       });
       await finishOpen(r);
-    } catch (err: any) {
+    } catch (err) {
       showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
       setSubmitting(false);

@@ -7,7 +7,7 @@
 // failure (cap, proof, dormant, in progress) degrades to the plain balance
 // check instead of blocking; its refusal copy is shown only if that check fails.
 import { Alert } from 'react-native';
-import { gasApi, p2pChainKey, SONIC_GAS_SPONSOR_CHAIN_IDS, type P2PGasAction } from './p2p';
+import { gasApi, p2pChainKey, SONIC_GAS_SPONSOR_CHAIN_IDS, type P2PGasTarget } from './p2p';
 import { ensureGas } from './wallet';
 import { waitMined } from './txWait';
 import { p2pErrorMessage, p2pKycCode, type P2PErrorLike } from './p2pErrors';
@@ -24,26 +24,39 @@ function explainsEmptySigner(r: P2PErrorLike): boolean {
   return r.code === 'gas_unavailable' || r.code === 'WALLET_PROOF_REQUIRED' || !!p2pKycCode(r);
 }
 
-export interface EnsureP2PGasParams {
-  chainId: number;
-  walletAddress: string;
-  action: P2PGasAction;
-  /** open_trade / cancel_ad. */
-  adId?: string;
-  /** mark_paid / release / cancel_trade / dispute. */
-  tradeId?: string;
-  onStage?: (label: string) => void;
-  onAlert?: (title: string, message: string) => void;
+/** The request body: just the target's own fields — the params carry more
+ *  (runP2PTx passes its whole params object). */
+function gasTarget(t: P2PGasTarget): P2PGasTarget {
+  switch (t.action) {
+    case 'open_trade':
+    case 'cancel_ad':
+      return { action: t.action, adId: t.adId };
+    case 'mark_paid':
+    case 'release':
+    case 'cancel_trade':
+    case 'dispute':
+      return { action: t.action, tradeId: t.tradeId };
+    default:
+      return { action: t.action };
+  }
 }
 
+/** The action's entity id is required by the type (P2PGasTarget). */
+export type EnsureP2PGasParams = P2PGasTarget & {
+  chainId: number;
+  walletAddress: string;
+  onStage?: (label: string) => void;
+  onAlert?: (title: string, message: string) => void;
+};
+
 export async function ensureP2PGas(p: EnsureP2PGasParams): Promise<boolean> {
-  const { chainId, walletAddress, action, adId, tradeId, onStage, onAlert } = p;
+  const { chainId, walletAddress, onStage, onAlert } = p;
   let refusal: P2PErrorLike | undefined;
 
   if (SONIC_GAS_SPONSOR_CHAIN_IDS.has(chainId)) {
     onStage?.('Checking network fee…');
     try {
-      const res = await gasApi.topUp({ action, ...(tradeId ? { tradeId } : {}), ...(adId ? { adId } : {}) });
+      const res = await gasApi.topUp(gasTarget(p));
       // A 503 gas_unavailable carries the unconfirmed drip's hash: wait on it
       // rather than reporting a failure that may yet land.
       const hash = res.success

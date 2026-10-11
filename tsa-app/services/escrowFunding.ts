@@ -24,7 +24,7 @@
 // told funds are already on-chain — there is no server-side deposit reconciler,
 // so recovery is user-initiated.
 
-import { p2pKycCode } from './p2pErrors';
+import { p2pErrorMessage, p2pKycCode, p2pRefusalError, type P2PErrorLike } from './p2pErrors';
 import { poolApi, p2pChainKey } from './p2p';
 import { ensureGas } from './wallet';
 import { addPending } from './p2pPending';
@@ -58,10 +58,10 @@ export interface EnsureFundingParams {
   gasAction?: 'deposit';
 }
 
-/** Keep the machine code and status on a refusal so the screen can route a KYC
- *  403 to the Verify prompt (a bare Error drops them). */
-function refusalError(res: { message?: string; status?: number; code?: string }, fallback: string): Error {
-  return Object.assign(new Error(res.message || fallback), { code: p2pKycCode(res) ?? res.code, status: res.status });
+/** A refusal as mapped copy that keeps the code and status, so the screen can
+ *  route a KYC 403 to the Verify prompt. */
+function refusalError(res: P2PErrorLike, fallback: string): Error {
+  return p2pRefusalError(res, p2pErrorMessage(res, fallback));
 }
 
 /** A KYC refusal on a read must stop the flow, not read as an empty balance. */
