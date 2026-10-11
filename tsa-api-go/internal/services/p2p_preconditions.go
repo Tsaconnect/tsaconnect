@@ -137,9 +137,12 @@ func (s *P2PTradeService) openerKYCTier(ctx context.Context, ad *models.P2PAd, u
 	case ad.Side != models.P2PAdSideBuy:
 		err = requireVerifiedForMoneyIn(ctx, s.db, userID)
 	case ad.PMID == nil:
+		// Defence in depth for non-HTTP callers: every HTTP P2P route already
+		// refuses an unverified user (P2PHandler.require).
 		err = requireKYCVerified(ctx, s.db, userID)
 	default:
-		// PM buy-ads keep their existing behaviour.
+		// PM buy-ads are carved out to keep their existing behaviour (PM is
+		// out of scope here); over HTTP the route check above still applies.
 		return nil
 	}
 	if errors.Is(err, ErrKYCVerificationRequired) {

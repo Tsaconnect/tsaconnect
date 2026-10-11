@@ -38,7 +38,7 @@ func TestBuildMarketplaceFunding_DormantWithoutItsPieces(t *testing.T) {
 func TestBuildSonicGasSponsorship_DormantWithoutItsPieces(t *testing.T) {
 	cfg := &config.Config{
 		RampSponsorPrivateKey:       "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
-		MarketplaceSonicGasFloorWei: "5000000000000000000", MarketplaceSonicGasTopUpMaxWei: "500000000000000000",
+		SonicGasFloorWei: "5000000000000000000", SonicGasTopUpMaxWei: "500000000000000000",
 		RampSponsorDailyGasBudget: "500000000",
 	}
 	chains := services.NewBlockchainService(cfg)
@@ -52,11 +52,11 @@ func TestBuildSonicGasSponsorship_DormantWithoutItsPieces(t *testing.T) {
 		t.Fatal("a raw sponsor key in production without ALLOW_RAW_SIGNER_KEYS must leave the lane off")
 	}
 	cfg.Env = ""
-	cfg.MarketplaceSonicGasTopUpMaxWei = "5e17"
+	cfg.SonicGasTopUpMaxWei = "5e17"
 	if buildSonicGasSponsorship(cfg, chains) != nil {
 		t.Fatal("a malformed ceiling must skip the lane, never run it unbounded")
 	}
-	cfg.MarketplaceSonicGasTopUpMaxWei = "500000000000000000"
+	cfg.SonicGasTopUpMaxWei = "500000000000000000"
 	if buildSonicGasSponsorship(cfg, chains) != nil {
 		t.Fatal("no sonic client must leave the lane off")
 	}

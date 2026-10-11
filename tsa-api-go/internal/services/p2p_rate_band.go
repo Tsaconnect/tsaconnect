@@ -6,10 +6,9 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
-
-const defaultFixedRateBandBps = 2000
 
 // RateBandError is returned when a fixed-rate ad is priced outside the
 // allowed band around the market reference. It is an ErrInvalidParams so any
@@ -27,18 +26,16 @@ func (e *RateBandError) Error() string {
 func (e *RateBandError) Unwrap() error { return ErrInvalidParams }
 
 // SetFixedRateBandBps sets the allowed distance of a fixed-rate ad from the
-// market reference. <=0 falls back to the default: the band is never "off".
+// market reference (cfg.P2PFixedRateBandBps).
 func (s *P2PTradeService) SetFixedRateBandBps(bps int) {
-	if bps <= 0 {
-		s.fixedRateBandBps = defaultFixedRateBandBps
-		return
-	}
 	s.fixedRateBandBps = bps
 }
 
+// fixedRateBand is the band in force: an unset or non-positive value is the
+// config default, never "off".
 func (s *P2PTradeService) fixedRateBand() int {
 	if s.fixedRateBandBps <= 0 {
-		return defaultFixedRateBandBps
+		return config.DefaultP2PFixedRateBandBps
 	}
 	return s.fixedRateBandBps
 }
@@ -58,12 +55,14 @@ func (s *P2PTradeService) checkFixedRateBand(p CreateAdParams) error {
 	if err != nil {
 		return nil // requireFreshRate already ran and owns snapshot failures
 	}
-	row, ok := snap.Rates[strings.ToUpper(strings.TrimSpace(p.FiatCurrency))]
-	refF := row.MidRate
-	if refF <= 0 {
-		refF = row.BinanceSell
+	refF := 0.0
+	if row, ok := snap.Rates[strings.ToUpper(strings.TrimSpace(p.FiatCurrency))]; ok && !row.Stale {
+		refF = row.MidRate
+		if refF <= 0 {
+			refF = row.BinanceSell
+		}
 	}
-	if !ok || row.Stale || refF <= 0 {
+	if refF <= 0 {
 		log.Printf("[p2p rate band] no usable reference for %s; fixed-rate ad allowed unchecked", p.FiatCurrency)
 		return nil
 	}
@@ -77,13 +76,13 @@ func (s *P2PTradeService) checkFixedRateBand(p CreateAdParams) error {
 	}
 	bps := s.fixedRateBand()
 	band := big.NewRat(int64(bps), 10000)
-	min := new(big.Rat).Mul(ref, new(big.Rat).Sub(big.NewRat(1, 1), band))
-	max := new(big.Rat).Mul(ref, new(big.Rat).Add(big.NewRat(1, 1), band))
-	if rate.Cmp(min) >= 0 && rate.Cmp(max) <= 0 {
+	lo := new(big.Rat).Mul(ref, new(big.Rat).Sub(big.NewRat(1, 1), band))
+	hi := new(big.Rat).Mul(ref, new(big.Rat).Add(big.NewRat(1, 1), band))
+	if rate.Cmp(lo) >= 0 && rate.Cmp(hi) <= 0 {
 		return nil
 	}
 	return &RateBandError{
-		ReferenceRate: ratDecimal(ref), MinRate: ratDecimal(min), MaxRate: ratDecimal(max), BandBps: bps,
+		ReferenceRate: ratDecimal(ref), MinRate: ratDecimal(lo), MaxRate: ratDecimal(hi), BandBps: bps,
 	}
 }
 

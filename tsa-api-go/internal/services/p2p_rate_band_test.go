@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 )
 
 func TestCreateAd_FixedRateOutsideBandRefused(t *testing.T) {
@@ -67,7 +68,7 @@ func TestFixedRateBand_SkipsFloatNonStableAndMissingReference(t *testing.T) {
 func TestSetFixedRateBandBps_NonPositiveFallsBackToDefault(t *testing.T) {
 	svc := &P2PTradeService{}
 	svc.SetFixedRateBandBps(-5)
-	if svc.fixedRateBand() != defaultFixedRateBandBps {
+	if svc.fixedRateBand() != config.DefaultP2PFixedRateBandBps {
 		t.Fatalf("band = %d", svc.fixedRateBand())
 	}
 }

@@ -120,8 +120,9 @@ func newIntentSponsorship(orders *services.PaycrestOrderService, lanes map[strin
 // is on (marketplaceSonicGas). A second lane on the same key would hold its
 // own send lock and could hand two txs the same nonce. It is a separate
 // sponsorship holding ONLY the Sonic lane, so it can never give a sale or a
-// TSA Pay intent from Sonic a source-chain top-up. Its floor, ceiling and
-// guard name are the ones the funding's own lane had.
+// TSA Pay intent from Sonic a source-chain top-up. Floor and ceiling are
+// SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI (the old MARKETPLACE_SONIC_GAS_*
+// names still read); guard and metrics are named sonic_gas.
 func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainService) *services.RampSponsorship {
 	if cfg.RampSponsorPrivateKey == "" || chains == nil {
 		log.Printf("[sonic-gas] dormant: RAMP_SPONSOR_PRIVATE_KEY not set — a P2P user or buyer with no S is told to add some")
@@ -146,14 +147,14 @@ func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainSer
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}
-	floor := bigFromDecimal(cfg.MarketplaceSonicGasFloorWei)
-	topUpMax := bigFromDecimal(cfg.MarketplaceSonicGasTopUpMaxWei)
+	floor := bigFromDecimal(cfg.SonicGasFloorWei)
+	topUpMax := bigFromDecimal(cfg.SonicGasTopUpMaxWei)
 	budget := bigFromDecimal(cfg.RampSponsorDailyGasBudget)
 	if floor == nil || topUpMax == nil || budget == nil {
-		log.Printf("[sonic-gas] ALERT marketplace_sonic_gas_skipped_total=1 reason=invalid MARKETPLACE_SONIC_GAS_FLOOR_WEI / _TOPUP_MAX_WEI / RAMP_SPONSOR_DAILY_GAS_BUDGET")
+		log.Printf("[sonic-gas] ALERT sonic_gas_skipped_total=1 reason=invalid SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI / RAMP_SPONSOR_DAILY_GAS_BUDGET")
 		return nil
 	}
-	lane := buildSponsorLane(chains, "sonic", key, "marketplace_sonic_gas", services.SponsorLimits{
+	lane := buildSponsorLane(chains, "sonic", key, "sonic_gas", services.SponsorLimits{
 		DailyGasBudget: budget, BalanceFloor: floor,
 	}, topUpMax)
 	if lane == nil {

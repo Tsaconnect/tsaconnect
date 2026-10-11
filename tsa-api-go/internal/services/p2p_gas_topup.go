@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -67,8 +68,6 @@ var (
 )
 
 const (
-	// p2pGasDefaultPerDay is P2P_GAS_TOPUPS_PER_DAY's default.
-	p2pGasDefaultPerDay = 6
 	// p2pGasUnusedWindow is how long an unspent drip blocks the next one.
 	p2pGasUnusedWindow = time.Hour
 )
@@ -142,7 +141,7 @@ func NewP2PGasSponsor(sponsor *RampSponsorship, need P2PGasNeed, perDay int, now
 		return nil
 	}
 	if perDay <= 0 {
-		perDay = p2pGasDefaultPerDay
+		perDay = config.DefaultP2PGasTopUpsPerDay
 	}
 	if now == nil {
 		now = time.Now

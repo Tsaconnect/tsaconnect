@@ -1845,7 +1845,7 @@ func main() {
 	// once.
 	sonicShared := buildSonicGasSponsorship(cfg, blockchainService)
 	if sonicShared != nil {
-		scheduler.Register(jobs.NewGasFloatMonitorNamed("marketplace_sonic_gas", sonicShared, 10*time.Minute))
+		scheduler.Register(jobs.NewGasFloatMonitorNamed("sonic_gas", sonicShared, 10*time.Minute))
 	}
 	// Only a live sponsor with a trade service to check needs against: a nil
 	// pointer in either interface would be non-nil.

@@ -4,9 +4,9 @@ import (
 	"context"
 	"log"
 	"time"
-)
 
-const defaultPaidUnreleasedAfter = 2 * time.Hour
+	"github.com/ojimcy/tsa-api-go/internal/config"
+)
 
 // StalePaidAlerter is the slice of P2PTradeService the worker depends on.
 type StalePaidAlerter interface {
@@ -22,7 +22,7 @@ type P2PPaidUnreleasedAlerter struct {
 
 func NewP2PPaidUnreleasedAlerter(svc StalePaidAlerter, after time.Duration) *P2PPaidUnreleasedAlerter {
 	if after <= 0 {
-		after = defaultPaidUnreleasedAfter
+		after = config.DefaultP2PPaidUnreleasedAlertAfter
 	}
 	return &P2PPaidUnreleasedAlerter{svc: svc, after: after}
 }
