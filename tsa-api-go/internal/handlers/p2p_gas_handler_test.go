@@ -80,6 +80,8 @@ func TestGasTopUp_ErrorContract(t *testing.T) {
 		{"rpc failure", errors.New("sponsor: read user balance: dial tcp"), http.StatusServiceUnavailable, "gas_unavailable"},
 		{"reverted", fmt.Errorf("%w (%w)", services.ErrP2PGasUnavailable, services.ErrTopUpFailed), http.StatusServiceUnavailable, "gas_unavailable"},
 		{"not needed", services.ErrP2PGasNotNeeded, http.StatusConflict, "gas_not_needed"},
+		{"kyc legal name", services.ErrKYCLegalNameMissing, http.StatusForbidden, services.KYCLegalNameMissingCode},
+		{"kyc unverified", services.ErrKYCVerificationRequired, http.StatusForbidden, services.KYCVerificationRequiredCode},
 		{"unused", services.ErrP2PGasUnused, http.StatusConflict, "gas_topup_unused"},
 		{"in progress", services.ErrSponsorshipInProgress, http.StatusConflict, sponsorshipInProgressCode},
 		{"daily cap", services.ErrTopUpDailyCap, http.StatusTooManyRequests, ""},

@@ -21,6 +21,38 @@ import (
 // from replacement by the counter-party.
 const disputePrepareStaleAfter = 10 * time.Minute
 
+// replaceableDisputeRow is the existing-row gate of PrepareRaiseDispute,
+// shared with the dispute gas need. An open dispute row that is not yet on
+// chain is an abandoned prepare (the user closed the sign sheet), and the
+// TradeID unique index allows one row per trade, so a retry rewrites it. It
+// returns that row (nil when there is none: create one), or a refusal wrapping
+// ErrDisputeAlreadyOpen when the counter-party's prepare is still live (only a
+// stale one may be replaced by the other party) or the chain already shows
+// Disputed (a real duplicate). A failed chain read is ErrChainUnavailable.
+func (s *P2PTradeService) replaceableDisputeRow(ctx context.Context, trade *models.P2PTrade, userID uuid.UUID, escrow P2PEscrowAdapter) (*models.P2PDispute, error) {
+	var existing models.P2PDispute
+	err := s.db.WithContext(ctx).
+		Where("trade_id = ? AND status = ?", trade.ID, models.P2PDisputeStatusOpen).
+		First(&existing).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if existing.RaisedBy != userID && s.clock.Now().Sub(existing.CreatedAt) <= disputePrepareStaleAfter {
+		return nil, refuse(ErrDisputeAlreadyOpen)
+	}
+	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrChainUnavailable, err)
+	}
+	if onchain.Status == OnChainP2PStatusDisputed {
+		return nil, refuse(ErrDisputeAlreadyOpen)
+	}
+	return &existing, nil
+}
+
 // requireDisputeRaiserMatches checks the TradeDisputed `by` address is the
 // on-chain buyer or seller matching the role on the dispute row, so a row
 // replaced by the other party cannot be confirmed with the first party's tx.
@@ -100,31 +132,8 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	if err := s.requireOpenOnChain(ctx, &trade, escrow); err != nil {
 		return nil, err
 	}
-	// An open dispute row that is not yet on chain is an abandoned prepare (the
-	// user closed the sign sheet): let either party replace it. Only a chain
-	// already showing Disputed is a real duplicate. The TradeID unique index
-	// allows one row per trade, so we rewrite that row rather than add one.
-	var existing models.P2PDispute
-	var replace *models.P2PDispute
-	err = s.db.WithContext(ctx).
-		Where("trade_id = ? AND status = ?", trade.ID, models.P2PDisputeStatusOpen).
-		First(&existing).Error
-	switch {
-	case err == nil:
-		// A live prepare by one party must not be clobbered by the other: the
-		// counter-party may only replace a row that has gone stale.
-		if existing.RaisedBy != userID && s.clock.Now().Sub(existing.CreatedAt) <= disputePrepareStaleAfter {
-			return nil, ErrDisputeAlreadyOpen
-		}
-		onchain, rerr := escrow.ReadTrade(HashID(trade.ID))
-		if rerr != nil {
-			return nil, fmt.Errorf("%w: %v", ErrChainUnavailable, rerr)
-		}
-		if onchain.Status == OnChainP2PStatusDisputed {
-			return nil, ErrDisputeAlreadyOpen
-		}
-		replace = &existing
-	case !errors.Is(err, gorm.ErrRecordNotFound):
+	replace, err := s.replaceableDisputeRow(ctx, &trade, userID, escrow)
+	if err != nil {
 		return nil, err
 	}
 
@@ -176,6 +185,10 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 			PrepareNonce: &nonce,
 		}
 		if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
+			// A concurrent first prepare created the trade's one row first.
+			if isDuplicateKeyErr(err) {
+				return nil, ErrDisputeAlreadyOpen
+			}
 			return nil, fmt.Errorf("persist dispute: %w", err)
 		}
 	}

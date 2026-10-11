@@ -1102,7 +1102,8 @@ func (h *P2PHandler) ListMyAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
-	h.fillAdFees(c.Request.Context(), rows)
+	// No live fee here: My Ads never shows it, and it would cost up to the
+	// 2s fee budget on a busy screen.
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(c.Request.Context(), rows)})
 }
 

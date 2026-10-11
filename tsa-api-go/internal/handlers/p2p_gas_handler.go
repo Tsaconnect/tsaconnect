@@ -20,8 +20,8 @@ type P2PGasSponsor interface {
 
 // The codes the app keys on. Every refusal this route makes carries one of
 // these, sponsorship_in_progress, WALLET_PROOF_REQUIRED or
-// kyc_verification_required (from require(), before the sponsor is asked) —
-// or is a 400 (bad request) / 429 (daily cap).
+// kyc_verification_required / kyc_legal_name_missing (require(), or the
+// open_trade KYC tier) — or is a 400 (bad request) / 429 (daily cap).
 const (
 	p2pGasUnavailableCode = "gas_unavailable"
 	p2pGasNotNeededCode   = "gas_not_needed"
@@ -103,6 +103,11 @@ func p2pGasError(c *gin.Context, res services.GasTopUpResult, err error) {
 		p2pGasUnavailable(c, res, err)
 	case errors.Is(err, services.ErrInvalidParams):
 		utils.ErrorResponse(c, http.StatusBadRequest, "That trade or ad could not be found, or none was given for this step.")
+	case services.KYCRefusalCode(err) != "":
+		// open_trade gas for a caller OpenTrade would refuse on KYC tier (a
+		// verified user with no legal name on a sell-ad): the refusal's own
+		// copy and code, so the app shows the real blocker.
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), services.KYCRefusalCode(err))
 	case errors.Is(err, services.ErrP2PGasNotNeeded):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, services.ErrP2PGasNotNeeded.Error(), p2pGasNotNeededCode)
 	case errors.Is(err, services.ErrP2PGasUnused):

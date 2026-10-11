@@ -597,24 +597,31 @@ func (s *P2PEscrowService) ReadVoucherCancelled(voucherHash [32]byte) (bool, err
 
 // ReadTrade returns the on-chain Trade record. Exists=false when the trade
 // slot is empty (Status == None). On a V3 escrow it is one trades(bytes32)
-// read, which also carries the fee snapshot; an escrow whose trades getter has
-// the older layout falls back to getTrade (no snapshot).
+// read, which also carries the fee snapshot; an escrow whose trades getter
+// answers in an older layout falls back to getTrade (no snapshot, 2 RPCs). A
+// trades() call that fails is returned as an error.
 func (s *P2PEscrowService) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
 	if err := s.requireConfigured(); err != nil {
 		return nil, err
 	}
-	if data, err := parsedP2PEscrowABI.Pack("trades", tradeId); err == nil {
-		if out, err := s.callContract(data); err == nil {
-			if t, ok := decodeTradesGetter(out); ok {
-				return t, nil
-			}
-		}
+	data, err := parsedP2PEscrowABI.Pack("trades", tradeId)
+	if err != nil {
+		return nil, fmt.Errorf("pack trades: %w", err)
 	}
-	data, err := parsedP2PEscrowABI.Pack("getTrade", tradeId)
+	out, err := s.callContract(data)
+	if err != nil {
+		// A failed call is not a pre-V3 sign: falling back would record a V3
+		// open without its fee snapshot.
+		return nil, err
+	}
+	if t, ok := decodeTradesGetter(out); ok {
+		return t, nil
+	}
+	data, err = parsedP2PEscrowABI.Pack("getTrade", tradeId)
 	if err != nil {
 		return nil, fmt.Errorf("pack getTrade: %w", err)
 	}
-	out, err := s.callContract(data)
+	out, err = s.callContract(data)
 	if err != nil {
 		return nil, err
 	}

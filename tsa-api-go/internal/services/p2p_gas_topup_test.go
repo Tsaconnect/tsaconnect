@@ -254,6 +254,23 @@ func TestP2PGasTopUp_FailuresAreUnavailable(t *testing.T) {
 	}
 }
 
+// A KYC refusal from the state check reaches the handler as itself (it maps
+// to 403 with the KYC code), and nothing is sent.
+func TestP2PGasTopUp_KYCRefusalPassesThrough(t *testing.T) {
+	for _, kyc := range []error{ErrKYCLegalNameMissing, ErrKYCVerificationRequired} {
+		r := newP2PGasRig(t, 6)
+		r.setUserBalance(0)
+		r.need.err = kyc
+		_, err := r.topUp(P2PGasOpenTrade)
+		if KYCRefusalCode(err) != KYCRefusalCode(kyc) || errors.Is(err, ErrP2PGasUnavailable) {
+			t.Fatalf("need %v -> %v", kyc, err)
+		}
+		if r.signer.broadcastCalls != 0 {
+			t.Fatalf("a KYC refusal sent %d txs", r.signer.broadcastCalls)
+		}
+	}
+}
+
 func gasUnavailableCause(err error) error {
 	var u gasUnavailableError
 	if errors.As(err, &u) {

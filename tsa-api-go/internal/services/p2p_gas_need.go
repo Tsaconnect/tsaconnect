@@ -21,13 +21,14 @@ import (
 //   - withdraw: a non-zero available pool balance in some listed asset.
 //   - cancel_ad: adId of her own active/paused sell ad with no open trade.
 //   - open_trade: adId of an active, openable ad that is not hers, and she
-//     clears OpenTrade's KYC tier for its side.
+//     clears OpenTrade's KYC tier for its side (else that KYC refusal itself).
 //   - mark_paid: tradeId; she is the buyer, it is pending_payment and its
 //     open is on chain.
 //   - release: tradeId; she is the seller and it is pending_payment, paid or
 //     releasing (a retry), as PrepareRelease allows.
 //   - cancel_trade: tradeId; she is a party, pending_payment, past expiry.
-//   - dispute: tradeId; she is a party, pending_payment or paid, open on chain.
+//   - dispute: tradeId; she is a party, pending_payment or paid, open on
+//     chain, and no live counterparty prepare or on-chain dispute exists.
 //
 // Returns ErrInvalidParams for a missing or unknown id, ErrP2PGasNotNeeded
 // when it is not her turn (or not on Sonic), and any other error unwrapped
@@ -108,7 +109,21 @@ func (s *P2PTradeService) gasNeedTradeTurn(ctx context.Context, userID uuid.UUID
 	if err == nil && (action == P2PGasMarkPaid || action == P2PGasDispute) {
 		err = s.gasNeedOpenOnChain(ctx, t)
 	}
+	if err == nil && action == P2PGasDispute {
+		err = s.gasNeedDisputeRow(ctx, userID, t)
+	}
 	return gasNotNeeded(err, fmt.Sprintf("%s on trade %s (status %s)", action, t.ID, t.Status))
+}
+
+// gasNeedDisputeRow applies PrepareRaiseDispute's existing-row gate
+// (replaceableDisputeRow): no gas for a prepare that would be refused.
+func (s *P2PTradeService) gasNeedDisputeRow(ctx context.Context, userID uuid.UUID, t *models.P2PTrade) error {
+	escrow, _, _, err := s.resolve(t.ChainID)
+	if err != nil {
+		return err
+	}
+	_, err = s.replaceableDisputeRow(ctx, t, userID, escrow)
+	return err
 }
 
 // gasNeedOpenOnChain is requireOpenOnChain for the gas check: "not opened" (or
@@ -126,12 +141,19 @@ func (s *P2PTradeService) gasNeedOpenOnChain(ctx context.Context, t *models.P2PT
 }
 
 // gasNotNeeded turns a gate refusal into ErrP2PGasNotNeeded and passes a
-// failed read through unchanged.
+// failed read through unchanged. A KYC refusal is returned as itself (403 with
+// its code): it is the real blocker, and "nothing to sign" would leave the app
+// telling her to add S she cannot use.
 func gasNotNeeded(err error, what string) error {
-	if isRefusal(err) {
+	var r p2pRefusal
+	switch {
+	case !errors.As(err, &r):
+		return err
+	case errors.Is(r.err, ErrKYCVerificationRequired):
+		return r.err
+	default:
 		return fmt.Errorf("%w: %s: %v", ErrP2PGasNotNeeded, what, err)
 	}
-	return err
 }
 
 func (s *P2PTradeService) gasNeedCancelAd(ctx context.Context, userID uuid.UUID, ad *models.P2PAd) error {

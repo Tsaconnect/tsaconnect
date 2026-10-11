@@ -181,7 +181,7 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 		return GasTopUpResult{}, ErrSponsorWallet
 	}
 	if err := p.need.RequireP2PGasNeed(ctx, user, wallet, req); err != nil {
-		if errors.Is(err, ErrInvalidParams) || errors.Is(err, ErrP2PGasNotNeeded) {
+		if errors.Is(err, ErrInvalidParams) || errors.Is(err, ErrP2PGasNotNeeded) || KYCRefusalCode(err) != "" {
 			return GasTopUpResult{}, err
 		}
 		return GasTopUpResult{}, gasUnavailable(fmt.Errorf("need check: %w", err))

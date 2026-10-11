@@ -88,6 +88,28 @@ func TestPrepareRaiseDispute_ConcurrentReplaceLosesTheRace(t *testing.T) {
 	}
 }
 
+// Two first prepares with no row yet: the loser hits the trade_id unique
+// index and is told the dispute is already open (409), not a 500.
+func TestPrepareRaiseDispute_ConcurrentFirstCreateIsAlreadyOpen(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, tradeID, _ := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
+	db.Model(&models.P2PTrade{}).Where("id = ?", tradeID).Update("open_tx_hash", "0xopen")
+	var tr models.P2PTrade
+	db.First(&tr, "id = ?", tradeID)
+	esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusPaid, Exists: true, Amount: big.NewInt(30), Funding: 1}
+	ctx := context.Background()
+	var innerErr error
+	esc.onPrepareRaiseDispute = func() {
+		_, innerErr = svc.PrepareRaiseDispute(ctx, tr.ID, tr.SellerID, "0xa", "inner", nil)
+	}
+	if _, err := svc.PrepareRaiseDispute(ctx, tr.ID, tr.SellerID, "0xa", "outer", nil); !errors.Is(err, ErrDisputeAlreadyOpen) {
+		t.Fatalf("outer err = %v, want ErrDisputeAlreadyOpen", err)
+	}
+	if innerErr != nil {
+		t.Fatalf("inner err = %v", innerErr)
+	}
+}
+
 // A row prepared before prepare_nonce existed (NULL) is still replaceable.
 func TestPrepareRaiseDispute_ReplacesALegacyRowWithNoNonce(t *testing.T) {
 	svc, _, tr := preparedDisputeFixture(t)

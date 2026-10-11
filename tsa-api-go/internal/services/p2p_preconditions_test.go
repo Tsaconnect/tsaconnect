@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -92,20 +93,72 @@ func TestP2PGasNeed_NeverOpenedTradeIsNotNeeded(t *testing.T) {
 	}
 }
 
-// A verified buyer with no legal name cannot open a sell-ad trade (the
-// money-in tier), so no gas is sent for it; a buy-ad open needs only the
-// verified status.
+// A verified user with no legal name cannot open a sell-ad trade (the
+// money-in tier), so no gas is sent for it — and the refusal is the KYC one
+// itself (not gas_not_needed), so the app can tell her the real blocker. A
+// buy-ad open needs only the verified status.
 func TestP2PGasNeed_OpenTradeAppliesOpenTradeKYCTier(t *testing.T) {
 	f := newGasNeedFixture(t)
 	nameless := seedVerifiedWithoutLegalName(t, f.db, "")
 	buyAd := f.seedAd(t, f.seller, models.P2PAdSideBuy, models.P2PAdStatusActive, 146)
 
-	wantGasNeed(t, "sell ad, no legal name", f.check(nameless, P2PGasRequest{Action: P2PGasOpenTrade, AdID: f.adID}), ErrP2PGasNotNeeded)
+	err := f.check(nameless, P2PGasRequest{Action: P2PGasOpenTrade, AdID: f.adID})
+	if !errors.Is(err, ErrKYCLegalNameMissing) || errors.Is(err, ErrP2PGasNotNeeded) || KYCRefusalCode(err) != KYCLegalNameMissingCode {
+		t.Fatalf("sell ad, no legal name: err = %v, want the legal-name KYC refusal", err)
+	}
 	wantGasNeed(t, "buy ad, no legal name", f.check(nameless, P2PGasRequest{Action: P2PGasOpenTrade, AdID: buyAd}), nil)
 	wantGasNeed(t, "sell ad, named buyer", f.check(f.buyer, P2PGasRequest{Action: P2PGasOpenTrade, AdID: f.adID}), nil)
 
 	pending := seedUserAt(t, f.db, uuid.New(), models.VerificationStatusPending)
-	wantGasNeed(t, "buy ad, unverified", f.check(pending, P2PGasRequest{Action: P2PGasOpenTrade, AdID: buyAd}), ErrP2PGasNotNeeded)
+	err = f.check(pending, P2PGasRequest{Action: P2PGasOpenTrade, AdID: buyAd})
+	if KYCRefusalCode(err) != KYCVerificationRequiredCode || errors.Is(err, ErrP2PGasNotNeeded) {
+		t.Fatalf("buy ad, unverified: err = %v, want kyc_verification_required", err)
+	}
+}
+
+// Dispute gas also mirrors PrepareRaiseDispute's refusals on an existing
+// unconfirmed dispute row: the counterparty's live prepare, or the chain
+// already showing Disputed. Same row on twin trades, same verdict.
+func TestP2PGasNeed_DisputeMatchesPrepareRowRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		rowBySeller   bool // else by the buyer (the caller)
+		age           time.Duration
+		chainDisputed bool
+		wantOK        bool
+	}{
+		{"counterparty live prepare", true, time.Minute, false, false},
+		{"counterparty stale prepare", true, disputePrepareStaleAfter + time.Minute, false, true},
+		{"own live prepare", false, time.Minute, false, true},
+		{"chain already disputed", false, time.Minute, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGasNeedFixture(t)
+			if tc.chainDisputed {
+				f.esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusDisputed, Exists: true}
+			}
+			raiser, role := f.buyer, models.P2PDisputeRoleBuyer
+			if tc.rowBySeller {
+				raiser, role = f.seller, models.P2PDisputeRoleSeller
+			}
+			seed := func() uuid.UUID {
+				id := f.seedTrade(t, models.P2PTradeStatusPaid, 30*time.Minute, 146)
+				if err := f.db.Create(&models.P2PDispute{ID: uuid.New(), TradeID: id, RaisedBy: raiser, RaisedRole: role,
+					Reason: "r", Status: models.P2PDisputeStatusOpen, CreatedAt: f.now.Add(-tc.age)}).Error; err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			gasErr := f.check(f.buyer, P2PGasRequest{Action: P2PGasDispute, TradeID: seed()})
+			_, prepErr := f.svc.PrepareRaiseDispute(context.Background(), seed(), f.buyer, gasNeedWallet, "not paid", nil)
+			if gasOK, prepOK := gasErr == nil, prepErr == nil; gasOK != tc.wantOK || prepOK != tc.wantOK {
+				t.Fatalf("gas ok=%v (%v), prepare ok=%v (%v), want %v", gasOK, gasErr, prepOK, prepErr, tc.wantOK)
+			}
+			if !tc.wantOK && (!errors.Is(gasErr, ErrP2PGasNotNeeded) || !errors.Is(prepErr, ErrDisputeAlreadyOpen)) {
+				t.Fatalf("gas %v / prepare %v", gasErr, prepErr)
+			}
+		})
+	}
 }
 
 // open_trade and cancel_ad say yes exactly when OpenTrade / the cancel call
@@ -153,5 +206,26 @@ func TestP2PGasNeed_AdActionsMatchPrepareGates(t *testing.T) {
 				t.Fatalf("cancel_ad %s: gas ok=%v, PrepareCancelAd gate ok=%v (%v / %v)", label, gasOK, prepOK, gasErr, cancelErr)
 			}
 		}
+	}
+}
+
+// End to end through the sponsor: open_trade gas for a verified buyer with no
+// legal name on a sell-ad comes back as the legal-name KYC refusal (the
+// handler's 403 kyc_legal_name_missing) and nothing is sent.
+func TestP2PGasTopUp_NamelessOpenTradeIsTheKYCRefusal(t *testing.T) {
+	f := newGasNeedFixture(t)
+	nameless := seedVerifiedWithoutLegalName(t, f.db, "")
+	r, _ := newSponsorRig("sonic", "USDT")
+	r.chain.balances[strings.ToLower(sponsorTestUser)] = big.NewInt(0)
+	now := func() time.Time { return sponsorTestNow }
+	g := NewP2PGasSponsor(NewRampSponsorship(nil, r.store, r.lanes(), 2, time.Second, now), f.svc, 6, now)
+	user := &models.User{ID: nameless, WalletAddress: sponsorTestUser, VerificationStatus: models.VerificationStatusVerified}
+
+	_, err := g.TopUp(context.Background(), user, sponsorTestUser, P2PGasRequest{Action: P2PGasOpenTrade, AdID: f.adID})
+	if KYCRefusalCode(err) != KYCLegalNameMissingCode || errors.Is(err, ErrP2PGasNotNeeded) || errors.Is(err, ErrP2PGasUnavailable) {
+		t.Fatalf("err = %v, want the legal-name KYC refusal", err)
+	}
+	if r.signer.broadcastCalls != 0 {
+		t.Fatalf("sent %d txs", r.signer.broadcastCalls)
 	}
 }

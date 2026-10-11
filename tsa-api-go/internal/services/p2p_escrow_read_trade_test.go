@@ -105,6 +105,18 @@ func TestReadTrade_V3IsOneCallWithTheFeeSnapshot(t *testing.T) {
 	}
 }
 
+// A failed trades() call is an error, not a reason to try getTrade: a V3
+// escrow must never record an open without its fee snapshot because of a blip.
+func TestReadTrade_TransportErrorIsReturned(t *testing.T) {
+	stub := &escrowCallStub{answers: map[string][]byte{}} // every call errors
+	if _, err := newEscrowOnStub(t, stub).ReadTrade([32]byte{1}); err == nil {
+		t.Fatal("want the trades() error")
+	}
+	if len(stub.calls) != 1 || stub.calls[0] != "trades" {
+		t.Fatalf("calls = %v, want only trades()", stub.calls)
+	}
+}
+
 // A pre-V3 escrow's trades getter has the old layout: fall back to getTrade,
 // with no snapshot.
 func TestReadTrade_PreV3FallsBackToGetTrade(t *testing.T) {
