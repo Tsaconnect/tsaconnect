@@ -536,6 +536,43 @@ func (s *P2PEscrowService) ReadVoucherCancelled(voucherHash [32]byte) (bool, err
 	return vals[0].(bool), nil
 }
 
+// ReadPaymentWindow is the escrow's paymentWindow() (uint40 seconds).
+func (s *P2PEscrowService) ReadPaymentWindow() (time.Duration, error) {
+	if err := s.requireConfigured(); err != nil {
+		return 0, err
+	}
+	data, err := parsedP2PEscrowABI.Pack("paymentWindow")
+	if err != nil {
+		return 0, fmt.Errorf("pack paymentWindow: %w", err)
+	}
+	out, err := s.callContract(data)
+	if err != nil {
+		return 0, err
+	}
+	vals, err := parsedP2PEscrowABI.Unpack("paymentWindow", out)
+	if err != nil {
+		return 0, fmt.Errorf("decode paymentWindow: %w", err)
+	}
+	return paymentWindowOf(vals)
+}
+
+// paymentWindowOf decodes paymentWindow()'s unpacked uint40 — the one decode
+// for the boot gate and ReadPaymentWindow alike (review M-3).
+func paymentWindowOf(vals []any) (time.Duration, error) {
+	if len(vals) == 0 {
+		return 0, fmt.Errorf("decode paymentWindow: empty")
+	}
+	switch v := vals[0].(type) {
+	case *big.Int:
+		if v != nil && v.IsInt64() && v.Sign() >= 0 {
+			return time.Duration(v.Int64()) * time.Second, nil
+		}
+	case uint64:
+		return time.Duration(v) * time.Second, nil
+	}
+	return 0, fmt.Errorf("decode paymentWindow: unexpected %T %v", vals[0], vals[0])
+}
+
 // ReadTrade returns the on-chain Trade record. Exists=false when the trade
 // slot is empty (Status == None).
 func (s *P2PEscrowService) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {

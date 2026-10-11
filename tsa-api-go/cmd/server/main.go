@@ -473,6 +473,9 @@ func main() {
 	// (eth_chainId + bytecode per chain) runs inside the constructor. The trade
 	// service resolves escrow + EIP-712 domain per entity-chain from this registry.
 	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg)
+	if err := checkPoolUnconfigure(config.DB, cfg, p2pEscrowRegistry); err != nil {
+		fatalf("[config] REFUSING TO START: %v", err)
+	}
 
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
@@ -1647,6 +1650,10 @@ func main() {
 		// whenever Paycrest is on or off.
 		treasuryRates *services.TreasuryMarketRate
 	)
+	// The TSA Liquidity pool (wirePoolOrders): built inside the Paycrest block
+	// when Paycrest is on (the pool provider joins the router there), after it
+	// otherwise.
+	var pool *poolWiring
 	if paycrestClient.IsEnabled() {
 		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes = services.NewPaycrestQuoteService(paycrestClient, nil, nil)
@@ -1683,6 +1690,8 @@ func main() {
 		rampTreasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
 		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
 		wireConvertedBuys(itService, rampTreasury, blockchainService, cfg, paycrestQuotes)
+		// TSA Liquidity before the router: the pool provider needs its desk.
+		pool = wirePoolOrders(cfg, blockchainService, p2pEscrowRegistry, p2pTradeSvc, pmSvc, releaseSigner, itService, rampTreasury)
 		// The ramp router (Paycrest is its only provider today) answers the
 		// hub's legs and serves /api/ramp/*. Without an order service there
 		// is nothing to route, and the legs come straight from the quotes.
@@ -1692,10 +1701,18 @@ func main() {
 			if cfg.RampPriceGuard == string(services.PriceGuardEnforce) {
 				guard = services.PriceGuardEnforce
 			}
-			// Registration order is the rate tie-break: company wallet →
-			// Paycrest → Flutterwave (S6, D36). A disabled or unwired provider
-			// is a true nil, which NewRouter skips. The two flags are read here
-			// and nowhere else: off stops new quotes and opens only (I1).
+			// Registration order is the rate tie-break: TSA Liquidity pool →
+			// company wallet → Paycrest → Flutterwave (S6, D36, spec §11.1). A
+			// disabled or unwired provider is a true nil, which NewRouter skips.
+			// The two flags are read here and nowhere else: off stops new
+			// quotes and opens only (I1). The pool has no flag (decision 17):
+			// it is nil unless wirePoolOrders built its desk.
+			poolProvider := ramp.NewPoolProvider(itService, treasuryRates)
+			if poolProvider != nil {
+				if pricer := convertedPricerFor(cfg, rampTreasury, paycrestQuotes, "pool"); pricer != nil {
+					poolProvider = ramp.WithConversion(poolProvider, pricer)
+				}
+			}
 			treasuryProvider := ramp.NewTreasuryProvider(itService, treasuryRates, cfg.RampTreasuryBuy)
 			fwProvider := ramp.NewFlutterwaveProvider(itService, cfg.RampFlutterwaveBuy)
 			// Converted venues (spec §15.3): a route follows its provider's
@@ -1725,6 +1742,9 @@ func main() {
 			}
 			log.Printf("[ramp] converted venues: route1=%v%s route2=%v%s", route1, offReason(why1), route2, offReason(why2))
 			names := []string{}
+			if poolProvider != nil {
+				names = append(names, ramp.ProviderPool)
+			}
 			if treasuryProvider != nil {
 				names = append(names, ramp.ProviderTreasury)
 			} else if cfg.RampTreasuryBuy {
@@ -1739,7 +1759,7 @@ func main() {
 			rampRouter = ramp.NewRouter(ramp.Config{
 				ToleranceBps: cfg.RampPriceToleranceBps, Guard: guard,
 				ProviderTimeout: cfg.RampProviderTimeout, AttemptTimeout: cfg.RampOpenAttemptTimeout, OpenBudget: cfg.RampOpenBudget,
-			}, treasuryProvider, ramp.NewPaycrestProvider(paycrestOrders, paycrestQuotes, currencyRegistry), fwProvider)
+			}, poolProvider, treasuryProvider, ramp.NewPaycrestProvider(paycrestOrders, paycrestQuotes, currencyRegistry), fwProvider)
 			log.Printf("[ramp] router enabled (providers=%s, guard=%s, tolerance=%dbps)", strings.Join(names, ","), guard, cfg.RampPriceToleranceBps)
 		}
 		// Direction lives on the order book, not in our config: /api/it/currencies
@@ -1804,15 +1824,29 @@ func main() {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
 	}
 
-	// TSA Liquidity (spec 2026-10-08): the pool chain's treasury lane and boot
-	// gates. Dormant unless a preset row carries a pool escrow; independent of
-	// Paycrest (review I6). Both run before scheduler.Start: poolTreasuryFor may
-	// set EscrowCalls on the shared conversion lane in place, and the gates are
-	// checked once here. poolGates and poolTreasury are consumed by Plan B (LP
-	// endpoints) and Plan C1 (pool provider).
-	poolTreasury := poolTreasuryFor(cfg, blockchainService, rampTreasury)
-	poolGates := buildPoolChain(cfg, blockchainService, p2pEscrowRegistry, releaseSigner, poolTreasury)
+	// TSA Liquidity (spec 2026-10-08): the pool chain's treasury lane, boot
+	// gates and order desk, all built by wirePoolOrders — inside the Paycrest
+	// block when Paycrest is on (the router needs the desk), here otherwise:
+	// LP flows and the canceller need the pool either way (review I6). Dormant
+	// unless a preset row carries a pool escrow; the desk only on BSC testnet
+	// until plan C2 (a mainnet row keeps its gates for LP onboarding). All of
+	// it runs before scheduler.Start: poolTreasuryFor may set EscrowCalls on
+	// the shared conversion lane in place, and the gates are checked once.
+	if pool == nil {
+		pool = wirePoolOrders(cfg, blockchainService, p2pEscrowRegistry, p2pTradeSvc, pmSvc, releaseSigner, itService, rampTreasury)
+	}
+	poolGates := pool.gates
 	registerPoolJobs(scheduler, poolGates)
+	registerPoolOrderJobs(scheduler, pool)
+	attachPoolCard(pool, p2pHandler, itService)
+	// The expiry canceller (§14) runs whether or not the pool exists: it also
+	// cancels expired ordinary P2P trades. A tick defers while the
+	// central-account statement is stale.
+	var expiryNotifier jobs.WorkerFailureNotifier
+	if inboundAlerts != nil {
+		expiryNotifier = workerFailureAlerts{to: inboundAlerts}
+	}
+	registerExpiryCanceller(scheduler, p2pTradeSvc, releaseSigner, itService, statementFreshness(inboundPoller), expiryNotifier)
 
 	// TSA Liquidity plan B: LP onboarding, the /liquidity reads and the voucher
 	// renewal job, live only with a pool chain (prod stays dormant until the

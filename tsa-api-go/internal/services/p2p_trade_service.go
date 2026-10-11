@@ -128,6 +128,9 @@ type P2PEscrowAdapter interface {
 	// trade (design §8). Returns 0/false on a pre-V3 escrow or a V2-opened trade
 	// (no snapshot) — the documented no-op signal for accrueP2PReleaseFee.
 	ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool)
+	// ReadTradeFeeSnapshot is a trade's snapshotted platform and gas fee bps
+	// (V3 trades() getter). A pool slice must read (0, 0) (spec §6.2, F15).
+	ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, gasBps uint16, found bool)
 	ReadBalance(seller, token string) (*OnChainBalance, error)
 	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
 	ReadVoucherCancelled(voucherHash [32]byte) (bool, error)
@@ -203,6 +206,14 @@ type P2PTradeService struct {
 	// balanceMoved is told of every confirmed deposit and withdrawal (the LP
 	// balance cache, review I4); nil when liquidity is dormant.
 	balanceMoved func(chainID int64, wallet, token string)
+	// poolSlices and poolSender handle LP-side actions on pool slices (spec
+	// S42, F21–F22; plan C1 P14). Nil: dormant pool — the reconciler alerts
+	// and waits.
+	poolSlices PoolSliceOrders
+	poolSender ChainSender
+	// sliceOpenAlerts throttles the unresolved-open alert per slice (M-12,
+	// re-review N-6): once, then hourly.
+	sliceOpenAlerts *alertThrottle
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -214,12 +225,13 @@ const defaultFloatOffsetMaxBps = 1000
 
 func NewP2PTradeService(db *gorm.DB, escrows *P2PEscrowRegistry, rates RateProvider, bus EventPublisher, defaultChainID int64) *P2PTradeService {
 	return &P2PTradeService{
-		db:             db,
-		escrows:        escrows,
-		rates:          rates,
-		bus:            bus,
-		clock:          SystemClock,
-		defaultChainID: defaultChainID,
+		sliceOpenAlerts: &alertThrottle{},
+		db:              db,
+		escrows:         escrows,
+		rates:           rates,
+		bus:             bus,
+		clock:           SystemClock,
+		defaultChainID:  defaultChainID,
 	}
 }
 
@@ -1651,6 +1663,9 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	// The opener is the party who funds + broadcasts the open: buyer on a
 	// pooled sell-ad, seller (depositor) on a JIT buy-ad.
 	opener := trade.BuyerID
@@ -1734,6 +1749,9 @@ func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UU
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	if trade.BuyerID != buyerID {
 		return nil, ErrForbidden
 	}
@@ -1748,8 +1766,9 @@ func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UU
 		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
 	}
 	now := s.clock.Now()
+	// dropped_at: the expiry canceller has decided this trade (plan C1 P15).
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Where("id = ? AND status = ? AND dropped_at IS NULL", trade.ID, models.P2PTradeStatusPendingPayment).
 		Updates(map[string]any{
 			"status":          models.P2PTradeStatusPaid,
 			"marked_paid_at":  now,
@@ -1778,6 +1797,9 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.SellerID != sellerID {
@@ -1863,6 +1885,9 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.SellerID != sellerID {
@@ -1998,8 +2023,9 @@ func (s *P2PTradeService) SystemMarkPaid(ctx context.Context, tradeID uuid.UUID,
 		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
 	}
 	now := s.clock.Now()
+	// dropped_at: the expiry canceller has decided this trade (plan C1 P15).
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Where("id = ? AND status = ? AND dropped_at IS NULL", trade.ID, models.P2PTradeStatusPendingPayment).
 		Updates(map[string]any{
 			"status":          models.P2PTradeStatusPaid,
 			"marked_paid_at":  now,
@@ -2047,9 +2073,11 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	// Capture the pre-flip status so a post-flip failure can roll it back.
 	priorStatus := trade.Status
 	if trade.Status != models.P2PTradeStatusReleasing {
+		// A pending_payment trade the expiry canceller has decided
+		// (dropped_at, plan C1 P15) is never released by the system.
 		res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-			Where("id = ? AND status IN ?", trade.ID,
-				[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+			Where("id = ? AND (status = ? OR (status = ? AND dropped_at IS NULL))", trade.ID,
+				models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment).
 			Updates(map[string]any{"status": models.P2PTradeStatusReleasing, "updated_at": s.clock.Now()})
 		if res.Error != nil {
 			return nil, res.Error
@@ -2110,6 +2138,9 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	if trade.BuyerID != userID && trade.SellerID != userID {
 		return nil, ErrForbidden
 	}
@@ -2139,8 +2170,8 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 // dormant PM ledger (s.pm == nil) is a no-op. The reserved amount equals the
 // trade's FiatAmount (what was reserved at open).
 func (s *P2PTradeService) releasePMSellReservationTx(ctx context.Context, tx *gorm.DB, trade *models.P2PTrade) error {
-	if s.pm == nil {
-		return nil
+	if s.pm == nil || trade.IsPoolSlice() {
+		return nil // a slice never reserved NGN: writeSlices takes no ReserveInTx (its "fiat" is the LP's payout, settled by C2)
 	}
 	// Idempotency guard: the failed-payout handler releases the reservation but
 	// leaves the trade in pending_payment for the watchdog, setting this marker.
@@ -2182,6 +2213,9 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.BuyerID != userID && trade.SellerID != userID {
@@ -2323,6 +2357,9 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	var role string
 	switch userID {
 	case trade.BuyerID:
@@ -2410,6 +2447,9 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.BuyerID != userID && trade.SellerID != userID {
@@ -2776,10 +2816,21 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// appear on chain. Such a row permanently holds reserved/remaining capacity,
 	// so reclaim it — cancel + restore the ad's off-chain counters.
 	if !onchain.Exists {
+		// An ordinary trade keeps today's rule (no open hash). A slice is
+		// judged by S44 alone, hash or not (review I1): its open is gone only
+		// when it can never land.
 		if trade.Status == models.P2PTradeStatusPendingPayment &&
-			trade.OpenTxHash == "" &&
-			s.clock.Now().After(trade.ExpiresAt) {
+			s.clock.Now().After(trade.ExpiresAt) &&
+			((!trade.IsPoolSlice() && trade.OpenTxHash == "") || (trade.IsPoolSlice() && s.sliceOrphanable(ctx, &trade))) {
+			if trade.IsPoolSlice() {
+				s.notePaidSliceLost(ctx, &trade, "never_opened") // a paid order's slice is never silently gone
+			}
 			return s.reconcileOrphanOpen(ctx, &trade)
+		}
+		// Re-review N5: a slice not on-chain yet, still inside its window, is
+		// rotated too, so an hour of failed opens never holds the window.
+		if trade.IsPoolSlice() && trade.Status == models.P2PTradeStatusPendingPayment && !s.clock.Now().After(trade.ExpiresAt) {
+			s.rotateSlice(ctx, &trade)
 		}
 		return ReconcileResult{}, nil
 	}
@@ -2802,12 +2853,24 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 
 	switch onchain.Status {
 	case OnChainP2PStatusReleased:
+		if trade.IsPoolSlice() {
+			s.noteSliceSelfRelease(ctx, &trade)
+		}
 		return s.reconcileToReleased(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusCancelled:
+		if trade.IsPoolSlice() {
+			s.notePaidSliceLost(ctx, &trade, "cancelled") // review I3
+		}
 		return s.reconcileToCancelled(ctx, &trade, funding)
 	case OnChainP2PStatusResolved:
+		if trade.IsPoolSlice() {
+			return s.reconcileSliceResolved(ctx, &trade)
+		}
 		return s.reconcileToResolved(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusDisputed:
+		if trade.IsPoolSlice() {
+			return s.reconcileSliceDisputed(ctx, &trade)
+		}
 		return s.reconcileToDisputed(ctx, &trade)
 	case OnChainP2PStatusPaid:
 		// Chain Paid + DB pending_payment → someone called on-chain markPaid
@@ -2935,11 +2998,13 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 		"funding": funding,
 		"reason":  "chain Released",
 	})
-	s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
-	if funding == models.P2PTradeFundingDepositedByTaker {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
-	} else {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	if !trade.IsPoolSlice() { // an LP sees pool events (C2), never a P2P trade push
+		s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		if funding == models.P2PTradeFundingDepositedByTaker {
+			s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		} else {
+			s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		}
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusReleased,
 		Reason: "chain Released"}, nil
@@ -2995,11 +3060,13 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 		"funding": funding,
 		"reason":  "chain Cancelled",
 	})
-	if funding == models.P2PTradeFundingDepositedByTaker {
-		// SellerID is the depositing user — crypto returned to their wallet.
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
-	} else {
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+	if !trade.IsPoolSlice() { // an LP sees pool events (C2), never a P2P trade push
+		if funding == models.P2PTradeFundingDepositedByTaker {
+			// SellerID is the depositing user — crypto returned to their wallet.
+			s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
+		} else {
+			s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		}
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusCancelled,
 		Reason: "chain Cancelled"}, nil
@@ -3010,39 +3077,12 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 // permanently held the ad's reserved/remaining capacity; this cancels it and
 // restores the off-chain counters. There is nothing on chain to settle.
 func (s *P2PTradeService) reconcileOrphanOpen(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
-	now := s.clock.Now()
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Guard on status + empty open_tx_hash: if ConfirmOpenTrade landed between
-		// our read and here, RowsAffected==0 and we restore nothing (no double-credit).
-		res := tx.Model(&models.P2PTrade{}).
-			Where("id = ? AND status = ? AND open_tx_hash = ''", trade.ID, models.P2PTradeStatusPendingPayment).
-			Updates(map[string]any{
-				"status":        models.P2PTradeStatusCancelled,
-				"cancel_reason": "reconciled_orphan",
-				"updated_at":    now,
-			})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return nil
-		}
-		if err := tx.Model(&models.P2PAd{}).
-			Where("id = ?", trade.AdID).
-			Updates(map[string]any{
-				"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
-				"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
-				"updated_at": now,
-			}).Error; err != nil {
-			return err
-		}
-		// PM sell trade: release the held NGN payout reservation in the SAME
-		// transaction as the orphan reclaim so reserved_ngn never leaks. Non-PM /
-		// dormant PM is a clean no-op.
-		return s.releasePMSellReservationTx(ctx, tx, trade)
-	})
+	reclaimed, err := s.reclaimUnopenedTrade(ctx, trade, "reconciled_orphan")
 	if err != nil {
 		return ReconcileResult{}, err
+	}
+	if !reclaimed {
+		return ReconcileResult{}, nil
 	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": models.P2PTradeStatusPendingPayment, "to": models.P2PTradeStatusCancelled,
@@ -3050,6 +3090,40 @@ func (s *P2PTradeService) reconcileOrphanOpen(ctx context.Context, trade *models
 	})
 	return ReconcileResult{Changed: true, FromStatus: models.P2PTradeStatusPendingPayment,
 		ToStatus: models.P2PTradeStatusCancelled, Reason: "orphan open reclaimed"}, nil
+}
+
+// reclaimUnopenedTrade cancels a pending_payment trade whose open never landed
+// and restores the ad's off-chain counters, in one guarded transaction (the
+// body reconcileOrphanOpen always had); it reports whether this call reclaimed
+// it. An ordinary trade keeps today's guard (no open hash): if ConfirmOpenTrade
+// landed between the caller's read and here, nothing is restored (no
+// double-credit). A pool slice may carry the hash of a broadcast that never
+// mined (review I1): its caller has already proven the open can never land
+// (S44, or a provably unbroadcast send), so the hash does not block it.
+func (s *P2PTradeService) reclaimUnopenedTrade(ctx context.Context, trade *models.P2PTrade, reason string) (bool, error) {
+	now := s.clock.Now()
+	reclaimed := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.P2PTrade{}).
+			Where("id = ? AND status = ? AND (open_tx_hash = '' OR it_intent_id IS NOT NULL)", trade.ID, models.P2PTradeStatusPendingPayment).
+			Updates(map[string]any{"status": models.P2PTradeStatusCancelled, "cancel_reason": reason, "updated_at": now})
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		reclaimed = true
+		if err := tx.Model(&models.P2PAd{}).Where("id = ?", trade.AdID).Updates(map[string]any{
+			"reserved":   gorm.Expr("CAST(reserved AS NUMERIC) - CAST(? AS NUMERIC)", trade.TokenAmount),
+			"remaining":  gorm.Expr("CAST(remaining AS NUMERIC) + CAST(? AS NUMERIC)", trade.TokenAmount),
+			"updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		// PM sell trade: release the held NGN payout reservation in the SAME
+		// transaction so reserved_ngn never leaks. Non-PM / dormant PM / a pool
+		// slice is a clean no-op.
+		return s.releasePMSellReservationTx(ctx, tx, trade)
+	})
+	return reclaimed && err == nil, err
 }
 
 func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
@@ -3255,6 +3329,7 @@ func (s *P2PTradeService) ClaimExpiredPendingTrades(ctx context.Context, limit i
 	// cost is acceptable for Phase 1 single-instance.
 	var candidates []models.P2PTrade
 	if err := s.db.WithContext(ctx).
+		Scopes(notPoolSlice).
 		Where("status = ? AND expires_at < ? AND expired_notified_at IS NULL",
 			models.P2PTradeStatusPendingPayment, now).
 		Order("expires_at ASC").
@@ -3288,6 +3363,7 @@ func (s *P2PTradeService) ListExpiredPendingTrades(ctx context.Context, limit in
 	}
 	var out []models.P2PTrade
 	if err := s.db.WithContext(ctx).
+		Scopes(notPoolSlice).
 		Where("status = ? AND expires_at < ?",
 			models.P2PTradeStatusPendingPayment, s.clock.Now()).
 		Order("expires_at ASC").
@@ -3572,6 +3648,9 @@ func (s *P2PTradeService) GetTrade(ctx context.Context, tradeID, requestor uuid.
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	if trade.BuyerID != requestor && trade.SellerID != requestor {
 		return nil, ErrForbidden
 	}
@@ -3579,7 +3658,7 @@ func (s *P2PTradeService) GetTrade(ctx context.Context, tradeID, requestor uuid.
 }
 
 func (s *P2PTradeService) ListTrades(ctx context.Context, f TradeFilter) ([]models.P2PTrade, error) {
-	q := s.db.WithContext(ctx).Model(&models.P2PTrade{})
+	q := notPoolSlice(s.db.WithContext(ctx).Model(&models.P2PTrade{}))
 	switch f.Role {
 	case "buyer":
 		q = q.Where("buyer_id = ?", f.UserID)

@@ -484,7 +484,7 @@ func sellFeeLines(out *SellSwapQuote, landed *big.Int) {
 	if cost.Sign() <= 0 {
 		return
 	}
-	out.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionLiFiLabel, FeeProviderLiFi, cost, 6, rate)}
+	out.Fees = []VenueFee{tokenFeeLine(FeeKindConversion, ConversionFeeLabel, cost, 6, rate)}
 	eff := new(big.Rat).Quo(fiat, usdcRat(gross))
 	kobo := new(big.Int).Quo(new(big.Int).Mul(eff.Num(), big.NewInt(100)), eff.Denom())
 	out.EffectiveRate = FormatMinor(kobo.String())

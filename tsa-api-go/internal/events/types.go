@@ -140,6 +140,9 @@ const (
 	// LiquidityVoucherExpiring: an LP's stock-ad voucher needs renewing (TSA
 	// Liquidity spec §8.4 step 6, §19). Data: "adId".
 	LiquidityVoucherExpiring = "liquidity.voucher_expiring"
+	// LiquidityPausedByAdmin: an LP was paused — by an admin, or automatically
+	// after disputing a pool slice (spec F21, §19). Data: "reason".
+	LiquidityPausedByAdmin = "liquidity.paused_by_admin"
 
 	// TP reward events — fired by the payout-computation engine
 	// (services.RewardService, fee/TP overhaul SP5). The notification dispatcher

@@ -11,19 +11,36 @@ import (
 	"gorm.io/gorm"
 )
 
+// poolSettingUnit is how a pool row is edited and read (spec §16.2).
+type poolSettingUnit string
+
+const (
+	poolUnitUSD   poolSettingUnit = "usd"   // flat_amount_usd
+	poolUnitBps   poolSettingUnit = "bps"   // bps
+	poolUnitCount poolSettingUnit = "count" // a whole number in the bps column (S25)
+)
+
 // poolSettingDefault is one TSA Liquidity fee_configs row (spec §16.1).
 type poolSettingDefault struct {
 	feature          string
+	unit             poolSettingUnit
 	flatUSD          float64
 	minFlat, maxFlat float64
+	bps              int
+	minBps, maxBps   int
 }
 
-// poolSettingDefaults are the rows ensured at boot. Plan C1 appends
-// pool_spread, pool_take, pool_band, pool_slice_cap, pool_min_slice,
-// pool_order_max and pool_user_daily_max.
+// poolSettingDefaults are the rows ensured at boot (Plan B's two, then C1's seven).
 var poolSettingDefaults = []poolSettingDefault{
-	{feature: models.FeaturePoolLPMin, flatUSD: 5, minFlat: 1, maxFlat: 1000},
-	{feature: models.FeaturePoolLPMax, flatUSD: 5000, minFlat: 0, maxFlat: 100000},
+	{feature: models.FeaturePoolLPMin, unit: poolUnitUSD, flatUSD: 5, minFlat: 1, maxFlat: 1000},
+	{feature: models.FeaturePoolLPMax, unit: poolUnitUSD, flatUSD: 5000, minFlat: 0, maxFlat: 100000},
+	{feature: models.FeaturePoolSpread, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 300},
+	{feature: models.FeaturePoolTake, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 300},
+	{feature: models.FeaturePoolBand, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 500},
+	{feature: models.FeaturePoolSliceCap, unit: poolUnitCount, bps: 3, minBps: 1, maxBps: 5},
+	{feature: models.FeaturePoolMinSlice, unit: poolUnitUSD, flatUSD: 2, minFlat: 1, maxFlat: 100},
+	{feature: models.FeaturePoolOrderMax, unit: poolUnitUSD, flatUSD: 2000, minFlat: 0, maxFlat: 2000},
+	{feature: models.FeaturePoolUserDailyMax, unit: poolUnitUSD, flatUSD: 2000, minFlat: 1, maxFlat: 100000},
 }
 
 func poolSettingDefaultFor(feature string) (poolSettingDefault, bool) {
@@ -53,11 +70,12 @@ func (s *FeeConfigService) ensurePoolSettingRows() error {
 		if n > 0 {
 			continue
 		}
-		row := models.FeeConfig{ID: uuid.New(), Feature: d.feature, TokenSymbol: models.FeeTokenAny, FlatAmountUSD: d.flatUSD, Active: true}
+		row := models.FeeConfig{ID: uuid.New(), Feature: d.feature, TokenSymbol: models.FeeTokenAny,
+			BPS: d.bps, FlatAmountUSD: d.flatUSD, Active: true}
 		if err := s.db.Create(&row).Error; err != nil {
 			return fmt.Errorf("ensure %s: %w", d.feature, err)
 		}
-		log.Printf("[FeeConfig] ensured TSA Liquidity setting %s = %v", d.feature, d.flatUSD)
+		log.Printf("[FeeConfig] ensured TSA Liquidity setting %s = %v %s", d.feature, poolDefaultValue(d), d.unit)
 	}
 	return nil
 }
@@ -77,6 +95,78 @@ func poolSettingFlat(feature string) float64 {
 	d, _ := poolSettingDefaultFor(feature)
 	log.Printf("[liquidity] ALERT liquidity_pool_setting_missing feature=%s — using the default %v", feature, d.flatUSD)
 	return d.flatUSD
+}
+
+func poolDefaultValue(d poolSettingDefault) float64 {
+	if d.unit == poolUnitUSD {
+		return d.flatUSD
+	}
+	return float64(d.bps)
+}
+
+// poolSettingBps reads a bps/count row from the replica; a missing row reads
+// its default with an ALERT, never 0.
+func poolSettingBps(feature string) int64 {
+	if Fees != nil {
+		if bps, _, _, found := Fees.RateFor(feature, models.FeeTokenAny, nil); found {
+			return int64(bps)
+		}
+	}
+	d, _ := poolSettingDefaultFor(feature)
+	log.Printf("[liquidity] ALERT liquidity_pool_setting_missing feature=%s — using the default %d", feature, d.bps)
+	return int64(d.bps)
+}
+
+// poolOrderMaxCeilingUSD bounds pool_order_max: the treasury's per-order
+// in-flight cap (spec §16.1; RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER).
+var poolOrderMaxCeilingUSD = 2000.0
+
+// SetPoolOrderMaxCeilingUSD is called once at boot with the treasury's
+// per-order cap. A non-positive value keeps the default.
+func SetPoolOrderMaxCeilingUSD(usd float64) {
+	if usd > 0 {
+		poolOrderMaxCeilingUSD = usd
+	}
+}
+
+// PoolSettings is what one quote or open prices at (spec §16.1). Read once per
+// call and snapshotted into pool_orders at open. Units are canonical 6 dp.
+type PoolSettings struct {
+	SpreadBps, TakeBps, BandBps int64
+	SliceCap                    int
+	MinSliceUnits               *big.Int
+	OrderMaxUnits               *big.Int
+	UserDailyMaxUnits           *big.Int
+	// OrdersStopped: pool_order_max = 0, the incident stop (S46). Quotes and
+	// opens close; claims, expiry and (C2) settlement keep running.
+	OrdersStopped bool
+}
+
+func usdToCanonical(usd float64) *big.Int {
+	if usd <= 0 {
+		return new(big.Int)
+	}
+	return new(big.Int).SetUint64(flatUSDToUnits(usd))
+}
+
+// CurrentPoolSettings reads the C1 rows from the replica. The order maximum is
+// clamped to the treasury's per-order ceiling at read time (review M9): a row
+// ensured at 2,000 must not outlive a lower env ceiling.
+func CurrentPoolSettings() PoolSettings {
+	orderMax := poolSettingFlat(models.FeaturePoolOrderMax)
+	if orderMax > poolOrderMaxCeilingUSD {
+		orderMax = poolOrderMaxCeilingUSD
+	}
+	return PoolSettings{
+		SpreadBps:         poolSettingBps(models.FeaturePoolSpread),
+		TakeBps:           poolSettingBps(models.FeaturePoolTake),
+		BandBps:           poolSettingBps(models.FeaturePoolBand),
+		SliceCap:          int(poolSettingBps(models.FeaturePoolSliceCap)),
+		MinSliceUnits:     usdToCanonical(poolSettingFlat(models.FeaturePoolMinSlice)),
+		OrderMaxUnits:     usdToCanonical(orderMax),
+		UserDailyMaxUnits: usdToCanonical(poolSettingFlat(models.FeaturePoolUserDailyMax)),
+		OrdersStopped:     orderMax <= 0,
+	}
 }
 
 // usdToChainUnits converts USD to token base units at the 1 USDT = $1 peg
@@ -102,15 +192,13 @@ func PoolLPLimitUnits(decimals int) (min, max *big.Int, err error) {
 	return min, max, nil
 }
 
-// ValidatePoolSetting is the admin edit's range check (spec §16.1). The LP min
-// and max are checked against each other's CURRENT row.
+// ValidatePoolSetting is the admin edit's range check (spec §16.1). Rows that
+// bound each other (LP min/max; min slice, order max, daily max) are checked
+// against the other row's CURRENT value.
 func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) error {
 	d, ok := poolSettingDefaultFor(feature)
 	if !ok {
 		return fmt.Errorf("unknown TSA Liquidity setting %q", feature)
-	}
-	if bps != 0 {
-		return fmt.Errorf("%s is a flat USD amount; bps must be 0", feature)
 	}
 	current := func(f string) float64 {
 		var row models.FeeConfig
@@ -120,6 +208,19 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 			return dd.flatUSD
 		}
 		return row.FlatAmountUSD
+	}
+	switch d.unit {
+	case poolUnitBps, poolUnitCount:
+		if flatUSD != 0 {
+			return fmt.Errorf("%s is a rate; flatAmountUsd must be 0", feature)
+		}
+		if bps < d.minBps || bps > d.maxBps {
+			return fmt.Errorf("%s must be between %d and %d", feature, d.minBps, d.maxBps)
+		}
+		return nil
+	}
+	if bps != 0 {
+		return fmt.Errorf("%s is a flat USD amount; bps must be 0", feature)
 	}
 	switch feature {
 	case models.FeaturePoolLPMin:
@@ -135,6 +236,33 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 		}
 		if flatUSD > d.maxFlat {
 			return fmt.Errorf("pool_lp_max must be at most 100000 USD")
+		}
+	case models.FeaturePoolMinSlice:
+		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
+			return fmt.Errorf("pool_min_slice must be between 1 and 100 USD")
+		}
+		if max := current(models.FeaturePoolOrderMax); max > 0 && flatUSD > max {
+			return fmt.Errorf("pool_min_slice cannot exceed the order maximum (%v USD)", max)
+		}
+	case models.FeaturePoolOrderMax:
+		if flatUSD == 0 {
+			return nil // the incident stop (S46)
+		}
+		if flatUSD < 0 || flatUSD > poolOrderMaxCeilingUSD {
+			return fmt.Errorf("pool_order_max must be 0 (stop) or at most %v USD", poolOrderMaxCeilingUSD)
+		}
+		if min := current(models.FeaturePoolMinSlice); flatUSD < min {
+			return fmt.Errorf("pool_order_max must be at least the minimum slice (%v USD) or 0", min)
+		}
+		if daily := current(models.FeaturePoolUserDailyMax); flatUSD > daily {
+			return fmt.Errorf("pool_order_max cannot exceed the daily maximum (%v USD)", daily)
+		}
+	case models.FeaturePoolUserDailyMax:
+		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
+			return fmt.Errorf("pool_user_daily_max must be between 1 and at most 100000 USD")
+		}
+		if max := current(models.FeaturePoolOrderMax); max > 0 && flatUSD < max {
+			return fmt.Errorf("pool_user_daily_max must be at least the order maximum (%v USD)", max)
 		}
 	}
 	return nil

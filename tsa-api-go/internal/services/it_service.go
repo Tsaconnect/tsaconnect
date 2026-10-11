@@ -136,6 +136,9 @@ type ITService struct {
 
 	// wallet is the company wallet (spec 2.3 #1). Nil: the provider is dormant.
 	wallet *CompanyWallet
+	// poolDesk is the TSA Liquidity pool (spec 2026-10-08; plan C1 P4). Nil:
+	// the pool is dormant (no pool chain, or not wired).
+	poolDesk *PoolDesk
 	// converted gates OPENING converted buys and the attach-hash pre-check
 	// (spec §15.5). Nothing that settles, sends or hands off reads it (N1).
 	converted ConvertedBuys
@@ -1028,7 +1031,11 @@ func (s *ITService) GetIntent(ctx context.Context, id uuid.UUID) (*models.ITInte
 
 func (s *ITService) ListUserIntents(ctx context.Context, userID uuid.UUID) ([]models.ITIntent, error) {
 	var out []models.ITIntent
-	err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at DESC").Limit(100).Find(&out).Error
+	err := s.db.WithContext(ctx).Where("user_id = ?", userID).
+		// M14: she never saw a pay-in for these (spec §7.5).
+		Where("status <> ? AND NOT (status = ? AND COALESCE(failure_reason, '') = ?)",
+			models.ITStatusOpening, models.ITStatusCancelled, models.ITFailurePoolOpenFailed).
+		Order("created_at DESC").Limit(100).Find(&out).Error
 	return out, err
 }
 

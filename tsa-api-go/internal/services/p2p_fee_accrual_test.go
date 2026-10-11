@@ -127,7 +127,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 			status TEXT DEFAULT 'pending_payment', proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT, marked_paid_at DATETIME, released_at DATETIME,
-			expires_at DATETIME NOT NULL, expired_notified_at DATETIME,
+			expires_at DATETIME NOT NULL, expired_notified_at DATETIME, it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
 			created_at DATETIME, updated_at DATETIME
 		)`,
 		`CREATE TABLE p2p_audit_logs (

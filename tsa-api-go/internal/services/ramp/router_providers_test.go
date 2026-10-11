@@ -22,7 +22,7 @@ func fakeNamed(name string, venues ...Venue) *fakeProvider {
 func feeVenue(provider, chain, token, display, effective string) Venue {
 	v := venue(provider, chain, token, display)
 	v.EffectiveRate = effective
-	v.Fees = []VenueFee{{Kind: "network", Label: "Network fee", Provider: "Flutterwave", Token: "1.5", Ngn: "2538.85"}}
+	v.Fees = []VenueFee{{Kind: "network", Label: "Network fee", Provider: "provider", Token: "1.5", Ngn: "2538.85"}}
 	return v
 }
 

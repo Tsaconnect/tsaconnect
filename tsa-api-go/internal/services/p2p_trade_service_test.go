@@ -55,6 +55,8 @@ type mockEscrow struct {
 	disputedEvent  *P2PTradeDisputedEvent
 	resolvedEvent  *P2PTradeResolvedEvent
 	onChainTrade   *OnChainP2PTrade
+	readTradeErr   error
+	readTradeCalls int
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -74,6 +76,9 @@ type mockEscrow struct {
 	// trade → accrueP2PReleaseFee no-ops. platformFeeFound toggles the found flag.
 	platformFeeBpsSnapshot uint16
 	platformFeeFound       bool
+	// Pool slices: the V3 fee snapshot ReadTradeFeeSnapshot answers with.
+	snapPlatform, snapGas uint16
+	snapMissing           bool
 }
 
 type depositArgs struct {
@@ -273,6 +278,10 @@ func (m *mockEscrow) VerifyTradeResolved(txHash string, tradeId [32]byte) (*P2PT
 		AmountMoved: big.NewInt(99), FeeToSystem: big.NewInt(1)}, nil
 }
 func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
+	m.readTradeCalls++
+	if m.readTradeErr != nil {
+		return nil, m.readTradeErr
+	}
 	if m.onChainTrade != nil {
 		return m.onChainTrade, nil
 	}
@@ -283,6 +292,9 @@ func (m *mockEscrow) ReadTradePlatformFeeBps(tradeId [32]byte) (uint16, bool) {
 		return m.platformFeeBpsSnapshot, true
 	}
 	return 0, m.platformFeeFound
+}
+func (m *mockEscrow) ReadTradeFeeSnapshot(tradeId [32]byte) (uint16, uint16, bool) {
+	return m.snapPlatform, m.snapGas, !m.snapMissing
 }
 func (m *mockEscrow) ReadBalance(seller, token string) (*OnChainBalance, error) {
 	if m.balanceErr != nil {
@@ -384,6 +396,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			marked_paid_at DATETIME, released_at DATETIME,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
 			CHECK (buyer_id <> seller_id)
 		)`,

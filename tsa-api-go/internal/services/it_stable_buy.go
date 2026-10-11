@@ -273,6 +273,14 @@ type stableBuyOpen struct {
 	// insert writes the row; nil is a plain insert. The company wallet's takes
 	// its stock under the (chain, token) lock (Task 6).
 	insert func(ctx context.Context, intent *models.ITIntent) error
+	// status is the row's first status; "" means pending_payment. A pool
+	// order starts opening (S11) and becomes claimable only once every slice
+	// is locked on-chain.
+	status string
+	// deferHonour leaves RateExpiresAt NULL at insert: the honour window
+	// starts when the pay-in is shown (spec §12.2 step 6), and a failed open
+	// is then never counted as abandoned (M2).
+	deferHonour bool
 }
 
 // openStableBuy is the one write every entry point shares.
@@ -331,7 +339,7 @@ func (s *ITService) openStableBuy(
 		}
 	}
 	// Find-then-Create is not atomic: the partial unique index
-	// uq_it_intents_open_stable_buy (config/database.go) closes the race on
+	// uq_it_intents_open_stable_buy_v2 (config/database.go) closes the race on
 	// Postgres and is translated below. SQLite has none, hence the find.
 
 	display := q.RatePerUnitMinor
@@ -342,7 +350,7 @@ func (s *ITService) openStableBuy(
 		ID:          uuid.New(),
 		UserID:      userID,
 		Direction:   models.ITDirectionBuy,
-		Status:      models.ITStatusPendingPayment,
+		Status:      firstNonEmpty(o.status, models.ITStatusPendingPayment),
 		Provider:    o.provider,
 		Asset:       q.Asset,
 		AssetAmount: q.AssetUnits.String(),
@@ -367,7 +375,7 @@ func (s *ITService) openStableBuy(
 		PlatformKeptKobo: "0",
 		ReceivedAmount:   "0",
 	}
-	if o.routed {
+	if o.routed && !o.deferHonour {
 		honourUntil := time.Now().Add(s.stableLockTTL())
 		intent.RateExpiresAt = &honourUntil
 	}
@@ -387,13 +395,13 @@ func (s *ITService) openStableBuy(
 	return intent, payInto, nil
 }
 
-// findOpenStableBuy is the user's stablecoin purchase awaiting payment, of any
-// provider, or nil.
+// findOpenStableBuy is the user's stablecoin purchase awaiting payment, or a
+// pool order still opening (S11), of any provider, or nil.
 func (s *ITService) findOpenStableBuy(ctx context.Context, userID uuid.UUID) (*models.ITIntent, error) {
 	var rows []models.ITIntent
 	if err := s.db.WithContext(ctx).
-		Where("user_id = ? AND direction = ? AND status = ? AND asset IN ?",
-			userID, models.ITDirectionBuy, models.ITStatusPendingPayment,
+		Where("user_id = ? AND direction = ? AND status IN ? AND asset IN ?",
+			userID, models.ITDirectionBuy, []string{models.ITStatusPendingPayment, models.ITStatusOpening},
 			[]string{models.ITAssetUSDC, models.ITAssetUSDT}).
 		Order("created_at DESC").Limit(1).Find(&rows).Error; err != nil {
 		return nil, err

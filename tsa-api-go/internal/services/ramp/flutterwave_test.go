@@ -160,9 +160,9 @@ func TestFlutterwaveQuote_DisplayRateEffectiveRateAndFees(t *testing.T) {
 		t.Fatalf("polygon USDC = %+v", usdc)
 	}
 	if len(usdc.Fees) != 3 ||
-		usdc.Fees[0] != (VenueFee{Kind: "funding", Label: "Funding fee (1.4%)", Provider: "Flutterwave", Token: "1.393035", Ngn: "2310.34"}) ||
-		usdc.Fees[1] != (VenueFee{Kind: "conversion", Label: "Provider conversion fee (1.5%)", Provider: "Flutterwave", Token: "1.471642", Ngn: "2440.71"}) ||
-		usdc.Fees[2] != (VenueFee{Kind: "network", Label: "Network fee", Provider: "Flutterwave", Token: "1.5", Ngn: "2487.75"}) {
+		usdc.Fees[0] != (VenueFee{Kind: "funding", Label: "Funding fee (1.4%)", Provider: "provider", Token: "1.393035", Ngn: "2310.34"}) ||
+		usdc.Fees[1] != (VenueFee{Kind: "conversion", Label: "Provider conversion fee (1.5%)", Provider: "provider", Token: "1.471642", Ngn: "2440.71"}) ||
+		usdc.Fees[2] != (VenueFee{Kind: "network", Label: "Network fee", Provider: "provider", Token: "1.5", Ngn: "2487.75"}) {
 		t.Fatalf("fees = %+v", usdc.Fees)
 	}
 	if math.Abs(usdc.SpreadPercent-5.1107) > 0.01 {

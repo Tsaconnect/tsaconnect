@@ -91,6 +91,7 @@ import {
   type RampVenue,
 } from '@/services/rampApi';
 import { itIntentRoute } from '@/utils/itBuyOrder';
+import { poolBuyParams } from '@/utils/poolCard';
 import { IT_AGREEMENT_REQUIRED } from '@/services/itApi';
 import { FeeLines, fiatText } from '@/components/ramp/FeeLines';
 import { formatTokenAmount } from '@/services/p2p';
@@ -167,14 +168,24 @@ export default function PaycrestBuyScreen() {
   // token+chain picker below (see `want`), never a filter: the user can
   // change either one, and the quote says plainly when the pair they land on
   // cannot be filled.
-  const { asset, currency: currencyParam, openPicker } = useLocalSearchParams<{
+  const { asset, currency: currencyParam, openPicker, pool, chainId, chain, tokenAddress } = useLocalSearchParams<{
     asset?: string;
     currency?: string;
     /** Set by the IT hub's "Any other token" row — she arrives with nothing
      *  pre-selected, so the picker opens immediately instead of waiting for
      *  her to notice and tap the token field herself. */
     openPicker?: string;
+    /** Set by the pinned TSA Connect card (utils/poolCard): pool=1 asks the
+     *  pool-only quote, and the card's token on its chain is preselected. */
+    pool?: string;
+    chainId?: string;
+    chain?: string;
+    tokenAddress?: string;
   }>();
+  const poolBuy = poolBuyParams({ pool, chainId, chain, tokenAddress, asset, currency: currencyParam });
+  // A pool buy settles in naira only, so it overrides both the route's
+  // currency and the saved ramp choice.
+  const routeCurrency = poolBuy.currency ?? currencyParam;
 
   // The currency this order settles in — NOT the display currency (see
   // hooks/useRampCurrency.ts). Restricted to 'paycrest' so the picker below
@@ -194,12 +205,12 @@ export default function PaycrestBuyScreen() {
   const currencyLabel = rampCurrencyLabel(currencyCode);
   useScreenTitle(`Buy with ${currencyLabel}`);
   useEffect(() => {
-    if (currencyParam) setCurrencyCode(currencyParam);
+    if (routeCurrency) setCurrencyCode(routeCurrency);
     // Applying the hub's choice is a one-time sync on arrival, not a binding —
     // re-running on every setCurrencyCode identity change would fight the
     // user's own in-screen picker selection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currencyParam]);
+  }, [routeCurrency]);
   const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
 
   const [amount, setAmount] = useState('');
@@ -207,6 +218,8 @@ export default function PaycrestBuyScreen() {
   const [venue, setVenue] = useState<PaycrestVenue | null>(null);
   const [quoting, setQuoting] = useState(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
+  // A pool-only quote the pool could not fill: the venues shown are other offers.
+  const [poolFallback, setPoolFallback] = useState(false);
 
   // ── What the user wants to receive: token AND chain, both explicit ──────
   //
@@ -222,12 +235,14 @@ export default function PaycrestBuyScreen() {
   // the effect below resolves it from the chain's own token list by symbol.
   // AssetPicker.onSelect always supplies it directly, so it never needs
   // resolving there.
-  const [want, setWant] = useState<RequestedAsset>({
-    token: (asset || 'USDC').toString().toUpperCase(),
-    chainId: DEFAULT_CHAIN_ID,
-    chain: DEFAULT_CHAIN_KEY,
-    address: '',
-  });
+  const [want, setWant] = useState<RequestedAsset>(
+    poolBuy.want ?? {
+      token: (asset || 'USDC').toString().toUpperCase(),
+      chainId: DEFAULT_CHAIN_ID,
+      chain: DEFAULT_CHAIN_KEY,
+      address: '',
+    },
+  );
   // Kept only for the picker's icon/name — every lookup that matters (the
   // quote, the order) goes through `want`, which survives even when this
   // hasn't resolved (e.g. the "use X instead" choice below, which has no
@@ -380,6 +395,7 @@ export default function PaycrestBuyScreen() {
       setQuote(null);
       setVenue(null);
       setQuoteError(null);
+      setPoolFallback(false);
       return;
     }
     const seq = ++quoteSeq.current;
@@ -389,10 +405,13 @@ export default function PaycrestBuyScreen() {
         // The router's direct venues (every provider, best per pair, in the
         // server's order) plus the converted ones only /paycrest prices.
         // Either can fail alone — Paycrest's naira book has been empty.
-        const [direct, converted] = await Promise.allSettled([
-          getRampQuote('buy', raw, currencyCode, want),
-          getQuote('buy', raw, currencyCode, want),
-        ]);
+        // From the pool card, the pool-only quote stands alone: it already
+        // carries the other offers when the pool cannot fill.
+        const [direct, converted] = await Promise.allSettled(
+          poolBuy.pool
+            ? [getRampQuote('buy', raw, currencyCode, want, { pool: true }), Promise.resolve(null)]
+            : [getRampQuote('buy', raw, currencyCode, want), getQuote('buy', raw, currencyCode, want)],
+        );
         if (seq !== quoteSeq.current) return;
         const merged = mergeBuyQuotes(
           direct.status === 'fulfilled' ? direct.value : null,
@@ -405,6 +424,7 @@ export default function PaycrestBuyScreen() {
         }
         const q = merged as PaycrestQuote;
         setQuote(q);
+        setPoolFallback(poolBuy.pool && direct.status === 'fulfilled' && direct.value.poolAvailable === false);
         setQuoteError(null);
         // Never infer a substitute here. Either the exact pair the user asked
         // for is fillable — directly or via a labelled conversion — or venue
@@ -418,6 +438,7 @@ export default function PaycrestBuyScreen() {
         if (seq !== quoteSeq.current) return;
         setQuote(null);
         setVenue(null);
+        setPoolFallback(false);
         // The server's wording is written for users — "no provider can fill
         // that amount right now" is actionable in a way "error" is not.
         setQuoteError(
@@ -430,7 +451,7 @@ export default function PaycrestBuyScreen() {
       }
     }, QUOTE_DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [amount, currencyCode, want]);
+  }, [amount, currencyCode, want, poolBuy.pool]);
 
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
@@ -441,9 +462,10 @@ export default function PaycrestBuyScreen() {
     try {
       // A direct venue, or a converted one the router priced (it carries a
       // handle), goes through the ramp router, held to the rate she saw.
-      // Paycrest's own converted venue (no handle) keeps its route.
+      // Paycrest's own converted venue (no handle) keeps its route — except
+      // on a pool buy, which always goes to the router flagged pool.
       const routerVenue = !!(venue as RampVenue).handle;
-      const created = isConvertedVenue(venue) && !routerVenue
+      const created = isConvertedVenue(venue) && !routerVenue && !poolBuy.pool
         ? await createBuy({
           amount: amount.trim(),
           // The settlement leg — what Paycrest itself is asked to fill.
@@ -480,6 +502,8 @@ export default function PaycrestBuyScreen() {
             // provider she was shown first — the router falls back.
             quotedRate: quotedRateOf(venue as RampVenue),
             ...((venue as RampVenue).handle ? { handle: (venue as RampVenue).handle } : {}),
+            // From the pinned card: the pool's order or none (I-3).
+            ...(poolBuy.pool ? { pool: true as const } : {}),
             ...(isConvertedVenue(venue)
               ? {
                   requestedChainId: want.chainId,
@@ -553,7 +577,7 @@ export default function PaycrestBuyScreen() {
     } finally {
       setCreating(false);
     }
-  }, [venue, address, amount, refundBank, refundAccount, currencyCode, want]);
+  }, [venue, address, amount, refundBank, refundAccount, currencyCode, want, poolBuy.pool]);
 
   // The explicit alternative offered when nothing can fill the exact pair the
   // user asked for, even with a conversion — never auto-selected, only
@@ -859,6 +883,11 @@ export default function PaycrestBuyScreen() {
                 </>
               ) : null}
             </Card>
+          )}
+          {poolFallback && (
+            <Text variant="caption" color="textSecondary" style={{ marginTop: spacing.sm }}>
+              {"TSA Connect can't fill this amount right now — these are other offers."}
+            </Text>
           )}
 
           {/* Demoted: insurance, not part of the purchase. One line once known. */}

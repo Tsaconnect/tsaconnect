@@ -268,14 +268,18 @@ func (p *TreasuryProvider) converts(r Request) bool {
 	return p.conv != nil && r.Want != nil && r.Side == Buy && strings.EqualFold(strings.TrimSpace(r.FiatCode), treasuryFiat)
 }
 
-// convertedLeg is the delivered leg the pricer converts from: D on chain at
-// the leg's display rate.
-func convertedLeg(chain string, q *services.StableBuyQuote, fiat string, mid float64) services.SettlementLeg {
+// convertedLeg is the delivered leg the pricer converts from: D of token on
+// chain at the leg's display rate. An empty token is USDC (the company wallet
+// and Flutterwave); the pool passes its own.
+func convertedLeg(chain, token string, q *services.StableBuyQuote, fiat string, mid float64) services.SettlementLeg {
 	display := q.RatePerUnitMinor
 	if q.DisplayRateMinor != nil {
 		display = q.DisplayRateMinor
 	}
-	return services.SettlementLeg{ChainKey: chain, Token: convertedLegToken, Delivered: q.AssetUnits,
+	if token == "" {
+		token = convertedLegToken
+	}
+	return services.SettlementLeg{ChainKey: chain, Token: token, Delivered: q.AssetUnits,
 		FiatAmount: fiat, Rate: services.FormatMinor(display.String()), MarketRate: mid}
 }
 

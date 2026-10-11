@@ -152,8 +152,10 @@ func (g *PoolChainGates) Check(ctx context.Context) PoolGateStatus {
 	// Payment window ≥ honour window + grace + release margin (S3, M4).
 	if vals, err := callP2PView(ctx, g.c.Chain, g.c.Escrow, "paymentWindow"); err != nil {
 		fail("payment_window", "unreadable: "+err.Error())
-	} else if w, _ := vals[0].(*big.Int); w == nil || w.Cmp(new(big.Int).SetUint64(g.c.MinPaymentWindowSec)) < 0 {
-		fail("payment_window", fmt.Sprintf("paymentWindow() is %v, below %d s", w, g.c.MinPaymentWindowSec))
+	} else if w, err := paymentWindowOf(vals); err != nil {
+		fail("payment_window", err.Error())
+	} else if w < time.Duration(g.c.MinPaymentWindowSec)*time.Second {
+		fail("payment_window", fmt.Sprintf("paymentWindow() is %s, below %d s", w, g.c.MinPaymentWindowSec))
 	}
 	// 3. The release EOA is an escrow admin.
 	if g.c.ReleaseAdmin == "" {

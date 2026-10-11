@@ -98,7 +98,7 @@ func TestPaycrestTake_ConvertedBuyChargesTheTakePlusTheRoutesCost(t *testing.T) 
 		t.Fatalf("fees = %+v, want one Conversion (provider) line", v.Fees)
 	}
 	f := v.Fees[0]
-	if f.Kind != FeeKindConversion || f.Label != ConversionLiFiLabel || f.Provider != FeeProviderLiFi ||
+	if f.Kind != FeeKindConversion || f.Label != ConversionFeeLabel || f.Provider != FeeProviderShown ||
 		f.Token != "0.298508" || f.Ngn != "450.00" {
 		t.Fatalf("fee line = %+v, want 0.298508 USDC (₦450.00 at 1507.50)", f)
 	}
@@ -150,7 +150,7 @@ func TestPaycrestTake_SwappedSellChargesTheTakePlusTheRoundTripAtCost(t *testing
 		t.Fatalf("rate %s usdc %s fiat %s; want the take-only 1492.50 on 9.96 USDC", res.Rate, res.USDCAmount, res.FiatEstimate)
 	}
 	// 9.96 is 40 bps short of the 10 USDC a free route lands: 0.04 USDC, ₦59.70.
-	if len(res.Fees) != 1 || res.Fees[0].Label != ConversionLiFiLabel || res.Fees[0].Token != "0.04" ||
+	if len(res.Fees) != 1 || res.Fees[0].Label != ConversionFeeLabel || res.Fees[0].Token != "0.04" ||
 		res.Fees[0].Ngn != "59.70" || res.EffectiveRate != "1486.53" {
 		t.Fatalf("fees %+v effective %s; want one 0.04 USDC / ₦59.70 line and 1486.53 all in", res.Fees, res.EffectiveRate)
 	}

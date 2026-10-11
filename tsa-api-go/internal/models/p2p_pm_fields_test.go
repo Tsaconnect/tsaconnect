@@ -78,6 +78,7 @@ func TestP2PPMFields_Persist(t *testing.T) {
 			released_at DATETIME,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
 			payment_ref TEXT,
 			nomba_inbound_event_id TEXT,
 			nomba_payout_id TEXT,

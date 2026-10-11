@@ -148,6 +148,7 @@ func AutoMigrate() error {
 		&models.P2PPaymentMethod{},
 		&models.P2PAd{},
 		&models.P2PTrade{},
+		&models.PoolOrder{},
 		&models.P2PMessage{},
 		&models.P2PDispute{},
 		&models.P2PAuditLog{},
@@ -333,6 +334,13 @@ func AutoMigrate() error {
 		ON p2p_trades (ad_id, opener_id)
 		WHERE opener_id IS NOT NULL AND status IN ('pending_payment','paid','releasing','disputed')`)
 
+	// TSA Liquidity slices (spec §7.4): the order lookup and one live slice per
+	// LP per generation. uq_p2p_active_trade_per_ad_opener is untouched: a
+	// slice's opener_id is NULL (S10).
+	if err := MigratePoolSliceIndexes(DB); err != nil {
+		log.Printf("[Migrate] WARNING pool slice indexes: %v", err)
+	}
+
 	// P2P rating value + one-rating-per-(trade,rater)
 	DB.Exec(`ALTER TABLE p2p_ratings
 	         DROP CONSTRAINT IF EXISTS p2p_ratings_value_chk`)
@@ -508,12 +516,12 @@ func AutoMigrate() error {
 	// IT stablecoin-buy "one open purchase per user": CreateStableBuyIntent's
 	// Count-then-Create is not atomic, so a losing race must fail at the
 	// database rather than mint a second claimable intent for the same
-	// standing VA reference. Partial over pending_payment stablecoin buys.
-	// Idempotent.
-	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_it_intents_open_stable_buy
-	    ON it_intents (user_id)
-	    WHERE direction = 'buy' AND status = 'pending_payment'
-	      AND asset IN ('USDC','USDT')`)
+	// standing VA reference. Pool `opening` included (TSA Liquidity S11, plan
+	// C1 P2). Built under a new name first; the old definition is dropped only
+	// once the new one exists.
+	if err := MigrateOpenStableBuyIndex(DB); err != nil {
+		log.Printf("[Migrate] WARNING %s: %v — the one-open check still runs in the service", OpenStableBuyIndexName, err)
+	}
 
 	// IT MCGP-buy "one open order per user": OpenBuyOrder no longer supersedes
 	// a prior order (that made the order the user was paying vanish, and in
@@ -647,4 +655,31 @@ func AutoMigrate() error {
 	}
 
 	return nil
+}
+
+// OpenStableBuyIndexName is the one-open-buy index (plan C1 P2).
+const OpenStableBuyIndexName = "uq_it_intents_open_stable_buy_v2"
+
+// MigrateOpenStableBuyIndex builds the v2 one-open-buy index (pending_payment
+// and the pool's opening) and drops the v1 one only after it exists, so a
+// failed build never leaves the table without the backstop. Idempotent.
+func MigrateOpenStableBuyIndex(db *gorm.DB) error {
+	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS ` + OpenStableBuyIndexName + `
+	    ON it_intents (user_id)
+	    WHERE direction = 'buy' AND status IN ('pending_payment','opening')
+	      AND asset IN ('USDC','USDT')`).Error; err != nil {
+		return err
+	}
+	return db.Exec(`DROP INDEX IF EXISTS uq_it_intents_open_stable_buy`).Error
+}
+
+// MigratePoolSliceIndexes is spec §7.4's two slice indexes. Idempotent.
+func MigratePoolSliceIndexes(db *gorm.DB) error {
+	if err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_p2p_trades_it_intent
+	    ON p2p_trades (it_intent_id) WHERE it_intent_id IS NOT NULL`).Error; err != nil {
+		return err
+	}
+	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pool_slice_per_order_gen_ad
+	    ON p2p_trades (it_intent_id, generation, ad_id)
+	    WHERE it_intent_id IS NOT NULL AND status <> 'cancelled'`).Error
 }

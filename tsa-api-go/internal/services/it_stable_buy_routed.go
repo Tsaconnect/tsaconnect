@@ -68,10 +68,13 @@ const (
 
 // Fee lines (spec §14, Decision D39).
 const (
-	FeeKindFunding         = "funding"
-	FeeKindConversion      = "conversion"
-	FeeKindNetwork         = "network"
-	FeeProviderFlutterwave = "Flutterwave"
+	FeeKindFunding    = "funding"
+	FeeKindConversion = "conversion"
+	FeeKindNetwork    = "network"
+	// FeeProviderShown is the provider tag on every fee line she sees, ramp
+	// and IT alike (owner rule, review I-4): never the name of the company
+	// the cost is paid to. Set where the line is made, never patched later.
+	FeeProviderShown = "provider"
 )
 
 // StableBuyFee is one provider fee inside a quote, stored with the intent.
@@ -387,9 +390,9 @@ func formatBps(bps int64) string {
 // shown as its own fee line: bps of what is left when it is charged, or a
 // flat number of token units.
 type passThroughCost struct {
-	kind, label, provider string
-	bps                   int64
-	flat                  *big.Int
+	kind, label string
+	bps         int64
+	flat        *big.Int
 }
 
 // inHousePrice is one in-house buy price: the display rate, what she
@@ -397,6 +400,13 @@ type passThroughCost struct {
 type inHousePrice struct {
 	gross, displayRate, net *big.Int
 	fees                    []StableBuyFee
+}
+
+// inHouseDisplayRate is the rate an in-house buy shows: the base rate grossed
+// up by the company take, floored to a kobo. The quote and the pool card both
+// read it here (review M-2), so they cannot drift.
+func inHouseDisplayRate(baseRate *big.Rat, takeBps int64) *big.Int {
+	return floorRatMinor(new(big.Rat).Mul(baseRate, big.NewRat(10_000+takeBps, 10_000)))
 }
 
 // priceInHouseBuy is the one price of both in-house providers — the company
@@ -410,7 +420,7 @@ type inHousePrice struct {
 func priceInHouseBuy(fiatMinor *big.Int, baseRate *big.Rat, takeBps int64, costs []passThroughCost) inHousePrice {
 	p := inHousePrice{
 		gross:       grossStableUnits(fiatMinor, baseRate),
-		displayRate: floorRatMinor(new(big.Rat).Mul(baseRate, big.NewRat(10_000+takeBps, 10_000))),
+		displayRate: inHouseDisplayRate(baseRate, takeBps),
 	}
 	if p.displayRate.Sign() <= 0 {
 		p.net = new(big.Int)
@@ -429,7 +439,7 @@ func priceInHouseBuy(fiatMinor *big.Int, baseRate *big.Rat, takeBps int64, costs
 		}
 		left.Sub(left, units)
 		ngn := new(big.Int).Mul(units, p.displayRate)
-		p.fees = append(p.fees, StableBuyFee{Kind: c.kind, Label: c.label, Provider: c.provider,
+		p.fees = append(p.fees, StableBuyFee{Kind: c.kind, Label: c.label, Provider: FeeProviderShown,
 			Units: units.String(), NgnMinor: ngn.Quo(ngn, stableUnitsPerToken()).String()})
 	}
 	p.net = left
@@ -451,7 +461,7 @@ func (s *ITService) fundingCost(ch PayInChannel) (passThroughCost, error) {
 	default:
 		return passThroughCost{}, fmt.Errorf("%w: no funding cost for pay-in channel %q", ErrStableQuoteUnavailable, ch)
 	}
-	return passThroughCost{kind: FeeKindFunding, provider: FeeProviderFlutterwave, bps: bps,
+	return passThroughCost{kind: FeeKindFunding, bps: bps,
 		label: fmt.Sprintf("Funding fee (%s%%)", formatBps(bps))}, nil
 }
 
@@ -495,9 +505,9 @@ func (s *ITService) routedPrice(fiatMinor *big.Int, fiatPerUnit *big.Rat, ch Pay
 	}
 	return priceInHouseBuy(fiatMinor, fiatPerUnit, s.rampTerms().takeBps, []passThroughCost{
 		funding,
-		{kind: FeeKindConversion, provider: FeeProviderFlutterwave, bps: lim.conversionFeeBps,
+		{kind: FeeKindConversion, bps: lim.conversionFeeBps,
 			label: fmt.Sprintf("Provider conversion fee (%s%%)", formatBps(lim.conversionFeeBps))},
-		{kind: FeeKindNetwork, provider: FeeProviderFlutterwave, label: "Network fee", flat: lim.sendFeeUnits},
+		{kind: FeeKindNetwork, label: "Network fee", flat: lim.sendFeeUnits},
 	}), nil
 }
 
@@ -684,7 +694,8 @@ func marshalFees(fees []StableBuyFee) datatypes.JSON {
 }
 
 // StableBuyFees decodes an intent's stored fee lines (spec §14). Unreadable
-// JSON reads as none — the amounts on the intent stay authoritative.
+// JSON reads as none — the amounts on the intent stay authoritative. A line
+// stored before review I-4 named the vendor; it reads as FeeProviderShown.
 func StableBuyFees(i *models.ITIntent) []StableBuyFee {
 	if i == nil || len(i.Fees) == 0 {
 		return nil
@@ -692,6 +703,9 @@ func StableBuyFees(i *models.ITIntent) []StableBuyFee {
 	var out []StableBuyFee
 	if err := json.Unmarshal(i.Fees, &out); err != nil {
 		return nil
+	}
+	for k := range out {
+		out[k].Provider = FeeProviderShown
 	}
 	return out
 }
@@ -828,6 +842,10 @@ type routedArrival struct {
 	honoured    bool
 	repriced    bool
 	needsStock  bool // company wallet, priced live: win the stock under the lock
+	// needsPoolCoverage: a pool buy, honoured or priced live — claimed only by
+	// claimPool, under the pool lock, over the slices that still back it (S18,
+	// review C-2)
+	needsPoolCoverage bool
 }
 
 // setQuoteColumns writes a price onto a claim or re-price. display is nil on
@@ -885,7 +903,10 @@ func (s *ITService) priceRoutedArrival(ctx context.Context, intent *models.ITInt
 		if !okU || units.Sign() <= 0 || !okR || locked.Sign() <= 0 {
 			return nil, fmt.Errorf("it stable buy: routed intent %s has no usable quote", intent.ID)
 		}
-		return &routedArrival{units: units, rate: locked, honoured: true}, nil
+		return &routedArrival{units: units, rate: locked, honoured: true, needsPoolCoverage: terms.pool}, nil
+	}
+	if terms.pool {
+		return &routedArrival{repriced: true, needsPoolCoverage: true}, nil // priced under the lock
 	}
 	q, err := s.quoteRoutedLiveFor(ctx, intent, paid, ch)
 	if err != nil {
@@ -910,6 +931,8 @@ func (s *ITService) quoteRoutedLiveFor(ctx context.Context, intent *models.ITInt
 		return nil, err
 	case terms.companyWallet:
 		return s.quoteTreasuryLive(ctx, intent.Asset, paid, intent.Currency, true, ch)
+	case terms.pool:
+		return nil, errPoolPricedUnderLock
 	case terms.flutterwaveFulfils:
 		return s.quoteRoutedLive(ctx, intent.Asset, paid, intent.Currency, ch)
 	default:
@@ -957,12 +980,15 @@ func creditArrival(credit *models.InboundCredit, now time.Time) time.Time {
 func isDeterministicPricingError(err error) bool {
 	return errors.Is(err, ErrStableBuyBelowMinimum) || errors.Is(err, ErrStableNotAnAsset) ||
 		errors.Is(err, ErrStableBuyAboveMaximum) || errors.Is(err, ErrStableRateImplausible) ||
-		errors.Is(err, ErrConvertedOverpaid) || errors.Is(err, ErrUnknownITProvider)
+		errors.Is(err, ErrConvertedOverpaid) || errors.Is(err, ErrUnknownITProvider) ||
+		errors.Is(err, errPoolNotRouted)
 }
 
 // parkReasonOf names a park for the ramp_treasury_parked metric.
 func parkReasonOf(err error) string {
 	switch {
+	case errors.Is(err, errPoolNotRouted):
+		return "pool_unrouted"
 	case errors.Is(err, ErrUnknownITProvider):
 		return "unknown_provider"
 	case errors.Is(err, ErrConvertedOverpaid):
@@ -1003,6 +1029,9 @@ func (s *ITService) quoteForIntent(ctx context.Context, intent *models.ITIntent,
 	terms, err := providerTerms(intent)
 	if err != nil {
 		return nil, err
+	}
+	if terms.pool {
+		return nil, errPoolPricedUnderLock // never Flutterwave's old endpoint, routed or not
 	}
 	if !IsRoutedStableBuy(intent) {
 		return s.QuoteStableBuy(ctx, intent.Asset, fiatMinor, intent.Currency)

@@ -49,6 +49,9 @@ type rampBuyBody struct {
 	paycrestBuyBody
 	QuotedRate string `json:"quotedRate"`
 	Handle     string `json:"handle"`
+	// Pool: the buy came from the pinned TSA Connect card (as the quote's
+	// ?pool=1). The router keeps it the pool's order or none (review I-3).
+	Pool bool `json:"pool"`
 }
 
 type rampSellBody struct {
@@ -88,6 +91,7 @@ func (h *RampHandler) Quote(c *gin.Context) {
 	res, err := h.router.Quote(c.Request.Context(), ramp.Request{
 		Side: side, FiatCode: currency, FiatAmount: amount,
 		Token: c.Query("token"), ChainKey: c.Query("chain"),
+		PoolOnly: c.Query("pool") == "1",
 	})
 	if err != nil {
 		rampError(c, err)
@@ -120,6 +124,7 @@ func (h *RampHandler) ConvertedQuote(c *gin.Context) {
 	chainID, _ := strconv.ParseInt(c.Query("requestedChainId"), 10, 64)
 	res, err := h.router.Quote(c.Request.Context(), ramp.Request{
 		Side: ramp.Buy, FiatCode: currency, FiatAmount: amount, UserID: user.ID,
+		PoolOnly: c.Query("pool") == "1",
 		Want: &services.RequestedAsset{
 			ChainID: chainID, Address: strings.TrimSpace(c.Query("requestedTokenAddress")),
 			Token: strings.TrimSpace(c.Query("requestedToken")), Chain: strings.TrimSpace(c.Query("requestedChain")),
@@ -168,7 +173,7 @@ func (h *RampHandler) Buy(c *gin.Context) {
 	}
 	o, err := h.router.Open(c.Request.Context(), ramp.OpenRequest{
 		Request: ramp.Request{Side: ramp.Buy, FiatCode: body.Currency, FiatAmount: body.Amount,
-			Token: body.Token, ChainKey: body.Chain},
+			Token: body.Token, ChainKey: body.Chain, PoolOnly: body.Pool},
 		Handle: body.Handle, QuotedRate: body.QuotedRate,
 		Input: ramp.OrderInput{UserID: user.ID, WalletAddress: wallet,
 			RefundBankCode: body.RefundBankCode, RefundAccount: body.RefundAccount, RefundAccountName: body.RefundAccountName},
@@ -181,11 +186,11 @@ func (h *RampHandler) Buy(c *gin.Context) {
 }
 
 // buyConverted opens a converted venue the router priced. Only a
-// company-wallet or Flutterwave handle reaches the router; anything else is
+// company-wallet, Flutterwave or TSA pool handle reaches the router; anything else is
 // Paycrest's converted buy, served on /paycrest/buy.
 func (h *RampHandler) buyConverted(c *gin.Context, user *models.User, body rampBuyBody) {
 	name, _, herr := ramp.DecodeHandle(body.Handle)
-	if herr != nil || (name != ramp.ProviderTreasury && name != ramp.ProviderFlutterwave) {
+	if herr != nil || (name != ramp.ProviderTreasury && name != ramp.ProviderFlutterwave && name != ramp.ProviderPool) {
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
 			"This purchase needs the conversion route. Update the app and try again.", "use_paycrest_route")
 		return
@@ -195,7 +200,7 @@ func (h *RampHandler) buyConverted(c *gin.Context, user *models.User, body rampB
 		return
 	}
 	o, err := h.router.OpenConverted(c.Request.Context(), ramp.OpenRequest{
-		Request: ramp.Request{Side: ramp.Buy, FiatCode: body.Currency, FiatAmount: body.Amount, UserID: user.ID,
+		Request: ramp.Request{Side: ramp.Buy, FiatCode: body.Currency, FiatAmount: body.Amount, UserID: user.ID, PoolOnly: body.Pool,
 			Want: &services.RequestedAsset{Chain: strings.TrimSpace(body.RequestedChain), Token: strings.TrimSpace(body.RequestedToken),
 				ChainID: body.RequestedChainID, Address: strings.TrimSpace(body.RequestedTokenAddress),
 				Destination: strings.TrimSpace(body.DestinationAddress), Recipient: wallet}},
@@ -380,10 +385,11 @@ func newConversionView(rec *models.PaycrestOrderRecord, intent *models.ITIntent)
 	if rec == nil || intent == nil {
 		return nil
 	}
+	fee := services.ConversionFeeLine(intent, rec) // tagged "provider" at its source (review I-4)
 	return &conversionView{OrderID: rec.ID.String(), Status: rec.Status, Holder: rec.Holder,
 		RequestedToken: rec.RequestedToken, RequestedChain: rec.RequestedChain, RequestedChainID: rec.RequestedChainID,
 		RequestedTokenDecimals: rec.RequestedTokenDecimals, EstimatedAmount: rec.EstimatedAmount,
-		PromisedAmount: rec.PromisedAmount, MarkupBps: rec.MarkupBps, Fee: services.ConversionFeeLine(intent, rec),
+		PromisedAmount: rec.PromisedAmount, MarkupBps: rec.MarkupBps, Fee: fee,
 		WalletAddress: rec.WalletAddress, DestinationAddress: rec.DestinationAddress}
 }
 
@@ -427,6 +433,9 @@ const (
 	// convertedOverpaidCode: a converted buy priced above what it was opened
 	// for parks and is refunded, never bridged (N4).
 	convertedOverpaidCode = "converted_overpaid"
+	// The pool was the last venue to refuse (§19): her copy, never a name.
+	poolCannotFillMessage = "That amount can't be filled right now. Try a smaller amount."
+	poolCannotFillCode    = "pool_cannot_fill"
 )
 
 // rampError maps router outcomes; everything else (refusals keep their
@@ -455,7 +464,7 @@ func rampError(c *gin.Context, err error) {
 	case errors.Is(err, ramp.ErrAbandonCapReached), errors.Is(err, services.ErrStableBuyAbandonCapReached):
 		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
 			"You've cancelled too many unpaid purchases today. Try again tomorrow.", rampAbandonCapCode)
-	case errors.Is(err, services.ErrTreasuryDailyCapReached):
+	case errors.Is(err, services.ErrTreasuryDailyCapReached), errors.Is(err, services.ErrPoolDailyCapReached):
 		utils.ErrorResponseWithCode(c, http.StatusTooManyRequests,
 			"You've reached today's limit for instant purchases. Try a smaller amount, or come back tomorrow.", rampDailyLimitCode)
 	case errors.Is(err, services.ErrPaycrestBankUnsupported), errors.Is(err, services.ErrPaycrestBelowMinimum):
@@ -469,6 +478,9 @@ func rampError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, itBuyPaymentArrivedMessage, itBuyPaymentArrivedCode)
 	case errors.Is(err, services.ErrITBadState):
 		paycrestError(c, services.ErrPaycrestNotCancellable)
+	case errors.Is(err, services.ErrPoolCannotFill):
+		// §19: the pool was the last venue to refuse; never names a provider.
+		utils.ErrorResponseWithCode(c, http.StatusConflict, poolCannotFillMessage, poolCannotFillCode)
 	case errors.Is(err, ramp.ErrUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable,
 			"Bank transfers are temporarily unavailable. Please try again shortly.", "ramp_unavailable")

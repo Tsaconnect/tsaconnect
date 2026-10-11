@@ -45,8 +45,23 @@ export interface LiquidityActivityPage {
   nextCursor?: string;
 }
 
+/** The pinned "TSA Connect · Recommended" card (spec §15). enabled=false: dormant, show nothing. */
+export interface PoolCard {
+  enabled: boolean;
+  name?: string;
+  badge?: string;
+  available: boolean;
+  rate?: string;
+  fundingFeePercent?: string;
+  minNgn?: string;
+  maxNgn?: string;
+  token?: { symbol: string; address: string; decimals: number };
+  chain?: { id: number; key: string; name: string };
+}
+
 export const liquidityApi = {
   me: () => request<LiquidityMe>('GET', '/liquidity/me'),
   activity: (type: LiquidityActivityType, cursor?: string) =>
     request<LiquidityActivityPage>('GET', '/liquidity/me/activity', undefined, { query: { type, cursor } }),
+  poolCard: () => request<PoolCard>('GET', '/p2p/pool-card', undefined, { query: { currency: 'NGN' } }),
 };
