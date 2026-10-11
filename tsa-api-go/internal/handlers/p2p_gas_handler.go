@@ -20,7 +20,8 @@ type P2PGasSponsor interface {
 
 // The codes the app keys on. Every refusal this route makes carries one of
 // these, sponsorship_in_progress, WALLET_PROOF_REQUIRED or
-// kyc_verification_required — or is a 400 (bad request) / 429 (daily cap).
+// kyc_verification_required (from require(), before the sponsor is asked) —
+// or is a 400 (bad request) / 429 (daily cap).
 const (
 	p2pGasUnavailableCode = "gas_unavailable"
 	p2pGasNotNeededCode   = "gas_not_needed"
@@ -110,8 +111,6 @@ func p2pGasError(c *gin.Context, res services.GasTopUpResult, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, "Your network fee is already on its way. Check your balance in a moment.", sponsorshipInProgressCode)
 	case errors.Is(err, services.ErrTopUpDailyCap):
 		utils.ErrorResponse(c, http.StatusTooManyRequests, services.ErrTopUpDailyCap.Error())
-	case errors.Is(err, services.ErrKYCRequired):
-		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity to have the network fee covered.", services.KYCVerificationRequiredCode)
 	case errors.Is(err, services.ErrSponsorWallet):
 		utils.ErrorResponse(c, http.StatusForbidden, "Gas can only be sent to your own linked wallet.")
 	default:

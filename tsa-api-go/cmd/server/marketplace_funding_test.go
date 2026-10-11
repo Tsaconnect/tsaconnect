@@ -37,8 +37,8 @@ func TestBuildMarketplaceFunding_DormantWithoutItsPieces(t *testing.T) {
 // is on) stays dormant, never fatal, without its pieces.
 func TestBuildSonicGasSponsorship_DormantWithoutItsPieces(t *testing.T) {
 	cfg := &config.Config{
-		RampSponsorPrivateKey:       "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
-		SonicGasFloorWei: "5000000000000000000", SonicGasTopUpMaxWei: "500000000000000000",
+		RampSponsorPrivateKey: "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+		SonicGasFloorWei:      "5000000000000000000", SonicGasTopUpMaxWei: "500000000000000000",
 		RampSponsorDailyGasBudget: "500000000",
 	}
 	chains := services.NewBlockchainService(cfg)

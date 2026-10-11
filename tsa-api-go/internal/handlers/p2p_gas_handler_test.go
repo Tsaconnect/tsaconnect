@@ -82,7 +82,6 @@ func TestGasTopUp_ErrorContract(t *testing.T) {
 		{"not needed", services.ErrP2PGasNotNeeded, http.StatusConflict, "gas_not_needed"},
 		{"unused", services.ErrP2PGasUnused, http.StatusConflict, "gas_topup_unused"},
 		{"in progress", services.ErrSponsorshipInProgress, http.StatusConflict, sponsorshipInProgressCode},
-		{"kyc", services.ErrKYCRequired, http.StatusForbidden, services.KYCVerificationRequiredCode},
 		{"daily cap", services.ErrTopUpDailyCap, http.StatusTooManyRequests, ""},
 		{"bad id", fmt.Errorf("%w: unknown tradeId", services.ErrInvalidParams), http.StatusBadRequest, ""},
 	} {
@@ -126,5 +125,20 @@ func TestGasTopUp_NoSponsorIsGasUnavailable(t *testing.T) {
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/gas/top-up", map[string]any{"action": "approve"})
 	if rec.Code != http.StatusServiceUnavailable || decode(t, rec)["code"] != "gas_unavailable" {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// An unverified caller is refused by the route's own check (403
+// kyc_verification_required) before the sponsor is asked, which is why the
+// error mapping needs no KYC arm.
+func TestGasTopUp_UnverifiedRefusedBeforeTheSponsor(t *testing.T) {
+	r, f := gasRig(t, true)
+	r.user.VerificationStatus = models.VerificationStatusPending
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/gas/top-up", map[string]any{"action": "release", "tradeId": uuid.NewString()})
+	if code, _ := decode(t, rec)["code"].(string); rec.Code != http.StatusForbidden || code != services.KYCVerificationRequiredCode {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if f.calls != 0 {
+		t.Fatal("an unverified caller reached the sponsor")
 	}
 }

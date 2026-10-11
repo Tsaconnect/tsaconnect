@@ -120,7 +120,7 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		if rerr != nil {
 			return nil, fmt.Errorf("%w: %v", ErrChainUnavailable, rerr)
 		}
-		if onchain != nil && onchain.Status == OnChainP2PStatusDisputed {
+		if onchain.Status == OnChainP2PStatusDisputed {
 			return nil, ErrDisputeAlreadyOpen
 		}
 		replace = &existing

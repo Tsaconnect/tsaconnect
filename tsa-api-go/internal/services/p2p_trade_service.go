@@ -1703,7 +1703,7 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	if err := s.verifyOpenOnChain(ctx, "confirm", &trade, onchain); err != nil {
 		return nil, err
 	}
-	openUpdates := s.openRecordUpdates(txHash, escrow, &trade, onchain)
+	openUpdates := s.openRecordUpdates(txHash, &trade, onchain)
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ?", trade.ID).
 		Updates(openUpdates).Error; err != nil {
@@ -2550,7 +2550,7 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// Disputed must never reach our row; only Cancelled is applied, as it just
 	// returns the capacity our row reserved. The rest waits for an operator.
 	if !trade.OpenRecorded() {
-		if ok, err := s.recordOpenFromChain(ctx, escrow, &trade, onchain); err != nil {
+		if ok, err := s.recordOpenFromChain(ctx, &trade, onchain); err != nil {
 			if !errors.Is(err, ErrInvalidTransition) && !errors.Is(err, ErrUnsupportedToken) {
 				return ReconcileResult{}, fmt.Errorf("backfill open: %w", err)
 			}

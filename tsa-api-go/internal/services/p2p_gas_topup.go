@@ -165,7 +165,9 @@ func NewP2PGasSponsor(sponsor *RampSponsorship, need P2PGasNeed, perDay int, now
 // ErrP2PGasUnavailable and nothing else); an unconfirmed send also returns
 // its txHash in the result.
 func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet string, req P2PGasRequest) (GasTopUpResult, error) {
-	if p == nil || p.sponsor == nil || p.sponsor.topUp == nil || p.need == nil {
+	// NewP2PGasSponsor sets every field or returns nil, so nil is the only
+	// dormant state.
+	if p == nil {
 		return GasTopUpResult{}, ErrP2PGasUnavailable
 	}
 	if err := requireTopUpUser(user); err != nil {

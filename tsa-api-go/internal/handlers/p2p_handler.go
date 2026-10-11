@@ -1292,10 +1292,11 @@ func (h *P2PHandler) OpenTrade(c *gin.Context) {
 	})
 }
 
-// confirmTradeRequest mirrors confirmAdRequest but for trade confirmations —
-// includes an optional caller address (buyer for open, seller for release).
+// confirmTradeRequest is the confirm-open body.
 type confirmTradeRequest struct {
-	TxHash        string `json:"txHash" binding:"required"`
+	TxHash string `json:"txHash" binding:"required"`
+	// CallerAddress is still accepted because old apps send it, but it is
+	// ignored: the opener is checked against the wallet stored at prepare.
 	CallerAddress string `json:"callerAddress"`
 }
 

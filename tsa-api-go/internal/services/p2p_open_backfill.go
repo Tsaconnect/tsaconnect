@@ -40,9 +40,9 @@ func openDeadlineFromChain(onchain *OnChainP2PTrade) (time.Time, bool) {
 // fee_bps is the trade's snapshotted platform+gas bps (the fee the escrow takes
 // at release), stored with its platform and gas legs, all from the trade read
 // the caller already made; a read with no snapshot (pre-V3) leaves them unset.
-func (s *P2PTradeService) openRecordUpdates(openTxHash string, escrow P2PEscrowAdapter, t *models.P2PTrade, onchain *OnChainP2PTrade) map[string]any {
+func (s *P2PTradeService) openRecordUpdates(openTxHash string, t *models.P2PTrade, onchain *OnChainP2PTrade) map[string]any {
 	updates := map[string]any{"open_tx_hash": openTxHash, "updated_at": s.clock.Now()}
-	if escrow != nil && onchain != nil {
+	if onchain != nil {
 		if bps, ok := feeBpsFromSnapshot(onchain.PlatformFeeBps, onchain.GasFeeBps, onchain.FeeSnapshotFound); ok {
 			platform, gas := int(onchain.PlatformFeeBps), int(onchain.GasFeeBps)
 			updates["fee_bps"], updates["fee_platform_bps"], updates["fee_gas_bps"] = bps, platform, gas
@@ -145,11 +145,11 @@ func (s *P2PTradeService) verifyOpenOnChain(ctx context.Context, path string, t 
 // rejects — that is not the open we prepared. Reports true only when this
 // call wrote the open; false when one was already recorded (t is refreshed
 // from the row in that case).
-func (s *P2PTradeService) recordOpenFromChain(ctx context.Context, escrow P2PEscrowAdapter, t *models.P2PTrade, onchain *OnChainP2PTrade) (bool, error) {
+func (s *P2PTradeService) recordOpenFromChain(ctx context.Context, t *models.P2PTrade, onchain *OnChainP2PTrade) (bool, error) {
 	if err := s.verifyOpenOnChain(ctx, "backfill", t, onchain); err != nil {
 		return false, err
 	}
-	updates := s.openRecordUpdates(openTxReconciled, escrow, t, onchain)
+	updates := s.openRecordUpdates(openTxReconciled, t, onchain)
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ? AND (open_tx_hash = '' OR open_tx_hash IS NULL)", t.ID).
 		Updates(updates)
@@ -189,7 +189,7 @@ func (s *P2PTradeService) openRecorded(ctx context.Context, t *models.P2PTrade, 
 	if !onchain.Exists {
 		return false, nil
 	}
-	if _, err := s.recordOpenFromChain(ctx, escrow, t, onchain); err != nil {
+	if _, err := s.recordOpenFromChain(ctx, t, onchain); err != nil {
 		return false, err
 	}
 	return t.OpenRecorded(), nil
