@@ -40,6 +40,7 @@ import {
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { ensureEscrowFunding } from '../../services/escrowFunding';
+import { feeBpsFor, feeSplit, formatFeePct } from '../../services/p2pFee';
 import { p2pKycCode } from '../../services/p2pErrors';
 import { promptKycRefusal } from '../../utils/kycRefusal';
 import { fundingPreflight, publishActionForFunding } from '../../services/createAdFunding';
@@ -93,10 +94,6 @@ type RateType = 'fixed' | 'float';
 // Sonic chain IDs (mainnet + testnet). Used for the "Sonic-first" chain sort
 // and the pool-balance caveat copy.
 const SONIC_CHAIN_IDS = new Set([146, 14601]);
-
-// P2P/PM platform fee charged to the merchant on a successful trade. Mirrors
-// the on-chain FeatureP2PPlatform rate (1%) — kept in sync by review.
-const P2P_PLATFORM_FEE_PCT = 0.01;
 
 /** Return true if the given chainId is Sonic (either net). */
 function isSonicChain(chainId: number): boolean {
@@ -489,6 +486,17 @@ const CreateAdScreen: React.FC = () => {
       return null;
     }
   }, [amountInput, adDecimals]);
+
+  // Live rate from /p2p/chains (null when the API omits it → neutral copy).
+  const feeBps = feeBpsFor(enabledChains, selectedChainId ?? chainsForToken[0]?.chainId, token.symbol);
+  const feePct = formatFeePct(feeBps);
+  const previewFee = useMemo(() => {
+    try {
+      return feeSplit(parseTokenAmount(amountInput || '0', adDecimals), feeBps);
+    } catch {
+      return null;
+    }
+  }, [amountInput, adDecimals, feeBps]);
 
   // Allowance-aware funding summary computed before submit (spec "Review
   // fixes" §6/§7): shortfall ≤ 0 → already covered (no deposit); else we'll
@@ -1252,15 +1260,20 @@ const CreateAdScreen: React.FC = () => {
                     value={`${symbol}${previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
                   />
                   <SummaryRow
-                    label="Platform fee (1%)"
-                    value={`${((parseFloat(amountInput) || 0) * P2P_PLATFORM_FEE_PCT).toLocaleString(undefined, {
-                      maximumFractionDigits: 4,
-                    })} ${token.symbol}`}
+                    label={feePct ? `Platform fee (${feePct})` : 'Platform fee'}
+                    value={previewFee
+                      ? `${formatTokenAmount(previewFee.fee, adDecimals, 4)} ${token.symbol}`
+                      : 'Shown on each trade'}
                   />
+                  {previewFee && (
+                    <SummaryRow
+                      label="Buyers receive"
+                      value={`${formatTokenAmount(previewFee.net, adDecimals, 4)} ${token.symbol}`}
+                    />
+                  )}
                 </SummaryCard>
 
-                {/* Merchant fee disclosure — the seller (you) is charged 1% only on
-                    a successfully completed trade. Mirrors FeatureP2PPlatform (1%). */}
+                {/* Fee disclosure — rate from the API; on a sell ad the buyer is the crypto receiver. */}
                 <View
                   style={{
                     flexDirection: 'row',
@@ -1274,9 +1287,9 @@ const CreateAdScreen: React.FC = () => {
                 >
                   <Icon name="info" size={16} color={colors.info} />
                   <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                    A 1% platform fee is charged to you (the merchant) only when a trade completes —
-                    on USDT and USDC alike. It is split instantly into the system fee, cashback
-                    to the buyer and their direct upline, and Trade Points.
+                    {feePct
+                      ? `A ${feePct} platform fee comes out of the ${token.symbol} the buyer receives when a trade completes. You are not charged on top.`
+                      : `A platform fee comes out of the ${token.symbol} the buyer receives when a trade completes. The exact rate shows on each trade.`}
                   </Text>
                 </View>
               </Card>

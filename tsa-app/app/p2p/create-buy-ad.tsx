@@ -26,12 +26,14 @@ import {
   chainsApi,
   paymentMethodsApi,
   parseTokenAmount,
+  p2pTokenDecimals,
   type P2PChainInfo,
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { getActiveWallet } from '../../services/wallet';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
+import { feeBpsFor, formatFeePct } from '../../services/p2pFee';
 import { p2pKycCode } from '../../services/p2pErrors';
 import { promptKycRefusal } from '../../utils/kycRefusal';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
@@ -184,6 +186,12 @@ const CreateBuyAdScreen: React.FC = () => {
     );
   };
 
+  // Chain-aware decimals (BSC stables are 18dp); token.decimals is the
+  // chain-blind fallback and would post 1e12 too little on BSC.
+  const chainForFee = selectedChainId ?? chainsForToken[0]?.chainId;
+  const adDecimals = p2pTokenDecimals(chainForFee, token.symbol);
+  const feePct = formatFeePct(feeBpsFor(enabledChains, chainForFee, token.symbol));
+
   const valid =
     parseFloat(amountInput || '0') > 0 &&
     parseFloat(rateInput || '0') > 0 &&
@@ -201,9 +209,13 @@ const CreateBuyAdScreen: React.FC = () => {
 
       let tokenAmount: string;
       try {
-        tokenAmount = parseTokenAmount(amountInput.trim(), token.decimals);
+        tokenAmount = parseTokenAmount(amountInput.trim(), adDecimals);
       } catch (e: any) {
         throw new Error(`Invalid amount: ${e?.message}`);
+      }
+
+      if (BigInt(tokenAmount) === 0n) {
+        throw new Error('Amount is too small for this token.');
       }
 
       const minLimit = minLimitInput.trim() || undefined;
@@ -454,9 +466,7 @@ const CreateBuyAdScreen: React.FC = () => {
             />
           </View>
 
-          {/* Merchant fee disclosure — as the ad poster (merchant) you are
-              charged 1% only on a successfully completed trade. Mirrors the
-              on-chain FeatureP2PPlatform rate (1%). */}
+          {/* Fee disclosure — the rate comes from the API; the poster is the crypto receiver on a buy ad. */}
           <View
             style={{
               flexDirection: 'row',
@@ -470,9 +480,9 @@ const CreateBuyAdScreen: React.FC = () => {
           >
             <Icon name="info" size={16} color={colors.info} />
             <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-              A 1% platform fee is charged to you (the ad poster) only when a trade completes — on
-              USDT and USDC alike. It is split instantly into the system fee, cashback to the
-              buyer and their direct upline, and Trade Points.
+              {feePct
+                ? `A ${feePct} platform fee comes out of the ${token.symbol} you receive when a trade completes.`
+                : `A platform fee comes out of the ${token.symbol} you receive when a trade completes. The exact rate shows on each trade.`}
             </Text>
           </View>
 
