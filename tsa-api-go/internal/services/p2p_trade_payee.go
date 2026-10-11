@@ -51,7 +51,7 @@ func PublicPaymentMethods(rows []models.P2PPaymentMethod) []PublicPaymentMethod 
 func payeeVisible(t *models.P2PTrade) bool {
 	switch t.Status {
 	case models.P2PTradeStatusPendingPayment:
-		return t.OpenTxHash != ""
+		return t.OpenRecorded()
 	case models.P2PTradeStatusPaid, models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed:
 		return true
 	}

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -148,6 +149,12 @@ type PmPayTo struct {
 
 func (P2PTrade) TableName() string {
 	return "p2p_trades"
+}
+
+// OpenRecorded reports whether the trade's on-chain open is recorded: a real
+// open tx hash, or the "reconciled" marker the open backfill writes.
+func (t *P2PTrade) OpenRecorded() bool {
+	return strings.TrimSpace(t.OpenTxHash) != ""
 }
 
 // Funding discriminator values — keep in lock-step with P2PEscrowV2.sol's

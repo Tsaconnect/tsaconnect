@@ -87,11 +87,8 @@ func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, 
 	if ad == nil || ad.ID != t.AdID {
 		return fmt.Errorf("%w: trade's ad not found", ErrInvalidTransition)
 	}
-	wantFunding, adSide, openerSide := models.P2PTradeFundingPooled, onchain.Seller, onchain.Buyer
-	if ad.Side == models.P2PAdSideBuy {
-		wantFunding, adSide, openerSide = models.P2PTradeFundingDepositedByTaker, onchain.Buyer, onchain.Seller
-	}
-	if onchain.Funding != wantFunding || t.Funding != wantFunding {
+	funding := fundingForAd(ad)
+	if tradeFunding(onchain.Funding) != funding || fundingOf(t) != funding {
 		return mismatch("funding")
 	}
 	if !common.IsHexAddress(tokenAddr) || !strings.EqualFold(onchain.Token.Hex(), tokenAddr) {
@@ -101,13 +98,13 @@ func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, 
 	if !common.IsHexAddress(ad.SellerAddress) {
 		return fmt.Errorf("%w: the trade's ad has no wallet recorded", ErrInvalidTransition)
 	}
-	if adSide != common.HexToAddress(ad.SellerAddress) {
+	if funding.OnChainCounterparty(onchain) != common.HexToAddress(ad.SellerAddress) {
 		return mismatch("counterparty")
 	}
 	if !common.IsHexAddress(t.OpenerAddress) {
 		return fmt.Errorf("%w: trade has no opener wallet recorded", ErrInvalidTransition)
 	}
-	if openerSide != common.HexToAddress(t.OpenerAddress) {
+	if funding.OnChainOpener(onchain) != common.HexToAddress(t.OpenerAddress) {
 		return mismatch("opener")
 	}
 	return nil
@@ -181,7 +178,7 @@ func (s *P2PTradeService) recordOpenFromChain(ctx context.Context, escrow P2PEsc
 // openRecorded reports whether the trade's escrow is known to be funded,
 // backfilling a lost confirm-open from chain when it is.
 func (s *P2PTradeService) openRecorded(ctx context.Context, t *models.P2PTrade, escrow P2PEscrowAdapter) (bool, error) {
-	if strings.TrimSpace(t.OpenTxHash) != "" {
+	if t.OpenRecorded() {
 		return true, nil
 	}
 	onchain, err := escrow.ReadTrade(HashID(t.ID))
@@ -194,7 +191,7 @@ func (s *P2PTradeService) openRecorded(ctx context.Context, t *models.P2PTrade, 
 	if _, err := s.recordOpenFromChain(ctx, escrow, t, onchain); err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(t.OpenTxHash) != "", nil
+	return t.OpenRecorded(), nil
 }
 
 // requireOpenOnChain is the one gate for "the escrow is funded" on the

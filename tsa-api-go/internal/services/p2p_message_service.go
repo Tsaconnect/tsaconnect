@@ -160,7 +160,9 @@ func (m *P2PMessageService) List(ctx context.Context, tradeID, requestor uuid.UU
 	if err := m.assertParticipant(ctx, tradeID, requestor); err != nil {
 		return nil, err
 	}
-	return m.listThread(ctx, tradeID, f)
+	// The oldest `limit` messages after f.Since, oldest-first, so a poll with
+	// since=<last seen> pages forward.
+	return m.queryThread(ctx, tradeID, f, "created_at ASC, id ASC")
 }
 
 // AdminList is List without the participant check, for dispute review: the
@@ -181,12 +183,6 @@ func (m *P2PMessageService) AdminList(ctx context.Context, tradeID uuid.UUID, f 
 	}
 	slices.Reverse(out)
 	return out, nil
-}
-
-// listThread is the participant view: the oldest `limit` messages after
-// f.Since, oldest-first, so a poll with since=<last seen> pages forward.
-func (m *P2PMessageService) listThread(ctx context.Context, tradeID uuid.UUID, f MessageFilter) ([]models.P2PMessage, error) {
-	return m.queryThread(ctx, tradeID, f, "created_at ASC, id ASC")
 }
 
 // queryThread reads up to f.Limit (default 100, max 200) of a trade's
