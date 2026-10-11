@@ -34,7 +34,7 @@ export type EscrowMode = 'deposit' | 'withdraw' | TradeTxMode;
 
 const TRADE_TX_MODES: readonly EscrowMode[] = ['open', 'mark_paid', 'release', 'cancel_trade', 'dispute'];
 
-export function isTradeTxMode(mode: EscrowMode): mode is TradeTxMode {
+function isTradeTxMode(mode: EscrowMode): mode is TradeTxMode {
   return TRADE_TX_MODES.includes(mode);
 }
 
@@ -121,12 +121,6 @@ export async function removePending(txHash: string): Promise<void> {
   if (next.length !== all.length) {
     await writeAll(next);
   }
-}
-
-/** The stashed open broadcast for a trade, if its confirm was lost. */
-export async function findPendingOpen(tradeId: string): Promise<PendingEscrowConfirm | null> {
-  const all = await readAll();
-  return all.find((r) => r.mode === 'open' && r.tradeId === tradeId) ?? null;
 }
 
 /** A stashed trade tx: a trade mode, and always the trade it acted on. */

@@ -32,7 +32,7 @@ import { addPending, removePending, type PendingEscrowConfirm } from './p2pPendi
 
 // The API waits ~30s for the receipt on confirm, so the client wait only buys
 // early revert detection and the `mined` copy — keep it under the server's.
-export const P2P_MINE_WAIT_MS = 25_000;
+const P2P_MINE_WAIT_MS = 25_000;
 
 const inFlight = new Set<string>();
 

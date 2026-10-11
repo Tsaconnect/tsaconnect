@@ -354,6 +354,9 @@ const TradeDetailScreen: React.FC = () => {
   const tokenDecimals = p2pTokenDecimals(trade.chainId, trade.token);
   const feeLines = tradeFeeLines(trade, role, tokenDecimals);
   // A stale stash keeps its card and retry but no longer hides the buttons.
+  // Date.now() is read per render: useCountdown re-renders every second while
+  // the trade is pending_payment — the only state whose gates (Cancel after
+  // expiry) depend on the clock — so the buttons follow the deadline.
   const view = tradeActions(trade, role, Date.now(), pendingStale ? null : pendingTx?.mode);
   const pendingCopy = pendingTx ? pendingTradeTxCopy(pendingTx, pendingStale) : null;
 

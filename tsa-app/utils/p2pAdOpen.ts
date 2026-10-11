@@ -20,7 +20,7 @@ import { OPEN_ABANDONED_NEXT } from '@/utils/p2pTradeView';
 /** What POST /p2p/ads/:id/trades returns. */
 export type OpenPrep = { trade: P2PTrade; unsignedTx: UnsignedTx | null };
 
-export const OPEN_FAILED = 'Could not open trade';
+const OPEN_FAILED = 'Could not open trade';
 
 // ErrRateStale (p2p_trade_service.go): "p2p: rate source is stale; cannot quote".
 const STALE_RATE = /rate source is stale/i;

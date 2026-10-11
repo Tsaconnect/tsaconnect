@@ -38,7 +38,7 @@ jest.mock('../p2pPending', () => ({
 }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { P2P_MINE_WAIT_MS, p2pTxFollowUp, retryStashedConfirm, runP2PTx } from '../p2pTx';
+import { p2pTxFollowUp, retryStashedConfirm, runP2PTx } from '../p2pTx';
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import { TxRevertedError } from '../txWait';
 
@@ -73,7 +73,7 @@ it('gas → prepare → sign as the wallet → broadcast on the trade chain → 
   expect(order).toEqual(['gas', 'prepare', 'mined', 'confirm']);
   expect(mockSign).toHaveBeenCalledWith({ __txLike: true, ...UTX }, W);
   expect(mockBroadcast).toHaveBeenCalledWith('chain-146', '0xsigned');
-  expect(mockWaitMined).toHaveBeenCalledWith(146, '0xhash', expect.objectContaining({ timeoutMs: P2P_MINE_WAIT_MS }));
+  expect(mockWaitMined).toHaveBeenCalledWith(146, '0xhash', expect.objectContaining({ timeoutMs: 25_000 }));
   expect(confirm).toHaveBeenCalledWith('0xhash', prepared);
   expect(r).toEqual({ status: 'confirmed', txHash: '0xhash', prepared, data: { id: 't1', status: 'paid' } });
 });
@@ -211,8 +211,9 @@ describe('mining', () => {
     expect(mockWaitMined).toHaveBeenCalledWith(146, '0xhash', expect.objectContaining({ provider }));
   });
 
-  it('waits less than the server does on confirm (~30s)', () => {
-    expect(P2P_MINE_WAIT_MS).toBeLessThanOrEqual(25_000);
+  it('waits less than the server does on confirm (~30s)', async () => {
+    await runP2PTx({ chainId: 146, walletAddress: W, action: 'release', tradeId: 't1', prepare: ok, confirm: async () => ({ success: true }) });
+    expect(mockWaitMined.mock.calls[0][2].timeoutMs).toBeLessThanOrEqual(25_000);
   });
 
   it('a reverted tx is a clear failure and is never sent to confirm', async () => {

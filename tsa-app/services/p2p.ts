@@ -44,22 +44,6 @@ export interface PmPayTo {
   payerInstruction?: string;
 }
 
-/**
- * P2P ad — a seller's published offer to sell USDT/USDC/MCGP at either a
- * fixed fiat rate (`rateType: 'fixed'`) or a floating rate computed at trade
- * time as `referenceRate * (1 + floatOffsetBps/10000)` (`rateType: 'float'`).
- *
- * For float ads, `rate` is a server-cached snapshot of the most recently
- * computed effective rate — used for browse display only. The authoritative
- * price at trade open is recomputed live from the feed and snapshotted onto
- * the trade row.
- *
- * `rateStale` is set by the list endpoint when the reference feed is
- * unavailable for a float ad. Buyers must not be allowed to open a trade in
- * that state (the server will reject with 503 anyway).
- *
- * Status lifecycle: pending → active → (paused ↔ active) → exhausted | cancelled.
- */
 /** The account the fiat payer must pay on a DIRECT (non-PM) trade — GET
  *  /p2p/trades/:id `payee`. The API sends it only to the two parties, and only
  *  while the trade is live. */
@@ -79,10 +63,27 @@ export interface P2PAdPaymentMethod {
   bankName: string;
   accountNumber?: string;
   accountNumberLast4?: string;
-  /** Not sent by the API any more; optional so older payloads still type. */
+  /** Kept only for older payloads: the API no longer sends the holder's name
+   *  on a public ad. */
   accountName?: string;
 }
 
+/**
+ * P2P ad — a seller's published offer to sell USDT/USDC/MCGP at either a
+ * fixed fiat rate (`rateType: 'fixed'`) or a floating rate computed at trade
+ * time as `referenceRate * (1 + floatOffsetBps/10000)` (`rateType: 'float'`).
+ *
+ * For float ads, `rate` is a server-cached snapshot of the most recently
+ * computed effective rate — used for browse display only. The authoritative
+ * price at trade open is recomputed live from the feed and snapshotted onto
+ * the trade row.
+ *
+ * `rateStale` is set by the list endpoint when the reference feed is
+ * unavailable for a float ad. Buyers must not be allowed to open a trade in
+ * that state (the server will reject with 503 anyway).
+ *
+ * Status lifecycle: pending → active → (paused ↔ active) → exhausted | cancelled.
+ */
 export interface P2PAd {
   id: string;
   sellerId: string;

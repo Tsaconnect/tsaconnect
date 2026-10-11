@@ -23,7 +23,6 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 // eslint-disable-next-line import/first -- jest.mock must be hoisted above this import.
 import {
   addPending,
-  findPendingOpen,
   listPending,
   listPendingForTrade,
   removePending,
@@ -148,8 +147,8 @@ describe("mode 'open' (a trade open whose confirm was lost)", () => {
   it('finds the stash by trade id and keeps it out of deposit/withdraw lists', async () => {
     await addPending(rec({ mode: 'open', txHash: '0xopen', tradeId: 'trade-1' }));
     await addPending(rec({ mode: 'deposit', txHash: '0xdep' }));
-    expect((await findPendingOpen('trade-1'))?.txHash).toBe('0xopen');
-    expect(await findPendingOpen('trade-2')).toBeNull();
+    expect((await listPendingForTrade('trade-1')).map((r) => [r.mode, r.txHash])).toEqual([['open', '0xopen']]);
+    expect(await listPendingForTrade('trade-2')).toEqual([]);
     expect((await listPending('deposit', '0xWALLET')).map((r) => r.txHash)).toEqual(['0xdep']);
   });
 });
@@ -163,6 +162,5 @@ describe('trade-action modes (lost mark-paid / release / cancel confirms)', () =
     expect((await listPendingForTrade('trade-1')).map((r) => r.txHash)).toEqual(['0xopen', '0xpaid']);
     expect(await listPendingForTrade('trade-3')).toEqual([]);
     expect((await listPending('deposit', '0xWALLET')).map((r) => r.txHash)).toEqual(['0xdep']);
-    expect((await findPendingOpen('trade-1'))?.txHash).toBe('0xopen');
   });
 });

@@ -8,7 +8,6 @@ import {
   approveFollowUp,
   buyAdFeeNote,
   findMyActiveTradeOnAd,
-  OPEN_FAILED,
   openFollowUp,
   openThrownFollowUp,
   sellAdReceivePreview,
@@ -24,6 +23,7 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
+const OPEN_FAILED = 'Could not open trade';
 const trade = { id: 't1', tokenAmount: '1000000' } as P2PTrade;
 const prepared: OpenPrep = { trade, unsignedTx: null };
 const hash = '0xabc';

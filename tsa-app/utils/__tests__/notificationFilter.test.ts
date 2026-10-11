@@ -1,4 +1,4 @@
-import { isOwnAction, mergeInbox } from './notificationFilter';
+import { isOwnAction, mergeInbox } from '../notificationFilter';
 
 describe('isOwnAction', () => {
   it('true when the event’s actor is the signed-in user', () => {

@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
 import { useAuth } from '../AuthContext/AuthContext';
-import { isOwnAction } from '../hooks/notificationFilter';
+import { isOwnAction } from '../utils/notificationFilter';
 
 export interface Notification {
   id: string;

@@ -119,10 +119,8 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   // onGasAlert this module exposes. Sponsored flows drip per step instead, so
   // an approve's S is not requested until the approve is about to be sent.
   const alert = onGasAlert ? (title: string, message: string) => onGasAlert(`${title}: ${message}`) : undefined;
-  const checkGas = (action: 'approve' | 'deposit') =>
-    gasAction
-      ? ensureP2PGas({ chainId, walletAddress, action, onStage, onAlert: alert })
-      : ensureGas(chainKey, walletAddress, alert);
+  const sponsoredGas = (action: 'approve' | 'deposit') =>
+    ensureP2PGas({ chainId, walletAddress, action, onStage, onAlert: alert });
   if (!gasAction) {
     onStage?.('Checking gas…');
     if (!(await ensureGas(chainKey, walletAddress, alert))) return { status: 'aborted', reason: 'no gas' };
@@ -145,7 +143,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   }
 
   if (allowance < shortfall) {
-    if (gasAction && !(await checkGas('approve'))) return { status: 'aborted', reason: 'no gas' };
+    if (gasAction && !(await sponsoredGas('approve'))) return { status: 'aborted', reason: 'no gas' };
     onStage?.('Preparing approve…');
     const aPrep = await poolApi.prepareApprove(token, shortfall.toString(), walletAddress, chainId);
     if (!aPrep.success || !aPrep.data) {
@@ -166,7 +164,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   }
 
   // Deposit the shortfall into the seller's `available` balance.
-  if (gasAction && !(await checkGas('deposit'))) return { status: 'aborted', reason: 'no gas' };
+  if (gasAction && !(await sponsoredGas('deposit'))) return { status: 'aborted', reason: 'no gas' };
   onStage?.('Preparing deposit…');
   const dPrep = await poolApi.prepareDeposit(token, shortfall.toString(), walletAddress, chainId);
   if (!dPrep.success || !dPrep.data) {

@@ -17,7 +17,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import moment from 'moment';
 import { useNotifications } from '../../contexts/NotificationContext';
-import { mergeInbox } from '../../hooks/notificationFilter';
+import { mergeInbox } from '../../utils/notificationFilter';
 import { useAuth } from '../../AuthContext/AuthContext';
 import { routeForNotification } from '../../hooks/notificationRouting';
 import api from '@/components/services/api';

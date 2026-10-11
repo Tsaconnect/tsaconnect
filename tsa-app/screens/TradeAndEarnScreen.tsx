@@ -37,7 +37,7 @@ const TradeAndEarnScreen: React.FC = () => {
   const [summary, setSummary] = useState<RewardSummary | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   // Merchant status drives the second CTA. Derived from the /profile response
-  // fetchData already makes — useUserRole() would have been a second, identical
+  // fetchData already makes — a separate role fetch would be a second, identical
   // request on mount, and two copies of the same answer can disagree.
   const [isMerchant, setIsMerchant] = useState(false);
   const [roleResolved, setRoleResolved] = useState(false);
