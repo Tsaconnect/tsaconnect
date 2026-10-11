@@ -65,6 +65,43 @@ func preparedDisputeFixture(t *testing.T) (*P2PTradeService, *mockEscrow, models
 	return svc, esc, tr
 }
 
+// Two retries that read the same unconfirmed row: only the first may rewrite
+// it, even when both land in the same instant (the guard is the row's prepare
+// nonce, not its timestamp).
+func TestPrepareRaiseDispute_ConcurrentReplaceLosesTheRace(t *testing.T) {
+	svc, esc, tr := preparedDisputeFixture(t)
+	ctx := context.Background()
+	var innerErr error
+	esc.onPrepareRaiseDispute = func() {
+		_, innerErr = svc.PrepareRaiseDispute(ctx, tr.ID, tr.SellerID, "0xa", "inner retry", nil)
+	}
+	if _, err := svc.PrepareRaiseDispute(ctx, tr.ID, tr.SellerID, "0xa", "outer retry", nil); !errors.Is(err, ErrDisputeAlreadyOpen) {
+		t.Fatalf("outer err = %v, want ErrDisputeAlreadyOpen", err)
+	}
+	if innerErr != nil {
+		t.Fatalf("inner err = %v", innerErr)
+	}
+	var row models.P2PDispute
+	svc.db.First(&row, "trade_id = ?", tr.ID)
+	if row.Reason != "inner retry" || row.PrepareNonce == nil {
+		t.Fatalf("row = %+v", row)
+	}
+}
+
+// A row prepared before prepare_nonce existed (NULL) is still replaceable.
+func TestPrepareRaiseDispute_ReplacesALegacyRowWithNoNonce(t *testing.T) {
+	svc, _, tr := preparedDisputeFixture(t)
+	svc.db.Model(&models.P2PDispute{}).Where("trade_id = ?", tr.ID).Update("prepare_nonce", nil)
+	if _, err := svc.PrepareRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xa", "retry", nil); err != nil {
+		t.Fatal(err)
+	}
+	var row models.P2PDispute
+	svc.db.First(&row, "trade_id = ?", tr.ID)
+	if row.Reason != "retry" || row.PrepareNonce == nil {
+		t.Fatalf("row = %+v", row)
+	}
+}
+
 func TestPrepareRaiseDispute_OtherPartyCannotReplaceALivePrepare(t *testing.T) {
 	svc, _, tr := preparedDisputeFixture(t)
 	if _, err := svc.PrepareRaiseDispute(context.Background(), tr.ID, tr.BuyerID, "0xb", "hijack", nil); !errors.Is(err, ErrDisputeAlreadyOpen) {

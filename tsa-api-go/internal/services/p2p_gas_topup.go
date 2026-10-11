@@ -73,6 +73,23 @@ const (
 	p2pGasUnusedWindow = time.Hour
 )
 
+// gasUnavailableError is ErrP2PGasUnavailable with the cause that led to it.
+// The cause is in the message (logged, redacted) but deliberately not in the
+// Unwrap chain: a cause that happens to wrap a caller-refusal sentinel (KYC,
+// wallet, daily cap) must never be mistaken for that refusal.
+type gasUnavailableError struct{ cause error }
+
+func gasUnavailable(cause error) error { return gasUnavailableError{cause: cause} }
+
+func (e gasUnavailableError) Error() string {
+	if e.cause == nil {
+		return ErrP2PGasUnavailable.Error()
+	}
+	return ErrP2PGasUnavailable.Error() + " (" + e.cause.Error() + ")"
+}
+
+func (e gasUnavailableError) Unwrap() error { return ErrP2PGasUnavailable }
+
 // P2PGasRequest is one top-up request: the action, and the trade or ad it is
 // for (uuid.Nil when the action takes none).
 type P2PGasRequest struct {
@@ -145,8 +162,9 @@ func NewP2PGasSponsor(sponsor *RampSponsorship, need P2PGasNeed, perDay int, now
 // linked wallet (the handler passes the proven one).
 //
 // Our own failures (no lane, float, ceiling, budget, a chain read, a send that
-// failed or is unconfirmed) all come back wrapping ErrP2PGasUnavailable; an
-// unconfirmed send also returns its txHash in the result.
+// failed or is unconfirmed) all come back as a gasUnavailableError (matches
+// ErrP2PGasUnavailable and nothing else); an unconfirmed send also returns
+// its txHash in the result.
 func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet string, req P2PGasRequest) (GasTopUpResult, error) {
 	if p == nil || p.sponsor == nil || p.sponsor.topUp == nil || p.need == nil {
 		return GasTopUpResult{}, ErrP2PGasUnavailable
@@ -165,7 +183,7 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 		if errors.Is(err, ErrInvalidParams) || errors.Is(err, ErrP2PGasNotNeeded) {
 			return GasTopUpResult{}, err
 		}
-		return GasTopUpResult{}, fmt.Errorf("%w (need check: %w)", ErrP2PGasUnavailable, err)
+		return GasTopUpResult{}, gasUnavailable(fmt.Errorf("need check: %w", err))
 	}
 	if !p.enter(user.ID) {
 		return GasTopUpResult{}, fmt.Errorf("%w: a gas top-up is already being sent", ErrSponsorshipInProgress)
@@ -179,7 +197,7 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 	}
 	need, err := lane.gasCost(units)
 	if err != nil {
-		return GasTopUpResult{}, fmt.Errorf("%w (%w)", ErrP2PGasUnavailable, err)
+		return GasTopUpResult{}, gasUnavailable(err)
 	}
 	need.Mul(need, big.NewInt(topUpGasBuffer))
 	if err := p.refuseUnusedDrip(ctx, lane, user.ID, wallet, need); err != nil {
@@ -212,7 +230,7 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 	case err == nil, errors.Is(err, ErrTopUpDailyCap), errors.Is(err, ErrSponsorshipInProgress):
 		return res, err
 	}
-	return res, fmt.Errorf("%w (%w)", ErrP2PGasUnavailable, err)
+	return res, gasUnavailable(err)
 }
 
 // refuseUnusedDrip refuses a new send while her last drip is under an hour old
@@ -232,7 +250,7 @@ func (p *P2PGasSponsor) refuseUnusedDrip(ctx context.Context, lane *SponsorLane,
 	}
 	have, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(wallet), nil)
 	if err != nil {
-		return fmt.Errorf("%w (read user balance: %w)", ErrP2PGasUnavailable, err)
+		return gasUnavailable(fmt.Errorf("read user balance: %w", err))
 	}
 	if have.Cmp(need) < 0 && have.Cmp(last.postBalance) >= 0 {
 		return ErrP2PGasUnused

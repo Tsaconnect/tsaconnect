@@ -317,7 +317,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			status TEXT NOT NULL DEFAULT 'open',
 			resolved_by TEXT, resolution TEXT,
 			refunded_to_buyer INTEGER, resolve_tx_hash TEXT,
-			created_at DATETIME, resolved_at DATETIME
+			created_at DATETIME, resolved_at DATETIME, prepare_nonce TEXT
 		)`,
 		`CREATE TABLE p2p_messages (
 			id TEXT PRIMARY KEY, trade_id TEXT NOT NULL,

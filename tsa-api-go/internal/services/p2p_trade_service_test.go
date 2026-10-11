@@ -45,6 +45,9 @@ type mockEscrow struct {
 	verifyDisputedErr  error
 	onVerifyDisputed   func() // runs inside VerifyTradeDisputed (simulates a concurrent writer)
 	raiseDisputeErr    error  // PrepareRaiseDispute build failure
+	// onPrepareRaiseDispute runs inside PrepareRaiseDispute: between the
+	// service's dispute-row read and its write (simulates a concurrent retry).
+	onPrepareRaiseDispute func()
 	readTradeErr       error  // ReadTrade failure injection
 	verifyPaidErr      error
 	prepareMarkPaidErr error
@@ -191,6 +194,10 @@ func (m *mockEscrow) PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]
 	return []byte(`{"tx":"cancelByTimeout"}`), nil
 }
 func (m *mockEscrow) PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, error) {
+	if hook := m.onPrepareRaiseDispute; hook != nil {
+		m.onPrepareRaiseDispute = nil
+		hook()
+	}
 	if m.raiseDisputeErr != nil {
 		return nil, m.raiseDisputeErr
 	}
@@ -432,7 +439,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			status TEXT NOT NULL DEFAULT 'open',
 			resolved_by TEXT, resolution TEXT,
 			refunded_to_buyer INTEGER, resolve_tx_hash TEXT,
-			created_at DATETIME, resolved_at DATETIME
+			created_at DATETIME, resolved_at DATETIME, prepare_nonce TEXT
 		)`,
 		`CREATE TABLE p2p_messages (
 			id TEXT PRIMARY KEY, trade_id TEXT NOT NULL,

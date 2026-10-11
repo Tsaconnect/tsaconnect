@@ -165,8 +165,11 @@ const (
 
 // Event is the payload passed through the event bus.
 type Event struct {
-	Type    string
-	UserID  uuid.UUID
+	Type   string
+	UserID uuid.UUID
+	// ActorID is the user who performed the action (uuid.Nil for system and
+	// reconciler events). Serialised to clients as data.actorId.
+	ActorID uuid.UUID
 	Title   string
 	Message string
 	Data    map[string]interface{}

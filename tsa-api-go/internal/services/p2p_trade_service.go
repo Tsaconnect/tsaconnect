@@ -4108,24 +4108,17 @@ func actorOf(actor *uuid.UUID) uuid.UUID {
 }
 
 // emit publishes a P2P bus event to userID. actorID is the user who performed
-// the action (uuid.Nil for system/reconciler events); it rides in
-// data["actorId"] so the notification router can skip push/email for the actor
-// and the app can tell its own actions from the counterparty's.
+// the action (uuid.Nil for system/reconciler events): the notification router
+// skips push/email for the actor, and clients read it as data.actorId to tell
+// their own actions from the counterparty's.
 func (s *P2PTradeService) emit(eventType string, userID, actorID uuid.UUID, title, message string, data map[string]any) {
 	if s.bus == nil {
 		return
 	}
-	if actorID != uuid.Nil {
-		tagged := make(map[string]any, len(data)+1)
-		for k, v := range data {
-			tagged[k] = v
-		}
-		tagged["actorId"] = actorID.String()
-		data = tagged
-	}
 	s.bus.Publish(events.Event{
 		Type:    eventType,
 		UserID:  userID,
+		ActorID: actorID,
 		Title:   title,
 		Message: message,
 		Data:    data,

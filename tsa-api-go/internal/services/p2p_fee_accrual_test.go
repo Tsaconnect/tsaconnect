@@ -138,7 +138,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 			id TEXT PRIMARY KEY, trade_id TEXT UNIQUE, raised_by TEXT, raised_role TEXT,
 			reason TEXT, evidence_urls TEXT, status TEXT DEFAULT 'open',
 			resolved_by TEXT, resolution TEXT, refunded_to_buyer INTEGER,
-			resolve_tx_hash TEXT, created_at DATETIME, resolved_at DATETIME
+			resolve_tx_hash TEXT, created_at DATETIME, resolved_at DATETIME, prepare_nonce TEXT
 		)`,
 	}
 	for _, s := range stmts {

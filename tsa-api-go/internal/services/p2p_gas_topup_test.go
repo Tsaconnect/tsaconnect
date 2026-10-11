@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -109,7 +110,7 @@ func TestP2PGasTopUp_UnderfundedSponsorIsUnavailableAndFreesTheSlot(t *testing.T
 	r := newP2PGasRig(t, 1)
 	r.setUserBalance(0)
 	r.chain.balances[strings.ToLower(sponsorTestSigner)] = big.NewInt(1)
-	if _, err := r.topUp(P2PGasRelease); !errors.Is(err, ErrP2PGasUnavailable) || !errors.Is(err, ErrRelayerUnderfunded) {
+	if _, err := r.topUp(P2PGasRelease); !errors.Is(err, ErrP2PGasUnavailable) || !errors.Is(gasUnavailableCause(err), ErrRelayerUnderfunded) {
 		t.Fatalf("err = %v", err)
 	}
 	delete(r.chain.balances, strings.ToLower(sponsorTestSigner))
@@ -235,14 +236,14 @@ func TestP2PGasTopUp_FailuresAreUnavailable(t *testing.T) {
 	r.setUserBalance(0)
 	r.native.receiptErr = errors.New("receipt timeout")
 	got, err := r.topUp(P2PGasMarkPaid)
-	if !errors.Is(err, ErrP2PGasUnavailable) || !errors.Is(err, ErrTopUpUnconfirmed) || got.TxHash != "0xsponsored" {
+	if !errors.Is(err, ErrP2PGasUnavailable) || !errors.Is(gasUnavailableCause(err), ErrTopUpUnconfirmed) || got.TxHash != "0xsponsored" {
 		t.Fatalf("unconfirmed: %+v %v", got, err)
 	}
 
 	r = newP2PGasRig(t, 6)
 	r.setUserBalance(0)
 	r.native.receiptStatus = 0
-	if _, err := r.topUp(P2PGasMarkPaid); !errors.Is(err, ErrP2PGasUnavailable) || !errors.Is(err, ErrTopUpFailed) {
+	if _, err := r.topUp(P2PGasMarkPaid); !errors.Is(err, ErrP2PGasUnavailable) || !errors.Is(gasUnavailableCause(err), ErrTopUpFailed) {
 		t.Fatalf("reverted: %v", err)
 	}
 
@@ -250,6 +251,32 @@ func TestP2PGasTopUp_FailuresAreUnavailable(t *testing.T) {
 	r.chain.balanceErr = errors.New("rpc down")
 	if _, err := r.topUp(P2PGasMarkPaid); !errors.Is(err, ErrP2PGasUnavailable) {
 		t.Fatalf("balance read: %v", err)
+	}
+}
+
+func gasUnavailableCause(err error) error {
+	var u gasUnavailableError
+	if errors.As(err, &u) {
+		return u.cause
+	}
+	return nil
+}
+
+// An unavailable error keeps its cause for the log but never matches it: a
+// failed read whose cause is a caller-refusal sentinel must still read as
+// ours (gas_unavailable), whatever order the handler checks in.
+func TestP2PGasTopUp_UnavailableNeverMatchesItsCause(t *testing.T) {
+	for _, cause := range []error{ErrKYCRequired, ErrSponsorWallet, ErrTopUpDailyCap, ErrP2PGasUnused} {
+		r := newP2PGasRig(t, 6)
+		r.setUserBalance(0)
+		r.need.err = fmt.Errorf("lookup: %w", cause)
+		_, err := r.topUp(P2PGasRelease)
+		if !errors.Is(err, ErrP2PGasUnavailable) || errors.Is(err, cause) {
+			t.Fatalf("cause %v -> %v: want unavailable only", cause, err)
+		}
+		if !errors.Is(gasUnavailableCause(err), cause) || !strings.Contains(err.Error(), cause.Error()) {
+			t.Fatalf("cause %v lost from %v", cause, err)
+		}
 	}
 }
 

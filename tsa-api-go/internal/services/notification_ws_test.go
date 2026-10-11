@@ -211,11 +211,11 @@ func TestActedOnByRecipient(t *testing.T) {
 		ev   events.Event
 		want bool
 	}{
-		{"actor is recipient", events.Event{UserID: u, Data: map[string]any{"actorId": u.String()}}, true},
-		{"actor as uuid value", events.Event{UserID: u, Data: map[string]any{"actorId": u}}, true},
-		{"counterparty", events.Event{UserID: u, Data: map[string]any{"actorId": uuid.New().String()}}, false},
+		{"actor is recipient", events.Event{UserID: u, ActorID: u}, true},
+		{"counterparty", events.Event{UserID: u, ActorID: uuid.New()}, false},
 		{"system event", events.Event{UserID: u, Data: map[string]any{"tradeId": "x"}}, false},
-		{"nil data", events.Event{UserID: u}, false},
+		// Only the typed field counts: a data key is not a claim about who acted.
+		{"untyped data key", events.Event{UserID: u, Data: map[string]any{"actorId": u.String()}}, false},
 	}
 	for _, tc := range cases {
 		if got := actedOnByRecipient(tc.ev); got != tc.want {
@@ -262,8 +262,8 @@ func TestP2PEvent_ActorGetsNoPushButStillGetsTheFrame(t *testing.T) {
 	_ = NewNotificationService(db, bus, hub, NewEmailService("", ""), push)
 
 	tradeID := uuid.New().String()
-	data := map[string]any{"tradeId": tradeID, "actorId": actor.String()}
-	bus.Publish(events.Event{Type: events.P2PTradePaid, UserID: actor, Title: "Buyer marked payment sent", Data: data})
+	data := map[string]any{"tradeId": tradeID}
+	bus.Publish(events.Event{Type: events.P2PTradePaid, UserID: actor, ActorID: actor, Title: "Buyer marked payment sent", Data: data})
 
 	select {
 	case raw := <-actorClient.Send:
@@ -285,9 +285,16 @@ func TestP2PEvent_ActorGetsNoPushButStillGetsTheFrame(t *testing.T) {
 	}
 
 	// Control: the counterparty of the same action is still pushed.
-	bus.Publish(events.Event{Type: events.P2PTradePaid, UserID: other, Title: "Buyer marked payment sent", Data: data})
+	bus.Publish(events.Event{Type: events.P2PTradePaid, UserID: other, ActorID: actor, Title: "Buyer marked payment sent", Data: data})
 	select {
-	case <-otherClient.Send:
+	case raw := <-otherClient.Send:
+		// The app tells its own actions from the counterparty's by data.actorId.
+		var frame struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &frame); err != nil || frame.Data["actorId"] != actor.String() {
+			t.Fatalf("counterparty frame data = %v (%v), want actorId %s", frame.Data, err, actor)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("counterparty got no WS frame")
 	}
@@ -329,13 +336,13 @@ func TestP2PTradeServiceEmit_TagsTheActor(t *testing.T) {
 	s.emit(events.P2PTradePaid, other, actor, "x", "", orig)
 	s.emit(events.P2PTradeReleased, other, uuid.Nil, "y", "", map[string]any{"tradeId": "t1"})
 
-	if got := bus.published[0].Data["actorId"]; got != actor.String() {
-		t.Fatalf("actorId = %v, want %s", got, actor)
+	if got := bus.published[0].ActorID; got != actor {
+		t.Fatalf("ActorID = %v, want %s", got, actor)
 	}
 	if _, tagged := orig["actorId"]; tagged {
 		t.Fatal("emit mutated the caller's map")
 	}
-	if _, ok := bus.published[1].Data["actorId"]; ok {
-		t.Fatalf("system event must carry no actorId: %v", bus.published[1].Data)
+	if got := bus.published[1].ActorID; got != uuid.Nil {
+		t.Fatalf("system event must carry no actor: %v", got)
 	}
 }

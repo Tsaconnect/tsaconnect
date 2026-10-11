@@ -95,10 +95,10 @@ func optionalUUID(s string) (uuid.UUID, bool) {
 // read, a send that failed) and reads as gas_unavailable, so the app only
 // ever branches on the contract's codes.
 func p2pGasError(c *gin.Context, res services.GasTopUpResult, err error) {
+	// An unavailable error never matches its cause (services.gasUnavailableError),
+	// so the order of these cases does not matter.
 	switch {
 	case errors.Is(err, services.ErrP2PGasUnavailable):
-		// First: an unavailable error wraps its cause, which must not be
-		// mistaken for one of the caller's own refusals below.
 		p2pGasUnavailable(c, res, err)
 	case errors.Is(err, services.ErrInvalidParams):
 		utils.ErrorResponse(c, http.StatusBadRequest, "That trade or ad could not be found, or none was given for this step.")

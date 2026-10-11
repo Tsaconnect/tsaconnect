@@ -136,19 +136,27 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		return nil, fmt.Errorf("prepare raiseDispute: %w", err)
 	}
 
+	nonce := uuid.New()
 	if replace != nil {
-		res := s.db.WithContext(ctx).Model(&models.P2PDispute{}).
-			Where("id = ? AND status = ? AND raised_by = ? AND created_at = ?",
-				replace.ID, models.P2PDisputeStatusOpen, replace.RaisedBy, replace.CreatedAt).
-			Updates(map[string]any{
-				"raised_by":     userID,
-				"raised_role":   role,
-				"reason":        reason,
-				"evidence_urls": evidenceJSON,
-				"created_at":    s.clock.Now(),
-				"resolved_by":   nil,
-				"resolution":    "",
-			})
+		// Conditional on the nonce we read: a concurrent retry that rewrote
+		// the row first wins, and this one is refused.
+		q := s.db.WithContext(ctx).Model(&models.P2PDispute{}).
+			Where("id = ? AND status = ? AND raised_by = ?", replace.ID, models.P2PDisputeStatusOpen, replace.RaisedBy)
+		if replace.PrepareNonce != nil {
+			q = q.Where("prepare_nonce = ?", *replace.PrepareNonce)
+		} else {
+			q = q.Where("prepare_nonce IS NULL")
+		}
+		res := q.Updates(map[string]any{
+			"raised_by":     userID,
+			"raised_role":   role,
+			"reason":        reason,
+			"evidence_urls": evidenceJSON,
+			"created_at":    s.clock.Now(),
+			"prepare_nonce": nonce,
+			"resolved_by":   nil,
+			"resolution":    "",
+		})
 		if res.Error != nil {
 			return nil, fmt.Errorf("replace dispute: %w", res.Error)
 		}
@@ -165,6 +173,7 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 			EvidenceURLs: evidenceJSON,
 			Status:       models.P2PDisputeStatusOpen,
 			CreatedAt:    s.clock.Now(),
+			PrepareNonce: &nonce,
 		}
 		if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
 			return nil, fmt.Errorf("persist dispute: %w", err)

@@ -2,7 +2,6 @@ package services
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"time"
 
@@ -199,14 +198,25 @@ func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailServ
 }
 
 // actedOnByRecipient reports whether the event's recipient is the user who
-// performed the action (data.actorId). They get the in-app row and WS frame so
-// their screen refreshes, but no push or email about their own action.
+// performed the action. They get the in-app row and WS frame so their screen
+// refreshes, but no push or email about their own action.
 func actedOnByRecipient(event events.Event) bool {
-	raw, ok := event.Data["actorId"]
-	if !ok || raw == nil {
-		return false
+	return event.ActorID != uuid.Nil && event.ActorID == event.UserID
+}
+
+// clientData is the event data as stored and sent to the app: the event's
+// actor rides in data.actorId (the app contract). The caller's map is not
+// mutated.
+func clientData(event events.Event) map[string]interface{} {
+	if event.ActorID == uuid.Nil {
+		return event.Data
 	}
-	return fmt.Sprint(raw) == event.UserID.String()
+	out := make(map[string]interface{}, len(event.Data)+1)
+	for k, v := range event.Data {
+		out[k] = v
+	}
+	out["actorId"] = event.ActorID.String()
+	return out
 }
 
 func (ns *NotificationService) handleEvent(event events.Event) {
@@ -218,7 +228,8 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 	}
 
 	// Marshal data
-	dataJSON, _ := json.Marshal(event.Data)
+	data := clientData(event)
+	dataJSON, _ := json.Marshal(data)
 
 	// Create notification record (always, even if muted). A row about the
 	// recipient's own action is stored already read: it keeps the history and
@@ -260,7 +271,7 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 			"type":      notification.Type,
 			"title":     notification.Title,
 			"message":   notification.Message,
-			"data":      event.Data,
+			"data":      data,
 			"createdAt": notification.CreatedAt,
 		})
 		ns.hub.SendToUser(event.UserID, wsPayload)
@@ -350,7 +361,7 @@ func (ns *NotificationService) sendPush(event events.Event) {
 		toks[i] = tokens[i].Token
 	}
 	data := map[string]interface{}{"type": event.Type}
-	for k, v := range event.Data {
+	for k, v := range clientData(event) {
 		data[k] = v
 	}
 	dead := ns.push.Send(toks, event.Title, event.Message, data)
