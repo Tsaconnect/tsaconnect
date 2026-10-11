@@ -120,6 +120,17 @@ it('signer empty + gas_unavailable shows the refusal copy', async () => {
   expect(onAlert).toHaveBeenCalledWith('Not enough gas', expect.stringMatching(/unavailable/i));
 });
 
+it.each([
+  ['kyc_legal_name_missing', /legal name.*Contact support/],
+  ['kyc_verification_required', /Verify your identity/],
+])('signer empty + 403 %s shows the KYC copy, not "add S"', async (code, copy) => {
+  const onAlert = jest.fn();
+  mockTopUp.mockResolvedValue({ success: false, status: 403, code, message: 'p2p: refused' });
+  emptySigner();
+  await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'open_trade', adId: 'a', onAlert });
+  expect(onAlert).toHaveBeenCalledWith('Not enough gas', expect.stringMatching(copy));
+});
+
 it('a thrown network error shows friendly text, never the raw message', async () => {
   const onAlert = jest.fn();
   mockTopUp.mockRejectedValue(new Error('TypeError: Network request failed at fetch'));

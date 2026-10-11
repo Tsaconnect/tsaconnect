@@ -6,7 +6,7 @@
 // shared guard against stack traces, HTML and SQL reaching the screen.
 import { decodeRevertError } from './txErrors';
 import { mapSubmitError, TRANSFER_COPY } from './submitErrors';
-import { KYC_LEGAL_NAME_MISSING, KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
+import { KYC_LEGAL_NAME_MISSING, KYC_VERIFICATION_REQUIRED, kycRefusalFor } from '@/utils/kycRefusal';
 
 export interface P2PErrorLike {
   message?: string;
@@ -19,6 +19,8 @@ export interface P2PErrorLike {
 const CODE_COPY: Record<string, string> = {
   app_update_required: 'Please update the app to continue this trade.',
   [KYC_VERIFICATION_REQUIRED]: 'Verify your identity to use P2P.',
+  // Verified, but no legal name: only support can fix it (kycRefusal's copy).
+  [KYC_LEGAL_NAME_MISSING]: kycRefusalFor(KYC_LEGAL_NAME_MISSING)!.message,
   gas_not_needed: "This step doesn't need gas right now.",
   gas_topup_unused: 'A gas top-up was already sent recently. Use it first, then try again.',
   sponsorship_in_progress: 'A gas top-up is already in progress. Give it a moment.',

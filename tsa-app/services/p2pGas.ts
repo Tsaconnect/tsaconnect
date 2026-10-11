@@ -10,17 +10,18 @@ import { Alert } from 'react-native';
 import { gasApi, p2pChainKey, SONIC_GAS_SPONSOR_CHAIN_IDS, type P2PGasAction } from './p2p';
 import { ensureGas } from './wallet';
 import { waitMined } from './txWait';
-import { KYC_VERIFICATION_REQUIRED } from '@/utils/kycRefusal';
-import { p2pErrorMessage, type P2PErrorLike } from './p2pErrors';
+import { p2pErrorMessage, p2pKycCode, type P2PErrorLike } from './p2pErrors';
 
 const TOPUP_WAIT_MS = 60_000;
 
 // Refusals that explain why sponsorship did not help. gas_not_needed,
 // gas_topup_unused and sponsorship_in_progress describe the PROVEN wallet, which
-// may differ from the signer, so for those ensureGas's own message stands.
+// may differ from the signer, so for those ensureGas's own message stands. A
+// KYC refusal (unverified, or verified with no legal name — the open_trade
+// drip's 403) is the real blocker, so it explains it rather than "add S".
 function explainsEmptySigner(r: P2PErrorLike): boolean {
   if (r.status === 429) return /used today's gas top-ups/i.test(r.message ?? '');
-  return r.code === 'gas_unavailable' || r.code === 'WALLET_PROOF_REQUIRED' || r.code === KYC_VERIFICATION_REQUIRED;
+  return r.code === 'gas_unavailable' || r.code === 'WALLET_PROOF_REQUIRED' || !!p2pKycCode(r);
 }
 
 export interface EnsureP2PGasParams {
