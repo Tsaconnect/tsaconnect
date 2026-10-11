@@ -8,6 +8,8 @@ jest.mock('../wallet', () => ({ signTypedData: (...a: any[]) => mockSignTypedDat
 
 // eslint-disable-next-line import/first
 import { createAndSignAd } from '../adPublish';
+// eslint-disable-next-line import/first
+import { P2PCopyError } from '../p2pErrors';
 
 const typedData = { domain: { chainId: 97 }, types: {}, message: { maxAmount: '500000000000000000000000' }, primaryType: 'AdVoucher' };
 const payload = { token: 'USDT', tokenAmount: '1', fiatCurrency: 'NGN', paymentMethodIds: [], sellerAddress: '0xabc', chainId: 97 };
@@ -61,4 +63,9 @@ it('keeps the refusal data and hands the whole response to statusError (rate_out
 it('keeps the KYC refusal code on the error so the screen can prompt Verify', async () => {
   mockCreate.mockResolvedValue({ success: false, status: 403, code: 'kyc_verification_required', message: 'Identity verification required' });
   await expect(createAndSignAd({ payload, sellerAddress: '0xabc', statusError })).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+});
+
+it('throws statusError copy as a P2PCopyError, so screens show it as-is', async () => {
+  mockCreate.mockResolvedValue({ success: false, status: 400, message: 'signature recovered to 0x1, expected 0x2' });
+  await expect(createAndSignAd({ payload, sellerAddress: '0xabc', statusError })).rejects.toBeInstanceOf(P2PCopyError);
 });

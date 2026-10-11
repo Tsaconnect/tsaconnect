@@ -323,6 +323,31 @@ describe('ensureEscrowFunding — prepare failures surface as throws (funds-safe
   });
 });
 
+describe('ensureEscrowFunding — sign/broadcast failures are mapped like runP2PTx', () => {
+  it('maps a raw approve signing error', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockSignTransaction.mockRejectedValue(new Error('insufficient funds for gas * price + value: have 0 want 1000'));
+
+    await expect(ensureEscrowFunding(params())).rejects.toThrow('Not enough native token to pay gas on this chain.');
+    expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+
+  it('maps a raw deposit broadcast error and never confirms or stashes', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockBroadcastTransaction.mockRejectedValue(new Error('nonce too low: next nonce 7, tx nonce 6'));
+
+    await expect(ensureEscrowFunding(params())).rejects.toThrow(
+      'Your wallet was out of step with the network. Please try again.',
+    );
+    expect(mockConfirmDeposit).not.toHaveBeenCalled();
+    expect(mockAddPending).not.toHaveBeenCalled();
+  });
+});
+
 // TSA Liquidity (review I4): an LP deposit must move EXACTLY the typed amount.
 // With exactDepositBaseUnits set, a shortfall that differs (the balance moved
 // since the caller read it, or this read failed) stops before any gas check,

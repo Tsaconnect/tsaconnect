@@ -41,12 +41,18 @@ import {
 } from '../../services/p2p';
 import { ensureEscrowFunding } from '../../services/escrowFunding';
 import { feeBpsFor, feeSplit, formatFeePct } from '../../services/p2pFee';
-import { p2pErrorMessage, p2pKycCode, type P2PErrorLike } from '../../services/p2pErrors';
+import {
+  errorMessage,
+  P2PCopyError,
+  p2pCaughtMessage,
+  p2pErrorMessage,
+  p2pKycCode,
+  type P2PErrorLike,
+} from '../../services/p2pErrors';
 import { fixedRateBandRefusal } from '../../utils/p2pRateBand';
 import { promptKycRefusal } from '../../utils/kycRefusal';
-import { fundingPreflight, publishActionForFunding } from '../../services/createAdFunding';
+import { fundingPreflight, publishActionForFunding, publishFailureMessage } from '../../services/createAdFunding';
 import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
-import { decodeRevertError } from '../../services/txErrors';
 import { getActiveWallet, verifyWalletKey } from '../../services/wallet';
 import { createAndSignAd } from '../../services/adPublish';
 import { goBack } from '../../utils/back';
@@ -123,12 +129,12 @@ async function assertWalletKey(address: string): Promise<void> {
   const integrity = await verifyWalletKey(address);
   if (integrity.ok) return;
   if (integrity.reason === 'missing') {
-    throw new Error(
+    throw new P2PCopyError(
       `No private key stored for wallet ${address}. ` +
         'Remove this wallet and re-import it from its seed phrase.'
     );
   }
-  throw new Error(
+  throw new P2PCopyError(
     `Wallet ${address} is corrupt — its stored key actually ` +
       `derives to ${integrity.derived}. Remove this wallet from the ` +
       'wallet list and re-import it from its seed phrase, then retry.'
@@ -578,7 +584,7 @@ const CreateAdScreen: React.FC = () => {
       setSubmitStage('Loading wallet…');
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) {
-        throw new Error('No wallet found. Please set up a wallet first.');
+        throw new P2PCopyError('No wallet found. Please set up a wallet first.');
       }
 
       // Pre-flight: the stored key must derive to sellerAddress (see
@@ -611,7 +617,7 @@ const CreateAdScreen: React.FC = () => {
           reference: suggestedRate,
           referenceStale: rateStale,
         });
-        if (refusal) throw new Error(refusal);
+        if (refusal) throw new P2PCopyError(refusal);
       }
 
       const preflight = fundingPreflight({
@@ -621,7 +627,7 @@ const CreateAdScreen: React.FC = () => {
         chainsFetched,
       });
       if (preflight.kind === 'block') {
-        throw new Error(preflight.message);
+        throw new P2PCopyError(preflight.message);
       }
       if (preflight.kind === 'fund') {
         const fundResult = await ensureEscrowFunding({
@@ -688,43 +694,13 @@ const CreateAdScreen: React.FC = () => {
       Alert.alert('Ad published', `Your ad is now live in the marketplace.`, [
         { text: 'OK', onPress: () => router.back() },
       ]);
-    } catch (err: any) {
+    } catch (err) {
       // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
-      if (promptKycRefusal(p2pKycCode(err), err?.message, 'p2p')) return;
-      const raw = err?.message || String(err);
-      // Turn an opaque on-chain revert (e.g. the ERC20InsufficientBalance hex the
-      // backend surfaces when the wallet can't cover the deposit) into a clear,
-      // actionable message instead of raw ABI bytes.
-      const revert = decodeRevertError(raw);
-      let body: string;
-      if (revert?.kind === 'insufficient-balance') {
-        body =
-          `Your wallet doesn't have enough ${token.symbol} to back this ad. It needs ` +
-          `${formatTokenAmount(revert.needed, adDecimals, 4)} ${token.symbol}, but your wallet holds ` +
-          `${formatTokenAmount(revert.balance, adDecimals, 4)} ${token.symbol} on this network. ` +
-          `Top up your ${token.symbol}, then publish.`;
-      } else if (revert?.kind === 'insufficient-allowance') {
-        body =
-          `The escrow isn't approved to move your ${token.symbol} yet. Please try publishing ` +
-          `again — the approval is requested first.`;
-      } else if (revert?.kind === 'unknown-revert') {
-        body =
-          `The deposit can't go through right now — your wallet may be missing the ${token.symbol} ` +
-          `or the network gas needed. Check your balances and try again.`;
-      } else if (/confirmation timed out/i.test(raw)) {
-        // The approve wait (escrowFunding) gave up; the approve may still land.
-        body = p2pErrorMessage(raw);
-      } else {
-        body = raw;
-      }
-      // Only mention a safe deposit when one actually broadcast+confirmed this
-      // attempt; an insufficient-balance / gas-estimate revert moves no funds.
-      if (depositedThisAttempt) {
-        body +=
-          '\n\nThe deposit you just made is safe in your escrow balance — retry to publish, ' +
-          'or reclaim it from My Ads.';
-      }
-      Alert.alert('Could not publish ad', body);
+      if (promptKycRefusal(p2pKycCode(err as P2PErrorLike), errorMessage(err), 'p2p')) return;
+      Alert.alert(
+        'Could not publish ad',
+        publishFailureMessage(err, { symbol: token.symbol, decimals: adDecimals, depositedThisAttempt }),
+      );
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -798,9 +774,8 @@ const CreateAdScreen: React.FC = () => {
           [{ text: 'OK', onPress: () => goBack('/liquidity') }],
         );
       }
-    } catch (err: any) {
-      const raw = err?.message || String(err);
-      Alert.alert('Could not add liquidity', /confirmation timed out/i.test(raw) ? p2pErrorMessage(raw) : raw);
+    } catch (err) {
+      Alert.alert('Could not add liquidity', p2pCaughtMessage(err));
     } finally {
       setSubmitting(false);
       setSubmitStage('');

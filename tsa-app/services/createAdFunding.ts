@@ -22,6 +22,9 @@
 // stays a thin orchestrator over tested decisions.
 
 import type { EnsureFundingResult } from './escrowFunding';
+import { formatTokenAmount } from './p2p';
+import { errorMessage, p2pCaughtMessage } from './p2pErrors';
+import { decodeRevertError } from './txErrors';
 
 export interface FundingPreflightInput {
   /** Base units the ad must be backed by (already decimal-scaled by caller). */
@@ -94,4 +97,45 @@ export function publishActionForFunding(result: EnsureFundingResult): PublishAct
     case 'aborted':
       return { kind: 'abort' };
   }
+}
+
+/**
+ * The "Could not publish ad" body for a failed publish (KYC refusals are routed
+ * to the Verify prompt before this). An opaque on-chain revert — e.g. the
+ * ERC20InsufficientBalance hex the backend surfaces when the wallet can't cover
+ * the deposit — becomes an actionable sentence; anything else goes through
+ * p2pCaughtMessage, so a raw server or RPC string never reaches the screen.
+ */
+export function publishFailureMessage(
+  err: unknown,
+  p: { symbol: string; decimals: number; depositedThisAttempt: boolean },
+): string {
+  const { symbol: sym, decimals } = p;
+  const revert = decodeRevertError(errorMessage(err));
+  let body: string;
+  if (revert?.kind === 'insufficient-balance') {
+    body =
+      `Your wallet doesn't have enough ${sym} to back this ad. It needs ` +
+      `${formatTokenAmount(revert.needed, decimals, 4)} ${sym}, but your wallet holds ` +
+      `${formatTokenAmount(revert.balance, decimals, 4)} ${sym} on this network. ` +
+      `Top up your ${sym}, then publish.`;
+  } else if (revert?.kind === 'insufficient-allowance') {
+    body =
+      `The escrow isn't approved to move your ${sym} yet. Please try publishing ` +
+      `again — the approval is requested first.`;
+  } else if (revert?.kind === 'unknown-revert') {
+    body =
+      `The deposit can't go through right now — your wallet may be missing the ${sym} ` +
+      `or the network gas needed. Check your balances and try again.`;
+  } else {
+    body = p2pCaughtMessage(err);
+  }
+  // Only mention a safe deposit when one actually broadcast+confirmed this
+  // attempt; an insufficient-balance / gas-estimate revert moves no funds.
+  if (p.depositedThisAttempt) {
+    body +=
+      '\n\nThe deposit you just made is safe in your escrow balance — retry to publish, ' +
+      'or reclaim it from My Ads.';
+  }
+  return body;
 }

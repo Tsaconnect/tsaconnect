@@ -94,6 +94,29 @@ export function p2pErrorMessage(
   return mapSubmitError(tidy, { fallback, retry: TRANSFER_COPY.retry });
 }
 
+/** The message of anything a catch receives (an Error, a string, a refusal). */
+export function errorMessage(err: unknown): string {
+  return (err as { message?: string } | undefined)?.message ?? String(err);
+}
+
+/** An error whose message is app copy written for the user (not a raw API or
+ *  RPC string), so p2pCaughtMessage shows it as-is: re-mapping could swap a
+ *  long, specific sentence for the generic fallback. */
+export class P2PCopyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'P2PCopyError';
+  }
+}
+
+/** What a catch shows: app copy as-is, anything else through p2pErrorMessage
+ *  (a raw server, RPC or library message never reaches the screen). */
+export function p2pCaughtMessage(err: unknown, fallback?: string): string {
+  if (err instanceof P2PCopyError) return err.message;
+  // An Error keeps the code/status a refusal attached (services/adPublish).
+  return p2pErrorMessage(typeof err === 'object' && err !== null ? (err as P2PErrorLike) : errorMessage(err), fallback);
+}
+
 /** The KYC refusal code to route on (utils/kycRefusal), if any. Older API
  *  builds send the P2P gate's 403 without a code — its message counts too. */
 export function p2pKycCode(res: P2PErrorLike | null | undefined): string | undefined {

@@ -2,7 +2,7 @@ jest.mock('expo-router', () => ({ router: { push: jest.fn() } }));
 jest.mock('react-native', () => ({ Alert: { alert: jest.fn() } }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { p2pErrorMessage, p2pKycCode } from '../p2pErrors';
+import { P2PCopyError, p2pCaughtMessage, p2pErrorMessage, p2pKycCode } from '../p2pErrors';
 
 describe('p2pKycCode', () => {
   it('passes the API code through', () => {
@@ -125,5 +125,19 @@ describe('wrong active wallet for this trade', () => {
   });
   it('leaves other reverts alone', () => {
     expect(p2pErrorMessage({ status: 422, message: prepared('NotPending()') })).toMatch(/would reject this transaction/);
+  });
+});
+
+describe('p2pCaughtMessage', () => {
+  it('shows app copy as-is, even past the raw-message length guard', () => {
+    const copy = 'A long, specific sentence the app wrote. '.repeat(8);
+    expect(p2pCaughtMessage(new P2PCopyError(copy))).toBe(copy);
+  });
+  it('maps anything else through p2pErrorMessage', () => {
+    expect(p2pCaughtMessage(new Error('p2p: invalid state transition'))).toMatch(/already moved on/);
+    expect(p2pCaughtMessage('<html>oops</html>', 'Fallback.')).toBe('Fallback.');
+  });
+  it('keeps the code an error carries', () => {
+    expect(p2pCaughtMessage(Object.assign(new Error('x'), { code: 'gas_unavailable' }))).toMatch(/gas top-up is unavailable/);
   });
 });

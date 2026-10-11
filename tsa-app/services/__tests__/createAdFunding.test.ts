@@ -13,11 +13,22 @@
 //   - 'aborted' (e.g. no gas) also stops the publish; only 'already-funded' /
 //     'funded' proceed.
 
+//   - publishFailureMessage never shows a raw server/RPC string (app copy
+//     passes through as-is; an undecodable revert gets an actionable sentence).
+
+// services/p2p.ts (formatTokenAmount) pulls in the auth headers' storage.
+jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn(), setItem: jest.fn() }));
+
+// eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import {
   fundingPreflight,
   publishActionForFunding,
+  publishFailureMessage,
 } from '../createAdFunding';
+// eslint-disable-next-line import/first
 import type { EnsureFundingResult } from '../escrowFunding';
+// eslint-disable-next-line import/first
+import { P2PCopyError } from '../p2pErrors';
 
 describe('fundingPreflight — funding decision + chain gate', () => {
   it('skips funding when available already covers the ad (shortfall <= 0)', () => {
@@ -131,5 +142,37 @@ describe('publishActionForFunding — only a backed ad proceeds', () => {
       deposited: '60',
     };
     expect(publishActionForFunding(r)).toEqual({ kind: 'recover' });
+  });
+});
+
+describe('publishFailureMessage — what "Could not publish ad" says', () => {
+  const opts = { symbol: 'USDT', decimals: 18, depositedThisAttempt: false };
+  const word = (v: bigint) => v.toString(16).padStart(64, '0');
+
+  it('maps a raw server/RPC message instead of showing it', () => {
+    const raw = 'p2p: prepare deposit: ' + 'x'.repeat(250);
+    expect(publishFailureMessage(new Error(raw), opts)).toBe('Something went wrong. Please try again.');
+    expect(publishFailureMessage(new Error('p2p: ad is not active'), opts)).toBe('This ad is no longer available.');
+  });
+
+  it('keeps the timeout copy for an approve that has not confirmed yet', () => {
+    expect(publishFailureMessage(new Error('Approve confirmation timed out'), opts)).toMatch(/may still go through/);
+  });
+
+  it('shows app copy as-is, however long', () => {
+    const copy = 'Your wallet did not sign the ad correctly — ' + 'its key does not match. '.repeat(10);
+    expect(publishFailureMessage(new P2PCopyError(copy), opts)).toBe(copy);
+  });
+
+  it('decodes an insufficient-balance revert first', () => {
+    const msg = 'execution reverted: 0xe450d38c' + word(1n) + word(0n) + word(25n * 10n ** 18n);
+    expect(publishFailureMessage(new Error(msg), opts)).toMatch(/needs 25 USDT, but your wallet holds 0 USDT/);
+  });
+
+  it('adds the deposit-is-safe line only when a deposit landed this attempt', () => {
+    expect(publishFailureMessage(new Error('boom'), opts)).not.toMatch(/safe in your escrow/);
+    expect(publishFailureMessage(new Error('boom'), { ...opts, depositedThisAttempt: true })).toMatch(
+      /^Boom\n\nThe deposit you just made is safe in your escrow balance/,
+    );
   });
 });

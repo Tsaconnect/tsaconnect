@@ -6,8 +6,9 @@
 //
 // It reuses the EXACT primitives the standalone pool screen used —
 // poolApi.{balance,allowance,prepareApprove,prepareDeposit,confirmDeposit} plus
-// the wallet's sign/broadcast/gas helpers — so funding behaves identically to
-// the old Pool deposit flow; it just runs inline at publish time.
+// the wallet's gas check and runP2PTx's sign/broadcast (p2pTx.signAndBroadcast,
+// which maps a raw wallet/RPC failure to copy) — so funding behaves identically
+// to the old Pool deposit flow; it just runs inline at publish time.
 //
 // CONTRACT (caller's responsibilities):
 //   - ALL amounts here are BASE UNITS. Decimal scaling via
@@ -24,19 +25,12 @@
 // so recovery is user-initiated.
 
 import { p2pKycCode } from './p2pErrors';
-import {
-  poolApi,
-  p2pChainKey,
-  unsignedTxToTxLike,
-} from './p2p';
-import {
-  signTransaction,
-  broadcastTransaction,
-  ensureGas,
-} from './wallet';
+import { poolApi, p2pChainKey } from './p2p';
+import { ensureGas } from './wallet';
 import { addPending } from './p2pPending';
 import { waitMined } from './txWait';
 import { ensureP2PGas } from './p2pGas';
+import { signAndBroadcast } from './p2pTx';
 
 export interface EnsureFundingParams {
   token: string;
@@ -157,10 +151,11 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
     if (!aPrep.success || !aPrep.data) {
       throw refusalError(aPrep, 'Prepare approve failed');
     }
-    onStage?.('Signing approve…');
-    const signedApprove = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx), walletAddress);
-    onStage?.('Broadcasting approve…');
-    const approveResp = await broadcastTransaction(chainKey, signedApprove);
+    const approveResp = await signAndBroadcast(chainId, aPrep.data.unsignedTx, walletAddress, {
+      onStage,
+      signing: 'Signing approve…',
+      broadcasting: 'Broadcasting approve…',
+    });
     // Poll until the approve mines so the deposit's transferFrom can't race it.
     onStage?.('Waiting for approve…');
     // Known limitation: if the chain's primary RPC is unreachable for reads the
@@ -177,10 +172,11 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   if (!dPrep.success || !dPrep.data) {
     throw refusalError(dPrep, 'Prepare deposit failed');
   }
-  onStage?.('Signing deposit…');
-  const signedDeposit = await signTransaction(unsignedTxToTxLike(dPrep.data.unsignedTx), walletAddress);
-  onStage?.('Depositing…');
-  const depositResp = await broadcastTransaction(chainKey, signedDeposit);
+  const depositResp = await signAndBroadcast(chainId, dPrep.data.unsignedTx, walletAddress, {
+    onStage,
+    signing: 'Signing deposit…',
+    broadcasting: 'Depositing…',
+  });
   const txHash = depositResp.hash;
   const deposited = shortfall.toString();
 

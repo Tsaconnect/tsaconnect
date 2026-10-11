@@ -117,7 +117,7 @@ it('creates the stock ad after the first deposit and says the deposit is safe if
   mockFund.mockResolvedValue({ status: 'funded', deposited: (10n * E18).toString() });
   mockCreateAndSign.mockRejectedValue(new Error('pool closed'));
   await expect(runLpDeposit({ ...base, me: { ...me, voucher: undefined }, input: '10' }))
-    .rejects.toThrow(/10 USDT is safe in your escrow balance.*pool closed/s);
+    .rejects.toThrow(/10 USDT is safe in your escrow balance.*pool closed/is);
   expect(mockCreateAndSign).toHaveBeenCalledWith(expect.objectContaining({
     payload: expect.objectContaining({ token: 'USDT', chainId: 97, sellerAddress: '0xabc', fiatCurrency: 'NGN' }),
   }));
@@ -132,4 +132,13 @@ it('retries only the stock ad on Renew after a failed first publish, with no sec
   expect(mockBalance).not.toHaveBeenCalled();
   expect(mockFund).not.toHaveBeenCalled();
   expect(res).toEqual({ status: 'done', depositedUnits: '0', stockAd: true });
+});
+
+it('maps a raw pool-ad failure inside the deposit-is-safe copy', async () => {
+  freshBalance(0n);
+  mockFund.mockResolvedValue({ status: 'funded', deposited: (10n * E18).toString() });
+  mockCreateAndSign.mockRejectedValue(new Error('<html>502 Bad Gateway</html>'));
+  await expect(runLpDeposit({ ...base, me: { ...me, voucher: undefined }, input: '10' }))
+    .rejects.toThrow('Your 10 USDT is safe in your escrow balance, but it could not be added to the pool yet: ' +
+      'Something went wrong. Please try again. Leave the amount empty and tap Renew to retry.');
 });

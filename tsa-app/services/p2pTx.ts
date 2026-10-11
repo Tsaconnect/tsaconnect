@@ -18,7 +18,7 @@ import { p2pChainKey, tradesApi, unsignedTxToTxLike, type ApiResponse, type P2PT
 import { broadcastTransaction, signTransaction } from './wallet';
 import { ensureP2PGas } from './p2pGas';
 import { mapSubmitError, TRANSFER_COPY } from './submitErrors';
-import { p2pErrorMessage } from './p2pErrors';
+import { errorMessage, p2pErrorMessage } from './p2pErrors';
 import { TxRevertedError, waitMined, type ReceiptSource } from './txWait';
 import { addPending, removePending, type PendingEscrowConfirm } from './p2pPending';
 
@@ -73,16 +73,33 @@ export type RunP2PTxResult<P, C> =
   | { status: 'busy' }
   | { status: 'refused'; response: ApiResponse<P> };
 
-function errorMessage(err: unknown): string {
-  return (err as { message?: string } | undefined)?.message ?? String(err);
-}
-
 // The stash is a safety net: a storage failure must never block the confirm.
 async function bestEffort(what: string, op: () => Promise<void>): Promise<void> {
   try {
     await op();
   } catch (err) {
     console.warn(`[p2pTx] ${what} failed`, err);
+  }
+}
+
+/** Sign a prepared tx as `walletAddress` and broadcast it on `chainId`. A
+ *  throw means nothing reached the chain, and its raw wallet/RPC text has been
+ *  mapped to copy. Also returns the provider that accepted it — a fallback RPC
+ *  when the primary is down — to wait for the receipt on. */
+export async function signAndBroadcast(
+  chainId: number,
+  unsignedTx: UnsignedTx,
+  walletAddress: string,
+  stage: { onStage?: (label: string) => void; signing?: string; broadcasting?: string } = {},
+): Promise<{ hash: string; provider?: ReceiptSource }> {
+  try {
+    stage.onStage?.(stage.signing ?? 'Signing…');
+    const signed = await signTransaction(unsignedTxToTxLike(unsignedTx), walletAddress);
+    stage.onStage?.(stage.broadcasting ?? 'Broadcasting…');
+    const sent = await broadcastTransaction(p2pChainKey(chainId), signed);
+    return { hash: sent.hash, provider: sent.provider ?? undefined };
+  } catch (err) {
+    throw new Error(mapSubmitError(errorMessage(err), TRANSFER_COPY));
   }
 }
 
@@ -125,19 +142,7 @@ async function run<P extends { unsignedTx?: UnsignedTx | null }, C>(
     return { status: 'refused', response: { success: false, message: WRONG_CHAIN } };
   }
 
-  let txHash: string;
-  let receipts: ReceiptSource | undefined;
-  try {
-    onStage?.('Signing…');
-    const signed = await signTransaction(unsignedTxToTxLike(prepared.unsignedTx), walletAddress);
-    onStage?.('Broadcasting…');
-    const sent = await broadcastTransaction(p2pChainKey(chainId), signed);
-    txHash = sent.hash;
-    // The provider that accepted it — a fallback RPC when the primary is down.
-    receipts = sent.provider ?? undefined;
-  } catch (err) {
-    throw new Error(mapSubmitError(errorMessage(err), TRANSFER_COPY));
-  }
+  const { hash: txHash, provider: receipts } = await signAndBroadcast(chainId, prepared.unsignedTx, walletAddress, { onStage });
 
   if (stash) {
     // The builder runs inside the guard too: after a broadcast nothing may throw.
