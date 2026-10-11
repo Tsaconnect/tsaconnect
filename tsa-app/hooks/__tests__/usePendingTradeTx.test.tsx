@@ -63,3 +63,16 @@ it('drops a stash the trade has moved past', async () => {
   expect(state.pending).toBeNull();
   expect(await listPendingForTrade('t1')).toEqual([]);
 });
+
+it('re-reads the store when the trade moves, not for every refetched copy of it', async () => {
+  const { getItem } = jest.requireMock('@react-native-async-storage/async-storage');
+  await act(async () => { tree = TestRenderer.create(<Screen t={trade} />); });
+  await flush();
+  const reads = getItem.mock.calls.length;
+  await act(async () => { tree.update(<Screen t={{ ...trade }} />); });
+  await flush();
+  expect(getItem.mock.calls.length).toBe(reads);
+  await act(async () => { tree.update(<Screen t={{ ...trade, status: 'paid' }} />); });
+  await flush();
+  expect(getItem.mock.calls.length).toBeGreaterThan(reads);
+});

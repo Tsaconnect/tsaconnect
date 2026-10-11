@@ -23,11 +23,17 @@ export function usePendingTradeTx(trade: P2PTrade | null): PendingTradeTxState {
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick((n) => n + 1), []);
 
+  // Keyed on the fields the split reads, not the object: every poll and WS
+  // refetch hands back a new trade object, and storage needn't be re-read for
+  // a trade that hasn't moved.
+  const id = trade?.id;
+  const status = trade?.status;
+  const openTxHash = trade?.openTxHash;
   useEffect(() => {
-    if (!trade) return;
+    if (!id || !status) return;
     let cancelled = false;
     (async () => {
-      const split = splitPendingTradeTxs(await listPendingForTrade(trade.id), trade, Date.now());
+      const split = splitPendingTradeTxs(await listPendingForTrade(id), { id, status, openTxHash }, Date.now());
       for (const rec of split.settled) {
         try {
           await removePending(rec.txHash);
@@ -42,7 +48,7 @@ export function usePendingTradeTx(trade: P2PTrade | null): PendingTradeTxState {
     return () => {
       cancelled = true;
     };
-  }, [trade, tick]);
+  }, [id, status, openTxHash, tick]);
 
   return { pending, stale, refresh };
 }

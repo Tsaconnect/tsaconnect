@@ -17,7 +17,7 @@
 //           if short → runP2PTx('open_trade'): tradesApi.open({tokenAmount,
 //           sellerAddress, fiatAmount, paymentMethodId}) → confirmOpen
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -106,6 +106,9 @@ const AdDetailScreen: React.FC = () => {
   const [amountInput, setAmountInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // Holds the submit slot from the first tap: `submitting` still reads false
+  // to a second tap that lands before the re-render.
+  const submittingRef = useRef(false);
   const [submitStage, setSubmitStage] = useState('');
   const { supportedCurrencies } = useCurrency();
   const toast = useToast();
@@ -316,7 +319,8 @@ const AdDetailScreen: React.FC = () => {
   });
 
   const handleOpenSellAd = async () => {
-    if (!ad || submitting) return;
+    if (!ad || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     const prepared: { tradeId?: string } = {};
     try {
@@ -355,6 +359,7 @@ const AdDetailScreen: React.FC = () => {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
       showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
       setSubmitStage('');
     }
@@ -363,7 +368,7 @@ const AdDetailScreen: React.FC = () => {
   // ─── Buy-ad submit (sell crypto — approve → deposit + open) ─────────────
 
   const handleOpenBuyAd = async () => {
-    if (!ad || submitting) return;
+    if (!ad || submittingRef.current) return;
 
     // FIX 1: Fail closed — block immediately if the token isn't in the known
     // decimals map. A wrong decimal count would produce the wrong on-chain
@@ -376,6 +381,7 @@ const AdDetailScreen: React.FC = () => {
       return;
     }
 
+    submittingRef.current = true;
     setSubmitting(true);
     const prepared: { tradeId?: string } = {};
     try {
@@ -472,6 +478,7 @@ const AdDetailScreen: React.FC = () => {
     } catch (err) {
       showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
       setSubmitStage('');
     }
