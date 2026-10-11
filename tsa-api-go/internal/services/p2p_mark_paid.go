@@ -161,6 +161,9 @@ func (s *P2PTradeService) markPaidCore(ctx context.Context, t *models.P2PTrade, 
 	t.MarkedPaidAt = &now
 	t.UpdatedAt = now
 	s.audit(ctx, models.P2PAuditTradeMarkedPaid, actor, &t.AdID, &t.ID, meta)
+	if t.IsPoolSlice() { // an LP sees pool events (C2), never a P2P trade push
+		return true, nil
+	}
 	s.emit(events.P2PTradePaid, t.BuyerID, actorOf(actor), "Buyer marked payment sent", "", map[string]any{"tradeId": t.ID})
 	s.emit(events.P2PTradePaid, t.SellerID, actorOf(actor), "Buyer marked payment sent — please confirm", "", map[string]any{"tradeId": t.ID})
 	s.systemMsg(ctx, t.ID, "Buyer marked payment as sent. Seller — verify your bank and release.")

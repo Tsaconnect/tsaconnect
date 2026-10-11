@@ -2588,7 +2588,10 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// under our id is not the one we prepared, so its Paid/Released/Resolved/
 	// Disputed must never reach our row; only Cancelled is applied, as it just
 	// returns the capacity our row reserved. The rest waits for an operator.
-	if !trade.OpenRecorded() {
+	// A pool slice is never backfilled: its open is proven by the pool's own
+	// path (opened_at, S44) and it has no opener_address, so the matcher would
+	// refuse it and stall the slice rules in the switch below.
+	if !trade.IsPoolSlice() && !trade.OpenRecorded() {
 		if ok, err := s.recordOpenFromChain(ctx, &trade, onchain); err != nil {
 			if !errors.Is(err, ErrInvalidTransition) && !errors.Is(err, ErrUnsupportedToken) {
 				return ReconcileResult{}, fmt.Errorf("backfill open: %w", err)

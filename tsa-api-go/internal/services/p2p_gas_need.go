@@ -86,6 +86,10 @@ func (s *P2PTradeService) gasNeedTrade(ctx context.Context, id uuid.UUID) (*mode
 		}
 		return nil, err
 	}
+	// A pool slice answers as missing, as on every user P2P path (hideSlice).
+	if trade.IsPoolSlice() {
+		return nil, fmt.Errorf("%w: unknown tradeId", ErrInvalidParams)
+	}
 	if trade.ChainID != s.defaultChainID {
 		return nil, fmt.Errorf("%w: trade is not on the sponsored chain", ErrP2PGasNotNeeded)
 	}
