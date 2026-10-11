@@ -3,7 +3,7 @@
 import { formatFiat, formatTokenAmount, type P2PTrade } from '@/services/p2p';
 import { formatFeePct, tradeFee } from '@/services/p2pFee';
 import { isPendingTradeTx, type PendingEscrowConfirm, type PendingTradeTx, type TradeTxMode } from '@/services/p2pPending';
-import type { RunP2PTxResult } from '@/services/p2pTx';
+import { P2P_TX_COPY, type P2PFollowUp, type StashedConfirmResult } from '@/services/p2pTx';
 import { shortAddress } from '@/utils/sendForm';
 
 export const RELEASE_CONFIRM_TITLE = 'Have you checked the money is in your account?';
@@ -17,29 +17,6 @@ export function releaseConfirmMessage(
     `has arrived. Don't rely on a screenshot or an SMS. Releasing sends ` +
     `${formatTokenAmount(t.tokenAmount, decimals, 4)} ${t.token} to the buyer and can't be undone.`
   );
-}
-
-export interface TradeTxFollowUp {
-  /** The trade the server recorded, to show before the reload lands. */
-  trade?: P2PTrade;
-  /** Refetch the server truth (anything may have moved on chain or in the DB). */
-  reload: boolean;
-}
-
-/** What the screen does with a trade action's outcome (the alert copy is
- *  txOutcomeAlert's job). The screen's actingRef stops a double tap before it
- *  reaches runP2PTx, so `busy` means another screen instance owns the run —
- *  this one just clears its spinner. */
-export function tradeTxFollowUp(r: RunP2PTxResult<unknown, P2PTrade>): TradeTxFollowUp {
-  switch (r.status) {
-    case 'confirmed':
-      return { trade: r.data, reload: true };
-    case 'busy':
-    case 'aborted':
-      return { trade: undefined, reload: false };
-    default:
-      return { trade: undefined, reload: true };
-  }
 }
 
 /** The mark-paid guardrail. After the window the seller may cancel at any
@@ -242,6 +219,27 @@ export const OPEN_UNCONFIRMED_COPY =
  *  trade — there is nothing for the user to redo here. */
 export const OPEN_REVERTED_ALERT = {
   title: 'Escrow failed',
-  message: 'The network rejected the escrow transaction, so nothing was locked. ' +
-    OPEN_ABANDONED_NEXT,
+  message: P2P_TX_COPY.revertedMessage('the escrow transaction', OPEN_ABANDONED_NEXT, 'nothing was locked'),
 };
+
+/** What the trade screen does after re-sending a stashed confirm
+ *  (retryStashedConfirm). The server truth is reloaded whatever happened. */
+export function stashedConfirmFollowUp(
+  r: StashedConfirmResult,
+  rec: Pick<PendingTradeTx, 'mode' | 'txHash'>,
+): P2PFollowUp {
+  const { label } = pendingTradeTxCopy(rec);
+  switch (r.status) {
+    case 'confirmed':
+      return { toast: { type: 'success', message: `${label} confirmed` }, reload: true };
+    case 'reverted':
+      return {
+        alert: rec.mode === 'open'
+          ? OPEN_REVERTED_ALERT
+          : { title: P2P_TX_COPY.failedTitle(label), message: P2P_TX_COPY.revertedMessage() },
+        reload: true,
+      };
+    case 'pending':
+      return { alert: { title: 'Still confirming', message: r.message }, reload: true };
+  }
+}

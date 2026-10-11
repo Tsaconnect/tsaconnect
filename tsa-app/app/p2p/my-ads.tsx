@@ -15,8 +15,9 @@ import {
   type P2PAd,
 } from '../../services/p2p';
 import { p2pErrorMessage } from '../../services/p2pErrors';
-import { runP2PTx } from '../../services/p2pTx';
+import { runP2PTx, type P2PFollowUp } from '../../services/p2pTx';
 import { adCancelFollowUp } from '../../utils/p2pAdCancel';
+import { applyFollowUp } from '../../utils/p2pFollowUp';
 import { getActiveWallet } from '../../services/wallet';
 import { useTheme } from '@/theme';
 import {
@@ -118,7 +119,7 @@ const MyAdsScreen: React.FC = () => {
   };
 
   const doCancel = async (ad: P2PAd) => {
-    let reload = true;
+    let next: P2PFollowUp = { reload: true };
     try {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
@@ -132,16 +133,13 @@ const MyAdsScreen: React.FC = () => {
         prepare: () => adsApi.prepareCancel(ad.id, sellerAddress),
         confirm: (h) => adsApi.confirmCancel(ad.id, h),
       });
-      const next = adCancelFollowUp(r);
-      if (next.toast) toast.success(next.toast);
-      if (next.alert) Alert.alert(next.alert.title, next.alert.message);
+      next = adCancelFollowUp(r);
       if (next.cancelSent) setCancelSent((prev) => new Set(prev).add(ad.id));
-      reload = next.reload;
     } catch (err: any) {
-      toast.error(p2pErrorMessage(err?.message));
+      next = { toast: { type: 'error', message: p2pErrorMessage(err?.message) }, reload: true };
     } finally {
       setActing('');
-      if (reload) load();
+      applyFollowUp(next, { toast, reload: load });
     }
   };
 

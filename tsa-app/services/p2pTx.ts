@@ -18,7 +18,7 @@ import { p2pChainKey, tradesApi, unsignedTxToTxLike, type ApiResponse, type P2PT
 import { broadcastTransaction, signTransaction } from './wallet';
 import { ensureP2PGas } from './p2pGas';
 import { mapSubmitError, TRANSFER_COPY } from './submitErrors';
-import { errorMessage, p2pErrorMessage } from './p2pErrors';
+import { errorMessage, p2pErrorMessage, p2pKycCode } from './p2pErrors';
 import { TxRevertedError, waitMined, type ReceiptSource } from './txWait';
 import { addPending, removePending, type PendingEscrowConfirm } from './p2pPending';
 
@@ -185,33 +185,93 @@ async function run<P extends { unsignedTx?: UnsignedTx | null }, C>(
   };
 }
 
-/** The alert for an outcome, or null when there is nothing to say. */
-export function txOutcomeAlert(
-  label: string,
-  r: RunP2PTxResult<unknown, unknown>,
-): { title: string; message: string } | null {
-  const support = (hash: string) =>
-    `Don't send it again — pull down to refresh in a minute. ` +
-    `If nothing changes, contact support with this hash: ${hash}`;
+const REFRESH_AND_RETRY = 'Pull down to refresh, then try again.';
+
+/** The one table of P2P tx-outcome copy. Screens and helpers build their
+ *  alerts from it so a revert, a missing tx or a lost confirm reads the same
+ *  everywhere. */
+export const P2P_TX_COPY = {
+  failedTitle: (label: string) => `${label} failed`,
+  stillConfirmingTitle: (label: string) => `${label} sent — still confirming`,
+  /** A mined status-0 tx: the chain rejected `what`, so nothing moved. `next`
+   *  is what the user does now. */
+  revertedMessage: (what = 'this transaction', next = REFRESH_AND_RETRY, effect = 'nothing changed') =>
+    `The network rejected ${what}, so ${effect} (only the network fee was spent). ${next}`,
+  /** prepare returned no unsignedTx where one was needed. */
+  noTxMessage: (what = 'a transaction') => `The server did not return ${what}. Nothing was sent — please try again.`,
+  /** Broadcast but not recorded. Never "failed": it may still go through. */
+  stillConfirming: (r: { txHash: string; mined: boolean; message: string }) =>
+    (r.mined
+      ? `Your transaction is on chain, but we couldn't record it yet (${r.message}). `
+      : "We couldn't confirm your transaction in time. It may still go through. ") +
+    "Don't send it again — pull down to refresh in a minute. " +
+    `If nothing changes, contact support with this hash: ${r.txHash}`,
+};
+
+export interface P2PFollowUpAlert {
+  title: string;
+  message: string;
+  /** Offer "View trade" for this trade next to the dismiss button. */
+  viewTradeId?: string;
+  /** The dismiss button's text when "View trade" is offered (default OK). */
+  dismissText?: string;
+}
+
+/** What a screen does after a P2P tx (or a retried confirm): data, so it can be
+ *  tested, applied by utils/p2pFollowUp.applyFollowUp. A KYC refusal wins over
+ *  everything else. */
+export interface P2PFollowUp {
+  alert?: P2PFollowUpAlert;
+  /** Route to the Verify prompt (utils/kycRefusal). */
+  kyc?: { code: string; message?: string };
+  toast?: { type: 'success' | 'error' | 'info'; message: string };
+  /** Refetch the server truth (anything may have moved on chain or in the DB). */
+  reload: boolean;
+  /** Go to this trade — after the alert's OK when there is an alert. */
+  navigate?: string;
+  /** A step that gates the next one (the approve before an open) may go on. */
+  proceed?: boolean;
+  /** The cancel was broadcast but not recorded: show it as sent and don't
+   *  offer Cancel again until a later reload still shows the ad open. */
+  cancelSent?: boolean;
+}
+
+type ResultFor<P, C, S extends RunP2PTxResult<P, C>['status']> = Extract<RunP2PTxResult<P, C>, { status: S }>;
+
+/** `label` titles the default alerts; a status key replaces fields of that
+ *  outcome's default (a function gets the narrowed result). */
+export type P2PFollowUpOverrides<P, C> = { label: string } & {
+  [S in RunP2PTxResult<P, C>['status']]?:
+    | Partial<P2PFollowUp>
+    | ((r: ResultFor<P, C, S>) => Partial<P2PFollowUp>);
+};
+
+function defaultFollowUp(label: string, r: RunP2PTxResult<unknown, unknown>): P2PFollowUp {
   switch (r.status) {
-    case 'refused':
-      return { title: `${label} failed`, message: p2pErrorMessage(r.response) };
+    case 'refused': {
+      const code = p2pKycCode(r.response);
+      if (code) return { kyc: { code, message: r.response.message }, reload: false };
+      return { alert: { title: P2P_TX_COPY.failedTitle(label), message: p2pErrorMessage(r.response) }, reload: true };
+    }
     case 'reverted':
-      return {
-        title: `${label} failed`,
-        message: 'The network rejected this transaction, so nothing changed (only the network fee was spent). ' +
-          'Pull down to refresh, then try again.',
-      };
+      return { alert: { title: P2P_TX_COPY.failedTitle(label), message: P2P_TX_COPY.revertedMessage() }, reload: true };
     case 'confirm-failed':
-      return {
-        title: `${label} sent — still confirming`,
-        message: r.mined
-          ? `Your transaction is on chain, but we couldn't record it yet (${r.message}). ${support(r.txHash)}`
-          : `We couldn't confirm your transaction in time. It may still go through. ${support(r.txHash)}`,
-      };
-    default:
-      return null;
+      return { alert: { title: P2P_TX_COPY.stillConfirmingTitle(label), message: P2P_TX_COPY.stillConfirming(r) }, reload: true };
+    case 'confirmed':
+    case 'no-tx':
+      return { reload: true };
+    case 'aborted': // the gas alert has been shown
+    case 'busy': // another run owns it
+      return { reload: false };
   }
+}
+
+/** The follow-up for a runP2PTx outcome: the shared default per status, with
+ *  the caller's overrides on top. */
+export function p2pTxFollowUp<P, C>(r: RunP2PTxResult<P, C>, overrides: P2PFollowUpOverrides<P, C>): P2PFollowUp {
+  const base = defaultFollowUp(overrides.label, r as RunP2PTxResult<unknown, unknown>);
+  const o = overrides[r.status] as Partial<P2PFollowUp> | ((x: typeof r) => Partial<P2PFollowUp>) | undefined;
+  return { ...base, ...(typeof o === 'function' ? o(r) : o) };
 }
 
 export type StashedConfirmResult =

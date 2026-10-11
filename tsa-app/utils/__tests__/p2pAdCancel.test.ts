@@ -6,9 +6,9 @@ jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn
 describe('adCancelFollowUp (My Ads sell-ad cancel)', () => {
   it('confirmed / DB-only buy-ad cancel: toast and reload', () => {
     expect(adCancelFollowUp({ status: 'confirmed', txHash: '0x1', prepared: {} })).toEqual({
-      toast: 'Ad cancelled', cancelSent: false, reload: true,
+      toast: { type: 'success', message: 'Ad cancelled' }, reload: true,
     });
-    expect(adCancelFollowUp({ status: 'no-tx', prepared: {} }).toast).toBe('Ad cancelled');
+    expect(adCancelFollowUp({ status: 'no-tx', prepared: {} }).toast?.message).toBe('Ad cancelled');
   });
   it('confirm-failed: says it was sent and updates once recorded, holds the cancel, no immediate reload', () => {
     const f = adCancelFollowUp({ status: 'confirm-failed', txHash: '0xfeed', prepared: {}, message: 'x', mined: false });
@@ -16,10 +16,20 @@ describe('adCancelFollowUp (My Ads sell-ad cancel)', () => {
     expect(f.alert?.message).toMatch(/Your cancel was sent\. The ad will update here once it’s recorded/);
     expect(f.alert?.message).toContain('0xfeed');
     expect(f.alert?.message).not.toMatch(/reconcil|automatically|on its own/i);
+    expect(f.alert?.title).toBe('Cancel sent — still confirming');
   });
   it('reverted: nothing changed — the shared copy, cancel offered again after a reload', () => {
     const f = adCancelFollowUp({ status: 'reverted', txHash: '0x1', prepared: {} });
-    expect(f).toMatchObject({ cancelSent: false, reload: true });
+    expect(f).toMatchObject({ reload: true });
+    expect(f.cancelSent).toBeFalsy();
     expect(f.alert?.title).toBe('Cancel failed');
+  });
+  it('refused for KYC: the KYC prompt', () => {
+    expect(adCancelFollowUp({ status: 'refused', response: { success: false, status: 403, code: 'kyc_verification_required' } }))
+      .toMatchObject({ kyc: { code: 'kyc_verification_required' } });
+  });
+  it('aborted / busy: still reloads the list', () => {
+    expect(adCancelFollowUp({ status: 'aborted' })).toEqual({ reload: true });
+    expect(adCancelFollowUp({ status: 'busy' })).toEqual({ reload: true });
   });
 });

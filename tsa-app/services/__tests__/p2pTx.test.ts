@@ -38,7 +38,7 @@ jest.mock('../p2pPending', () => ({
 }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { P2P_MINE_WAIT_MS, retryStashedConfirm, runP2PTx, txOutcomeAlert } from '../p2pTx';
+import { P2P_MINE_WAIT_MS, p2pTxFollowUp, retryStashedConfirm, runP2PTx } from '../p2pTx';
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import { TxRevertedError } from '../txWait';
 
@@ -152,7 +152,7 @@ it('refuses an unsigned tx built for another chain, signing nothing', async () =
   expect(r).toMatchObject({ status: 'refused', response: { success: false } });
   expect(mockSign).not.toHaveBeenCalled();
   expect(mockBroadcast).not.toHaveBeenCalled();
-  expect(txOutcomeAlert('Release', r)?.message).toMatch(/different network/);
+  expect(p2pTxFollowUp(r, { label: 'Release' }).alert?.message).toMatch(/different network/);
 });
 
 describe('in-flight guard', () => {
@@ -170,7 +170,7 @@ describe('in-flight guard', () => {
     const first = runP2PTx(params);
     const second = await runP2PTx(params);
     expect(second).toEqual({ status: 'busy' });
-    expect(txOutcomeAlert('Release', second)).toBeNull();
+    expect(p2pTxFollowUp(second, { label: 'Release' })).toEqual({ reload: false });
 
     gate.resolve({ success: true, data: prepared });
     expect((await first).status).toBe('confirmed');
@@ -301,19 +301,25 @@ describe('lost-confirm stash', () => {
   });
 });
 
-describe('txOutcomeAlert', () => {
+describe('p2pTxFollowUp (the shared default per outcome)', () => {
   const HASH = '0x' + 'a'.repeat(64);
-  it('says nothing for confirmed / no-tx / aborted', () => {
-    expect(txOutcomeAlert('Release', { status: 'confirmed', txHash: '0x', prepared: {} })).toBeNull();
-    expect(txOutcomeAlert('Release', { status: 'no-tx', prepared: {} })).toBeNull();
-    expect(txOutcomeAlert('Release', { status: 'aborted' })).toBeNull();
+  const f = (r: Parameters<typeof p2pTxFollowUp>[0], label = 'Release') => p2pTxFollowUp(r, { label });
+  it('confirmed / no-tx: just the reload; aborted / busy: nothing', () => {
+    expect(f({ status: 'confirmed', txHash: '0x', prepared: {} })).toEqual({ reload: true });
+    expect(f({ status: 'no-tx', prepared: {} })).toEqual({ reload: true });
+    expect(f({ status: 'aborted' })).toEqual({ reload: false });
+    expect(f({ status: 'busy' })).toEqual({ reload: false });
   });
-  it('refused → friendly copy', () => {
-    expect(txOutcomeAlert('Release', { status: 'refused', response: { success: false, message: 'p2p: not authorized for this action' } }))
-      .toEqual({ title: 'Release failed', message: "You can't do that on this trade." });
+  it('refused → friendly copy and a reload', () => {
+    expect(f({ status: 'refused', response: { success: false, message: 'p2p: not authorized for this action' } }))
+      .toEqual({ alert: { title: 'Release failed', message: "You can't do that on this trade." }, reload: true });
+  });
+  it('refused for KYC → the KYC prompt only, no alert or reload', () => {
+    expect(f({ status: 'refused', response: { success: false, status: 403, code: 'kyc_verification_required', message: 'v' } }))
+      .toEqual({ kyc: { code: 'kyc_verification_required', message: 'v' }, reload: false });
   });
   it('confirm-failed → do-not-resend, with the full hash for support', () => {
-    const a = txOutcomeAlert('Mark paid', { status: 'confirm-failed', txHash: HASH, prepared: {}, message: 'm', mined: true });
+    const a = f({ status: 'confirm-failed', txHash: HASH, prepared: {}, message: 'm', mined: true }, 'Mark paid').alert;
     expect(a?.title).toBe('Mark paid sent — still confirming');
     expect(a?.message).toMatch(/on chain/);
     expect(a?.message).toMatch(/Don't send it again/);
@@ -321,7 +327,7 @@ describe('txOutcomeAlert', () => {
     expect(a?.message).not.toMatch(/failed/i);
   });
   it('unmined confirm-failed → it may still go through, never "failed"', () => {
-    const a = txOutcomeAlert('Release', { status: 'confirm-failed', txHash: HASH, prepared: {}, message: 'm', mined: false });
+    const a = f({ status: 'confirm-failed', txHash: HASH, prepared: {}, message: 'm', mined: false }).alert;
     expect(a?.title).toBe('Release sent — still confirming');
     expect(a?.message).toMatch(/may still go through/);
     expect(a?.message).toMatch(/Don't send it again/);
@@ -329,10 +335,22 @@ describe('txOutcomeAlert', () => {
     expect(a?.message).not.toMatch(/on chain|failed/i);
   });
   it('reverted → a clear failure: nothing changed, safe to try again', () => {
-    const a = txOutcomeAlert('Release', { status: 'reverted', txHash: HASH, prepared: {} });
-    expect(a?.title).toBe('Release failed');
-    expect(a?.message).toMatch(/nothing changed/i);
-    expect(a?.message).toMatch(/try again/i);
+    const next = f({ status: 'reverted', txHash: HASH, prepared: {} });
+    expect(next.reload).toBe(true);
+    expect(next.alert?.title).toBe('Release failed');
+    expect(next.alert?.message).toMatch(/nothing changed/i);
+    expect(next.alert?.message).toMatch(/try again/i);
+  });
+  it('a status override replaces fields of that outcome only; a function gets the narrowed result', () => {
+    const overrides = {
+      label: 'Dispute',
+      confirmed: { navigate: 't1' },
+      'confirm-failed': (r: { txHash: string }) => ({ navigate: r.txHash }),
+    };
+    expect(p2pTxFollowUp({ status: 'confirmed', txHash: HASH, prepared: {} }, overrides)).toEqual({ reload: true, navigate: 't1' });
+    expect(p2pTxFollowUp({ status: 'confirm-failed', txHash: HASH, prepared: {}, message: 'm', mined: false }, overrides))
+      .toMatchObject({ navigate: HASH, alert: { title: 'Dispute sent — still confirming' } });
+    expect(p2pTxFollowUp({ status: 'aborted' }, overrides)).toEqual({ reload: false });
   });
 });
 

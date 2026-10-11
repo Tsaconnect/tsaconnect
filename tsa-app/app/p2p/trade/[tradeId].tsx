@@ -77,22 +77,21 @@ import {
   type P2PTrade,
   type UnsignedTx,
 } from '../../../services/p2p';
-import { retryStashedConfirm, runP2PTx, txOutcomeAlert, type RunP2PTxResult } from '../../../services/p2pTx';
-import { p2pErrorMessage, p2pKycCode } from '../../../services/p2pErrors';
+import { P2P_TX_COPY, p2pTxFollowUp, retryStashedConfirm, runP2PTx, type RunP2PTxResult } from '../../../services/p2pTx';
+import { p2pErrorMessage } from '../../../services/p2pErrors';
 import { getActiveWallet } from '../../../services/wallet';
-import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { confirmAsync } from '../../../utils/confirmAsync';
+import { applyFollowUp } from '../../../utils/p2pFollowUp';
 import {
   markPaidConfirmMessage,
-  OPEN_REVERTED_ALERT,
   OPEN_UNCONFIRMED_COPY,
   pendingTradeTxCopy,
   RELEASE_CONFIRM_TITLE,
   releaseConfirmMessage,
+  stashedConfirmFollowUp,
   timeoutCancelConfirm,
   tradeActions,
   tradeFeeLines,
-  tradeTxFollowUp,
   type TradeActions,
 } from '../../../utils/p2pTradeView';
 import { getAuthHeaders } from '../../../services/walletApi';
@@ -409,16 +408,13 @@ const TradeDetailScreen: React.FC = () => {
         confirm: (txHash) => confirm(txHash),
         stash: () => ({ mode: action, tradeId: trade.id, token: trade.token, amount: trade.tokenAmount }),
       });
-      if (r.status === 'refused' && promptKycRefusal(p2pKycCode(r.response), r.response.message, 'p2p')) return r.status;
-      const next = tradeTxFollowUp(r);
-      if (next.trade) setTrade(next.trade);
-      const alert = txOutcomeAlert(label, r);
-      if (alert) Alert.alert(alert.title, alert.message);
-      if (next.reload) load();
+      // Show the recorded trade before the reload lands.
+      if (r.status === 'confirmed' && r.data) setTrade(r.data);
+      applyFollowUp(p2pTxFollowUp(r, { label }), { reload: load });
       return r.status;
     } catch (err: any) {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
-      Alert.alert(`${label} failed`, p2pErrorMessage(err?.message));
+      Alert.alert(P2P_TX_COPY.failedTitle(label), p2pErrorMessage(err?.message));
       return undefined;
     }
   };
@@ -496,21 +492,10 @@ const TradeDetailScreen: React.FC = () => {
     withActing(async () => {
       const rec = pendingTx;
       if (!rec) return;
-      const { label } = pendingTradeTxCopy(rec);
       startActing('Checking the network…');
       const r = await retryStashedConfirm(rec);
-      if (r.status === 'confirmed') {
-        if (r.data) setTrade(r.data);
-        toast.success(`${label} confirmed`);
-      } else if (r.status === 'reverted') {
-        const a = rec.mode === 'open'
-          ? OPEN_REVERTED_ALERT
-          : txOutcomeAlert(label, { status: 'reverted', txHash: rec.txHash, prepared: null });
-        if (a) Alert.alert(a.title, a.message);
-      } else {
-        Alert.alert('Still confirming', r.message);
-      }
-      load();
+      if (r.status === 'confirmed' && r.data) setTrade(r.data);
+      applyFollowUp(stashedConfirmFollowUp(r, rec), { toast, reload: load });
     });
 
   const handleSendMessage = async () => {

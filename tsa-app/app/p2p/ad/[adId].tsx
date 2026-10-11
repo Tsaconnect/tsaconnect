@@ -53,26 +53,20 @@ import {
   type NgBank,
 } from '../../../services/ngBanks';
 import { getActiveWallet } from '../../../services/wallet';
-import { runP2PTx, type RunP2PTxResult } from '../../../services/p2pTx';
+import { runP2PTx, type P2PFollowUp, type RunP2PTxResult } from '../../../services/p2pTx';
 import { getChainByChainId } from '../../../constants/chains';
 import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
-import { promptKycRefusal } from '../../../utils/kycRefusal';
 import { confirmAsync } from '@/utils/confirmAsync';
+import { applyFollowUp } from '@/utils/p2pFollowUp';
 import {
-  ACTIVE_TRADE_NO_LINK,
-  ACTIVE_TRADE_TITLE,
-  ACTIVE_TRADE_WITH_LINK,
   allowanceReadFollowUp,
   approveFollowUp,
   buyAdFeeNote,
-  findMyActiveTradeOnAd,
   openFollowUp,
   openThrownFollowUp,
   sellAdReceivePreview,
   waitForAllowance,
-  type ApproveFollowUp,
-  type OpenFollowUp,
   type OpenPrep,
 } from '@/utils/p2pAdOpen';
 import { useTheme } from '@/theme';
@@ -298,42 +292,11 @@ const AdDetailScreen: React.FC = () => {
   // banner can retry it; if it never shows, the trade appears once the server picks it up.
   const viewTrade = (tradeId: string) => router.replace(`/p2p/trade/${tradeId}`);
 
-  const showOpenFollowUp = async (next: OpenFollowUp) => {
-    switch (next.kind) {
-      case 'none':
-        return;
-      case 'kyc':
-        promptKycRefusal(next.code, next.message, 'p2p');
-        return;
-      case 'alert': {
-        const tradeId = next.tradeId;
-        Alert.alert(
-          next.title,
-          next.message,
-          tradeId ? [{ text: 'OK', style: 'cancel' }, { text: 'View trade', onPress: () => viewTrade(tradeId) }] : undefined,
-        );
-        if (next.reload) load();
-        return;
-      }
-      case 'active-trade': {
-        const tradeId = ad ? await findMyActiveTradeOnAd(ad) : null;
-        if (tradeId) {
-          Alert.alert(ACTIVE_TRADE_TITLE, ACTIVE_TRADE_WITH_LINK, [
-            { text: 'Close', style: 'cancel' },
-            { text: 'View trade', onPress: () => viewTrade(tradeId) },
-          ]);
-        } else {
-          Alert.alert(ACTIVE_TRADE_TITLE, ACTIVE_TRADE_NO_LINK);
-        }
-        return;
-      }
-      case 'trade':
-        if (next.notice) toast.info(next.notice);
-        viewTrade(next.tradeId);
-    }
-  };
+  const showFollowUp = (next: P2PFollowUp) => applyFollowUp(next, { toast, reload: load, navigate: viewTrade });
 
-  const finishOpen = (r: RunP2PTxResult<OpenPrep, P2PTrade>) => showOpenFollowUp(openFollowUp(r));
+  const finishOpen = async (r: RunP2PTxResult<OpenPrep, P2PTrade>) => {
+    if (ad) showFollowUp(await openFollowUp(r, ad));
+  };
 
   // The prepare inserts the trade server-side, so a sign/broadcast failure
   // after it leaves a trade the user must know about (openThrownFollowUp).
@@ -343,11 +306,6 @@ const AdDetailScreen: React.FC = () => {
       if (res.success && res.data?.trade?.id) holder.tradeId = res.data.trade.id;
       return res;
     };
-
-  const stopForApproval = (next: ApproveFollowUp) => {
-    if (next.kyc) promptKycRefusal(next.kyc.code, next.kyc.message, 'p2p');
-    else if (next.alert) Alert.alert(next.alert.title, next.alert.message);
-  };
 
   const openStash = (prep: OpenPrep) => ({
     mode: 'open' as const,
@@ -394,7 +352,7 @@ const AdDetailScreen: React.FC = () => {
       await finishOpen(r);
     } catch (err: any) {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
-      await showOpenFollowUp(openThrownFollowUp(err?.message, prepared.tradeId));
+      showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -459,7 +417,7 @@ const AdDetailScreen: React.FC = () => {
       // An unverified seller is refused here (403), before anything is signed.
       const read = allowanceReadFollowUp(await poolApi.allowance(ad.token, sellerAddress, ad.chainId));
       if (!read.proceed) {
-        stopForApproval(read);
+        showFollowUp(read);
         return;
       }
       if (!hasSufficientAllowance(read.allowance ?? '0', tokenBaseUnits)) {
@@ -475,7 +433,7 @@ const AdDetailScreen: React.FC = () => {
         });
         const next = approveFollowUp(approval);
         if (!next.proceed) {
-          stopForApproval(next);
+          showFollowUp(next);
           return;
         }
       }
@@ -511,7 +469,7 @@ const AdDetailScreen: React.FC = () => {
       });
       await finishOpen(r);
     } catch (err: any) {
-      await showOpenFollowUp(openThrownFollowUp(err?.message, prepared.tradeId));
+      showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
       setSubmitting(false);
       setSubmitStage('');
