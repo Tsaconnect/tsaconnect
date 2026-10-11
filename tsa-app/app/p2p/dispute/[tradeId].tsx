@@ -38,11 +38,11 @@ import {
 import { useTheme } from '@/theme';
 import { useAuth } from '../../../AuthContext/AuthContext';
 import { tradesApi, type P2PTrade } from '../../../services/p2p';
-import { errorMessage, p2pErrorMessage } from '../../../services/p2pErrors';
-import { p2pTxFollowUp, runP2PTx } from '../../../services/p2pTx';
+import { runP2PTx } from '../../../services/p2pTx';
 import { getActiveWallet } from '../../../services/wallet';
 import { safeProofUrl } from '../../../utils/payInto';
 import { applyFollowUp } from '../../../utils/p2pFollowUp';
+import { disputeFollowUp, disputeThrownFollowUp } from '../../../utils/p2pTradeView';
 
 // Structured reasons. The `reason` string on the wire is free-text (the
 // backend stores it verbatim and shows it to the admin), so each enum maps to
@@ -241,23 +241,10 @@ const DisputeWizardScreen: React.FC = () => {
         stash: () => ({ mode: 'dispute', tradeId: trade.id, token: trade.token, amount: trade.tokenAmount }),
       });
 
-      applyFollowUp(
-        p2pTxFollowUp(r, {
-          label: 'Dispute',
-          refused: ({ response }) => ({
-            alert: undefined,
-            toast: { type: 'error', message: p2pErrorMessage(response) },
-          }),
-          confirmed: { toast: { type: 'success', message: 'Dispute opened. An admin will review it shortly.' }, navigate: trade.id },
-          // The dispute tx was broadcast: don't leave the user on a form that
-          // invites a second submit.
-          'confirm-failed': { navigate: trade.id },
-        }),
-        { toast, navigate: leave },
-      );
+      applyFollowUp(disputeFollowUp(r, trade.id), { toast, navigate: leave });
     } catch (err) {
       // Only reached before anything is broadcast (no wallet, sign/broadcast failure).
-      toast.error(p2pErrorMessage(errorMessage(err)));
+      applyFollowUp(disputeThrownFollowUp(err), { toast });
     } finally {
       setSubmitting(false);
     }

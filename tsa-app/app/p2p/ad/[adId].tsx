@@ -17,7 +17,7 @@
 //           if short → runP2PTx('open_trade'): tradesApi.open({tokenAmount,
 //           sellerAddress, fiatAmount, paymentMethodId}) → confirmOpen
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -60,6 +60,7 @@ import { useCurrency } from '../../../contexts/CurrencyContext';
 import SellerTrustBadges from '../../../components/p2p/SellerTrustBadges';
 import { confirmAsync } from '@/utils/confirmAsync';
 import { applyFollowUp } from '@/utils/p2pFollowUp';
+import { useSubmitSlot } from '@/hooks/useSubmitSlot';
 import {
   allowanceReadFollowUp,
   approveFollowUp,
@@ -105,10 +106,8 @@ const AdDetailScreen: React.FC = () => {
   // For sell-ads: user enters fiat amount. For buy-ads: user enters token amount.
   const [amountInput, setAmountInput] = useState('');
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  // Holds the submit slot from the first tap: `submitting` still reads false
-  // to a second tap that lands before the re-render.
-  const submittingRef = useRef(false);
+  // Holds the submit slot from the first tap (a double tap can't open twice).
+  const { submitting, begin: beginSubmit, end: endSubmit } = useSubmitSlot();
   const [submitStage, setSubmitStage] = useState('');
   const { supportedCurrencies } = useCurrency();
   const toast = useToast();
@@ -319,9 +318,7 @@ const AdDetailScreen: React.FC = () => {
   });
 
   const handleOpenSellAd = async () => {
-    if (!ad || submittingRef.current) return;
-    submittingRef.current = true;
-    setSubmitting(true);
+    if (!ad || !beginSubmit()) return;
     const prepared: { tradeId?: string } = {};
     try {
       setSubmitStage('Loading wallet…');
@@ -359,8 +356,7 @@ const AdDetailScreen: React.FC = () => {
       // Wallet lookup, signing or broadcast: nothing reached the chain.
       showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      endSubmit();
       setSubmitStage('');
     }
   };
@@ -368,7 +364,7 @@ const AdDetailScreen: React.FC = () => {
   // ─── Buy-ad submit (sell crypto — approve → deposit + open) ─────────────
 
   const handleOpenBuyAd = async () => {
-    if (!ad || submittingRef.current) return;
+    if (!ad) return;
 
     // FIX 1: Fail closed — block immediately if the token isn't in the known
     // decimals map. A wrong decimal count would produce the wrong on-chain
@@ -381,8 +377,7 @@ const AdDetailScreen: React.FC = () => {
       return;
     }
 
-    submittingRef.current = true;
-    setSubmitting(true);
+    if (!beginSubmit()) return;
     const prepared: { tradeId?: string } = {};
     try {
       setSubmitStage('Loading wallet…');
@@ -478,8 +473,7 @@ const AdDetailScreen: React.FC = () => {
     } catch (err) {
       showFollowUp(openThrownFollowUp(err, prepared.tradeId));
     } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
+      endSubmit();
       setSubmitStage('');
     }
   };

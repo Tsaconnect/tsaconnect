@@ -11,6 +11,7 @@ import { gasApi, p2pChainKey, SONIC_GAS_SPONSOR_CHAIN_IDS, type P2PGasTarget } f
 import { ensureGas } from './wallet';
 import { waitMined } from './txWait';
 import { p2pErrorMessage, p2pKycCode, type P2PErrorLike } from './p2pErrors';
+import { promptKycRefusal } from '@/utils/kycRefusal';
 
 const TOPUP_WAIT_MS = 60_000;
 
@@ -80,8 +81,11 @@ export async function ensureP2PGas(p: EnsureP2PGasParams): Promise<boolean> {
   }
 
   // The existing guard on the signer is the last word. If it still comes up
-  // empty and the sponsor refused, say why in plain words.
+  // empty and the sponsor refused, say why in plain words — and a KYC refusal
+  // is not a gas problem: it gets the KYC prompt (with Verify now).
+  const kycCode = p2pKycCode(refusal);
   const alert = (title: string, message: string) => {
+    if (kycCode && promptKycRefusal(kycCode, refusal?.message, 'p2p')) return;
     const text = refusal ? p2pErrorMessage(refusal) : message;
     if (onAlert) onAlert(title, text);
     else Alert.alert(title, text);

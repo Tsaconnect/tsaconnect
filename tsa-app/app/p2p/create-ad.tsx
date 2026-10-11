@@ -51,7 +51,13 @@ import {
 } from '../../services/p2pErrors';
 import { fixedRateBandRefusal } from '../../utils/p2pRateBand';
 import { promptKycRefusal } from '../../utils/kycRefusal';
-import { fundingPreflight, publishActionForFunding, publishFailureMessage } from '../../services/createAdFunding';
+import {
+  createAdStatusError,
+  fundingPreflight,
+  lpStatusError,
+  publishActionForFunding,
+  publishFailureMessage,
+} from '../../services/createAdFunding';
 import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
 import { getActiveWallet, verifyWalletKey } from '../../services/wallet';
 import { createAndSignAd } from '../../services/adPublish';
@@ -140,6 +146,8 @@ async function assertWalletKey(address: string): Promise<void> {
       'wallet list and re-import it from its seed phrase, then retry.'
   );
 }
+
+const RETRY_CONFIRM_FAILED = 'Server still cannot record this deposit.';
 
 const CreateAdScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
@@ -724,13 +732,14 @@ const CreateAdScreen: React.FC = () => {
         rec.chainId,
       );
       if (!conf.success) {
-        throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
+        Alert.alert('Retry failed', p2pErrorMessage(conf, RETRY_CONFIRM_FAILED));
+        return;
       }
       await removePending(rec.txHash);
       await refreshPendingDeposits();
       Alert.alert('Confirmed', 'Your deposit has been recorded. You can publish now.');
-    } catch (err: any) {
-      Alert.alert('Retry failed', err?.message || 'Server still cannot record this deposit.');
+    } catch (err) {
+      Alert.alert('Retry failed', p2pCaughtMessage(err, RETRY_CONFIRM_FAILED));
     } finally {
       setRetryingTxHash(null);
     }
@@ -783,42 +792,6 @@ const CreateAdScreen: React.FC = () => {
       loadLpMe();
     }
   };
-
-  // LP-specific HTTP copy (review M4): a 503 here is the pool closing or the
-  // chain being unreachable, never a stale rate.
-  function lpStatusError(status?: number, message?: string, res?: P2PErrorLike): string {
-    if (status === 503) return 'The pool is closed or the network is busy right now. Your funds are safe; try again later.';
-    if (status === 409) return message || 'You already have a live pool ad.';
-    return createAdStatusError(status, message, res);
-  }
-
-  // createAdStatusError turns the backend's HTTP status into actionable user
-  // guidance. 410 (Gone) is the Phase 2B migration sentinel for stale clients
-  // calling removed legacy endpoints; 503 fires when the rate feed is stale
-  // mid-publish (float ads need a fresh feed). Anything else goes through the
-  // shared P2P copy (e.g. rate_out_of_band → "Rate must be between X and Y").
-  function createAdStatusError(status: number | undefined, message: string | undefined, res?: P2PErrorLike): string {
-    if (status === 410) {
-      return 'Your app version is out of date — please update and retry.';
-    }
-    if (status === 503) {
-      return 'Live rate just expired. Refresh the screen and try again.';
-    }
-    // Server-side EIP-712 recovery mismatch — the wallet that produced the
-    // signature derives to a different address than the one we declared as
-    // sellerAddress. The pre-flight in handleSubmit catches the common
-    // SecureStore-corruption case, but if a stale build slips through (or
-    // the active wallet flips mid-flow) we still want a useful message
-    // instead of the raw "signature recovered to 0x… expected 0x…" alert.
-    if (message && /signature recovered to /i.test(message)) {
-      return (
-        'Your wallet did not sign the ad correctly — its key does not match ' +
-        'the address on the ad. Remove this wallet and re-import it from its ' +
-        'seed phrase, then retry. (Server message: ' + message + ')'
-      );
-    }
-    return p2pErrorMessage(res ?? { status, message }, 'Server rejected the request');
-  }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>

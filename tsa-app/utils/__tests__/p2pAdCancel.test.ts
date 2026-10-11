@@ -1,4 +1,4 @@
-import { adCancelFollowUp } from '../p2pAdCancel';
+import { adCancelFollowUp, adCancelThrownFollowUp } from '../p2pAdCancel';
 
 // babel-jest hoists this above the imports.
 jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn().mockResolvedValue(null) }));
@@ -31,5 +31,10 @@ describe('adCancelFollowUp (My Ads sell-ad cancel)', () => {
   it('aborted / busy: still reloads the list', () => {
     expect(adCancelFollowUp({ status: 'aborted' })).toEqual({ reload: true });
     expect(adCancelFollowUp({ status: 'busy' })).toEqual({ reload: true });
+  });
+  it('thrown before any broadcast: an error toast with mapped copy, and a reload', () => {
+    expect(adCancelThrownFollowUp(new Error('No wallet found'))).toEqual({
+      toast: { type: 'error', message: 'No wallet found' }, reload: true,
+    });
   });
 });

@@ -19,8 +19,8 @@ export interface P2PErrorLike {
 const CODE_COPY: Record<string, string> = {
   app_update_required: 'Please update the app to continue this trade.',
   [KYC_VERIFICATION_REQUIRED]: 'Verify your identity to use P2P.',
-  // Verified, but no legal name: only support can fix it (kycRefusal's copy).
-  [KYC_LEGAL_NAME_MISSING]: kycRefusalFor(KYC_LEGAL_NAME_MISSING)!.message,
+  // Verified, but no legal name: only support can fix it (kycRefusal's P2P copy).
+  [KYC_LEGAL_NAME_MISSING]: kycRefusalFor(KYC_LEGAL_NAME_MISSING, undefined, 'p2p')!.message,
   gas_not_needed: "This step doesn't need gas right now.",
   gas_topup_unused: 'A gas top-up was already sent recently. Use it first, then try again.',
   sponsorship_in_progress: 'A gas top-up is already in progress. Give it a moment.',
@@ -54,6 +54,8 @@ const RULES: [RegExp, string][] = [
   [/payment method not found/i, 'Pick a payment method and try again.'],
   [/token not supported on this chain/i, "This token isn't supported on that network."],
   [/ad has open trades/i, 'This ad has trades in progress. Wait for them to finish first.'],
+  // ErrPoolStockAdExists (p2p_pool_ad.go): the LP's stock ad is live and not due.
+  [/already have a live stock ad/i, 'You already have a live pool ad. You can renew it when it is due.'],
 ];
 
 // The escrow's party checks, as a revert from the server's gas estimate (the
@@ -78,6 +80,9 @@ export function p2pErrorMessage(
   const raw = r.message ?? '';
   if (r.code === 'rate_out_of_band') return rateBandCopy(r.data);
   if (r.code && CODE_COPY[r.code]) return CODE_COPY[r.code];
+  // An older code-less KYC 403 still gets the KYC copy, not its own text.
+  const kyc = p2pKycCode(r);
+  if (kyc) return CODE_COPY[kyc];
   if (r.status === 401) return 'Your session has expired. Sign in again.';
   if (r.status === 410) return 'Your app version is out of date — please update and retry.';
   if (r.status === 429) {
@@ -115,7 +120,20 @@ export class P2PCopyError extends Error {
  *  the machine fields a screen routes on — the KYC code, status and data
  *  (rate_out_of_band's min/max). A bare Error would drop them. */
 export function p2pRefusalError(res: P2PErrorLike, message: string): P2PCopyError {
-  return Object.assign(new P2PCopyError(message), { code: p2pKycCode(res) ?? res.code, status: res.status, data: res.data });
+  return Object.assign(new P2PCopyError(message), {
+    code: p2pKycCode(res) ?? res.code,
+    status: res.status,
+    data: res.data,
+    raw: res.message,
+  });
+}
+
+/** The unmapped server/RPC text behind a mapped error (its `raw`), else its
+ *  message. Only for decoders that need the original string (e.g. an ERC20
+ *  revert's hex) — never to show. */
+export function rawErrorText(err: unknown): string {
+  const raw = (err as { raw?: unknown } | null | undefined)?.raw;
+  return typeof raw === 'string' ? raw : errorMessage(err);
 }
 
 /** What a catch shows: app copy as-is, anything else through p2pErrorMessage

@@ -21,14 +21,16 @@ jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import {
+  createAdStatusError,
   fundingPreflight,
+  lpStatusError,
   publishActionForFunding,
   publishFailureMessage,
 } from '../createAdFunding';
 // eslint-disable-next-line import/first
 import type { EnsureFundingResult } from '../escrowFunding';
 // eslint-disable-next-line import/first
-import { P2PCopyError } from '../p2pErrors';
+import { P2PCopyError, p2pErrorMessage } from '../p2pErrors';
 
 describe('fundingPreflight — funding decision + chain gate', () => {
   it('skips funding when available already covers the ad (shortfall <= 0)', () => {
@@ -174,5 +176,45 @@ describe('publishFailureMessage — what "Could not publish ad" says', () => {
     expect(publishFailureMessage(new Error('boom'), { ...opts, depositedThisAttempt: true })).toMatch(
       /^Boom\n\nThe deposit you just made is safe in your escrow balance/,
     );
+  });
+});
+
+// statusError output is thrown as a P2PCopyError and shown as-is, so it must be
+// app copy or p2pErrorMessage's mapping — never the server text passed through.
+describe('createAdStatusError / lpStatusError — never the raw server message', () => {
+  const STOCK_AD = 'p2p: you already have a live stock ad; it can be renewed when it is due';
+
+  it('LP 409 stock-ad sentinel: fixed pool-ad copy, not the server sentence', () => {
+    const res = { status: 409, message: STOCK_AD };
+    expect(lpStatusError(409, STOCK_AD, res)).toBe('You already have a live pool ad. You can renew it when it is due.');
+  });
+
+  it('LP 409 with an unreadable body: the pool-ad fallback', () => {
+    expect(lpStatusError(409, '<html>409</html>')).toBe('You already have a live pool ad.');
+  });
+
+  it('LP 409 otherwise: the shared P2P mapping', () => {
+    const res = { status: 409, message: 'p2p: ad is not active' };
+    expect(lpStatusError(409, res.message, res)).toBe('This ad is no longer available.');
+  });
+
+  it('signature mismatch: actionable copy without the server message', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const raw = 'signature recovered to 0x1111111111111111111111111111111111111111, expected 0x2222222222222222222222222222222222222222';
+    const copy = createAdStatusError(400, raw);
+    expect(copy).toMatch(/^Your wallet did not sign the ad correctly/);
+    expect(copy).not.toContain('0x1111');
+    expect(copy).not.toMatch(/server message/i);
+    warn.mockRestore();
+  });
+
+  it.each([
+    [400, 'p2p: amount outside ad min/max'],
+    [500, '<html>Internal Server Error</html>'],
+    [400, 'pq: duplicate key value violates unique constraint; sql: ' + 'x'.repeat(50)],
+  ])('%s %s: exactly the shared mapping', (status, message) => {
+    const res = { status, message };
+    expect(createAdStatusError(status, message, res)).toBe(p2pErrorMessage(res, 'Server rejected the request'));
+    expect(lpStatusError(status, message, res)).toBe(p2pErrorMessage(res, 'Server rejected the request'));
   });
 });

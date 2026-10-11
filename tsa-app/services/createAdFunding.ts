@@ -23,7 +23,7 @@
 
 import type { EnsureFundingResult } from './escrowFunding';
 import { formatTokenAmount } from './p2p';
-import { errorMessage, p2pCaughtMessage } from './p2pErrors';
+import { p2pCaughtMessage, p2pErrorMessage, rawErrorText, type P2PErrorLike } from './p2pErrors';
 import { decodeRevertError } from './txErrors';
 
 export interface FundingPreflightInput {
@@ -111,7 +111,9 @@ export function publishFailureMessage(
   p: { symbol: string; decimals: number; depositedThisAttempt: boolean },
 ): string {
   const { symbol: sym, decimals } = p;
-  const revert = decodeRevertError(errorMessage(err));
+  // Decode the original text: escrow funding throws mapped copy, keeping the
+  // server/RPC string (with the revert hex) as `raw`.
+  const revert = decodeRevertError(rawErrorText(err));
   let body: string;
   if (revert?.kind === 'insufficient-balance') {
     body =
@@ -138,4 +140,48 @@ export function publishFailureMessage(
       'or reclaim it from My Ads.';
   }
   return body;
+}
+
+// The statusError copy createAndSignAd throws as a P2PCopyError (shown as-is),
+// so it must only ever be app copy or p2pErrorMessage's mapping — never a
+// server message passed through.
+
+/**
+ * A create/sign refusal on the sell-ad publish, as actionable copy. 410 (Gone)
+ * is the Phase 2B migration sentinel for stale clients calling removed legacy
+ * endpoints; 503 fires when the rate feed is stale mid-publish (float ads need
+ * a fresh feed). Anything else goes through the shared P2P copy (e.g.
+ * rate_out_of_band → "Rate must be between X and Y").
+ */
+export function createAdStatusError(status: number | undefined, message: string | undefined, res?: P2PErrorLike): string {
+  if (status === 410) {
+    return 'Your app version is out of date — please update and retry.';
+  }
+  if (status === 503) {
+    return 'Live rate just expired. Refresh the screen and try again.';
+  }
+  // Server-side EIP-712 recovery mismatch — the wallet that produced the
+  // signature derives to a different address than the one we declared as
+  // sellerAddress. The pre-flight in handleSubmit catches the common
+  // SecureStore-corruption case, but if a stale build slips through (or the
+  // active wallet flips mid-flow) we still want a useful message instead of
+  // the raw "signature recovered to 0x… expected 0x…" — which only goes to
+  // the log, for support.
+  if (message && /signature recovered to /i.test(message)) {
+    console.warn('[createAd] voucher signature mismatch:', message);
+    return (
+      'Your wallet did not sign the ad correctly — its key does not match ' +
+      'the address on the ad. Remove this wallet and re-import it from its ' +
+      'seed phrase, then retry.'
+    );
+  }
+  return p2pErrorMessage(res ?? { status, message }, 'Server rejected the request');
+}
+
+/** LP-specific HTTP copy (review M4): a 503 here is the pool closing or the
+ *  chain being unreachable, never a stale rate. */
+export function lpStatusError(status?: number, message?: string, res?: P2PErrorLike): string {
+  if (status === 503) return 'The pool is closed or the network is busy right now. Your funds are safe; try again later.';
+  if (status === 409) return p2pErrorMessage(res ?? { status, message }, 'You already have a live pool ad.');
+  return createAdStatusError(status, message, res);
 }

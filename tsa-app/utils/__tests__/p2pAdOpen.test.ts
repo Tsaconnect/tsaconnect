@@ -40,7 +40,6 @@ describe('openFollowUp (every runP2PTx outcome of an open)', () => {
   it('confirm-failed: still lands on the trade (R4 banner there) with a notice, mined or not', async () => {
     for (const mined of [true, false]) {
       expect(await open({ status: 'confirm-failed', txHash: hash, prepared, message: 'x', mined })).toEqual({
-        alert: undefined,
         toast: { type: 'info', message: 'Trade opened — still confirming the escrow.' },
         navigate: 't1',
         reload: false,

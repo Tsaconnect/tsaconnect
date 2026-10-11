@@ -353,6 +353,16 @@ describe('p2pTxFollowUp (the shared default per outcome)', () => {
       .toMatchObject({ navigate: HASH, alert: { title: 'Dispute sent — still confirming' } });
     expect(p2pTxFollowUp({ status: 'aborted' }, overrides)).toEqual({ reload: false });
   });
+  it('an override toast replaces the default alert; an explicit alert stays', () => {
+    const refused = { status: 'refused' as const, response: { success: false, message: 'p2p: invalid state transition' } };
+    expect(p2pTxFollowUp(refused, { label: 'X', refused: { toast: { type: 'error', message: 't' } } }))
+      .toEqual({ toast: { type: 'error', message: 't' }, reload: true });
+    const both = p2pTxFollowUp(refused, {
+      label: 'X',
+      refused: { toast: { type: 'info', message: 't' }, alert: { title: 'A', message: 'B' } },
+    });
+    expect(both.alert).toEqual({ title: 'A', message: 'B' });
+  });
 });
 
 describe('retryStashedConfirm (the trade screen\'s retry for a lost confirm)', () => {

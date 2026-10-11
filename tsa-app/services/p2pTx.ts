@@ -100,7 +100,8 @@ export async function signAndBroadcast(
     const sent = await broadcastTransaction(p2pChainKey(chainId), signed);
     return { hash: sent.hash, provider: sent.provider ?? undefined };
   } catch (err) {
-    throw new Error(mapSubmitError(errorMessage(err), TRANSFER_COPY));
+    // `raw` keeps the original for decoders (rawErrorText); the message is copy.
+    throw Object.assign(new Error(mapSubmitError(errorMessage(err), TRANSFER_COPY)), { raw: errorMessage(err) });
   }
 }
 
@@ -240,7 +241,9 @@ export interface P2PFollowUp {
 type ResultFor<P, C, S extends RunP2PTxResult<P, C>['status']> = Extract<RunP2PTxResult<P, C>, { status: S }>;
 
 /** `label` titles the default alerts; a status key replaces fields of that
- *  outcome's default (a function gets the narrowed result). */
+ *  outcome's default (a function gets the narrowed result). Fields merge one
+ *  by one, except that an override giving a `toast` and no `alert` key drops
+ *  the default alert — a toast replaces it, never doubles it. */
 export type P2PFollowUpOverrides<P, C> = { label: string } & {
   [S in RunP2PTxResult<P, C>['status']]?:
     | Partial<P2PFollowUp>
@@ -272,7 +275,10 @@ function defaultFollowUp(label: string, r: RunP2PTxResult<unknown, unknown>): P2
 export function p2pTxFollowUp<P, C>(r: RunP2PTxResult<P, C>, overrides: P2PFollowUpOverrides<P, C>): P2PFollowUp {
   const base = defaultFollowUp(overrides.label, r as RunP2PTxResult<unknown, unknown>);
   const o = overrides[r.status] as Partial<P2PFollowUp> | ((x: typeof r) => Partial<P2PFollowUp>) | undefined;
-  return { ...base, ...(typeof o === 'function' ? o(r) : o) };
+  const patch = (typeof o === 'function' ? o(r) : o) ?? {};
+  const next = { ...base, ...patch };
+  if (patch.toast && !('alert' in patch)) delete next.alert;
+  return next;
 }
 
 export type StashedConfirmResult =

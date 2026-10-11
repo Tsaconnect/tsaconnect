@@ -1,6 +1,7 @@
 // utils/p2pAdCancel.ts — what My Ads does with an ad cancel's outcome (pure,
 // testable without a render harness; applied by utils/p2pFollowUp).
 import { P2P_TX_COPY, p2pTxFollowUp, type P2PFollowUp, type RunP2PTxResult } from '@/services/p2pTx';
+import { p2pCaughtMessage } from '@/services/p2pErrors';
 
 export function adCancelFollowUp(r: RunP2PTxResult<unknown, unknown>): P2PFollowUp {
   const cancelled: Partial<P2PFollowUp> = { toast: { type: 'success', message: 'Ad cancelled' } };
@@ -24,4 +25,10 @@ export function adCancelFollowUp(r: RunP2PTxResult<unknown, unknown>): P2PFollow
     aborted: { reload: true },
     busy: { reload: true },
   });
+}
+
+/** The cancel threw before anything was broadcast (no wallet, sign or
+ *  broadcast failure): an error toast, and the list reloads. */
+export function adCancelThrownFollowUp(err: unknown): P2PFollowUp {
+  return { toast: { type: 'error', message: p2pCaughtMessage(err) }, reload: true };
 }

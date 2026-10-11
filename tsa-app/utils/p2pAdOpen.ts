@@ -41,7 +41,6 @@ function openOutcome(r: RunP2PTxResult<OpenPrep, P2PTrade>): P2PFollowUp {
     // Land on the trade: its R4 banner retries the stashed hash and the
     // reconciler backfills it.
     'confirm-failed': (c) => ({
-      alert: undefined,
       toast: { type: 'info', message: 'Trade opened — still confirming the escrow.' },
       navigate: c.prepared.trade.id,
       reload: false,

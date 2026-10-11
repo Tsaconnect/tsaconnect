@@ -29,6 +29,8 @@ export function applyFollowUp(next: P2PFollowUp, h: FollowUpHandlers): void {
     } else if (navigate) {
       buttons = [{ text: 'OK', onPress: () => h.navigate?.(navigate) }];
     }
+    // An alert offering "View trade" leaves navigation to the user, so a
+    // `navigate` alongside it is ignored (no builder sets both).
     Alert.alert(alert.title, alert.message, buttons);
   } else if (navigate) {
     h.navigate?.(navigate);

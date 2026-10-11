@@ -11,6 +11,8 @@ import {
   splitPendingTradeTxs,
   timeoutCancelConfirm,
   tradeActions,
+  disputeFollowUp,
+  disputeThrownFollowUp,
   stashedConfirmFollowUp,
   tradeFeeLines,
 } from '../p2pTradeView';
@@ -50,6 +52,38 @@ describe('stashedConfirmFollowUp (the retry of a lost confirm)', () => {
   it('still pending: says so with the server message', () => {
     expect(stashedConfirmFollowUp({ status: 'pending', message: 'not yet' }, rec))
       .toEqual({ alert: { title: 'Still confirming', message: 'not yet' }, reload: true });
+  });
+});
+
+describe('disputeFollowUp (the dispute form)', () => {
+  const HASH = '0x' + 'c'.repeat(64);
+  it('refused: an error toast only — no alert, the form stays', () => {
+    expect(disputeFollowUp({ status: 'refused', response: { success: false, message: 'p2p: already has an open dispute' } }, 't1'))
+      .toEqual({ toast: { type: 'error', message: expect.stringMatching(/already open or being raised/) }, reload: true });
+  });
+  it('refused for KYC: the KYC prompt', () => {
+    expect(disputeFollowUp({ status: 'refused', response: { success: false, status: 403, code: 'kyc_verification_required', message: 'v' } }, 't1'))
+      .toMatchObject({ kyc: { code: 'kyc_verification_required', message: 'v' } });
+  });
+  it('confirmed: a success toast and back to the trade', () => {
+    expect(disputeFollowUp({ status: 'confirmed', txHash: HASH, prepared: {} }, 't1')).toEqual({
+      toast: { type: 'success', message: 'Dispute opened. An admin will review it shortly.' }, navigate: 't1', reload: true,
+    });
+  });
+  it('confirm-failed: the still-confirming alert, then back to the trade', () => {
+    const f = disputeFollowUp({ status: 'confirm-failed', txHash: HASH, prepared: {}, message: 'm', mined: false }, 't1');
+    expect(f).toMatchObject({ navigate: 't1', alert: { title: 'Dispute sent — still confirming' } });
+    expect(f.toast).toBeUndefined();
+  });
+  it('reverted: the failure alert, the form stays', () => {
+    const f = disputeFollowUp({ status: 'reverted', txHash: HASH, prepared: {} }, 't1');
+    expect(f.alert?.title).toBe('Dispute failed');
+    expect(f.navigate).toBeUndefined();
+  });
+  it('thrown: an error toast with mapped copy', () => {
+    expect(disputeThrownFollowUp(new Error('<html>oops</html>'))).toEqual({
+      toast: { type: 'error', message: 'Something went wrong. Please try again.' }, reload: false,
+    });
   });
 });
 

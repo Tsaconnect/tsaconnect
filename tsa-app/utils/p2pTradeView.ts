@@ -3,7 +3,8 @@
 import { formatFiat, formatTokenAmount, type P2PTrade } from '@/services/p2p';
 import { formatFeePct, tradeFee } from '@/services/p2pFee';
 import { isPendingTradeTx, type PendingEscrowConfirm, type PendingTradeTx, type TradeTxMode } from '@/services/p2pPending';
-import { P2P_TX_COPY, type P2PFollowUp, type StashedConfirmResult } from '@/services/p2pTx';
+import { P2P_TX_COPY, p2pTxFollowUp, type P2PFollowUp, type RunP2PTxResult, type StashedConfirmResult } from '@/services/p2pTx';
+import { p2pCaughtMessage, p2pErrorMessage } from '@/services/p2pErrors';
 import { shortAddress } from '@/utils/sendForm';
 
 export const RELEASE_CONFIRM_TITLE = 'Have you checked the money is in your account?';
@@ -242,4 +243,22 @@ export function stashedConfirmFollowUp(
     case 'pending':
       return { alert: { title: 'Still confirming', message: r.message }, reload: true };
   }
+}
+
+/** The dispute form's follow-up. A refusal is a toast (the form stays open to
+ *  fix); once the dispute is recorded, or sent and still confirming, the user
+ *  goes back to the trade (`navigate`) so the form can't invite a second
+ *  submit — after the alert's OK in the confirming case. */
+export function disputeFollowUp(r: RunP2PTxResult<unknown, P2PTrade>, tradeId: string): P2PFollowUp {
+  return p2pTxFollowUp(r, {
+    label: 'Dispute',
+    refused: ({ response }) => ({ toast: { type: 'error', message: p2pErrorMessage(response) } }),
+    confirmed: { toast: { type: 'success', message: 'Dispute opened. An admin will review it shortly.' }, navigate: tradeId },
+    'confirm-failed': { navigate: tradeId },
+  });
+}
+
+/** Nothing was broadcast (no wallet, or sign/broadcast failed): say why. */
+export function disputeThrownFollowUp(err: unknown): P2PFollowUp {
+  return { toast: { type: 'error', message: p2pCaughtMessage(err) }, reload: false };
 }

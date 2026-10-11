@@ -48,9 +48,13 @@ export function kycRefusalFor(
       return {
         kind: 'support',
         title: 'Contact support',
+        // P2P refusals come from many routes (gas, ads, trades) whose wording
+        // is not written for users, so P2P always shows its own copy.
         message:
-          serverMessage ||
-          'Your identity is verified, but we could not confirm the legal name on it. Contact support to finish setting up payments.',
+          context === 'p2p'
+            ? 'Your identity is verified, but we could not confirm the legal name on it. Contact support to finish setting up P2P.'
+            : serverMessage ||
+              'Your identity is verified, but we could not confirm the legal name on it. Contact support to finish setting up payments.',
       };
     default:
       return null;

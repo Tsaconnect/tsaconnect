@@ -8,7 +8,8 @@ const mockEnsureGas = jest.fn();
 jest.mock('../wallet', () => ({ ensureGas: (...a: any[]) => mockEnsureGas(...a) }));
 const mockWaitMined = jest.fn();
 jest.mock('../txWait', () => ({ waitMined: (...a: any[]) => mockWaitMined(...a) }));
-jest.mock('react-native', () => ({ Alert: { alert: jest.fn() } }));
+const mockRnAlert = jest.fn();
+jest.mock('react-native', () => ({ Alert: { alert: (...a: any[]) => mockRnAlert(...a) } }));
 jest.mock('expo-router', () => ({ router: { push: jest.fn() } }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
@@ -121,14 +122,20 @@ it('signer empty + gas_unavailable shows the refusal copy', async () => {
 });
 
 it.each([
-  ['kyc_legal_name_missing', /legal name.*Contact support/],
-  ['kyc_verification_required', /Verify your identity/],
-])('signer empty + 403 %s shows the KYC copy, not "add S"', async (code, copy) => {
+  ['kyc_legal_name_missing', 'Contact support', /legal name.*setting up P2P/, false],
+  ['kyc_verification_required', 'Verify your identity', /trade on P2P/, true],
+  [undefined, 'Verify your identity', /trade on P2P/, true], // older code-less 403
+])('signer empty + 403 %s: the KYC prompt, not a gas alert', async (code, title, copy, verify) => {
   const onAlert = jest.fn();
-  mockTopUp.mockResolvedValue({ success: false, status: 403, code, message: 'p2p: refused' });
+  mockTopUp.mockResolvedValue({ success: false, status: 403, code, message: 'p2p: identity verification required' });
   emptySigner();
   await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'open_trade', adId: 'a', onAlert });
-  expect(onAlert).toHaveBeenCalledWith('Not enough gas', expect.stringMatching(copy));
+  expect(onAlert).not.toHaveBeenCalled();
+  const [t, m, buttons] = mockRnAlert.mock.calls[0];
+  expect(t).toBe(title);
+  expect(m).toMatch(copy);
+  expect(m).not.toMatch(/p2p:/);
+  expect((buttons ?? []).some((b: { text: string }) => b.text === 'Verify now')).toBe(verify);
 });
 
 it('a thrown network error shows friendly text, never the raw message', async () => {
