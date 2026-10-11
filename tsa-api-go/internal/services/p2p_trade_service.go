@@ -182,9 +182,9 @@ type P2PTradeService struct {
 	rates          RateProvider
 	// fixedRateBandBps bounds fixed-rate ads around the market reference; see p2p_rate_band.go.
 	fixedRateBandBps int
-	bus            EventPublisher
-	clock          Clock
-	tokenResolver  func(chainID int64, symbol string) string
+	bus              EventPublisher
+	clock            Clock
+	tokenResolver    func(chainID int64, symbol string) string
 	// messages is optional. When set, every state transition also writes a
 	// "system" chat message so the trade thread is self-documenting. Nil-safe
 	// — internal calls go through `s.systemMsg` which guards.
@@ -1311,6 +1311,11 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	if err := requireVerifiedForMoneyIn(ctx, s.db, buyerID); err != nil {
 		return nil, nil, err
 	}
+	// The buyer's wallet becomes the on-chain buyer and is the only opener
+	// confirm/backfill will accept, so it must be a real address.
+	if !common.IsHexAddress(buyerAddress) {
+		return nil, nil, fmt.Errorf("%w: buyer address", ErrInvalidParams)
+	}
 
 	// Effective rate is recomputed live for float ads (snapshotted onto the
 	// trade row below), and returned verbatim for fixed ads. ErrRateStale on
@@ -1350,6 +1355,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		BuyerID:         buyerID,
 		SellerID:        ad.SellerID,
 		OpenerID:        &buyerID, // sell-ad: the buyer opens
+		OpenerAddress:   common.HexToAddress(buyerAddress).Hex(),
 		Token:           ad.Token,
 		ChainID:         ad.ChainID,
 		TokenAmount:     tokenAmount.String(),
@@ -1572,6 +1578,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		SellerID:        openerID,    // user deposits + releases crypto
 		BuyerID:         ad.SellerID, // merchant receives crypto
 		OpenerID:        &openerID,   // buy-ad: the depositing user opens
+		OpenerAddress:   common.HexToAddress(openerAddress).Hex(),
 		Token:           ad.Token,
 		ChainID:         ad.ChainID,
 		Funding:         models.P2PTradeFundingDepositedByTaker,
@@ -1684,10 +1691,12 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 
 // ConfirmOpenTrade is called by the OPENER (the user who broadcast the open
 // tx). For a sell-ad the opener is the BuyerID; for a buy-ad (JIT deposit) the
-// opener is the SellerID (the depositing user). `openerAddress` is their
-// wallet. The on-chain event differs by funding: TradeOpened (voucher) vs
+// opener is the SellerID (the depositing user). The opener's wallet is the
+// one stored at prepare (trade.OpenerAddress) — never a client-supplied
+// address, which an attacker who front-ran the open could simply echo back.
+// The on-chain event differs by funding: TradeOpened (voucher) vs
 // TradeOpenedWithDeposit (JIT).
-func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerID uuid.UUID, openerAddress, txHash string) (*models.P2PTrade, error) {
+func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerID uuid.UUID, txHash string) (*models.P2PTrade, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1721,28 +1730,16 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	}
 
 	// The receipt proves txHash opened this trade id; what was opened (amount,
-	// token, funding, counterparty) is checked against the escrow's view below.
+	// token, funding, counterparty, and that the opener is the wallet this
+	// trade was prepared for) is checked against the escrow's view below, where
+	// every refusal ALERTs.
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
-		ev, err := escrow.VerifyTradeOpenedWithDeposit(txHash, HashID(trade.ID))
-		if err != nil {
+		if _, err := escrow.VerifyTradeOpenedWithDeposit(txHash, HashID(trade.ID)); err != nil {
 			return nil, fmt.Errorf("verify on-chain open (deposit): %w", err)
 		}
-		// On a buy-ad the on-chain seller is the depositing user (opener) and
-		// the on-chain buyer is the merchant (trade.BuyerID). Cross-check the
-		// opener's wallet against the on-chain seller.
-		if openerAddress != "" && !strings.EqualFold(ev.Seller.Hex(), openerAddress) {
-			return nil, fmt.Errorf("on-chain seller %s does not match opener %s", ev.Seller.Hex(), openerAddress)
-		}
 	} else {
-		ev, err := escrow.VerifyTradeOpened(txHash, HashID(trade.ID))
-		if err != nil {
+		if _, err := escrow.VerifyTradeOpened(txHash, HashID(trade.ID)); err != nil {
 			return nil, fmt.Errorf("verify on-chain open: %w", err)
-		}
-		// Cross-check the on-chain buyer matches the caller's wallet. tradeId is
-		// server-owned (keccak of UUID); this guard catches a future bug where
-		// the verify-receipt path misses a topic-shift.
-		if openerAddress != "" && !strings.EqualFold(ev.Buyer.Hex(), openerAddress) {
-			return nil, fmt.Errorf("on-chain buyer %s does not match expected %s", ev.Buyer.Hex(), openerAddress)
 		}
 	}
 

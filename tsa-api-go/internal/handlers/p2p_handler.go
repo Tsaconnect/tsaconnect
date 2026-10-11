@@ -1300,11 +1300,9 @@ func (h *P2PHandler) ConfirmOpenTrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	buyerAddr := req.CallerAddress
-	if buyerAddr == "" {
-		buyerAddr = user.WalletAddress
-	}
-	trade, err := h.trade.ConfirmOpenTrade(c.Request.Context(), id, user.ID, buyerAddr, req.TxHash)
+	// callerAddress is accepted for old clients but not trusted: the service
+	// checks the on-chain opener against the wallet stored at prepare.
+	trade, err := h.trade.ConfirmOpenTrade(c.Request.Context(), id, user.ID, req.TxHash)
 	if mapServiceError(c, err) {
 		return
 	}

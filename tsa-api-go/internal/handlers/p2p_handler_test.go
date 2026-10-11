@@ -300,7 +300,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
-			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER,
+			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, opener_address TEXT,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,

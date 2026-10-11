@@ -52,8 +52,15 @@ type P2PTrade struct {
 	// guard, the concurrent backstop for the service-layer check). Nullable so
 	// pre-existing rows don't collide on the partial unique index.
 	OpenerID *uuid.UUID `gorm:"type:uuid;index" json:"openerId,omitempty"`
-	Token    string     `gorm:"size:16;not null" json:"token"`
-	ChainID  int64      `gorm:"not null" json:"chainId"`
+	// OpenerAddress is the wallet the open was prepared for (checksummed): the
+	// on-chain buyer of a pooled sell-ad open, the on-chain seller (depositor)
+	// of a JIT buy-ad open. Confirm and backfill accept only an on-chain trade
+	// whose opener side is this wallet, so a third party who front-runs the
+	// open under our trade id can't be recorded as the trade. Nullable: rows
+	// prepared before it existed are refused, never guessed.
+	OpenerAddress string `gorm:"size:42" json:"-"`
+	Token         string `gorm:"size:16;not null" json:"token"`
+	ChainID       int64  `gorm:"not null" json:"chainId"`
 	// Funding discriminates the two-sided escrow flow. Pooled (0) = sell-ad:
 	// the crypto comes from the merchant's deposited on-chain pool. Deposited-
 	// by-taker (1) = buy-ad: the user deposits crypto just-in-time at
@@ -95,8 +102,8 @@ type P2PTrade struct {
 	// FeeBps is the fee (platform + gas bps) the escrow snapshotted when the open
 	// was recorded; the crypto receiver nets amount minus floor(amount*bps/10000).
 	// Nil until the snapshot was read; never guessed.
-	FeeBps    *int       `gorm:"column:fee_bps" json:"feeBps,omitempty"`
-	ExpiresAt              time.Time  `gorm:"index;not null" json:"expiresAt"`
+	FeeBps    *int      `gorm:"column:fee_bps" json:"feeBps,omitempty"`
+	ExpiresAt time.Time `gorm:"index;not null" json:"expiresAt"`
 	// ExpiredNotifiedAt — set by the timeout watchdog when it first detects
 	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
 	// expired-notification fires exactly once per trade.

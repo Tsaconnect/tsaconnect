@@ -66,6 +66,13 @@ func (s *P2PTradeService) openRecordUpdates(openTxHash string, escrow P2PEscrowA
 // the on-chain seller. Buy-ad (JIT, openTradeWithDeposit): the prepare passes
 // ad.SellerAddress as merchant, so it is the on-chain buyer. PM ads are
 // ordinary sell/buy ads whose SellerAddress is the PM maker wallet.
+//
+// The opener's side must be the wallet the open was prepared for
+// (t.OpenerAddress): openTrade sets buyer = msg.sender and
+// openTradeWithDeposit sets seller = msg.sender, so anyone holding the ad's
+// voucher (or any wallet, on a buy-ad) can open under our trade id first and
+// would otherwise be recorded — and later paid — as the counterparty. A row
+// with no stored opener (prepared before the column existed) is refused.
 func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, onchain *OnChainP2PTrade) error {
 	mismatch := func(what string) error {
 		return fmt.Errorf("%w: on-chain trade does not match this trade's %s", ErrInvalidTransition, what)
@@ -80,9 +87,9 @@ func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, 
 	if ad == nil || ad.ID != t.AdID {
 		return fmt.Errorf("%w: trade's ad not found", ErrInvalidTransition)
 	}
-	wantFunding, adSide := models.P2PTradeFundingPooled, onchain.Seller
+	wantFunding, adSide, openerSide := models.P2PTradeFundingPooled, onchain.Seller, onchain.Buyer
 	if ad.Side == models.P2PAdSideBuy {
-		wantFunding, adSide = models.P2PTradeFundingDepositedByTaker, onchain.Buyer
+		wantFunding, adSide, openerSide = models.P2PTradeFundingDepositedByTaker, onchain.Buyer, onchain.Seller
 	}
 	if onchain.Funding != wantFunding || t.Funding != wantFunding {
 		return mismatch("funding")
@@ -96,6 +103,12 @@ func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, 
 	}
 	if adSide != common.HexToAddress(ad.SellerAddress) {
 		return mismatch("counterparty")
+	}
+	if !common.IsHexAddress(t.OpenerAddress) {
+		return fmt.Errorf("%w: trade has no opener wallet recorded", ErrInvalidTransition)
+	}
+	if openerSide != common.HexToAddress(t.OpenerAddress) {
+		return mismatch("opener")
 	}
 	return nil
 }
@@ -120,9 +133,9 @@ func (s *P2PTradeService) verifyOpenOnChain(ctx context.Context, path string, t 
 	}
 	if err := onChainOpenMatches(t, ad, tokenAddr, onchain); err != nil {
 		if onchain != nil && onchain.Exists {
-			log.Printf("[p2p] ALERT p2p_open_backfill_mismatch_total=1 path=%s trade=%s err=%v chainAmount=%v dbAmount=%s chainFunding=%d dbFunding=%d chainToken=%s token=%s chainSeller=%s chainBuyer=%s",
+			log.Printf("[p2p] ALERT p2p_open_backfill_mismatch_total=1 path=%s trade=%s err=%v chainAmount=%v dbAmount=%s chainFunding=%d dbFunding=%d chainToken=%s token=%s chainSeller=%s chainBuyer=%s opener=%q",
 				path, t.ID, err, onchain.Amount, t.TokenAmount, onchain.Funding, t.Funding,
-				onchain.Token.Hex(), tokenAddr, onchain.Seller.Hex(), onchain.Buyer.Hex())
+				onchain.Token.Hex(), tokenAddr, onchain.Seller.Hex(), onchain.Buyer.Hex(), t.OpenerAddress)
 		}
 		return err
 	}

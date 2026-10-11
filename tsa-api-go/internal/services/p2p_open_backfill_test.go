@@ -63,7 +63,8 @@ func lostPooledOpen(t *testing.T) (*P2PTradeService, *mockEscrow, models.P2PTrad
 	}
 	tr := models.P2PTrade{
 		ID: uuid.New(), AdID: ad.ID, SellerID: merchantID, BuyerID: takerID, OpenerID: &takerID,
-		Token: "USDT", ChainID: 146, Funding: models.P2PTradeFundingPooled,
+		OpenerAddress: common.HexToAddress(openTestUser).Hex(),
+		Token:         "USDT", ChainID: 146, Funding: models.P2PTradeFundingPooled,
 		TokenAmount: "30", FiatAmount: "39000", FiatCurrency: "NGN", Rate: "1300",
 		PaymentMethodID: uuid.New(), Status: models.P2PTradeStatusPendingPayment,
 		ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now,
@@ -142,7 +143,7 @@ func confirmAsOpener(svc *P2PTradeService, tr models.P2PTrade) (*models.P2PTrade
 	if tr.Funding == models.P2PTradeFundingDepositedByTaker {
 		opener = tr.SellerID
 	}
-	return svc.ConfirmOpenTrade(context.Background(), tr.ID, opener, "", "0xopen")
+	return svc.ConfirmOpenTrade(context.Background(), tr.ID, opener, "0xopen")
 }
 
 func TestConfirmOpenTrade_RefusesOnChainTradeThatIsNotOurs(t *testing.T) {
@@ -316,7 +317,7 @@ func TestPrepareRaiseDispute_RefusesWhenOpenNotOnChain(t *testing.T) {
 func TestConfirmOpenTrade_IdempotentOnceOpenRecordedAndMovedOn(t *testing.T) {
 	svc, _, tr, db, _ := lostOpen(t, 30)
 	db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Updates(map[string]any{"open_tx_hash": "reconciled", "status": models.P2PTradeStatusPaid})
-	got, err := svc.ConfirmOpenTrade(context.Background(), tr.ID, tr.SellerID, "", "0xrealopen")
+	got, err := svc.ConfirmOpenTrade(context.Background(), tr.ID, tr.SellerID, "0xrealopen")
 	if err != nil || got.Status != models.P2PTradeStatusPaid {
 		t.Fatalf("retry-confirm after backfill must succeed: %+v %v", got, err)
 	}
@@ -497,5 +498,86 @@ func TestChainsCarryLiveFeeBpsPerAsset(t *testing.T) {
 	out = svc.withLiveFees(context.Background(), []P2PChainInfo{{ChainID: 146, Assets: []string{"USDT"}}})
 	if out[0].FeeBps != nil {
 		t.Fatalf("unreadable chain must yield no feeBps, got %v", out[0].FeeBps)
+	}
+}
+
+// ── Opener binding (final review A1) ───────────────────────────────────────
+//
+// openTrade sets buyer = msg.sender and openTradeWithDeposit sets seller =
+// msg.sender, so anyone can open under our trade id before the user's own tx
+// lands. Confirm and backfill must accept only the wallet the open was
+// prepared for, and refuse (with the ALERT) a row that has none recorded.
+
+var openerBindingCases = []openTamper{
+	{"pooled front-run: on-chain buyer is not the prepared opener", true, func(esc *mockEscrow, _ *gorm.DB, _ models.P2PTrade) {
+		esc.onChainTrade.Buyer = common.HexToAddress(openTestAttacker)
+		esc.openedEvent.Buyer = common.HexToAddress(openTestAttacker)
+	}},
+	{"JIT front-run: on-chain seller is not the prepared opener", false, func(esc *mockEscrow, _ *gorm.DB, _ models.P2PTrade) {
+		esc.onChainTrade.Seller = common.HexToAddress(openTestAttacker)
+		esc.openedDepositEvent.Seller = common.HexToAddress(openTestAttacker)
+	}},
+	{"pooled legacy row: no opener recorded", true, func(_ *mockEscrow, db *gorm.DB, tr models.P2PTrade) {
+		db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Update("opener_address", gorm.Expr("NULL"))
+	}},
+	{"JIT legacy row: no opener recorded", false, func(_ *mockEscrow, db *gorm.DB, tr models.P2PTrade) {
+		db.Model(&models.P2PTrade{}).Where("id = ?", tr.ID).Update("opener_address", gorm.Expr("NULL"))
+	}},
+}
+
+func TestConfirmOpenTrade_RefusesOpenerItWasNotPreparedFor(t *testing.T) {
+	for _, c := range openerBindingCases {
+		t.Run(c.name, func(t *testing.T) {
+			svc, tr, db := tamperedOpen(t, c)
+			logs := captureLog(t)
+			if _, err := confirmAsOpener(svc, tr); !errors.Is(err, ErrInvalidTransition) {
+				t.Fatalf("err = %v, want ErrInvalidTransition", err)
+			}
+			if got := openTxHash(t, db, tr.ID); got != "" {
+				t.Fatalf("open_tx_hash = %q, a refused open must write nothing", got)
+			}
+			if !strings.Contains(logs.String(), "ALERT p2p_open_backfill_mismatch_total=1 path=confirm") {
+				t.Fatalf("no confirm ALERT logged:\n%s", logs)
+			}
+		})
+	}
+}
+
+func TestReconcile_RefusesToBackfillOpenerItWasNotPreparedFor(t *testing.T) {
+	for _, c := range openerBindingCases {
+		t.Run(c.name, func(t *testing.T) {
+			svc, tr, db := tamperedOpen(t, c)
+			logs := captureLog(t)
+			_, _ = svc.ReconcileTrade(context.Background(), tr.ID)
+			if got := openTxHash(t, db, tr.ID); got != "" {
+				t.Fatalf("open_tx_hash = %q, an open by another wallet must not be backfilled", got)
+			}
+			if !strings.Contains(logs.String(), "ALERT p2p_open_backfill_mismatch_total=1 path=backfill") {
+				t.Fatalf("no backfill ALERT logged:\n%s", logs)
+			}
+		})
+	}
+}
+
+// The stored opener is compared case-insensitively and the client's
+// callerAddress plays no part: a matching on-chain opener is accepted.
+func TestOnChainOpenMatches_OpenerCaseInsensitive(t *testing.T) {
+	for _, pooled := range []bool{true, false} {
+		var (
+			esc *mockEscrow
+			tr  models.P2PTrade
+			db  *gorm.DB
+		)
+		if pooled {
+			_, esc, tr, db = lostPooledOpen(t)
+		} else {
+			_, esc, tr, db, _ = lostOpen(t, 30)
+		}
+		var ad models.P2PAd
+		db.First(&ad, "id = ?", tr.AdID)
+		tr.OpenerAddress = "0x" + strings.ToUpper(openTestUser[2:])
+		if err := onChainOpenMatches(&tr, &ad, openTestUSDT, esc.onChainTrade); err != nil {
+			t.Fatalf("pooled=%v: matching opener refused: %v", pooled, err)
+		}
 	}
 }

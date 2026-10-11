@@ -273,7 +273,7 @@ func TestOpenTrade_RefusesUnverifiedBuyer(t *testing.T) {
 
 	for _, status := range unverifiedStatuses {
 		buyerID := seedUserAt(t, db, uuid.New(), status)
-		_, _, err := svc.OpenTrade(ctx, res.Ad.ID, buyerID, "0xbeef",
+		_, _, err := svc.OpenTrade(ctx, res.Ad.ID, buyerID, "0x000000000000000000000000000000000000bEEF",
 			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 		if !errors.Is(err, ErrKYCVerificationRequired) {
 			t.Fatalf("OpenTrade for %q buyer = %v, want ErrKYCVerificationRequired", status, err)
@@ -286,7 +286,7 @@ func TestOpenTrade_RefusesUnverifiedBuyer(t *testing.T) {
 	}
 
 	buyerID := seedVerifiedUser(t, db)
-	if _, _, err := svc.OpenTrade(ctx, res.Ad.ID, buyerID, "0xbeef",
+	if _, _, err := svc.OpenTrade(ctx, res.Ad.ID, buyerID, "0x000000000000000000000000000000000000bEEF",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID}); err != nil {
 		t.Fatalf("verified buyer refused: %v", err)
 	}
