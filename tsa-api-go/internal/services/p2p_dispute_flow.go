@@ -116,6 +116,9 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 		}
 		return nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	role, err := canDispute(userID, &trade)
 	if err != nil {
 		return nil, err
@@ -223,6 +226,9 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.BuyerID != userID && trade.SellerID != userID {

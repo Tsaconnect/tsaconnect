@@ -220,6 +220,15 @@ it('a payment she can still pay is remembered for Waiting for you', async () => 
   expect(forgetPayCheckout).not.toHaveBeenCalled();
 });
 
+it('a payment with no expiry is payable, and remembered for Waiting for you', async () => {
+  const c = checkoutWith({ status: 'pending', payable: true, youArePaying: false, expiresAt: null });
+  jest.mocked(getCheckout).mockResolvedValue(c);
+  await act(async () => { tree = TestRenderer.create(<PayScreen />); });
+  await flush();
+  expect(text()).not.toContain('expires in under five minutes');
+  expect(rememberPayCheckout).toHaveBeenCalledWith(c);
+});
+
 it.each([
   ['she is paying it', { status: 'processing', youArePaying: true }],
   ['it is paid', { status: 'succeeded', youArePaying: false }],

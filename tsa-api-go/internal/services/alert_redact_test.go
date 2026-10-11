@@ -117,3 +117,24 @@ func TestRedactAlertTextBoundsLengthAndFlattensLines(t *testing.T) {
 		t.Errorf("a truncated error must say so")
 	}
 }
+
+// Review I-2: a voucher signature (65 bytes, 130 hex) and calldata that embeds
+// it are one hex run each, with no word boundary at 64 characters; every run
+// of 64 or more hex characters is redacted.
+func TestRedactAlertText_VoucherSignatureAndCalldata(t *testing.T) {
+	sig := "0x" + strings.Repeat("ab", 65)
+	calldata := "0x1a2b3c4d" + strings.Repeat("00", 32) + strings.Repeat("cd", 65) + strings.Repeat("ef", 40)
+	for name, in := range map[string]string{
+		"signature":      "open not sent: voucher sig=" + sig + " rejected",
+		"bare signature": "sig " + strings.Repeat("Ab", 65),
+		"calldata":       `rpc echoed {"data":"` + calldata + `"} reverted`,
+	} {
+		got := RedactAlertText(in)
+		if strings.Contains(got, strings.Repeat("ab", 8)) || strings.Contains(got, strings.Repeat("cd", 8)) || strings.Contains(got, strings.Repeat("Ab", 8)) {
+			t.Errorf("%s: hex survived: %s", name, got)
+		}
+		if !strings.Contains(got, "[hex-redacted]") {
+			t.Errorf("%s: no redaction marker: %s", name, got)
+		}
+	}
+}

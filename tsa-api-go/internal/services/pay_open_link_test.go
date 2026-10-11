@@ -20,6 +20,13 @@ func openLinkIn() PayOpenLinkInput {
 	return PayOpenLinkInput{Label: "  Sky Air — Counter 3 "}
 }
 
+// expiringOpenLinkIn is openLinkIn whose payments expire after 30 minutes.
+func expiringOpenLinkIn() PayOpenLinkInput {
+	in := openLinkIn()
+	in.PaymentExpiresIn = 1800
+	return in
+}
+
 // fullUpdate is an edit that sends every field, as a form saving the whole
 // link does.
 func fullUpdate(in PayOpenLinkInput, active *bool, version *int) PayOpenLinkUpdate {
@@ -250,7 +257,7 @@ func TestPayOpenLink_ACustomerStartsTheirOwnPayment(t *testing.T) {
 	}
 	if p.Source != models.PaySourceOpen || p.OpenLinkID == nil || *p.OpenLinkID != l.ID || p.Mode != models.PayModeTest ||
 		!regexp.MustCompile(`^open_[a-z2-7]{12}$`).MatchString(p.Reference) || p.Description != "" ||
-		p.ReturnURL != "" || !p.ExpiresAt.Equal(payTestNow.Add(30*time.Minute)) || p.AmountKobo != 450_000 {
+		p.ReturnURL != "" || p.ExpiresAt != nil || p.AmountKobo != 450_000 {
 		t.Fatalf("payment %+v", p)
 	}
 	noted, err := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 450_000, Note: "  2 bags of rice "}, false)
@@ -460,7 +467,7 @@ func TestPayOpenLink_UntriedPaymentsAreScanNoise(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
 	withWebhooks(t, s, m)
-	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
+	l := mustOpenLink(t, s, m, models.PayModeTest, expiringOpenLinkIn())
 	untried, _ := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
 	tried, _ := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false)
 	if _, _, err := s.Lock(ctx, payUser(t, s, false), tried.ID, false); err != nil {
@@ -516,7 +523,7 @@ func TestPayOpenLink_UntriedPaymentsExpireInBulk(t *testing.T) {
 	ctx := context.Background()
 	s, m := newPayPaymentRig(t)
 	withWebhooks(t, s, m)
-	l := mustOpenLink(t, s, m, models.PayModeTest, openLinkIn())
+	l := mustOpenLink(t, s, m, models.PayModeTest, expiringOpenLinkIn())
 	for i := 0; i < 5; i++ {
 		if _, err := s.CreateFromOpenLink(ctx, l.Slug, PayOpenPaymentInput{AmountKobo: 300_000}, false); err != nil {
 			t.Fatal(err)

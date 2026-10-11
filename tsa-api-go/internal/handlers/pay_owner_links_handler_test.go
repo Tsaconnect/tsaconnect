@@ -44,7 +44,7 @@ func TestPayOwnerLinks_LiveNeedsLivePaymentsSwitchedOn(t *testing.T) {
 	if res.status != http.StatusCreated || res.Data.Source != models.PaySourceLink || res.Data.Mode != models.PayModeTest ||
 		res.Data.CustomerName != "Ada Obi" || res.Data.Description != "Wedding cake deposit" ||
 		res.Data.CheckoutURL != "https://x/"+res.Data.ID.String() || !strings.HasPrefix(res.Data.Reference, "link_") ||
-		res.Data.MerchantNet != 2_500_000 || !res.Data.ExpiresAt.Equal(payHandlerNow.AddDate(0, 0, 7)) {
+		res.Data.MerchantNet != 2_500_000 || res.Data.ExpiresAt != nil {
 		t.Fatalf("test: %d %s", res.status, res.raw)
 	}
 	// Both switches on: a live link is made.

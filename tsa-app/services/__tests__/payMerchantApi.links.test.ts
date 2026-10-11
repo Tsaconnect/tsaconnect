@@ -30,6 +30,11 @@ it('creates in the mode asked for, with the form\'s Idempotency-Key', async () =
   expect(init.headers['Idempotency-Key']).toBe('form-key');
 });
 
+it('a link with no expiry goes without expiresInDays', async () => {
+  await createPayLink('test', { amount: 500_000, description: 'Rice', expiresInDays: undefined }, 'form-key');
+  expect(JSON.parse(String(call()[1].body))).toEqual({ amount: 500_000, description: 'Rice' });
+});
+
 it('lists, reads and cancels on the owner routes', async () => {
   await listPayLinks('live', 2, 50);
   expect(call(0)[0]).toBe(`${API_BASE_URL}/pay/merchant/links?mode=live&page=2&limit=50`);
@@ -70,4 +75,12 @@ it('reusable links: create with the form\'s key, list, read, change and replace 
   await replaceOpenLink('test', 'o1');
   expect(call(4)[0]).toBe(`${API_BASE_URL}/pay/merchant/open-links/o1/replace?mode=test`);
   expect(call(4)[1].method).toBe('POST');
+});
+
+it('a reusable link carries how long each payment through it stays open, on create and on change', async () => {
+  const input = { label: 'Mama Ngozi Store', minAmount: 0, maxAmount: 0, paymentExpiresIn: 1800 };
+  await createOpenLink('live', input, 'form-key');
+  expect(JSON.parse(String(call(0)[1].body))).toEqual(input);
+  await updateOpenLink('live', 'o1', { ...input, paymentExpiresIn: 0, active: true }, 4);
+  expect(JSON.parse(String(call(1)[1].body))).toEqual({ ...input, paymentExpiresIn: 0, active: true, expectedVersion: 4 });
 });

@@ -164,6 +164,11 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 		if termsErr != nil && !errors.Is(termsErr, ErrUnknownITProvider) {
 			return termsErr
 		}
+		if terms.pool {
+			// Plan C1 P3: the pool's refund is S37's (zero slices releasing or
+			// released, inside the pool lock) — plan C2 builds it.
+			return fmt.Errorf("%w: a TSA pool buy is refunded only through its own path", ErrITBadState)
+		}
 		provider = models.ITIntentProvider(&intent) // the audit row names the raw value
 		refundable := []string{models.ITStatusBuyAwaitingRate}
 		if terms.companyWallet {

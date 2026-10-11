@@ -44,23 +44,28 @@ var (
 	ErrPayOpenLinkStale = errors.New("this payment link changed since it was read")
 )
 
-// PayOpenLinkInput is an owner making an open link: what the payer sees, and
-// optionally a narrower range than the merchant's own (0 = the merchant's bound).
+// PayOpenLinkInput is an owner making an open link: what the payer sees,
+// optionally a narrower range than the merchant's own (0 = the merchant's
+// bound), and optionally how many seconds each payment started through it
+// stays payable (0 = until it is paid).
 type PayOpenLinkInput struct {
-	Label         string `json:"label"`
-	MinAmountKobo int64  `json:"minAmount"`
-	MaxAmountKobo int64  `json:"maxAmount"`
+	Label            string `json:"label"`
+	MinAmountKobo    int64  `json:"minAmount"`
+	MaxAmountKobo    int64  `json:"maxAmount"`
+	PaymentExpiresIn int    `json:"paymentExpiresIn"`
 }
 
 // PayOpenLinkUpdate is an owner's edit of an open link: every field it carries
 // replaces what is there, and every field it omits is left as it is.
 // ExpectedVersion is the version the owner was looking at, and is required.
 type PayOpenLinkUpdate struct {
-	Label           *string `json:"label"`
-	MinAmountKobo   *int64  `json:"minAmount"`
-	MaxAmountKobo   *int64  `json:"maxAmount"`
-	Active          *bool   `json:"active"`
-	ExpectedVersion *int    `json:"expectedVersion"`
+	Label         *string `json:"label"`
+	MinAmountKobo *int64  `json:"minAmount"`
+	MaxAmountKobo *int64  `json:"maxAmount"`
+	Active        *bool   `json:"active"`
+	// PaymentExpiresIn sets the link's payment expiry; 0 clears it.
+	PaymentExpiresIn *int `json:"paymentExpiresIn"`
+	ExpectedVersion  *int `json:"expectedVersion"`
 }
 
 // Why an open link isn't taking payments (PayOpenLinkView.NotTakingReason).
@@ -90,6 +95,7 @@ type PayOpenLinkView struct {
 	Label             string    `json:"label"`
 	MinAmount         int64     `json:"minAmount"`
 	MaxAmount         int64     `json:"maxAmount"`
+	PaymentExpiresIn  int       `json:"paymentExpiresIn"`
 	MerchantMinAmount int64     `json:"merchantMinAmount"`
 	MerchantMaxAmount int64     `json:"merchantMaxAmount"`
 	Active            bool      `json:"active"`
@@ -133,8 +139,11 @@ func (s *PayPaymentService) CreateOpenLink(ctx context.Context, m *models.PayMer
 	if err := payOpenLinkRange(m, in.MinAmountKobo, in.MaxAmountKobo); err != nil {
 		return nil, err
 	}
+	if err := payOpenLinkPaymentExpiry(in.PaymentExpiresIn); err != nil {
+		return nil, err
+	}
 	l := &models.PayOpenLink{MerchantID: m.ID, Mode: mode, Label: label, MinAmountKobo: in.MinAmountKobo,
-		MaxAmountKobo: in.MaxAmountKobo, Active: true, Version: 1}
+		MaxAmountKobo: in.MaxAmountKobo, PaymentExpiresIn: in.PaymentExpiresIn, Active: true, Version: 1}
 	err = s.withFreshSlug(ctx, m, func(slug string) error {
 		l.Slug = slug
 		return s.db.WithContext(ctx).Create(l).Error
@@ -143,6 +152,16 @@ func (s *PayPaymentService) CreateOpenLink(ctx context.Context, m *models.PayMer
 		return nil, err
 	}
 	return l, nil
+}
+
+// payOpenLinkPaymentExpiry checks an open link's payment expiry: none (0), or
+// within the bounds any payment's expiry has.
+func payOpenLinkPaymentExpiry(secs int) error {
+	if secs != 0 && (secs < payMinExpirySeconds || secs > payMaxExpirySeconds) {
+		return payInvalid(fmt.Sprintf("paymentExpiresIn must be 0 or %d-%d seconds", payMinExpirySeconds, payMaxExpirySeconds),
+			"Payments can expire after 15 minutes to 24 hours, or never")
+	}
+	return nil
 }
 
 // payOpenLinkSlugSuffix is a slug's random half. A variable only so a test can
@@ -347,6 +366,12 @@ func (s *PayPaymentService) UpdateOpenLink(ctx context.Context, m *models.PayMer
 	if in.Active != nil {
 		fields["active"] = *in.Active
 	}
+	if in.PaymentExpiresIn != nil {
+		if err := payOpenLinkPaymentExpiry(*in.PaymentExpiresIn); err != nil {
+			return nil, err
+		}
+		fields["payment_expires_in"] = *in.PaymentExpiresIn
+	}
 	res := s.db.WithContext(ctx).Model(&models.PayOpenLink{}).
 		Where("id = ? AND merchant_id = ? AND mode = ? AND version = ?", id, m.ID, mode, *in.ExpectedVersion).
 		Updates(fields)
@@ -422,7 +447,8 @@ func (s *PayPaymentService) OpenLinkViews(ctx context.Context, m *models.PayMerc
 		l := &ls[i]
 		why := payOpenLinkNotTaking(l, m, liveEnabled)
 		views[i] = PayOpenLinkView{ID: l.ID, Mode: l.Mode, Slug: l.Slug, URL: s.openLinkURL(l.Slug), Label: l.Label,
-			MinAmount: l.MinAmountKobo, MaxAmount: l.MaxAmountKobo, MerchantMinAmount: m.MinAmountKobo, MerchantMaxAmount: m.MaxAmountKobo,
+			MinAmount: l.MinAmountKobo, MaxAmount: l.MaxAmountKobo, PaymentExpiresIn: l.PaymentExpiresIn,
+			MerchantMinAmount: m.MinAmountKobo, MerchantMaxAmount: m.MaxAmountKobo,
 			Active: l.Active, Version: l.Version, TakingPayments: why == "", NotTakingReason: why, PaidCount: byLink[l.ID].Count,
 			PaidTotal: byLink[l.ID].Total, ReceivedTotal: byLink[l.ID].Received, CreatedAt: l.CreatedAt}
 	}
@@ -483,8 +509,8 @@ func (s *PayPaymentService) OpenLinkPublic(ctx context.Context, slug string, liv
 
 // CreateFromOpenLink is a customer starting a payment through the open link at
 // slug, for the amount they entered: a new payment every time (source "open",
-// a fresh "open_" reference, the default 30-minute expiry, no return URL),
-// through the same create as every other payment. Its description is the
+// a fresh "open_" reference, the link's payment expiry if it has one, no
+// return URL), through the same create as every other payment. Its description is the
 // customer's own note and nothing else — empty when they left none — because it
 // is shown as their words; where a purpose is needed the link's label stands in
 // (openLinkLabels).
@@ -514,7 +540,7 @@ func (s *PayPaymentService) CreateFromOpenLink(ctx context.Context, slug string,
 	err = payTryFresh(func() (string, error) { return newPayReference(payOpenReferencePrefix) }, func(reference string) error {
 		var err error
 		p, _, err = s.create(ctx, m, l.Mode, CreatePayPaymentInput{AmountKobo: in.AmountKobo, Currency: "NGN", Reference: reference,
-			Description: note}, payCreateOptions{source: models.PaySourceOpen, openLinkID: &l.ID, openLinkSlug: l.Slug, maxExpirySeconds: payMaxExpirySeconds})
+			Description: note, ExpiresInSeconds: l.PaymentExpiresIn}, payCreateOptions{source: models.PaySourceOpen, openLinkID: &l.ID, openLinkSlug: l.Slug, maxExpirySeconds: payMaxExpirySeconds})
 		return err
 	}, payReferenceTaken)
 	return p, err

@@ -53,8 +53,17 @@ type fakePaycrestConversionClient struct {
 	// offrampRate is the provider's own rate on the order it answers with;
 	// empty is the book's 1500, which a 0.5% fee then prices at 1492.50.
 	offrampRate string
+	// offrampRates, when set, is the rate per CreateOfframpOrder call in turn
+	// (a reopened order filling at a different rate); past its end, offrampRate.
+	offrampRates []string
+	// offrampFeesSent is the senderFeePercent of every CreateOfframpOrder call.
+	offrampFeesSent []string
 	// offrampSenderFee is the fee amount Paycrest reports on the order; empty reports none.
 	offrampSenderFee string
+	// offrampReportsFeeOnDeposit reports the fee the way live Paycrest does at
+	// creation — deposit × p to 4 decimals, rounded up — rather than the
+	// deposit × p/(1 + p) it actually takes. Overrides offrampSenderFee.
+	offrampReportsFeeOnDeposit bool
 	// offrampErrFirst fails only the FIRST CreateOfframpOrder, for a retry.
 	offrampErrFirst error
 	// offrampEntered/offrampGate pause the FIRST CreateOfframpOrder
@@ -101,6 +110,7 @@ func (f *fakePaycrestConversionClient) CreateOnrampOrder(_ context.Context, req 
 func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req PaycrestOfframpRequest) (*PaycrestOrder, error) {
 	f.offrampCalls++
 	f.lastOfframp = req
+	f.offrampFeesSent = append(f.offrampFeesSent, req.SenderFeePercent)
 	if f.offrampEntered != nil && f.offrampCalls == 1 {
 		f.offrampEntered <- struct{}{}
 		<-f.offrampGate
@@ -112,17 +122,40 @@ func (f *fakePaycrestConversionClient) CreateOfframpOrder(_ context.Context, req
 		return nil, f.offrampErrFirst
 	}
 	rate := f.offrampRate
+	if i := f.offrampCalls - 1; i < len(f.offrampRates) {
+		rate = f.offrampRates[i]
+	}
 	if rate == "" {
 		rate = "1500"
+	}
+	senderFee := f.offrampSenderFee
+	if f.offrampReportsFeeOnDeposit {
+		senderFee = feeOnDeposit(req.AmountToken, req.SenderFeePercent)
 	}
 	return &PaycrestOrder{
 		ID: "pc-sell-" + req.Reference, Status: PaycrestStatusPending,
 		Rate: rate, Amount: req.AmountToken,
-		SenderFeePercent: req.SenderFeePercent, SenderFee: f.offrampSenderFee,
+		SenderFeePercent: req.SenderFeePercent, SenderFee: senderFee,
 		ProviderAccount: &PaycrestProviderAccount{
 			Institution: "Fake Bank", ReceiveAddress: "0x00000000000000000000000000000000000dep05",
 		},
 	}, nil
+}
+
+// feeOnDeposit is deposit × pct% to 4 decimals, rounded up: the senderFee
+// Paycrest reports on a new offramp (0.0385 on 3.735942 at 1.0303%, 2026-10-09).
+func feeOnDeposit(deposit, pct string) string {
+	d, ok1 := new(big.Rat).SetString(deposit)
+	p, ok2 := new(big.Rat).SetString(pct)
+	if !ok1 || !ok2 {
+		return ""
+	}
+	scaled := new(big.Rat).Mul(new(big.Rat).Mul(d, p), big.NewRat(100, 1)) // × 10_000 / 100
+	units, rem := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	if rem.Sign() > 0 {
+		units.Add(units, big.NewInt(1))
+	}
+	return new(big.Rat).SetFrac(units, big.NewInt(10_000)).FloatString(4)
 }
 
 func (f *fakePaycrestConversionClient) GetOrder(_ context.Context, id string) (*PaycrestOrder, error) {

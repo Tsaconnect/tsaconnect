@@ -145,7 +145,8 @@ export type PayLink = {
   linkLabel?: string;
   /** She cancelled it: the server keeps it as expired, with this set. */
   cancelled?: boolean;
-  expiresAt: string;
+  /** Null: she set no expiry, so it stays open until paid or cancelled. */
+  expiresAt: string | null;
   succeededAt?: string;
   /** What the customer opens — the link she shares. */
   checkoutUrl: string;
@@ -160,7 +161,8 @@ export type CreatePayLinkInput = {
   customerName?: string;
   /** Blank and the server makes one. */
   reference?: string;
-  expiresInDays: 1 | 3 | 7;
+  /** Omitted: the link never expires. */
+  expiresInDays?: 1 | 3 | 7;
 };
 
 export type PayLinkPage = { items: PayLink[]; total: number; page: number; limit: number };
@@ -219,6 +221,8 @@ export type OpenLink = {
   /** What a change from the detail screen is made against: a stale screen is refused. */
   version: number;
   createdAt: string;
+  /** Seconds each payment started through it stays open; 0 (or absent, from an older server) is no expiry. */
+  paymentExpiresIn?: number;
   /** Payments that succeeded through it; their prices summed (paidTotal) and what she received (receivedTotal). */
   paidCount: number;
   paidTotal: number;
@@ -229,7 +233,9 @@ export type OpenLink = {
 export type OpenLinkNotTakingReason = 'paused' | 'suspended' | 'live_off' | 'no_payout' | 'range_outside_limits';
 
 export type OpenLinkRange = { minAmount: number; maxAmount: number };
-export type CreateOpenLinkInput = OpenLinkRange & { label: string };
+/** paymentExpiresIn: seconds each payment through it stays open — 0 or omitted is no expiry. */
+export type CreateOpenLinkInput = OpenLinkRange & { label: string; paymentExpiresIn?: number };
+/** Omitting paymentExpiresIn leaves it as it is (Pause/Resume); 0 clears it. */
 export type OpenLinkChange = CreateOpenLinkInput & { active: boolean };
 export type OpenLinkPage = { items: OpenLink[]; total: number; page: number; limit: number };
 

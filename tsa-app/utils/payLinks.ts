@@ -9,9 +9,31 @@ import { strictHttpsHost } from '@/utils/strictHttpsHost';
 import { TSA_SITE_HOSTS } from '@/utils/payCode';
 import { formatKobo, koboFromNaira } from '@/utils/stableSellQuote';
 
-/** How long a link stays open; the server takes exactly these. */
-export const LINK_OPEN_DAYS = [1, 3, 7] as const;
+/** How long a one-time link stays open: 0 is no expiry (expiresInDays omitted); the server takes exactly the rest. */
+export const LINK_OPEN_DAYS = [0, 1, 3, 7] as const;
 export type LinkOpenDays = (typeof LINK_OPEN_DAYS)[number];
+
+/** How long each payment started through a reusable link stays open, in seconds: 0 is no expiry. */
+const OPEN_LINK_PAYMENT_EXPIRY = [
+  { seconds: 0, label: 'No expiry' },
+  { seconds: 1800, label: '30 min' },
+  { seconds: 3600, label: '1 hour' },
+  { seconds: 86400, label: '24 hours' },
+] as const;
+
+/**
+ * A reusable link's per-payment expiry as one of the choices: an older server
+ * sends none (0), and a value set elsewhere that isn't offered here still shows
+ * as itself rather than snapping to a choice she didn't make.
+ */
+export const openLinkPaymentExpiryOptions = (current: number): { key: string; label: string }[] => {
+  const offered = OPEN_LINK_PAYMENT_EXPIRY.map((o) => ({ key: String(o.seconds), label: o.label }));
+  if (offered.some((o) => o.key === String(current))) return offered;
+  const mins = Math.round(current / 60);
+  const hours = mins / 60;
+  const label = mins % 60 === 0 ? `${hours} ${hours === 1 ? 'hour' : 'hours'}` : `${mins} min`;
+  return [...offered, { key: String(current), label }];
+};
 
 /**
  * The one-time link's share message. It quotes what the customer will be
@@ -109,15 +131,15 @@ export const payLinkReceives = (link: Pick<PayLink, 'status' | 'cancelled'>): bo
 /**
  * The one time a link's detail shows beside its created time: until when it is
  * open, when it was paid, or when it expired. Being paid, failed or cancelled
- * have none worth showing.
+ * have none worth showing — nor does an open link that never expires.
  */
 export function payLinkTimeRow(link: Pick<PayLink, 'status' | 'cancelled' | 'expiresAt' | 'succeededAt'>):
   { label: string; at: string } | null {
   if (link.cancelled) return null;
   switch (link.status) {
-    case 'pending': return { label: 'Open until', at: link.expiresAt };
+    case 'pending': return link.expiresAt ? { label: 'Open until', at: link.expiresAt } : null;
     case 'succeeded': return link.succeededAt ? { label: 'Paid', at: link.succeededAt } : null;
-    case 'expired': return { label: 'Expired', at: link.expiresAt };
+    case 'expired': return link.expiresAt ? { label: 'Expired', at: link.expiresAt } : null;
     default: return null;
   }
 }

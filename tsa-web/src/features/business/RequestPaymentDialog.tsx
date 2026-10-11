@@ -25,7 +25,9 @@ import { AMOUNT_HINT, checkOpenLink, emptyOpenLinkDraft, toOpenLink, type OpenLi
 import { queryKeys, type ListKind } from './queryKeys';
 import { useIdempotencyKey } from './useIdempotencyKey';
 
+// '0': the link never expires (no expiresInDays is sent).
 const DAYS = [
+  { value: '0', label: 'No expiry' },
   { value: '1', label: '1 day' },
   { value: '3', label: '3 days' },
   { value: '7', label: '7 days' },
@@ -144,7 +146,7 @@ const cancelAndSubmit = (close: () => void, formId: string, busy: boolean, label
 /** A fixed amount for one customer: a payment link. */
 function useOnceFlow({ mode, merchant, close, picker }: FlowProps): Flow {
   const formId = useId();
-  const { draft, set } = useDraft<OnceDraft>({ amount: '', description: '', customerName: '', reference: '', days: '7' });
+  const { draft, set } = useDraft<OnceDraft>({ amount: '', description: '', customerName: '', reference: '', days: '0' });
   const [errors, setErrors] = useState<OnceErrors>({});
   const create = useCreate((link: NewLink, key) => createLink(mode, link, key), ['links', 'payments'], mode);
 
@@ -158,7 +160,7 @@ function useOnceFlow({ mode, merchant, close, picker }: FlowProps): Flow {
       description: draft.description.trim(),
       customerName: draft.customerName.trim(),
       reference: draft.reference.trim(),
-      expiresInDays: Number(draft.days) as LinkDays,
+      ...(draft.days !== '0' ? { expiresInDays: Number(draft.days) as LinkDays } : {}),
     }, {
       onError: (err) => {
         if (err instanceof ApiError && err.code === 'reference_taken') setErrors({ reference: err.message });

@@ -42,6 +42,14 @@ const (
 const (
 	FeaturePoolLPMin = "pool_lp_min" // flat USD: minimum first deposit (decision 10)
 	FeaturePoolLPMax = "pool_lp_max" // flat USD: stake ceiling (decision 10)
+	// Plan C1 (spec §16.1, S31–S33, decision 19).
+	FeaturePoolSpread       = "pool_spread"         // bps: LP earning over mid
+	FeaturePoolTake         = "pool_take"           // bps: company take
+	FeaturePoolBand         = "pool_band"           // bps: IT preference band
+	FeaturePoolSliceCap     = "pool_slice_cap"      // count in the bps column: max LPs per order
+	FeaturePoolMinSlice     = "pool_min_slice"      // flat USD: minimum slice and minimum order
+	FeaturePoolOrderMax     = "pool_order_max"      // flat USD: per order; 0 = the incident stop (S46)
+	FeaturePoolUserDailyMax = "pool_user_daily_max" // flat USD: rolling 24h per user
 )
 
 // IsPoolSetting reports whether feature is a TSA Liquidity setting row.

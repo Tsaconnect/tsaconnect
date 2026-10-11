@@ -57,6 +57,17 @@ describe('developer docs', () => {
     expect(within(hooks).getByText(/1 minute, 5 minutes, 30 minutes, 2 hours, 6 hours and 24 hours/)).toBeInTheDocument();
   });
 
+  it('says a payment with no expiresIn never expires, and expiresAt can be null', () => {
+    mount();
+    const create = screen.getByRole('heading', { level: 2, name: 'Create a payment' }).closest('section')!;
+    const expiresIn = within(create).getByText('expiresIn').closest('tr')!;
+    expect(expiresIn).toHaveTextContent('Leave it out and the payment never expires.');
+    expect(expiresIn).not.toHaveTextContent(/Default/);
+    const object = screen.getByRole('heading', { level: 2, name: 'The payment object' }).closest('section')!;
+    const expiresAt = within(object).getAllByText('expiresAt').map((c) => c.closest('tr')).find((r) => r?.firstElementChild?.textContent === 'expiresAt');
+    expect(expiresAt).toHaveTextContent('or null when it never expires');
+  });
+
   it('lists both live refusals and the allowlist refusal in the error table', () => {
     mount();
     const errors = screen.getByRole('heading', { level: 2, name: 'Errors' }).closest('section')!;

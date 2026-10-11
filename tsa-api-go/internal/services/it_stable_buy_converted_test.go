@@ -219,7 +219,7 @@ func TestNewConvertedTerms_OwedAllInRateAndTheLiFiLine(t *testing.T) {
 	}
 	last := terms.Fees[len(terms.Fees)-1]
 	// D − T = 0.036391 USDC at ₦1,354.74 = ₦49.30.
-	if last.Kind != FeeKindConversion || last.Label != ConversionLiFiLabel || last.Provider != FeeProviderLiFi ||
+	if last.Kind != FeeKindConversion || last.Label != ConversionFeeLabel || last.Provider != FeeProviderShown ||
 		last.Units != "36391" || last.NgnMinor != "4930" {
 		t.Fatalf("fee line = %+v", last)
 	}

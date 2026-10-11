@@ -58,7 +58,7 @@ export interface ITIntent {
 
   /** A stablecoin buy the ramp router opened: who fills it. Absent on every
    *  other intent. */
-  provider?: 'treasury' | 'flutterwave';
+  provider?: 'treasury' | 'flutterwave' | 'tsa_pool';
   /** Set only on a buy opened through the ramp router: when its quote stops
    *  being held. With it, `repriced` means "priced at a live rate instead"
    *  (utils/rampHonour). */

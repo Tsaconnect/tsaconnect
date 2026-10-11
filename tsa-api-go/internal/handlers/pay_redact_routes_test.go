@@ -441,7 +441,7 @@ func TestEveryResponseThatCarriesARecordGoesThroughACallerView(t *testing.T) {
 	}
 }
 
-// A pay order's sender fee is chosen per order to take the deposit's cushion:
+// A pay order's sender fee is chosen per order to pay the merchant exactly:
 // an internal figure the payer was never quoted, so her view carries neither
 // the percent nor the amount. The record itself is not changed.
 func TestPayOrderView_HidesOurPerOrderFee(t *testing.T) {

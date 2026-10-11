@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -13,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
@@ -87,7 +90,7 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 		return "", notBroadcast(fmt.Errorf("rlp encode: %w", err))
 	}
 	hash, err := s.bc.SendRawTransaction(raw)
-	if err != nil && rejectedForFunds(err) {
+	if err != nil && rejectedDefinitely(err) {
 		return "", notBroadcast(err)
 	}
 	if err != nil {
@@ -96,11 +99,63 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 	return hash, nil
 }
 
-// rejectedForFunds reports a node refusing a transaction because the sender
-// cannot pay for it. That refusal is definite — the transaction never entered
-// a mempool — unlike a timeout, which can hide one that did. Matched on text
-// because the RPC error carries no code for it; geth, erigon and the
-// L2 forks all say "insufficient funds", nethermind "InsufficientFunds".
+// rejectedDefinitely reports a node refusing a transaction before it could
+// enter any mempool. That refusal is definite — unlike a timeout, which can
+// hide one that did — so the signer reports it as ErrTxNotBroadcast and a
+// treasury lane hands the nonce back (pre-merge review M-1: otherwise the
+// next send skips it and queues behind a gap). Matched on text because the
+// RPC error carries no code for most of these:
+//   - the sender cannot pay (geth/erigon "insufficient funds", nethermind
+//     "InsufficientFunds");
+//   - the price is below the node's floor ("transaction underpriced") or the
+//     block's base fee, or the fee is above the node's RPC cap;
+//   - the gas limit is below the intrinsic cost;
+//   - every RPC endpoint answered 429: the failover transport moves a
+//     broadcast on only past a 429 (refused unprocessed), so a final 429
+//     means none took it.
+//
+// Deliberately NOT definite, because the nonce is taken and stepping it back
+// would rebuild the collision the lane's floor prevents: "replacement
+// transaction underpriced" (our own tx holds the nonce), "nonce too low" (a
+// mined tx holds it — possibly this very one), "already known". A 5xx stays
+// uncertain too: the failover transport stops there because the node may
+// hold the transaction.
+func rejectedDefinitely(err error) bool {
+	// The HTTP status decides first (re-review N-1): a 429 is definite; a 5xx
+	// is uncertain whatever its body says, since the node or a proxy in front
+	// of it may hold the transaction. Any other HTTP error (a 400 whose body
+	// says "insufficient funds") and a JSON-RPC error fall to the text rules.
+	var herr rpc.HTTPError
+	if errors.As(err, &herr) {
+		switch {
+		case herr.StatusCode == http.StatusTooManyRequests:
+			return true
+		case herr.StatusCode >= http.StatusInternalServerError:
+			return false
+		}
+	}
+	if rejectedForFunds(err) {
+		return true
+	}
+	msg := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
+	if strings.Contains(msg, "replacementtransactionunderpriced") {
+		return false
+	}
+	for _, definite := range []string{
+		"transactionunderpriced",
+		"exceedstheconfiguredcap",
+		"lessthanblockbasefee",
+		"intrinsicgastoolow",
+	} {
+		if strings.Contains(msg, definite) {
+			return true
+		}
+	}
+	return false
+}
+
+// rejectedForFunds reports the node refusing a send its sender cannot pay
+// for (geth/erigon "insufficient funds", nethermind "InsufficientFunds").
 func rejectedForFunds(err error) bool {
 	msg := strings.ToLower(strings.ReplaceAll(err.Error(), " ", ""))
 	return strings.Contains(msg, "insufficientfunds")

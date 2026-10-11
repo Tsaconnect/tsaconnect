@@ -322,7 +322,7 @@ func (s *ITService) AutoPayout(ctx context.Context, intent *models.ITIntent) err
 	if err != nil {
 		var rej *ProviderRejectedError
 		switch {
-		case errors.As(err, &rej) && isMCGP && firstAttempt:
+		case isMCGP && providerRefusalIsFinal(err, firstAttempt):
 			if s.markPayoutRejected(ctx, intent, itPayoutReasonPrefix+" rejected: "+err.Error()) {
 				return fmt.Errorf("%w: %v", ErrITSellPayoutRejected, err)
 			}
@@ -401,6 +401,15 @@ const itPayoutReasonPrefix = "auto-payout"
 
 // payoutNeverSubmitted reports whether the intent's payout reference has
 // provably never been sent to the provider.
+// providerRefusalIsFinal: the provider's refusal proves no transfer exists
+// only on a reference's first attempt. On a retry a refusal can mean "that
+// reference already exists" — the first attempt went out — Replayed or not.
+// Shared by the IT sell payout and the P2P sell payout (re-review N-4).
+func providerRefusalIsFinal(err error, firstAttempt bool) bool {
+	var rej *ProviderRejectedError
+	return firstAttempt && errors.As(err, &rej)
+}
+
 func payoutNeverSubmitted(intent *models.ITIntent) bool {
 	return intent.PayoutAttempts == 0 && intent.PayoutID == "" &&
 		!strings.HasPrefix(intent.FailureReason, itPayoutReasonPrefix)

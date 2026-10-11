@@ -41,9 +41,12 @@ var (
 	// flwSecretKeyRE catches a Flutterwave secret key by its own prefix,
 	// wherever it appears and whatever field (if any) carries it.
 	flwSecretKeyRE = regexp.MustCompile(`\bFLWSECK(?:_TEST)?-[A-Za-z0-9-]+`)
-	// hex64RE is the shape of a raw private key. Tx hashes share it and are
-	// lost too; an alert that might carry a key is not worth the hash.
-	hex64RE = regexp.MustCompile(`\b(0x)?[0-9a-fA-F]{64}\b`)
+	// hex64RE is the shape of a raw private key, and — at 64 or more — of a
+	// voucher signature (130 hex) or calldata that embeds one (review I-2):
+	// a leaked voucher lets anyone lock that LP's stock. Tx hashes share the
+	// shape and are lost too; an alert that might carry a key is not worth
+	// the hash.
+	hex64RE = regexp.MustCompile(`\b(0x)?[0-9a-fA-F]{64,}\b`)
 	// pgDetailRE is Postgres' "Key (col)=(value)" constraint detail, whose
 	// value is a user's row data.
 	pgDetailRE = regexp.MustCompile(`\)=\([^)]*\)`)

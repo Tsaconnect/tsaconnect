@@ -39,15 +39,16 @@ export function intentDisplayRateMinor(intent: { displayRate?: string; rateKobo?
   return /^\d+$/.test(d) && !/^0+$/.test(d) ? d : intent.rateKobo;
 }
 
-/** "View on explorer" for a company-wallet delivery once it settled. Only the
- *  company wallet's hash is ours; txExplorerUrl refuses anything not a hash. */
+/** "View on explorer" for a company-wallet or pool delivery once it settled.
+ *  Only the company wallet's or the pool's delivery hash is ours;
+ *  txExplorerUrl refuses anything not a hash. */
 export function deliveryExplorerUrl(intent: {
   provider?: string;
   status?: string;
   txHash?: string;
   destChain?: string;
 }): string | undefined {
-  if (intent.provider !== 'treasury' || intent.status !== 'settled' || !intent.txHash || !intent.destChain) {
+  if ((intent.provider !== 'treasury' && intent.provider !== 'tsa_pool') || intent.status !== 'settled' || !intent.txHash || !intent.destChain) {
     return undefined;
   }
   return txExplorerUrl(intent.txHash, { chainKey: intent.destChain.toLowerCase() as AnyChainKey });

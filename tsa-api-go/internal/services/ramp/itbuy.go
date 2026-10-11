@@ -184,16 +184,22 @@ func WithConversion(p Provider, conv ConvertedPricer) Provider {
 		if tp != nil {
 			tp.conv = conv
 		}
+	case *PoolProvider:
+		if tp != nil {
+			tp.conv = conv
+		}
 	}
 	return p
 }
 
 // itConvertedLeg is a provider's settlement leg for a converted buy: the
-// leg's quote, the chain it delivers on, and the market mid.
+// leg's quote, the chain and token it delivers, and the market mid.
 type itConvertedLeg struct {
 	q     *services.StableBuyQuote
 	chain string
+	token string // the leg's token; "" is USDC (convertedLegToken)
 	mid   float64
+	pool  *services.PoolPrice // the pool's price, for its open (nil for the others)
 }
 
 // itConverted is what differs between the IT-backed providers' converted
@@ -222,7 +228,7 @@ func (p *itBuyProvider) quoteConverted(ctx context.Context, c itConverted, r Req
 	if err != nil {
 		return skip(err.Error())
 	}
-	pv, err := c.conv.PriceConvertedLeg(ctx, convertedLeg(leg.chain, leg.q, r.FiatAmount, leg.mid), *r.Want)
+	pv, err := c.conv.PriceConvertedLeg(ctx, convertedLeg(leg.chain, leg.token, leg.q, r.FiatAmount, leg.mid), *r.Want)
 	if err != nil {
 		return skip("no conversion route: " + err.Error())
 	}
@@ -248,7 +254,7 @@ func (p *itBuyProvider) openConverted(ctx context.Context, c itConverted, r Requ
 	}
 	want := *r.Want
 	want.Recipient = in.WalletAddress
-	pv, err := c.conv.PriceConvertedLeg(ctx, convertedLeg(leg.chain, leg.q, r.FiatAmount, leg.mid), want)
+	pv, err := c.conv.PriceConvertedLeg(ctx, convertedLeg(leg.chain, leg.token, leg.q, r.FiatAmount, leg.mid), want)
 	if err != nil || pv == nil {
 		return nil, WrapClass(ErrVenueUnavailable, errConversionGone)
 	}

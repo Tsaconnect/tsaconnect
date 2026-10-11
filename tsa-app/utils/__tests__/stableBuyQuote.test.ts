@@ -4,6 +4,8 @@ import {
   buyStatusToHops,
   formatAssetUnits,
   formatMinorAsNaira,
+  isAwaitingPayment,
+  isBuyEstimate,
   isTerminalBuyStatus,
 } from '../stableBuyQuote';
 
@@ -68,6 +70,28 @@ describe('buyStatusToHops', () => {
 
   it('flags the parked state as failed so it reads as needing attention', () => {
     expect(buyStatusToHops('buy_awaiting_rate').some((h) => h.state === 'failed')).toBe(true);
+  });
+});
+
+describe('isAwaitingPayment', () => {
+  it('treats a pool buy still opening as unpaid, like pending_payment (I-5)', () => {
+    expect(isAwaitingPayment('opening')).toBe(true);
+    expect(isAwaitingPayment('pending_payment')).toBe(true);
+  });
+
+  it('is false once her money has landed, and on a cancelled order', () => {
+    for (const s of ['payment_received', 'converting', 'delivering', 'settled', 'cancelled', 'failed', 'refunded', '']) {
+      expect(isAwaitingPayment(s)).toBe(false);
+    }
+  });
+});
+
+describe('isBuyEstimate', () => {
+  it('marks an opening buy as an estimate, like pending_payment outside its rate hold', () => {
+    expect(isBuyEstimate('opening', false)).toBe(true);
+    expect(isBuyEstimate('pending_payment', false)).toBe(true);
+    expect(isBuyEstimate('pending_payment', true)).toBe(false);
+    expect(isBuyEstimate('settled', false)).toBe(false);
   });
 });
 

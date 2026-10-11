@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ─── Pure matcher ────────────────────────────────────────────────────────────
@@ -239,6 +240,7 @@ func (s *PMAutomationService) HandleInbound(ctx context.Context, p InboundPaymen
 	var rows []inboundCandidateRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id, p2p_trades.buyer_id, p2p_trades.fiat_amount").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id = ?", pm.ID).
@@ -375,6 +377,7 @@ func (s *PMAutomationService) RecoverStuckTrades(ctx context.Context, olderThan 
 	var rows []recoverStuckRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
@@ -520,6 +523,11 @@ func (s *PMAutomationService) RetryFailedWebhooks(ctx context.Context, staleAfte
 
 // ─── Sell flow (payout → release) ────────────────────────────────────────────
 
+// pmPayoutFailedReason starts the cancel_reason the failed-payout handler
+// records. The expiry canceller reads it: a payout recorded as failed moved no
+// naira, so the deposit may be refunded (review C-1).
+const pmPayoutFailedReason = "pm payout failed"
+
 // InitiateSellPayout pays the user's bank for a deposited PM sell trade and
 // records the Nomba payout id. Preconditions: trade is a deposited (funding=1)
 // pending_payment trade with a confirmed deposit (open_tx_hash set) and a
@@ -570,11 +578,54 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 		req.SenderName = pm.Name
 	}
 
+	// Nonce before broadcast, for naira (review C-1): under the row lock the
+	// expiry canceller decides under, refuse a trade it has decided, then
+	// COMMIT a durable "payout started" marker before the gateway is asked.
+	// If the money leaves and the id write below is lost, the marker still
+	// refuses the canceller's refund and any second payout; the webhook
+	// (matched on the trade-id reference) records the outcome.
+	// firstAttempt (re-review N-4): no earlier request with this reference
+	// can exist once the row has neither the marker nor an id — every
+	// request since the marker shipped is gated on it. A trade whose payout
+	// was attempted before then left no trace; the pre-deploy check covers it.
+	firstAttempt := false
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var cur models.P2PTrade
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "status", "dropped_at", "payout_started_at", "nomba_payout_id").First(&cur, "id = ?", trade.ID).Error; err != nil {
+			return err
+		}
+		firstAttempt = cur.PayoutStartedAt == nil && cur.NombaPayoutID == ""
+		switch {
+		case cur.PayoutStartedAt != nil || cur.NombaPayoutID != "":
+			return fmt.Errorf("%w: a payout was already started for this trade; its result is awaited", ErrInvalidTransition)
+		case cur.Status != models.P2PTradeStatusPendingPayment || cur.DroppedAt != nil:
+			return fmt.Errorf("%w: trade expired and is being cancelled", ErrInvalidTransition)
+		}
+		return tx.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("payout_started_at", time.Now()).Error
+	})
+	if err != nil {
+		return "", err
+	}
+
 	payoutID, err := s.gateway.InitiatePayout(ctx, req)
 	if err != nil {
+		if providerRefusalIsFinal(err, firstAttempt) {
+			// The provider refused this reference's first request: no
+			// transfer exists, so the marker comes off and the operator may
+			// try again.
+			if cerr := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+				Where("id = ? AND nomba_payout_id = ''", trade.ID).
+				Update("payout_started_at", nil).Error; cerr != nil {
+				log.Printf("[pm automation] ALERT pm_payout_marker_stuck trade=%s: refused payout, marker not cleared: %s", trade.ID, RedactAlertText(cerr.Error()))
+			}
+		} else {
+			log.Printf("[pm automation] ALERT pm_payout_outcome_unknown trade=%s: %s; awaiting the payout webhook, no retry", trade.ID, RedactAlertText(err.Error()))
+		}
 		return "", fmt.Errorf("initiate nomba payout: %w", err)
 	}
 	if strings.TrimSpace(payoutID) == "" {
+		log.Printf("[pm automation] ALERT pm_payout_outcome_unknown trade=%s: empty payout id; awaiting the payout webhook", trade.ID)
 		return "", fmt.Errorf("nomba returned empty payout id")
 	}
 	// Guard the write on nomba_payout_id='' so a concurrent caller can't clobber
@@ -582,6 +633,7 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ? AND nomba_payout_id = ''", trade.ID).
 		Update("nomba_payout_id", payoutID).Error; err != nil {
+		log.Printf("[pm automation] ALERT pm_payout_id_unrecorded trade=%s payout=%s: %s", trade.ID, payoutID, RedactAlertText(err.Error()))
 		return "", err
 	}
 	return payoutID, nil
@@ -659,6 +711,14 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 
 	switch strings.ToLower(p.Status) {
 	case "success":
+		// A payout whose id write was lost (review C-1) gets it here.
+		if trade.NombaPayoutID == "" && strings.TrimSpace(p.PayoutID) != "" {
+			if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+				Where("id = ? AND nomba_payout_id = ''", trade.ID).
+				Update("nomba_payout_id", p.PayoutID).Error; err != nil {
+				return err
+			}
+		}
 		// Money already left the PM's Nomba account → consume the held NGN
 		// reservation (available-=fiat, reserved-=fiat) BEFORE releasing the
 		// token, then release the escrowed crypto to the PM. ConsumeNGN is
@@ -691,7 +751,7 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 				return fmt.Errorf("release PM ledger on payout failure (pm=%s trade=%s): %w", pm.ID, trade.ID, err)
 			}
 		}
-		log.Printf("[pm automation] WARN payout FAILED for trade=%s payout=%s (event=%s); leaving pending_payment for watchdog/manual", trade.ID, p.PayoutID, p.EventID)
+		log.Printf("[pm automation] WARN payout FAILED for trade=%s payout=%s (event=%s); leaving pending_payment for the expiry canceller to refund — never pay it by hand", trade.ID, p.PayoutID, p.EventID)
 		// Mark the reservation as already released so the later cancel path
 		// (timeout watchdog / ConfirmCancel) does NOT release it a second time —
 		// a double-release would steal another live trade's reservation or hard-
@@ -699,7 +759,9 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		// Only set the marker when there was a PM reservation to release (pm != nil);
 		// a non-PM trade never reserved, so leave the marker false.
 		updates := map[string]any{
-			"cancel_reason": "pm payout failed (nomba payout=" + p.PayoutID + "); routed to manual",
+			// Pre-merge review M-3: the expiry canceller refunds the deposit, so
+			// the marker must never read as an invitation to pay by hand.
+			"cancel_reason": pmPayoutFailedReason + " (payout=" + p.PayoutID + "); deposit will be refunded automatically",
 		}
 		if pm != nil {
 			updates["ngn_reservation_released"] = true
@@ -780,6 +842,7 @@ func (s *PMAutomationService) ListBuyManualQueue(ctx context.Context) ([]ManualQ
 	var rows []manualQueueRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id, p2p_trades.ad_id, p2p_trades.buyer_id, p2p_trades.token, p2p_trades.token_amount, p2p_trades.fiat_amount, p2p_trades.created_at").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
@@ -862,6 +925,12 @@ func (s *PMAutomationService) tradeUSDForCap(ctx context.Context, tradeID uuid.U
 // operator performing the release (for the ref/audit trail). ErrInvalidTransition
 // on markPaid is tolerated (already paid) and execution continues to release.
 func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminID uuid.UUID) (*models.P2PTrade, error) {
+	var probe models.P2PTrade
+	if err := s.db.WithContext(ctx).Select("id", "it_intent_id").First(&probe, "id = ?", tradeID).Error; err == nil {
+		if err := hideSlice(&probe); err != nil {
+			return nil, err
+		}
+	}
 	// Daily-cap gate (operator path). Reach the PM via the trade's ad's pm_id. If
 	// the trade belongs to a PM with a daily cap, an over-cap release returns a
 	// clear error so the operator sees it (we never silently release over cap). A

@@ -658,8 +658,8 @@ func TestPayCheckout_AStoreFailureAtTheLockIsInternalNotAProviderFailure(t *test
 
 func TestPayCheckout_TheWrongRouteSaysHowThePaymentReallySettles(t *testing.T) {
 	c := newCryptoRig(t)
-	c.payFromCryptoMerchant(t, "PNR-NAIRA-ON-CRYPTO")
-	c.pay.db.Model(&models.PayPayment{}).Where("id = ?", c.p.ID).Update("settlement_mode", models.PaySettlementFiat)
+	// A payment not yet started settles the way its merchant is paid now.
+	c.pay.db.Model(&models.PayMerchant{}).Where("id = ?", c.m.ID).Update("settlement_mode", models.PaySettlementFiat)
 	_, _, err := c.svc.PayCrypto(context.Background(), c.alice, c.p.ID, payCryptoSource(c.payCheckoutRig))
 	if !errors.Is(err, ErrPayWrongRoute) || !strings.Contains(err.Error(), "settles in naira") || strings.Contains(err.Error(), "settles in crypto") {
 		t.Fatalf("a naira payment on the crypto route: %v", err)

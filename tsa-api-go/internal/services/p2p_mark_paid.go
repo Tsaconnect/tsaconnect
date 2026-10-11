@@ -40,6 +40,9 @@ func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID 
 		}
 		return nil, nil, err
 	}
+	if err := hideSlice(&trade); err != nil {
+		return nil, nil, err
+	}
 	if err := canMarkPaid(payerID, &trade); err != nil {
 		return nil, nil, err
 	}
@@ -63,8 +66,9 @@ func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID 
 		return nil, nil, fmt.Errorf("%w: %v", ErrChainUnavailable, err)
 	}
 	now := s.clock.Now()
+	// dropped_at: the expiry canceller has decided this trade (plan C1 P15).
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
+		Where("id = ? AND status = ? AND dropped_at IS NULL", trade.ID, models.P2PTradeStatusPendingPayment).
 		Updates(map[string]any{"proof_image_url": proofURL, "updated_at": now})
 	if res.Error != nil {
 		return nil, nil, res.Error
@@ -87,6 +91,9 @@ func (s *P2PTradeService) ConfirmMarkPaid(ctx context.Context, tradeID, payerID 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.BuyerID != payerID {
@@ -131,6 +138,10 @@ func (s *P2PTradeService) ConfirmMarkPaid(ctx context.Context, tradeID, payerID 
 // reports false (no error) when the trade was no longer pending_payment.
 // SystemMarkPaid (PM) keeps its own body — it stamps a provenance ref into
 // proof_image_url and posts different copy.
+//
+// No dropped_at guard here, unlike the prepare: both callers act on a chain
+// that already says Paid, so any cancelByTimeout the expiry canceller sent
+// reverted, and refusing would strand the row in pending_payment.
 func (s *P2PTradeService) markPaidCore(ctx context.Context, t *models.P2PTrade, actor *uuid.UUID, meta map[string]any) (bool, error) {
 	now := s.clock.Now()
 	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).

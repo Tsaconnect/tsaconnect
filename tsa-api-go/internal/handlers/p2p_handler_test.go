@@ -300,6 +300,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, fee_platform_bps INTEGER, fee_gas_bps INTEGER, opener_address TEXT,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
 			CHECK (buyer_id <> seller_id)
 		)`,
@@ -1671,5 +1672,20 @@ func TestGetTrade_FeeAmountAndBuyerNet(t *testing.T) {
 	data, _ := decode(t, rec)["data"].(map[string]any)
 	if data["feeBps"] != float64(50) || data["feeAmount"] != "500000" || data["buyerNetAmount"] != "99500000" {
 		t.Fatalf("fee fields wrong; body=%s", rec.Body.String())
+	}
+}
+
+// Plan C1 §23 (T9 ledger, final review): a pool slice is not a trade any
+// user can rate — even its LP, a party to it, reads not-found.
+func TestRateTrade_PoolSliceIsNotFound(t *testing.T) {
+	r := newRig(t)
+	tradeID, intent := uuid.New(), uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, BuyerID: uuid.New(), SellerID: r.sellerID,
+		Status: models.P2PTradeStatusReleased, ITIntentID: &intent}).Error; err != nil {
+		t.Fatalf("seed slice: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/rate", map[string]any{"value": 1})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }

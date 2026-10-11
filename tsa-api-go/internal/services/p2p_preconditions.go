@@ -35,13 +35,18 @@ func isRefusal(err error) bool {
 var openTradeStatuses = []string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
 	models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed}
 
-// canMarkPaid: the buyer, while the trade waits for payment.
+// canMarkPaid: the buyer, while the trade waits for payment and the expiry
+// canceller has not decided it (dropped_at, plan C1 P15: its cancelByTimeout
+// is on its way, so a markPaid now would race it).
 func canMarkPaid(userID uuid.UUID, t *models.P2PTrade) error {
 	if t.BuyerID != userID {
 		return refuse(ErrForbidden)
 	}
 	if t.Status != models.P2PTradeStatusPendingPayment {
 		return refuse(fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, t.Status))
+	}
+	if t.DroppedAt != nil {
+		return refuse(fmt.Errorf("%w: trade expired and is being cancelled", ErrInvalidTransition))
 	}
 	return nil
 }

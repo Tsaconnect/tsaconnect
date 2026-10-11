@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -157,19 +158,43 @@ func (r *Router) quote(ctx context.Context, req Request, rule bool) (*QuoteResul
 		}
 	}
 	if rule {
-		res.Venues = companyWalletFirst(res.Venues)
-	}
-	sort.SliceStable(res.Venues, func(i, j int) bool {
-		return RateBetter(req.Side, res.Venues[i].RankRate(), res.Venues[j].RankRate())
-	})
-	if rule && (req.Token == "" || req.ChainKey == "") {
-		res.Venues = bestPerPair(res.Venues)
+		r.shown(res, req)
+	} else {
+		sortVenues(req.Side, res.Venues) // every venue, pools included; Open orders them itself
 	}
 	if len(res.Venues) == 0 {
 		return nil, quoteError(errs)
 	}
 	res.Best = &res.Venues[0]
 	return res, nil
+}
+
+// shown shapes what a quote shows her — the quote's own tail, and an open's
+// "price moved" re-show (review I-3), so the two cannot drift. A pool-card
+// (PoolOnly) quote lists the pool's venues best-first with PoolAvailable set;
+// when the pool has none it says so and falls back to the ruled list. Any
+// other quote is the ruled list.
+func (r *Router) shown(res *QuoteResult, req Request) {
+	if req.PoolOnly {
+		pools, _ := splitPool(res.Venues)
+		avail := len(pools) > 0
+		res.PoolAvailable = &avail
+		if avail {
+			sortVenues(req.Side, pools)
+			res.Venues = pools
+			return
+		}
+	}
+	res.Venues = r.ruled(req.Side, res.Venues, req.Token == "" || req.ChainKey == "")
+}
+
+// poolCardOnly reports an open from the pinned pool card that must stay the
+// pool's order (decision 14, review I-3): PoolOnly, and the venue she tapped
+// was the pool's (or none was named). A pool-card screen showing other
+// offers because the pool could not fill lets her pick one, which opens as
+// any open does.
+func poolCardOnly(q Request, handleProvider string) bool {
+	return q.PoolOnly && (handleProvider == "" || handleProvider == ProviderPool)
 }
 
 // bestPerPair keeps the first (best, since sorted) venue per target — what it
@@ -185,6 +210,145 @@ func bestPerPair(sorted []Venue) []Venue {
 		}
 		seen[k] = true
 		out = append(out, v)
+	}
+	return out
+}
+
+func sortVenues(side Side, vs []Venue) {
+	sort.SliceStable(vs, func(i, j int) bool { return RateBetter(side, vs[i].RankRate(), vs[j].RankRate()) })
+}
+
+// ruled is what a shown quote obeys: the company wallet first over Flutterwave,
+// best-first, the pool ahead of its target within the band (S17), one venue
+// per target when the pair is not pinned. Without a pool venue it is exactly
+// today's companyWalletFirst → sort → bestPerPair.
+func (r *Router) ruled(side Side, venues []Venue, unpinned bool) []Venue {
+	pools, rest := splitPool(venues)
+	third := bestThirdParty(side, rest) // read before company-wallet suppression
+	rest = companyWalletFirst(rest)
+	sortVenues(side, rest)
+	inBand, _ := r.poolsInBand(side, pools, third)
+	out := placePools(side, rest, inBand)
+	if unpinned {
+		out = bestPerPair(out)
+	}
+	return out
+}
+
+// failoverOrder is an open's re-quote order (§11.2 step 5): in-band pool
+// venues first, then today's order (Flutterwave last), then out-of-band pool
+// venues as the very last resort.
+func (r *Router) failoverOrder(side Side, venues []Venue) []Venue {
+	pools, rest := splitPool(venues)
+	inBand, outBand := r.poolsInBand(side, pools, bestThirdParty(side, rest))
+	out := append([]Venue(nil), inBand...)
+	out = append(out, companyWalletFirstOrder(rest)...)
+	return append(out, outBand...)
+}
+
+// splitPool separates pool venues, keeping both lists' order.
+func splitPool(vs []Venue) (pools, rest []Venue) {
+	for _, v := range vs {
+		if v.Provider == ProviderPool {
+			pools = append(pools, v)
+		} else {
+			rest = append(rest, v)
+		}
+	}
+	return pools, rest
+}
+
+// bestThirdParty is the best RankRate per target among Paycrest and
+// Flutterwave venues (S17: the company wallet is never compared).
+func bestThirdParty(side Side, vs []Venue) map[VenueKey]string {
+	out := map[VenueKey]string{}
+	for _, v := range vs {
+		if v.Provider != ProviderPaycrest && v.Provider != ProviderFlutterwave {
+			continue
+		}
+		t := v.Target()
+		if cur, ok := out[t]; !ok || RateBetter(side, v.RankRate(), cur) {
+			out[t] = v.RankRate()
+		}
+	}
+	return out
+}
+
+// poolsInBand splits pool venues by the band rule (S17): preferred when no
+// third party serves the target, or when within pool_band of the best one.
+// Both lists come back best-first.
+func (r *Router) poolsInBand(side Side, pools []Venue, third map[VenueKey]string) (in, out []Venue) {
+	var band int64
+	if p, ok := r.byName[ProviderPool].(PoolBander); ok {
+		band = p.BandBps()
+	}
+	sortVenues(side, pools)
+	for _, p := range pools {
+		best, has := third[p.Target()]
+		preferred := !has || withinBand(side, p.RankRate(), best, band)
+		gap := "n/a"
+		if has {
+			gap = bandGapBps(p.RankRate(), best)
+		}
+		if !preferred { // review M-14: only the pool priced out of its band is worth a line
+			log.Printf("[ramp] METRIC ramp_pool_band target=%s/%s pool=%s best_third_party=%q gap_bps=%s preferred=false",
+				p.Target().ChainKey, p.Target().Token, p.RankRate(), best, gap)
+		}
+		if preferred {
+			in = append(in, p)
+		} else {
+			out = append(out, p)
+		}
+	}
+	return in, out
+}
+
+// withinBand: pool ≤ best × (1 + band) on a buy (the pool is buy-only).
+func withinBand(side Side, pool, best string, bandBps int64) bool {
+	p, ok1 := new(big.Rat).SetString(strings.TrimSpace(pool))
+	b, ok2 := new(big.Rat).SetString(strings.TrimSpace(best))
+	if !ok1 || !ok2 || side != Buy {
+		return false
+	}
+	limit := new(big.Rat).Mul(b, big.NewRat(10_000+bandBps, 10_000))
+	return p.Cmp(limit) <= 0
+}
+
+func bandGapBps(pool, best string) string {
+	p, ok1 := new(big.Rat).SetString(strings.TrimSpace(pool))
+	b, ok2 := new(big.Rat).SetString(strings.TrimSpace(best))
+	if !ok1 || !ok2 || b.Sign() == 0 {
+		return "n/a"
+	}
+	g := new(big.Rat).Quo(new(big.Rat).Sub(p, b), b)
+	return g.Mul(g, big.NewRat(10_000, 1)).FloatString(1)
+}
+
+// placePools puts each preferred pool venue directly ahead of the first venue
+// for its target, else at its rank; every other venue keeps its position.
+// pools is best-first and is placed worst-first, so when several share a
+// target the best of them ends up first. The result is never nil: a re-shown
+// quote must not send "venues": null.
+func placePools(side Side, sorted, pools []Venue) []Venue {
+	out := append(make([]Venue, 0, len(sorted)+len(pools)), sorted...)
+	for j := len(pools) - 1; j >= 0; j-- {
+		p := pools[j]
+		at := len(out)
+		for i, v := range out {
+			if v.Target() == p.Target() {
+				at = i
+				break
+			}
+		}
+		if at == len(out) {
+			for i, v := range out {
+				if RateBetter(side, p.RankRate(), v.RankRate()) {
+					at = i
+					break
+				}
+			}
+		}
+		out = append(out[:at], append([]Venue{p}, out[at:]...)...)
 	}
 	return out
 }
@@ -402,6 +566,7 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 	pinned := VenueKey{ChainKey: q.ChainKey, Token: q.Token}
 
 	var first Provider
+	handleProvider := ""
 	if strings.TrimSpace(req.Handle) != "" {
 		name, k, err := DecodeHandle(req.Handle)
 		if err != nil {
@@ -411,7 +576,9 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			return nil, ErrInvalidQuote
 		}
 		first = r.provider(name) // nil when that provider is gone: start at step 3
+		handleProvider = name
 	}
+	q.PoolOnly = poolCardOnly(q, handleProvider)
 
 	in := req.Input
 	in.LimitRate, in.Guard = limit, r.cfg.Guard
@@ -446,9 +613,12 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 	enforce := r.cfg.Guard == services.PriceGuardEnforce
 	fresh, qerr := r.quote(budget, q, false)
 	if fresh != nil {
-		for _, v := range companyWalletFirstOrder(fresh.Venues) {
+		for _, v := range r.failoverOrder(q.Side, fresh.Venues) {
 			if budget.Err() != nil {
 				break
+			}
+			if q.PoolOnly && v.Provider != ProviderPool {
+				continue // a pool-card open is the pool's order or none
 			}
 			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
 				continue
@@ -486,12 +656,10 @@ func (r *Router) noneOpened(st *openState, fresh *QuoteResult, qerr error, pinne
 			fresh = &QuoteResult{FiatCode: q.FiatCode, FiatAmount: q.FiatAmount, Side: string(q.Side),
 				Venues: []Venue{}, QuotedAt: time.Now()} // never "venues": null
 		}
-		// What she is shown again obeys the same rules as any quote: the
-		// re-quote kept every venue for failover (rule=false).
-		fresh.Venues = companyWalletFirst(fresh.Venues)
-		if q.Token == "" || q.ChainKey == "" {
-			fresh.Venues = bestPerPair(fresh.Venues) // still sorted best-first
-		}
+		// What she is shown again obeys the same rules as any quote — a
+		// pool-card open's is pool-only (review I-3): the re-quote kept every
+		// venue for failover (rule=false).
+		r.shown(fresh, q)
 		fresh.Best = nil
 		if len(fresh.Venues) > 0 {
 			fresh.Best = &fresh.Venues[0]
@@ -533,6 +701,7 @@ func (r *Router) OpenConverted(ctx context.Context, req OpenRequest) (*Order, er
 			return nil, err
 		}
 		first = r.provider(name) // nil when that provider is gone: start at the re-quote
+		q.PoolOnly = poolCardOnly(q, name)
 		// A handle carries the pair the provider delivers: her target means a
 		// direct venue, anything else the settlement leg of a conversion.
 		shown = Venue{Provider: name, ChainKey: k.ChainKey, Token: k.Token, Kind: models.RouteKindDirect}
@@ -585,12 +754,15 @@ func (r *Router) OpenConverted(ctx context.Context, req OpenRequest) (*Order, er
 	enforce := r.cfg.Guard == services.PriceGuardEnforce
 	fresh, qerr := r.quote(budget, q, false)
 	if fresh != nil {
-		for _, v := range companyWalletFirstOrder(fresh.Venues) {
+		for _, v := range r.failoverOrder(q.Side, fresh.Venues) {
 			if budget.Err() != nil {
 				break
 			}
 			if v.Kind != models.RouteKindConverted && v.Target() != target {
 				continue // a direct venue for another pair: an alternative, not her order
+			}
+			if q.PoolOnly && v.Provider != ProviderPool {
+				continue // a pool-card open is the pool's order or none
 			}
 			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
 				continue

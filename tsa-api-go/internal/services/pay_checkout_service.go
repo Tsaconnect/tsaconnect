@@ -209,7 +209,7 @@ func (s *PayCheckoutService) PayDirect(ctx context.Context, user *models.User, i
 		AccountNo:     p.SettleAccountNumber,
 		AccountName:   p.SettleAccountName,
 		PayPaymentID:  &p.ID,
-		// The merchant is paid what they invoiced; the deposit's cushion is ours.
+		// The merchant is paid what they invoiced; our fee absorbs the drift.
 		KeepSurplus: true,
 	}, false, nil)
 	if errors.Is(err, ErrSellAttemptMayExist) {
@@ -419,7 +419,7 @@ func (s *PayCheckoutService) CryptoQuote(ctx context.Context, user *models.User,
 	if _, err := s.quotable(ctx, user, id, models.PaySettlementCrypto); err != nil {
 		return nil, err
 	}
-	p, err := s.payments.Get(ctx, id)
+	p, err := s.payments.GetAsStarted(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +499,7 @@ func (s *PayCheckoutService) PayCrypto(ctx context.Context, user *models.User, i
 // refusal after a fresh lock still hands it back: nothing has been asked of a
 // provider, so no money can be moving.
 func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uuid.UUID, settlement string) (*models.PayPayment, error) {
-	read, err := s.payments.Get(ctx, id)
+	read, err := s.payments.GetAsStarted(ctx, id)
 	if err != nil {
 		return nil, payInternal(err)
 	}
@@ -522,7 +522,8 @@ func (s *PayCheckoutService) begin(ctx context.Context, user *models.User, id uu
 		// second one is never started.
 		return nil, ErrPayInProgress
 	}
-	// The snapshot cannot change under a lock, so this is a backstop only.
+	// Lock set the destination GetAsStarted read, so this is a backstop only:
+	// the merchant could only have changed it in between.
 	if p.Mode != models.PayModeLive {
 		s.release(ctx, p, "released: not a live payment")
 		return nil, ErrPayNotPayable

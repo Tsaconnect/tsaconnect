@@ -21,7 +21,7 @@ func newPayPaymentRig(t *testing.T) (*PayPaymentService, *models.PayMerchant) {
 
 func payIn() CreatePayPaymentInput {
 	return CreatePayPaymentInput{AmountKobo: 5_000_000, Currency: "NGN", Reference: "PNR-ABC123",
-		Description: "LOS-ABV 12 Oct", ReturnURL: "https://www.skyair.ng/booking/done"}
+		Description: "LOS-ABV 12 Oct", ReturnURL: "https://www.skyair.ng/booking/done", ExpiresInSeconds: 1800}
 }
 
 func TestPayPayment_CreateSnapshotsTheSplitAndTarget(t *testing.T) {
@@ -318,7 +318,7 @@ func TestPayPayment_ExpireDueTouchesOnlyPendingPastExpiry(t *testing.T) {
 	inFlight, _, _ := s.Create(context.Background(), m, models.PayModeTest, in)
 	payer := payUser(t, s, false)
 	s.Lock(context.Background(), payer, inFlight.ID, false)
-	s.now = func() time.Time { return pending.ExpiresAt } // exactly at expiry: not yet
+	s.now = func() time.Time { return *pending.ExpiresAt } // exactly at expiry: not yet
 	if n, _ := s.ExpireDue(context.Background(), 50); n != 0 {
 		t.Fatal("expired at exactly expires_at")
 	}

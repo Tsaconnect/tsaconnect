@@ -92,7 +92,7 @@ func TestRampBuy_ConvertedBodyWithACompanyWalletHandleOpensConverted(t *testing.
 		}
 	}
 	fee, _ := cv["fee"].(map[string]any)
-	if fee == nil || fee["label"] != services.ConversionLiFiLabel || fee["units"] == nil || fee["ngnMinor"] == nil {
+	if fee == nil || fee["label"] != services.ConversionFeeLabel || fee["units"] == nil || fee["ngnMinor"] == nil {
 		t.Fatalf("conversion.fee = %v", cv["fee"])
 	}
 }

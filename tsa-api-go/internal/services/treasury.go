@@ -59,6 +59,17 @@ type TreasuryLane struct {
 	// route must never be able to call the escrow.
 	EscrowCalls []common.Address
 
+	// nonceFloor is the next nonce this process may use on the lane, set by
+	// every escrow call, transfer and route it prepares (plan C1 review I2). A
+	// pool burst sends slices back to back, faster than a load-balanced RPC's
+	// pending view moves; without the floor the second slice would be built on
+	// the first one's nonce and replace or bounce it. Read and written only
+	// under SponsorLane.sendMu, the lane's one nonce lock. It expires after
+	// treasuryNonceFloorTTL so a dropped tx never leaves the lane permanently
+	// ahead of the chain.
+	nonceFloor   uint64
+	nonceFloorAt time.Time
+
 	// convertCh is a capacity-1 channel used as a context-aware lock that
 	// serialises the whole allowance-read -> approve -> route sequence for
 	// THIS lane. It is deliberately separate from SponsorLane.sendMu, which
@@ -87,6 +98,54 @@ type TreasuryLane struct {
 func (l *TreasuryLane) convertLock() chan struct{} {
 	l.convertOnce.Do(func() { l.convertCh = make(chan struct{}, 1) })
 	return l.convertCh
+}
+
+const treasuryNonceFloorTTL = 30 * time.Second
+
+// pinNonce raises a prepared tx's nonce to the lane's floor and moves the
+// floor past it. Caller holds SponsorLane.sendMu (inside lane.send's build).
+func (l *TreasuryLane) pinNonce(u *blockchain.UnsignedTx, now time.Time) {
+	if !l.nonceFloorAt.IsZero() && now.Sub(l.nonceFloorAt) < treasuryNonceFloorTTL && u.Nonce < l.nonceFloor {
+		u.Nonce = l.nonceFloor
+	}
+	l.nonceFloor, l.nonceFloorAt = u.Nonce+1, now
+}
+
+// stepBackNonce hands back the one nonce a send provably never used
+// (ErrTxNotBroadcast), and only while the floor still sits just past it: a
+// concurrent send that moved the floor since is never undone (re-review N3).
+func (l *TreasuryLane) stepBackNonce(n uint64) {
+	l.sendMu.Lock()
+	defer l.sendMu.Unlock()
+	if l.nonceFloor == n+1 {
+		l.nonceFloor = n
+	}
+}
+
+// pinnedBuild wraps any lane build so its nonce comes from the lane's floor
+// (P23): parse the prepared tx, pin, record the nonce through onPrepared (nil
+// allowed) BEFORE it is signed, and hand back the re-marshalled tx. Runs inside
+// lane.send, i.e. under sendMu. *pinned and *built tell the caller which nonce
+// to step back if the send then provably never left.
+func (l *TreasuryLane) pinnedBuild(build func() ([]byte, error), onPrepared func(uint64) error, pinned *uint64, built *bool) func() ([]byte, error) {
+	return func() ([]byte, error) {
+		unsigned, err := build()
+		if err != nil {
+			return nil, err
+		}
+		var u blockchain.UnsignedTx
+		if err := json.Unmarshal(unsigned, &u); err != nil {
+			return nil, fmt.Errorf("treasury: read the prepared nonce: %w", err)
+		}
+		l.pinNonce(&u, time.Now())
+		*pinned, *built = u.Nonce, true
+		if onPrepared != nil {
+			if err := onPrepared(u.Nonce); err != nil {
+				return nil, fmt.Errorf("treasury: record the nonce before broadcast: %w", err)
+			}
+		}
+		return json.Marshal(u)
+	}
 }
 
 // TreasuryCaps bound the treasury's value exposure. A treasury caps VALUE,
@@ -534,9 +593,14 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		// Exact-amount approval, never MaxUint256: the spender is a
 		// third-party router that changes weekly. lane.send carries the
 		// nonce lock and the broadcastAttempted contract.
-		approveHash, attempted, aerr := lane.send(ctx, func() ([]byte, error) {
+		var aPinned uint64
+		aBuilt := false
+		approveHash, attempted, aerr := lane.send(ctx, lane.pinnedBuild(func() ([]byte, error) {
 			return lane.Native.PrepareERC20Approve(tokenAddr, lane.Signer.Address(), route.ApprovalAddress, amount)
-		})
+		}, nil, &aPinned, &aBuilt))
+		if aBuilt && !attempted {
+			lane.stepBackNonce(aPinned)
+		}
 		approveAttempted = attempted // sticky from here on, see doc comment
 		if aerr != nil {
 			return "", approveAttempted, fmt.Errorf("treasury: approve: %w", aerr)
@@ -559,9 +623,14 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	// never zero here (a missing or malformed limit became the ceiling
 	// above), so the builder never estimates an unbounded one. value is
 	// always zero: routeValueIsZero already refused anything else above.
-	txHash, attempted, err := lane.send(ctx, func() ([]byte, error) {
+	var rPinned uint64
+	rBuilt := false
+	txHash, attempted, err := lane.send(ctx, lane.pinnedBuild(func() ([]byte, error) {
 		return lane.Builder.BuildUnsignedCall(lane.Signer.Address(), route.To, callData, big.NewInt(0), gasLimit)
-	})
+	}, nil, &rPinned, &rBuilt))
+	if rBuilt && !attempted {
+		lane.stepBackNonce(rPinned)
+	}
 	attempted = attempted || approveAttempted // sticky, see doc comment
 	if err != nil {
 		if attempted {
@@ -609,21 +678,16 @@ func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane
 	if err := t.requireGas(ctx, lane, treasuryERC20Gas); err != nil {
 		return "", false, err
 	}
-	txHash, attempted, err := lane.send(ctx, func() ([]byte, error) {
-		unsigned, err := lane.Native.PrepareERC20Transfer(tokenAddr, lane.Signer.Address(), to, amount)
-		if err != nil || onPrepared == nil {
-			return unsigned, err
-		}
-		// Inside lane.send's nonce lock: the nonce read here is the one signed.
-		var u blockchain.UnsignedTx
-		if err := json.Unmarshal(unsigned, &u); err != nil {
-			return nil, fmt.Errorf("treasury: read the prepared nonce: %w", err)
-		}
-		if err := onPrepared(u.Nonce); err != nil {
-			return nil, fmt.Errorf("treasury: record the nonce before broadcast: %w", err)
-		}
-		return unsigned, nil
-	})
+	// Inside lane.send's nonce lock: the nonce pinned and recorded here is the
+	// one signed.
+	var pinned uint64
+	built := false
+	txHash, attempted, err := lane.send(ctx, lane.pinnedBuild(func() ([]byte, error) {
+		return lane.Native.PrepareERC20Transfer(tokenAddr, lane.Signer.Address(), to, amount)
+	}, onPrepared, &pinned, &built))
+	if built && !attempted {
+		lane.stepBackNonce(pinned)
+	}
 	if err != nil {
 		if attempted {
 			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=transfer tx=%s err=%s",
@@ -631,6 +695,108 @@ func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane
 			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast transfer: %w", err)
 		}
 		return "", false, fmt.Errorf("treasury: broadcast transfer: %w", err)
+	}
+	return txHash, true, nil
+}
+
+// treasuryEscrowCallGas budgets one escrow call from the treasury: openTrade
+// is about 150–200k gas on BSC (spec §4.4), with headroom.
+const treasuryEscrowCallGas uint64 = 300_000
+
+// CallEscrowRecorded calls a P2P escrow from the treasury (spec 2026-10-08
+// S21, S43): the pool's slice opens. Same contract as TransferTokenRecorded —
+// kill switch, gas, nonce recorded by onPrepared BEFORE broadcast, an uncertain
+// broadcast reported as attempted with its hash when known — plus two guards a
+// transfer does not need:
+//   - escrow must be on the lane's EscrowCalls (never on Routers: a LiFi route
+//     can never reach the escrow, and this can never reach a router);
+//   - the prepared transaction must target escrow with zero value on this
+//     lane's chain, so a build that went wrong is refused, never signed.
+func (t *Treasury) CallEscrowRecorded(ctx context.Context, lane *TreasuryLane, escrow string, build func() ([]byte, error), onPrepared func(nonce uint64) error) (string, bool, error) {
+	b, err := t.StartEscrowBurst(ctx, lane, escrow, 1)
+	if err != nil {
+		return "", false, err
+	}
+	return b.Call(ctx, build, onPrepared)
+}
+
+// EscrowBurst is a run of escrow calls on one lane — a pool order's slice
+// opens (pre-merge review I-1): the lane, the escrow allowlist and the gas
+// for every call in it are checked once, so each call is only its nonce,
+// record and broadcast under the lane lock.
+type EscrowBurst struct {
+	lane   *TreasuryLane
+	escrow string
+}
+
+// StartEscrowBurst checks what CallEscrowRecorded checks, once, for calls
+// escrow calls: the kill switch, EscrowCalls and that the lane can pay all
+// of their gas.
+func (t *Treasury) StartEscrowBurst(ctx context.Context, lane *TreasuryLane, escrow string, calls int) (*EscrowBurst, error) {
+	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
+		return nil, ErrSponsorNotAvailable
+	}
+	if lane.Guard.Killed() {
+		return nil, ErrTreasuryKilled
+	}
+	// routerAllowed is the generic strict address-list match; the LIST is
+	// EscrowCalls, separate from Routers by design (S21).
+	if !routerAllowed(lane.EscrowCalls, escrow) {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_escrow_call_refused_total=1 chain=%s to=%s", lane.ChainKey, escrow)
+		return nil, fmt.Errorf("%w: %s is not an escrow this lane may call", ErrTreasuryInvalidRoute, escrow)
+	}
+	if calls < 1 {
+		calls = 1
+	}
+	if err := t.requireGas(ctx, lane, treasuryEscrowCallGas*uint64(calls)); err != nil {
+		return nil, err
+	}
+	return &EscrowBurst{lane: lane, escrow: escrow}, nil
+}
+
+// Call sends one escrow call of the burst: the kill switch again (in memory),
+// then the prepared tx's guards, the lane's nonce floor, onPrepared and the
+// broadcast under the lane's send lock. Same contract as CallEscrowRecorded.
+func (b *EscrowBurst) Call(ctx context.Context, build func() ([]byte, error), onPrepared func(nonce uint64) error) (string, bool, error) {
+	lane, escrow := b.lane, b.escrow
+	if lane.Guard.Killed() {
+		return "", false, ErrTreasuryKilled
+	}
+	// The escrow guards run on the prepared tx first; then pinnedBuild takes
+	// the nonce from the lane's floor, not the escrow client's pending view
+	// (review I2), under the lane's one send lock.
+	checked := func() ([]byte, error) {
+		unsigned, err := build()
+		if err != nil {
+			return nil, err
+		}
+		var u blockchain.UnsignedTx
+		if err := json.Unmarshal(unsigned, &u); err != nil {
+			return nil, fmt.Errorf("treasury: read the prepared escrow call: %w", err)
+		}
+		// Review M3: the chain id is required and must be this lane's; an empty
+		// one is a client-less development build (nonce 0), never signed.
+		if !strings.EqualFold(u.To, escrow) || !routeValueIsZero(u.Value) ||
+			u.ChainID == "" || u.ChainID != strconv.FormatInt(lane.ChainID, 10) {
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_escrow_call_mismatch_total=1 chain=%s to=%s value=%q tx_chain=%s",
+				lane.ChainKey, u.To, u.Value, u.ChainID)
+			return nil, fmt.Errorf("%w: the prepared call is not a zero-value call to the escrow on %s", ErrTreasuryInvalidRoute, lane.ChainKey)
+		}
+		return unsigned, nil
+	}
+	var pinned uint64
+	built := false
+	txHash, attempted, err := lane.send(ctx, lane.pinnedBuild(checked, onPrepared, &pinned, &built))
+	if built && !attempted {
+		lane.stepBackNonce(pinned)
+	}
+	if err != nil {
+		if attempted {
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=escrow_call tx=%s err=%s",
+				lane.ChainKey, uncertainTxHash(err), RedactAlertText(err.Error()))
+			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast escrow call: %w", err)
+		}
+		return "", false, fmt.Errorf("treasury: escrow call: %w", err)
 	}
 	return txHash, true, nil
 }

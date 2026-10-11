@@ -48,7 +48,8 @@ export type PayCheckout = {
   source?: 'api' | 'link' | 'open';
   /** Through a reusable link: that link's name — what the payment is for. */
   linkLabel?: string;
-  expiresAt: string;
+  /** Null: the merchant set no expiry, so it never expires (an older server always sent a time). */
+  expiresAt: string | null;
   settlementMode: 'fiat' | 'crypto';
   settleTokenSymbol?: string;
   settleTokenAddress?: string;
@@ -116,7 +117,7 @@ export async function listMyPayments(): Promise<PayHistoryItem[]> {
 }
 
 /** What anyone — signed in or not — may read of a payment (GET /pay/public/:id). */
-export type PayPublic = { id: string; merchantName: string; status: PayStatus; expiresAt: string };
+export type PayPublic = { id: string; merchantName: string; status: PayStatus; expiresAt: string | null };
 
 /** The signed-out read: enough to know until when a payment is worth coming back to. */
 export async function getPublicPayment(id: string, signal?: AbortSignal): Promise<PayPublic> {

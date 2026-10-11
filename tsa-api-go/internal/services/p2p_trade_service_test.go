@@ -68,6 +68,7 @@ type mockEscrow struct {
 	feeSnapshotPlatform, feeSnapshotGas uint16
 	feeSnapshotFound                    bool
 	feeSnapshotReads                    int
+	readTradeCalls                      int
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -301,6 +302,7 @@ func (m *mockEscrow) VerifyTradeResolved(txHash string, tradeId [32]byte) (*P2PT
 		AmountMoved: big.NewInt(99), FeeToSystem: big.NewInt(1)}, nil
 }
 func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
+	m.readTradeCalls++
 	if m.readTradeErr != nil {
 		return nil, m.readTradeErr
 	}
@@ -416,6 +418,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, fee_platform_bps INTEGER, fee_gas_bps INTEGER, opener_address TEXT,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
+			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
 			created_at DATETIME, updated_at DATETIME,
 			CHECK (buyer_id <> seller_id)
 		)`,

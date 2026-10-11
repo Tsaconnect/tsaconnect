@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
@@ -81,6 +82,16 @@ func TestLocalKeyReleaseSigner_InsufficientFundsIsNotBroadcast(t *testing.T) {
 		"InsufficientFunds":                                                true,
 		"context deadline exceeded":                                        false,
 		"nonce too low":                                                    false,
+		// Pre-merge review M-1: the other definite refusals.
+		"transaction underpriced":                                     true,
+		"tx fee (1.20 ether) exceeds the configured cap (1.00 ether)": true,
+		"max fee per gas less than block base fee":                    true,
+		"intrinsic gas too low":                                       true,
+		// The nonce is taken (our own pending tx, or a mined one): stepping
+		// it back would rebuild the collision, and the floor is already right.
+		"replacement transaction underpriced": false,
+		"already known":                       false,
+		"connection reset by peer":            false,
 	} {
 		bc := &captureBroadcaster{chainID: big.NewInt(56), err: fmt.Errorf("failed to send transaction: %w", errors.New(msg))}
 		_, err := NewLocalKeyReleaseSigner(key, bc).SignAndBroadcast(context.Background(), unsigned)
@@ -89,6 +100,26 @@ func TestLocalKeyReleaseSigner_InsufficientFundsIsNotBroadcast(t *testing.T) {
 		}
 		if got := errors.Is(err, ErrTxNotBroadcast); got != wantNotBroadcast {
 			t.Errorf("%q: not-broadcast = %v, want %v", msg, got, wantNotBroadcast)
+		}
+	}
+}
+
+// Pre-merge review M-1: the failover transport moves a broadcast on only past
+// a 429 (refused unprocessed), so a final 429 means every endpoint refused it.
+// A 5xx stops the failover because the node may hold the transaction: that
+// one stays uncertain.
+func TestLocalKeyReleaseSigner_All429IsNotBroadcastA5xxIsNot(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	unsigned, _ := json.Marshal(blockchain.UnsignedTx{
+		Nonce: 1, GasPrice: "1000000000", GasLimit: 90000,
+		To: "0x000000000000000000000000000000000000dEaD", Value: "0", ChainID: "56",
+	})
+	for status, wantNotBroadcast := range map[int]bool{429: true, 502: false, 503: false} {
+		herr := rpc.HTTPError{StatusCode: status, Status: fmt.Sprintf("%d", status)}
+		bc := &captureBroadcaster{chainID: big.NewInt(56), err: fmt.Errorf("failed to send transaction: %w", herr)}
+		_, err := NewLocalKeyReleaseSigner(key, bc).SignAndBroadcast(context.Background(), unsigned)
+		if got := errors.Is(err, ErrTxNotBroadcast); got != wantNotBroadcast {
+			t.Errorf("HTTP %d: not-broadcast = %v, want %v", status, got, wantNotBroadcast)
 		}
 	}
 }
@@ -119,5 +150,36 @@ func TestLocalKeyReleaseSigner_UncertainBroadcastCarriesItsHash(t *testing.T) {
 	}
 	if uncertainTxHash(notBroadcast(errors.New("insufficient funds"))) != "" {
 		t.Fatal("a refusal that never left carries no hash")
+	}
+}
+
+// Re-review N-1: a 429 is definite and a 5xx uncertain on the status alone;
+// any other HTTP error falls through to the text rules, so a node that answers
+// 400 with "insufficient funds" in its body is a definite refusal, as before M-1.
+func TestLocalKeyReleaseSigner_HTTPErrorBodyIsStillRead(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	unsigned, _ := json.Marshal(blockchain.UnsignedTx{
+		Nonce: 1, GasPrice: "1000000000", GasLimit: 90000,
+		To: "0x000000000000000000000000000000000000dEaD", Value: "0", ChainID: "56",
+	})
+	for _, c := range []struct {
+		status int
+		body   string
+		want   bool
+	}{
+		{400, `{"jsonrpc":"2.0","error":{"code":-32000,"message":"insufficient funds for gas * price + value"}}`, true},
+		{400, `{"jsonrpc":"2.0","error":{"code":-32000,"message":"nonce too low"}}`, false},
+		{502, "", false},
+		// A 5xx is uncertain whatever its body says: the node (or a proxy in
+		// front of it) may hold the transaction.
+		{502, `{"jsonrpc":"2.0","error":{"code":-32000,"message":"insufficient funds for gas * price + value"}}`, false},
+		{503, "transaction underpriced", false},
+	} {
+		herr := rpc.HTTPError{StatusCode: c.status, Status: fmt.Sprintf("%d", c.status), Body: []byte(c.body)}
+		bc := &captureBroadcaster{chainID: big.NewInt(56), err: fmt.Errorf("failed to send transaction: %w", herr)}
+		_, err := NewLocalKeyReleaseSigner(key, bc).SignAndBroadcast(context.Background(), unsigned)
+		if got := errors.Is(err, ErrTxNotBroadcast); got != c.want {
+			t.Errorf("HTTP %d %q: not-broadcast = %v, want %v", c.status, c.body, got, c.want)
+		}
 	}
 }

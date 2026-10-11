@@ -120,7 +120,8 @@ function SectionTitle({ children }: { children: string }) {
   );
 }
 
-type Waiting = RecentPayCheckout & { expiresAt?: string };
+/** expiresAt null: the payment never expires — the row says only that it isn't paid. */
+type Waiting = RecentPayCheckout & { expiresAt?: string | null };
 
 /**
  * Payments she opened on this phone and can still pay. Each is re-read from the

@@ -114,8 +114,33 @@ type P2PTrade struct {
 	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
 	// expired-notification fires exactly once per trade.
 	ExpiredNotifiedAt *time.Time `gorm:"index" json:"expiredNotifiedAt,omitempty"`
-	CreatedAt         time.Time  `json:"createdAt"`
-	UpdatedAt         time.Time  `json:"updatedAt"`
+	// TSA Liquidity slice fields (spec 2026-10-08 §7.4, plan C1 P1). A slice is
+	// one LP's escrow trade backing a pool order: ITIntentID names the order.
+	// NULL on every ordinary trade. Never serialised: slices are hidden from
+	// every user P2P endpoint (§23) and their internals are server-side only.
+	ITIntentID *uuid.UUID `gorm:"type:uuid" json:"-"` // indexed by MigratePoolSliceIndexes (partial)
+	// OpenedAt: the open was proven on-chain (ReadTrade, zero fee snapshot,
+	// receipt 2 deep — §12.2 step 4).
+	OpenedAt *time.Time `json:"-"`
+	// OpenNonce is the conversion treasury's nonce for the open, written BEFORE
+	// broadcast (S43): S44 reclaims an unlanded slice only once it is consumed.
+	OpenNonce *int64 `json:"-"`
+	// Generation is the order attempt that opened the slice (S41).
+	Generation int `gorm:"not null;default:1" json:"-"`
+	// DroppedAt: the order no longer needs this slice (S18 unselected, a failed
+	// open, a deterministic park, an F21 resolve to the LP, or the canceller's
+	// decision); the expiry canceller may free it on-chain (plan C1 P1). On an
+	// ordinary trade it is the canceller's legacy-scope decision (P15): no
+	// system or buyer payment path may take the trade any more.
+	DroppedAt *time.Time `json:"-"`
+	// PayoutStartedAt is committed under the row lock BEFORE the sell payout's
+	// gateway call (review C-1, the nonce-before-broadcast rule for naira):
+	// once set, naira may have left even if the payout id never reached the
+	// DB, so the expiry canceller refuses the trade unless the payout is
+	// recorded failed, and no second payout is ever started.
+	PayoutStartedAt *time.Time `json:"-"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 
 	// ── Virtual PM-detail fields (gorm:"-": serialized, never persisted) ───
 	// Populated by the GetTrade handler when the trade's ad is a PM ad, so the
@@ -161,6 +186,9 @@ func (P2PTrade) TableName() string {
 func (t *P2PTrade) OpenRecorded() bool {
 	return strings.TrimSpace(t.OpenTxHash) != ""
 }
+
+// IsPoolSlice reports whether the trade is a TSA Liquidity slice.
+func (t *P2PTrade) IsPoolSlice() bool { return t != nil && t.ITIntentID != nil }
 
 // Funding discriminator values — keep in lock-step with P2PEscrowV2.sol's
 // `enum Funding { PooledFromMaker, DepositedByTaker }`.

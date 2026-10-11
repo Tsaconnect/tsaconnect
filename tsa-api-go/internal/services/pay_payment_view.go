@@ -35,7 +35,7 @@ type PayPaymentView struct {
 	OpenLinkID    *uuid.UUID `json:"openLinkId,omitempty"`
 	LinkLabel     string     `json:"linkLabel,omitempty"` // open-link payments, from Views: the link it was paid through
 	ReturnURL     string     `json:"returnUrl,omitempty"`
-	ExpiresAt     time.Time  `json:"expiresAt"`
+	ExpiresAt     *time.Time `json:"expiresAt"`
 	SettlementRef string     `json:"settlementRef,omitempty"`
 	FailureReason string     `json:"failureReason,omitempty"`
 	SucceededAt   *time.Time `json:"succeededAt,omitempty"`
@@ -66,7 +66,7 @@ type PayCheckoutView struct {
 	Description        string     `json:"description"`
 	CustomerName       string     `json:"customerName,omitempty"`
 	LinkLabel          string     `json:"linkLabel,omitempty"` // open-link payments: the link paid through (the note, the description, is often empty)
-	ExpiresAt          time.Time  `json:"expiresAt"`
+	ExpiresAt          *time.Time `json:"expiresAt"`
 	SettlementMode     string     `json:"settlementMode"`
 	SettleTokenSymbol  string     `json:"settleTokenSymbol,omitempty"`
 	SettleTokenAddress string     `json:"settleTokenAddress,omitempty"`
@@ -123,7 +123,7 @@ type PayPublicView struct {
 	CustomerName  string     `json:"customerName,omitempty"` // links only
 	LinkLabel     string     `json:"linkLabel,omitempty"`    // open links only: the link it was paid through
 	OpenLinkURL   string     `json:"openLinkUrl,omitempty"`  // open links only, while that link takes payments
-	ExpiresAt     time.Time  `json:"expiresAt"`
+	ExpiresAt     *time.Time `json:"expiresAt"`
 	SucceededAt   *time.Time `json:"succeededAt,omitempty"`
 	ReturnURL     string     `json:"returnUrl,omitempty"`  // only once succeeded
 	ReceiptURL    string     `json:"receiptUrl,omitempty"` // live payments, once succeeded
@@ -255,6 +255,11 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		}
 	}
 
+	// A payment not yet being paid shows the payout a start would give it.
+	settle := p
+	if p.Status == models.PayStatusPending {
+		settle = settlementAsStarted(p, m, s.now())
+	}
 	v := &PayCheckoutView{
 		ID:                 p.ID,
 		PayCode:            s.payCodeFor(ctx, p),
@@ -271,10 +276,10 @@ func (s *PayPaymentService) CheckoutView(ctx context.Context, user *models.User,
 		Description:        p.Description,
 		CustomerName:       p.CustomerName,
 		ExpiresAt:          p.ExpiresAt,
-		SettlementMode:     p.SettlementMode,
-		SettleTokenSymbol:  p.SettleTokenSymbol,
-		SettleTokenAddress: p.SettleTokenAddress,
-		SettleChainID:      p.SettleChainID,
+		SettlementMode:     settle.SettlementMode,
+		SettleTokenSymbol:  settle.SettleTokenSymbol,
+		SettleTokenAddress: settle.SettleTokenAddress,
+		SettleChainID:      settle.SettleChainID,
 		Payable:            payable,
 		NotPayableWhy:      why,
 		NotPayableCode:     whyCode,
@@ -333,13 +338,13 @@ func (s *PayPaymentService) payability(p *models.PayPayment, m *models.PayMercha
 	}
 
 	now := s.now()
-	if !now.Before(p.ExpiresAt) {
+	if p.ExpiresAt != nil && !now.Before(*p.ExpiresAt) {
 		return false, "This payment has expired"
 	}
-	if now.Add(payMinTimeToStart).After(p.ExpiresAt) {
+	if payTooLateToStart(p, now) {
 		return false, "There isn't enough time left to start this payment"
 	}
-	if m.Status != models.PayMerchantActive {
+	if m.Status != models.PayMerchantActive || m.SettlementMode == "" {
 		return false, "This merchant can't accept payments right now"
 	}
 	if p.Mode == models.PayModeLive && !m.LiveAllowed(liveEnabled) {

@@ -195,8 +195,8 @@ function Detail({ payment: p, payer, deliveries, mode, list }: { payment: Paymen
         {p.succeededAt ? (
           <Row label="Succeeded">{dateTime(p.succeededAt)}</Row>
         ) : (
-          // A cancelled link closed when its owner cancelled it, not at this time.
-          !p.cancelled && <Row label={p.status === 'expired' ? 'Expired' : 'Expires'}>{dateTime(p.expiresAt)}</Row>
+          // A cancelled link closed when its owner cancelled it, not at this time; one with no expiry has none to show.
+          !p.cancelled && p.expiresAt && <Row label={p.status === 'expired' ? 'Expired' : 'Expires'}>{dateTime(p.expiresAt)}</Row>
         )}
         {p.failureReason && !p.cancelled && <Row label="Why it failed"><span className="text-danger-strong">{p.failureReason}</span></Row>}
       </dl>

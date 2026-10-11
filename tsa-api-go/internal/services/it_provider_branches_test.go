@@ -152,10 +152,10 @@ var providerSites = []providerSite{
 	}},
 }
 
-// Spec §12.3 / S45: every site refuses a provider without terms. C1 moves
-// "tsa_pool" out of this list when it gives the pool its own terms.
+// Spec §12.3 / S45: every site refuses a provider without terms. C1 gave
+// tsa_pool its own terms (TestProviderBranches_PoolTerms).
 func TestProviderBranches_Exhaustive(t *testing.T) {
-	for _, provider := range []string{"tsa_pool", "bogus"} {
+	for _, provider := range []string{"bogus"} {
 		for _, site := range providerSites {
 			t.Run(provider+"/"+site.name, func(t *testing.T) {
 				s, userID := newRoutedBuyService(t)
@@ -477,7 +477,7 @@ func (l *providerLint) boundProviderFindings(call *ast.CallExpr) []string {
 		arg := ast.Unparen(call.Args[argIdx])
 		switch {
 		case op == "=" && l.providerConst(arg) == "ITProviderTreasury":
-		case op == "in" && isCallTo(arg, "flutterwaveFulfilledProviders"):
+		case op == "in" && (isCallTo(arg, "flutterwaveFulfilledProviders") || isCallTo(arg, "poolProviders")):
 		default:
 			out = append(out, pos+": it_intents provider filter not built from providerTerms")
 		}

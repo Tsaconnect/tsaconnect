@@ -601,7 +601,7 @@ func seedRoutesPayment(t *testing.T, db *gorm.DB, mode, status, code string) *mo
 	p := &models.PayPayment{MerchantID: m.ID, Mode: mode, Reference: "R-" + code, AmountKobo: 500_000, Currency: "NGN",
 		Source: models.PaySourceLink, Description: "Wedding cake deposit", FeeBps: 100, CustomerFeeSharePercent: 100,
 		CustomerTotalKobo: 505_051, MerchantNetKobo: 500_000, SettlementMode: models.PaySettlementFiat,
-		ExpiresAt: now.Add(time.Hour), Status: status, PayCode: &code}
+		Status: status, PayCode: &code}
 	if status == models.PayStatusSucceeded {
 		p.SucceededAt = &now
 	}

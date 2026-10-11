@@ -32,7 +32,7 @@ func TestProviderTerms_LegacyEmptyIsFlutterwave(t *testing.T) {
 
 // Spec S45: the default is an error, never Flutterwave's terms.
 func TestProviderTerms_UnknownIsAnError(t *testing.T) {
-	for _, p := range []string{"tsa_pool", "bogus", "TREASURY"} {
+	for _, p := range []string{"bogus", "bogus", "TREASURY"} {
 		terms, err := providerTerms(&models.ITIntent{Provider: p})
 		if !errors.Is(err, ErrUnknownITProvider) || !errors.Is(err, ErrITBadState) {
 			t.Fatalf("provider %q: err = %v, want ErrUnknownITProvider wrapping ErrITBadState", p, err)
@@ -65,7 +65,7 @@ func TestRequireFlutterwaveFulfils(t *testing.T) {
 	if !errors.Is(err, ErrITBadState) || err.Error() != "invalid IT intent state: a company-wallet buy is never converted at Flutterwave" {
 		t.Fatalf("treasury err = %v", err)
 	}
-	if err := requireFlutterwaveFulfils(&models.ITIntent{Provider: "tsa_pool"}, "sent by"); !errors.Is(err, ErrUnknownITProvider) {
+	if err := requireFlutterwaveFulfils(&models.ITIntent{Provider: "bogus"}, "sent by"); !errors.Is(err, ErrUnknownITProvider) {
 		t.Fatalf("pool err = %v", err)
 	}
 }

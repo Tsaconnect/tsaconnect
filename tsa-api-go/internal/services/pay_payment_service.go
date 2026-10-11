@@ -31,11 +31,12 @@ type payIntents interface {
 }
 
 const (
-	payDefaultExpirySeconds = 1800
-	payMinExpirySeconds     = 900
-	payMaxExpirySeconds     = 86_400
-	payMaxReferenceLen      = 128
-	payMaxDescriptionLen    = 255
+	// A payment expires only if its merchant asked for an expiry, within these
+	// bounds; one created without expiresIn never expires (owner, 2026-10-09).
+	payMinExpirySeconds  = 900
+	payMaxExpirySeconds  = 86_400
+	payMaxReferenceLen   = 128
+	payMaxDescriptionLen = 255
 
 	// payMinTimeToStart is the least time a payment may have left when a
 	// customer FIRST locks it — the app refuses to start with < 5 min left.
@@ -249,10 +250,7 @@ func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, m
 	}
 
 	expiresIn := in.ExpiresInSeconds
-	switch {
-	case expiresIn == 0:
-		expiresIn = payDefaultExpirySeconds
-	case expiresIn < payMinExpirySeconds || expiresIn > opts.maxExpirySeconds:
+	if expiresIn != 0 && (expiresIn < payMinExpirySeconds || expiresIn > opts.maxExpirySeconds) {
 		return nil, false, fmt.Errorf("%w: expiresIn must be %d-%d seconds", ErrPayPaymentInvalid, payMinExpirySeconds, opts.maxExpirySeconds)
 	}
 
@@ -286,11 +284,21 @@ func (s *PayPaymentService) create(ctx context.Context, m *models.PayMerchant, m
 		SettleTokenAddress:      m.TokenAddress,
 		SettleTokenSymbol:       m.TokenSymbol,
 		SettleWalletAddress:     m.WalletAddress,
-		ExpiresAt:               now.Add(time.Duration(expiresIn) * time.Second),
+		ExpiresAt:               payExpiresAt(now, expiresIn),
 		Status:                  models.PayStatusPending,
 	}
 
 	return s.createOrExisting(ctx, p, in)
+}
+
+// payExpiresAt is when a payment created at now with expiresIn seconds
+// expires: nil — never — when no expiry was asked for (0).
+func payExpiresAt(now time.Time, expiresIn int) *time.Time {
+	if expiresIn == 0 {
+		return nil
+	}
+	t := now.Add(time.Duration(expiresIn) * time.Second)
+	return &t
 }
 
 // createOrExisting inserts p outside any transaction, with a fresh payment code

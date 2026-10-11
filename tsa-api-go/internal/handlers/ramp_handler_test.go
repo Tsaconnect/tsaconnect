@@ -315,7 +315,7 @@ func TestRampOrder_ITViewCarriesTheQuotedBreakdown(t *testing.T) {
 		t.Fatalf("fees = %#v", d["fees"])
 	}
 	first, _ := feeRows[0].(map[string]any)
-	if first["token"] != "1.46216" || first["ngn"] != "2474.80" || first["provider"] != "Flutterwave" || first["label"] != "Provider conversion fee (1.5%)" {
+	if first["token"] != "1.46216" || first["ngn"] != "2474.80" || first["provider"] != "provider" || first["label"] != "Provider conversion fee (1.5%)" {
 		t.Fatalf("fee = %#v", first)
 	}
 	// amount ÷ rate − Σfees = tokenAmount, within one base unit.
@@ -419,5 +419,21 @@ func TestRampCancel_ITRefusalsKeepTheirMeaning(t *testing.T) {
 		if w.Code != 409 || env.Code != tc.code || !strings.Contains(env.Message, tc.part) {
 			t.Fatalf("%v → %d %s", tc.err, w.Code, w.Body)
 		}
+	}
+}
+
+// Review I-3: a buy from the pinned pool card says so, and the router keeps it
+// the pool's order; a converted pool venue opens converted like the others.
+func TestRampBuy_PoolCardBodyReachesTheRouter(t *testing.T) {
+	f := &fakeRampRoutes{order: &ramp.Order{Provider: ramp.ProviderPaycrest, Paycrest: &models.PaycrestOrderRecord{ID: uuid.New()}}}
+	body := rampBuyJSON()
+	body["pool"] = true
+	if w := rampDoJSON(rampTestServer(t, f, rampUser()), "POST", "/api/ramp/buy", body); w.Code != 201 || !f.openReq.Request.PoolOnly {
+		t.Fatalf("%d poolOnly=%v", w.Code, f.openReq.Request.PoolOnly)
+	}
+	body["requestedChainId"], body["requestedToken"], body["requestedChain"] = 10, "USDT", "optimism"
+	body["handle"] = ramp.EncodeHandle(ramp.ProviderPool, ramp.VenueKey{ChainKey: "bsc", Token: "USDT"})
+	if w := rampDoJSON(rampTestServer(t, f, rampUser()), "POST", "/api/ramp/buy", body); w.Code != 201 || !f.convertedReq.Request.PoolOnly {
+		t.Fatalf("converted pool venue: %d %s poolOnly=%v", w.Code, w.Body, f.convertedReq.Request.PoolOnly)
 	}
 }

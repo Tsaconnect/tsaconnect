@@ -149,7 +149,7 @@ export function Docs() {
                 [<C>reference</C>, 'string', <>Required, up to 128 bytes. Your order id, unique per mode. Resending it returns the existing payment (<C>200</C>), so retries are safe; a different amount, currency, description or return URL is refused (<C>409</C>).</>],
                 [<C>description</C>, 'string', 'Optional, up to 255 bytes. Shown to your customer.'],
                 [<C>returnUrl</C>, 'string', <>Optional. An <C>https</C> URL whose host exactly matches one of your return domains, set in your dashboard.</>],
-                [<C>expiresIn</C>, 'integer', 'Optional. Seconds until an unpaid payment expires: 900 to 86400. Default 1800.'],
+                [<C>expiresIn</C>, 'integer', 'Optional. Seconds until an unpaid payment expires: 900 to 86400. Leave it out and the payment never expires.'],
               ]}
             />
             <div className="grid gap-4">
@@ -190,7 +190,7 @@ export function Docs() {
                 [<C>currency</C>, 'string', <><C>NGN</C>.</>],
                 [<C>description</C>, 'string', 'Your description.'],
                 [<C>returnUrl</C>, 'string, optional', 'Your return URL.'],
-                [<C>expiresAt</C>, 'string (RFC 3339)', 'When a pending payment expires.'],
+                [<C>expiresAt</C>, 'string (RFC 3339) or null', <>When a pending payment expires, or <C>null</C> when it never expires.</>],
                 [<C>settlementRef</C>, 'string, optional', <>Our payout reference once the payment succeeds (<C>"test"</C> in test mode). Treat it as opaque.</>],
                 [<C>failureReason</C>, 'string, optional', <>Why it failed or expired. For display and logs — branch on <C>status</C>.</>],
                 [<C>succeededAt</C>, 'string (RFC 3339), optional', 'When it succeeded.'],
@@ -205,7 +205,7 @@ export function Docs() {
             <ul className="grid max-w-[72ch] gap-2 text-body">
               <li><C>pending</C> → <C>processing</C> — the customer started paying.</li>
               <li><C>processing</C> → <C>succeeded</C> or <C>failed</C> — final.</li>
-              <li><C>pending</C> → <C>expired</C> — unpaid by <C>expiresAt</C>, cancelled, or your account was suspended. Final.</li>
+              <li><C>pending</C> → <C>expired</C> — unpaid by <C>expiresAt</C> (when one is set), cancelled, or your account was suspended. Final.</li>
               <li><C>processing</C> → <C>pending</C> — the customer abandoned the attempt; it can be paid again. No webhook.</li>
               <li>A refund doesn't change <C>status</C>: a refunded payment stays <C>succeeded</C>. Read <C>refundStatus</C> and <C>refundedAmount</C>.</li>
             </ul>

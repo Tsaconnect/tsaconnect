@@ -79,10 +79,22 @@ const (
 	ITStatusBuyAwaitingRate = "buy_awaiting_rate"
 )
 
+// ITStatusOpening is a pool order whose slices are being locked on-chain
+// (spec 2026-10-08 §7.5, S11). Never a claim; it counts as the open buy.
+const ITStatusOpening = "opening"
+
+// Pool failure reasons (spec §7.5, §12.3). pool_open_failed intents are hidden
+// from her lists and never count as abandoned (rate_expires_at is NULL).
+const (
+	ITFailurePoolOpenFailed  = "pool_open_failed"
+	ITFailurePoolSlicesShort = "pool_slices_short"
+)
+
 // Routed stablecoin buy providers (docs/specs/2026-10-03-ramp-flutterwave-provider-design.md §4.2).
 const (
 	ITProviderFlutterwave = "flutterwave" // Flutterwave buys and sends each order
 	ITProviderTreasury    = "treasury"    // the company wallet sells its own stock
+	ITProviderPool        = "tsa_pool"    // TSA Liquidity: LP escrow slices opened by the conversion treasury
 )
 
 // ITStatusRefunded closes a parked stablecoin buy whose naira an operator

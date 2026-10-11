@@ -59,30 +59,34 @@ type PayMerchant struct {
 	// LiveEnabled is this merchant's own live switch, on top of the global
 	// TSA_PAY_LIVE_ENABLED: a live key is refused until a super admin turns it
 	// on. Only the admin merchant update can change it.
-	LiveEnabled             bool      `gorm:"not null;default:false" json:"liveEnabled"`
-	SettlementMode          string    `gorm:"size:8" json:"settlementMode"` // "" until configured
-	BankCode                string    `gorm:"size:16" json:"bankCode,omitempty"`
-	AccountNumber           string    `gorm:"size:32" json:"accountNumber,omitempty"`
-	AccountName             string    `gorm:"size:128" json:"accountName,omitempty"` // always the name enquiry's, never the applicant's
-	ChainID                 int64     `json:"chainId,omitempty"`
-	TokenAddress            string    `gorm:"size:128" json:"tokenAddress,omitempty"`
-	TokenSymbol             string    `gorm:"size:16" json:"tokenSymbol,omitempty"`
-	WalletAddress           string    `gorm:"size:128" json:"walletAddress,omitempty"`
-	CustomerFeeSharePercent int       `gorm:"not null;default:100" json:"customerFeeSharePercent"`
-	MinAmountKobo           int64     `gorm:"not null" json:"minAmount"`
-	MaxAmountKobo           int64     `gorm:"not null" json:"maxAmount"`
-	WebhookURL              string    `gorm:"size:512" json:"webhookUrl"`
-	TestWebhookURL          string    `gorm:"size:512" json:"testWebhookUrl"`
-	WebhookSecretVersion    int       `gorm:"not null;default:1" json:"-"`
-	ReturnDomains           string    `gorm:"size:1024" json:"-"` // comma-separated lowercase hostnames
-	AllowedIPs              string    `gorm:"size:1024" json:"-"` // the live key's allowlist: comma-separated IPs/CIDRs, "" = anywhere (see KeyAllowedFrom)
-	Version                 int       `gorm:"not null;default:1" json:"version"`
-	LiveKeyHash             *string   `gorm:"size:64;uniqueIndex" json:"-"`
-	LiveKeyPrefix           string    `gorm:"size:24" json:"liveKeyPrefix"`
-	TestKeyHash             *string   `gorm:"size:64;uniqueIndex" json:"-"`
-	TestKeyPrefix           string    `gorm:"size:24" json:"testKeyPrefix"`
-	CreatedAt               time.Time `json:"createdAt"`
-	UpdatedAt               time.Time `json:"updatedAt"`
+	LiveEnabled    bool   `gorm:"not null;default:false" json:"liveEnabled"`
+	SettlementMode string `gorm:"size:8" json:"settlementMode"` // "" until configured
+	BankCode       string `gorm:"size:16" json:"bankCode,omitempty"`
+	AccountNumber  string `gorm:"size:32" json:"accountNumber,omitempty"`
+	AccountName    string `gorm:"size:128" json:"accountName,omitempty"` // always the name enquiry's, never the applicant's
+	ChainID        int64  `json:"chainId,omitempty"`
+	TokenAddress   string `gorm:"size:128" json:"tokenAddress,omitempty"`
+	TokenSymbol    string `gorm:"size:16" json:"tokenSymbol,omitempty"`
+	WalletAddress  string `gorm:"size:128" json:"walletAddress,omitempty"`
+	// PayoutChangedAt is when the payout destination last changed (nil: never
+	// since this was recorded). Payments made before it keep their own payout
+	// for a day after it (services.payoutCoolOff).
+	PayoutChangedAt         *time.Time `json:"-"`
+	CustomerFeeSharePercent int        `gorm:"not null;default:100" json:"customerFeeSharePercent"`
+	MinAmountKobo           int64      `gorm:"not null" json:"minAmount"`
+	MaxAmountKobo           int64      `gorm:"not null" json:"maxAmount"`
+	WebhookURL              string     `gorm:"size:512" json:"webhookUrl"`
+	TestWebhookURL          string     `gorm:"size:512" json:"testWebhookUrl"`
+	WebhookSecretVersion    int        `gorm:"not null;default:1" json:"-"`
+	ReturnDomains           string     `gorm:"size:1024" json:"-"` // comma-separated lowercase hostnames
+	AllowedIPs              string     `gorm:"size:1024" json:"-"` // the live key's allowlist: comma-separated IPs/CIDRs, "" = anywhere (see KeyAllowedFrom)
+	Version                 int        `gorm:"not null;default:1" json:"version"`
+	LiveKeyHash             *string    `gorm:"size:64;uniqueIndex" json:"-"`
+	LiveKeyPrefix           string     `gorm:"size:24" json:"liveKeyPrefix"`
+	TestKeyHash             *string    `gorm:"size:64;uniqueIndex" json:"-"`
+	TestKeyPrefix           string     `gorm:"size:24" json:"testKeyPrefix"`
+	CreatedAt               time.Time  `json:"createdAt"`
+	UpdatedAt               time.Time  `json:"updatedAt"`
 }
 
 func (m *PayMerchant) BeforeCreate(tx *gorm.DB) error {
@@ -195,7 +199,7 @@ type PayPayment struct {
 	SettleTokenAddress      string     `gorm:"size:128" json:"-"`
 	SettleTokenSymbol       string     `gorm:"size:16" json:"-"`
 	SettleWalletAddress     string     `gorm:"size:128" json:"-"`
-	ExpiresAt               time.Time  `gorm:"not null;index" json:"expiresAt"`
+	ExpiresAt               *time.Time `gorm:"index" json:"expiresAt"`
 	Status                  string     `gorm:"size:16;not null;index" json:"status"`
 	PayerUserID             *uuid.UUID `gorm:"type:uuid;index" json:"-"`
 	LockedAt                *time.Time `json:"-"`
@@ -247,10 +251,13 @@ type PayOpenLink struct {
 	Label         string    `gorm:"size:80;not null" json:"label"`
 	MinAmountKobo int64     `gorm:"not null;default:0" json:"minAmount"`
 	MaxAmountKobo int64     `gorm:"not null;default:0" json:"maxAmount"`
-	Active        bool      `gorm:"not null;default:true" json:"active"`
-	Version       int       `gorm:"not null;default:1" json:"version"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	// PaymentExpiresIn is how many seconds each payment started through the
+	// link stays payable; 0 is never — the default (owner, 2026-10-09).
+	PaymentExpiresIn int       `gorm:"not null;default:0" json:"paymentExpiresIn"`
+	Active           bool      `gorm:"not null;default:true" json:"active"`
+	Version          int       `gorm:"not null;default:1" json:"version"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 func (l *PayOpenLink) BeforeCreate(tx *gorm.DB) error {

@@ -67,8 +67,8 @@ describe('payment links', () => {
     const dialog = await fillForm({ customer: 'Tolu Adeyemi' });
     // The name is shown on the link, so the form says who can see it.
     expect(within(dialog).getByLabelText('Customer name (optional)')).toHaveAccessibleDescription('Anyone with the link can see this name.');
-    // 7 days unless she picks otherwise.
-    expect(within(dialog).getByRole('radio', { name: '7 days' })).toBeChecked();
+    // No expiry unless she picks one.
+    expect(within(dialog).getByRole('radio', { name: 'No expiry' })).toBeChecked();
     await user.click(within(dialog).getByRole('radio', { name: '3 days' }));
     await user.click(within(dialog).getByRole('button', { name: 'Create link' }));
 
@@ -95,6 +95,36 @@ describe('payment links', () => {
 
     await user.click(within(ready).getByRole('button', { name: 'Done' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('a link made with the default expiry sends no expiresInDays: it never expires', async () => {
+    const f = stubFetch({ '/api/pay/merchant': ok(live), '/api/pay/merchant/links': (url) => (url.includes('page') ? noLinks : created({ ...link, expiresAt: null })) });
+    mountAt('/business/live/links');
+    await openRequest();
+    const dialog = await fillForm();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Create link' }));
+    await screen.findByRole('dialog', { name: 'Your payment link is ready' });
+    const post = posts(f).find(([u]) => u === '/api/pay/merchant/links?mode=live')!;
+    expect(JSON.parse(post[1].body)).toEqual({ amount: 500_000, description: link.description, customerName: '', reference: '' });
+  });
+
+  it('a link with no expiry says so in the list and shows no expiry date in its drawer', async () => {
+    const forever: Payment = { ...link, expiresAt: null };
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/pay/merchant/links': ok({ items: [forever], total: 1, page: 1, limit: 20 }),
+      [`/api/pay/merchant/payments/${link.id}`]: ok({ payment: forever, payer: null, deliveries: [] }),
+    });
+    mountAt('/business/live/links');
+    const row = (await screen.findByRole('link', { name: link.description })).closest('tr')!;
+    expect(within(row).getByText('No expiry')).toBeInTheDocument();
+    // Never the epoch a null date would format to.
+    expect(within(row).queryByText(/1 Jan/)).not.toBeInTheDocument();
+    await userEvent.click(within(row).getByRole('link', { name: link.description }));
+    const drawer = await screen.findByRole('dialog', { name: link.reference });
+    expect(within(drawer).getByText('Created')).toBeInTheDocument();
+    expect(within(drawer).queryByText('Expires')).not.toBeInTheDocument();
+    expect(within(drawer).queryByText(/1 Jan/)).not.toBeInTheDocument();
   });
 
   it('says what is missing before sending anything', async () => {

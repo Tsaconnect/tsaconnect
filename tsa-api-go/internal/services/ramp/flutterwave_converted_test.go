@@ -46,10 +46,10 @@ func TestFlutterwaveQuoteConverted_VenueCarriesTheLiFiLineAfterFlutterwavesFees(
 		v.EffectiveRate != "1743.31" || v.ViaChain != "polygon" || v.ViaToken != "USDC" || v.RequestedToken != "USDT" {
 		t.Fatalf("venue = %+v", v)
 	}
-	if len(v.Fees) != 4 || v.Fees[0].Provider != "Flutterwave" || v.Fees[1].Provider != "Flutterwave" || v.Fees[2].Provider != "Flutterwave" {
+	if len(v.Fees) != 4 || v.Fees[0].Provider != "provider" || v.Fees[1].Provider != "provider" || v.Fees[2].Provider != "provider" {
 		t.Fatalf("fees = %+v", v.Fees)
 	}
-	if last := v.Fees[3]; last.Label != "Conversion (provider)" || last.Provider != "LiFi" || last.Kind != "conversion" || last.Token != "0.47569" {
+	if last := v.Fees[3]; last.Label != "Conversion (provider)" || last.Provider != "provider" || last.Kind != "conversion" || last.Token != "0.47569" {
 		t.Fatalf("LiFi line = %+v", last)
 	}
 	if leg := pricer.legs[0]; leg.ChainKey != "polygon" || leg.Token != "USDC" || leg.Delivered.Cmp(big.NewInt(95_137_885)) != 0 {

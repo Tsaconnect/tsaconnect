@@ -23,6 +23,8 @@ import { getChainByChainId } from '../../constants/chains';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
 import { lpCta } from '@/utils/lpCta';
+import { liquidityApi, type PoolCard } from '@/services/liquidityApi';
+import { poolCardView } from '@/utils/poolCard';
 import { RAILS, railLabel } from '../../constants/rails';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import CurrencySelector from '../../components/currency/CurrencySelector';
@@ -86,6 +88,8 @@ const P2PMarketScreen: React.FC = () => {
   // ── Chain / token data from the backend ─────────────────────────────────
   const [enabledChains, setEnabledChains] = useState<P2PChainInfo[]>([]);
   const [chainsFetched, setChainsFetched] = useState(false);
+  // The pinned TSA Connect card; null while the pool is dormant or unreachable.
+  const [poolCard, setPoolCard] = useState<PoolCard | null>(null);
 
   // Derive the selectable token list from the union of assets; fall back to
   // FALLBACK_TOKENS if the endpoint hasn't responded yet or returned an error.
@@ -120,6 +124,14 @@ const P2PMarketScreen: React.FC = () => {
       }
     })();
   }, []);
+
+  // Re-read on every focus and pull-to-refresh, not just on mount: the card's
+  // availability, rate and limits move, and a card that has stopped filling
+  // must stop being tappable.
+  const loadPoolCard = useCallback(() => {
+    liquidityApi.poolCard().then((r) => setPoolCard(r.success ? r.data ?? null : null)).catch(() => setPoolCard(null));
+  }, []);
+  useFocusEffect(loadPoolCard);
 
   const load = useCallback(async () => {
     setError(null);
@@ -217,6 +229,7 @@ const P2PMarketScreen: React.FC = () => {
             onRefresh={() => {
               setRefreshing(true);
               load();
+              loadPoolCard();
             }}
           />
         }
@@ -298,6 +311,34 @@ const P2PMarketScreen: React.FC = () => {
               </AccentCard>
             </PressableScale>
           ) : null;
+        })()}
+
+        {(() => {
+          const v = poolCardView(poolCard, adSide);
+          if (!v) return null;
+          return (
+            <PressableScale
+              disabled={v.disabled}
+              onPress={() => v.route && router.push(v.route as never)}
+              style={{ marginBottom: spacing.lg, opacity: v.disabled ? 0.6 : 1 }}
+            >
+              <AccentCard padding="md">
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                  <Icon name="verified" size={24} color={colors.accent} />
+                  <View style={{ flex: 1 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                      <Text variant="bodyMed" weight="700">{v.title}</Text>
+                      <Badge label={v.badge} size="sm" color={colors.accent} background={colors.accentMuted} />
+                    </View>
+                    {v.lines.map((line) => (
+                      <Text key={line} variant="caption" color="textSecondary">{line}</Text>
+                    ))}
+                  </View>
+                  {!v.disabled && <Icon name="chevronRight" size={20} color={colors.textMuted} />}
+                </View>
+              </AccentCard>
+            </PressableScale>
+          );
         })()}
 
         {/* Filter row — Token always; Chain (when >1 chain offers the token);

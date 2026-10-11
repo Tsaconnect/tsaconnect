@@ -35,6 +35,10 @@ export const TERMINAL_STATUSES: PayStatus[] = ['succeeded', 'failed', 'expired']
 // that can't land.
 const EXPIRY_WARNING_MS = 5 * 60 * 1000;
 
+/** A payment's expiry in ms: Infinity when it has none (null), NaN when it isn't known or doesn't parse. */
+export const paymentExpiryMs = (expiresAt: string | null | undefined): number =>
+  (expiresAt === null ? Infinity : expiresAt ? Date.parse(expiresAt) : NaN);
+
 export function payScreenState(input: {
   id: unknown;
   authed: boolean;
@@ -74,8 +78,8 @@ export function payScreenState(input: {
     };
   }
 
-  const msLeft = new Date(checkout.expiresAt).getTime() - now;
-  if (msLeft < EXPIRY_WARNING_MS && !attemptActive) {
+  // A payment with no expiry (Infinity) has no deadline to warn about; one that doesn't parse (NaN) neither.
+  if (paymentExpiryMs(checkout.expiresAt) - now < EXPIRY_WARNING_MS && !attemptActive) {
     return {
       kind: 'blocked',
       checkout,

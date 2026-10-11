@@ -21,6 +21,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { Href } from 'expo-router';
 import { isPaymentId } from '@/utils/paymentId';
+import { paymentExpiryMs } from '@/utils/payCheckout';
 
 export const PENDING_PAY_KEY = 'tsapay.pendingPayment';
 
@@ -34,8 +35,10 @@ type Pending = { id: string; savedAt: number; until?: number };
 
 /**
  * Remembers a payment to return to after sign-in, signup or KYC — until
- * `expiresAt` (the payment's own expiry, capped at 7 days), or 30 minutes when
- * that isn't known. Silently does nothing for anything that isn't a real payment id.
+ * `expiresAt` (the payment's own expiry, capped at 7 days; null is a payment
+ * that never expires, so the full 7 days), or 30 minutes when that isn't known
+ * (undefined, or a time that doesn't parse). Silently does nothing for anything
+ * that isn't a real payment id.
  *
  * Never throws: it runs just before navigating (Sign in, Create an account,
  * Verify identity), and a storage failure must cost only the return trip, never
@@ -43,12 +46,12 @@ type Pending = { id: string; savedAt: number; until?: number };
  */
 export async function rememberPendingPayment(
   id: string,
-  opts: { expiresAt?: string; now?: number } = {},
+  opts: { expiresAt?: string | null; now?: number } = {},
 ): Promise<void> {
   if (!isPaymentId(id)) return;
   const now = opts.now ?? Date.now();
-  const expires = opts.expiresAt ? Date.parse(opts.expiresAt) : NaN;
-  const until = Number.isFinite(expires) ? Math.min(expires, now + MAX_TTL_MS) : now + DEFAULT_TTL_MS;
+  const expires = paymentExpiryMs(opts.expiresAt);
+  const until = Number.isNaN(expires) ? now + DEFAULT_TTL_MS : Math.min(expires, now + MAX_TTL_MS);
   const pending: Pending = { id, savedAt: now, until };
   try {
     await AsyncStorage.setItem(PENDING_PAY_KEY, JSON.stringify(pending));

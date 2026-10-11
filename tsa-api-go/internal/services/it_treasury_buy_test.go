@@ -1,9 +1,12 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -309,5 +312,20 @@ func TestITService_DormantWalletAccessorsAreNilSafe(t *testing.T) {
 	s, _ := newRoutedBuyService(t)
 	if s.TreasuryChains() != nil || s.TreasuryTokens("base") != nil || s.TreasuryCanPayGas(context.Background(), "base") {
 		t.Fatal("a dormant wallet must offer nothing")
+	}
+}
+
+// Review M-10: the company wallet's daily-cap metric keeps its "[it treasury
+// buy]" prefix, which log-based dashboards grep.
+func TestCheckTreasuryDailyCap_KeepsItsLogPrefix(t *testing.T) {
+	s, userID, _ := newTreasuryBuyService(t, 50_000_000)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	if err := s.CheckTreasuryDailyCap(context.Background(), userID, big.NewInt(600_000_000)); !errors.Is(err, ErrTreasuryDailyCapReached) {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if !strings.Contains(buf.String(), "[it treasury buy] METRIC ramp_treasury_daily_cap_hit") {
+		t.Fatalf("log = %q", buf.String())
 	}
 }

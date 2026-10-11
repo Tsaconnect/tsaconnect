@@ -47,7 +47,7 @@ func payRefundRoutesPaid(t *testing.T, db *gorm.DB, m *models.PayMerchant, ref s
 	at := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	p := &models.PayPayment{MerchantID: m.ID, Mode: models.PayModeTest, Reference: ref, AmountKobo: 1_500_000, Currency: "NGN",
 		Source: models.PaySourceLink, FeeBps: 100, CustomerFeeSharePercent: 100, CustomerTotalKobo: 1_500_000, MerchantNetKobo: 1_485_000,
-		SettlementMode: models.PaySettlementFiat, ExpiresAt: at.Add(time.Hour), Status: models.PayStatusSucceeded, SucceededAt: &at, PayerUserID: &payer.ID}
+		SettlementMode: models.PaySettlementFiat, Status: models.PayStatusSucceeded, SucceededAt: &at, PayerUserID: &payer.ID}
 	if err := db.Create(p).Error; err != nil {
 		t.Fatal(err)
 	}

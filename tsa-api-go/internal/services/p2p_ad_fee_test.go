@@ -12,15 +12,15 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// countingChain counts every chain read and, when hang is set, blocks each one
+// countingFeeChain counts every chain read and, when hang is set, blocks each one
 // until the test ends: a fee read that must never happen, or one that is slow.
-type countingChain struct {
+type countingFeeChain struct {
 	inner *feeViewChain
 	hang  chan struct{}
 	calls atomic.Int32
 }
 
-func (c *countingChain) CallContract(ctx context.Context, call ethereum.CallMsg, n *big.Int) ([]byte, error) {
+func (c *countingFeeChain) CallContract(ctx context.Context, call ethereum.CallMsg, n *big.Int) ([]byte, error) {
 	c.calls.Add(1)
 	if c.hang != nil {
 		<-c.hang
@@ -28,9 +28,9 @@ func (c *countingChain) CallContract(ctx context.Context, call ethereum.CallMsg,
 	return c.inner.CallContract(ctx, call, n)
 }
 
-func newCountingFeeView(t *testing.T, hang bool) (*P2PFeeView, *countingChain) {
+func newCountingFeeView(t *testing.T, hang bool) (*P2PFeeView, *countingFeeChain) {
 	t.Helper()
-	cc := &countingChain{inner: &feeViewChain{feeManager: true, rates: map[string][4]interface{}{
+	cc := &countingFeeChain{inner: &feeViewChain{feeManager: true, rates: map[string][4]interface{}{
 		"p2p_platform": {uint16(50), uint64(0), false, true},
 		"p2p":          {uint16(10), uint64(0), false, true},
 	}}}

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // P2P trades as a source of inbound naira claims, plus the instant forward of
@@ -159,11 +160,13 @@ func (s *P2PTradeClaimSource) OpenClaims(ctx context.Context, currency string) (
 	var rows []p2pClaimRow
 	if err := s.db.WithContext(ctx).
 		Table("p2p_trades").
+		Scopes(notPoolSlice).
 		Select("p2p_trades.id, p2p_trades.buyer_id, p2p_trades.fiat_amount, p2p_trades.fiat_currency, p2p_trades.created_at").
 		Joins("JOIN p2p_ads ON p2p_ads.id = p2p_trades.ad_id").
 		Where("p2p_ads.pm_id IS NOT NULL").
 		Where("p2p_ads.side = ?", models.P2PAdSideSell).
 		Where("p2p_trades.status = ?", models.P2PTradeStatusPendingPayment).
+		Where("p2p_trades.dropped_at IS NULL"). // the expiry canceller has decided (plan C1 P15)
 		Where("p2p_trades.funding = ?", models.P2PTradeFundingPooled).
 		Where("p2p_trades.open_tx_hash <> ?", "").
 		Where("p2p_trades.fiat_currency = ?", cur).
@@ -236,6 +239,9 @@ func (s *P2PTradeClaimSource) Accept(ctx context.Context, claimID uuid.UUID, cre
 			return ErrTradeNotFound
 		}
 		return err
+	}
+	if err := hideSlice(&trade); err != nil {
+		return err // a pool slice is settled only by the pool's own path (§12.3)
 	}
 	// Re-asserted from the trade itself rather than trusted from OpenClaims.
 	// The manual-assign path reaches here with a hand-typed claim id and never
@@ -424,6 +430,18 @@ func (s *P2PTradeClaimSource) claimAndCredit(
 
 	fresh := true
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The expiry canceller decides under this same row lock (plan C1
+		// P15): either it has already decided and no credit may land, or this
+		// forward row commits first and the canceller refuses the trade.
+		var cur models.P2PTrade
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "dropped_at").
+			First(&cur, "id = ?", trade.ID).Error; err != nil {
+			return err
+		}
+		if cur.DroppedAt != nil {
+			return fmt.Errorf("%w: trade %s expired and is being cancelled; credit %s must not settle it",
+				ErrInvalidTransition, trade.ID, ref)
+		}
 		if err := tx.Create(forward).Error; err != nil {
 			if isUniqueViolation(err) {
 				// Re-read on provider_ref ALONE. trade_id is unique too, so

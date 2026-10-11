@@ -34,11 +34,12 @@ import {
 } from '@/services/payMerchantApi';
 import { errorCode, errorMessage } from '@/utils/payCheckout';
 import {
-  koboFromNairaInput, LINK_OPEN_DAYS, nairaInputError, openLinkRangeFrom, payLinkShareMessage, type LinkOpenDays,
+  koboFromNairaInput, LINK_OPEN_DAYS, nairaInputError, openLinkPaymentExpiryOptions, openLinkRangeFrom,
+  payLinkShareMessage, type LinkOpenDays,
 } from '@/utils/payLinks';
 import { formatKobo } from '@/utils/stableSellQuote';
 
-const DAYS_LABEL: Record<LinkOpenDays, string> = { 1: '1 day', 3: '3 days', 7: '7 days' };
+const DAYS_LABEL: Record<LinkOpenDays, string> = { 0: 'No expiry', 1: '1 day', 3: '3 days', 7: '7 days' };
 
 type LinkKind = 'once' | 'open';
 const KINDS: { value: LinkKind; label: string; sublabel: string }[] = [
@@ -63,12 +64,13 @@ function NewLinkForm({ merchant, listMode }: { merchant: OwnMerchant; listMode?:
   const [label, setLabel] = useState('');
   const [min, setMin] = useState('');
   const [max, setMax] = useState('');
+  const [paymentExpiresIn, setPaymentExpiresIn] = useState(0);
   const [labelError, setLabelError] = useState<string | undefined>();
   const [rangeErrors, setRangeErrors] = useState<Partial<Record<'min' | 'max', string>>>({});
   const [description, setDescription] = useState('');
   const [customerName, setCustomerName] = useState('');
   const [reference, setReference] = useState('');
-  const [days, setDays] = useState<LinkOpenDays>(7);
+  const [days, setDays] = useState<LinkOpenDays>(0);
   // The server refused a live link (live is off for her): she chose a test one instead.
   const [testInstead, setTestInstead] = useState(false);
 
@@ -118,7 +120,7 @@ function NewLinkForm({ merchant, listMode }: { merchant: OwnMerchant; listMode?:
     setLabelError(labelWhy);
     setRangeErrors('errors' in range ? range.errors : {});
     if (labelWhy || 'errors' in range) return;
-    const input = { label: label.trim(), ...range.range };
+    const input = { label: label.trim(), ...range.range, paymentExpiresIn };
     const key = keyFor(JSON.stringify(['open', mode, input]));
     await send(async () => {
       const made = await createOpenLink(mode, input, key);
@@ -141,7 +143,8 @@ function NewLinkForm({ merchant, listMode }: { merchant: OwnMerchant; listMode?:
       description: description.trim(),
       customerName: customerName.trim() || undefined,
       reference: reference.trim() || undefined,
-      expiresInDays: days,
+      // No expiry is the field left out (an older server reads that as its 7-day default).
+      expiresInDays: days || undefined,
     };
     const key = keyFor(JSON.stringify(['once', mode, input]));
     await send(async () => {
@@ -155,7 +158,7 @@ function NewLinkForm({ merchant, listMode }: { merchant: OwnMerchant; listMode?:
     setDescription('');
     setCustomerName('');
     setReference('');
-    setDays(7);
+    setDays(0);
   };
 
   const seeAll = (made: PayLink) => {
@@ -214,6 +217,14 @@ function NewLinkForm({ merchant, listMode }: { merchant: OwnMerchant; listMode?:
               error={rangeErrors.max}
               helper="Leave both blank to take any amount within your TSA Pay limits."
             />
+            <View style={{ gap: spacing.xs }}>
+              <Text variant="bodySm" weight="600" color="textSecondary">Each payment expires after</Text>
+              <SegmentedControl<string>
+                segments={openLinkPaymentExpiryOptions(0)}
+                value={String(paymentExpiresIn)}
+                onChange={(k) => setPaymentExpiresIn(Number(k))}
+              />
+            </View>
           </>
         ) : (
           <>

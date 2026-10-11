@@ -73,12 +73,15 @@ describe('reusable payment links', () => {
     await user.type(within(dialog).getByLabelText('Label'), openLink.label);
     await user.clear(within(dialog).getByLabelText('Maximum (₦, optional)'));
     await user.type(within(dialog).getByLabelText('Maximum (₦, optional)'), '50,000');
+    // Payments from it never expire unless she picks a time.
+    expect(within(dialog).getByRole('radio', { name: 'No expiry' })).toBeChecked();
+    await user.click(within(dialog).getByRole('radio', { name: '1 hour' }));
     await user.click(within(dialog).getByRole('button', { name: 'Create link' }));
 
     const ready = await screen.findByRole('dialog', { name: 'Your reusable link is ready' });
     const [url, init] = posts(f)[0];
     expect(url).toBe('/api/pay/merchant/open-links?mode=live');
-    expect(JSON.parse(init.body)).toEqual({ label: openLink.label, minAmount: 200_000, maxAmount: 5_000_000 });
+    expect(JSON.parse(init.body)).toEqual({ label: openLink.label, minAmount: 200_000, maxAmount: 5_000_000, paymentExpiresIn: 3600 });
     expect(init.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
     expect(within(ready).getByText(/From ₦2,000.00 to ₦50,000.00/)).toBeInTheDocument();
     expect(within(ready).getByText(made.url)).toBeInTheDocument();
@@ -177,7 +180,8 @@ describe('reusable payment links', () => {
       .toHaveAttribute('href', `/business/live/payments/${withNote.id}`);
     expect(within(drawer).getByRole('link', { name: /print poster/i })).toHaveAttribute('href', `/business/live/links/open/${openLink.id}/poster`);
 
-    // Pause: every setting goes back as it was, with active off, against the version on screen.
+    // Pause: every setting goes back as it was, with active off, against the version on screen
+    // (this link comes from an older API with no paymentExpiresIn, so none is sent).
     f.mockImplementationOnce(async () => ok({ ...current, active: false, takingPayments: false, notTakingReason: 'paused', version: current.version + 1 }));
     await userEvent.click(within(drawer).getByRole('button', { name: 'Pause' }));
     expect(await within(drawer).findByText(/Paused\. Customers who open this link/)).toBeInTheDocument();
@@ -197,6 +201,59 @@ describe('reusable payment links', () => {
     await userEvent.click(within(drawer).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/business\/live\/links$/));
     expect(screen.getByRole('radio', { name: 'Reusable' })).toBeChecked();
+  });
+
+  it('Pause keeps the link\'s payment expiry as it is', async () => {
+    const timed = { ...openLink, paymentExpiresIn: 1800 };
+    const f = stubFetch({
+      '/api/pay/merchant': ok(live),
+      '/api/pay/merchant/open-links': noLinks,
+      [`/api/pay/merchant/open-links/${openLink.id}`]: ok({ openLink: timed, payments: [] }),
+    });
+    mountAt(`/business/live/links/open/${openLink.id}?type=reusable`);
+    const drawer = await screen.findByRole('dialog', { name: openLink.label });
+    f.mockImplementationOnce(async () => ok({ ...timed, active: false, takingPayments: false, notTakingReason: 'paused', version: 4 }));
+    await userEvent.click(within(drawer).getByRole('button', { name: 'Pause' }));
+    expect(await within(drawer).findByRole('button', { name: 'Resume' })).toBeInTheDocument();
+    const put = f.mock.calls.find(([, init]) => init?.method === 'PUT')!;
+    expect(JSON.parse(put[1].body)).toEqual({ label: openLink.label, minAmount: 100_000, maxAmount: 0, paymentExpiresIn: 1800, active: false, expectedVersion: 3 });
+  });
+
+  it('Edit shows the payment expiry the link has, and clearing it sends 0', async () => {
+    const f = stubFetch({
+      '/api/pay/merchant': ok(live),
+      '/api/pay/merchant/open-links': noLinks,
+      [`/api/pay/merchant/open-links/${openLink.id}`]: ok({ openLink: { ...openLink, paymentExpiresIn: 1800 }, payments: [] }),
+    });
+    mountAt(`/business/live/links/open/${openLink.id}?type=reusable`);
+    const drawer = await screen.findByRole('dialog', { name: openLink.label });
+    await userEvent.click(within(drawer).getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit link' });
+    expect(within(dialog).getByRole('radio', { name: '30 min' })).toBeChecked();
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'No expiry' }));
+    f.mockImplementationOnce(async () => ok({ ...openLink, paymentExpiresIn: 0, version: 4 }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit link' })).not.toBeInTheDocument());
+    const put = f.mock.calls.find(([, init]) => init?.method === 'PUT')!;
+    expect(JSON.parse(put[1].body)).toEqual({ label: openLink.label, minAmount: 100_000, maxAmount: 0, paymentExpiresIn: 0, active: true, expectedVersion: 3 });
+  });
+
+  it('Edit keeps a payment expiry set elsewhere that isn\'t one of the choices', async () => {
+    const f = stubFetch({
+      '/api/pay/merchant': ok(live),
+      '/api/pay/merchant/open-links': noLinks,
+      [`/api/pay/merchant/open-links/${openLink.id}`]: ok({ openLink: { ...openLink, paymentExpiresIn: 900 }, payments: [] }),
+    });
+    mountAt(`/business/live/links/open/${openLink.id}?type=reusable`);
+    const drawer = await screen.findByRole('dialog', { name: openLink.label });
+    await userEvent.click(within(drawer).getByRole('button', { name: 'Edit' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Edit link' });
+    expect(within(dialog).getByRole('radio', { name: '15 min' })).toBeChecked();
+    f.mockImplementationOnce(async () => ok({ ...openLink, paymentExpiresIn: 900, version: 4 }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(f.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
+    const put = f.mock.calls.find(([, init]) => init?.method === 'PUT')!;
+    expect(JSON.parse(put[1].body).paymentExpiresIn).toBe(900);
   });
 
   it('a link that can\'t be paid says why, with the way to fix it', async () => {
@@ -255,7 +312,7 @@ describe('reusable payment links', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit link' })).not.toBeInTheDocument());
     const put = f.mock.calls.find(([, init]) => init?.method === 'PUT')!;
     expect(put[0]).toBe(`/api/pay/merchant/open-links/${openLink.id}?mode=live`);
-    expect(JSON.parse(put[1].body)).toEqual({ label: 'Ikeja desk', minAmount: 100_000, maxAmount: 2_000_000, active: true, expectedVersion: 3 });
+    expect(JSON.parse(put[1].body)).toEqual({ label: 'Ikeja desk', minAmount: 100_000, maxAmount: 2_000_000, paymentExpiresIn: 0, active: true, expectedVersion: 3 });
     expect(await screen.findByRole('dialog', { name: 'Ikeja desk' })).toBeInTheDocument();
     expect(screen.getByText('From ₦1,000.00 to ₦20,000.00')).toBeInTheDocument();
   });

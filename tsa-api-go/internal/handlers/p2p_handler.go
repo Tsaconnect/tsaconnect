@@ -44,6 +44,9 @@ type P2PHandler struct {
 	// gas drips S for the caller's next P2P tx; nil while the Sonic sponsor
 	// lane is dormant (GasTopUp then answers 503 gas_unavailable).
 	gas P2PGasSponsor
+	// poolCard serves the pinned TSA Connect card (spec §15); nil while the
+	// pool is dormant (P17: the app shows nothing).
+	poolCard PoolCardSource
 }
 
 // CentralAccountSource is the single thing the PM buy screens need from the IT
@@ -1894,7 +1897,8 @@ func (h *P2PHandler) RateTrade(c *gin.Context) {
 		return
 	}
 	var trade models.P2PTrade
-	if err := h.db.First(&trade, "id = ?", tradeID).Error; err != nil {
+	// A pool slice answers exactly as a missing trade: no user rates pool money.
+	if err := h.db.First(&trade, "id = ?", tradeID).Error; err != nil || trade.IsPoolSlice() {
 		c.JSON(http.StatusNotFound, gin.H{"success": false, "message": "trade not found"})
 		return
 	}
