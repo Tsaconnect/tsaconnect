@@ -148,11 +148,15 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 	}
 	octx, cancel := context.WithTimeout(ctx, redeliverOpenBudget)
 	defer cancel()
-	opens, _, feeBroken := d.openAndProve(octx, intent, p, written)
+	opens, _, feeBroken := d.openAndProve(octx, intent, p, written, exclude)
 	if feeBroken || !allProven(opens, owed.String(), d) {
-		ids := make([]uuid.UUID, len(written))
-		for i := range written {
-			ids[i] = written[i].ID
+		// Review m-3: every slice this re-delivery opened, its re-picks
+		// included; a failed one already re-picked was reclaimed (cancelled).
+		var ids []uuid.UUID
+		for _, o := range opens {
+			if !o.repick {
+				ids = append(ids, o.slice.ID)
+			}
 		}
 		if dropped, err := d.dropSlices(s.db.WithContext(detached(ctx)), ids, d.now()); err != nil || len(dropped) != len(ids) {
 			log.Printf("[liquidity] ALERT liquidity_pool_redeliver_drop_incomplete intent=%s gen=%d asked=%d dropped=%d — check the new slices by hand",

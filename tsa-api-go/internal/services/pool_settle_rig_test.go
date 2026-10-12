@@ -212,7 +212,7 @@ func poolSettleRigOn(t *testing.T, base *poolOpenRig, freeWhole ...int64) *poolS
 			"settlement_bank_code": "058", "settlement_account_number": "0123456789", "settlement_account_name": "LP " + lp.ID.String()[:4]})
 		r.lps = append(r.lps, lp)
 	}
-	if err := r.db.AutoMigrate(&models.RampLeg{}); err != nil {
+	if err := r.db.AutoMigrate(&models.RampLeg{}, &models.JobRunMarker{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.db.Exec(models.RampLegsOneLiveSaleIndexSQL).Error; err != nil {

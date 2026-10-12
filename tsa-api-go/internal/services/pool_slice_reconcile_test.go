@@ -120,7 +120,7 @@ func TestReconcileOrphanOpen_SliceNeedsConsumedNonce(t *testing.T) {
 	nonce := int64(15)
 	old := time.Now().Add(-2 * time.Hour)
 	withNonce := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), Nonce: &nonce, CreatedAt: old})
-	unminedHash := "0x" + strings.Repeat("c3", 32) // broadcast, never mined: no receipt
+	unminedHash := "0x" + strings.Repeat("c3", 32)                                                         // broadcast, never mined: no receipt
 	r.db.Model(&models.P2PTrade{}).Where("id = ?", withNonce.ID).UpdateColumn("open_tx_hash", unminedHash) // keeps updated_at at the seed time
 	noNonce := seedPoolSlice(t, r.db, sliceSeed{Intent: r.userID, Ad: ad, Units: usdt18(3), CreatedAt: old})
 	r.chain.latest = 15 // nonce 15 not yet used

@@ -90,7 +90,7 @@ func (s *ITService) backfillPoolForwards(ctx context.Context) {
 		log.Printf("[liquidity] back-fill read: %s", RedactAlertText(err.Error()))
 		return
 	}
-	need := uint64(max(1, s.treasuryLimits().confirmations))
+	need := s.saleDepth()
 	for i := range rows {
 		sl := &rows[i]
 		if sl.DroppedAt == nil {

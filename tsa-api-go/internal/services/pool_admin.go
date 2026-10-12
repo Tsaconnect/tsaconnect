@@ -38,13 +38,6 @@ func (s *ITService) refundPoolBuy(ctx context.Context, adminID, intentID uuid.UU
 		if intent.Status != models.ITStatusPaymentReceived && intent.Status != models.ITStatusBuyAwaitingRate {
 			return fmt.Errorf("%w: a TSA pool buy is refundable only while paid and undelivered (status %s)", ErrITBadState, intent.Status)
 		}
-		// Never refund and deliver: a sale leg in flight or done is her delivery.
-		if leg, err := liveSaleLegOn(ctx, tx, intentID); err != nil || leg != nil {
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("%w: a TSA pool buy with a sale in flight is never refunded", ErrITBadState)
-		}
 		var slices []models.P2PTrade
 		if err := tx.Where("it_intent_id = ?", intentID).Find(&slices).Error; err != nil {
 			return err
@@ -54,23 +47,8 @@ func (s *ITService) refundPoolBuy(ctx context.Context, adminID, intentID uuid.UU
 			return fmt.Errorf("%w: a TSA pool buy with a slice at the treasury (%s) must be delivered, never refunded — re-deliver it",
 				ErrITBadState, strings.Join(at, ", "))
 		}
-		res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intentID, intent.Status).
-			Updates(map[string]any{"status": models.ITStatusRefunded, "failure_reason": "refunded by an operator"})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected != 1 {
-			return fmt.Errorf("%w: the order moved while the refund was recorded", ErrITBadState)
-		}
-		if err := d.dropAllSlices(tx, live, d.now()); err != nil {
-			return err
-		}
-		if err := markConversion(ctx, tx, intentID, []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending},
-			map[string]any{"status": models.PaycrestStatusCancelled, "failure_reason": "refunded in naira by an operator"}); err != nil {
-			return err
-		}
 		from = intent.Status
-		return auditIntent(tx, intentID, adminID, models.ITAuditStableBuyRefunded, note, map[string]any{
+		return s.writePoolRefund(ctx, tx, &intent, live, adminID, models.ITAuditStableBuyRefunded, note, "an operator", map[string]any{
 			"receivedAmount": intent.ReceivedAmount, "provider": models.ITProviderPool, "fromStatus": intent.Status, "parkedReason": intent.FailureReason})
 	})
 	if err != nil {
@@ -78,6 +56,38 @@ func (s *ITService) refundPoolBuy(ctx context.Context, adminID, intentID uuid.UU
 	}
 	log.Printf("[liquidity] METRIC ramp_it_refunded intent=%s provider=tsa_pool from=%s admin=%s", intentID, from, adminID)
 	return s.getIntent(ctx, intentID)
+}
+
+// writePoolRefund is the write S37's refund and its super-admin override
+// share (review m-6), under the caller's pool lock and intent row lock: never
+// with a live sale leg (her delivery — review m-7), the intent CAS to
+// refunded from the status the caller read, every live slice dropped or the
+// whole refund rolled back, the conversion record cancelled, audited.
+func (s *ITService) writePoolRefund(ctx context.Context, tx *gorm.DB, intent *models.ITIntent, live []uuid.UUID,
+	adminID uuid.UUID, action, note, by string, meta map[string]any) error {
+	if leg, err := liveSaleLegOn(ctx, tx, intent.ID); err != nil || leg != nil {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: a TSA pool buy with a sale in flight is never refunded", ErrITBadState)
+	}
+	res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intent.ID, intent.Status).
+		Updates(map[string]any{"status": models.ITStatusRefunded, "failure_reason": "refunded by " + by})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("%w: the order moved while the refund was recorded", ErrITBadState)
+	}
+	d := s.poolDesk
+	if err := d.dropAllSlices(tx, live, d.now()); err != nil {
+		return err
+	}
+	if err := markConversion(ctx, tx, intent.ID, []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending},
+		map[string]any{"status": models.PaycrestStatusCancelled, "failure_reason": "refunded in naira by " + by}); err != nil {
+		return err
+	}
+	return auditIntent(tx, intent.ID, adminID, action, note, meta)
 }
 
 // poolRefundSlices splits an order's slices for S37: the ones at the
@@ -318,39 +328,22 @@ func (s *ITService) RefundPoolBuyOverride(ctx context.Context, adminID, intentID
 		if err := tx.Where("it_intent_id = ?", intentID).Find(&slices).Error; err != nil {
 			return err
 		}
-		var live []uuid.UUID
 		for _, sl := range slices {
-			switch {
-			case sliceAtTreasury(sl.Status, sl.DroppedAt, sl.ReleaseTxHash, sl.CancelReason):
-				var n int64
-				if err := tx.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", sl.ID).Count(&n).Error; err != nil {
-					return err
-				}
-				if (sl.Status != models.P2PTradeStatusReleased && sl.Status != models.P2PTradeStatusResolved) || n == 0 {
-					return fmt.Errorf("%w: slice %s is not yet released and its LP forwarded — wait for the books pass", ErrITBadState, sl.ID)
-				}
-				held.Add(held, d.toCanonical(sl.TokenAmount))
-			case sl.DroppedAt == nil && (sl.Status == models.P2PTradeStatusPendingPayment || sl.Status == models.P2PTradeStatusPaid):
-				live = append(live, sl.ID)
+			if !sliceAtTreasury(sl.Status, sl.DroppedAt, sl.ReleaseTxHash, sl.CancelReason) {
+				continue
 			}
+			var n int64
+			if err := tx.Model(&models.P2PSettlementForward{}).Where("trade_id = ?", sl.ID).Count(&n).Error; err != nil {
+				return err
+			}
+			if (sl.Status != models.P2PTradeStatusReleased && sl.Status != models.P2PTradeStatusResolved) || n == 0 {
+				return fmt.Errorf("%w: slice %s is not yet released and its LP forwarded — wait for the books pass", ErrITBadState, sl.ID)
+			}
+			held.Add(held, d.toCanonical(sl.TokenAmount))
 		}
-		res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intentID, models.ITStatusBuyAwaitingRate).
-			Updates(map[string]any{"status": models.ITStatusRefunded, "failure_reason": "refunded by a super-admin override"})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected != 1 {
-			return fmt.Errorf("%w: the order moved while the override was recorded", ErrITBadState)
-		}
-		if err := d.dropAllSlices(tx, live, d.now()); err != nil {
-			return err
-		}
-		if err := markConversion(ctx, tx, intentID, []string{models.PaycrestStatusAwaitingPayment, models.PaycrestStatusPending},
-			map[string]any{"status": models.PaycrestStatusCancelled, "failure_reason": "refunded in naira by a super-admin override"}); err != nil {
-			return err
-		}
-		return auditIntent(tx, intentID, adminID, models.ITAuditPoolRefundOverride, note, map[string]any{
-			"receivedAmount": intent.ReceivedAmount, "treasuryHeldUnits": held.String()})
+		_, live := poolRefundSlices(slices)
+		return s.writePoolRefund(ctx, tx, &intent, live, adminID, models.ITAuditPoolRefundOverride, note, "a super-admin override",
+			map[string]any{"receivedAmount": intent.ReceivedAmount, "treasuryHeldUnits": held.String()})
 	})
 	if err != nil {
 		return nil, err

@@ -157,9 +157,11 @@ func TestPoolLate_SliceCancelledUnderPaidOrderReevaluates(t *testing.T) {
 }
 
 // F22 on a paid order: the LP released it themselves — counts once proven,
-// with the hash found from the escrow's TradeReleased log.
-func TestPoolSlice_SelfReleasePaidIsProven(t *testing.T) {
+// with the hash found from the escrow's TradeReleased log, and its LP is
+// forwarded automatically (review m-9: the Review-Focus name's promise).
+func TestPoolSlice_SelfReleasePaidIsProvenAndForwarded(t *testing.T) {
 	r := newPoolSettleRig(t, 50)
+	_, gw, _ := r.wireForwards(t)
 	intent := r.openPaid(t, "5000")
 	sl := r.slicesOf(t, intent.ID)[0]
 	id := HashID(sl.ID)
@@ -175,6 +177,10 @@ func TestPoolSlice_SelfReleasePaidIsProven(t *testing.T) {
 	if !strings.EqualFold(got.ReleaseTxHash, self.Hex()) || len(r.sender.sends) != 0 || len(r.legs(t, intent.ID)) != 1 {
 		t.Fatalf("hash=%s sends=%d legs=%d, want the self-release found, no second release, delivered",
 			got.ReleaseTxHash, len(r.sender.sends), len(r.legs(t, intent.ID)))
+	}
+	fwds := r.forwards(t)
+	if len(fwds) != 1 || fwds[0].TradeID != sl.ID || fwds[0].ProviderRef != poolForwardRef(sl.ID) || len(gw.calls) != 1 {
+		t.Fatalf("forwards=%+v calls=%d, want the LP forwarded once on its own slice", fwds, len(gw.calls))
 	}
 }
 
@@ -241,6 +247,10 @@ func TestPoolSettle_ReleaseNearWindowAlerts(t *testing.T) {
 	_ = r.advance(t, intent.ID)
 	if !strings.Contains(buf.String(), "ALERT liquidity_pool_release_near_window") {
 		t.Fatalf("no near-window alert:\n%s", buf.String())
+	}
+	_ = r.advance(t, intent.ID) // review m-10: deduped durably, once per slice
+	if n := strings.Count(buf.String(), "ALERT liquidity_pool_release_near_window"); n != 1 {
+		t.Fatalf("near-window alerts = %d, want 1", n)
 	}
 }
 
@@ -411,5 +421,19 @@ func TestPoolSettle_ShortProvenTotalParks(t *testing.T) {
 	}
 	if out, err := r.it.RefundPoolBuyOverride(context.Background(), uuid.New(), intent.ID, "short; refunded"); err != nil || out.Status != models.ITStatusRefunded {
 		t.Fatalf("override = %v %v, want refunded (its LP already forwarded)", out, err)
+	}
+}
+
+// Review m-1: the release decision honours opened_at, as the park's drop list
+// (orderSlices) does — a kept slice never stamped opened is never released,
+// so a park and a release can never both claim it.
+func TestPoolSettle_ReleaseDecisionNeedsOpenedAt(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	intent := r.openPaid(t, "5000")
+	sl := r.slicesOf(t, intent.ID)[0]
+	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("status", models.ITStatusDelivering)
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("opened_at", nil)
+	if ok, err := r.it.decidePoolRelease(context.Background(), r.desk, intent.ID, sl.ID); ok || err != nil {
+		t.Fatalf("release = %v %v, want refused for a slice never stamped opened", ok, err)
 	}
 }

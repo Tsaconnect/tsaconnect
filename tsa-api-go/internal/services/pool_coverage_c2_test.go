@@ -21,7 +21,7 @@ func TestSliceAtTreasury_Rule(t *testing.T) {
 		{models.P2PTradeStatusReleasing, nil, "", "", true},
 		{models.P2PTradeStatusReleased, nil, "", "", true},
 		{models.P2PTradeStatusReleased, &now, "0xself", "", false}, // review I-1: dropped, then self-released — the LP's USDT (F22)
-		{models.P2PTradeStatusDisputed, nil, "", "", true},  // a paid order's dispute resolves to the treasury (F21)
+		{models.P2PTradeStatusDisputed, nil, "", "", true},         // a paid order's dispute resolves to the treasury (F21)
 		{models.P2PTradeStatusResolved, nil, "", "", true},
 		{models.P2PTradeStatusDisputed, &now, "", "", false}, // F21 dropped it: going back to the LP
 		{models.P2PTradeStatusResolved, &now, "", "", false},

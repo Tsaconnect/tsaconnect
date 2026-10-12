@@ -425,7 +425,7 @@ func (s *ITService) SliceHashReverted(ctx context.Context, slice *models.P2PTrad
 		return false, nil
 	}
 	gen := d.c.Probe.EndpointGeneration()
-	need := uint64(max(1, s.treasuryLimits().confirmations))
+	need := s.saleDepth()
 	return receiptDeep(ctx, d.c.Probe, slice.ReleaseTxHash, types.ReceiptStatusFailed, need, gen)
 }
 

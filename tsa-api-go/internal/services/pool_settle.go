@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,9 +21,6 @@ var (
 	// ErrPoolSettleUnwired: the desk has no release key, verifier or sale wallet.
 	ErrPoolSettleUnwired = errors.New("liquidity pool: the settle side is not wired")
 )
-
-// poolNearWindowAlerted dedupes liquidity_pool_release_near_window per slice.
-var poolNearWindowAlerted sync.Map
 
 const (
 	poolReleaseStallAfter = 10 * time.Minute // F10, §22
@@ -205,7 +201,9 @@ func (s *ITService) advancePoolDelivering(ctx context.Context, d *PoolDesk, inte
 		}
 		all = false
 		if time.Until(sl.ExpiresAt) < poolReleaseNearWindow {
-			if _, seen := poolNearWindowAlerted.LoadOrStore(sl.ID, true); !seen { // once per slice per process
+			// Once per slice per day, durably (review m-10: job_run_markers, as
+			// every other dedupe here — never a process map that only grows).
+			if claimRunAt(ctx, s.db, "pool_release_near_window:"+sl.ID.String(), 24*time.Hour, time.Now()) {
 				log.Printf("[liquidity] ALERT liquidity_pool_release_near_window slice=%s intent=%s expires=%s status=%s",
 					sl.ID, intent.ID, sl.ExpiresAt.UTC().Format(time.RFC3339), sl.Status)
 			}
@@ -254,8 +252,8 @@ func (s *ITService) advancePoolDelivering(ctx context.Context, d *PoolDesk, inte
 
 // decidePoolRelease is the release decision (plan C2 P4.2), taken under the
 // pool lock and the intent's row lock — the locks every drop, park and refund
-// takes: the order is still delivering and the slice still backs it, live and
-// with no release recorded. AutoRelease's flip CAS then makes one caller the
+// takes: the order is still delivering and the slice still backs it, live
+// (opened, not dropped) and with no release recorded. AutoRelease's flip CAS then makes one caller the
 // only sender.
 func (s *ITService) decidePoolRelease(ctx context.Context, d *PoolDesk, intentID, sliceID uuid.UUID) (bool, error) {
 	release := false
@@ -271,7 +269,9 @@ func (s *ITService) decidePoolRelease(ctx context.Context, d *PoolDesk, intentID
 		if err := tx.First(&sl, "id = ? AND it_intent_id = ?", sliceID, intentID).Error; err != nil {
 			return err
 		}
-		release = sl.DroppedAt == nil && sl.ReleaseTxHash == "" &&
+		// Review m-1: opened_at too — the same "live" orderSlices uses for a
+		// park's drop list, so a slice a park cannot drop is never released.
+		release = sl.DroppedAt == nil && sl.OpenedAt != nil && sl.ReleaseTxHash == "" &&
 			(sl.Status == models.P2PTradeStatusPendingPayment || sl.Status == models.P2PTradeStatusPaid)
 		return nil
 	})

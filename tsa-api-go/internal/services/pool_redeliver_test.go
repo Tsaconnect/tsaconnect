@@ -427,7 +427,7 @@ func TestPoolSlice_ClearStuckReleaseRefusedWithoutEvidence(t *testing.T) {
 			r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("updated_at", time.Now())
 		},
 		"release key busy": func(r *poolSettleRig, _ *models.P2PTrade) { r.chain.latest = r.chain.nextNonce - 1 },
-		"landed": func(r *poolSettleRig, sl *models.P2PTrade) { r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusReleased) },
+		"landed":           func(r *poolSettleRig, sl *models.P2PTrade) { r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusReleased) },
 		"logged": func(r *poolSettleRig, sl *models.P2PTrade) {
 			id := HashID(sl.ID)
 			r.desk.c.Probe = &logProbe{TreasuryTxProbe: r.desk.c.Probe, logs: []types.Log{{BlockNumber: r.chain.head, TxHash: common.HexToHash("0x02"),
@@ -446,5 +446,49 @@ func TestPoolSlice_ClearStuckReleaseRefusedWithoutEvidence(t *testing.T) {
 		if got.Status != models.P2PTradeStatusReleasing || got.ReleaseTxHash != sl.ReleaseTxHash {
 			t.Fatalf("%s: slice = %s %q, want untouched", name, got.Status, got.ReleaseTxHash)
 		}
+	}
+}
+
+// Review m-3: a failed re-delivery drops every slice it opened, its re-picks
+// included — none is left backing the parked order for the canceller to find.
+func TestPoolRedeliver_FailedDropsItsRepicksToo(t *testing.T) {
+	r := newPoolSettleRig(t, 60, 45, 30)
+	intent := parkedShort(t, r)
+	d, _ := r.addLP(t, 60)
+	r.chain.prepareErr[walletOf(d)] = errors.New("execution reverted: SellerInsufficient")
+	r.chain.neverLand[walletOf(r.lps[2])] = true // the re-pick (C) is sent but never lands
+	if _, err := r.it.RedeliverPoolBuy(context.Background(), uuid.New(), intent.ID, "note"); !errors.Is(err, ErrPoolCannotFill) {
+		t.Fatalf("redeliver = %v, want it to fail", err)
+	}
+	var gen2 []models.P2PTrade
+	r.db.Where("it_intent_id = ? AND generation = 2", intent.ID).Find(&gen2)
+	if len(gen2) != 2 {
+		t.Fatalf("generation 2 = %d slices, want D's and its re-pick", len(gen2))
+	}
+	for _, sl := range gen2 {
+		if sl.DroppedAt == nil && sl.Status != models.P2PTradeStatusCancelled {
+			t.Fatalf("slice %s (%s) still backs the parked order", sl.ID, sl.Status)
+		}
+	}
+}
+
+// Review m-7: the S37 override never refunds an order whose sale leg is live
+// (her delivery), belt and braces with the plain refund's same guard.
+func TestPoolRefundOverride_RefusedWithALiveSaleLeg(t *testing.T) {
+	r := newPoolSettleRig(t, 60, 45)
+	r.wireForwards(t)
+	intent := parkedShort(t, r)
+	if _, err := r.it.CompletePoolBooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.db.Create(&models.RampLeg{ID: uuid.New(), OrderID: intent.ID, Kind: models.RampLegKindSale, Status: models.RampLegStatusPending,
+		Attempt: 1, ChainKey: "bsc", Token: "USDT", Amount: "1"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.it.RefundPoolBuyOverride(context.Background(), uuid.New(), intent.ID, "override"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("override = %v, want refused while a sale leg is live", err)
+	}
+	if got := r.intent(t, intent.ID); got.Status != models.ITStatusBuyAwaitingRate {
+		t.Fatalf("status = %s, want still parked", got.Status)
 	}
 }
