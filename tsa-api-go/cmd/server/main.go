@@ -1492,6 +1492,16 @@ func main() {
 		settlementForwarder := services.NewP2PSettlementForwarder(
 			config.DB, pmSvc, gateway, balanceReader, cfg.NombaSenderName)
 		pmAuto.SetSettlementForwarder(settlementForwarder)
+		if fwClient != nil {
+			settlementForwarder.SetFeeReader(fwClient)      // S47: the actual payout fee, once per settled forward
+			settlementForwarder.SetTransferLookup(fwClient) // review I-1: a started forward is looked up before any re-ask
+		}
+		if itService != nil {
+			settlementForwarder.SetOnSettled(itService.PoolForwardSettled) // a no-op for every non-pool forward
+		}
+		if itHandler != nil {
+			itHandler.SetForwardRechecker(settlementForwarder) // re-review I-D: the operator recheck, every forward
+		}
 		scheduler.Register(jobs.NewP2PForwardSweepJob(settlementForwarder), jobs.AlertOnFailureStreak())
 		log.Printf("[pm] settlement forward wired (balance pre-check=%t); unanswered-transfer sweep registered",
 			balanceReader != nil)
@@ -1502,6 +1512,9 @@ func main() {
 		// is credited and forwarded to; see inbound_claim_p2p.go.
 		p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
 		p2pClaims.SetForwarder(settlementForwarder)
+		if itService != nil {
+			itService.SetPoolForwards(p2pClaims) // the pool pays its LPs through the same forwarder (review I-4)
+		}
 		registerInboundClaim(services.InboundClaimTypeP2PTrade, p2pClaims)
 		// Read below to decide whether P2P buyers may be sent to the company
 		// account at all. Set from the registration itself, never from the
@@ -1833,8 +1846,8 @@ func main() {
 	// gates and order desk, all built by wirePoolOrders — inside the Paycrest
 	// block when Paycrest is on (the router needs the desk), here otherwise:
 	// LP flows and the canceller need the pool either way (review I6). Dormant
-	// unless a preset row carries a pool escrow; the desk only on BSC testnet
-	// until plan C2 (a mainnet row keeps its gates for LP onboarding). All of
+	// unless a preset row carries a pool escrow; the desk (and its settle job)
+	// only with the release key and the P2P settlement forwarder. All of
 	// it runs before scheduler.Start: poolTreasuryFor may set EscrowCalls on
 	// the shared conversion lane in place, and the gates are checked once.
 	if pool == nil {
@@ -1844,14 +1857,17 @@ func main() {
 	registerPoolJobs(scheduler, poolGates)
 	registerPoolOrderJobs(scheduler, pool)
 	attachPoolCard(pool, p2pHandler, itService)
+	// Sustained-condition alerts for the pool settle job and the expiry canceller.
+	var poolAlerts jobs.WorkerFailureNotifier
+	if inboundAlerts != nil {
+		poolAlerts = workerFailureAlerts{to: inboundAlerts}
+	}
+	attachPoolSettle(pool, itService, itHandler)
+	registerPoolSettleJob(scheduler, pool, itService, poolAlerts)
 	// The expiry canceller (§14) runs whether or not the pool exists: it also
 	// cancels expired ordinary P2P trades. A tick defers while the
 	// central-account statement is stale.
-	var expiryNotifier jobs.WorkerFailureNotifier
-	if inboundAlerts != nil {
-		expiryNotifier = workerFailureAlerts{to: inboundAlerts}
-	}
-	registerExpiryCanceller(scheduler, p2pTradeSvc, releaseSigner, itService, statementFreshness(inboundPoller), expiryNotifier)
+	registerExpiryCanceller(scheduler, p2pTradeSvc, releaseSigner, itService, statementFreshness(inboundPoller), poolAlerts)
 
 	// TSA Liquidity plan B: LP onboarding, the /liquidity reads and the voucher
 	// renewal job, live only with a pool chain (prod stays dormant until the

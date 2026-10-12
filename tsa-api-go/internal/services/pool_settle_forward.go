@@ -20,6 +20,12 @@ var errPoolForwardRefused = fmt.Errorf("%w: this slice is not forwarded automati
 
 func (s *ITService) SetPoolForwards(src *P2PTradeClaimSource) { s.poolForwards = src }
 
+// HasPoolForwards: a P2P claim source with a settlement forwarder can pay LPs
+// (review I-4: boot builds no desk without it).
+func (s *ITService) HasPoolForwards() bool {
+	return s != nil && s.poolForwards != nil && s.poolForwards.forwarder != nil
+}
+
 // poolForwardRef is the forward's provider_ref for a pool slice: unique per
 // slice, so a replay finds its own row (§12.5).
 func poolForwardRef(sliceID uuid.UUID) string { return "pool:" + sliceID.String() }

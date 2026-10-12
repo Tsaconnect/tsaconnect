@@ -25,26 +25,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// Re-review N8 / review I3: a mainnet pool row (set for Plan B's LP
-// onboarding) builds the gates LP onboarding uses and no order desk.
-func TestWirePoolOrders_MainnetRowKeepsGatesNoDesk(t *testing.T) {
-	cfg := poolTestConfig(t, "mainnet") // pool row on chain 56
-	reg := services.NewP2PEscrowRegistryFromEntries(map[int64]services.P2PRegistryEntry{
-		56: {ChainKey: "bsc", Purpose: config.P2PPurposePool, Assets: []string{"USDT"}, Decimals: map[string]int{"USDT": 18}},
-	}, "2")
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	trades := services.NewP2PTradeService(nil, reg, nil, nil, 146)
-	w := wirePoolOrders(cfg, nil, reg, trades, services.NewPMService(nil), nil, services.NewITService(nil, nil, nil), nil)
-	if w.gates == nil || w.desk != nil || w.nonces != nil {
-		t.Fatalf("mainnet wiring = %+v, want gates and no desk", w)
-	}
-	if !strings.Contains(buf.String(), "pool orders wait for plan C2") {
-		t.Fatalf("the mainnet row must be refused by the C2 guard, not by a missing part:\n%s", buf.String())
-	}
-}
-
 // Production today: no pool row → no desk, no provider, nothing to wire. The
 // pool_order_max ceiling still follows the treasury's per-order cap: the
 // admin console can edit pool settings while the pool is dormant.
@@ -80,8 +60,15 @@ func (e windowEscrow) ReadPaymentWindow() (time.Duration, error) { return e.w, n
 // RPC client (lazy, never dialled), a router-less treasury lane, an active
 // IT_PM_ID merchant and an escrow reporting window.
 func poolDeskWorld(t *testing.T, window time.Duration) (*config.Config, *services.BlockchainService, *services.P2PEscrowRegistry, *services.P2PTradeService, *services.ITService) {
+	return poolDeskWorldOn(t, "testnet", 97, window)
+}
+
+// poolDeskWorldOn is a pool row on network's BSC chain with every desk part,
+// including the P2P claim source with a settlement forwarder that pays LPs
+// (review I-4: the desk refuses to serve without one).
+func poolDeskWorldOn(t *testing.T, network string, chainID int64, window time.Duration) (*config.Config, *services.BlockchainService, *services.P2PEscrowRegistry, *services.P2PTradeService, *services.ITService) {
 	t.Helper()
-	cfg := poolTestConfig(t, "testnet")
+	cfg := poolTestConfig(t, network)
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -98,9 +85,15 @@ func poolDeskWorld(t *testing.T, window time.Duration) (*config.Config, *service
 	config.DB = db
 	t.Cleanup(func() { config.DB = prev })
 	reg := services.NewP2PEscrowRegistryFromEntries(map[int64]services.P2PRegistryEntry{
-		97: {Escrow: windowEscrow{w: window}, ChainKey: "bsc", Purpose: config.P2PPurposePool, Assets: []string{"USDT"}, Decimals: map[string]int{"USDT": 18}},
+		chainID: {Escrow: windowEscrow{w: window}, ChainKey: "bsc", Purpose: config.P2PPurposePool, Assets: []string{"USDT"}, Decimals: map[string]int{"USDT": 18}},
 	}, "2")
-	return cfg, services.NewBlockchainService(cfg), reg, services.NewP2PTradeService(db, reg, nil, nil, 97), services.NewITService(db, nil, nil)
+	trades := services.NewP2PTradeService(db, reg, nil, nil, chainID)
+	pmSvc := services.NewPMService(db)
+	claims := services.NewP2PTradeClaimSource(db, pmSvc, trades, fakeSender{})
+	claims.SetForwarder(services.NewP2PSettlementForwarder(db, pmSvc, nil, nil, "TSA"))
+	it := services.NewITService(db, nil, nil)
+	it.SetPoolForwards(claims)
+	return cfg, services.NewBlockchainService(cfg), reg, trades, it
 }
 
 // The rehearsal chain (BSC testnet, 97) with every part: the desk, its nonce

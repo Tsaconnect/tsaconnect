@@ -23,7 +23,7 @@ type poolWiring struct {
 }
 
 // wirePoolOrders builds the pool chain's treasury lane and gates (Plan A) and
-// the order desk (plan C1 P4), and hands the desk to ITService and the slice
+// the order desk (plan C1 P4, its settle side plan C2), and hands the desk to ITService and the slice
 // hooks to the trade service. Dormant (no pool row): an empty wiring. The
 // pool_order_max ceiling is set either way: the admin console edits pool
 // settings while the pool is dormant too.
@@ -36,7 +36,7 @@ func wirePoolOrders(cfg *config.Config, bs *services.BlockchainService, reg *ser
 	}
 	w.treasury = poolTreasuryFor(cfg, bs, rampTreasury) // sets the lane's EscrowCalls to the pool escrow only
 	w.gates = buildPoolChain(cfg, bs, reg, release, w.treasury)
-	w.desk, w.nonces = buildPoolDesk(cfg, bs, reg, trades, pm, w.treasury, w.gates)
+	w.desk, w.nonces = buildPoolDesk(cfg, bs, reg, trades, pm, release, it, w.treasury, w.gates)
 	if w.desk != nil && it != nil {
 		it.SetPoolDesk(w.desk)
 		if err := it.PoolHonourFits(); err != nil { // review I4: opens refuse until the env values shrink
@@ -50,20 +50,13 @@ func wirePoolOrders(cfg *config.Config, bs *services.BlockchainService, reg *ser
 }
 
 // buildPoolDesk is nil (pool orders dormant, with the reason logged) unless
-// every part exists. The burst generation sums the endpoint generations of the
+// every part exists, the settle side included: the release key, the P2P
+// settlement forwarder that pays LPs, and the pool chain's sale wallet. The burst generation sums the endpoint generations of the
 // clients an open touches (P10): any failover in any of them aborts a burst.
 func buildPoolDesk(cfg *config.Config, bs *services.BlockchainService, reg *services.P2PEscrowRegistry, trades *services.P2PTradeService,
-	pm *services.PMService, treasury *services.Treasury, gates services.PoolGate) (*services.PoolDesk, *services.TreasuryNonceWatch) {
+	pm *services.PMService, release services.ChainSender, it *services.ITService, treasury *services.Treasury,
+	gates services.PoolGate) (*services.PoolDesk, *services.TreasuryNonceWatch) {
 	pool, ok := reg.PoolChain()
-	if ok {
-		if err := services.PoolOrdersAllowedOn(pool.ChainID); err != nil {
-			// Review I3: expected on a mainnet pool row until plan C2 lands. Plan
-			// B's LP onboarding keeps running on the same row (wirePoolOrders
-			// still builds and returns the gates).
-			log.Printf("[liquidity] pool orders wait for plan C2's settle path on %s; LP onboarding stays on", pool.ChainKey)
-			return nil, nil
-		}
-	}
 	if !ok || bs == nil || trades == nil || pm == nil || treasury == nil || gates == nil {
 		log.Printf("[liquidity] pool orders dormant: a part is missing (chain=%v trades=%v pm=%v treasury=%v gates=%v)",
 			ok, trades != nil, pm != nil, treasury != nil, gates != nil)
@@ -97,10 +90,32 @@ func buildPoolDesk(cfg *config.Config, bs *services.BlockchainService, reg *serv
 	if g, ok := lane.Native.(interface{ EndpointGeneration() uint64 }); ok && g != interface{ EndpointGeneration() uint64 }(client) {
 		gens = append(gens, g)
 	}
+	if release == nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant chain=%s reason=no release key — nothing could settle a paid order", pool.ChainKey)
+		return nil, nil
+	}
+	if !it.HasPoolForwards() {
+		// Review I-4: a desk that cannot pay its LPs never takes naira.
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant chain=%s reason=no P2P settlement forwarder — LPs could not be paid", pool.ChainKey)
+		return nil, nil
+	}
+	pc, _ := cfg.PoolChain()
+	verifier := services.NewLogTransferVerifier(client.Client)
+	sale := services.NewCompanyWallet(services.CompanyWalletConfig{
+		Treasury: treasury, Decimals: map[string]map[string]int{pool.ChainKey: {tok.Symbol: tok.Decimals}},
+		Verifiers:          map[string]services.ERC20SourcedTransferVerifier{pool.ChainKey: verifier},
+		Probes:             map[string]services.TreasuryTxProbe{pool.ChainKey: client.Probe()},
+		ConversionTreasury: treasury.Address(),
+	})
+	if sale == nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant chain=%s reason=the treasury lane cannot sell %s", pool.ChainKey, tok.Symbol)
+		return nil, nil
+	}
 	nonces := services.NewTreasuryNonceWatch(pool.ChainKey, client.Probe(), treasury.Address(), 30*time.Second, nil)
 	desk, err := services.NewPoolDesk(services.PoolDeskConfig{
 		DB: config.DB, PM: pm, Trades: trades, Stock: stock, Token: tok, Escrow: escrow, EscrowAddr: escrow.ContractAddress(),
 		Treasury: treasury, Gates: gates, Probe: client.Probe(), Nonces: nonces, BuyerUserID: buyer, ChainName: poolChainName(cfg),
+		Sender: release, Verifier: verifier, Sale: sale, LogChunk: pc.Pool.LogChunkBlocks,
 		Generation: func() uint64 {
 			var sum uint64
 			for _, g := range gens {
@@ -145,6 +160,26 @@ func attachPoolCard(w *poolWiring, p2p *handlers.P2PHandler, it *services.ITServ
 		return
 	}
 	p2p.SetPoolCard(it)
+}
+
+// attachPoolSettle registers the console's pool routes while the desk exists.
+func attachPoolSettle(w *poolWiring, it *services.ITService, itH *handlers.ITHandler) {
+	if w == nil || w.desk == nil || it == nil || itH == nil {
+		return
+	}
+	itH.SetPoolOrdersAdmin(it)
+}
+
+// registerPoolSettleJob runs pool settlement in its own job (review I-8), alert-watched.
+func registerPoolSettleJob(s *jobs.Scheduler, w *poolWiring, it *services.ITService, n jobs.WorkerFailureNotifier) {
+	if w == nil || w.desk == nil || it == nil {
+		return
+	}
+	j := jobs.NewPoolSettleJob(it, 30*time.Second)
+	if n != nil {
+		j.SetAlerter(n)
+	}
+	s.Register(j, jobs.AlertOnFailureStreak())
 }
 
 // statementFreshness is the canceller's view of the central-account poll: the

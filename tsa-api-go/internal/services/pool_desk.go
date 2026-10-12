@@ -37,8 +37,8 @@ type PoolDeskConfig struct {
 	Now      func() time.Time
 }
 
-// PoolDesk is the TSA Liquidity pool's order desk: free stock, allocation, and
-// (Task 10) the open. One per process; ITService holds it like the company
+// PoolDesk is the TSA Liquidity pool's order desk: free stock, allocation,
+// (Task 10) the open, and plan C2's settle side. One per process; ITService holds it like the company
 // wallet.
 type PoolDesk struct {
 	c           PoolDeskConfig
@@ -57,33 +57,9 @@ const (
 
 var errPoolDeskIncomplete = errors.New("liquidity pool: desk is missing a part")
 
-// ErrPoolOrdersAwaitSettle: plan C1 opens and claims pool orders but cannot
-// settle, refund or release them (plan C2). On a mainnet pool chain that would
-// take real naira into orders nobody can finish, so the desk is refused there
-// (review I3). This is a code guard, not configuration: plan C2 deletes
-// poolOrderChainsBeforeSettle together with this check when its settle path lands.
-var ErrPoolOrdersAwaitSettle = errors.New("liquidity pool: orders wait for the settle path (plan C2) on this chain")
-
-// poolOrderChainsBeforeSettle are the only chains pool orders may open on
-// before plan C2: BSC testnet, where Task 20 rehearses.
-var poolOrderChainsBeforeSettle = map[int64]bool{97: true}
-
-// PoolOrdersAllowedOn is the guard itself; boot asks it first (Task 16), so a
-// mainnet row is reported as "waiting for C2" before any other part is built.
-func PoolOrdersAllowedOn(chainID int64) error {
-	if !poolOrderChainsBeforeSettle[chainID] {
-		return fmt.Errorf("%w (chain %d)", ErrPoolOrdersAwaitSettle, chainID)
-	}
-	return nil
-}
-
-// NewPoolDesk refuses an incomplete desk, and any desk on a chain outside
-// poolOrderChainsBeforeSettle; boot then leaves pool orders dormant while
-// Plan B's LP onboarding (which never uses the desk) keeps working.
+// NewPoolDesk refuses an incomplete desk; boot then leaves pool orders
+// dormant while Plan B's LP onboarding (which never uses the desk) keeps working.
 func NewPoolDesk(c PoolDeskConfig) (*PoolDesk, error) {
-	if err := PoolOrdersAllowedOn(c.Token.ChainID); err != nil {
-		return nil, err
-	}
 	switch {
 	case c.DB == nil, c.PM == nil, c.Trades == nil, c.Stock == nil, c.Escrow == nil, c.EscrowAddr == "",
 		c.Treasury == nil, c.Gates == nil, c.Probe == nil, c.Generation == nil, c.Nonces == nil,
