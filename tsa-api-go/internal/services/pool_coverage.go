@@ -152,10 +152,16 @@ func (d *PoolDesk) orderSlices(tx *gorm.DB, intentID uuid.UUID) (*big.Int, []Poo
 	return released, pending, nil
 }
 
-// dropSlices marks slices as no longer backing their order (plan C1 P1).
+// dropSlices marks live slices as no longer backing their order (plan C1
+// P1). A slice whose release was broadcast (releasing, or a recorded hash) is
+// at the treasury and is never dropped (plan C2 P1, review C-1), whatever a
+// caller read before AutoRelease's flip landed.
 func (d *PoolDesk) dropSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return tx.Model(&models.P2PTrade{}).Where("id IN ? AND dropped_at IS NULL", ids).Update("dropped_at", at).Error
+	return tx.Model(&models.P2PTrade{}).
+		Where("id IN ? AND dropped_at IS NULL AND release_tx_hash = '' AND status IN ?", ids,
+			[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+		Update("dropped_at", at).Error
 }

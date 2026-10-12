@@ -28,7 +28,13 @@ type PoolDeskConfig struct {
 	Nonces      *TreasuryNonceWatch // the lane's stuck-nonce watch (F24)
 	BuyerUserID uuid.UUID           // IT_PM_ID's user: the slices' DB buyer (S10)
 	ChainName   string              // "BNB Smart Chain": the card's chain label
-	Now         func() time.Time
+	// Settle side (plan C2). Boot requires all three before the desk serves
+	// orders (Task 12); AdvancePoolBuy refuses without them.
+	Sender   ChainSender                  // the release key (S8)
+	Verifier ERC20SourcedTransferVerifier // release proofs: escrow → treasury per receipt
+	Sale     *CompanyWallet               // the conversion treasury's pool-chain lane as a sale wallet (S20)
+	LogChunk uint64                       // PoolChainConfig.LogChunkBlocks (the F22 scan)
+	Now      func() time.Time
 }
 
 // PoolDesk is the TSA Liquidity pool's order desk: free stock, allocation, and

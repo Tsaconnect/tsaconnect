@@ -2019,7 +2019,9 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 			Where("id = ? AND (status = ? OR (status = ? AND dropped_at IS NULL))", trade.ID,
 				models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment)
 		if trade.IsPoolSlice() {
-			q = q.Where("release_tx_hash = ''") // the CAS that makes this caller the only sender
+			// The CAS that makes this caller the only sender; a slice its order
+			// dropped is never released to the treasury, paid or not.
+			q = q.Where("release_tx_hash = '' AND dropped_at IS NULL")
 		}
 		res := q.Updates(map[string]any{"status": models.P2PTradeStatusReleasing, "updated_at": s.clock.Now()})
 		if res.Error != nil {
