@@ -334,13 +334,13 @@ func (s *ITService) reevaluatePoolOrder(ctx context.Context, d *PoolDesk, id uui
 		cov := EvaluatePoolCoverage(live, released, pending, CurrentPoolSettings().MinSliceUnits)
 		now := d.now()
 		if cov.Covered {
-			return d.dropSlices(tx, cov.Drop, now)
+			return d.dropAllSlices(tx, cov.Drop, now)
 		}
 		all := make([]uuid.UUID, len(pending))
 		for i := range pending {
 			all[i] = pending[i].ID
 		}
-		if err := d.dropSlices(tx, all, now); err != nil {
+		if err := d.dropAllSlices(tx, all, now); err != nil {
 			return err
 		}
 		res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", id, models.ITStatusDelivering).

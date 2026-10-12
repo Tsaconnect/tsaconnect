@@ -543,7 +543,7 @@ func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, c
 			if p, perr = s.poolQuoteAt(locked.Asset, locked.Currency, paid, mid, CurrentPoolSettings(), ch, false); perr != nil {
 				parkClaim(claim, "could not price at settlement: "+RedactAlertText(perr.Error())) // review M13
 				parked = parkReasonOf(perr)
-				if err := d.dropSlices(tx, pendingIDs, now); err != nil {
+				if err := d.dropAllSlices(tx, pendingIDs, now); err != nil {
 					return err
 				}
 				res = write(tx)
@@ -556,7 +556,7 @@ func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, c
 			parkClaim(claim, models.ITFailurePoolSlicesShort+": the amount owed is not covered by this order's locked slices")
 			parked = models.ITFailurePoolSlicesShort
 			log.Printf("[liquidity] ALERT liquidity_pool_slices_short intent=%s owed=%s honoured=%v", locked.ID, cov.Owed, arrival.honoured)
-			if err := d.dropSlices(tx, pendingIDs, now); err != nil {
+			if err := d.dropAllSlices(tx, pendingIDs, now); err != nil {
 				return err
 			}
 			res = write(tx)
@@ -573,7 +573,7 @@ func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, c
 		if res.Error != nil || res.RowsAffected == 0 {
 			return res.Error
 		}
-		if err := d.dropSlices(tx, cov.Drop, now); err != nil {
+		if err := d.dropAllSlices(tx, cov.Drop, now); err != nil {
 			return err
 		}
 		var gen int

@@ -268,8 +268,8 @@ func TestPoolSettle_DropNeverTakesABroadcastRelease(t *testing.T) {
 	sls := r.slicesOf(t, intent.ID)
 	r.db.Model(&models.P2PTrade{}).Where("id = ?", sls[0].ID).Update("status", models.P2PTradeStatusReleasing)
 	r.db.Model(&models.P2PTrade{}).Where("id = ?", sls[1].ID).Updates(map[string]any{"status": models.P2PTradeStatusPaid, "release_tx_hash": "0xabc"})
-	if err := r.desk.dropSlices(r.db, []uuid.UUID{sls[0].ID, sls[1].ID}, time.Now()); err != nil {
-		t.Fatal(err)
+	if dropped, err := r.desk.dropSlices(r.db, []uuid.UUID{sls[0].ID, sls[1].ID}, time.Now()); err != nil || len(dropped) != 0 {
+		t.Fatalf("dropped=%v err=%v, want none", dropped, err)
 	}
 	for _, sl := range r.slicesOf(t, intent.ID) {
 		if sl.DroppedAt != nil {

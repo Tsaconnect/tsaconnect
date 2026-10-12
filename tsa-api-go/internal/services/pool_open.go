@@ -578,7 +578,7 @@ func (d *PoolDesk) repick(ctx context.Context, intent *models.ITIntent, p *PoolP
 		if err != nil {
 			return err
 		}
-		written, err = d.writeSlices(tx, intent.ID, 1, p, plan)
+		written, err = d.writeSlices(tx, intent.ID, failed.slice.Generation, p, plan) // a re-delivery re-picks in its own generation
 		return err
 	})
 	d.closeCancelledAds(ctx, closeAfter) // F23, after the lock's transaction ends (review C2)

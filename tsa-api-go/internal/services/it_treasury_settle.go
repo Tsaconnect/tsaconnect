@@ -147,6 +147,9 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 	if note == "" {
 		return nil, ErrITOperatorNoteRequired
 	}
+	if pre, err := s.getIntent(ctx, intentID); err == nil && isPoolBuy(pre) && s.poolDesk != nil {
+		return s.refundPoolBuy(ctx, adminID, intentID, note) // S37, under the pool lock (plan C2 P11)
+	}
 	var provider string
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var intent models.ITIntent

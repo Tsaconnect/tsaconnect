@@ -1,6 +1,8 @@
 package services
 
 import (
+	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"time"
@@ -152,16 +154,47 @@ func (d *PoolDesk) orderSlices(tx *gorm.DB, intentID uuid.UUID) (*big.Int, []Poo
 	return released, pending, nil
 }
 
+// errPoolSlicesMoved: a slice the caller decided to drop was released (or
+// left its live state) between the caller's read and the drop. The decision
+// was taken on a stale view, so the caller's transaction is rolled back and
+// the order is decided again on the next pass.
+var errPoolSlicesMoved = fmt.Errorf("%w: a slice of the order moved while it was decided (a release was broadcast) — decide again", ErrITBadState)
+
 // dropSlices marks live slices as no longer backing their order (plan C1
-// P1). A slice whose release was broadcast (releasing, or a recorded hash) is
-// at the treasury and is never dropped (plan C2 P1, review C-1), whatever a
-// caller read before AutoRelease's flip landed.
-func (d *PoolDesk) dropSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) error {
-	if len(ids) == 0 {
-		return nil
+// P1) and returns the ids it actually dropped. A slice whose release was
+// broadcast (releasing, or a recorded hash) is at the treasury and is never
+// dropped (plan C2 P1, review C-1), whatever a caller read before
+// AutoRelease's flip landed — so a caller must compare what was dropped with
+// what it asked for (dropAllSlices).
+func (d *PoolDesk) dropSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) ([]uuid.UUID, error) {
+	var dropped []uuid.UUID
+	for _, id := range ids {
+		res := tx.Model(&models.P2PTrade{}).
+			Where("id = ? AND dropped_at IS NULL AND release_tx_hash = '' AND status IN ?", id,
+				[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+			Update("dropped_at", at)
+		if res.Error != nil {
+			return dropped, res.Error
+		}
+		if res.RowsAffected == 1 {
+			dropped = append(dropped, id)
+		}
 	}
-	return tx.Model(&models.P2PTrade{}).
-		Where("id IN ? AND dropped_at IS NULL AND release_tx_hash = '' AND status IN ?", ids,
-			[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
-		Update("dropped_at", at).Error
+	return dropped, nil
+}
+
+// dropAllSlices drops every id or refuses with errPoolSlicesMoved: a
+// decision (park, cover, refund) that read a slice as live must never stand
+// once that slice turned out to be releasing — the caller's transaction rolls
+// back and the order is decided again.
+func (d *PoolDesk) dropAllSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) error {
+	dropped, err := d.dropSlices(tx, ids, at)
+	if err != nil {
+		return err
+	}
+	if len(dropped) != len(ids) {
+		log.Printf("[liquidity] ALERT liquidity_pool_drop_raced asked=%d dropped=%d — a slice moved under the decision; not applied", len(ids), len(dropped))
+		return errPoolSlicesMoved
+	}
+	return nil
 }
