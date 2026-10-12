@@ -35,6 +35,9 @@ func (routesPoolAdmin) PayPoolSliceLP(context.Context, uuid.UUID, uuid.UUID, uui
 func (routesPoolAdmin) NotePoolSliceReturned(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) error {
 	return nil
 }
+func (routesPoolAdmin) ClearPoolSliceRelease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) error {
+	return nil
+}
 
 type routesRechecker struct{}
 
@@ -77,6 +80,7 @@ func TestLiquidityAdminRoutes_ActionsNeedSuperAdmin(t *testing.T) {
 		order + "/refund-override",
 		slice + "/pay-lp",
 		slice + "/returned",
+		slice + "/clear-release",
 		"/api/admin/p2p/forwards/" + uuid.NewString() + "/recheck",
 	}
 	for _, tc := range []struct {

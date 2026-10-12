@@ -462,6 +462,19 @@ func (s *ITService) SliceResolveClaimAbandoned(ctx context.Context, slice *model
 	if err != nil || !t.Exists || t.Status != OnChainP2PStatusDisputed {
 		return false, err
 	}
+	if idle, err := d.releaseKeyIdle(ctx); err != nil || !idle {
+		return false, err // a release-key transaction is in flight: it may be this resolve
+	}
+	if found, err := d.findSliceTx(ctx, slice, topicTradeResolved); err != nil || found != "" {
+		return false, err
+	}
+	return endpointSteady(d.c.Probe, gen) == nil, nil
+}
+
+// releaseKeyIdle: the release key has no transaction pending — its pending
+// nonce equals its nonce at the head (read once). A block mined between the
+// reads reads as "pending": a refusal, never an allowance.
+func (d *PoolDesk) releaseKeyIdle(ctx context.Context) (bool, error) {
 	key := common.HexToAddress(d.c.Sender.Address())
 	head, err := d.c.Probe.BlockNumber(ctx)
 	if err != nil {
@@ -472,13 +485,10 @@ func (s *ITService) SliceResolveClaimAbandoned(ctx context.Context, slice *model
 		return false, err
 	}
 	latest, err := d.c.Probe.NonceAt(ctx, key, new(big.Int).SetUint64(head))
-	if err != nil || pending != latest {
-		return false, err // a release-key transaction is in flight: it may be this resolve
-	}
-	if found, err := d.findSliceTx(ctx, slice, topicTradeResolved); err != nil || found != "" {
+	if err != nil {
 		return false, err
 	}
-	return endpointSteady(d.c.Probe, gen) == nil, nil
+	return pending == latest, nil
 }
 
 // SliceOpenGone is S44 (review I1): the open can never land. A slice counts

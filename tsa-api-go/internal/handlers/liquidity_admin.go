@@ -25,6 +25,7 @@ type PoolOrdersAdmin interface {
 	RefundPoolBuyOverride(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
 	PayPoolSliceLP(ctx context.Context, adminID, intentID, sliceID uuid.UUID, note string) (*models.P2PSettlementForward, error)
 	NotePoolSliceReturned(ctx context.Context, adminID, intentID, sliceID uuid.UUID, txHash, note string) error
+	ClearPoolSliceRelease(ctx context.Context, adminID, intentID, sliceID uuid.UUID, note string) error
 }
 
 // ForwardRechecker is the operator's "recheck by reference" on any settlement
@@ -156,6 +157,14 @@ func (h *ITHandler) AdminPayPoolSliceLP(c *gin.Context) {
 func (h *ITHandler) AdminNotePoolSliceReturned(c *gin.Context) {
 	h.poolSliceAction(c, func(ctx context.Context, admin, intentID, id uuid.UUID, b poolSliceActionBody) (any, error) {
 		return nil, h.poolAdmin.NotePoolSliceReturned(ctx, admin, intentID, id, strings.TrimSpace(b.TxHash), b.Note)
+	})
+}
+
+// POST …/slices/:sliceId/clear-release — a stuck release, cleared only on
+// the chain's evidence (review m-5); the settle engine releases it again.
+func (h *ITHandler) AdminClearPoolSliceRelease(c *gin.Context) {
+	h.poolSliceAction(c, func(ctx context.Context, admin, intentID, id uuid.UUID, b poolSliceActionBody) (any, error) {
+		return nil, h.poolAdmin.ClearPoolSliceRelease(ctx, admin, intentID, id, b.Note)
 	})
 }
 

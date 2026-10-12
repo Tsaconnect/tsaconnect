@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -173,6 +175,119 @@ func (s *ITService) NotePoolSliceReturned(ctx context.Context, adminID, intentID
 		return auditIntent(tx, *sl.ITIntentID, adminID, models.ITAuditPoolSliceReturned, note,
 			map[string]any{"slice": sl.ID.String(), "returnTx": strings.TrimSpace(txHash)})
 	})
+}
+
+// ClearPoolSliceRelease is the operator's exit for a stuck slice release
+// (review m-5): a slice left releasing (or carrying a release hash) whose
+// transaction was dropped from the mempool, or a crash between Send and the
+// hash write that left none. The reconciler waits on it forever and the
+// expiry canceller skips it; the chain's evidence, all from one endpoint,
+// decides:
+//   - it is past the reconciler's releasing window;
+//   - the escrow still holds the trade Pending or Paid for the treasury;
+//   - the recorded hash, if any, is unknown to the node and has no receipt;
+//   - the release key has nothing pending;
+//   - no TradeReleased for the trade was ever logged.
+//
+// Then, under the intent's and the slice's row locks and guarded on exactly
+// the state read, the slice goes back to paid with no hash and the settle
+// engine releases it again. A resurfacing old release is harmless: a slice
+// releases only to the treasury, and the escrow accepts one release.
+func (s *ITService) ClearPoolSliceRelease(ctx context.Context, adminID, intentID, sliceID uuid.UUID, note string) error {
+	if note = strings.TrimSpace(note); note == "" {
+		return ErrITOperatorNoteRequired
+	}
+	d := s.poolDesk
+	if !d.settleWired() {
+		return ErrPoolSettleUnwired
+	}
+	var sl models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&sl, "id = ? AND it_intent_id = ?", sliceID, intentID).Error; err != nil || !sl.IsPoolSlice() {
+		return ErrTradeNotFound
+	}
+	if !poolSliceReleaseStuck(&sl, time.Now()) {
+		return fmt.Errorf("%w: slice %s is %s (tx %q) — not a release stuck past %s", ErrITBadState, sl.ID, sl.Status, sl.ReleaseTxHash, releasingStaleAfter)
+	}
+	if reason, err := d.releaseClearEvidence(ctx, &sl); err != nil || reason != "" {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %s — not cleared", ErrITBadState, reason)
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var in models.ITIntent // C1 lock order: the intent, then the slice
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").First(&in, "id = ?", intentID).Error; err != nil {
+			return err
+		}
+		res := tx.Model(&models.P2PTrade{}).Where("id = ? AND status = ? AND release_tx_hash = ?", sl.ID, sl.Status, sl.ReleaseTxHash).
+			Updates(map[string]any{"status": models.P2PTradeStatusPaid, "release_tx_hash": "", "updated_at": time.Now().UTC()})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("%w: the slice moved while its release was checked — look again", ErrITBadState)
+		}
+		log.Printf("[liquidity] ALERT liquidity_pool_release_cleared slice=%s intent=%s was=%s tx=%q admin=%s — released again on the next pass",
+			sl.ID, intentID, sl.Status, sl.ReleaseTxHash, adminID)
+		return auditIntent(tx, intentID, adminID, models.ITAuditPoolSliceReleaseCleared, note,
+			map[string]any{"slice": sl.ID.String(), "fromStatus": sl.Status, "releaseTx": sl.ReleaseTxHash})
+	})
+}
+
+// poolSliceReleaseStuck: a release in flight (releasing, or a recorded release
+// hash that is not a resolve claim) past the reconciler's releasing window.
+func poolSliceReleaseStuck(sl *models.P2PTrade, now time.Time) bool {
+	inFlight := sl.Status == models.P2PTradeStatusReleasing ||
+		((sl.Status == models.P2PTradeStatusPendingPayment || sl.Status == models.P2PTradeStatusPaid) &&
+			sl.ReleaseTxHash != "" && !strings.HasPrefix(sl.ReleaseTxHash, sliceResolveClaimPrefix))
+	return inFlight && now.Sub(sl.UpdatedAt) > releasingStaleAfter
+}
+
+// releaseClearEvidence is ClearPoolSliceRelease's chain check: "" when the
+// release can neither land nor has landed, else why not.
+func (d *PoolDesk) releaseClearEvidence(ctx context.Context, sl *models.P2PTrade) (string, error) {
+	gen := d.c.Probe.EndpointGeneration()
+	t, err := d.c.Escrow.ReadTrade(HashID(sl.ID))
+	if err != nil {
+		return "", err
+	}
+	if !t.Exists || (t.Status != OnChainP2PStatusPending && t.Status != OnChainP2PStatusPaid) || !SameEVMAddress(t.Buyer.Hex(), d.c.Treasury.Address()) {
+		return fmt.Sprintf("the escrow holds the trade as %v — the reconciler settles it", t.Status), nil
+	}
+	if h := sl.ReleaseTxHash; h != "" {
+		if _, _, err := d.c.Probe.TransactionByHash(ctx, common.HexToHash(h)); !errors.Is(err, ethereum.NotFound) {
+			if err != nil {
+				return "", err
+			}
+			return "the node still knows " + h, nil
+		}
+		if r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(h)); !errors.Is(err, ethereum.NotFound) {
+			if err != nil {
+				return "", err
+			}
+			if r != nil {
+				return h + " has a receipt — the reconciler decides it", nil
+			}
+		}
+	}
+	idle, err := d.releaseKeyIdle(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !idle {
+		return "the release key has a transaction pending", nil
+	}
+	found, err := d.findReleaseTx(ctx, sl)
+	if err != nil {
+		return "", err
+	}
+	if found != "" {
+		return "a release of this trade is logged in " + found, nil
+	}
+	if err := endpointSteady(d.c.Probe, gen); err != nil {
+		return "", err
+	}
+	return "", nil
 }
 
 // RefundPoolBuyOverride is S37's super-admin override (spec S37, review I-6):

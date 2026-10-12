@@ -42,6 +42,11 @@ func (f *fakePoolAdmin) NotePoolSliceReturned(_ context.Context, _, intent, _ uu
 	return f.err
 }
 
+func (f *fakePoolAdmin) ClearPoolSliceRelease(_ context.Context, _, intent, _ uuid.UUID, n string) error {
+	f.last, f.note, f.intent = "clear-release", n, intent
+	return f.err
+}
+
 func poolAdminServer(f *fakePoolAdmin) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	h := NewITHandler(nil, nil, nil)
@@ -54,6 +59,7 @@ func poolAdminServer(f *fakePoolAdmin) *gin.Engine {
 	r.POST("/o/:id/refund-override", h.AdminRefundPoolBuyOverride)
 	r.POST("/o/:id/slices/:sliceId/pay-lp", h.AdminPayPoolSliceLP)
 	r.POST("/o/:id/slices/:sliceId/returned", h.AdminNotePoolSliceReturned)
+	r.POST("/o/:id/slices/:sliceId/clear-release", h.AdminClearPoolSliceRelease)
 	return r
 }
 
@@ -67,6 +73,7 @@ func TestLiquidityAdmin_ActionsNeedANote(t *testing.T) {
 		"/o/" + id.String() + "/refund-override",
 		"/o/" + id.String() + "/slices/" + uuid.NewString() + "/pay-lp",
 		"/o/" + id.String() + "/slices/" + uuid.NewString() + "/returned",
+		"/o/" + id.String() + "/slices/" + uuid.NewString() + "/clear-release",
 	} {
 		if w := walletDo(r, http.MethodPost, p, map[string]string{}); w.Code != http.StatusBadRequest || f.last != "" {
 			t.Fatalf("%s without a note = %d (called %q)", p, w.Code, f.last)
@@ -121,7 +128,7 @@ func TestLiquidityAdmin_SliceActionsPassTheRouteOrder(t *testing.T) {
 	f := &fakePoolAdmin{}
 	r := poolAdminServer(f)
 	id := uuid.New()
-	for _, act := range []string{"pay-lp", "returned"} {
+	for _, act := range []string{"pay-lp", "returned", "clear-release"} {
 		f.intent = uuid.Nil
 		if w := walletDo(r, http.MethodPost, "/o/"+id.String()+"/slices/"+uuid.NewString()+"/"+act, map[string]string{"note": "n"}); w.Code != http.StatusOK || f.intent != id {
 			t.Fatalf("%s = %d intent=%s, want the route's order %s", act, w.Code, f.intent, id)

@@ -1274,6 +1274,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				act.POST("/:id/refund-override", ith.AdminRefundPoolBuyOverride)
 				act.POST("/:id/slices/:sliceId/pay-lp", ith.AdminPayPoolSliceLP)
 				act.POST("/:id/slices/:sliceId/returned", ith.AdminNotePoolSliceReturned)
+				act.POST("/:id/slices/:sliceId/clear-release", ith.AdminClearPoolSliceRelease)
 			}
 		}
 		// Any settlement forward, merchant or LP (re-review I-D).

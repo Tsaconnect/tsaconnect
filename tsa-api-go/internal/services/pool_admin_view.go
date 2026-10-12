@@ -34,7 +34,7 @@ type PoolSliceView struct {
 	OpenTxHash  string           `json:"openTxHash,omitempty"`
 	ReleaseTx   string           `json:"releaseTxHash,omitempty"`
 	Forward     *PoolForwardView `json:"forward,omitempty"`
-	SliceAction []string         `json:"actions"` // "pay-lp" | "returned" (F22 only)
+	SliceAction []string         `json:"actions"` // "pay-lp" | "returned" (F22) | "clear-release" (a stuck release)
 }
 
 // PoolForwardView is the LP's naira forward for a slice.
@@ -92,6 +92,9 @@ func (s *ITService) PoolOrderDetail(ctx context.Context, intentID uuid.UUID) (*P
 		case errors.Is(err, gorm.ErrRecordNotFound) && sl.Status == models.P2PTradeStatusReleased && sl.CancelReason == "" &&
 			poolF22Open(intent.Status, sl.DroppedAt):
 			v.SliceAction = []string{"pay-lp", "returned"} // F22, neither exit taken (review I-5)
+		}
+		if poolSliceReleaseStuck(&sl, time.Now()) {
+			v.SliceAction = append(v.SliceAction, "clear-release") // review m-5; the server checks the chain's evidence
 		}
 		out.Slices = append(out.Slices, v)
 	}

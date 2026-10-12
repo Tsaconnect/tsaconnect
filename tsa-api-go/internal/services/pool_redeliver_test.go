@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
@@ -377,5 +378,73 @@ func TestPoolSlice_F22ActionsRefuseAnotherOrdersSlice(t *testing.T) {
 	r.db.First(&cur, "id = ?", sl.ID)
 	if len(gw.calls) != 0 || cur.CancelReason != "" {
 		t.Fatalf("calls=%d cancel_reason=%q, want nothing done", len(gw.calls), cur.CancelReason)
+	}
+}
+
+// stuckRelease pays a one-slice order whose release was broadcast but never
+// mined (dropped from the mempool), past the reconciler's releasing window.
+func stuckRelease(t *testing.T, r *poolSettleRig) (*models.ITIntent, models.P2PTrade) {
+	t.Helper()
+	r.sender.noMine = true
+	intent := r.openPaid(t, "5000")
+	_ = r.advance(t, intent.ID)
+	sl := r.slicesOf(t, intent.ID)[0]
+	if sl.Status != models.P2PTradeStatusReleasing || sl.ReleaseTxHash == "" {
+		t.Fatalf("setup: slice %s %q, want releasing with a hash", sl.Status, sl.ReleaseTxHash)
+	}
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("updated_at", time.Now().Add(-releasingStaleAfter-time.Minute))
+	r.db.First(&sl, "id = ?", sl.ID)
+	r.chain.latest = r.chain.nextNonce // the release key is idle
+	return intent, sl
+}
+
+// Review m-5: a release dropped from the mempool is cleared by a super admin
+// on the chain's evidence, and the settle engine releases the slice again.
+func TestPoolSlice_ClearStuckReleaseOnEvidence(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	intent, sl := stuckRelease(t, r)
+	ctx := context.Background()
+	if err := r.it.ClearPoolSliceRelease(ctx, uuid.New(), intent.ID, sl.ID, "dropped from the mempool"); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", sl.ID)
+	if got.Status != models.P2PTradeStatusPaid || got.ReleaseTxHash != "" {
+		t.Fatalf("slice = %s %q, want paid with no hash", got.Status, got.ReleaseTxHash)
+	}
+	r.sender.noMine = false
+	_ = r.advance(t, intent.ID)
+	if len(r.sender.sends) != 2 || len(r.legs(t, intent.ID)) != 1 {
+		t.Fatalf("sends=%d legs=%d, want one more release and delivered", len(r.sender.sends), len(r.legs(t, intent.ID)))
+	}
+}
+
+// Review m-5: never cleared while the release can still land or has landed.
+func TestPoolSlice_ClearStuckReleaseRefusedWithoutEvidence(t *testing.T) {
+	ctx := context.Background()
+	cases := map[string]func(*poolSettleRig, *models.P2PTrade){
+		"inside the window": func(r *poolSettleRig, sl *models.P2PTrade) {
+			r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("updated_at", time.Now())
+		},
+		"release key busy": func(r *poolSettleRig, _ *models.P2PTrade) { r.chain.latest = r.chain.nextNonce - 1 },
+		"landed": func(r *poolSettleRig, sl *models.P2PTrade) { r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusReleased) },
+		"logged": func(r *poolSettleRig, sl *models.P2PTrade) {
+			id := HashID(sl.ID)
+			r.desk.c.Probe = &logProbe{TreasuryTxProbe: r.desk.c.Probe, logs: []types.Log{{BlockNumber: r.chain.head, TxHash: common.HexToHash("0x02"),
+				Address: common.HexToAddress(poolTestEscrow), Topics: []common.Hash{topicTradeReleased, common.BytesToHash(id[:])}}}}
+		},
+	}
+	for name, spoil := range cases {
+		r := newPoolSettleRig(t, 50)
+		intent, sl := stuckRelease(t, r)
+		spoil(r, &sl)
+		if err := r.it.ClearPoolSliceRelease(ctx, uuid.New(), intent.ID, sl.ID, "note"); !errors.Is(err, ErrITBadState) {
+			t.Fatalf("%s: err = %v, want refused", name, err)
+		}
+		var got models.P2PTrade
+		r.db.First(&got, "id = ?", sl.ID)
+		if got.Status != models.P2PTradeStatusReleasing || got.ReleaseTxHash != sl.ReleaseTxHash {
+			t.Fatalf("%s: slice = %s %q, want untouched", name, got.Status, got.ReleaseTxHash)
+		}
 	}
 }
