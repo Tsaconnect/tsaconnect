@@ -100,9 +100,39 @@ func minimalCoveringSubset(p []PoolPendingSlice, owed *big.Int) ([]int, *big.Int
 	return best, bestTotal, best != nil
 }
 
-// orderSlices is an order's released units (R) and its pending slices, all
-// generations, canonical. C1 counts `released` only; plan C2 narrows R to
-// releases proven 5 deep and adds F21's resolve-to-treasury.
+// F22 markers on a slice's cancel_reason (review I-5): one exit per slice,
+// taken under the slice's row lock by a CAS from the empty string.
+const (
+	poolF22Paid     = "pool_f22:paid"
+	poolF22Returned = "pool_f22:returned"
+)
+
+// sliceAtTreasury (plan C2 P1): the slice's USDT is, or may already be, at
+// the conversion treasury — releasing, released, a broadcast release not yet
+// resolved, or disputed/resolved while it still backs its order (F21 drops a
+// slice it sends back to the LP, so a non-dropped dispute of a paid order goes
+// to the treasury). R for S18 and the S37 refund's "zero slices" test. Proof
+// is separate (proveSliceRelease).
+func sliceAtTreasury(status string, droppedAt *time.Time, releaseTxHash, cancelReason string) bool {
+	if cancelReason == poolF22Returned {
+		return false // re-review I-B: an operator handed this slice's USDT back to its LP
+	}
+	switch status {
+	case models.P2PTradeStatusReleasing, models.P2PTradeStatusReleased:
+		return true
+	case models.P2PTradeStatusDisputed, models.P2PTradeStatusResolved:
+		return droppedAt == nil
+	case models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid:
+		// Review C-1: a recorded release hash means it was broadcast and is not
+		// proven gone (Task 1 clears the hash when it is): it may land.
+		return releaseTxHash != ""
+	}
+	return false
+}
+
+// orderSlices is an order's at-treasury units (R) and its pending slices,
+// all generations, canonical (plan C2 P1: R counts releasing and F21's
+// resolve-to-treasury too).
 func (d *PoolDesk) orderSlices(tx *gorm.DB, intentID uuid.UUID) (*big.Int, []PoolPendingSlice, error) {
 	var rows []models.P2PTrade
 	if err := tx.Where("it_intent_id = ?", intentID).Order("created_at").Find(&rows).Error; err != nil {
@@ -113,9 +143,9 @@ func (d *PoolDesk) orderSlices(tx *gorm.DB, intentID uuid.UUID) (*big.Int, []Poo
 	for _, r := range rows {
 		units := d.toCanonical(r.TokenAmount)
 		switch {
-		case r.Status == models.P2PTradeStatusReleased:
+		case sliceAtTreasury(r.Status, r.DroppedAt, r.ReleaseTxHash, r.CancelReason):
 			released.Add(released, units)
-		case r.Status == models.P2PTradeStatusPendingPayment && r.OpenedAt != nil && r.DroppedAt == nil:
+		case (r.Status == models.P2PTradeStatusPendingPayment || r.Status == models.P2PTradeStatusPaid) && r.OpenedAt != nil && r.DroppedAt == nil:
 			pending = append(pending, PoolPendingSlice{ID: r.ID, Units: units, CreatedAt: r.CreatedAt})
 		}
 	}
