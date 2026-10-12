@@ -188,7 +188,7 @@ func TestPoolReeval_ParkRefusedWhenADropRacesARelease(t *testing.T) {
 	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("status", models.ITStatusDelivering)
 	r.db.Model(&models.P2PTrade{}).Where("id = ?", sls[1].ID).Update("status", models.P2PTradeStatusCancelled) // B lost
 	flipBeforeDrop(t, r.db, sls[0].ID)
-	parked, err := r.it.reevaluatePoolOrder(context.Background(), r.desk, intent.ID)
+	parked, err := r.it.reevaluatePoolOrder(context.Background(), r.desk, intent.ID, "test")
 	if parked || !errors.Is(err, errPoolSlicesMoved) {
 		t.Fatalf("parked=%v err=%v, want refused: A's release flip landed under the decision", parked, err)
 	}

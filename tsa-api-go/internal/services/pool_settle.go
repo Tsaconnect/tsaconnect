@@ -176,7 +176,7 @@ func (s *ITService) advancePoolDelivering(ctx context.Context, d *PoolDesk, inte
 	}
 	// 2. A slice lost under the paid order: S18 again (P5).
 	if lost {
-		parked, err := s.reevaluatePoolOrder(ctx, d, intent.ID)
+		parked, err := s.reevaluatePoolOrder(ctx, d, intent.ID, "a slice left escrow before its release")
 		if err != nil || parked {
 			return err
 		}
@@ -227,6 +227,14 @@ func (s *ITService) advancePoolDelivering(ctx context.Context, d *PoolDesk, inte
 	owed, ok := new(big.Int).SetString(intent.AssetAmount, 10)
 	if !ok || total.Cmp(owed) < 0 {
 		log.Printf("[liquidity] ALERT liquidity_pool_short_release intent=%s proven=%s owed=%s — not delivered", intent.ID, total, intent.AssetAmount)
+		// Review I-2: never delivered short, never left without an exit. S18
+		// under the locks parks it pool_slices_short (refused while a sale leg
+		// is live), which opens re-delivery and the S37 override.
+		if ok {
+			if parked, err := s.reevaluatePoolOrder(ctx, d, intent.ID, "the proven releases fall short of her amount"); err != nil || parked {
+				return err
+			}
+		}
 		return fmt.Errorf("%w: proven %s of %s", ErrITBadState, total, intent.AssetAmount)
 	}
 	// 5. Deliver: hand off (converted) or send (direct).
@@ -304,8 +312,9 @@ func (s *ITService) handOffPoolOrder(ctx context.Context, intent *models.ITInten
 
 // reevaluatePoolOrder is S18 in the watcher (plan C2 P5), under the pool lock
 // and the intent's row lock: R = at-treasury units, pending = kept Pending
-// slices. Covered: drop what is not needed. Not: park pool_slices_short.
-func (s *ITService) reevaluatePoolOrder(ctx context.Context, d *PoolDesk, id uuid.UUID) (bool, error) {
+// slices. Covered: drop what is not needed. Not: park pool_slices_short,
+// stating why.
+func (s *ITService) reevaluatePoolOrder(ctx context.Context, d *PoolDesk, id uuid.UUID, why string) (bool, error) {
 	parked := false
 	err := withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
 		var locked models.ITIntent
@@ -345,7 +354,7 @@ func (s *ITService) reevaluatePoolOrder(ctx context.Context, d *PoolDesk, id uui
 		}
 		res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", id, models.ITStatusDelivering).
 			Updates(map[string]any{"status": models.ITStatusBuyAwaitingRate,
-				"failure_reason": models.ITFailurePoolSlicesShort + ": a slice left escrow before its release; owed " + cov.Owed.String()})
+				"failure_reason": models.ITFailurePoolSlicesShort + ": " + why + "; owed " + cov.Owed.String()})
 		parked = res.Error == nil && res.RowsAffected == 1
 		if parked {
 			log.Printf("[liquidity] ALERT liquidity_pool_slices_short intent=%s owed=%s at_treasury=%s — re-deliver or refund", id, cov.Owed, released)

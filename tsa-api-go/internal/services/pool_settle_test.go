@@ -288,7 +288,7 @@ func TestPoolReeval_NeverParksWithALiveSale(t *testing.T) {
 		t.Fatal("setup: no sale leg")
 	}
 	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("asset_amount", "999000000") // R no longer covers
-	parked, err := r.it.reevaluatePoolOrder(context.Background(), r.desk, intent.ID)
+	parked, err := r.it.reevaluatePoolOrder(context.Background(), r.desk, intent.ID, "test")
 	if err != nil || parked {
 		t.Fatalf("parked=%v err=%v, want not parked", parked, err)
 	}
@@ -380,5 +380,36 @@ func TestPoolSlice_DroppedThenSelfReleasedIsNotR(t *testing.T) {
 	// F22's other exit is open too, though the order holds her naira.
 	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), a.ID, "0xreturn", "handed back"); err != nil {
 		t.Fatalf("returned = %v, want allowed on a dropped self-release", err)
+	}
+}
+
+// Review I-2: every kept slice proven but the total short of her amount (any
+// accounting drift) is never delivered short and never left in delivering
+// with no exit: it parks pool_slices_short, alerted, and the S37 override
+// (its LP forwarded first) or a re-delivery takes it from there.
+func TestPoolSettle_ShortProvenTotalParks(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	r.wireForwards(t)
+	intent := r.openPaid(t, "5000")
+	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("asset_amount", "999000000") // drift: more than the slice
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	_ = r.advance(t, intent.ID)
+	got := r.intent(t, intent.ID)
+	if got.Status != models.ITStatusBuyAwaitingRate || !strings.HasPrefix(got.FailureReason, models.ITFailurePoolSlicesShort) {
+		t.Fatalf("intent = %s %q, want parked %s", got.Status, got.FailureReason, models.ITFailurePoolSlicesShort)
+	}
+	if n := len(r.legs(t, intent.ID)); n != 0 {
+		t.Fatal("a short order is never delivered")
+	}
+	if !strings.Contains(buf.String(), "ALERT liquidity_pool_short_release") {
+		t.Fatalf("no short-release alert:\n%s", buf.String())
+	}
+	if acts := r.it.poolOrderActions(context.Background(), &got); !contains(acts, "refund-override") {
+		t.Fatalf("actions = %v, want the S37 override offered", acts)
+	}
+	if out, err := r.it.RefundPoolBuyOverride(context.Background(), uuid.New(), intent.ID, "short; refunded"); err != nil || out.Status != models.ITStatusRefunded {
+		t.Fatalf("override = %v %v, want refunded (its LP already forwarded)", out, err)
 	}
 }
