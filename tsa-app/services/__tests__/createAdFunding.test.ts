@@ -13,11 +13,24 @@
 //   - 'aborted' (e.g. no gas) also stops the publish; only 'already-funded' /
 //     'funded' proceed.
 
+//   - publishFailureMessage never shows a raw server/RPC string (app copy
+//     passes through as-is; an undecodable revert gets an actionable sentence).
+
+// services/p2p.ts (formatTokenAmount) pulls in the auth headers' storage.
+jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn(), setItem: jest.fn() }));
+
+// eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import {
+  createAdStatusError,
   fundingPreflight,
+  lpStatusError,
   publishActionForFunding,
+  publishFailureMessage,
 } from '../createAdFunding';
+// eslint-disable-next-line import/first
 import type { EnsureFundingResult } from '../escrowFunding';
+// eslint-disable-next-line import/first
+import { P2PCopyError, p2pErrorMessage } from '../p2pErrors';
 
 describe('fundingPreflight — funding decision + chain gate', () => {
   it('skips funding when available already covers the ad (shortfall <= 0)', () => {
@@ -131,5 +144,77 @@ describe('publishActionForFunding — only a backed ad proceeds', () => {
       deposited: '60',
     };
     expect(publishActionForFunding(r)).toEqual({ kind: 'recover' });
+  });
+});
+
+describe('publishFailureMessage — what "Could not publish ad" says', () => {
+  const opts = { symbol: 'USDT', decimals: 18, depositedThisAttempt: false };
+  const word = (v: bigint) => v.toString(16).padStart(64, '0');
+
+  it('maps a raw server/RPC message instead of showing it', () => {
+    const raw = 'p2p: prepare deposit: ' + 'x'.repeat(250);
+    expect(publishFailureMessage(new Error(raw), opts)).toBe('Something went wrong. Please try again.');
+    expect(publishFailureMessage(new Error('p2p: ad is not active'), opts)).toBe('This ad is no longer available.');
+  });
+
+  it('keeps the timeout copy for an approve that has not confirmed yet', () => {
+    expect(publishFailureMessage(new Error('Approve confirmation timed out'), opts)).toMatch(/may still go through/);
+  });
+
+  it('shows app copy as-is, however long', () => {
+    const copy = 'Your wallet did not sign the ad correctly — ' + 'its key does not match. '.repeat(10);
+    expect(publishFailureMessage(new P2PCopyError(copy), opts)).toBe(copy);
+  });
+
+  it('decodes an insufficient-balance revert first', () => {
+    const msg = 'execution reverted: 0xe450d38c' + word(1n) + word(0n) + word(25n * 10n ** 18n);
+    expect(publishFailureMessage(new Error(msg), opts)).toMatch(/needs 25 USDT, but your wallet holds 0 USDT/);
+  });
+
+  it('adds the deposit-is-safe line only when a deposit landed this attempt', () => {
+    expect(publishFailureMessage(new Error('boom'), opts)).not.toMatch(/safe in your escrow/);
+    expect(publishFailureMessage(new Error('boom'), { ...opts, depositedThisAttempt: true })).toMatch(
+      /^Boom\n\nThe deposit you just made is safe in your escrow balance/,
+    );
+  });
+});
+
+// statusError output is thrown as a P2PCopyError and shown as-is, so it must be
+// app copy or p2pErrorMessage's mapping — never the server text passed through.
+describe('createAdStatusError / lpStatusError — never the raw server message', () => {
+  const STOCK_AD = 'p2p: you already have a live stock ad; it can be renewed when it is due';
+
+  it('LP 409 stock-ad sentinel: fixed pool-ad copy, not the server sentence', () => {
+    const res = { status: 409, message: STOCK_AD };
+    expect(lpStatusError(409, STOCK_AD, res)).toBe('You already have a live pool ad. You can renew it when it is due.');
+  });
+
+  it('LP 409 with an unreadable body: the pool-ad fallback', () => {
+    expect(lpStatusError(409, '<html>409</html>')).toBe('You already have a live pool ad.');
+  });
+
+  it('LP 409 otherwise: the shared P2P mapping', () => {
+    const res = { status: 409, message: 'p2p: ad is not active' };
+    expect(lpStatusError(409, res.message, res)).toBe('This ad is no longer available.');
+  });
+
+  it('signature mismatch: actionable copy without the server message', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const raw = 'signature recovered to 0x1111111111111111111111111111111111111111, expected 0x2222222222222222222222222222222222222222';
+    const copy = createAdStatusError(400, raw);
+    expect(copy).toMatch(/^Your wallet did not sign the ad correctly/);
+    expect(copy).not.toContain('0x1111');
+    expect(copy).not.toMatch(/server message/i);
+    warn.mockRestore();
+  });
+
+  it.each([
+    [400, 'p2p: amount outside ad min/max'],
+    [500, '<html>Internal Server Error</html>'],
+    [400, 'pq: duplicate key value violates unique constraint; sql: ' + 'x'.repeat(50)],
+  ])('%s %s: exactly the shared mapping', (status, message) => {
+    const res = { status, message };
+    expect(createAdStatusError(status, message, res)).toBe(p2pErrorMessage(res, 'Server rejected the request'));
+    expect(lpStatusError(status, message, res)).toBe(p2pErrorMessage(res, 'Server rejected the request'));
   });
 });

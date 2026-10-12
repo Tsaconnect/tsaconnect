@@ -25,7 +25,18 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export type EscrowMode = 'deposit' | 'withdraw';
+// Trade-scoped broadcasts stashed by runP2PTx (`mode` = its gas action, or
+// 'open'). Trades are reconciled server-side too, but the stash lets the trade
+// screen retry the confirm right away and show "confirming" instead of
+// re-offering an action that is already on its way.
+export type TradeTxMode = 'open' | 'mark_paid' | 'release' | 'cancel_trade' | 'dispute';
+export type EscrowMode = 'deposit' | 'withdraw' | TradeTxMode;
+
+const TRADE_TX_MODES: readonly EscrowMode[] = ['open', 'mark_paid', 'release', 'cancel_trade', 'dispute'];
+
+function isTradeTxMode(mode: EscrowMode): mode is TradeTxMode {
+  return TRADE_TX_MODES.includes(mode);
+}
 
 export interface PendingEscrowConfirm {
   mode: EscrowMode;
@@ -35,6 +46,8 @@ export interface PendingEscrowConfirm {
   amount: string;
   txHash: string;
   walletAddress: string;
+  /** Trade modes only: the trade this broadcast acted on. */
+  tradeId?: string;
   /** Epoch milliseconds the record was stashed. */
   createdAt: number;
 }
@@ -108,4 +121,17 @@ export async function removePending(txHash: string): Promise<void> {
   if (next.length !== all.length) {
     await writeAll(next);
   }
+}
+
+/** A stashed trade tx: a trade mode, and always the trade it acted on. */
+export type PendingTradeTx = PendingEscrowConfirm & { mode: TradeTxMode; tradeId: string };
+
+export function isPendingTradeTx(r: PendingEscrowConfirm): r is PendingTradeTx {
+  return isTradeTxMode(r.mode) && !!r.tradeId;
+}
+
+/** Every stashed trade tx for one trade (any TradeTxMode), oldest first. */
+export async function listPendingForTrade(tradeId: string): Promise<PendingTradeTx[]> {
+  const all = await readAll();
+  return all.filter(isPendingTradeTx).filter((r) => r.tradeId === tradeId);
 }

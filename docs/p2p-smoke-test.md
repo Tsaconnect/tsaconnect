@@ -207,13 +207,13 @@ Record pass/fail + tx hashes. **A1/A2** are the two happy paths; run both.
 ### A1. Sell-ad happy path (PooledFromMaker)
 1. **Merchant**: `/p2p` → Sell → ad form (USDT, rate, NG bank PM, fiat limits) → deposit into pool → sign the EIP-712 voucher → ad goes `active`.
 2. **Buyer**: open the ad → enter fiat amount → openTrade → trade `pending_payment`.
-3. **Buyer**: "I have paid" + proof image → `paid`.
+3. **Buyer**: "I have paid" + proof image → `mark-paid/prepare` → sign + broadcast `markPaid` → `mark-paid/confirm` → `paid`. (The old `POST /mark-paid` now returns 409 `app_update_required`.)
 4. **Merchant**: Release → sign → `released`; verify on-chain `balanceOf(seller,token)` `available`/`locked` moved and buyer received amount−fee.
 
 ### A2. Buy-ad happy path (DepositedByTaker)
 1. **Merchant**: `/p2p` → Buy ad (USDT, rate, merchant's own PM) → `active` immediately (no voucher).
 2. **User**: open ad → enter crypto amount → approve (exact amount) → `openTradeWithDeposit` → trade `pending_payment` (user=seller, merchant=buyer).
-3. **Merchant**: send fiat → "I have paid" + proof → `paid`.
+3. **Merchant**: send fiat → "I have paid" + proof → `mark-paid/prepare` → sign + broadcast → `mark-paid/confirm` → `paid`.
 4. **User**: Release → `released`; verify merchant received amount−fee.
 
 ### B1/B2. Timeout cancel

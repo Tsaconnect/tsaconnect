@@ -57,11 +57,25 @@ func TestCreateAdHandler_LPAdmittedOnlyOnPoolChain(t *testing.T) {
 		r.ServeHTTP(w, req)
 		return w.Code
 	}
-	if code := post(146); code != http.StatusForbidden {
-		t.Fatalf("LP ordinary Sonic ad = %d, want 403", code)
+	// Off the pool chain the merchant/LP rule no longer applies (any verified
+	// user may post); this payload has no payment method, so it is refused by
+	// validation (400), not by role (403).
+	if code := post(146); code == http.StatusForbidden {
+		t.Fatalf("ordinary Sonic ad refused by role = %d, want no role gate", code)
 	}
-	if code := post(0); code != http.StatusForbidden {
-		t.Fatalf("LP ad on the default chain = %d, want 403", code)
+	if code := post(0); code == http.StatusForbidden {
+		t.Fatalf("ad on the default chain refused by role = %d, want no role gate", code)
+	}
+	// A verified non-merchant, non-LP user stays refused on the pool chain.
+	user.Role = models.RoleUser
+	if err := db.Exec("UPDATE payment_merchants SET status = 'suspended'").Error; err != nil {
+		t.Fatal(err)
+	}
+	if code := post(97); code != http.StatusForbidden {
+		t.Fatalf("non-LP user on the pool chain = %d, want 403", code)
+	}
+	if err := db.Exec("UPDATE payment_merchants SET status = ?", models.PaymentMerchantStatusActive).Error; err != nil {
+		t.Fatal(err)
 	}
 	if code := post(97); code != http.StatusCreated {
 		t.Fatalf("LP stock ad on the pool chain = %d, want 201", code)

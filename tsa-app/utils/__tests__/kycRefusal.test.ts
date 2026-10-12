@@ -57,6 +57,21 @@ describe('kycRefusalFor', () => {
   });
 });
 
+describe('kycRefusalFor p2p context', () => {
+  it('is neutral about paying in', () => {
+    const msg = kycRefusalFor(KYC_VERIFICATION_REQUIRED, undefined, 'p2p')?.message ?? '';
+    expect(msg).toContain('trade on P2P');
+    expect(msg).not.toContain('pay in');
+  });
+
+  it('a verified user with no legal name gets P2P support copy, never the server text', () => {
+    const r = kycRefusalFor(KYC_LEGAL_NAME_MISSING, 'p2p: legal name missing', 'p2p');
+    expect(r).toMatchObject({ kind: 'support', title: 'Contact support' });
+    expect(r?.message).toMatch(/finish setting up P2P\.$/);
+    expect(r?.message).not.toMatch(/payments|p2p:/);
+  });
+});
+
 describe('promptKycRefusal', () => {
   it('offers a Verify now action that opens the KYC screen', () => {
     expect(promptKycRefusal(KYC_VERIFICATION_REQUIRED)).toBe(true);

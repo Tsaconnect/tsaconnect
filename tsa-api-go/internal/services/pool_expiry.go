@@ -341,6 +341,10 @@ func (e *ExpiryCanceller) legacyScope(ctx context.Context, now time.Time, budget
 		}
 		sent, cerr := e.cancelOnChain(ctx, tr, now, func() (bool, error) {
 			cancel, leg, err := e.c.Trades.decideLegacyCancelLeg(ctx, tr, now)
+			if leg == "proof" {
+				e.c.Trades.alertExpiredWithProof(ctx, tr)
+				return cancel, err
+			}
 			if leg != "" && e.moneyMovedAlerts.due(tr.ID, now) {
 				metric := "p2p_expiry_money_moved"
 				if leg == "payout" {
@@ -420,9 +424,11 @@ func (s *ITService) decideSliceCancel(ctx context.Context, slice *models.P2PTrad
 // decision in dropped_at in the same transaction. Every payment path refuses a
 // trade with dropped_at set — the credit (which takes the same lock), the sell
 // payout (which commits its started marker under it before the gateway call),
-// the operator's and the buyer's mark-paid, and the release — so whoever locks
-// the row first wins. It also names the off-chain leg that refused the cancel
-// ("" when none did), for the canceller's throttled alert.
+// the operator's mark-paid, the buyer's mark-paid prepare (a confirm or
+// reconcile of a markPaid that already landed still flips: the cancel
+// reverted) and the system release (AutoRelease) — so whoever locks the row
+// first wins. It also names the off-chain leg that refused the cancel ("" when
+// none did), for the canceller's alert.
 func (s *P2PTradeService) decideLegacyCancelLeg(ctx context.Context, tr *models.P2PTrade, now time.Time) (bool, string, error) {
 	cancel, moved := false, ""
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -526,7 +532,12 @@ func (s *P2PTradeService) undoLegacyDecision(ctx context.Context, id uuid.UUID, 
 //     (then nothing left and the deposit is owed back);
 //   - inbound: a merchant-account inbound was matched to the trade;
 //   - forward: a central-account credit claimed the trade (the forward row
-//     lands before the trade is marked paid).
+//     lands before the trade is marked paid);
+//   - proof: on a direct (non-merchant) trade the buyer saved payment proof
+//     (PrepareMarkPaid) but the on-chain markPaid has not landed — the fiat may
+//     have left her bank, so refunding the seller is the parties' call (mark
+//     paid, dispute, or a cancel by timeout), never the platform's. A merchant
+//     trade only gets proof from SystemMarkPaid, which also marks it paid.
 //
 // A new off-chain leg belongs here.
 func legacyMoneyMoved(tx *gorm.DB, tr *models.P2PTrade) (string, error) {
@@ -543,7 +554,40 @@ func legacyMoneyMoved(tx *gorm.DB, tr *models.P2PTrade) (string, error) {
 	if credited > 0 {
 		return "forward", nil
 	}
+	if strings.TrimSpace(tr.ProofImageURL) != "" {
+		var direct int64
+		if err := tx.Model(&models.P2PAd{}).Where("id = ? AND pm_id IS NULL", tr.AdID).Count(&direct).Error; err != nil {
+			return "", err
+		}
+		if direct > 0 {
+			return "proof", nil
+		}
+	}
 	return "", nil
+}
+
+// alertExpiredWithProof tells operators, once per trade, that the canceller
+// left an expired direct trade alone because its buyer saved payment proof
+// (legacyMoneyMoved's proof leg). The audit row it writes first is the dedupe,
+// so a restart or a failed email never re-alerts it every tick.
+func (s *P2PTradeService) alertExpiredWithProof(ctx context.Context, tr *models.P2PTrade) {
+	var seen int64
+	if err := s.db.WithContext(ctx).Model(&models.P2PAuditLog{}).
+		Where("trade_id = ? AND action = ?", tr.ID, models.P2PAuditTradeExpiredProofAlerted).Count(&seen).Error; err != nil {
+		log.Printf("[p2p-expiry] trade=%s proof-alert dedupe read failed: %s", tr.ID, RedactAlertText(err.Error()))
+		return
+	}
+	if seen > 0 {
+		return
+	}
+	tradeID := tr.ID
+	if err := s.db.WithContext(ctx).Create(&models.P2PAuditLog{ID: uuid.New(), TradeID: &tradeID, AdID: &tr.AdID,
+		Action: models.P2PAuditTradeExpiredProofAlerted, CreatedAt: s.clock.Now()}).Error; err != nil {
+		log.Printf("[p2p-expiry] trade=%s proof-alert dedupe write failed: %s", tr.ID, RedactAlertText(err.Error()))
+		return
+	}
+	log.Printf("[p2p-expiry] ALERT p2p_expiry_proof_saved trade=%s status=%s: expired with the buyer's payment proof saved and no on-chain markPaid; not cancelled, left to the parties", tr.ID, tr.Status)
+	s.alert(ctx, P2PAlertExpiredWithProof, tr, nil)
 }
 
 // SweepStaleOpening is F3: an opening order older than 2 minutes was left by a

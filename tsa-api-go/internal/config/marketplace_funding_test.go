@@ -11,7 +11,7 @@ import (
 // Pay) do, so sonic is not a default RAMP_SPONSOR_CHAINS lane.
 func TestLoad_MarketplaceFundingDefaultsOff(t *testing.T) {
 	for _, k := range []string{"MARKETPLACE_FUNDING", "MARKETPLACE_SONIC_GAS", "RAMP_SPONSOR_CHAINS",
-		"MARKETPLACE_SONIC_GAS_FLOOR_WEI", "MARKETPLACE_SONIC_GAS_TOPUP_MAX_WEI"} {
+		"MARKETPLACE_SONIC_GAS_FLOOR_WEI", "MARKETPLACE_SONIC_GAS_TOPUP_MAX_WEI", "SONIC_GAS_FLOOR_WEI", "SONIC_GAS_TOPUP_MAX_WEI"} {
 		t.Setenv(k, "") // restored after the test
 		os.Unsetenv(k)
 	}
@@ -22,8 +22,8 @@ func TestLoad_MarketplaceFundingDefaultsOff(t *testing.T) {
 	if slices.Contains(cfg.RampSponsorChains, "sonic") {
 		t.Fatalf("RAMP_SPONSOR_CHAINS default %v must not include sonic", cfg.RampSponsorChains)
 	}
-	if cfg.MarketplaceSonicGasFloorWei != "5000000000000000000" || cfg.MarketplaceSonicGasTopUpMaxWei != "500000000000000000" {
-		t.Fatalf("sonic lane floor/max = %s/%s, want 5 S / 0.5 S", cfg.MarketplaceSonicGasFloorWei, cfg.MarketplaceSonicGasTopUpMaxWei)
+	if cfg.SonicGasFloorWei != "5000000000000000000" || cfg.SonicGasTopUpMaxWei != "500000000000000000" {
+		t.Fatalf("sonic lane floor/max = %s/%s, want 5 S / 0.5 S", cfg.SonicGasFloorWei, cfg.SonicGasTopUpMaxWei)
 	}
 	if cfg.MarketplaceEscrowGasPerOrder != 400_000 {
 		t.Fatalf("gas per order = %d", cfg.MarketplaceEscrowGasPerOrder)

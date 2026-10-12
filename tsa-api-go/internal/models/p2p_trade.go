@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,8 +53,15 @@ type P2PTrade struct {
 	// guard, the concurrent backstop for the service-layer check). Nullable so
 	// pre-existing rows don't collide on the partial unique index.
 	OpenerID *uuid.UUID `gorm:"type:uuid;index" json:"openerId,omitempty"`
-	Token    string     `gorm:"size:16;not null" json:"token"`
-	ChainID  int64      `gorm:"not null" json:"chainId"`
+	// OpenerAddress is the wallet the open was prepared for (checksummed): the
+	// on-chain buyer of a pooled sell-ad open, the on-chain seller (depositor)
+	// of a JIT buy-ad open. Confirm and backfill accept only an on-chain trade
+	// whose opener side is this wallet, so a third party who front-runs the
+	// open under our trade id can't be recorded as the trade. Nullable: rows
+	// prepared before it existed are refused, never guessed.
+	OpenerAddress string `gorm:"size:42" json:"-"`
+	Token         string `gorm:"size:16;not null" json:"token"`
+	ChainID       int64  `gorm:"not null" json:"chainId"`
 	// Funding discriminates the two-sided escrow flow. Pooled (0) = sell-ad:
 	// the crypto comes from the merchant's deposited on-chain pool. Deposited-
 	// by-taker (1) = buy-ad: the user deposits crypto just-in-time at
@@ -92,7 +100,16 @@ type P2PTrade struct {
 	ResolvedByAdmin        *uuid.UUID `gorm:"type:uuid" json:"resolvedByAdmin,omitempty"`
 	MarkedPaidAt           *time.Time `json:"markedPaidAt,omitempty"`
 	ReleasedAt             *time.Time `json:"releasedAt,omitempty"`
-	ExpiresAt              time.Time  `gorm:"index;not null" json:"expiresAt"`
+	// FeeBps is the fee (platform + gas bps) the escrow snapshotted when the open
+	// was recorded; the crypto receiver nets amount minus floor(amount*bps/10000).
+	// Nil until the snapshot was read; never guessed.
+	FeeBps *int `gorm:"column:fee_bps" json:"feeBps,omitempty"`
+	// FeePlatformBps and FeeGasBps are FeeBps's two legs, from the same
+	// snapshot read (release accrual reads the platform leg from here before
+	// asking the chain). Nil for trades recorded before the columns existed.
+	FeePlatformBps *int      `gorm:"column:fee_platform_bps" json:"-"`
+	FeeGasBps      *int      `gorm:"column:fee_gas_bps" json:"-"`
+	ExpiresAt      time.Time `gorm:"index;not null" json:"expiresAt"`
 	// ExpiredNotifiedAt — set by the timeout watchdog when it first detects
 	// the trade has passed `expires_at`. Watchdog filters on `NULL` so the
 	// expired-notification fires exactly once per trade.
@@ -132,6 +149,20 @@ type P2PTrade struct {
 	IsPM      bool     `gorm:"-" json:"isPm"`
 	PmPayTo   *PmPayTo `gorm:"-" json:"pmPayTo,omitempty"`
 	PayerName string   `gorm:"-" json:"payerName,omitempty"`
+	// Payee is where the fiat payer sends money in a direct (non-PM) trade.
+	// Set by GetTrade only while the trade is live; never persisted.
+	Payee *P2PPayee `gorm:"-" json:"payee,omitempty"`
+	// FeeAmount / BuyerNetAmount (token base units) are derived from FeeBps.
+	FeeAmount      string `gorm:"-" json:"feeAmount,omitempty"`
+	BuyerNetAmount string `gorm:"-" json:"buyerNetAmount,omitempty"`
+}
+
+// P2PPayee is the fiat destination of a direct trade (virtual; not persisted).
+type P2PPayee struct {
+	Provider      string `json:"provider"`
+	BankName      string `json:"bankName"`
+	AccountNumber string `json:"accountNumber"`
+	AccountName   string `json:"accountName"`
 }
 
 // PmPayTo is the PM's static fiat destination shown to a buyer (virtual; not persisted).
@@ -148,6 +179,12 @@ type PmPayTo struct {
 
 func (P2PTrade) TableName() string {
 	return "p2p_trades"
+}
+
+// OpenRecorded reports whether the trade's on-chain open is recorded: a real
+// open tx hash, or the "reconciled" marker the open backfill writes.
+func (t *P2PTrade) OpenRecorded() bool {
+	return strings.TrimSpace(t.OpenTxHash) != ""
 }
 
 // IsPoolSlice reports whether the trade is a TSA Liquidity slice.

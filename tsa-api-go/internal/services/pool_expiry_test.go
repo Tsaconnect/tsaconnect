@@ -316,7 +316,7 @@ func TestExpiry_LegacyDecidedTradeTakesNoPayment(t *testing.T) {
 	if _, err := r.src.trades.SystemMarkPaid(ctx, r.trade.ID, "manual:op"); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("operator mark-paid: %v", err)
 	}
-	if _, err := r.src.trades.MarkPaid(ctx, r.trade.ID, r.trade.BuyerID, "https://proof"); !errors.Is(err, ErrInvalidTransition) {
+	if _, _, err := r.src.trades.PrepareMarkPaid(ctx, r.trade.ID, r.trade.BuyerID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/proof.png"); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("buyer mark-paid: %v", err)
 	}
 	if _, err := r.src.trades.AutoRelease(ctx, r.trade.ID, sender); !errors.Is(err, ErrInvalidTransition) {

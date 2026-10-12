@@ -51,6 +51,9 @@ jest.mock('../wallet', () => ({
   getProvider: () => ({ waitForTransaction: (...a: any[]) => mockWaitForTransaction(...a) }),
 }));
 
+const mockEnsureP2PGas = jest.fn();
+jest.mock('../p2pGas', () => ({ ensureP2PGas: (...a: any[]) => mockEnsureP2PGas(...a) }));
+
 const mockAddPending = jest.fn();
 jest.mock('../p2pPending', () => ({
   addPending: (...a: any[]) => mockAddPending(...a),
@@ -78,7 +81,7 @@ function arrangeHappyChain() {
   mockEnsureGas.mockResolvedValue(true);
   mockSignTransaction.mockResolvedValue('0xsigned');
   mockBroadcastTransaction.mockImplementation(async () => ({ hash: '0xdeposit' }));
-  mockWaitForTransaction.mockResolvedValue({});
+  mockWaitForTransaction.mockResolvedValue({ status: 1 });
   mockPrepareApprove.mockResolvedValue({ success: true, data: { unsignedTx: { to: '0xtok' } } });
   mockPrepareDeposit.mockResolvedValue({ success: true, data: { unsignedTx: { to: '0xescrow' } } });
 }
@@ -194,7 +197,7 @@ describe('ensureEscrowFunding — allowance handling', () => {
     });
     mockWaitForTransaction.mockImplementation(async () => {
       order.push('waitMined');
-      return {};
+      return { status: 1 };
     });
     mockPrepareDeposit.mockImplementation(async () => {
       order.push('prepareDeposit');
@@ -208,6 +211,16 @@ describe('ensureEscrowFunding — allowance handling', () => {
     // approve broadcast -> mined -> deposit prepared -> deposit broadcast.
     expect(order).toEqual(['broadcast', 'waitMined', 'prepareDeposit', 'broadcast']);
     expect(mockConfirmDeposit).toHaveBeenCalledWith(TOKEN, '60', '0xdeposit', WALLET, CHAIN_ID);
+  });
+
+  it('stops before the deposit when the approve reverted on chain', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockWaitForTransaction.mockResolvedValue({ status: 0 });
+
+    await expect(ensureEscrowFunding(params({ amountBaseUnits: '100' }))).rejects.toThrow(/failed on chain/);
+    expect(mockPrepareDeposit).not.toHaveBeenCalled();
   });
 
   it('treats a non-numeric allowance as 0 and runs the approve', async () => {
@@ -310,6 +323,42 @@ describe('ensureEscrowFunding — prepare failures surface as throws (funds-safe
   });
 });
 
+describe('ensureEscrowFunding — a prepare refusal is mapped copy', () => {
+  it('never throws a raw server body', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockPrepareDeposit.mockResolvedValue({ success: false, status: 502, message: '<html>502 Bad Gateway</html>' });
+
+    await expect(ensureEscrowFunding(params())).rejects.toThrow('Prepare deposit failed');
+  });
+});
+
+describe('ensureEscrowFunding — sign/broadcast failures are mapped like runP2PTx', () => {
+  it('maps a raw approve signing error', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockSignTransaction.mockRejectedValue(new Error('insufficient funds for gas * price + value: have 0 want 1000'));
+
+    await expect(ensureEscrowFunding(params())).rejects.toThrow('Not enough native token to pay gas on this chain.');
+    expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+
+  it('maps a raw deposit broadcast error and never confirms or stashes', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockBroadcastTransaction.mockRejectedValue(new Error('nonce too low: next nonce 7, tx nonce 6'));
+
+    await expect(ensureEscrowFunding(params())).rejects.toThrow(
+      'Your wallet was out of step with the network. Please try again.',
+    );
+    expect(mockConfirmDeposit).not.toHaveBeenCalled();
+    expect(mockAddPending).not.toHaveBeenCalled();
+  });
+});
+
 // TSA Liquidity (review I4): an LP deposit must move EXACTLY the typed amount.
 // With exactDepositBaseUnits set, a shortfall that differs (the balance moved
 // since the caller read it, or this read failed) stops before any gas check,
@@ -347,5 +396,75 @@ describe('ensureEscrowFunding — exactDepositBaseUnits', () => {
 
     expect(res).toEqual({ status: 'aborted', reason: 'balance-changed' });
     expect(mockBroadcastTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('P2P gas sponsor (gasAction)', () => {
+  it('asks the P2P sponsor when gasAction is set; LP (unset) keeps ensureGas', async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockConfirmDeposit.mockResolvedValue({ success: true });
+    mockPrepareDeposit.mockResolvedValue({ success: true, data: { unsignedTx: {} } });
+    mockEnsureP2PGas.mockResolvedValue(true);
+
+    await ensureEscrowFunding(params({ gasAction: 'deposit' }));
+    expect(mockEnsureP2PGas).toHaveBeenCalledWith(expect.objectContaining({ chainId: CHAIN_ID, walletAddress: WALLET, action: 'deposit' }));
+    expect(mockEnsureGas).not.toHaveBeenCalled();
+  });
+
+  it('requests one drip per step: approve before the approve, deposit before the deposit', async () => {
+    const order: string[] = [];
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    arrangeHappyChain();
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockConfirmDeposit.mockResolvedValue({ success: true });
+    mockPrepareApprove.mockResolvedValue({ success: true, data: { unsignedTx: {} } });
+    mockPrepareDeposit.mockResolvedValue({ success: true, data: { unsignedTx: {} } });
+    mockWaitForTransaction.mockResolvedValue({ status: 1 });
+    mockEnsureP2PGas.mockImplementation(async (a: any) => { order.push(`gas:${a.action}`); return true; });
+    mockBroadcastTransaction.mockImplementation(async () => { order.push('broadcast'); return { hash: '0xh' }; });
+
+    await ensureEscrowFunding(params({ gasAction: 'deposit' }));
+    expect(order).toEqual(['gas:approve', 'broadcast', 'gas:deposit', 'broadcast']);
+  });
+});
+
+describe('KYC refusals reach the caller with their code', () => {
+  const kyc = { success: false, status: 403, code: 'kyc_verification_required', message: 'Identity verification required' };
+
+  it('a KYC 403 on the balance read stops before any gas check', async () => {
+    mockBalance.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+    expect(mockEnsureGas).not.toHaveBeenCalled();
+    expect(mockEnsureP2PGas).not.toHaveBeenCalled();
+  });
+
+  it('a KYC 403 on the allowance read is not read as a zero allowance', async () => {
+    arrangeHappyChain();
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0' } });
+    mockAllowance.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required' });
+    expect(mockPrepareApprove).not.toHaveBeenCalled();
+  });
+
+  it('keeps code and status when prepareApprove or prepareDeposit refuses', async () => {
+    arrangeHappyChain();
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0' } });
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '0' } });
+    mockPrepareApprove.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockPrepareDeposit.mockResolvedValue(kyc);
+    await expect(ensureEscrowFunding(params())).rejects.toMatchObject({ code: 'kyc_verification_required', status: 403 });
+  });
+
+  it('a non-KYC balance failure still reads as zero', async () => {
+    arrangeHappyChain();
+    mockBalance.mockResolvedValue({ success: false, status: 500, message: 'boom' });
+    mockAllowance.mockResolvedValue({ success: true, data: { allowance: '1000' } });
+    mockConfirmDeposit.mockResolvedValue({ success: true });
+    await expect(ensureEscrowFunding(params())).resolves.toMatchObject({ status: 'funded' });
   });
 });

@@ -40,7 +40,7 @@ func TestOpenTrade_PMSellAd_NoPaymentMethod_OK(t *testing.T) {
 	markAdAsPM(t, svc, adID) // stamp pm_id → treat as a PM ad
 
 	buyerID := seedVerifiedUser(t, db)
-	trade, raw, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xbeef",
+	trade, raw, err := svc.OpenTrade(context.Background(), adID, buyerID, "0x000000000000000000000000000000000000bEEF",
 		OpenTradeParams{FiatAmount: "1000"}) // no PaymentMethodID
 	if err != nil {
 		t.Fatalf("OpenTrade(PM sell-ad, no payment method): %v", err)
@@ -60,7 +60,7 @@ func TestOpenTrade_NonPMSellAd_NoPaymentMethod_Rejected(t *testing.T) {
 	svc, _, adID, _, db := setupSignedAd(t) // pm_id stays NULL
 
 	buyerID := seedVerifiedUser(t, db)
-	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xbeef",
+	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0x000000000000000000000000000000000000bEEF",
 		OpenTradeParams{FiatAmount: "1000"}) // no PaymentMethodID
 	if !errors.Is(err, ErrInvalidParams) {
 		t.Fatalf("expected ErrInvalidParams for non-PM sell-ad with no method, got %v", err)
@@ -156,7 +156,7 @@ func TestOpenTradeWithDeposit_PMBuyAd_MissingPayout_Errors(t *testing.T) {
 func TestOpenTradeWithDeposit_NonPMBuyAd_PayoutOptional(t *testing.T) {
 	svc, _, _, _, adID, _, db := buyAdFixture(t) // pm_id stays NULL
 
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 

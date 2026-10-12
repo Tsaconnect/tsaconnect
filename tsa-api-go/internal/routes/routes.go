@@ -840,6 +840,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.POST("/withdrawals", idem, p2p.PrepareWithdraw)
 			p2pGroup.POST("/withdrawals/confirm", idem, p2p.ConfirmWithdraw)
 
+			// Gas: S for the caller's next P2P tx on Sonic, to her proven wallet.
+			p2pGroup.POST("/gas/top-up", idem, p2p.GasTopUp)
+
 			p2pGroup.GET("/ads", p2p.ListAds)
 			p2pGroup.GET("/ads/my", p2p.ListMyAds)
 			p2pGroup.GET("/ads/:id", p2p.GetAd)
@@ -857,7 +860,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.GET("/trades", p2p.ListTrades)
 			p2pGroup.GET("/trades/:id", p2p.GetTrade)
 			p2pGroup.POST("/trades/:id/open/confirm", idem, p2p.ConfirmOpenTrade)
-			p2pGroup.POST("/trades/:id/mark-paid", idem, p2p.MarkPaid)
+			// Retired: answers 409 app_update_required (DB-only mark-paid left the escrow cancellable).
+			p2pGroup.POST("/trades/:id/mark-paid", p2p.MarkPaidRetired)
+			p2pGroup.POST("/trades/:id/mark-paid/prepare", idem, p2p.PrepareMarkPaid)
+			p2pGroup.POST("/trades/:id/mark-paid/confirm", idem, p2p.ConfirmMarkPaid)
 			p2pGroup.POST("/trades/:id/release", idem, p2p.PrepareRelease)
 			p2pGroup.POST("/trades/:id/release/confirm", idem, p2p.ConfirmRelease)
 			p2pGroup.POST("/trades/:id/cancel", idem, p2p.PrepareCancel)
@@ -893,6 +899,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		{
 			adminP2P.GET("/disputes", p2p.AdminListDisputes)
 			adminP2P.GET("/disputes/:id", p2p.AdminGetDispute)
+			adminP2P.GET("/trades/:id", p2p.AdminGetTrade)
+			adminP2P.GET("/trades/:id/messages", p2p.AdminListTradeMessages)
 			adminP2P.POST("/disputes/:id/resolve", idem, p2p.AdminResolveDispute)
 			adminP2P.POST("/disputes/:id/resolve/confirm", idem, p2p.ConfirmAdminResolveDispute)
 		}

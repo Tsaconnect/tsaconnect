@@ -46,6 +46,7 @@ import {
   unsignedTxToTxLike,
   type P2PChainInfo,
 } from '../../services/p2p';
+import { ensureP2PGas } from '../../services/p2pGas';
 import {
   addPending,
   listPending,
@@ -55,7 +56,6 @@ import {
 import { getChain, getChainByChainId } from '../../constants/chains';
 import {
   broadcastTransaction,
-  ensureGas,
   getActiveWallet,
   signTransaction,
 } from '../../services/wallet';
@@ -308,7 +308,9 @@ const P2PPoolScreen: React.FC = () => {
       // before we sign/broadcast — the withdraw tx pays gas on this chain. Bails
       // with a fund-your-wallet prompt rather than letting the tx fail mid-flow.
       setStage('Checking gas…');
-      const hasGas = await ensureGas(p2pChainKey(selectedChainId), w);
+      // Only Sonic is sponsored; on any other chain (the LP pool chain
+      // included) ensureP2PGas is the plain signer balance check.
+      const hasGas = await ensureP2PGas({ chainId: selectedChainId, walletAddress: w, action: 'withdraw', onStage: setStage });
       if (!hasGas) return; // `finally` resets submitting/stage.
 
       setStage('Preparing transaction…');
@@ -385,9 +387,6 @@ const P2PPoolScreen: React.FC = () => {
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
-          <Text variant="title1" weight="700">
-            Escrow funds
-          </Text>
           <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs, marginBottom: spacing.lg }}>
             Reclaim funds from your escrow pool. Available is withdrawable anytime;
             locked is reserved against open trades.

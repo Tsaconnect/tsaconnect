@@ -37,13 +37,12 @@ import {
 } from '@/components/ui';
 import { useTheme } from '@/theme';
 import { useAuth } from '../../../AuthContext/AuthContext';
-import {
-  tradesApi,
-  p2pChainKey,
-  unsignedTxToTxLike,
-  type P2PTrade,
-} from '../../../services/p2p';
-import { broadcastTransaction, getActiveWallet, signTransaction } from '../../../services/wallet';
+import { tradesApi, type P2PTrade } from '../../../services/p2p';
+import { runP2PTx } from '../../../services/p2pTx';
+import { getActiveWallet } from '../../../services/wallet';
+import { safeProofUrl } from '../../../utils/payInto';
+import { applyFollowUp } from '../../../utils/p2pFollowUp';
+import { disputeFollowUp, disputeThrownFollowUp } from '../../../utils/p2pTradeView';
 
 // Structured reasons. The `reason` string on the wire is free-text (the
 // backend stores it verbatim and shows it to the admin), so each enum maps to
@@ -205,51 +204,47 @@ const DisputeWizardScreen: React.FC = () => {
   const onBack = () => setStep((s) => Math.max(0, s - 1));
   const onNext = () => setStep((s) => Math.min(STEPS.length - 1, s + 1));
 
-  // Submit: same prepare → sign+broadcast → confirm dance as the trade screen's
-  // handleSubmitDispute, with evidenceUrls passed alongside the reason.
+  const leave = () => {
+    // router.back() returns to the trade screen; fall back to a hard route
+    // if there's no stack.
+    if (router.canGoBack?.()) router.back();
+    else router.replace(`/p2p/trade/${trade.id}` as never);
+  };
+
   const onSubmit = async () => {
     if (submitting) return;
     const reasonStr = wireReason();
     if (!reasonStr) return;
 
-    let broadcastHash: string | null = null;
+    const safeEvidence = evidence.map(safeProofUrl);
+    if (safeEvidence.some((u) => u === null)) {
+      toast.error('Some evidence images are not secure (https) links. Remove them and add them again.');
+      return;
+    }
+    const evidenceUrls = safeEvidence as string[];
+
     try {
       setSubmitting(true);
 
       const callerAddress = await getActiveWallet();
       if (!callerAddress) throw new Error('No wallet found');
 
-      const prep = await tradesApi.raiseDispute(trade.id, reasonStr, callerAddress, evidence);
-      if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
+      const r = await runP2PTx({
+        chainId: trade.chainId,
+        walletAddress: callerAddress,
+        action: 'dispute',
+        tradeId: trade.id,
+        prepare: () => tradesApi.raiseDispute(trade.id, reasonStr, callerAddress, evidenceUrls),
+        confirm: (h) => tradesApi.confirmRaiseDispute(trade.id, h),
+        // A lost confirm: the trade screen shows "Confirming…" with a retry
+        // instead of re-offering the dispute, until the trade shows disputed.
+        stash: () => ({ mode: 'dispute', tradeId: trade.id, token: trade.token, amount: trade.tokenAmount }),
+      });
 
-      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), callerAddress);
-
-      const resp = await broadcastTransaction(p2pChainKey(trade.chainId), signed);
-      broadcastHash = resp.hash;
-
-      const conf = await tradesApi.confirmRaiseDispute(trade.id, resp.hash);
-      if (!conf.success) throw new Error(conf.message || 'Confirm failed');
-
-      toast.success('Dispute opened. An admin will review it shortly.');
-      // Back to the trade. router.back() returns to wherever the user came
-      // from (the trade screen); fall back to a hard route if there's no stack.
-      if (router.canGoBack?.()) {
-        router.back();
-      } else {
-        router.replace(`/p2p/trade/${trade.id}` as never);
-      }
-    } catch (err: any) {
-      const detail = err?.message || String(err);
-      if (broadcastHash) {
-        // Tx already on chain but the server confirm failed — do NOT retry;
-        // the chain reconciler will pick it up. Same guidance as the trade screen.
-        toast.error(
-          `Dispute submitted on chain (tx ${broadcastHash.slice(0, 10)}…) but the server couldn't ` +
-            `record it. Don't retry — it will reconcile shortly.`,
-        );
-      } else {
-        toast.error(detail);
-      }
+      applyFollowUp(disputeFollowUp(r, trade.id), { toast, navigate: leave });
+    } catch (err) {
+      // Only reached before anything is broadcast (no wallet, sign/broadcast failure).
+      applyFollowUp(disputeThrownFollowUp(err), { toast });
     } finally {
       setSubmitting(false);
     }

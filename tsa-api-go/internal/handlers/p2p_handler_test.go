@@ -33,6 +33,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/datatypes"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -53,6 +54,7 @@ type mockEscrow struct {
 	disputedEvent      *services.P2PTradeDisputedEvent
 	resolvedEvent      *services.P2PTradeResolvedEvent
 	onChainTrade       *services.OnChainP2PTrade
+	prepareMarkPaidErr error
 	hashFn             func(services.AdVoucher) [32]byte
 	// Captured args so handler tests can assert the deposit path was taken
 	// with the right roles/addresses.
@@ -112,6 +114,9 @@ func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string,
 	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
 }
 func (m *mockEscrow) PrepareMarkPaid(_ [32]byte, _ string) ([]byte, error) {
+	if m.prepareMarkPaidErr != nil {
+		return nil, m.prepareMarkPaidErr
+	}
 	return []byte(`{"tx":"markPaid"}`), nil
 }
 func (m *mockEscrow) PrepareRelease(_ [32]byte, _ string) ([]byte, error) {
@@ -171,6 +176,9 @@ func (m *mockEscrow) VerifyTradeCancelled(_ string, id [32]byte) (*services.P2PT
 	}
 	return &services.P2PTradeCancelledEvent{TradeID: id, Amount: big.NewInt(100), ReturnedToPool: true}, nil
 }
+func (m *mockEscrow) VerifyTradePaid(_ string, id [32]byte) (*services.P2PTradePaidEvent, error) {
+	return &services.P2PTradePaidEvent{TradeID: id}, nil
+}
 func (m *mockEscrow) VerifyTradeDisputed(_ string, id [32]byte) (*services.P2PTradeDisputedEvent, error) {
 	if m.disputedEvent != nil {
 		return m.disputedEvent, nil
@@ -190,10 +198,9 @@ func (m *mockEscrow) ReadTrade(_ [32]byte) (*services.OnChainP2PTrade, error) {
 	}
 	return &services.OnChainP2PTrade{Status: services.OnChainP2PStatusNone}, nil
 }
-func (m *mockEscrow) ReadTradePlatformFeeBps(_ [32]byte) (uint16, bool) {
-	return 0, false // pre-V3 default: no platform snapshot → accrual no-op
+func (m *mockEscrow) ReadTradeFeeSnapshot(_ [32]byte) (uint16, uint16, bool) {
+	return 0, 0, false
 }
-func (m *mockEscrow) ReadTradeFeeSnapshot(_ [32]byte) (uint16, uint16, bool) { return 0, 0, true }
 func (m *mockEscrow) ReadBalance(_, _ string) (*services.OnChainBalance, error) {
 	avail := m.balance.Available
 	if avail == nil {
@@ -290,7 +297,7 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
-			marked_paid_at DATETIME, released_at DATETIME,
+			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, fee_platform_bps INTEGER, fee_gas_bps INTEGER, opener_address TEXT,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
 			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
@@ -304,11 +311,11 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE p2p_disputes (
 			id TEXT PRIMARY KEY, trade_id TEXT NOT NULL UNIQUE,
 			raised_by TEXT NOT NULL, raised_role TEXT NOT NULL,
-			reason TEXT NOT NULL,
+			reason TEXT NOT NULL, evidence_urls TEXT,
 			status TEXT NOT NULL DEFAULT 'open',
 			resolved_by TEXT, resolution TEXT,
 			refunded_to_buyer INTEGER, resolve_tx_hash TEXT,
-			created_at DATETIME, resolved_at DATETIME
+			created_at DATETIME, resolved_at DATETIME, prepare_nonce TEXT
 		)`,
 		`CREATE TABLE p2p_messages (
 			id TEXT PRIMARY KEY, trade_id TEXT NOT NULL,
@@ -342,7 +349,9 @@ func setupP2PTestDB(t *testing.T) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME,
+			verification_status TEXT DEFAULT 'pending',
+			account_status TEXT DEFAULT 'active'
 		)`,
 	}
 	for _, s := range stmts {
@@ -433,6 +442,9 @@ func mountP2PRoutes(r *gin.Engine, h *P2PHandler) {
 	g.GET("/payment-providers", h.ListPaymentProviders)
 	g.GET("/sellers/:id", h.GetSellerProfile)
 	g.POST("/trades/:id/rate", h.RateTrade)
+	g.POST("/trades/:id/mark-paid", h.MarkPaidRetired)
+	g.POST("/trades/:id/mark-paid/prepare", h.PrepareMarkPaid)
+	g.POST("/trades/:id/mark-paid/confirm", h.ConfirmMarkPaid)
 	g.GET("/trades/:id", h.GetTrade)
 	g.GET("/ads/:id", h.GetAd)
 }
@@ -736,25 +748,27 @@ func TestCreateAd_ReturnsTypedDataAndPending(t *testing.T) {
 	}
 }
 
-// TestCreateAd_RejectsNonMerchant: only merchant/admin tiers can publish
-// ads. A regular 'user' role gets 403 before the request body is even
-// validated, so any downstream resource (payment method, on-chain balance
-// check) is untouched.
-func TestCreateAd_RejectsNonMerchant(t *testing.T) {
+// TestCreateAd_AllowsVerifiedNonMerchant: any KYC-verified user may post an
+// ad off the pool chain (owner decision 2026-10-09).
+func TestCreateAd_AllowsVerifiedNonMerchant(t *testing.T) {
 	r := newRig(t)
 	r.user.Role = models.RoleUser
 	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
-	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
-	body := makeCreateAdBody(pmID)
+	pm := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeCreateAdBody(pm)
 	body["sellerAddress"] = r.user.WalletAddress
-	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body); rec.Code != http.StatusCreated {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
-	decoded := decode(t, rec)
-	msg, _ := decoded["message"].(string)
-	if !strings.Contains(strings.ToLower(msg), "merchant") {
-		t.Errorf("expected 'merchant' in error message, got %q", msg)
+}
+
+// Every /api/p2p/* KYC refusal carries the machine code the app routes on.
+func TestP2PRequire_UnverifiedGetsKYCCode(t *testing.T) {
+	r := newRig(t)
+	r.user.VerificationStatus = "pending"
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", map[string]any{})
+	if rec.Code != http.StatusForbidden || decode(t, rec)["code"] != "kyc_verification_required" {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -775,6 +789,24 @@ func TestCreateAd_InsufficientBalance_400(t *testing.T) {
 	msg, _ := decoded["message"].(string)
 	if !strings.Contains(strings.ToLower(msg), "insufficient") {
 		t.Errorf("expected 'insufficient' in error message, got %q", msg)
+	}
+}
+
+func TestCreateAd_FixedRateOutsideBand_400(t *testing.T) {
+	r := newRig(t)
+	r.escrow.balance = services.OnChainBalance{Available: big.NewInt(1_000_000_000)}
+	pmID := seedPaymentMethod(t, r.db, r.sellerID, "NGN")
+	body := makeCreateAdBody(pmID)
+	body["sellerAddress"] = r.user.WalletAddress
+	body["rate"] = "2000"
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	out := decode(t, rec)
+	data, _ := out["data"].(map[string]any)
+	if out["code"] != "rate_out_of_band" || data["minRate"] != "1040" {
+		t.Fatalf("body = %v", out)
 	}
 }
 
@@ -1147,6 +1179,10 @@ func TestOpenBuyAdTrade_DepositPath(t *testing.T) {
 	// On a buy-ad, the PM must be owned by the TAKER (opener), who receives the
 	// fiat — not the merchant's allowlisted PM. Seed one for the opener.
 	openerPm := seedPaymentMethod(t, r.db, opener.ID, "NGN")
+	// The service re-reads verification from the users table (the gate).
+	if err := r.db.Exec("INSERT INTO users (id, verification_status) VALUES (?, 'verified')", opener.ID).Error; err != nil {
+		t.Fatal(err)
+	}
 	rec := doJSON(t, r, http.MethodPost, "/api/p2p/ads/"+adID+"/trades", map[string]any{
 		"fiatAmount":      "1300",
 		"paymentMethodId": openerPm.String(),
@@ -1454,6 +1490,188 @@ func TestIsISO2Country(t *testing.T) {
 		if got := isISO2Country(c.in); got != c.want {
 			t.Errorf("isISO2Country(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+func TestAdResponses_NeverCarryVoucherSecrets(t *testing.T) {
+	r := newRig(t)
+	adID := createSignedAd(t, r)
+	for _, path := range []string{"/api/p2p/ads/" + adID} {
+		rec := doJSON(t, r, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d", path, rec.Code)
+		}
+		for _, k := range []string{"voucherSignature", "voucherNonce", "voucherDeadline"} {
+			if strings.Contains(rec.Body.String(), `"`+k+`"`) {
+				t.Errorf("%s leaks %s: %s", path, k, rec.Body.String())
+			}
+		}
+		if !strings.Contains(rec.Body.String(), `"voucherHash"`) {
+			t.Errorf("voucherHash should stay")
+		}
+	}
+}
+
+// seedPayerTrade seeds a pending_payment trade whose fiat payer (BuyerID) is
+// the rig user and whose open is confirmed on-chain.
+func seedPayerTrade(t *testing.T, r *rig, buyerID uuid.UUID) uuid.UUID {
+	t.Helper()
+	adID := uuid.New()
+	r.db.Create(&models.P2PAd{ID: adID, SellerID: uuid.New(), Side: "sell", Token: "USDT", FiatCurrency: "NGN",
+		Amount: "0", Remaining: "0", Reserved: "0", Rate: "1500", Status: "active"})
+	tradeID := uuid.New()
+	r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: buyerID, SellerID: uuid.New(), Token: "USDT",
+		ChainID: 146, OnChainTradeID: tradeID.String(), TokenAmount: "1000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500", OpenTxHash: "0xopen",
+		ExpiresAt: time.Now().Add(time.Hour), Status: models.P2PTradeStatusPendingPayment})
+	return tradeID
+}
+
+func TestMarkPaid_PrepareThenConfirm(t *testing.T) {
+	r := newRig(t)
+	tradeID := seedPayerTrade(t, r, r.sellerID)
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid/prepare", map[string]any{"proofImageUrl": "https://res.cloudinary.com/tsa/image/upload/p.png"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prepare = %d %s", rec.Code, rec.Body.String())
+	}
+	data := decode(t, rec)["data"].(map[string]any)
+	if data["unsignedTx"] == nil || data["trade"].(map[string]any)["status"] != "pending_payment" {
+		t.Fatalf("data = %v", data)
+	}
+	rec = doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid/confirm", map[string]any{"txHash": "0xpaid"})
+	if rec.Code != http.StatusOK || decode(t, rec)["data"].(map[string]any)["status"] != "paid" {
+		t.Fatalf("confirm = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMarkPaidPrepare_StatusMapping(t *testing.T) {
+	r := newRig(t)
+	body := map[string]any{"proofImageUrl": "https://res.cloudinary.com/tsa/image/upload/p.png"}
+
+	notPayer := seedPayerTrade(t, r, uuid.New())
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+notPayer.String()+"/mark-paid/prepare", body); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-payer = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+
+	unopened := seedPayerTrade(t, r, r.sellerID)
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", unopened).Update("open_tx_hash", "")
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+unopened.String()+"/mark-paid/prepare", body); rec.Code != http.StatusConflict {
+		t.Fatalf("open not on-chain = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+
+	reverting := seedPayerTrade(t, r, r.sellerID)
+	r.escrow.prepareMarkPaidErr = errors.New("execution reverted: Not buyer")
+	if rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+reverting.String()+"/mark-paid/prepare", body); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("would revert = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The pre-launch app's "I've paid" called this route and flipped the trade
+// to paid in the DB only. It must now refuse with a code the app can route on
+// and leave the trade exactly as it was.
+func TestMarkPaid_OldRouteRetired(t *testing.T) {
+	r := newRig(t)
+	tradeID := seedPayerTrade(t, r, r.sellerID)
+	var before models.P2PTrade
+	r.db.First(&before, "id = ?", tradeID)
+	rec := doJSON(t, r, http.MethodPost, "/api/p2p/trades/"+tradeID.String()+"/mark-paid", map[string]any{"proofImageUrl": "https://res.cloudinary.com/tsa/image/upload/p.png"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("old mark-paid = %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	if body["success"] != false || body["code"] != "app_update_required" {
+		t.Fatalf("body = %v", body)
+	}
+	var after models.P2PTrade
+	r.db.First(&after, "id = ?", tradeID)
+	if after.Status != models.P2PTradeStatusPendingPayment || after.ProofImageURL != before.ProofImageURL ||
+		after.MarkedPaidAt != nil || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("old route changed the trade: %+v", after)
+	}
+}
+
+func seedSellAdTrade(t *testing.T, r *rig, status, openTx string) (tradeID, adID uuid.UUID) {
+	t.Helper()
+	seller := uuid.New()
+	pm := seedPaymentMethod(t, r.db, seller, "NGN") // 1234567890 / "Test" / "Test"
+	adID = uuid.New()
+	if err := r.db.Create(&models.P2PAd{ID: adID, SellerID: seller, Side: "sell", Token: "USDT", ChainID: 146, FiatCurrency: "NGN",
+		Amount: "100", Remaining: "100", Reserved: "0", Rate: "1300", RateType: "fixed", FloatAnchor: "bybit_sell", Status: "active",
+		PaymentMethodIDs: datatypes.JSONSlice[string]{pm.String()}}).Error; err != nil {
+		t.Fatal(err)
+	}
+	tradeID = uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: r.sellerID, SellerID: seller, Token: "USDT",
+		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300", PaymentMethodID: pm, OpenTxHash: openTx,
+		ExpiresAt: time.Now().Add(time.Hour), Status: status}).Error; err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+func TestGetTrade_PayeeVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		status, open string
+		want         bool
+	}{
+		{"pending_payment", "0xopen", true}, {"pending_payment", "reconciled", true}, {"pending_payment", "", false},
+		{"paid", "0xopen", true}, {"releasing", "0xopen", true},
+		{"disputed", "0xopen", true}, {"released", "0xopen", false}, {"cancelled", "0xopen", false},
+	} {
+		r := newRig(t)
+		id, _ := seedSellAdTrade(t, r, tc.status, tc.open)
+		rec := doJSON(t, r, http.MethodGet, "/api/p2p/trades/"+id.String(), nil)
+		data := decode(t, rec)["data"].(map[string]any)
+		p, has := data["payee"].(map[string]any)
+		if has != tc.want {
+			t.Fatalf("%s/%q: payee present=%v body=%s", tc.status, tc.open, has, rec.Body.String())
+		}
+		if has && (p["accountNumber"] != "1234567890" || p["accountName"] != "Test" || p["bankName"] != "Test") {
+			t.Fatalf("payee = %v", p)
+		}
+	}
+}
+
+func TestGetAd_PaymentMethodsAreMasked(t *testing.T) {
+	r := newRig(t)
+	_, adID := seedSellAdTrade(t, r, "pending_payment", "0xopen")
+	if err := r.db.Model(&models.P2PPaymentMethod{}).Where("account_number = ?", "1234567890").
+		Update("account_name", "Adaeze Holder").Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/ads/"+adID.String(), nil)
+	body := rec.Body.String()
+	if strings.Contains(body, "1234567890") {
+		t.Fatalf("full account number on a public ad: %s", body)
+	}
+	if strings.Contains(body, "Adaeze Holder") || strings.Contains(body, "accountName") {
+		t.Fatalf("account holder name on a public ad: %s", body)
+	}
+	pms := decode(t, rec)["data"].(map[string]any)["paymentMethods"].([]any)
+	m := pms[0].(map[string]any)
+	if m["accountNumber"] != "******7890" || m["accountNumberLast4"] != "7890" || m["id"] == nil {
+		t.Fatalf("pm = %v", m)
+	}
+}
+
+func TestGetTrade_FeeAmountAndBuyerNet(t *testing.T) {
+	r := newRig(t)
+	adID := uuid.New()
+	if err := r.db.Create(&models.P2PAd{ID: adID, SellerID: uuid.New(), Side: models.P2PAdSideSell,
+		Token: "USDT", FiatCurrency: "NGN", Amount: "0", Remaining: "0", Reserved: "0", Rate: "1500",
+		Status: models.P2PAdStatusActive}).Error; err != nil {
+		t.Fatalf("seed ad: %v", err)
+	}
+	bps := 50
+	tradeID := uuid.New()
+	if err := r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: r.sellerID, SellerID: uuid.New(),
+		Token: "USDT", TokenAmount: "100000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500", FeeBps: &bps,
+		ExpiresAt: time.Now().Add(time.Hour), Status: models.P2PTradeStatusPendingPayment}).Error; err != nil {
+		t.Fatalf("seed trade: %v", err)
+	}
+	rec := doJSON(t, r, http.MethodGet, "/api/p2p/trades/"+tradeID.String(), nil)
+	data, _ := decode(t, rec)["data"].(map[string]any)
+	if data["feeBps"] != float64(50) || data["feeAmount"] != "500000" || data["buyerNetAmount"] != "99500000" {
+		t.Fatalf("fee fields wrong; body=%s", rec.Body.String())
 	}
 }
 

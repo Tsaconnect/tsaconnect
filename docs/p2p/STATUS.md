@@ -1,6 +1,6 @@
 # P2P — Status & Handover
 
-**As of:** 2026-05-28 · **Branch:** `feat/p2p-trading`
+**As of:** 2026-10-09 · **Branch:** `feat/p2p-launch-ready` (API side done; see the P2P section of `tsa-api-go/CLAUDE.md` for current behaviour — mark-paid is on-chain, gas top-ups, operator alerts, live fees). The sections below are the May snapshot and are partly stale.
 
 Pick-up note for anyone continuing the P2P work. High-level docs: [README.md](./README.md), [architecture.md](./architecture.md), [merchant-reputation.md](./merchant-reputation.md). Full design rationale + implementation plans: [`design/`](./design/) (see "Design docs" below).
 

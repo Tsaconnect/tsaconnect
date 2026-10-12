@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -199,6 +200,28 @@ func NewNotificationService(db *gorm.DB, bus *events.Bus, hub *ws.Hub, emailServ
 	return ns
 }
 
+// actedOnByRecipient reports whether the event's recipient is the user who
+// performed the action. They get the in-app row and WS frame so their screen
+// refreshes, but no push or email about their own action.
+func actedOnByRecipient(event events.Event) bool {
+	return event.ActorID != uuid.Nil && event.ActorID == event.UserID
+}
+
+// clientData is the event data as stored and sent to the app: the event's
+// actor rides in data.actorId (the app contract). The caller's map is not
+// mutated.
+func clientData(event events.Event) map[string]interface{} {
+	if event.ActorID == uuid.Nil {
+		return event.Data
+	}
+	out := make(map[string]interface{}, len(event.Data)+1)
+	for k, v := range event.Data {
+		out[k] = v
+	}
+	out["actorId"] = event.ActorID.String()
+	return out
+}
+
 func (ns *NotificationService) handleEvent(event events.Event) {
 	// Determine channel. P2P trade milestones also email (via a dedicated
 	// role-aware composer below), so mark them "both" on the record too.
@@ -208,9 +231,14 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 	}
 
 	// Marshal data
-	dataJSON, _ := json.Marshal(event.Data)
+	data := clientData(event)
+	dataJSON, _ := json.Marshal(data)
 
-	// Create notification record (always, even if muted)
+	// Create notification record (always, even if muted). A row about the
+	// recipient's own action is stored already read: it keeps the history and
+	// the WS frame still refreshes their screen, but it must not raise the
+	// unread badge for something they just did.
+	selfActed := actedOnByRecipient(event)
 	notification := models.Notification{
 		UserID:  event.UserID,
 		Type:    event.Type,
@@ -218,6 +246,11 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 		Message: event.Message,
 		Data:    dataJSON,
 		Channel: channel,
+	}
+	if selfActed {
+		now := time.Now()
+		notification.IsRead = true
+		notification.ReadAt = &now
 	}
 
 	if err := ns.db.Create(&notification).Error; err != nil {
@@ -241,19 +274,19 @@ func (ns *NotificationService) handleEvent(event events.Event) {
 			"type":      notification.Type,
 			"title":     notification.Title,
 			"message":   notification.Message,
-			"data":      event.Data,
+			"data":      data,
 			"createdAt": notification.CreatedAt,
 		})
 		ns.hub.SendToUser(event.UserID, wsPayload)
 
 		// Out-of-app Expo push for the curated set (async; best-effort).
-		if ns.push != nil && pushWorthy(event.Type) {
+		if ns.push != nil && pushWorthy(event.Type) && !selfActed {
 			go ns.sendPush(event)
 		}
 	}
 
 	// Email delivery (if applicable and not muted).
-	if byEmail && user.Email != "" && ns.emailService != nil {
+	if byEmail && !selfActed && user.Email != "" && ns.emailService != nil {
 		switch {
 		case p2pTradeEmailEvents[event.Type]:
 			// Rich, role-aware P2P trade email (loads the trade + composes per
@@ -331,7 +364,7 @@ func (ns *NotificationService) sendPush(event events.Event) {
 		toks[i] = tokens[i].Token
 	}
 	data := map[string]interface{}{"type": event.Type}
-	for k, v := range event.Data {
+	for k, v := range clientData(event) {
 		data[k] = v
 	}
 	dead := ns.push.Send(toks, event.Title, event.Message, data)

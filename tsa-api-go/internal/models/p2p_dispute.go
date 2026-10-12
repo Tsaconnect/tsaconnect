@@ -9,7 +9,7 @@ import (
 )
 
 // P2PDispute is the off-chain audit row for a disputed trade. Exactly one
-// row per trade (enforced by unique index on TradeID for non-rejected rows).
+// row per trade (enforced by a plain unique index on TradeID; an unconfirmed open row is rewritten by a retry, not duplicated).
 // The on-chain dispute state lives in P2PEscrow.Trade.status; this record
 // captures the WHY (raised reason, raised role) and the resolution decision
 // the admin made (refundedToBuyer, free-form note).
@@ -32,8 +32,15 @@ type P2PDispute struct {
 	Resolution      string     `gorm:"type:text" json:"resolution,omitempty"`
 	RefundedToBuyer *bool      `json:"refundedToBuyer,omitempty"`
 	ResolveTxHash   string     `gorm:"size:66" json:"resolveTxHash,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	ResolvedAt      *time.Time `json:"resolvedAt,omitempty"`
+	// CreatedAt is "last prepared" while the row is unconfirmed: each replacing
+	// retry resets it, and it gates the counter-party's right to replace.
+	CreatedAt time.Time `json:"createdAt"`
+	// PrepareNonce is new on every create and replace of an unconfirmed row;
+	// a replace is conditional on the nonce it read, so two retries that read
+	// the same row cannot both rewrite it. Nullable: rows prepared before the
+	// column existed have none. Internal, never serialised.
+	PrepareNonce *uuid.UUID `gorm:"type:uuid" json:"-"`
+	ResolvedAt   *time.Time `json:"resolvedAt,omitempty"`
 }
 
 func (P2PDispute) TableName() string {

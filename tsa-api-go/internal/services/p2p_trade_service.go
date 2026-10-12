@@ -17,6 +17,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ─── Errors (handler-mapped to HTTP) ────────────────────────────────────────
@@ -120,16 +121,17 @@ type P2PEscrowAdapter interface {
 	VerifyTradeReleased(txHash string, expectedTradeId [32]byte) (*P2PTradeReleasedEvent, error)
 	VerifyTradeCancelled(txHash string, expectedTradeId [32]byte) (*P2PTradeCancelledEvent, error)
 	VerifyTradeDisputed(txHash string, expectedTradeId [32]byte) (*P2PTradeDisputedEvent, error)
+	VerifyTradePaid(txHash string, expectedTradeId [32]byte) (*P2PTradePaidEvent, error)
 	VerifyTradeResolved(txHash string, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error)
 
 	// Views — used by reconciler + voucher-state checks.
 	ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
-	// ReadTradePlatformFeeBps reads the V3-snapshotted platform-fee bps for a
-	// trade (design §8). Returns 0/false on a pre-V3 escrow or a V2-opened trade
-	// (no snapshot) — the documented no-op signal for accrueP2PReleaseFee.
-	ReadTradePlatformFeeBps(tradeId [32]byte) (platformBps uint16, found bool)
-	// ReadTradeFeeSnapshot is a trade's snapshotted platform and gas fee bps
-	// (V3 trades() getter). A pool slice must read (0, 0) (spec §6.2, F15).
+	// ReadTradeFeeSnapshot reads a trade's V3-snapshotted platform and gas fee
+	// bps; found=false when the read failed or the escrow predates V3. Only
+	// release accrual's fallback uses it (a trade recorded before
+	// p2p_trades.fee_platform_bps existed): ReadTrade already carries the
+	// snapshot on V3.
+	// A pool slice must read (0, 0) (spec §6.2, F15).
 	ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, gasBps uint16, found bool)
 	ReadBalance(seller, token string) (*OnChainBalance, error)
 	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
@@ -165,6 +167,10 @@ var SystemClock Clock = realClock{}
 
 type P2PTradeService struct {
 	db *gorm.DB
+	// feeView reads the live on-chain fee bps (nil: fee fields stay unset).
+	feeView *P2PFeeView
+	// adFeeBudget bounds how long an ad list waits on fee reads (FillAdFees).
+	adFeeBudget time.Duration
 	// escrows resolves the per-chain escrow adapter + EIP-712 domain (chainId,
 	// version) from an entity's ChainID. There is deliberately NO single
 	// escrow/chainID/version scalar: every escrow-touching method resolves from
@@ -176,9 +182,11 @@ type P2PTradeService struct {
 	// (approve/deposit/withdraw/allowance/balance). Sonic in production.
 	defaultChainID int64
 	rates          RateProvider
-	bus            EventPublisher
-	clock          Clock
-	tokenResolver  func(chainID int64, symbol string) string
+	// fixedRateBandBps bounds fixed-rate ads around the market reference; see p2p_rate_band.go.
+	fixedRateBandBps int
+	bus              EventPublisher
+	clock            Clock
+	tokenResolver    func(chainID int64, symbol string) string
 	// messages is optional. When set, every state transition also writes a
 	// "system" chat message so the trade thread is self-documenting. Nil-safe
 	// — internal calls go through `s.systemMsg` which guards.
@@ -206,6 +214,9 @@ type P2PTradeService struct {
 	// balanceMoved is told of every confirmed deposit and withdrawal (the LP
 	// balance cache, review I4); nil when liquidity is dormant.
 	balanceMoved func(chainID int64, wallet, token string)
+
+	// alerter emails operators about P2P money events (p2p_alert.go). Nil-safe.
+	alerter P2PAlerter
 	// poolSlices and poolSender handle LP-side actions on pool slices (spec
 	// S42, F21–F22; plan C1 P14). Nil: dormant pool — the reconciler alerts
 	// and waits.
@@ -232,6 +243,7 @@ func NewP2PTradeService(db *gorm.DB, escrows *P2PEscrowRegistry, rates RateProvi
 		bus:             bus,
 		clock:           SystemClock,
 		defaultChainID:  defaultChainID,
+		adFeeBudget:     p2pAdFeeBudget,
 	}
 }
 
@@ -257,6 +269,12 @@ func (s *P2PTradeService) WithClock(c Clock) *P2PTradeService {
 	cp := *s
 	cp.clock = c
 	return &cp
+}
+
+// SetFeeView wires the live on-chain fee reader. Optional: without it ads and
+// chains carry no fee (the field is omitted, never defaulted).
+func (s *P2PTradeService) SetFeeView(v *P2PFeeView) {
+	s.feeView = v
 }
 
 // SetTokenResolver wires a (chainID, symbol) → address function. Called at
@@ -400,13 +418,13 @@ func (s *P2PTradeService) applyPMAdTag(pm *models.PaymentMerchant, walletAddress
 // TP/cashback comes from the SEPARATE 1% PLATFORM fee, which P2PEscrowV3
 // SNAPSHOTS into the trade as platformFeeBpsSnapshot at openTrade.
 //
-// This reads that snapshot from the escrow (ReadTradePlatformFeeBps), computes
+// This reads that snapshot (tradePlatformFeeBps: the trade row, else the chain), computes
 // the platform-fee USD from the trade's token amount, and settles it under
 // FeatureP2PPlatform (the carved {0.50,0.15,0.15,0.00,0.20} split) for the buyer
 // (gen0 — the party that receives crypto and bears the fee). The on-chain gas
 // fee (feeBaseUnits) is deliberately NOT accrued.
 //
-// SAFE TO MERGE BEFORE V3: until V3 is deployed, ReadTradePlatformFeeBps returns
+// SAFE TO MERGE BEFORE V3: until V3 is deployed, the snapshot reads
 // 0 (pre-V3 escrow / V2-opened trade) → this is a documented no-op, exactly as
 // before. The flag check + the wiring fire real accrual the moment V3 lands.
 //
@@ -439,8 +457,8 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 		return
 	}
 
-	// Read the V3-snapshotted platform-fee bps. 0 ⇒ pre-V3 / V2 trade ⇒ no-op.
-	platformBps, found := esc.ReadTradePlatformFeeBps(HashID(trade.ID))
+	// The V3-snapshotted platform-fee bps. 0 ⇒ pre-V3 / V2 trade ⇒ no-op.
+	platformBps, found := tradePlatformFeeBps(esc, trade)
 	if !found || platformBps == 0 {
 		return
 	}
@@ -468,6 +486,17 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 		SourceType: "p2p_release",
 		SourceID:   trade.ID,
 	})
+}
+
+// tradePlatformFeeBps is the trade's snapshotted platform-fee bps: the value
+// recorded at open, else (a trade recorded before the column existed, or whose
+// snapshot read failed then) one read of the escrow.
+func tradePlatformFeeBps(esc P2PEscrowAdapter, trade *models.P2PTrade) (int, bool) {
+	if trade.FeePlatformBps != nil {
+		return *trade.FeePlatformBps, true
+	}
+	p, _, found := esc.ReadTradeFeeSnapshot(HashID(trade.ID))
+	return int(p), found
 }
 
 // onChainTradeFee derives the platform fee (base units) from a view-read trade:
@@ -652,6 +681,11 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 	if err := s.requireFreshRate(params.FiatCurrency); err != nil {
 		return nil, err
 	}
+	if sellerPM == nil {
+		if err := s.checkFixedRateBand(params); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := s.validatePaymentMethodsOwned(sellerID, params.PaymentMethodIDs, params.FiatCurrency); err != nil {
 		return nil, err
@@ -791,7 +825,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 		"rate":        ad.Rate,
 		"voucherHash": ad.VoucherHash,
 	})
-	s.emit(events.P2PAdCreated, sellerID, "P2P ad created", "", map[string]any{"adId": ad.ID, "status": ad.Status})
+	s.emit(events.P2PAdCreated, sellerID, sellerID, "P2P ad created", "", map[string]any{"adId": ad.ID, "status": ad.Status})
 
 	return &CreateAdResult{Ad: ad, TypedData: typedData}, nil
 }
@@ -834,6 +868,11 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 
 	if err := s.requireFreshRate(params.FiatCurrency); err != nil {
 		return nil, err
+	}
+	if merchantPM == nil {
+		if err := s.checkFixedRateBand(params); err != nil {
+			return nil, err
+		}
 	}
 	// The PMs on a buy-ad are the MERCHANT's accounts — where they'll send
 	// fiat to the user once the user deposits crypto. Same ownership +
@@ -916,7 +955,7 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 		"amount": ad.Amount,
 		"rate":   ad.Rate,
 	})
-	s.emit(events.P2PAdCreated, merchantID, "P2P buy ad live", "", map[string]any{"adId": ad.ID, "status": ad.Status})
+	s.emit(events.P2PAdCreated, merchantID, merchantID, "P2P buy ad live", "", map[string]any{"adId": ad.ID, "status": ad.Status})
 
 	// No typed data — buy-ads have no voucher to sign.
 	return &CreateAdResult{Ad: ad, TypedData: nil}, nil
@@ -1026,7 +1065,7 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	s.audit(ctx, models.P2PAuditAdSigned, &sellerID, &ad.ID, nil, map[string]any{
 		"voucherHash": ad.VoucherHash,
 	})
-	s.emit(events.P2PAdCreated, sellerID, "P2P ad live", "", map[string]any{"adId": ad.ID, "status": "active"})
+	s.emit(events.P2PAdCreated, sellerID, sellerID, "P2P ad live", "", map[string]any{"adId": ad.ID, "status": "active"})
 	return &ad, nil
 }
 
@@ -1054,17 +1093,8 @@ func (s *P2PTradeService) PrepareCancelAd(ctx context.Context, adID, sellerID uu
 	if ad.Side == models.P2PAdSideBuy {
 		return nil, ErrNotApplicableForBuyAd
 	}
-	if ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused {
-		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
-	}
-	var openCount int64
-	s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("ad_id = ? AND status IN ?", ad.ID,
-			[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-				models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed}).
-		Count(&openCount)
-	if openCount > 0 {
-		return nil, ErrAdHasOpenTrades
+	if err := s.cancelAdPreflight(ctx, &ad, sellerID); err != nil {
+		return nil, err
 	}
 	voucher, err := s.adVoucher(&ad, sellerAddress)
 	if err != nil {
@@ -1138,7 +1168,7 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 	ad.Status = models.P2PAdStatusCancelled
 	ad.Remaining = "0"
 	s.audit(ctx, models.P2PAuditAdClosed, &sellerID, &ad.ID, nil, map[string]any{"txHash": txHash})
-	s.emit(events.P2PAdClosed, sellerID, "P2P ad closed", "", map[string]any{"adId": ad.ID})
+	s.emit(events.P2PAdClosed, sellerID, sellerID, "P2P ad closed", "", map[string]any{"adId": ad.ID})
 	return &ad, nil
 }
 
@@ -1164,17 +1194,8 @@ func (s *P2PTradeService) CancelBuyAd(ctx context.Context, adID, merchantID uuid
 	if ad.Status == models.P2PAdStatusCancelled {
 		return &ad, nil
 	}
-	if ad.Status != models.P2PAdStatusActive && ad.Status != models.P2PAdStatusPaused {
-		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
-	}
-	var openCount int64
-	s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("ad_id = ? AND status IN ?", ad.ID,
-			[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-				models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed}).
-		Count(&openCount)
-	if openCount > 0 {
-		return nil, ErrAdHasOpenTrades
+	if err := s.cancelAdPreflight(ctx, &ad, merchantID); err != nil {
+		return nil, err
 	}
 
 	res := s.db.WithContext(ctx).Model(&models.P2PAd{}).
@@ -1195,7 +1216,7 @@ func (s *P2PTradeService) CancelBuyAd(ctx context.Context, adID, merchantID uuid
 	ad.Status = models.P2PAdStatusCancelled
 	ad.Remaining = "0"
 	s.audit(ctx, models.P2PAuditAdClosed, &merchantID, &ad.ID, nil, map[string]any{"side": "buy"})
-	s.emit(events.P2PAdClosed, merchantID, "P2P buy ad cancelled", "", map[string]any{"adId": ad.ID})
+	s.emit(events.P2PAdClosed, merchantID, merchantID, "P2P buy ad cancelled", "", map[string]any{"adId": ad.ID})
 	return &ad, nil
 }
 
@@ -1239,7 +1260,7 @@ func (s *P2PTradeService) flipAdStatus(ctx context.Context, adID, sellerID uuid.
 		return fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
 	}
 	s.audit(ctx, action, &sellerID, &ad.ID, nil, nil)
-	s.emit(event, sellerID, "", "", map[string]any{"adId": ad.ID})
+	s.emit(event, sellerID, sellerID, "", "", map[string]any{"adId": ad.ID})
 	return nil
 }
 
@@ -1253,23 +1274,8 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		}
 		return nil, nil, err
 	}
-	// An LP stock ad is opened only by the pool's own order path (Plan C1),
-	// never by a buyer at another price (spec §9.4).
-	if pool, err := s.isPoolAd(ctx, &ad); err != nil {
-		return nil, nil, err
-	} else if pool {
-		return nil, nil, ErrAdNotActive
-	}
-	if ad.Status != models.P2PAdStatusActive {
-		return nil, nil, ErrAdNotActive
-	}
-	if ad.SellerID == buyerID {
-		return nil, nil, ErrSelfTrade
-	}
-	// An ad that was live before its asset was delisted can't take new trades
-	// (browse hides it, but a stale screen or deep link can still reach here).
-	// Before the buy-ad branch so the JIT-deposit path is covered too.
-	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
+	// Before the buy-ad branch so both sides are covered, KYC tier included.
+	if err := s.openTradePreflight(ctx, &ad, buyerID); err != nil {
 		return nil, nil, err
 	}
 
@@ -1280,12 +1286,11 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		return s.openTradeWithDeposit(ctx, &ad, buyerID, buyerAddress, params)
 	}
 
-	// Below the buy-ad branch on purpose. From here down `buyerID` really is
-	// the buyer: they are about to send fiat. On the branch above the opener is
-	// depositing crypto to SELL it, and gating that would trap a balance they
-	// already hold.
-	if err := requireVerifiedForMoneyIn(ctx, s.db, buyerID); err != nil {
-		return nil, nil, err
+	// From here down `buyerID` really is the buyer (the preflight held them to
+	// the money-in KYC tier). The buyer's wallet becomes the on-chain buyer and is the only opener
+	// confirm/backfill will accept, so it must be a real address.
+	if !common.IsHexAddress(buyerAddress) {
+		return nil, nil, fmt.Errorf("%w: buyer address", ErrInvalidParams)
 	}
 
 	// Effective rate is recomputed live for float ads (snapshotted onto the
@@ -1326,6 +1331,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		BuyerID:         buyerID,
 		SellerID:        ad.SellerID,
 		OpenerID:        &buyerID, // sell-ad: the buyer opens
+		OpenerAddress:   common.HexToAddress(buyerAddress).Hex(),
 		Token:           ad.Token,
 		ChainID:         ad.ChainID,
 		TokenAmount:     tokenAmount.String(),
@@ -1446,10 +1452,10 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		"tokenAmount": trade.TokenAmount,
 		"fiatAmount":  trade.FiatAmount,
 	})
-	s.emit(events.P2PTradeOpened, buyerID, "P2P trade opened", "", map[string]any{
+	s.emit(events.P2PTradeOpened, buyerID, buyerID, "P2P trade opened", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID,
 	})
-	s.emit(events.P2PTradeOpened, ad.SellerID, "Buyer opened a trade on your ad", "", map[string]any{
+	s.emit(events.P2PTradeOpened, ad.SellerID, buyerID, "Buyer opened a trade on your ad", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID,
 	})
 	s.systemMsg(ctx, trade.ID, fmt.Sprintf(
@@ -1478,6 +1484,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 	if ad.SellerAddress == "" || !common.IsHexAddress(ad.SellerAddress) {
 		return nil, nil, fmt.Errorf("%w: buy-ad missing merchant wallet", ErrInvalidTransition)
 	}
+	// The opener's KYC tier was checked by OpenTrade's preflight.
 
 	// PM buy-ad: the PM automation will pay the user fiat after release, so a
 	// payout bank account is mandatory. Validate BEFORE building any on-chain
@@ -1540,6 +1547,7 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		SellerID:        openerID,    // user deposits + releases crypto
 		BuyerID:         ad.SellerID, // merchant receives crypto
 		OpenerID:        &openerID,   // buy-ad: the depositing user opens
+		OpenerAddress:   common.HexToAddress(openerAddress).Hex(),
 		Token:           ad.Token,
 		ChainID:         ad.ChainID,
 		Funding:         models.P2PTradeFundingDepositedByTaker,
@@ -1638,10 +1646,10 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		"tokenAmount": trade.TokenAmount,
 		"fiatAmount":  trade.FiatAmount,
 	})
-	s.emit(events.P2PTradeOpened, openerID, "P2P trade opened", "", map[string]any{
+	s.emit(events.P2PTradeOpened, openerID, openerID, "P2P trade opened", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID, "side": "buy",
 	})
-	s.emit(events.P2PTradeOpened, ad.SellerID, "A user opened a trade on your buy ad", "", map[string]any{
+	s.emit(events.P2PTradeOpened, ad.SellerID, openerID, "A user opened a trade on your buy ad", "", map[string]any{
 		"tradeId": trade.ID, "adId": ad.ID, "side": "buy",
 	})
 	s.systemMsg(ctx, trade.ID, fmt.Sprintf(
@@ -1652,10 +1660,12 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 
 // ConfirmOpenTrade is called by the OPENER (the user who broadcast the open
 // tx). For a sell-ad the opener is the BuyerID; for a buy-ad (JIT deposit) the
-// opener is the SellerID (the depositing user). `openerAddress` is their
-// wallet. The on-chain event differs by funding: TradeOpened (voucher) vs
+// opener is the SellerID (the depositing user). The opener's wallet is the
+// one stored at prepare (trade.OpenerAddress) — never a client-supplied
+// address, which an attacker who front-ran the open could simply echo back.
+// The on-chain event differs by funding: TradeOpened (voucher) vs
 // TradeOpenedWithDeposit (JIT).
-func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerID uuid.UUID, openerAddress, txHash string) (*models.P2PTrade, error) {
+func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerID uuid.UUID, txHash string) (*models.P2PTrade, error) {
 	var trade models.P2PTrade
 	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1666,23 +1676,18 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
-	// The opener is the party who funds + broadcasts the open: buyer on a
-	// pooled sell-ad, seller (depositor) on a JIT buy-ad.
-	opener := trade.BuyerID
-	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
-		opener = trade.SellerID
-	}
-	if opener != openerID {
+	funding := fundingOf(&trade)
+	if funding.OpenerUserID(&trade) != openerID {
 		return nil, ErrForbidden
 	}
-	if trade.OpenTxHash == txHash && trade.OpenTxHash != "" {
+	// Replay of the same confirm, or a retry after the open was already
+	// recorded (e.g. backfilled from chain) and the trade has moved on.
+	if trade.OpenRecorded() && (trade.OpenTxHash == txHash || trade.Status != models.P2PTradeStatusPendingPayment) {
 		return &trade, nil
 	}
 	if trade.Status != models.P2PTradeStatusPendingPayment {
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
-
-	expected, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 
 	// Resolve the trade's chain so the open receipt is verified against the
 	// escrow the trade was actually opened on — never a default chain.
@@ -1691,103 +1696,33 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 		return nil, err
 	}
 
-	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
-		ev, err := escrow.VerifyTradeOpenedWithDeposit(txHash, HashID(trade.ID))
-		if err != nil {
-			return nil, fmt.Errorf("verify on-chain open (deposit): %w", err)
-		}
-		if ev.Amount.Cmp(expected) != 0 {
-			return nil, fmt.Errorf("on-chain amount %s does not match db %s", ev.Amount, trade.TokenAmount)
-		}
-		// On a buy-ad the on-chain seller is the depositing user (opener) and
-		// the on-chain buyer is the merchant (trade.BuyerID). Cross-check the
-		// opener's wallet against the on-chain seller.
-		if openerAddress != "" && !strings.EqualFold(ev.Seller.Hex(), openerAddress) {
-			return nil, fmt.Errorf("on-chain seller %s does not match opener %s", ev.Seller.Hex(), openerAddress)
-		}
-	} else {
-		ev, err := escrow.VerifyTradeOpened(txHash, HashID(trade.ID))
-		if err != nil {
-			return nil, fmt.Errorf("verify on-chain open: %w", err)
-		}
-		if ev.Amount.Cmp(expected) != 0 {
-			return nil, fmt.Errorf("on-chain amount %s does not match db %s", ev.Amount, trade.TokenAmount)
-		}
-		// Cross-check the on-chain buyer matches the caller's wallet. tradeId is
-		// server-owned (keccak of UUID); this guard catches a future bug where
-		// the verify-receipt path misses a topic-shift.
-		if openerAddress != "" && !strings.EqualFold(ev.Buyer.Hex(), openerAddress) {
-			return nil, fmt.Errorf("on-chain buyer %s does not match expected %s", ev.Buyer.Hex(), openerAddress)
-		}
+	// The receipt proves txHash opened this trade id; what was opened (amount,
+	// token, funding, counterparty, and that the opener is the wallet this
+	// trade was prepared for) is checked against the escrow's view below, where
+	// every refusal ALERTs.
+	if err := funding.verifyOpen(escrow, txHash, HashID(trade.ID)); err != nil {
+		return nil, err
 	}
 
-	openUpdates := map[string]any{"open_tx_hash": txHash, "updated_at": s.clock.Now()}
-	// Re-anchor the off-chain deadline to the ON-CHAIN createdAt: the contract
-	// enforces cancelByTimeout at createdAt+paymentWindow, but expires_at was set
-	// at intent time and drifts earlier if the open mined late — which would nudge
-	// a timeout-cancel the contract reverts. Best-effort: keep intent-time on read failure.
-	if onchain, rerr := escrow.ReadTrade(HashID(trade.ID)); rerr == nil && onchain.CreatedAt != nil && onchain.CreatedAt.Sign() > 0 {
-		openUpdates["expires_at"] = time.Unix(onchain.CreatedAt.Int64(), 0).UTC().Add(p2pPaymentWindow)
+	// The receipt is mined, so the trade exists; a read that fails or doesn't
+	// see it yet is a lagging node — retryable, not a refusal.
+	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read on-chain trade: %v", ErrChainUnavailable, err)
 	}
+	if !onchain.Exists {
+		return nil, fmt.Errorf("%w: opened trade not yet visible on-chain", ErrChainUnavailable)
+	}
+	if err := s.verifyOpenOnChain(ctx, "confirm", &trade, onchain); err != nil {
+		return nil, err
+	}
+	openUpdates := s.openRecordUpdates(txHash, &trade, onchain)
 	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("id = ?", trade.ID).
 		Updates(openUpdates).Error; err != nil {
 		return nil, err
 	}
 	trade.OpenTxHash = txHash
-	return &trade, nil
-}
-
-func (s *P2PTradeService) MarkPaid(ctx context.Context, tradeID, buyerID uuid.UUID, proofURL string) (*models.P2PTrade, error) {
-	if strings.TrimSpace(proofURL) == "" {
-		return nil, fmt.Errorf("%w: proof URL required", ErrInvalidParams)
-	}
-	var trade models.P2PTrade
-	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrTradeNotFound
-		}
-		return nil, err
-	}
-	if err := hideSlice(&trade); err != nil {
-		return nil, err
-	}
-	if trade.BuyerID != buyerID {
-		return nil, ErrForbidden
-	}
-	if trade.Status != models.P2PTradeStatusPendingPayment {
-		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
-	}
-	// The escrow is only funded once the open is confirmed on-chain (OpenTxHash is
-	// set solely by ConfirmOpenTrade). Refuse mark-paid on a never-broadcast open
-	// so a phantom trade can't be flipped to `paid` — a state the watchdog and
-	// reconciler can't clear and which blocks the seller from cancelling the ad.
-	if strings.TrimSpace(trade.OpenTxHash) == "" {
-		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
-	}
-	now := s.clock.Now()
-	// dropped_at: the expiry canceller has decided this trade (plan C1 P15).
-	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ? AND dropped_at IS NULL", trade.ID, models.P2PTradeStatusPendingPayment).
-		Updates(map[string]any{
-			"status":          models.P2PTradeStatusPaid,
-			"marked_paid_at":  now,
-			"proof_image_url": proofURL,
-			"updated_at":      now,
-		})
-	if res.Error != nil {
-		return nil, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return nil, ErrInvalidTransition
-	}
-	trade.Status = models.P2PTradeStatusPaid
-	trade.MarkedPaidAt = &now
-	trade.ProofImageURL = proofURL
-	s.audit(ctx, models.P2PAuditTradeMarkedPaid, &buyerID, &trade.AdID, &trade.ID, map[string]any{"proofUrl": proofURL})
-	s.emit(events.P2PTradePaid, buyerID, "Buyer marked payment sent", "", map[string]any{"tradeId": trade.ID})
-	s.emit(events.P2PTradePaid, trade.SellerID, "Buyer marked payment sent — please confirm", "", map[string]any{"tradeId": trade.ID})
-	s.systemMsg(ctx, trade.ID, "Buyer marked payment as sent. Seller — verify your bank and release.")
 	return &trade, nil
 }
 
@@ -1802,19 +1737,11 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
-	if trade.SellerID != sellerID {
-		return nil, ErrForbidden
+	if err := canRelease(sellerID, &trade); err != nil {
+		return nil, err
 	}
 	if !common.IsHexAddress(sellerAddress) {
 		return nil, fmt.Errorf("%w: invalid sellerAddress", ErrInvalidParams)
-	}
-	// Allow Release from pending_payment OR paid OR releasing (retry).
-	// Symmetric with the contract relax: seller's signature is the gate,
-	// not the buyer's (unverifiable) off-chain markPaid claim.
-	if trade.Status != models.P2PTradeStatusPendingPayment &&
-		trade.Status != models.P2PTradeStatusPaid &&
-		trade.Status != models.P2PTradeStatusReleasing {
-		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
 	// Resolve the trade's chain BEFORE the status flip so an unconfigured chain
@@ -1843,7 +1770,7 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 			return nil, ErrInvalidTransition
 		}
 		s.audit(ctx, models.P2PAuditTradeReleasing, &sellerID, &trade.AdID, &trade.ID, nil)
-		s.emit(events.P2PTradeReleasing, sellerID, "Releasing USDT…", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleasing, sellerID, sellerID, "Releasing USDT…", "", map[string]any{"tradeId": trade.ID})
 		// Notify the buyer too — they should know their funds are on the way as
 		// soon as the seller starts releasing, not only once it confirms. (The
 		// other lifecycle steps already notify both parties; release-start was
@@ -1853,7 +1780,7 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 		if trade.Funding == models.P2PTradeFundingDepositedByTaker {
 			buyerReleasingMsg = "The seller is releasing the crypto — it should arrive shortly."
 		}
-		s.emit(events.P2PTradeReleasing, trade.BuyerID, "Release in progress", buyerReleasingMsg, map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleasing, trade.BuyerID, sellerID, "Release in progress", buyerReleasingMsg, map[string]any{"tradeId": trade.ID})
 	} else {
 		// Retry path: trade was already Releasing. Bump updated_at so the
 		// chain reconciler's stale-release rollback window resets — protects
@@ -1992,13 +1919,13 @@ func (s *P2PTradeService) confirmReleaseCore(ctx context.Context, trade *models.
 		"amountToBuyer": ev.AmountToBuyer.String(),
 		"feeToSystem":   ev.FeeToSystem.String(),
 	})
-	s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released", "", map[string]any{"tradeId": trade.ID})
+	s.emit(events.P2PTradeReleased, trade.SellerID, actorOf(auditActor), "Trade released", "", map[string]any{"tradeId": trade.ID})
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received in your wallet", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "Crypto received in your wallet", "", map[string]any{"tradeId": trade.ID})
 		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to merchant; %s in platform fee.",
 			ev.AmountToBuyer, ev.FeeToSystem))
 	} else {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received in your wallet", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "USDT received in your wallet", "", map[string]any{"tradeId": trade.ID})
 		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to buyer; %s in platform fee.",
 			ev.AmountToBuyer, ev.FeeToSystem))
 	}
@@ -2141,25 +2068,33 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
-	if trade.BuyerID != userID && trade.SellerID != userID {
-		return nil, ErrForbidden
-	}
-	if trade.Status != models.P2PTradeStatusPendingPayment {
-		return nil, fmt.Errorf("%w: trade status=%s (only pending_payment can be timed out)",
-			ErrInvalidTransition, trade.Status)
-	}
-	// Contract enforces `block.timestamp >= createdAt + TIMEOUT`. We
-	// pre-check off-chain so callers get a clear error instead of a chain
-	// revert ("Timeout not elapsed") at gas-estimation time.
-	if !s.clock.Now().After(trade.ExpiresAt) {
-		return nil, fmt.Errorf("%w: trade has not yet expired (expires_at=%s)",
-			ErrInvalidTransition, trade.ExpiresAt.Format(time.RFC3339))
+	if err := canCancelByTimeout(userID, &trade, s.clock.Now()); err != nil {
+		return nil, err
 	}
 	escrow, _, _, err := s.resolve(trade.ChainID)
 	if err != nil {
 		return nil, err
 	}
 	return escrow.PrepareCancelByTimeout(HashID(trade.ID), callerAddress)
+}
+
+// cancelledOnChainElsewhere: when the chain already says Cancelled, reconcile
+// the trade (the same transition the reconciler applies) and return the
+// refreshed row; ok=false when the chain says otherwise or cannot be read.
+func (s *P2PTradeService) cancelledOnChainElsewhere(ctx context.Context, escrow P2PEscrowAdapter, trade *models.P2PTrade) (*models.P2PTrade, bool) {
+	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	if err != nil || onchain == nil || !onchain.Exists || onchain.Status != OnChainP2PStatusCancelled {
+		return nil, false
+	}
+	if _, err := s.ReconcileTrade(ctx, trade.ID); err != nil {
+		log.Printf("[p2p ConfirmCancel] trade=%s reconcile after a lost cancel failed: %v", trade.ID, err)
+		return nil, false
+	}
+	var fresh models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&fresh, "id = ?", trade.ID).Error; err != nil || fresh.Status != models.P2PTradeStatusCancelled {
+		return nil, false
+	}
+	return &fresh, true
 }
 
 // releasePMSellReservationTx releases the NGN payout reservation a PM sell trade
@@ -2234,6 +2169,13 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	}
 	ev, err := escrow.VerifyTradeCancelled(txHash, HashID(trade.ID))
 	if err != nil {
+		// Her cancel may have lost to another cancelByTimeout (the expiry
+		// canceller's, or the counterparty's) and reverted. The trade is still
+		// cancelled on chain: apply it now rather than show an error until the
+		// reconciler's next pass.
+		if done, ok := s.cancelledOnChainElsewhere(ctx, escrow, &trade); ok {
+			return done, nil
+		}
 		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
 	}
 	// Sanity check: on-chain cancelled amount matches our recorded amount.
@@ -2248,7 +2190,7 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	// Cross-check the on-chain pool-return flag matches our funding model. A
 	// mismatch means the trade's DB funding diverged from chain truth — refuse
 	// rather than restore capacity down the wrong branch.
-	wantReturnedToPool := trade.Funding == models.P2PTradeFundingPooled
+	wantReturnedToPool := fundingOf(&trade) == fundingPooled
 	if ev.ReturnedToPool != wantReturnedToPool {
 		return nil, fmt.Errorf("on-chain returnedToPool=%v disagrees with funding=%d",
 			ev.ReturnedToPool, trade.Funding)
@@ -2305,18 +2247,18 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
 		// On a buy-ad the SellerID is the depositing user (crypto returned to
 		// their wallet); the BuyerID is the merchant.
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled — crypto returned to your wallet",
+		s.emit(events.P2PTradeCancelled, trade.SellerID, userID, "Trade cancelled — crypto returned to your wallet",
 			"", map[string]any{"tradeId": trade.ID})
 		if trade.BuyerID != trade.SellerID {
-			s.emit(events.P2PTradeCancelled, trade.BuyerID, "Trade cancelled (timed out)",
+			s.emit(events.P2PTradeCancelled, trade.BuyerID, userID, "Trade cancelled (timed out)",
 				"", map[string]any{"tradeId": trade.ID})
 		}
 		s.systemMsg(ctx, trade.ID, "Trade cancelled after 30-minute payment window expired. Crypto returned to the seller's wallet.")
 	} else {
-		s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled — funds returned to your ad",
+		s.emit(events.P2PTradeCancelled, trade.SellerID, userID, "Trade cancelled — funds returned to your ad",
 			"", map[string]any{"tradeId": trade.ID})
 		if trade.BuyerID != trade.SellerID {
-			s.emit(events.P2PTradeCancelled, trade.BuyerID, "Trade cancelled (timed out)",
+			s.emit(events.P2PTradeCancelled, trade.BuyerID, userID, "Trade cancelled (timed out)",
 				"", map[string]any{"tradeId": trade.ID})
 		}
 		s.systemMsg(ctx, trade.ID, "Trade cancelled after 30-minute payment window expired. Funds returned to seller's ad.")
@@ -2325,185 +2267,6 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 }
 
 // ─── Dispute lifecycle (Step 8) ─────────────────────────────────────────────
-
-// PrepareRaiseDispute prepares an on-chain raiseDispute tx and persists a dispute
-// row tied to the trade. The trade itself isn't transitioned until
-// ConfirmRaiseDispute verifies the receipt — the dispute row sits in `open`
-// state in the interim so the UI can surface "dispute pending broadcast".
-// Either buyer or seller (in Paid state only) may dispute.
-func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, callerAddress, reason string, evidenceURLs []string) ([]byte, error) {
-	if strings.TrimSpace(reason) == "" {
-		return nil, fmt.Errorf("%w: reason required", ErrInvalidParams)
-	}
-	// Evidence is optional: image URLs uploaded client-side (Cloudinary). Cap the
-	// count and require http(s) URLs; store as JSON on the dispute row.
-	evidenceJSON := ""
-	if len(evidenceURLs) > 0 {
-		if len(evidenceURLs) > 6 {
-			return nil, fmt.Errorf("%w: at most 6 evidence images", ErrInvalidParams)
-		}
-		for _, u := range evidenceURLs {
-			if t := strings.TrimSpace(u); t == "" || !strings.HasPrefix(t, "http") {
-				return nil, fmt.Errorf("%w: evidence must be http(s) image URLs", ErrInvalidParams)
-			}
-		}
-		b, _ := json.Marshal(evidenceURLs)
-		evidenceJSON = string(b)
-	}
-	var trade models.P2PTrade
-	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrTradeNotFound
-		}
-		return nil, err
-	}
-	if err := hideSlice(&trade); err != nil {
-		return nil, err
-	}
-	var role string
-	switch userID {
-	case trade.BuyerID:
-		role = models.P2PDisputeRoleBuyer
-	case trade.SellerID:
-		role = models.P2PDisputeRoleSeller
-	default:
-		return nil, ErrForbidden
-	}
-	// Disputes are allowed from pending_payment OR paid — symmetric with
-	// the contract (P2PEscrow.sol relax). A buyer who actually paid fiat but
-	// didn't call markPaid still needs a dispute path; rejecting them here
-	// would force them to call raiseDispute on chain directly and rely on
-	// the reconciler back-fill, defeating the API design.
-	if trade.Status != models.P2PTradeStatusPaid && trade.Status != models.P2PTradeStatusPendingPayment {
-		return nil, fmt.Errorf("%w: trade status=%s (only pending or paid trades can dispute)",
-			ErrInvalidTransition, trade.Status)
-	}
-	// A never-opened-on-chain trade has no escrowed funds to dispute; refuse so a
-	// phantom trade can't be escalated to `disputed` and pull in an admin.
-	if strings.TrimSpace(trade.OpenTxHash) == "" {
-		return nil, fmt.Errorf("%w: trade not yet opened on-chain", ErrInvalidTransition)
-	}
-	// Reject duplicate open dispute. Unique constraint on TradeID makes the
-	// race unlikely; this is the friendly-error path.
-	var existing models.P2PDispute
-	err := s.db.WithContext(ctx).
-		Where("trade_id = ? AND status = ?", trade.ID, models.P2PDisputeStatusOpen).
-		First(&existing).Error
-	if err == nil {
-		return nil, ErrDisputeAlreadyOpen
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-
-	// Resolve the trade's chain BEFORE persisting the dispute row so an
-	// unconfigured chain fails loud without leaving an orphan dispute.
-	escrow, _, _, err := s.resolve(trade.ChainID)
-	if err != nil {
-		return nil, err
-	}
-
-	dispute := &models.P2PDispute{
-		ID:           uuid.New(),
-		TradeID:      trade.ID,
-		RaisedBy:     userID,
-		RaisedRole:   role,
-		Reason:       reason,
-		EvidenceURLs: evidenceJSON,
-		Status:       models.P2PDisputeStatusOpen,
-	}
-	if err := s.db.WithContext(ctx).Create(dispute).Error; err != nil {
-		return nil, fmt.Errorf("persist dispute: %w", err)
-	}
-
-	unsignedTx, err := escrow.PrepareRaiseDispute(HashID(trade.ID), callerAddress)
-	if err != nil {
-		// Best-effort rollback so a failed prep doesn't leave a phantom
-		// dispute row blocking future retries.
-		_ = s.db.WithContext(ctx).Delete(&models.P2PDispute{}, "id = ?", dispute.ID).Error
-		return nil, fmt.Errorf("prepare raiseDispute: %w", err)
-	}
-
-	s.audit(ctx, models.P2PAuditTradeDisputed, &userID, &trade.AdID, &trade.ID, map[string]any{
-		"role":   role,
-		"reason": reason,
-	})
-	// Notify only the raiser at prepare time. The counter-party notice and the
-	// "funds frozen" chat message fire in ConfirmRaiseDispute — after the dispute
-	// is actually on chain — so a never-broadcast prepare can't signal the
-	// counter-party or freeze the trade chat.
-	s.emit(events.P2PTradeDisputed, userID, "Dispute prepared — sign to submit", "", map[string]any{
-		"tradeId": trade.ID, "role": role,
-	})
-
-	return unsignedTx, nil
-}
-
-// ConfirmRaiseDispute verifies the on-chain TradeDisputed event and
-// transitions the trade to Disputed. Idempotent across retries.
-func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, userID uuid.UUID, txHash string) (*models.P2PTrade, error) {
-	var trade models.P2PTrade
-	if err := s.db.WithContext(ctx).First(&trade, "id = ?", tradeID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrTradeNotFound
-		}
-		return nil, err
-	}
-	if err := hideSlice(&trade); err != nil {
-		return nil, err
-	}
-	if trade.BuyerID != userID && trade.SellerID != userID {
-		return nil, ErrForbidden
-	}
-	if trade.Status == models.P2PTradeStatusDisputed {
-		return &trade, nil
-	}
-	if trade.Status != models.P2PTradeStatusPaid && trade.Status != models.P2PTradeStatusPendingPayment {
-		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
-	}
-
-	escrow, _, _, err := s.resolve(trade.ChainID)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := escrow.VerifyTradeDisputed(txHash, HashID(trade.ID)); err != nil {
-		return nil, fmt.Errorf("verify on-chain dispute: %w", err)
-	}
-
-	res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status IN ?", trade.ID,
-			[]string{models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment}).
-		Updates(map[string]any{
-			"status":     models.P2PTradeStatusDisputed,
-			"updated_at": s.clock.Now(),
-		})
-	if res.Error != nil {
-		return nil, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return nil, ErrInvalidTransition
-	}
-	trade.Status = models.P2PTradeStatusDisputed
-
-	// Symmetric with the other Confirm* paths: emit an audit row + bus event
-	// once the on-chain transition is verified. Without this the operator
-	// timeline only shows the intent (RaiseDispute) and not the chain-side
-	// settle, making it hard to investigate disputes after the fact.
-	s.audit(ctx, models.P2PAuditTradeDisputeConfirmed, &userID, &trade.AdID, &trade.ID,
-		map[string]any{"txHash": txHash})
-	s.emit(events.P2PTradeDisputed, userID, "Dispute confirmed on chain", "",
-		map[string]any{"tradeId": trade.ID})
-	// Now that the dispute is on chain, notify the counter-party and freeze the
-	// trade chat (deferred from PrepareRaiseDispute).
-	other := trade.SellerID
-	if userID == trade.SellerID {
-		other = trade.BuyerID
-	}
-	s.emit(events.P2PTradeDisputed, other, "Counter-party opened a dispute on this trade", "",
-		map[string]any{"tradeId": trade.ID})
-	s.systemMsg(ctx, trade.ID, "A dispute has been opened. Funds are frozen pending admin review.")
-	return &trade, nil
-}
 
 // PrepareAdminResolveDispute prepares the on-chain adminResolve tx. Admin can side
 // with the buyer (release fee-split to buyer) or seller (refund to ad pool).
@@ -2691,9 +2454,9 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 		"amountMoved":     ev.AmountMoved.String(),
 		"feeToSystem":     ev.FeeToSystem.String(),
 	})
-	s.emit(events.P2PTradeResolved, trade.BuyerID, "Dispute resolved", "",
+	s.emit(events.P2PTradeResolved, trade.BuyerID, adminID, "Dispute resolved", "",
 		map[string]any{"tradeId": trade.ID, "releasedToBuyer": ev.ReleasedToBuyer})
-	s.emit(events.P2PTradeResolved, trade.SellerID, "Dispute resolved", "",
+	s.emit(events.P2PTradeResolved, trade.SellerID, adminID, "Dispute resolved", "",
 		map[string]any{"tradeId": trade.ID, "releasedToBuyer": ev.ReleasedToBuyer})
 	buyAd := trade.Funding == models.P2PTradeFundingDepositedByTaker
 	switch {
@@ -2821,7 +2584,7 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 		// when it can never land.
 		if trade.Status == models.P2PTradeStatusPendingPayment &&
 			s.clock.Now().After(trade.ExpiresAt) &&
-			((!trade.IsPoolSlice() && trade.OpenTxHash == "") || (trade.IsPoolSlice() && s.sliceOrphanable(ctx, &trade))) {
+			((!trade.IsPoolSlice() && !trade.OpenRecorded()) || (trade.IsPoolSlice() && s.sliceOrphanable(ctx, &trade))) {
 			if trade.IsPoolSlice() {
 				s.notePaidSliceLost(ctx, &trade, "never_opened") // a paid order's slice is never silently gone
 			}
@@ -2843,6 +2606,31 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// for both fundings, but recording the authoritative value matters for
 	// auditing and side-aware messaging.
 	funding := onchain.Funding
+
+	// The open is on chain but its confirm-open never reached us (app killed
+	// after broadcast): record it so mark-paid and dispute are allowed. When
+	// the chain has moved past Pending, the switch below still applies that
+	// transition. A refused backfill (ALERT logged) means the on-chain trade
+	// under our id is not the one we prepared, so its Paid/Released/Resolved/
+	// Disputed must never reach our row; only Cancelled is applied, as it just
+	// returns the capacity our row reserved. The rest waits for an operator.
+	// A pool slice is never backfilled: its open is proven by the pool's own
+	// path (opened_at, S44) and it has no opener_address, so the matcher would
+	// refuse it and stall the slice rules in the switch below.
+	if !trade.IsPoolSlice() && !trade.OpenRecorded() {
+		if ok, err := s.recordOpenFromChain(ctx, &trade, onchain); err != nil {
+			if !errors.Is(err, ErrInvalidTransition) && !errors.Is(err, ErrUnsupportedToken) {
+				return ReconcileResult{}, fmt.Errorf("backfill open: %w", err)
+			}
+			log.Printf("[p2p reconcile] open backfill refused: trade=%s chainStatus=%d err=%v", trade.ID, onchain.Status, err)
+			if onchain.Status != OnChainP2PStatusCancelled {
+				return ReconcileResult{}, nil
+			}
+		} else if ok && onchain.Status == OnChainP2PStatusPending {
+			return ReconcileResult{Changed: true, FromStatus: trade.Status, ToStatus: trade.Status,
+				Reason: "open backfilled"}, nil
+		}
+	}
 
 	// Realized on-chain fee for the release/resolve paths. The reconciler has no
 	// TradeReleased event to read FeeToSystem from, so derive it from the view:
@@ -2873,26 +2661,22 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 		}
 		return s.reconcileToDisputed(ctx, &trade)
 	case OnChainP2PStatusPaid:
-		// Chain Paid + DB pending_payment → someone called on-chain markPaid
-		// outside our normal off-chain flow. Surface it.
+		// Chain Paid + DB pending_payment → the payer's markPaid landed but its
+		// confirm never reached us (e.g. app killed after broadcast). Backfill
+		// through the same transition a confirm uses, so the audit, both
+		// parties' notifications and the chat message still happen.
 		if trade.Status == models.P2PTradeStatusPendingPayment {
-			now := s.clock.Now()
-			res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-				Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusPendingPayment).
-				Updates(map[string]any{
-					"status":         models.P2PTradeStatusPaid,
-					"marked_paid_at": now,
-					"updated_at":     now,
-				})
-			if res.Error != nil {
-				return ReconcileResult{}, res.Error
+			fromStatus := trade.Status
+			flipped, err := s.markPaidCore(ctx, &trade, nil, map[string]any{"source": "reconciler", "reason": "chain status Paid"})
+			if err != nil {
+				return ReconcileResult{}, err
 			}
-			if res.RowsAffected > 0 {
+			if flipped {
 				s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 					"from": "pending_payment", "to": "paid",
 					"reason": "chain status Paid",
 				})
-				return ReconcileResult{Changed: true, FromStatus: trade.Status,
+				return ReconcileResult{Changed: true, FromStatus: fromStatus,
 					ToStatus: models.P2PTradeStatusPaid, Reason: "chain Paid"}, nil
 			}
 		}
@@ -2999,11 +2783,11 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 		"reason":  "chain Released",
 	})
 	if !trade.IsPoolSlice() { // an LP sees pool events (C2), never a P2P trade push
-		s.emit(events.P2PTradeReleased, trade.SellerID, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		s.emit(events.P2PTradeReleased, trade.SellerID, uuid.Nil, "Trade released (reconciled)", "", map[string]any{"tradeId": trade.ID})
 		if funding == models.P2PTradeFundingDepositedByTaker {
-			s.emit(events.P2PTradeReleased, trade.BuyerID, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+			s.emit(events.P2PTradeReleased, trade.BuyerID, uuid.Nil, "Crypto received (reconciled)", "", map[string]any{"tradeId": trade.ID})
 		} else {
-			s.emit(events.P2PTradeReleased, trade.BuyerID, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
+			s.emit(events.P2PTradeReleased, trade.BuyerID, uuid.Nil, "USDT received (reconciled)", "", map[string]any{"tradeId": trade.ID})
 		}
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusReleased,
@@ -3019,7 +2803,16 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *models.P2PTrade, funding uint8) (ReconcileResult, error) {
 	now := s.clock.Now()
 	from := trade.Status
+	cancelled := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The caller's status is a pre-read; a mark-paid confirm may have landed
+		// since. Re-read under a row lock so the audit, result and paid-trade
+		// alert reflect what was actually flipped.
+		cur, err := lockTradeStatus(tx, trade.ID)
+		if err != nil {
+			return err
+		}
+		from = cur
 		res := tx.Model(&models.P2PTrade{}).
 			Where("id = ? AND status NOT IN ?", trade.ID,
 				[]string{
@@ -3038,6 +2831,7 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 		if res.RowsAffected == 0 {
 			return nil
 		}
+		cancelled = true
 		if err := tx.Model(&models.P2PAd{}).
 			Where("id = ?", trade.AdID).
 			Updates(map[string]any{
@@ -3055,6 +2849,10 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if !cancelled {
+		// A concurrent writer already settled the trade; nothing was changed.
+		return ReconcileResult{}, nil
+	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusCancelled,
 		"funding": funding,
@@ -3063,9 +2861,12 @@ func (s *P2PTradeService) reconcileToCancelled(ctx context.Context, trade *model
 	if !trade.IsPoolSlice() { // an LP sees pool events (C2), never a P2P trade push
 		if funding == models.P2PTradeFundingDepositedByTaker {
 			// SellerID is the depositing user — crypto returned to their wallet.
-			s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
+			s.emit(events.P2PTradeCancelled, trade.SellerID, uuid.Nil, "Trade cancelled (reconciled) — crypto returned to your wallet", "", map[string]any{"tradeId": trade.ID})
 		} else {
-			s.emit(events.P2PTradeCancelled, trade.SellerID, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+			s.emit(events.P2PTradeCancelled, trade.SellerID, uuid.Nil, "Trade cancelled (reconciled)", "", map[string]any{"tradeId": trade.ID})
+		}
+		if from == models.P2PTradeStatusPaid || from == models.P2PTradeStatusReleasing {
+			s.alert(ctx, P2PAlertPaidTradeCancelled, trade, func(a *P2PAlert) { a.FromStatus = from })
 		}
 	}
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusCancelled,
@@ -3132,7 +2933,15 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 	}
 	from := trade.Status
 	now := s.clock.Now()
+	flipped, backfilled := false, false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The caller's status is a pre-read; re-read under a row lock so the
+		// audit, result and alert reflect what was actually flipped.
+		cur, err := lockTradeStatus(tx, trade.ID)
+		if err != nil {
+			return err
+		}
+		from = cur
 		res := tx.Model(&models.P2PTrade{}).
 			Where("id = ? AND status NOT IN ?", trade.ID,
 				[]string{
@@ -3151,6 +2960,7 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 		if res.RowsAffected == 0 {
 			return nil
 		}
+		flipped = true
 		// Back-fill a dispute row if none exists yet. FirstOrCreate avoids
 		// the unique-index race when a phantom row from a failed RaiseDispute
 		// already sits in the table (best-effort delete can fail silently).
@@ -3165,20 +2975,26 @@ func (s *P2PTradeService) reconcileToDisputed(ctx context.Context, trade *models
 			Status:     models.P2PDisputeStatusOpen,
 			CreatedAt:  now,
 		}
-		if err := tx.Where(models.P2PDispute{TradeID: trade.ID}).
+		fc := tx.Where(models.P2PDispute{TradeID: trade.ID}).
 			Attrs(placeholder).
-			FirstOrCreate(&placeholder).Error; err != nil {
-			return err
+			FirstOrCreate(&placeholder)
+		if fc.Error != nil {
+			return fc.Error
 		}
+		backfilled = fc.RowsAffected > 0
 		return nil
 	})
 	if err != nil {
 		return ReconcileResult{}, err
 	}
+	if !flipped {
+		return ReconcileResult{}, nil
+	}
 	s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
 		"from": from, "to": models.P2PTradeStatusDisputed,
 		"reason": "chain Disputed",
 	})
+	s.alertDisputeFiled(ctx, trade, from, backfilled)
 	return ReconcileResult{Changed: true, FromStatus: from, ToStatus: models.P2PTradeStatusDisputed,
 		Reason: "chain Disputed"}, nil
 }
@@ -3393,10 +3209,27 @@ type AdFilter struct {
 	// from); leave it off for the owner's own list, where they must still see
 	// such an ad to cancel it and withdraw the pool behind it.
 	ExcludeDelisted bool
+	// ExcludeSuspended hides ads whose seller's account is suspended or
+	// deleted. Set it wherever ExcludeDelisted is set (browse, express, seller
+	// profile); the owner's own list leaves it off.
+	ExcludeSuspended bool
 	// ViewerID is the caller. LP stock ads (S29) are listed only on the
 	// caller's own list (SellerID == ViewerID, ListMyAds); every other read
 	// hides them whatever the other filters say.
 	ViewerID uuid.UUID
+}
+
+// blockedAccountStatuses are the account states whose ads are neither listed
+// nor openable (suspend blocks login; delete is terminal).
+var blockedAccountStatuses = []string{models.AccountStatusSuspended, models.AccountStatusDeleted}
+
+// sellerBlocked reports whether the user's account is suspended or deleted. A
+// missing users row is not blocked.
+func (s *P2PTradeService) sellerBlocked(ctx context.Context, id uuid.UUID) (bool, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Table("users").
+		Where("id = ? AND account_status IN ?", id, blockedAccountStatuses).Count(&n).Error
+	return n > 0, err
 }
 
 func (s *P2PTradeService) GetAd(ctx context.Context, adID uuid.UUID) (*models.P2PAd, error) {
@@ -3441,6 +3274,9 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 		if clause, args := s.delistedAdsClause(); clause != "" {
 			q = q.Where(clause, args...)
 		}
+	}
+	if f.ExcludeSuspended {
+		q = q.Where("seller_id NOT IN (SELECT id FROM users WHERE account_status IN ?)", blockedAccountStatuses)
 	}
 	if ownList := f.SellerID != uuid.Nil && f.SellerID == f.ViewerID; !ownList {
 		var err error
@@ -3491,7 +3327,7 @@ func (s *P2PTradeService) ExpressMatch(ctx context.Context, p ExpressMatchParams
 
 	cands, err := s.ListAds(ctx, AdFilter{
 		Side: adSide, Token: p.Token, FiatCurrency: p.FiatCurrency,
-		Status: models.P2PAdStatusActive, Limit: 100, ExcludeDelisted: true,
+		Status: models.P2PAdStatusActive, Limit: 100, ExcludeDelisted: true, ExcludeSuspended: true,
 	})
 	if err != nil {
 		return nil, err
@@ -3654,6 +3490,7 @@ func (s *P2PTradeService) GetTrade(ctx context.Context, tradeID, requestor uuid.
 	if trade.BuyerID != requestor && trade.SellerID != requestor {
 		return nil, ErrForbidden
 	}
+	fillTradeFee(&trade)
 	return &trade, nil
 }
 
@@ -3678,6 +3515,9 @@ func (s *P2PTradeService) ListTrades(ctx context.Context, f TradeFilter) ([]mode
 	var out []models.P2PTrade
 	if err := q.Find(&out).Error; err != nil {
 		return nil, err
+	}
+	for i := range out {
+		fillTradeFee(&out[i])
 	}
 	return out, nil
 }
@@ -4098,7 +3938,7 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 		"chainId": chainID,
 	})
 	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
-	s.emit(events.P2PDepositConfirmed, sellerID, "Deposit confirmed", "",
+	s.emit(events.P2PDepositConfirmed, sellerID, sellerID, "Deposit confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil
 }
@@ -4178,7 +4018,7 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 		"chainId": chainID,
 	})
 	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
-	s.emit(events.P2PWithdrawConfirmed, sellerID, "Withdrawal confirmed", "",
+	s.emit(events.P2PWithdrawConfirmed, sellerID, sellerID, "Withdrawal confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil
 }
@@ -4331,6 +4171,15 @@ func decodeHexSig(s string) ([]byte, error) {
 
 // ─── Audit + events helpers ─────────────────────────────────────────────────
 
+// lockTradeStatus re-reads a trade's status under a row lock inside tx. The
+// caller's copy is a pre-read; the flip that follows must report the status it
+// actually moved from.
+func lockTradeStatus(tx *gorm.DB, id uuid.UUID) (string, error) {
+	var cur models.P2PTrade
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("status").First(&cur, "id = ?", id).Error
+	return cur.Status, err
+}
+
 func (s *P2PTradeService) audit(ctx context.Context, action string, actorID *uuid.UUID, adID, tradeID *uuid.UUID, metadata map[string]any) {
 	var meta datatypes.JSON
 	if metadata != nil {
@@ -4355,13 +4204,27 @@ func (s *P2PTradeService) audit(ctx context.Context, action string, actorID *uui
 	}
 }
 
-func (s *P2PTradeService) emit(eventType string, userID uuid.UUID, title, message string, data map[string]any) {
+// actorOf is the acting user of an audit-style *uuid.UUID, uuid.Nil when the
+// transition was driven by the system (reconciler).
+func actorOf(actor *uuid.UUID) uuid.UUID {
+	if actor == nil {
+		return uuid.Nil
+	}
+	return *actor
+}
+
+// emit publishes a P2P bus event to userID. actorID is the user who performed
+// the action (uuid.Nil for system/reconciler events): the notification router
+// skips push/email for the actor, and clients read it as data.actorId to tell
+// their own actions from the counterparty's.
+func (s *P2PTradeService) emit(eventType string, userID, actorID uuid.UUID, title, message string, data map[string]any) {
 	if s.bus == nil {
 		return
 	}
 	s.bus.Publish(events.Event{
 		Type:    eventType,
 		UserID:  userID,
+		ActorID: actorID,
 		Title:   title,
 		Message: message,
 		Data:    data,

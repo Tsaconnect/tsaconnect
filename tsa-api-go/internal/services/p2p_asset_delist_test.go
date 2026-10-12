@@ -24,6 +24,10 @@ import (
 const (
 	delistTestUSDT = "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
 	delistTestMCGP = "0x7a1b2C3d4E5f60718293a4B5c6D7e8F901234567"
+	// delistTestMaker is the seeded sell-ad's wallet: the on-chain seller.
+	delistTestMaker = "0x000000000000000000000000000000000000a11c"
+	// delistTestBuyer is the seeded trade's opener: the on-chain buyer.
+	delistTestBuyer = "0x000000000000000000000000000000000000b0b0"
 )
 
 // delistTestService returns a trade service on chain 146 whose registry starts
@@ -265,14 +269,15 @@ func seedMCGPTrade(t *testing.T, db *gorm.DB, sellerID, buyerID uuid.UUID, statu
 		FiatCurrency: "NGN", Rate: "30", RateType: models.P2PAdRateTypeFixed,
 		FloatAnchor: models.P2PAdFloatAnchorBybitSell,
 		Amount:      "1000", Remaining: "900", Reserved: "100",
-		Status: models.P2PAdStatusActive,
+		Status: models.P2PAdStatusActive, SellerAddress: delistTestMaker,
 	}).Error; err != nil {
 		t.Fatalf("seed ad: %v", err)
 	}
 	now := time.Date(2026, 5, 23, 11, 0, 0, 0, time.UTC)
 	tr := &models.P2PTrade{
 		ID: uuid.New(), AdID: adID, BuyerID: buyerID, SellerID: sellerID, OpenerID: &buyerID,
-		Token: "MCGP", ChainID: 146, Funding: models.P2PTradeFundingPooled,
+		OpenerAddress: common.HexToAddress(delistTestBuyer).Hex(),
+		Token:         "MCGP", ChainID: 146, Funding: models.P2PTradeFundingPooled,
 		TokenAmount: "100", FiatAmount: "3000", FiatCurrency: "NGN", Rate: "30",
 		PaymentMethodID: uuid.New(), Status: status, OpenTxHash: openTx,
 		ExpiresAt: expiresAt, CreatedAt: now, UpdatedAt: now,
@@ -305,12 +310,15 @@ func TestDelistedAsset_ExistingPositionsStillExit(t *testing.T) {
 		sellerID, buyerID := uuid.New(), uuid.New()
 		// Prepared before the delist, broadcast after: the confirm must land.
 		tr := seedMCGPTrade(t, db, sellerID, buyerID, models.P2PTradeStatusPendingPayment, "", later)
-		if _, err := svc.ConfirmOpenTrade(ctx, tr.ID, buyerID, "", "0xopen"); err != nil {
+		esc.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending,
+			Funding: models.P2PTradeFundingPooled, Seller: common.HexToAddress(delistTestMaker),
+			Buyer: common.HexToAddress(delistTestBuyer),
+			Token: common.HexToAddress(delistTestMCGP), Amount: big.NewInt(100)}
+		if _, err := svc.ConfirmOpenTrade(ctx, tr.ID, buyerID, "0xopen"); err != nil {
 			t.Fatalf("ConfirmOpenTrade: %v", err)
 		}
-		if _, err := svc.MarkPaid(ctx, tr.ID, buyerID, "https://proof/x.png"); err != nil {
-			t.Fatalf("MarkPaid: %v", err)
-		}
+		esc.onChainTrade = nil
+		markPaidViaChain(t, svc, tr.ID, buyerID)
 		if _, err := svc.PrepareRelease(ctx, tr.ID, sellerID, sellerAddr); err != nil {
 			t.Fatalf("PrepareRelease: %v", err)
 		}
@@ -403,7 +411,7 @@ func TestDelistedAsset_RegistryDelistedVsUnconfigured(t *testing.T) {
 func TestP2PFee_NonStableToken_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db)
-	esc.platformFeeBpsSnapshot = 100 // V3 trade: a 1% platform fee WOULD accrue for a stable
+	esc.feeSnapshotPlatform, esc.feeSnapshotFound = 100, true // V3 trade: a 1% platform fee WOULD accrue for a stable
 
 	buyer := mkP2PUser(t, db, "mcgpbuyer", nil)
 	seller := mkP2PUser(t, db, "mcgpseller", nil)

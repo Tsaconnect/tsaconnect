@@ -11,12 +11,14 @@
 // own back affordance or the bell is a one-way trip. ScreenHeader is
 // canGoBack()-guarded and falls back to /home, which also covers arriving here
 // cold from a push notification.
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { View, FlatList, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import moment from 'moment';
 import { useNotifications } from '../../contexts/NotificationContext';
+import { mergeInbox } from '../../utils/notificationFilter';
+import { useAuth } from '../../AuthContext/AuthContext';
 import { routeForNotification } from '../../hooks/notificationRouting';
 import api from '@/components/services/api';
 import { useTheme } from '@/theme';
@@ -50,6 +52,7 @@ const CATEGORY_ICONS: Record<string, IconName> = {
 const NotificationInbox: React.FC = () => {
   const { colors, spacing } = useTheme();
   const { notifications: realtimeNotifications, setNotifications, refreshUnreadCount } = useNotifications();
+  const { currentUser } = useAuth();
   const [notifications, setLocalNotifications] = useState<any[]>([]);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
@@ -86,12 +89,13 @@ const NotificationInbox: React.FC = () => {
     fetchNotifications(1, true);
   }, [fetchNotifications]);
 
-  const mergedNotifications = [
-    ...realtimeNotifications.filter(
-      (rt) => !notifications.find((n) => n.id === rt.id)
-    ),
-    ...notifications,
-  ];
+  // Memoised: the merge used to rerun (and rescan the feed per realtime row)
+  // on every render, including each refresh/loading toggle.
+  const userId = currentUser?.id;
+  const mergedNotifications = useMemo(
+    () => mergeInbox(realtimeNotifications, notifications, userId),
+    [realtimeNotifications, notifications, userId],
+  );
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);

@@ -11,13 +11,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   adsApi,
   formatTokenAmount,
-  p2pChainKey,
   p2pTokenDecimals,
-  unsignedTxToTxLike,
   type P2PAd,
 } from '../../services/p2p';
-import { broadcastTransaction, getActiveWallet, signTransaction } from '../../services/wallet';
-import { useUserRole } from '../../hooks/useUserRole';
+import { p2pErrorMessage } from '../../services/p2pErrors';
+import { runP2PTx, type P2PFollowUp } from '../../services/p2pTx';
+import { adCancelFollowUp, adCancelThrownFollowUp } from '../../utils/p2pAdCancel';
+import { applyFollowUp } from '../../utils/p2pFollowUp';
+import { getActiveWallet } from '../../services/wallet';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -55,13 +56,16 @@ const MyAdsScreen: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [acting, setActing] = useState<string>(''); // adId currently undergoing an action
-  const { isMerchant, loading: roleLoading } = useUserRole();
+  // Ads whose cancel was broadcast but not recorded yet: shown as sent, not
+  // offered for cancel again until a later reload still shows them open.
+  const [cancelSent, setCancelSent] = useState<ReadonlySet<string>>(new Set());
 
   const load = useCallback(async () => {
     const res = await adsApi.listMine(filter === 'all' ? {} : { status: filter });
     if (res.success && res.data) {
       setAds(res.data);
       setLoadError(null);
+      setCancelSent(new Set());
     } else {
       // Keep the existing list visible (don't clobber on a transient fail)
       // but surface a retry banner so the user knows their view is stale.
@@ -88,7 +92,7 @@ const MyAdsScreen: React.FC = () => {
     setActing(ad.id);
     const res = ad.status === 'paused' ? await adsApi.resume(ad.id) : await adsApi.pause(ad.id);
     if (!res.success) {
-      toast.error(res.message || 'Server rejected the request');
+      toast.error(p2pErrorMessage(res, 'Server rejected the request'));
     } else {
       toast.success(ad.status === 'paused' ? 'Ad resumed' : 'Ad paused');
     }
@@ -104,7 +108,7 @@ const MyAdsScreen: React.FC = () => {
     setActing(ad.id);
     Alert.alert(
       'Cancel this ad?',
-      'Cancelling revokes your voucher on-chain. The locked portion stays in your pool ' +
+      'Cancelling closes this ad. The locked portion stays in your pool ' +
         'balance and any trades already in progress will continue until they finish.',
       [
         { text: 'Keep ad', style: 'cancel', onPress: () => setActing('') },
@@ -115,32 +119,27 @@ const MyAdsScreen: React.FC = () => {
   };
 
   const doCancel = async (ad: P2PAd) => {
-    let broadcastHash: string | null = null;
+    let next: P2PFollowUp = { reload: true };
     try {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
-      const prep = await adsApi.prepareCancel(ad.id, sellerAddress);
-      if (!prep.success || !prep.data) throw new Error(prep.message || 'Prepare failed');
-      const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx));
-      const resp = await broadcastTransaction(p2pChainKey(ad.chainId), signed);
-      broadcastHash = resp.hash;
-      const conf = await adsApi.confirmCancel(ad.id, resp.hash);
-      if (!conf.success) throw new Error(conf.message || 'Confirm failed');
-      toast.success('Ad cancelled');
-    } catch (err: any) {
-      const detail = err?.message || String(err);
-      if (broadcastHash) {
-        Alert.alert(
-          'Cancel submitted, server confirm failed',
-          `Tx ${broadcastHash} was broadcast on chain but the server couldn't record it ` +
-            `(${detail}). Wait a minute for the reconciler to catch up; contact support if not.`,
-        );
-      } else {
-        toast.error(detail);
-      }
+      const r = await runP2PTx({
+        chainId: ad.chainId,
+        walletAddress: sellerAddress,
+        action: 'cancel_ad',
+        adId: ad.id,
+        // A buy-ad cancel is DB-only (unsignedTx:null), so there is nothing to sponsor.
+        skipGas: ad.side === 'buy',
+        prepare: () => adsApi.prepareCancel(ad.id, sellerAddress),
+        confirm: (h) => adsApi.confirmCancel(ad.id, h),
+      });
+      next = adCancelFollowUp(r);
+      if (next.cancelSent) setCancelSent((prev) => new Set(prev).add(ad.id));
+    } catch (err) {
+      next = adCancelThrownFollowUp(err);
     } finally {
       setActing('');
-      load();
+      applyFollowUp(next, { toast, reload: load });
     }
   };
 
@@ -164,13 +163,11 @@ const MyAdsScreen: React.FC = () => {
             My Ads
           </Text>
           <Button
-            title={isMerchant ? 'New ad' : 'Become merchant'}
+            title="New ad"
             leftIcon="plus"
             size="sm"
             fullWidth={false}
-            onPress={() =>
-              router.push(isMerchant ? '/p2p/create-ad' : '/merchants/merchant-request')
-            }
+            onPress={() => router.push('/p2p/create-ad')}
           />
         </View>
 
@@ -182,53 +179,26 @@ const MyAdsScreen: React.FC = () => {
             seller's pool available/locked), we show a static subtitle that
             explains the available/locked semantics and invites a tap to
             manage. */}
-        {!roleLoading && isMerchant && (
-          <PressableScale
-            onPress={() => router.push('/p2p/pool')}
-            style={{ marginTop: spacing.lg }}
-          >
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="wallet" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Escrow funds
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Available is withdrawable; locked is reserved against open trades — tap to
-                    manage.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+        <PressableScale
+          onPress={() => router.push('/p2p/pool')}
+          style={{ marginTop: spacing.lg }}
+        >
+          <AccentCard padding="md">
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+              <Icon name="wallet" size={24} color={colors.accent} />
+              <View style={{ flex: 1 }}>
+                <Text variant="bodyMed" weight="700">
+                  Escrow funds
+                </Text>
+                <Text variant="caption" color="textSecondary">
+                  Available is withdrawable; locked is reserved against open trades — tap to
+                  manage.
+                </Text>
               </View>
-            </AccentCard>
-          </PressableScale>
-        )}
-
-        {/* Mirrors the marketplace-side banner: non-merchants reading their
-            (empty) My Ads list get a one-tap path to onboarding instead of
-            hitting a 403 inside the create-ad flow. */}
-        {!roleLoading && !isMerchant && (
-          <PressableScale
-            onPress={() => router.push('/merchants/merchant-request')}
-            style={{ marginTop: spacing.lg }}
-          >
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="storefront" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Become a merchant
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Required to publish P2P ads. Apply in a minute.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
-              </View>
-            </AccentCard>
-          </PressableScale>
-        )}
+              <Icon name="chevronRight" size={20} color={colors.textMuted} />
+            </View>
+          </AccentCard>
+        </PressableScale>
 
         <ScrollView
           horizontal
@@ -269,8 +239,8 @@ const MyAdsScreen: React.FC = () => {
                 ? "You haven't posted any ads yet. Tap 'New ad' to start selling."
                 : `No ads in '${filter}' status.`
             }
-            actionLabel={isMerchant ? 'New ad' : undefined}
-            onAction={isMerchant ? () => router.push('/p2p/create-ad') : undefined}
+            actionLabel="New ad"
+            onAction={() => router.push('/p2p/create-ad')}
           />
         ) : (
           <View style={{ gap: spacing.md }}>
@@ -279,6 +249,7 @@ const MyAdsScreen: React.FC = () => {
                 key={ad.id}
                 ad={ad}
                 busy={acting === ad.id}
+                cancelSent={cancelSent.has(ad.id)}
                 onTogglePause={onTogglePause}
                 onCancel={onCancel}
               />
@@ -293,9 +264,10 @@ const MyAdsScreen: React.FC = () => {
 const AdCard: React.FC<{
   ad: P2PAd;
   busy: boolean;
+  cancelSent: boolean;
   onTogglePause: (ad: P2PAd) => void;
   onCancel: (ad: P2PAd) => void;
-}> = ({ ad, busy, onTogglePause, onCancel }) => {
+}> = ({ ad, busy, cancelSent, onTogglePause, onCancel }) => {
   const { spacing } = useTheme();
   const decimals = p2pTokenDecimals(ad.chainId, ad.token);
   const remaining = formatTokenAmount(ad.remaining, decimals, 2);
@@ -371,7 +343,12 @@ const AdCard: React.FC<{
                 onPress={() => onTogglePause(ad)}
               />
             )}
-            {canCancel && (
+            {canCancel && cancelSent && (
+              <Text variant="caption" color="textMuted" style={{ alignSelf: 'center' }}>
+                Cancel sent — updating once recorded
+              </Text>
+            )}
+            {canCancel && !cancelSent && (
               <Button
                 title="Cancel ad"
                 leftIcon="close"

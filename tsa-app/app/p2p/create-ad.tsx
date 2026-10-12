@@ -40,9 +40,25 @@ import {
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { ensureEscrowFunding } from '../../services/escrowFunding';
-import { fundingPreflight, publishActionForFunding } from '../../services/createAdFunding';
+import { feeBpsFor, feeSplit, formatFeePct } from '../../services/p2pFee';
+import {
+  errorMessage,
+  P2PCopyError,
+  p2pCaughtMessage,
+  p2pErrorMessage,
+  p2pKycCode,
+  type P2PErrorLike,
+} from '../../services/p2pErrors';
+import { fixedRateBandRefusal } from '../../utils/p2pRateBand';
+import { promptKycRefusal } from '../../utils/kycRefusal';
+import {
+  createAdStatusError,
+  fundingPreflight,
+  lpStatusError,
+  publishActionForFunding,
+  publishFailureMessage,
+} from '../../services/createAdFunding';
 import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
-import { decodeRevertError } from '../../services/txErrors';
 import { getActiveWallet, verifyWalletKey } from '../../services/wallet';
 import { createAndSignAd } from '../../services/adPublish';
 import { goBack } from '../../utils/back';
@@ -92,10 +108,6 @@ type RateType = 'fixed' | 'float';
 // and the pool-balance caveat copy.
 const SONIC_CHAIN_IDS = new Set([146, 14601]);
 
-// P2P/PM platform fee charged to the merchant on a successful trade. Mirrors
-// the on-chain FeatureP2PPlatform rate (1%) — kept in sync by review.
-const P2P_PLATFORM_FEE_PCT = 0.01;
-
 /** Return true if the given chainId is Sonic (either net). */
 function isSonicChain(chainId: number): boolean {
   return SONIC_CHAIN_IDS.has(chainId);
@@ -123,17 +135,19 @@ async function assertWalletKey(address: string): Promise<void> {
   const integrity = await verifyWalletKey(address);
   if (integrity.ok) return;
   if (integrity.reason === 'missing') {
-    throw new Error(
+    throw new P2PCopyError(
       `No private key stored for wallet ${address}. ` +
         'Remove this wallet and re-import it from its seed phrase.'
     );
   }
-  throw new Error(
+  throw new P2PCopyError(
     `Wallet ${address} is corrupt — its stored key actually ` +
       `derives to ${integrity.derived}. Remove this wallet from the ` +
       'wallet list and re-import it from its seed phrase, then retry.'
   );
 }
+
+const RETRY_CONFIRM_FAILED = 'Server still cannot record this deposit.';
 
 const CreateAdScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
@@ -488,6 +502,17 @@ const CreateAdScreen: React.FC = () => {
     }
   }, [amountInput, adDecimals]);
 
+  // Live rate from /p2p/chains (null when the API omits it → neutral copy).
+  const feeBps = feeBpsFor(enabledChains, selectedChainId ?? chainsForToken[0]?.chainId, token.symbol);
+  const feePct = formatFeePct(feeBps);
+  const previewFee = useMemo(() => {
+    try {
+      return feeSplit(parseTokenAmount(amountInput || '0', adDecimals), feeBps);
+    } catch {
+      return null;
+    }
+  }, [amountInput, adDecimals, feeBps]);
+
   // Allowance-aware funding summary computed before submit (spec "Review
   // fixes" §6/§7): shortfall ≤ 0 → already covered (no deposit); else we'll
   // deposit the shortfall, and we only promise an approval when the current
@@ -567,7 +592,7 @@ const CreateAdScreen: React.FC = () => {
       setSubmitStage('Loading wallet…');
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) {
-        throw new Error('No wallet found. Please set up a wallet first.');
+        throw new P2PCopyError('No wallet found. Please set up a wallet first.');
       }
 
       // Pre-flight: the stored key must derive to sellerAddress (see
@@ -590,6 +615,19 @@ const CreateAdScreen: React.FC = () => {
       // (spec "Review fixes" §2) — selectedChainId is undefined for a
       // single-chain token or before /p2p/chains lands; in either case we'd be
       // about to deposit something, so block until a chain is resolved.
+      // A fixed rate far off the market would sell at a loss (or never fill):
+      // stop before the deposit moves any crypto. The server re-checks on
+      // create; PM ads are exempt there too.
+      if (rateType === 'fixed' && !isPm) {
+        const refusal = fixedRateBandRefusal({
+          token: token.symbol,
+          rate: rateInput.trim(),
+          reference: suggestedRate,
+          referenceStale: rateStale,
+        });
+        if (refusal) throw new P2PCopyError(refusal);
+      }
+
       const preflight = fundingPreflight({
         amountBaseUnits: tokenAmount,
         available: poolAvailable,
@@ -597,7 +635,7 @@ const CreateAdScreen: React.FC = () => {
         chainsFetched,
       });
       if (preflight.kind === 'block') {
-        throw new Error(preflight.message);
+        throw new P2PCopyError(preflight.message);
       }
       if (preflight.kind === 'fund') {
         const fundResult = await ensureEscrowFunding({
@@ -605,6 +643,7 @@ const CreateAdScreen: React.FC = () => {
           chainId: preflight.chainId,
           amountBaseUnits: tokenAmount,
           walletAddress: sellerAddress,
+          gasAction: 'deposit',
           onStage: setSubmitStage,
           onGasAlert: (m) => Alert.alert('Need gas', m),
         });
@@ -614,15 +653,15 @@ const CreateAdScreen: React.FC = () => {
           return;
         }
         if (action.kind === 'recover') {
-          // The deposit is on-chain & safe in `available`, but the confirm POST
-          // failed. Do NOT publish an unbacked ad — surface the recovery banner
-          // and let the seller retry the confirm, then re-publish.
+          // The deposit was broadcast but the confirm POST failed, so we don't
+          // know it was mined. Do NOT publish an unbacked ad — surface the
+          // recovery banner and let the seller retry the confirm.
           await refreshPendingDeposits();
           Alert.alert(
             'Deposit sent — confirm pending',
-            'Your deposit broadcast on-chain and your funds are safe in escrow, but ' +
-              'the server could not record it yet. Use “Retry confirm” at the top of ' +
-              'the screen, then publish again.',
+            'Your deposit was broadcast, but the server could not record it yet. Use ' +
+              '“Retry confirm” at the top of the screen, then publish again. ' +
+              "Don't send the deposit again.",
           );
           return;
         }
@@ -663,38 +702,13 @@ const CreateAdScreen: React.FC = () => {
       Alert.alert('Ad published', `Your ad is now live in the marketplace.`, [
         { text: 'OK', onPress: () => router.back() },
       ]);
-    } catch (err: any) {
-      const raw = err?.message || String(err);
-      // Turn an opaque on-chain revert (e.g. the ERC20InsufficientBalance hex the
-      // backend surfaces when the wallet can't cover the deposit) into a clear,
-      // actionable message instead of raw ABI bytes.
-      const revert = decodeRevertError(raw);
-      let body: string;
-      if (revert?.kind === 'insufficient-balance') {
-        body =
-          `Your wallet doesn't have enough ${token.symbol} to back this ad. It needs ` +
-          `${formatTokenAmount(revert.needed, adDecimals, 4)} ${token.symbol}, but your wallet holds ` +
-          `${formatTokenAmount(revert.balance, adDecimals, 4)} ${token.symbol} on this network. ` +
-          `Top up your ${token.symbol}, then publish.`;
-      } else if (revert?.kind === 'insufficient-allowance') {
-        body =
-          `The escrow isn't approved to move your ${token.symbol} yet. Please try publishing ` +
-          `again — the approval is requested first.`;
-      } else if (revert?.kind === 'unknown-revert') {
-        body =
-          `The deposit can't go through right now — your wallet may be missing the ${token.symbol} ` +
-          `or the network gas needed. Check your balances and try again.`;
-      } else {
-        body = raw;
-      }
-      // Only mention a safe deposit when one actually broadcast+confirmed this
-      // attempt; an insufficient-balance / gas-estimate revert moves no funds.
-      if (depositedThisAttempt) {
-        body +=
-          '\n\nThe deposit you just made is safe in your escrow balance — retry to publish, ' +
-          'or reclaim it from My Ads.';
-      }
-      Alert.alert('Could not publish ad', body);
+    } catch (err) {
+      // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
+      if (promptKycRefusal(p2pKycCode(err as P2PErrorLike), errorMessage(err), 'p2p')) return;
+      Alert.alert(
+        'Could not publish ad',
+        publishFailureMessage(err, { symbol: token.symbol, decimals: adDecimals, depositedThisAttempt }),
+      );
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -718,13 +732,14 @@ const CreateAdScreen: React.FC = () => {
         rec.chainId,
       );
       if (!conf.success) {
-        throw new Error(conf.message || `Confirm returned ${conf.status ?? 'no status'}`);
+        Alert.alert('Retry failed', p2pErrorMessage(conf, RETRY_CONFIRM_FAILED));
+        return;
       }
       await removePending(rec.txHash);
       await refreshPendingDeposits();
       Alert.alert('Confirmed', 'Your deposit has been recorded. You can publish now.');
-    } catch (err: any) {
-      Alert.alert('Retry failed', err?.message || 'Server still cannot record this deposit.');
+    } catch (err) {
+      Alert.alert('Retry failed', p2pCaughtMessage(err, RETRY_CONFIRM_FAILED));
     } finally {
       setRetryingTxHash(null);
     }
@@ -757,7 +772,7 @@ const CreateAdScreen: React.FC = () => {
         await refreshPendingDeposits();
         Alert.alert(
           'Deposit sent — confirm pending',
-          `Your ${sym} is safe in your escrow balance. Use “Retry confirm” above, then add it to the pool.`,
+          `Your ${sym} deposit was broadcast, but the server could not record it yet. Use “Retry confirm” above, then add it to the pool. Don't send the deposit again.`,
         );
       } else if (res.status === 'done') {
         Alert.alert(
@@ -768,8 +783,8 @@ const CreateAdScreen: React.FC = () => {
           [{ text: 'OK', onPress: () => goBack('/liquidity') }],
         );
       }
-    } catch (err: any) {
-      Alert.alert('Could not add liquidity', err?.message || String(err));
+    } catch (err) {
+      Alert.alert('Could not add liquidity', p2pCaughtMessage(err));
     } finally {
       setSubmitting(false);
       setSubmitStage('');
@@ -777,41 +792,6 @@ const CreateAdScreen: React.FC = () => {
       loadLpMe();
     }
   };
-
-  // LP-specific HTTP copy (review M4): a 503 here is the pool closing or the
-  // chain being unreachable, never a stale rate.
-  function lpStatusError(status?: number, message?: string): string {
-    if (status === 503) return 'The pool is closed or the network is busy right now. Your funds are safe; try again later.';
-    if (status === 409) return message || 'You already have a live pool ad.';
-    return createAdStatusError(status, message);
-  }
-
-  // createAdStatusError turns the backend's HTTP status into actionable user
-  // guidance. 410 (Gone) is the Phase 2B migration sentinel for stale clients
-  // calling removed legacy endpoints; 503 fires when the rate feed is stale
-  // mid-publish (float ads need a fresh feed). Anything else passes through.
-  function createAdStatusError(status: number | undefined, message: string | undefined): string {
-    if (status === 410) {
-      return 'Your app version is out of date — please update and retry.';
-    }
-    if (status === 503) {
-      return 'Live rate just expired. Refresh the screen and try again.';
-    }
-    // Server-side EIP-712 recovery mismatch — the wallet that produced the
-    // signature derives to a different address than the one we declared as
-    // sellerAddress. The pre-flight in handleSubmit catches the common
-    // SecureStore-corruption case, but if a stale build slips through (or
-    // the active wallet flips mid-flow) we still want a useful message
-    // instead of the raw "signature recovered to 0x… expected 0x…" alert.
-    if (message && /signature recovered to /i.test(message)) {
-      return (
-        'Your wallet did not sign the ad correctly — its key does not match ' +
-        'the address on the ad. Remove this wallet and re-import it from its ' +
-        'seed phrase, then retry. (Server message: ' + message + ')'
-      );
-    }
-    return message || 'Server rejected the request';
-  }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -866,8 +846,8 @@ const CreateAdScreen: React.FC = () => {
                 </View>
                 <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
                   A {amtHuman} {rec.token} deposit on {recChain?.shortName ?? `chain ${rec.chainId}`}{' '}
-                  broadcast on-chain but the server couldn&apos;t record it. Your funds are safe in
-                  escrow — retry to record it, then publish.
+                  was broadcast but the server couldn&apos;t record it yet. Retry to record it, then
+                  publish. Don&apos;t send the deposit again.
                 </Text>
                 <Text variant="caption" color="textMuted" numeric numberOfLines={1} style={{ marginTop: spacing.sm }}>
                   tx {rec.txHash}
@@ -1247,15 +1227,20 @@ const CreateAdScreen: React.FC = () => {
                     value={`${symbol}${previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
                   />
                   <SummaryRow
-                    label="Platform fee (1%)"
-                    value={`${((parseFloat(amountInput) || 0) * P2P_PLATFORM_FEE_PCT).toLocaleString(undefined, {
-                      maximumFractionDigits: 4,
-                    })} ${token.symbol}`}
+                    label={feePct ? `Fee (${feePct})` : 'Fee'}
+                    value={previewFee
+                      ? `${formatTokenAmount(previewFee.fee, adDecimals, 4)} ${token.symbol}`
+                      : 'Shown on each trade'}
                   />
+                  {previewFee && (
+                    <SummaryRow
+                      label="Buyers receive"
+                      value={`${formatTokenAmount(previewFee.net, adDecimals, 4)} ${token.symbol}`}
+                    />
+                  )}
                 </SummaryCard>
 
-                {/* Merchant fee disclosure — the seller (you) is charged 1% only on
-                    a successfully completed trade. Mirrors FeatureP2PPlatform (1%). */}
+                {/* Fee disclosure — rate from the API; on a sell ad the buyer is the crypto receiver. */}
                 <View
                   style={{
                     flexDirection: 'row',
@@ -1269,9 +1254,9 @@ const CreateAdScreen: React.FC = () => {
                 >
                   <Icon name="info" size={16} color={colors.info} />
                   <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                    A 1% platform fee is charged to you (the merchant) only when a trade completes —
-                    on USDT and USDC alike. It is split instantly into the system fee, cashback
-                    to the buyer and their direct upline, and Trade Points.
+                    {feePct
+                      ? `A ${feePct} fee comes out of the ${token.symbol} the buyer receives when a trade completes. You are not charged on top.`
+                      : `A fee comes out of the ${token.symbol} the buyer receives when a trade completes. The exact rate shows on each trade.`}
                   </Text>
                 </View>
               </Card>

@@ -6,8 +6,9 @@
 //
 // It reuses the EXACT primitives the standalone pool screen used —
 // poolApi.{balance,allowance,prepareApprove,prepareDeposit,confirmDeposit} plus
-// the wallet's sign/broadcast/gas helpers — so funding behaves identically to
-// the old Pool deposit flow; it just runs inline at publish time.
+// the wallet's gas check and runP2PTx's sign/broadcast (p2pTx.signAndBroadcast,
+// which maps a raw wallet/RPC failure to copy) — so funding behaves identically
+// to the old Pool deposit flow; it just runs inline at publish time.
 //
 // CONTRACT (caller's responsibilities):
 //   - ALL amounts here are BASE UNITS. Decimal scaling via
@@ -23,18 +24,13 @@
 // told funds are already on-chain — there is no server-side deposit reconciler,
 // so recovery is user-initiated.
 
-import {
-  poolApi,
-  p2pChainKey,
-  unsignedTxToTxLike,
-} from './p2p';
-import {
-  signTransaction,
-  broadcastTransaction,
-  ensureGas,
-  getProvider,
-} from './wallet';
+import { p2pErrorMessage, p2pKycCode, p2pRefusalError, type P2PErrorLike } from './p2pErrors';
+import { poolApi, p2pChainKey } from './p2p';
+import { ensureGas } from './wallet';
 import { addPending } from './p2pPending';
+import { waitMined } from './txWait';
+import { ensureP2PGas } from './p2pGas';
+import { signAndBroadcast } from './p2pTx';
 
 export interface EnsureFundingParams {
   token: string;
@@ -54,6 +50,23 @@ export interface EnsureFundingParams {
    * deposit more or less than the LP asked for.
    */
   exactDepositBaseUnits?: string;
+  /**
+   * Ask the P2P gas sponsor (R3) instead of the plain balance check. Each tx
+   * gets its own drip right before it ('approve', then 'deposit'). TSA
+   * Liquidity (lpDeposit) leaves this unset, so its behaviour is unchanged.
+   */
+  gasAction?: 'deposit';
+}
+
+/** A refusal as mapped copy that keeps the code and status, so the screen can
+ *  route a KYC 403 to the Verify prompt. */
+function refusalError(res: P2PErrorLike, fallback: string): Error {
+  return p2pRefusalError(res, p2pErrorMessage(res, fallback));
+}
+
+/** A KYC refusal on a read must stop the flow, not read as an empty balance. */
+function throwIfKycRefused(res: { success: boolean; message?: string; status?: number; code?: string }): void {
+  if (!res.success && p2pKycCode(res)) throw refusalError(res, 'Identity verification required');
 }
 
 export type EnsureFundingResult =
@@ -62,36 +75,13 @@ export type EnsureFundingResult =
   | { status: 'pending-confirm'; txHash: string; deposited: string }
   | { status: 'aborted'; reason: string };
 
-// Cap on how long we wait for the approve tx to mine before broadcasting the
-// deposit. The deposit's transferFrom needs the allowance in place; mirrors the
-// 90s confirmation budget used elsewhere (services/transaction.ts).
-const APPROVE_WAIT_MS = 90_000;
-
-/**
- * Wait for a broadcast tx to mine, with a timeout so a stuck RPC can't hang the
- * whole publish flow. Uses provider.waitForTransaction on the chain's primary
- * RPC. Known limitation: if that endpoint is unreachable for reads the race
- * rejects on the timeout and the publish aborts — but that fails safe (an
- * approve moves no funds) and a retry finds the allowance already in place, so
- * the deposit then skips straight past the approve.
- */
-async function waitMined(chainId: number, txHash: string): Promise<void> {
-  const provider = getProvider(p2pChainKey(chainId));
-  await Promise.race([
-    provider.waitForTransaction(txHash),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Approve confirmation timed out')), APPROVE_WAIT_MS),
-    ),
-  ]);
-}
-
 /**
  * Top up the seller's on-chain `available` balance so it covers `amountBaseUnits`
  * for this ad. See the file header + the per-step comments for behavior; all
  * math is BigInt over base-unit strings.
  */
 export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<EnsureFundingResult> {
-  const { token, chainId, amountBaseUnits, walletAddress, onStage, onGasAlert, exactDepositBaseUnits } = p;
+  const { token, chainId, amountBaseUnits, walletAddress, onStage, onGasAlert, exactDepositBaseUnits, gasAction } = p;
 
   // Never broadcast on an unresolved/defaulted chain — a silent Sonic fallback
   // would fund the wrong chain and desync the voucher domain.
@@ -102,6 +92,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   // How much the ad needs vs. what the seller already has available on-chain.
   onStage?.('Checking balance…');
   const balRes = await poolApi.balance(token, walletAddress, chainId);
+  throwIfKycRefused(balRes);
   const available = balRes.success && balRes.data ? balRes.data.available : '0';
 
   const need = BigInt(amountBaseUnits);
@@ -123,23 +114,23 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
 
   const chainKey = p2pChainKey(chainId);
 
-  // Gas guard before any broadcast — both approve and deposit pay gas here.
+  // Gas guard before each broadcast — approve and deposit both pay gas.
   // ensureGas takes a (title, message) alerter; collapse to the single-string
-  // onGasAlert this module exposes.
-  onStage?.('Checking gas…');
-  const hasGas = await ensureGas(
-    chainKey,
-    walletAddress,
-    onGasAlert ? (title, message) => onGasAlert(`${title}: ${message}`) : undefined,
-  );
-  if (!hasGas) {
-    return { status: 'aborted', reason: 'no gas' };
+  // onGasAlert this module exposes. Sponsored flows drip per step instead, so
+  // an approve's S is not requested until the approve is about to be sent.
+  const alert = onGasAlert ? (title: string, message: string) => onGasAlert(`${title}: ${message}`) : undefined;
+  const sponsoredGas = (action: 'approve' | 'deposit') =>
+    ensureP2PGas({ chainId, walletAddress, action, onStage, onAlert: alert });
+  if (!gasAction) {
+    onStage?.('Checking gas…');
+    if (!(await ensureGas(chainKey, walletAddress, alert))) return { status: 'aborted', reason: 'no gas' };
   }
 
   // Approve the escrow for the shortfall if the current allowance is short.
   // (transferFrom inside deposit() draws from this allowance.)
   onStage?.('Checking allowance…');
   const allowRes = await poolApi.allowance(token, walletAddress, chainId);
+  throwIfKycRefused(allowRes);
   let allowance = 0n;
   if (allowRes.success && allowRes.data) {
     try {
@@ -152,30 +143,38 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
   }
 
   if (allowance < shortfall) {
+    if (gasAction && !(await sponsoredGas('approve'))) return { status: 'aborted', reason: 'no gas' };
     onStage?.('Preparing approve…');
     const aPrep = await poolApi.prepareApprove(token, shortfall.toString(), walletAddress, chainId);
     if (!aPrep.success || !aPrep.data) {
-      throw new Error(aPrep.message || 'Prepare approve failed');
+      throw refusalError(aPrep, 'Prepare approve failed');
     }
-    onStage?.('Signing approve…');
-    const signedApprove = await signTransaction(unsignedTxToTxLike(aPrep.data.unsignedTx), walletAddress);
-    onStage?.('Broadcasting approve…');
-    const approveResp = await broadcastTransaction(chainKey, signedApprove);
+    const approveResp = await signAndBroadcast(chainId, aPrep.data.unsignedTx, walletAddress, {
+      onStage,
+      signing: 'Signing approve…',
+      broadcasting: 'Broadcasting approve…',
+    });
     // Poll until the approve mines so the deposit's transferFrom can't race it.
     onStage?.('Waiting for approve…');
-    await waitMined(chainId, approveResp.hash);
+    // Known limitation: if the chain's primary RPC is unreachable for reads the
+    // wait times out and the publish aborts — that fails safe (an approve moves
+    // no funds) and a retry finds the allowance already in place. A reverted
+    // approve throws TxRevertedError before the deposit is prepared.
+    await waitMined(chainId, approveResp.hash, { label: 'Approve' });
   }
 
   // Deposit the shortfall into the seller's `available` balance.
+  if (gasAction && !(await sponsoredGas('deposit'))) return { status: 'aborted', reason: 'no gas' };
   onStage?.('Preparing deposit…');
   const dPrep = await poolApi.prepareDeposit(token, shortfall.toString(), walletAddress, chainId);
   if (!dPrep.success || !dPrep.data) {
-    throw new Error(dPrep.message || 'Prepare deposit failed');
+    throw refusalError(dPrep, 'Prepare deposit failed');
   }
-  onStage?.('Signing deposit…');
-  const signedDeposit = await signTransaction(unsignedTxToTxLike(dPrep.data.unsignedTx), walletAddress);
-  onStage?.('Depositing…');
-  const depositResp = await broadcastTransaction(chainKey, signedDeposit);
+  const depositResp = await signAndBroadcast(chainId, dPrep.data.unsignedTx, walletAddress, {
+    onStage,
+    signing: 'Signing deposit…',
+    broadcasting: 'Depositing…',
+  });
   const txHash = depositResp.hash;
   const deposited = shortfall.toString();
 

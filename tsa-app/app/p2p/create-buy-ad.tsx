@@ -1,11 +1,11 @@
 // app/p2p/create-buy-ad.tsx
 //
-// Merchant posts a buy-ad: they want to BUY crypto from users and will pay
+// A verified user posts a buy-ad: they want to BUY crypto from users and will pay
 // fiat. Different capital model from create-ad.tsx:
 //
 //   - No pool deposit required — the ad is a binding intent to buy.
 //   - No EIP-712 voucher to sign — just create and it goes active.
-//   - The `amount` field specifies the total crypto the merchant wants to buy.
+//   - The `amount` field specifies the total crypto the poster wants to buy.
 //
 // Flow:
 //   1. Fill form (token, fiatCurrency, rate, limits, payment methods, amount)
@@ -13,7 +13,7 @@
 //   3. Navigate back to marketplace (buy tab)
 //
 // Restyled onto the TSA Signature design system (@/theme + @/components/ui).
-// Visual/UX only — the merchant-role gate, field validation, payment-method
+// Visual/UX only — field validation, payment-method
 // selection, wallet resolution, and the create-buy-ad submit flow are
 // unchanged.
 
@@ -26,13 +26,16 @@ import {
   chainsApi,
   paymentMethodsApi,
   parseTokenAmount,
+  p2pTokenDecimals,
   type P2PChainInfo,
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { getActiveWallet } from '../../services/wallet';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
-import { useUserRole } from '../../hooks/useUserRole';
+import { feeBpsFor, formatFeePct } from '../../services/p2pFee';
+import { p2pErrorMessage, p2pKycCode } from '../../services/p2pErrors';
+import { promptKycRefusal } from '../../utils/kycRefusal';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import CurrencySelector from '../../components/currency/CurrencySelector';
 import { getNetworkDisplayName } from '../../constants/chains';
@@ -44,7 +47,6 @@ import {
   Button,
   Card,
   Chip,
-  EmptyState,
   Icon,
   Input,
   PressableScale,
@@ -82,7 +84,6 @@ function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
 const CreateBuyAdScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
   const kbHeight = useKeyboardHeight();
-  const { isMerchant, loading: roleLoading } = useUserRole();
   const { currency: marketCurrency } = useP2pCurrency();
   const { supportedCurrencies } = useCurrency();
   // Active PMs pay sellers automatically from their Nomba account, so no manual
@@ -185,6 +186,12 @@ const CreateBuyAdScreen: React.FC = () => {
     );
   };
 
+  // Chain-aware decimals (BSC stables are 18dp); token.decimals is the
+  // chain-blind fallback and would post 1e12 too little on BSC.
+  const chainForFee = selectedChainId ?? chainsForToken[0]?.chainId;
+  const adDecimals = p2pTokenDecimals(chainForFee, token.symbol);
+  const feePct = formatFeePct(feeBpsFor(enabledChains, chainForFee, token.symbol));
+
   const valid =
     parseFloat(amountInput || '0') > 0 &&
     parseFloat(rateInput || '0') > 0 &&
@@ -202,9 +209,13 @@ const CreateBuyAdScreen: React.FC = () => {
 
       let tokenAmount: string;
       try {
-        tokenAmount = parseTokenAmount(amountInput.trim(), token.decimals);
+        tokenAmount = parseTokenAmount(amountInput.trim(), adDecimals);
       } catch (e: any) {
         throw new Error(`Invalid amount: ${e?.message}`);
+      }
+
+      if (BigInt(tokenAmount) === 0n) {
+        throw new Error('Amount is too small for this token.');
       }
 
       const minLimit = minLimitInput.trim() || undefined;
@@ -228,7 +239,10 @@ const CreateBuyAdScreen: React.FC = () => {
       });
 
       if (!createRes.success || !createRes.data) {
-        throw new Error(createRes.message || 'Server rejected the buy ad');
+        // The server's KYC 403 drives the Verify prompt (a cached status goes stale).
+        if (promptKycRefusal(p2pKycCode(createRes), createRes.message, 'p2p')) return;
+        // rate_out_of_band carries min/max in data → "Rate must be between X and Y".
+        throw new Error(p2pErrorMessage(createRes, 'Server rejected the buy ad'));
       }
 
       // Buy-ads don't require voucher signing — navigate directly to my-ads.
@@ -245,34 +259,6 @@ const CreateBuyAdScreen: React.FC = () => {
       setSubmitStage('');
     }
   };
-
-  // ─── Role gate ────────────────────────────────────────────────────────────
-
-  if (roleLoading) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <View style={{ paddingTop: spacing['4xl'] }}>
-          <Spinner label="Checking your account…" />
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  if (!isMerchant) {
-    return (
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <View style={{ flex: 1, justifyContent: 'center' }}>
-          <EmptyState
-            icon="storefront"
-            title="Merchants only"
-            subtitle="Buy ads can only be posted by verified merchants. Apply for merchant status to unlock this feature."
-            actionLabel="Become a merchant"
-            onAction={() => router.push('/merchants/merchant-request')}
-          />
-        </View>
-      </SafeAreaView>
-    );
-  }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -481,9 +467,7 @@ const CreateBuyAdScreen: React.FC = () => {
             />
           </View>
 
-          {/* Merchant fee disclosure — as the ad poster (merchant) you are
-              charged 1% only on a successfully completed trade. Mirrors the
-              on-chain FeatureP2PPlatform rate (1%). */}
+          {/* Fee disclosure — the rate comes from the API; the poster is the crypto receiver on a buy ad. */}
           <View
             style={{
               flexDirection: 'row',
@@ -497,9 +481,9 @@ const CreateBuyAdScreen: React.FC = () => {
           >
             <Icon name="info" size={16} color={colors.info} />
             <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-              A 1% platform fee is charged to you (the merchant) only when a trade completes — on
-              USDT and USDC alike. It is split instantly into the system fee, cashback to the
-              buyer and their direct upline, and Trade Points.
+              {feePct
+                ? `A ${feePct} fee comes out of the ${token.symbol} you receive when a trade completes.`
+                : `A fee comes out of the ${token.symbol} you receive when a trade completes. The exact rate shows on each trade.`}
             </Text>
           </View>
 

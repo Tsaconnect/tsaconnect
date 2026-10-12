@@ -33,30 +33,46 @@ func TestBuildMarketplaceFunding_DormantWithoutItsPieces(t *testing.T) {
 	}
 }
 
-// The funding's Sonic gas lane is its own switch (never a RAMP_SPONSOR_CHAINS
-// lane) and stays dormant, never fatal, without its pieces.
-func TestBuildMarketplaceSonicGas_DormantWithoutItsPieces(t *testing.T) {
+// The shared Sonic gas lane (P2P always, marketplace funding while its switch
+// is on) stays dormant, never fatal, without its pieces.
+func TestBuildSonicGasSponsorship_DormantWithoutItsPieces(t *testing.T) {
 	cfg := &config.Config{
-		MarketplaceSonicGasEnabled: false, RampSponsorPrivateKey: "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
-		MarketplaceSonicGasFloorWei: "5000000000000000000", MarketplaceSonicGasTopUpMaxWei: "500000000000000000",
+		RampSponsorPrivateKey: "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+		SonicGasFloorWei:      "5000000000000000000", SonicGasTopUpMaxWei: "500000000000000000",
 		RampSponsorDailyGasBudget: "500000000",
 	}
 	chains := services.NewBlockchainService(cfg)
-	if buildMarketplaceSonicGas(cfg, chains) != nil {
-		t.Fatal("MARKETPLACE_SONIC_GAS off must leave the lane off")
-	}
-	cfg.MarketplaceSonicGasEnabled = true
 	cfg.RampSponsorPrivateKey = ""
-	if buildMarketplaceSonicGas(cfg, chains) != nil {
+	if buildSonicGasSponsorship(cfg, chains) != nil {
 		t.Fatal("no sponsor key must leave the lane off")
 	}
 	cfg.RampSponsorPrivateKey = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
-	cfg.MarketplaceSonicGasTopUpMaxWei = "5e17"
-	if buildMarketplaceSonicGas(cfg, chains) != nil {
+	cfg.Env = "production"
+	if buildSonicGasSponsorship(cfg, chains) != nil {
+		t.Fatal("a raw sponsor key in production without ALLOW_RAW_SIGNER_KEYS must leave the lane off")
+	}
+	cfg.Env = ""
+	cfg.SonicGasTopUpMaxWei = "5e17"
+	if buildSonicGasSponsorship(cfg, chains) != nil {
 		t.Fatal("a malformed ceiling must skip the lane, never run it unbounded")
 	}
-	cfg.MarketplaceSonicGasTopUpMaxWei = "500000000000000000"
-	if buildMarketplaceSonicGas(cfg, chains) != nil {
+	cfg.SonicGasTopUpMaxWei = "500000000000000000"
+	if buildSonicGasSponsorship(cfg, chains) != nil {
 		t.Fatal("no sonic client must leave the lane off")
+	}
+}
+
+// One Sonic lane on the sponsor key: the funding sees it only while
+// MARKETPLACE_SONIC_GAS is on, exactly as when it built its own.
+func TestMarketplaceSonicGas_GatedByItsSwitch(t *testing.T) {
+	shared := &services.RampSponsorship{}
+	if marketplaceSonicGas(&config.Config{MarketplaceSonicGasEnabled: false}, shared) != nil {
+		t.Fatal("off must hide the shared lane from the funding")
+	}
+	if marketplaceSonicGas(&config.Config{MarketplaceSonicGasEnabled: true}, shared) != shared {
+		t.Fatal("on must hand it the shared lane")
+	}
+	if marketplaceSonicGas(&config.Config{MarketplaceSonicGasEnabled: true}, nil) != nil {
+		t.Fatal("on without a lane is still no lane")
 	}
 }

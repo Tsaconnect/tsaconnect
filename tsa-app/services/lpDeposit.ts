@@ -12,6 +12,7 @@ import { formatTokenAmount, parseTokenAmount, poolApi } from './p2p';
 import { ensureEscrowFunding } from './escrowFunding';
 import { publishActionForFunding } from './createAdFunding';
 import { createAndSignAd } from './adPublish';
+import { P2PCopyError, p2pCaughtMessage } from './p2pErrors';
 import type { LiquidityMe } from './liquidityApi';
 import { lpDepositPlan } from '../utils/liquidityView';
 
@@ -102,13 +103,13 @@ export async function runLpDeposit(p: {
         onStage: p.onStage,
         statusError: p.statusError,
       });
-    } catch (err: any) {
+    } catch (err) {
       if (deposited === '0') throw err;
       // The deposit landed; only the pool ad failed. Say so, so the LP retries
       // the ad (Renew, empty amount) instead of depositing again.
-      throw new Error(
+      throw new P2PCopyError(
         `Your ${formatTokenAmount(deposited, d, 4)} ${sym} is safe in your escrow balance, but it could not ` +
-          `be added to the pool yet: ${err?.message || String(err)} Leave the amount empty and tap Renew to retry.`,
+          `be added to the pool yet: ${p2pCaughtMessage(err)} Leave the amount empty and tap Renew to retry.`,
       );
     }
   }

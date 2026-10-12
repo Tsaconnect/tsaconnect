@@ -361,9 +361,13 @@ type Config struct {
 	// and TSA Pay intents from Sonic a source-chain top-up. It signs with the
 	// ramp sponsor key (RAMP_SPONSOR_PRIVATE_KEY) under its own guard, floor and
 	// ceiling. Off by default; off, a buyer with no S is refused before signing.
-	MarketplaceSonicGasEnabled     bool
-	MarketplaceSonicGasFloorWei    string
-	MarketplaceSonicGasTopUpMaxWei string
+	MarketplaceSonicGasEnabled bool
+	// SonicGas* are the ONE shared Sonic sponsor lane's floor and per-send
+	// ceiling (P2P top-ups and, while MARKETPLACE_SONIC_GAS is on, checkout
+	// funding). Env SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI; the old
+	// MARKETPLACE_SONIC_GAS_* names are read as deprecated fallbacks.
+	SonicGasFloorWei    string
+	SonicGasTopUpMaxWei string
 
 	// Ramp treasury / converted buys — Paycrest delivers into our own
 	// treasury instead of the user's wallet, and the treasury bridges it to
@@ -680,6 +684,15 @@ type Config struct {
 	// publishing float-rate ads pick an offset within ±this value relative
 	// to the reference feed. Tune via env to widen/tighten platform-wide.
 	P2PFloatOffsetMaxBps int
+	// P2PFixedRateBandBps: fixed-rate ads must price within this many bps of the market reference.
+	P2PFixedRateBandBps int
+
+	// A trade paid but not released for this long pages the operators once.
+	P2PPaidUnreleasedAlertAfter time.Duration
+
+	// P2PGasTopUpsPerDay caps the S top-ups one user is sent for P2P txs per
+	// rolling 24h (POST /api/p2p/gas/top-up). Skips do not count.
+	P2PGasTopUpsPerDay int
 
 	// Nomba — used for Nigerian bank directory + account name enquiry today,
 	// and the auto-payout path in Phase 2. Falls back to "feature disabled"
@@ -878,6 +891,14 @@ type Config struct {
 	TokenAddresses map[string]string
 }
 
+// Working defaults for the P2P launch knobs. They live only here: the services
+// and jobs that take these values fall back to these constants.
+const (
+	DefaultP2PFixedRateBandBps         = 2000 // ±20% of the market reference
+	DefaultP2PPaidUnreleasedAlertAfter = 2 * time.Hour
+	DefaultP2PGasTopUpsPerDay          = 6
+)
+
 func Load() *Config {
 	// Pick the Sonic deployment preset first; individual env vars layered on
 	// top can override any single field. Default is "mainnet" so a production
@@ -977,8 +998,8 @@ func Load() *Config {
 	// ~400k gas per order (approve + createOrder) x2 buffer at ~55 gwei is
 	// ~0.045 S an order: sponsoring stops below the floor (the float monitor
 	// alerts at twice it), and the ceiling covers a ~10-order cart.
-	cfg.MarketplaceSonicGasFloorWei = strings.TrimSpace(getEnv("MARKETPLACE_SONIC_GAS_FLOOR_WEI", "5000000000000000000"))       // 5 S
-	cfg.MarketplaceSonicGasTopUpMaxWei = strings.TrimSpace(getEnv("MARKETPLACE_SONIC_GAS_TOPUP_MAX_WEI", "500000000000000000")) // 0.5 S
+	cfg.SonicGasFloorWei = getEnvRenamed("SONIC_GAS_FLOOR_WEI", "MARKETPLACE_SONIC_GAS_FLOOR_WEI", "5000000000000000000")           // 5 S
+	cfg.SonicGasTopUpMaxWei = getEnvRenamed("SONIC_GAS_TOPUP_MAX_WEI", "MARKETPLACE_SONIC_GAS_TOPUP_MAX_WEI", "500000000000000000") // 0.5 S
 	cfg.MarketplaceEscrowGasPerOrder = uint64(max(getEnvInt64("MARKETPLACE_ESCROW_GAS_PER_ORDER", 400_000), 0))
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
@@ -1270,6 +1291,16 @@ func Load() *Config {
 	// P2P float-rate offset cap (basis points). 1000 = ±10%, matches Binance
 	// P2P's typical platform-wide deviation cap.
 	cfg.P2PFloatOffsetMaxBps = int(getEnvInt64("P2P_FLOAT_OFFSET_MAX_BPS", 1000))
+	// Non-positive overrides fall back to the default: none of these is ever "off".
+	cfg.P2PFixedRateBandBps = int(getEnvInt64("P2P_FIXED_RATE_BAND_BPS", DefaultP2PFixedRateBandBps))
+	if cfg.P2PFixedRateBandBps <= 0 {
+		cfg.P2PFixedRateBandBps = DefaultP2PFixedRateBandBps
+	}
+	cfg.P2PPaidUnreleasedAlertAfter = getEnvDuration("P2P_PAID_UNRELEASED_ALERT_AFTER", DefaultP2PPaidUnreleasedAlertAfter)
+	cfg.P2PGasTopUpsPerDay = int(getEnvInt64("P2P_GAS_TOPUPS_PER_DAY", DefaultP2PGasTopUpsPerDay))
+	if cfg.P2PGasTopUpsPerDay <= 0 {
+		cfg.P2PGasTopUpsPerDay = DefaultP2PGasTopUpsPerDay
+	}
 
 	// Nomba — sandbox by default. Production should set NOMBA_BASE_URL to
 	// https://api.nomba.com and provide live credentials.
@@ -1757,6 +1788,20 @@ func getEnvInt64(key string, fallback int64) int64 {
 		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
 			return parsed
 		}
+	}
+	return fallback
+}
+
+// getEnvRenamed reads a renamed variable: the new name, else the old one (with
+// a deprecation line so operators move it), else fallback. Blank counts as
+// unset. The value is trimmed.
+func getEnvRenamed(key, oldKey, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv(oldKey)); v != "" {
+		log.Printf("[config] DEPRECATED env %s: rename it to %s (still read for now)", oldKey, key)
+		return v
 	}
 	return fallback
 }

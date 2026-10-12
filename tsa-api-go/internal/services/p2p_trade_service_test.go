@@ -43,7 +43,15 @@ type mockEscrow struct {
 	verifyReleasedErr  error
 	verifyTradeCanErr  error
 	verifyDisputedErr  error
-	verifyResolvedErr  error
+	onVerifyDisputed   func() // runs inside VerifyTradeDisputed (simulates a concurrent writer)
+	raiseDisputeErr    error  // PrepareRaiseDispute build failure
+	// onPrepareRaiseDispute runs inside PrepareRaiseDispute: between the
+	// service's dispute-row read and its write (simulates a concurrent retry).
+	onPrepareRaiseDispute func()
+	readTradeErr          error // ReadTrade failure injection
+	verifyPaidErr         error
+	prepareMarkPaidErr    error
+	verifyResolvedErr     error
 
 	// Event fixtures the verify methods return on success.
 	depositedEvent *P2PDepositedEvent
@@ -55,8 +63,12 @@ type mockEscrow struct {
 	disputedEvent  *P2PTradeDisputedEvent
 	resolvedEvent  *P2PTradeResolvedEvent
 	onChainTrade   *OnChainP2PTrade
-	readTradeErr   error
-	readTradeCalls int
+	// feeSnapshot*: what ReadTradeFeeSnapshot answers; feeSnapshotReads counts
+	// the calls.
+	feeSnapshotPlatform, feeSnapshotGas uint16
+	feeSnapshotFound                    bool
+	feeSnapshotReads                    int
+	readTradeCalls                      int
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -70,15 +82,6 @@ type mockEscrow struct {
 	// Buy-ad / JIT verify fixtures + error injection.
 	verifyOpenedDepositErr error
 	openedDepositEvent     *P2PTradeOpenedWithDepositEvent
-
-	// platformFeeBpsSnapshot is the V3-snapshotted platform-fee bps returned by
-	// ReadTradePlatformFeeBps. 0 (the default) models a pre-V3 escrow / V2-opened
-	// trade → accrueP2PReleaseFee no-ops. platformFeeFound toggles the found flag.
-	platformFeeBpsSnapshot uint16
-	platformFeeFound       bool
-	// Pool slices: the V3 fee snapshot ReadTradeFeeSnapshot answers with.
-	snapPlatform, snapGas uint16
-	snapMissing           bool
 }
 
 type depositArgs struct {
@@ -176,6 +179,9 @@ func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string,
 	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
 }
 func (m *mockEscrow) PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error) {
+	if m.prepareMarkPaidErr != nil {
+		return nil, m.prepareMarkPaidErr
+	}
 	return []byte(`{"tx":"markPaid"}`), nil
 }
 func (m *mockEscrow) PrepareRelease(tradeId [32]byte, seller string) ([]byte, error) {
@@ -185,6 +191,13 @@ func (m *mockEscrow) PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]
 	return []byte(`{"tx":"cancelByTimeout"}`), nil
 }
 func (m *mockEscrow) PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, error) {
+	if hook := m.onPrepareRaiseDispute; hook != nil {
+		m.onPrepareRaiseDispute = nil
+		hook()
+	}
+	if m.raiseDisputeErr != nil {
+		return nil, m.raiseDisputeErr
+	}
 	return []byte(`{"tx":"raiseDispute"}`), nil
 }
 func (m *mockEscrow) PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, admin string) ([]byte, error) {
@@ -258,14 +271,25 @@ func (m *mockEscrow) VerifyTradeCancelled(txHash string, tradeId [32]byte) (*P2P
 	}
 	return &P2PTradeCancelledEvent{TradeID: tradeId, Amount: big.NewInt(100), ReturnedToPool: true}, nil
 }
+func (m *mockEscrow) VerifyTradePaid(txHash string, tradeId [32]byte) (*P2PTradePaidEvent, error) {
+	if m.verifyPaidErr != nil {
+		return nil, m.verifyPaidErr
+	}
+	return &P2PTradePaidEvent{TradeID: tradeId}, nil
+}
 func (m *mockEscrow) VerifyTradeDisputed(txHash string, tradeId [32]byte) (*P2PTradeDisputedEvent, error) {
+	if m.onVerifyDisputed != nil {
+		m.onVerifyDisputed()
+	}
 	if m.verifyDisputedErr != nil {
 		return nil, m.verifyDisputedErr
 	}
 	if m.disputedEvent != nil {
 		return m.disputedEvent, nil
 	}
-	return &P2PTradeDisputedEvent{TradeID: tradeId, By: common.HexToAddress("0xb000")}, nil
+	// Zero By matches the default ReadTrade (zero buyer/seller) so tests that do
+	// not care about the raiser pass the confirm raiser check.
+	return &P2PTradeDisputedEvent{TradeID: tradeId}, nil
 }
 func (m *mockEscrow) VerifyTradeResolved(txHash string, tradeId [32]byte) (*P2PTradeResolvedEvent, error) {
 	if m.verifyResolvedErr != nil {
@@ -287,14 +311,12 @@ func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
 	}
 	return &OnChainP2PTrade{Status: OnChainP2PStatusNone}, nil
 }
-func (m *mockEscrow) ReadTradePlatformFeeBps(tradeId [32]byte) (uint16, bool) {
-	if m.platformFeeBpsSnapshot != 0 {
-		return m.platformFeeBpsSnapshot, true
-	}
-	return 0, m.platformFeeFound
-}
+
+// ReadTradeFeeSnapshot returns the configured snapshot (feeSnapshotFound false
+// by default: a pre-V3 escrow, so no fee_bps is recorded).
 func (m *mockEscrow) ReadTradeFeeSnapshot(tradeId [32]byte) (uint16, uint16, bool) {
-	return m.snapPlatform, m.snapGas, !m.snapMissing
+	m.feeSnapshotReads++
+	return m.feeSnapshotPlatform, m.feeSnapshotGas, m.feeSnapshotFound
 }
 func (m *mockEscrow) ReadBalance(seller, token string) (*OnChainBalance, error) {
 	if m.balanceErr != nil {
@@ -393,7 +415,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,
 			resolved_by_admin TEXT,
-			marked_paid_at DATETIME, released_at DATETIME,
+			marked_paid_at DATETIME, released_at DATETIME, fee_bps INTEGER, fee_platform_bps INTEGER, fee_gas_bps INTEGER, opener_address TEXT,
 			expires_at DATETIME NOT NULL,
 			expired_notified_at DATETIME,
 			it_intent_id TEXT, opened_at DATETIME, open_nonce INTEGER, generation INTEGER NOT NULL DEFAULT 1, dropped_at DATETIME, payout_started_at DATETIME,
@@ -411,7 +433,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			status TEXT NOT NULL DEFAULT 'open',
 			resolved_by TEXT, resolution TEXT,
 			refunded_to_buyer INTEGER, resolve_tx_hash TEXT,
-			created_at DATETIME, resolved_at DATETIME
+			created_at DATETIME, resolved_at DATETIME, prepare_nonce TEXT
 		)`,
 		`CREATE TABLE p2p_messages (
 			id TEXT PRIMARY KEY, trade_id TEXT NOT NULL,
@@ -818,7 +840,7 @@ func TestOpenTrade_RequiresSignedAd(t *testing.T) {
 	// guard is ad.Status != Active.
 	buyerID := seedVerifiedUser(t, db)
 	buyerPm := seedPaymentMethod(t, db, buyerID, "NGN")
-	_, _, err := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xbeef",
+	_, _, err := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0x000000000000000000000000000000000000bEEF",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: buyerPm})
 	if !errors.Is(err, ErrAdNotActive) {
 		t.Fatalf("expected ErrAdNotActive, got %v", err)
@@ -844,7 +866,7 @@ func TestOpenTrade_HappyPath(t *testing.T) {
 	// Buyer picks one of the seller's payment methods (which is what the
 	// ad's allowlist contains).
 	buyerID := seedVerifiedUser(t, db)
-	trade, raw, err := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0xbeef",
+	trade, raw, err := svc.OpenTrade(context.Background(), res.Ad.ID, buyerID, "0x000000000000000000000000000000000000bEEF",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if err != nil {
 		t.Fatalf("OpenTrade: %v", err)
@@ -854,6 +876,30 @@ func TestOpenTrade_HappyPath(t *testing.T) {
 	}
 	if len(raw) == 0 {
 		t.Fatalf("expected unsigned tx")
+	}
+	// The buyer's wallet is stored checksummed: confirm/backfill accept only it.
+	var row models.P2PTrade
+	db.First(&row, "id = ?", trade.ID)
+	if row.OpenerAddress != common.HexToAddress("0xbeef").Hex() {
+		t.Errorf("opener_address = %q, want the buyer's checksummed wallet", row.OpenerAddress)
+	}
+}
+
+// A sell-ad open needs a real buyer wallet: it is the only opener confirm
+// will accept, so an empty or malformed one would strand the trade.
+func TestOpenTrade_RejectsInvalidBuyerAddress(t *testing.T) {
+	svc, _, adID, pmID, db := setupSignedAd(t)
+	for _, addr := range []string{"", "0xbeef", "not-an-address"} {
+		_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), addr,
+			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
+		if !errors.Is(err, ErrInvalidParams) {
+			t.Fatalf("addr=%q: err = %v, want ErrInvalidParams", addr, err)
+		}
+	}
+	var trades int64
+	db.Model(&models.P2PTrade{}).Count(&trades)
+	if trades != 0 {
+		t.Fatalf("a refused open must not insert a trade, got %d", trades)
 	}
 }
 
@@ -891,7 +937,7 @@ func TestOpenTrade_RejectsInsufficientSellerPool(t *testing.T) {
 	// Seller drained the pool after posting the ad.
 	esc.balance = OnChainBalance{Available: big.NewInt(1), Locked: big.NewInt(0)}
 
-	_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xbeef",
+	_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0x000000000000000000000000000000000000bEEF",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if !errors.Is(err, ErrSellerPoolInsufficient) {
 		t.Fatalf("expected ErrSellerPoolInsufficient, got %v", err)
@@ -906,7 +952,7 @@ func TestOpenTrade_MapsPrepareFailures(t *testing.T) {
 	t.Run("revert -> ErrTradePrepareReverted", func(t *testing.T) {
 		svc, esc, adID, pmID, db := setupSignedAd(t)
 		esc.openTradeErr = errors.New("estimate gas (would revert): execution reverted: Bad voucher signature")
-		_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xbeef",
+		_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0x000000000000000000000000000000000000bEEF",
 			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 		if !errors.Is(err, ErrTradePrepareReverted) {
 			t.Fatalf("expected ErrTradePrepareReverted, got %v", err)
@@ -918,7 +964,7 @@ func TestOpenTrade_MapsPrepareFailures(t *testing.T) {
 	t.Run("transport -> ErrChainUnavailable", func(t *testing.T) {
 		svc, esc, adID, pmID, db := setupSignedAd(t)
 		esc.openTradeErr = errors.New("get nonce: failed to get nonce for 0xbeef: connection refused")
-		_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xbeef",
+		_, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0x000000000000000000000000000000000000bEEF",
 			OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 		if !errors.Is(err, ErrChainUnavailable) {
 			t.Fatalf("expected ErrChainUnavailable, got %v", err)
@@ -1103,7 +1149,7 @@ func TestOpenTrade_RejectsExpiredVoucher(t *testing.T) {
 	if len(ad.PaymentMethodIDs) > 0 {
 		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
 	}
-	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xb000",
+	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0x000000000000000000000000000000000000b000",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("expected ErrInvalidTransition for expired voucher, got %v", err)
@@ -1118,7 +1164,7 @@ func TestOpenTrade_RejectsSelfTrade(t *testing.T) {
 	if len(ad.PaymentMethodIDs) > 0 {
 		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
 	}
-	_, _, err := svc.OpenTrade(context.Background(), adID, sellerID, "0xseller",
+	_, _, err := svc.OpenTrade(context.Background(), adID, sellerID, "0x00000000000000000000000000000000000005e1",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if !errors.Is(err, ErrSelfTrade) {
 		t.Fatalf("expected ErrSelfTrade, got %v", err)
@@ -1166,7 +1212,7 @@ func TestOpenTrade_RejectsCorruptStoredSignature(t *testing.T) {
 		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
 	}
 	buyerID := seedVerifiedUser(t, db)
-	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0xb000",
+	_, _, err := svc.OpenTrade(context.Background(), adID, buyerID, "0x000000000000000000000000000000000000b000",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID})
 	if !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("expected ErrInvalidTransition (corrupt sig), got %v", err)
@@ -1256,7 +1302,7 @@ func TestPrepareOpenTrade_PassesVoucherAndSigToAdapter(t *testing.T) {
 	if len(ad.PaymentMethodIDs) > 0 {
 		pmID, _ = uuid.Parse(string(ad.PaymentMethodIDs[0]))
 	}
-	if _, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0xb000",
+	if _, _, err := svc.OpenTrade(context.Background(), adID, seedVerifiedUser(t, db), "0x000000000000000000000000000000000000b000",
 		OpenTradeParams{FiatAmount: "1000", PaymentMethodID: pmID}); err != nil {
 		t.Fatalf("OpenTrade: %v", err)
 	}
@@ -1394,7 +1440,7 @@ func buyAdFixture(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, merchant
 
 func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
 	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
-	userID := uuid.New() // the user selling crypto
+	userID := seedVerifiedUser(t, db) // the user selling crypto
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
@@ -1451,7 +1497,7 @@ func TestOpenBuyAdTrade_RolesFundingAndCapacity(t *testing.T) {
 // and fiat is derived from it (50 USDT × 1300 = 65000 NGN).
 func TestOpenBuyAdTrade_TokenAmountIsAuthoritative(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
@@ -1482,8 +1528,8 @@ func TestOpenBuyAdTrade_RejectsMerchantSelfTake(t *testing.T) {
 }
 
 func TestOpenBuyAdTrade_RejectsExceedingCapacity(t *testing.T) {
-	svc, _, _, _, adID, pmID, _ := buyAdFixture(t)
-	userID := uuid.New()
+	svc, _, _, _, adID, pmID, db := buyAdFixture(t)
+	userID := seedVerifiedUser(t, db)
 	// 100 USDT @ 1300 = 130000 NGN cap; ask for way more fiat than capacity.
 	_, _, err := svc.OpenTrade(context.Background(), adID, userID, "0x000000000000000000000000000000000000beef",
 		OpenTradeParams{FiatAmount: "1000000", PaymentMethodID: pmID})
@@ -1494,7 +1540,7 @@ func TestOpenBuyAdTrade_RejectsExceedingCapacity(t *testing.T) {
 
 func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1509,8 +1555,15 @@ func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 		Buyer:   common.HexToAddress(merchantAddr),
 		Amount:  tokenAmt,
 	}
+	esc.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending,
+		Funding: models.P2PTradeFundingDepositedByTaker,
+		Seller:  common.HexToAddress(userAddr), Buyer: common.HexToAddress(merchantAddr),
+		Token: common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"), Amount: tokenAmt}
+	if trade.OpenerAddress != common.HexToAddress(userAddr).Hex() {
+		t.Fatalf("opener_address = %q, want the depositor's checksummed wallet", trade.OpenerAddress)
+	}
 	// The opener (user/seller) confirms — not the merchant.
-	got, err := svc.ConfirmOpenTrade(context.Background(), trade.ID, userID, userAddr, "0xopen")
+	got, err := svc.ConfirmOpenTrade(context.Background(), trade.ID, userID, "0xopen")
 	if err != nil {
 		t.Fatalf("ConfirmOpenTrade(buy): %v", err)
 	}
@@ -1518,7 +1571,7 @@ func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 		t.Errorf("open tx hash not stored")
 	}
 	// The merchant (buyer) must NOT be able to confirm the open.
-	_, err = svc.ConfirmOpenTrade(context.Background(), trade.ID, merchantID, merchantAddr, "0xopen2")
+	_, err = svc.ConfirmOpenTrade(context.Background(), trade.ID, merchantID, "0xopen2")
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("merchant confirm expected ErrForbidden, got %v", err)
 	}
@@ -1526,7 +1579,7 @@ func TestConfirmOpenBuyAdTrade_VerifiesDepositEvent(t *testing.T) {
 
 func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 	svc, esc, merchantID, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1538,9 +1591,7 @@ func TestBuyAdTrade_MarkPaidByMerchant_ReleaseByUser(t *testing.T) {
 	// MarkPaid now requires the open to be confirmed on-chain.
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 	// MarkPaid is by the BuyerID = merchant (the fiat sender).
-	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err != nil {
-		t.Fatalf("MarkPaid(merchant): %v", err)
-	}
+	markPaidViaChain(t, svc, trade.ID, merchantID)
 	// Release is by the SellerID = user (crypto provider). Set the released
 	// event to split the trade amount.
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
@@ -1651,7 +1702,7 @@ func TestPrepareRelease_UnconfiguredChain_FailsLoud(t *testing.T) {
 // regressions where a refactoring accidentally credits remaining on release.
 func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 	svc, esc, merchantID, merchantAddr, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 
@@ -1672,9 +1723,7 @@ func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 	}
 
 	// Merchant (BuyerID) marks fiat paid.
-	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err != nil {
-		t.Fatalf("MarkPaid(merchant): %v", err)
-	}
+	markPaidViaChain(t, svc, trade.ID, merchantID)
 
 	// Set up mock release event — escrow releases to the merchant.
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
@@ -1714,7 +1763,7 @@ func TestConfirmRelease_BuyAd_DoesNotCreditRemaining(t *testing.T) {
 
 func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1747,7 +1796,7 @@ func TestConfirmCancelBuyAdTrade_RestoresCapacityNoDoubleCredit(t *testing.T) {
 
 func TestConfirmCancelBuyAdTrade_RejectsPoolFlagMismatch(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1797,7 +1846,7 @@ func TestValidateCreateAd_RejectsNonNumeric(t *testing.T) {
 // flipped to `paid`.
 func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 	svc, _, merchantID, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
@@ -1806,8 +1855,8 @@ func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 		t.Fatalf("OpenTrade: %v", err)
 	}
 	// No ConfirmOpenTrade → OpenTxHash empty → mark-paid must be rejected.
-	if _, err := svc.MarkPaid(context.Background(), trade.ID, merchantID, "https://proof/x.png"); err == nil {
-		t.Fatalf("MarkPaid on an unconfirmed open should be rejected")
+	if _, _, err := svc.PrepareMarkPaid(context.Background(), trade.ID, merchantID, testPayerAddr, "https://res.cloudinary.com/tsa/image/upload/proof.png"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("PrepareMarkPaid on an unconfirmed open: want ErrInvalidTransition, got %v", err)
 	}
 }
 
@@ -1815,7 +1864,7 @@ func TestMarkPaid_RequiresConfirmedOpen(t *testing.T) {
 // same opener on the same ad is rejected (would otherwise double-debit capacity).
 func TestOpenTrade_RejectsDuplicateActiveTrade(t *testing.T) {
 	svc, _, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	addr := "0x000000000000000000000000000000000000beef"
 	if _, _, err := svc.OpenTrade(context.Background(), adID, userID, addr,
@@ -1894,7 +1943,7 @@ func TestExpressMatch_RanksAndFilters(t *testing.T) {
 // the count/URL validation rejects bad input.
 func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 	svc, _, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
@@ -1904,7 +1953,7 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 	}
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 
-	urls := []string{"https://cdn.test/ev1.jpg", "https://cdn.test/ev2.jpg"}
+	urls := []string{"https://res.cloudinary.com/tsa/image/upload/ev1.jpg", "https://res.cloudinary.com/tsa/image/upload/ev2.jpg"}
 	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, userID, "0xuser", "no crypto released", urls); err != nil {
 		t.Fatalf("PrepareRaiseDispute with evidence: %v", err)
 	}
@@ -1918,7 +1967,7 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 
 	tooMany := make([]string, 7)
 	for i := range tooMany {
-		tooMany[i] = "https://cdn.test/x.jpg"
+		tooMany[i] = "https://res.cloudinary.com/tsa/image/upload/x.jpg"
 	}
 	if _, err := svc.PrepareRaiseDispute(context.Background(), uuid.New(), uuid.New(), "0xz", "r", tooMany); err == nil {
 		t.Errorf("expected rejection for >6 evidence images")
@@ -1930,7 +1979,7 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 
 func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) {
 	svc, esc, merchantID, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userAddr := "0x000000000000000000000000000000000000beef"
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, userAddr,
@@ -1996,7 +2045,8 @@ func seedBuyAdWithTrade(t *testing.T, db *gorm.DB, status string) (svc *P2PTrade
 	}
 	trade := &models.P2PTrade{
 		ID: tradeID, AdID: adID, SellerID: userID, BuyerID: merchantID,
-		Token: "USDT", ChainID: 146, Funding: models.P2PTradeFundingDepositedByTaker,
+		OpenerAddress: common.HexToAddress("0x000000000000000000000000000000000000beef").Hex(),
+		Token:         "USDT", ChainID: 146, Funding: models.P2PTradeFundingDepositedByTaker,
 		TokenAmount: "30", FiatAmount: "39000", FiatCurrency: "NGN", Rate: "1300",
 		PaymentMethodID: uuid.New(), Status: status,
 		ExpiresAt: now.Add(30 * time.Minute), CreatedAt: now, UpdatedAt: now,
@@ -2007,12 +2057,24 @@ func seedBuyAdWithTrade(t *testing.T, db *gorm.DB, status string) (svc *P2PTrade
 	return svc, esc, tradeID, adID
 }
 
+// seededBuyAdChainTrade is the escrow's view of seedBuyAdWithTrade's trade as
+// it was prepared: the merchant (ad.SellerAddress) is the on-chain buyer.
+func seededBuyAdChainTrade(status OnChainP2PTradeStatus) *OnChainP2PTrade {
+	return &OnChainP2PTrade{
+		Status: status, Funding: models.P2PTradeFundingDepositedByTaker,
+		Seller: common.HexToAddress("0x000000000000000000000000000000000000beef"),
+		Buyer:  common.HexToAddress("0x000000000000000000000000000000000000d00d"),
+		Token:  common.HexToAddress("0x29219dd400f2Bf60E5a23d13Be72B486D4038894"),
+		Amount: big.NewInt(30), Exists: true,
+	}
+}
+
 // TestReconcile_OrphanOpen_ReclaimsCapacity locks audit #4: a pending_payment trade
 // whose on-chain open never landed (OpenTxHash empty, not on chain) and whose window
 // has elapsed is reclaimed by the reconciler — cancelled + ad capacity restored.
 func TestReconcile_OrphanOpen_ReclaimsCapacity(t *testing.T) {
 	svc, esc, _, _, adID, _, db := buyAdFixture(t)
-	userID := uuid.New()
+	userID := seedVerifiedUser(t, db)
 	userPm := seedPaymentMethod(t, db, userID, "NGN")
 	trade, _, err := svc.OpenTrade(context.Background(), adID, userID,
 		"0x000000000000000000000000000000000000beef",
@@ -2074,10 +2136,7 @@ func TestReconcileBuyAdTrade_Cancelled_RestoresCapacity(t *testing.T) {
 func TestReconcileBuyAdTrade_Released_DecrementsReservedOnly(t *testing.T) {
 	db := setupTradeDB(t)
 	svc, esc, tradeID, adID := seedBuyAdWithTrade(t, db, models.P2PTradeStatusPaid)
-	esc.onChainTrade = &OnChainP2PTrade{
-		Status: OnChainP2PStatusReleased, Funding: models.P2PTradeFundingDepositedByTaker,
-		Amount: big.NewInt(30), Exists: true,
-	}
+	esc.onChainTrade = seededBuyAdChainTrade(OnChainP2PStatusReleased)
 	out, err := svc.ReconcileTrade(context.Background(), tradeID)
 	if err != nil {
 		t.Fatalf("ReconcileTrade: %v", err)
@@ -2105,10 +2164,7 @@ func TestReconcileBuyAdTrade_Resolved_RefundSeller_RestoresCapacity(t *testing.T
 	}).Error; err != nil {
 		t.Fatalf("seed dispute: %v", err)
 	}
-	esc.onChainTrade = &OnChainP2PTrade{
-		Status: OnChainP2PStatusResolved, Funding: models.P2PTradeFundingDepositedByTaker,
-		Amount: big.NewInt(30), Exists: true,
-	}
+	esc.onChainTrade = seededBuyAdChainTrade(OnChainP2PStatusResolved)
 	out, err := svc.ReconcileTrade(context.Background(), tradeID)
 	if err != nil {
 		t.Fatalf("ReconcileTrade: %v", err)
@@ -2135,10 +2191,7 @@ func TestReconcileBuyAdTrade_Resolved_RefundBuyer_NoRemainingCredit(t *testing.T
 	}).Error; err != nil {
 		t.Fatalf("seed dispute: %v", err)
 	}
-	esc.onChainTrade = &OnChainP2PTrade{
-		Status: OnChainP2PStatusResolved, Funding: models.P2PTradeFundingDepositedByTaker,
-		Amount: big.NewInt(30), Exists: true,
-	}
+	esc.onChainTrade = seededBuyAdChainTrade(OnChainP2PStatusResolved)
 	if _, err := svc.ReconcileTrade(context.Background(), tradeID); err != nil {
 		t.Fatalf("ReconcileTrade: %v", err)
 	}
@@ -2322,4 +2375,3 @@ func TestComputeEffectiveRate_StalenessIsolation(t *testing.T) {
 		t.Errorf("ComputeEffectiveRate(ghsAd) error = %v, want ErrRateStale", err)
 	}
 }
-

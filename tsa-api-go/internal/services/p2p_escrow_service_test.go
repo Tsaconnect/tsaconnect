@@ -814,3 +814,28 @@ func mustBuildTradeReleasedLog(t *testing.T, contractAddr common.Address,
 		Data: data,
 	}
 }
+
+func TestParseTradePaidFromReceipt(t *testing.T) {
+	contract := common.HexToAddress("0xb5B073BF578fE24311ED50e540D9d632f1679261")
+	id := HashID(uuid.New())
+	lg := &types.Log{Address: contract, Topics: []common.Hash{parsedP2PEscrowABI.Events["TradePaid"].ID, common.BytesToHash(id[:])}}
+	ev, err := parseTradePaidFromReceipt(&types.Receipt{Status: 1, Logs: []*types.Log{lg}}, contract, id)
+	if err != nil || ev.TradeID != id {
+		t.Fatalf("ev=%+v err=%v", ev, err)
+	}
+	other := HashID(uuid.New())
+	if _, err := parseTradePaidFromReceipt(&types.Receipt{Status: 1, Logs: []*types.Log{lg}}, contract, other); err == nil {
+		t.Fatal("another trade's TradePaid must not verify")
+	}
+	foreign := *lg
+	foreign.Address = common.HexToAddress("0x0000000000000000000000000000000000000001")
+	if _, err := parseTradePaidFromReceipt(&types.Receipt{Status: 1, Logs: []*types.Log{&foreign}}, contract, id); err == nil {
+		t.Fatal("a log from another contract must not verify")
+	}
+}
+
+func TestVerifyTradePaid_RequiresClient(t *testing.T) {
+	if _, err := makeTestSvc(t).VerifyTradePaid("0xabc", HashID(uuid.New())); err == nil {
+		t.Fatal("want error without a chain client")
+	}
+}

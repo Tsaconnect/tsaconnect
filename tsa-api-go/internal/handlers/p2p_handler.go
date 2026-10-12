@@ -41,6 +41,9 @@ type P2PHandler struct {
 	central CentralAccountSource
 	// liquidity is the LP read side; nil until a pool chain exists.
 	liquidity LiquidityReader
+	// gas drips S for the caller's next P2P tx; nil while the Sonic sponsor
+	// lane is dormant (GasTopUp then answers 503 gas_unavailable).
+	gas P2PGasSponsor
 	// poolCard serves the pinned TSA Connect card (spec §15); nil while the
 	// pool is dormant (P17: the app shows nothing).
 	poolCard PoolCardSource
@@ -128,6 +131,7 @@ func (h *P2PHandler) require(c *gin.Context) (*models.User, bool) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Identity verification required for P2P",
+			"code":    services.KYCVerificationRequiredCode,
 		})
 		return nil, false
 	}
@@ -167,6 +171,14 @@ func mapServiceError(c *gin.Context, err error) bool {
 				"headroomUnits": lim.Headroom.String(),
 				"decimals":      lim.Decimals,
 			},
+		})
+		return true
+	}
+	var band *services.RateBandError
+	if errors.As(err, &band) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+			"success": false, "message": err.Error(), "code": "rate_out_of_band",
+			"data": gin.H{"referenceRate": band.ReferenceRate, "minRate": band.MinRate, "maxRate": band.MaxRate, "bandBps": band.BandBps},
 		})
 		return true
 	}
@@ -734,15 +746,11 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	// Only merchants (and admin tiers, who are implicitly trusted) may
-	// publish ads. The pool-model rewrite makes ad creation cheap (off-chain
-	// voucher signing, no per-ad gas), but we still want a verified
-	// counterparty behind every ad to keep the marketplace clean of spam /
-	// unverified sellers. Buyer-side actions (open trade, mark paid, dispute)
-	// stay open to all authenticated users. An active LP is admitted only on
-	// the pool chain, for its stock ad; never for an ordinary ad (plan B I1).
-	lpOnPool := h.trade.IsPoolChain(req.ChainID) && h.trade.IsActiveLP(c.Request.Context(), user.ID)
-	if user.Role != models.RoleMerchant && !hasAdminPrivilege(c, user) && !lpOnPool {
+	// Any KYC-verified user (require() above) may post an ad. The TSA Liquidity
+	// pool chain keeps its stricter rule: merchants, admin tiers, and an active
+	// LP (for its stock ad) only.
+	if h.trade.IsPoolChain(req.ChainID) && user.Role != models.RoleMerchant &&
+		!hasAdminPrivilege(c, user) && !h.trade.IsActiveLP(c.Request.Context(), user.ID) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"success": false,
 			"message": "Merchant account required to publish P2P ads.",
@@ -841,6 +849,7 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
+	h.trade.FillAdFees(c.Request.Context(), ad)
 	// Detail page benefits from the same effective-rate / staleness signal
 	// as the browse list — let the FE disable Open Trade when the feed is stale.
 	decorated := h.decorateAdsWithEffectiveRate(c.Request.Context(), []models.P2PAd{*ad})[0]
@@ -855,7 +864,7 @@ func (h *P2PHandler) GetAd(c *gin.Context) {
 		// whole detail view.
 		log.Printf("[p2p GetAd] LoadAdPaymentMethods failed for ad=%s: %v", ad.ID, err)
 	} else {
-		detail.PaymentMethods = pms
+		detail.PaymentMethods = services.PublicPaymentMethods(pms)
 	}
 	// PM enrichment: if this ad is backed by a payment merchant, attach its
 	// static Nomba inbound account so the buy screen can show the pay-to card.
@@ -941,11 +950,21 @@ type adListItem struct {
 // numbers (avoids broadcasting account info to anyone scraping the feed).
 type adDetailItem struct {
 	adListItem
-	PaymentMethods []models.P2PPaymentMethod `json:"paymentMethods,omitempty"`
+	PaymentMethods []services.PublicPaymentMethod `json:"paymentMethods,omitempty"`
 	// PM-detail fields: when the ad is a PM ad, the buy screen renders a
 	// "pay to this Nomba account" card from PmPayTo. Nil/false for manual ads.
 	IsPm    bool            `json:"isPm"`
 	PmPayTo *models.PmPayTo `json:"pmPayTo,omitempty"`
+}
+
+// fillAdFees sets the live fee on an ad screen's rows (bounded; see
+// P2PTradeService.FillAdFees). Internal ad reads never pay for it.
+func (h *P2PHandler) fillAdFees(ctx context.Context, rows []models.P2PAd) {
+	ptrs := make([]*models.P2PAd, len(rows))
+	for i := range rows {
+		ptrs[i] = &rows[i]
+	}
+	h.trade.FillAdFees(ctx, ptrs...)
 }
 
 // decorateAdsWithEffectiveRate computes effective rate per row for the list
@@ -1040,7 +1059,8 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 		Offset:       offset,
 		// Marketplace browse: nobody may open a trade on an ad in a delisted
 		// asset, so don't offer one. The owner sees theirs via ListMyAds.
-		ExcludeDelisted: true,
+		ExcludeDelisted:  true,
+		ExcludeSuspended: true,
 	}
 	if seller := c.Query("sellerId"); seller != "" {
 		if sid, err := uuid.Parse(seller); err == nil {
@@ -1064,6 +1084,7 @@ func (h *P2PHandler) ListAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
+	h.fillAdFees(c.Request.Context(), rows)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(c.Request.Context(), rows)})
 }
 
@@ -1084,6 +1105,8 @@ func (h *P2PHandler) ListMyAds(c *gin.Context) {
 	if mapServiceError(c, err) {
 		return
 	}
+	// No live fee here: My Ads never shows it, and it would cost up to the
+	// 2s fee budget on a busy screen.
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": h.decorateAdsWithEffectiveRate(c.Request.Context(), rows)})
 }
 
@@ -1273,10 +1296,11 @@ func (h *P2PHandler) OpenTrade(c *gin.Context) {
 	})
 }
 
-// confirmTradeRequest mirrors confirmAdRequest but for trade confirmations —
-// includes an optional caller address (buyer for open, seller for release).
+// confirmTradeRequest is the confirm-open body.
 type confirmTradeRequest struct {
-	TxHash        string `json:"txHash" binding:"required"`
+	TxHash string `json:"txHash" binding:"required"`
+	// CallerAddress is still accepted because old apps send it, but it is
+	// ignored: the opener is checked against the wallet stored at prepare.
 	CallerAddress string `json:"callerAddress"`
 }
 
@@ -1294,11 +1318,9 @@ func (h *P2PHandler) ConfirmOpenTrade(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	buyerAddr := req.CallerAddress
-	if buyerAddr == "" {
-		buyerAddr = user.WalletAddress
-	}
-	trade, err := h.trade.ConfirmOpenTrade(c.Request.Context(), id, user.ID, buyerAddr, req.TxHash)
+	// callerAddress is accepted for old clients but not trusted: the service
+	// checks the on-chain opener against the wallet stored at prepare.
+	trade, err := h.trade.ConfirmOpenTrade(c.Request.Context(), id, user.ID, req.TxHash)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -1307,9 +1329,24 @@ func (h *P2PHandler) ConfirmOpenTrade(c *gin.Context) {
 
 type markPaidRequest struct {
 	ProofImageURL string `json:"proofImageUrl" binding:"required"`
+	CallerAddress string `json:"callerAddress"`
 }
 
-func (h *P2PHandler) MarkPaid(c *gin.Context) {
+// MarkPaidRetired answers the pre-on-chain "I've paid" route. It flipped the
+// trade to paid in the DB only, leaving the escrow Pending so the crypto could
+// be clawed back by cancelByTimeout after the payer had sent fiat. An app that
+// still calls it is told to update; the trade is left untouched.
+func (h *P2PHandler) MarkPaidRetired(c *gin.Context) {
+	c.JSON(http.StatusConflict, gin.H{
+		"success": false,
+		"message": "Please update the app to mark this payment as sent.",
+		"code":    "app_update_required",
+	})
+}
+
+// PrepareMarkPaid returns the payer's unsigned on-chain markPaid tx and saves
+// the proof. The trade stays pending_payment until ConfirmMarkPaid.
+func (h *P2PHandler) PrepareMarkPaid(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
 		return
@@ -1323,7 +1360,36 @@ func (h *P2PHandler) MarkPaid(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	trade, err := h.trade.MarkPaid(c.Request.Context(), id, user.ID, req.ProofImageURL)
+	payerAddr := req.CallerAddress
+	if payerAddr == "" {
+		payerAddr = user.WalletAddress
+	}
+	trade, raw, err := h.trade.PrepareMarkPaid(c.Request.Context(), id, user.ID, payerAddr, req.ProofImageURL)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    gin.H{"unsignedTx": unsignedTxJSON(raw), "trade": trade},
+	})
+}
+
+// ConfirmMarkPaid flips the trade to paid once the markPaid receipt verifies.
+func (h *P2PHandler) ConfirmMarkPaid(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	id, ok := parseUUIDParam(c, "id")
+	if !ok {
+		return
+	}
+	var req confirmTxRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	trade, err := h.trade.ConfirmMarkPaid(c.Request.Context(), id, user.ID, req.TxHash)
 	if mapServiceError(c, err) {
 		return
 	}
@@ -1714,6 +1780,13 @@ func (h *P2PHandler) GetTrade(c *gin.Context) {
 		return
 	}
 	h.enrichTradeWithPM(c.Request.Context(), trade, user.ID)
+	if !trade.IsPM {
+		if p, err := h.trade.TradePayee(c.Request.Context(), trade); err != nil {
+			log.Printf("[p2p GetTrade] payee lookup failed for trade=%s: %v", trade.ID, err)
+		} else {
+			trade.Payee = p
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": trade})
 }
 
@@ -1794,10 +1867,11 @@ func (h *P2PHandler) GetSellerProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	ads, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{SellerID: id, Status: models.P2PAdStatusActive, ExcludeDelisted: true})
+	ads, err := h.trade.ListAds(c.Request.Context(), services.AdFilter{SellerID: id, Status: models.P2PAdStatusActive, ExcludeDelisted: true, ExcludeSuspended: true})
 	if err != nil {
 		ads = nil // non-fatal
 	}
+	h.fillAdFees(c.Request.Context(), ads)
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{
 		"userId": profile.UserID, "stats": profile.Stats,
 		"recentRatings": profile.RecentRatings, "activeAds": ads,

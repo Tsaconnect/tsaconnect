@@ -149,11 +149,10 @@ func TestOtherSigners_RefuseTheWalletKey(t *testing.T) {
 		t.Fatal("the conversion treasury must refuse the wallet's key")
 	}
 	mk := testConfig(t)
-	mk.MarketplaceSonicGasEnabled = true
 	mk.RampSponsorPrivateKey = testKeyA
 	mk.RampTreasuryWalletPrivateKey = testKeyA
-	if !refusesToStart(t, func() { buildMarketplaceSonicGas(mk, &services.BlockchainService{}) }) {
-		t.Fatal("the marketplace sonic gas sponsor must refuse the wallet's key")
+	if !refusesToStart(t, func() { buildSonicGasSponsorship(mk, &services.BlockchainService{}) }) {
+		t.Fatal("the shared sonic gas sponsor must refuse the wallet's key")
 	}
 	sp := testConfig(t)
 	sp.RampGasSponsorshipEnabled = true

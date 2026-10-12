@@ -5,7 +5,7 @@
 import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { goBack } from '@/utils/back';
 import { SERVICES_TAB } from '@/constants/routes';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BackHandler, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -17,8 +17,9 @@ import {
   type P2PAd,
   type P2PChainInfo,
 } from '../../services/p2p';
+import { KycRequiredState } from '@/components/p2p/KycRequiredState';
+import { marketLoadError, type MarketError } from '@/utils/p2pMarketError';
 import { getChainByChainId } from '../../constants/chains';
-import { useUserRole } from '../../hooks/useUserRole';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
 import { lpCta } from '@/utils/lpCta';
@@ -69,7 +70,7 @@ const P2PMarketScreen: React.FC = () => {
   const [token, setToken] = useState<string>('USDT');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<MarketError | null>(null);
   // Optional deep-link intent from the marketplace P2P heading: ?side=buy means
   // "I want to BUY crypto" → browse sell-ads (adSide 'sell'); ?side=sell means
   // "I want to SELL crypto" → browse buy-ads (adSide 'buy').
@@ -77,7 +78,6 @@ const P2PMarketScreen: React.FC = () => {
   const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
   const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
-  const { isMerchant, loading: roleLoading } = useUserRole();
   const { isPm, kind, liquidityAvailable, loading: pmLoading } = useIsPaymentMerchant();
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
@@ -134,7 +134,7 @@ const P2PMarketScreen: React.FC = () => {
   useFocusEffect(loadPoolCard);
 
   const load = useCallback(async () => {
-    setError(false);
+    setError(null);
     const res = await adsApi.list({
       side: adSide,
       token,
@@ -147,7 +147,7 @@ const P2PMarketScreen: React.FC = () => {
     if (res.success && res.data) {
       setAds(res.data);
     } else {
-      setError(true);
+      setError(marketLoadError(res));
     }
     setLoading(false);
     setRefreshing(false);
@@ -177,6 +177,19 @@ const P2PMarketScreen: React.FC = () => {
     }, []),
   );
 
+  // Back from verification the screen is still mounted: re-fetch so the market
+  // recovers without a restart. Driven by the server's last answer, not a cached
+  // verification status, which goes stale mid-session.
+  const retryIfKycBlocked = useRef<() => void>(() => {});
+  retryIfKycBlocked.current = () => {
+    if (error?.kycCode) load();
+  };
+  useFocusEffect(
+    useCallback(() => {
+      retryIfKycBlocked.current();
+    }, []),
+  );
+
   // Clear stale filters when currency/token/side changes (the amount filter is
   // denominated in the current currency, so it can't carry across switches).
   // Also reset chainFilter when token changes — the new token may not be on
@@ -201,7 +214,7 @@ const P2PMarketScreen: React.FC = () => {
   });
 
   const createRoute = adSide === 'sell' ? '/p2p/create-ad' : '/p2p/create-buy-ad';
-  const onCreate = () => router.push((isMerchant ? createRoute : '/merchants/merchant-request') as never);
+  const onCreate = () => router.push(createRoute as never);
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -262,25 +275,6 @@ const P2PMarketScreen: React.FC = () => {
             ? `Buy ${token} with ${currency.code}. Funds are escrowed on chain until the seller releases.`
             : `Sell ${token} to a merchant for ${currency.code}. Deposit + escrow happen at trade open.`}
         </Text>
-
-        {adSide === 'sell' && !roleLoading && !isMerchant && !isPmView && (
-          <PressableScale onPress={() => router.push('/merchants/merchant-request')} style={{ marginBottom: spacing.lg }}>
-            <AccentCard padding="md">
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Icon name="storefront" size={24} color={colors.accent} />
-                <View style={{ flex: 1 }}>
-                  <Text variant="bodyMed" weight="700">
-                    Want to sell?
-                  </Text>
-                  <Text variant="caption" color="textSecondary">
-                    Become a merchant to publish {RAILS.p2p.name} ({RAILS.p2p.acronym}) ads.
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={20} color={colors.textMuted} />
-              </View>
-            </AccentCard>
-          </PressableScale>
-        )}
 
         {shouldShowPmCta({ isPmView, isPm: isPm || kind === 'lp', loading: pmLoading }) && (
           <PressableScale onPress={() => router.push(PM_MERCHANT_REQUEST_ROUTE as never)} style={{ marginBottom: spacing.lg }}>
@@ -394,7 +388,11 @@ const P2PMarketScreen: React.FC = () => {
         {loading ? (
           <SkeletonGroup shape="adCard" count={4} />
         ) : error ? (
-          <ErrorState subtitle="Couldn’t load the market. Check your connection." onRetry={() => { setLoading(true); load(); }} />
+          error.kycCode ? (
+            <KycRequiredState code={error.kycCode} />
+          ) : (
+            <ErrorState subtitle={error.message} onRetry={() => { setLoading(true); load(); }} />
+          )
         ) : ads.length === 0 ? (
           <EmptyState
             icon="storefront"

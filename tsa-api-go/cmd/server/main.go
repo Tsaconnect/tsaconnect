@@ -1270,7 +1270,9 @@ func main() {
 			log.Printf("[p2p tokenResolver] chainID=%d symbol=%s -> %s", chainID, symbol, addr)
 			return addr
 		})
+		p2pTradeSvc.SetFeeView(services.NewP2PFeeViewForConfig(blockchainService, cfg))
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
+		p2pTradeSvc.SetFixedRateBandBps(cfg.P2PFixedRateBandBps)
 		// Wire the fee/TP engine (SP3) — P2P is a fee-settled integration.
 		// Every release transition (ConfirmRelease, reconciler auto-release,
 		// adminResolve→buyer) accrues the realized on-chain fee through a single
@@ -1282,6 +1284,7 @@ func main() {
 		// transition so the chat thread is self-documenting.
 		p2pMessageSvc = services.NewP2PMessageService(config.DB, eventBus)
 		p2pTradeSvc.SetMessageService(p2pMessageSvc)
+		p2pTradeSvc.SetAlerter(inboundAlerts)
 		// Register the timeout watchdog — scans for pending_payment trades
 		// past expires_at every minute and nudges participants to call the
 		// permissionless cancelByTimeout. Phase 1 has no operator EOA, so
@@ -1291,6 +1294,8 @@ func main() {
 		// trades and corrects DB drift against on-chain truth. Safety net
 		// for dropped-response failures in the prepare/confirm flow.
 		scheduler.Register(jobs.NewChainReconciler(p2pTradeSvc), jobs.AlertOnFailureStreak())
+		// Operators hear once when a trade sits paid past the threshold.
+		scheduler.Register(jobs.NewP2PPaidUnreleasedAlerter(p2pTradeSvc, cfg.P2PPaidUnreleasedAlertAfter), jobs.AlertOnFailureStreak())
 		// Register the merchant-reputation reconciler — recomputes windowed
 		// stats nightly as a correctness backstop for the incremental path.
 		merchantStats = services.NewMerchantStatsService(config.DB, eventBus, services.TrustedThresholds{
@@ -1867,9 +1872,22 @@ func main() {
 	// funded by swap has no Paycrest leg at all.
 	// The source-chain top-ups a funding may need come from the ramp's own
 	// sponsor lanes (built for intents only when Paycrest is off). The Sonic
-	// top-up is the funding's own lane (MARKETPLACE_SONIC_GAS), never a ramp
-	// lane, so turning it on changes nothing for sells; its float is watched
-	// only when it exists.
+	// top-up comes from the ONE Sonic lane on the sponsor key, never a ramp
+	// lane, so turning it on changes nothing for sells. P2P uses that lane
+	// whenever it exists; the funding only while MARKETPLACE_SONIC_GAS is on.
+	// Built once (two lanes on one key would race its nonce), its float watched
+	// once.
+	sonicShared := buildSonicGasSponsorship(cfg, blockchainService)
+	if sonicShared != nil {
+		scheduler.Register(jobs.NewGasFloatMonitorNamed("sonic_gas", sonicShared, 10*time.Minute))
+	}
+	// Only a live sponsor with a trade service to check needs against: a nil
+	// pointer in either interface would be non-nil.
+	if p2pTradeSvc != nil {
+		if p2pGas := services.NewP2PGasSponsor(sonicShared, p2pTradeSvc, cfg.P2PGasTopUpsPerDay, nil); p2pGas != nil {
+			p2pHandler.SetGasSponsor(p2pGas)
+		}
+	}
 	var sonicGas *services.RampSponsorship
 	if cfg.MarketplaceFundingEnabled {
 		if rampSponsor == nil {
@@ -1877,9 +1895,7 @@ func main() {
 				scheduler.Register(jobs.NewGasFloatMonitor(rampSponsor, 10*time.Minute))
 			}
 		}
-		if sonicGas = buildMarketplaceSonicGas(cfg, blockchainService); sonicGas != nil {
-			scheduler.Register(jobs.NewGasFloatMonitorNamed("marketplace_sonic_gas", sonicGas, 10*time.Minute))
-		}
+		sonicGas = marketplaceSonicGas(cfg, sonicShared)
 	}
 	if funding := buildMarketplaceFunding(cfg, blockchainService, payQuoter, paySellers, rampSponsor, sonicGas, feeDistributionService); funding != nil {
 		funding.SetOrderPulls(ch)

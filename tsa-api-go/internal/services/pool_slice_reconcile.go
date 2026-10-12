@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -170,7 +171,7 @@ func (s *P2PTradeService) pauseSliceLP(ctx context.Context, trade *models.P2PTra
 		return
 	}
 	if pm != nil {
-		s.emit(events.LiquidityPausedByAdmin, pm.UserID, "Your liquidity is paused",
+		s.emit(events.LiquidityPausedByAdmin, pm.UserID, uuid.Nil, "Your liquidity is paused",
 			"You disputed a TSA Connect order. Your stock is not offered until support reviews it.",
 			map[string]any{"reason": "dispute"})
 	}
