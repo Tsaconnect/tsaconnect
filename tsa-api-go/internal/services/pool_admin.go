@@ -125,7 +125,7 @@ func (s *ITService) PayPoolSliceLP(ctx context.Context, adminID, intentID, slice
 	if err != nil || !proven {
 		return nil, fmt.Errorf("%w: the slice's release is not proven at the treasury yet", ErrITBadState)
 	}
-	fwd, err := s.forwardSlice(ctx, d, &sl, "pool-f22:"+sl.ID.String(), true)
+	fwd, err := s.forwardSlice(ctx, d, &sl, poolF22ForwardRef(sl.ID), true)
 	if err != nil {
 		return nil, err
 	}

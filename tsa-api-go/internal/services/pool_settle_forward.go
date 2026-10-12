@@ -26,9 +26,25 @@ func (s *ITService) HasPoolForwards() bool {
 	return s != nil && s.poolForwards != nil && s.poolForwards.forwarder != nil
 }
 
+// The pool's forward provider_ref prefixes: the automatic forward's and
+// F22's operator forward's. Matched exactly (review m-4) — a merchant
+// credit's reference that merely starts with "pool" is not an LP's.
+const (
+	poolForwardRefPrefix    = "pool:"
+	poolF22ForwardRefPrefix = "pool-f22:"
+)
+
 // poolForwardRef is the forward's provider_ref for a pool slice: unique per
 // slice, so a replay finds its own row (§12.5).
-func poolForwardRef(sliceID uuid.UUID) string { return "pool:" + sliceID.String() }
+func poolForwardRef(sliceID uuid.UUID) string { return poolForwardRefPrefix + sliceID.String() }
+
+// poolF22ForwardRef is F22's operator forward reference for a slice.
+func poolF22ForwardRef(sliceID uuid.UUID) string { return poolF22ForwardRefPrefix + sliceID.String() }
+
+// isPoolForwardRef: the forward pays an LP (automatic or F22).
+func isPoolForwardRef(ref string) bool {
+	return strings.HasPrefix(ref, poolForwardRefPrefix) || strings.HasPrefix(ref, poolF22ForwardRefPrefix)
+}
 
 // publish sends an event through the IT service's bus (nil: none).
 func (s *ITService) publish(ev events.Event) {
@@ -147,7 +163,7 @@ func (s *ITService) forwardSlice(ctx context.Context, d *PoolDesk, sl *models.P2
 
 // PoolForwardSettled is the forwarder's onSettled hook: an LP's naira landed.
 func (s *ITService) PoolForwardSettled(ctx context.Context, fwd *models.P2PSettlementForward) {
-	if !strings.HasPrefix(fwd.ProviderRef, "pool") {
+	if !isPoolForwardRef(fwd.ProviderRef) {
 		return
 	}
 	pm, err := NewPMService(s.db).GetByID(ctx, fwd.PMID)
@@ -163,7 +179,8 @@ func (s *ITService) PoolForwardSettled(ctx context.Context, fwd *models.P2PSettl
 // started/pending past the stale window). Once per forward per process.
 func (s *ITService) notePoolPayoutsDelayed(ctx context.Context) {
 	var rows []models.P2PSettlementForward
-	s.db.WithContext(ctx).Where("provider_ref LIKE ? AND (status = ? OR (status = ? AND created_at < ?))", "pool%",
+	s.db.WithContext(ctx).Where("(provider_ref LIKE ? OR provider_ref LIKE ?) AND (status = ? OR (status = ? AND created_at < ?))",
+		poolForwardRefPrefix+"%", poolF22ForwardRefPrefix+"%",
 		models.P2PForwardFailed, models.P2PForwardPending, time.Now().Add(-p2pForwardStaleAfter)).Limit(200).Find(&rows)
 	for i := range rows {
 		// Durable dedupe (review minor): a job_run_markers claim per forward,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/events"
@@ -254,5 +255,48 @@ func TestPoolForward_F22OneExitPerSlice(t *testing.T) {
 	}
 	if !ngnEqual(available(r), "0") || len(gw.calls) != 0 {
 		t.Fatalf("available=%s calls=%d, want nothing for a slice handed back", available(r), len(gw.calls))
+	}
+}
+
+// Review m-4: the LP hooks match the pool's exact reference prefixes
+// ("pool:" and F22's "pool-f22:"), never any reference that merely starts
+// with "pool" — a merchant credit's reference must never reach an LP hook.
+func TestPoolForward_HooksMatchOnlyPoolReferences(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, _, bus := r.wireForwards(t)
+	for ref, want := range map[string]bool{
+		poolForwardRef(uuid.New()):        true,
+		poolF22ForwardRef(uuid.New()):     true,
+		"poolside-merchant-credit-123":    false,
+		"POOL:" + uuid.NewString():        false,
+		"pool-f22" + uuid.NewString()[:4]: false,
+	} {
+		if got := isPoolForwardRef(ref); got != want {
+			t.Fatalf("isPoolForwardRef(%q) = %v, want %v", ref, got, want)
+		}
+	}
+	bus.published = nil
+	r.it.PoolForwardSettled(context.Background(), &models.P2PSettlementForward{ID: uuid.New(), PMID: r.lps[0].ID,
+		ProviderRef: "poolside-merchant-credit-123", Amount: "100.00"})
+	if len(bus.published) != 0 {
+		t.Fatalf("a merchant forward reached the LP hook: %+v", bus.published)
+	}
+}
+
+// Review m-4: the delayed-payout notice reads pool forwards only.
+func TestPoolForward_DelayedNoticeReadsOnlyPoolReferences(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, _, bus := r.wireForwards(t)
+	for _, ref := range []string{"poolside-merchant-credit-123", poolForwardRef(uuid.New())} {
+		if err := r.db.Exec(`INSERT INTO p2p_settlement_forwards (id, trade_id, pm_id, provider_ref, currency, amount, status, reference, created_at)
+			VALUES (?, ?, ?, ?, 'NGN', '100.00', ?, ?, ?)`, uuid.NewString(), uuid.NewString(), r.lps[0].ID.String(), ref,
+			models.P2PForwardFailed, "ref_"+ref[:6]+uuid.NewString()[:4], time.Now()).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	bus.published = nil
+	r.it.notePoolPayoutsDelayed(context.Background())
+	if len(bus.published) != 1 {
+		t.Fatalf("delayed notices = %d, want 1 (the pool forward only)", len(bus.published))
 	}
 }
