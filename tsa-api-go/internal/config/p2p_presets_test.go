@@ -136,3 +136,13 @@ func TestP2PPresets_BSCNetworkChosenOnce(t *testing.T) {
 		t.Fatalf("FeeManagerChains = %+v, want BSC on its selected (mainnet) id", cfg.FeeManagerChains)
 	}
 }
+
+// The testnet pool row is Plan C2's pool (deployed 2026-10-12, block
+// 136370349), owned by a key we still hold; Plan A's 0x4C71… lost its owner.
+func TestBSCPresets_TestnetRowIsTheC2Pool(t *testing.T) {
+	row := bscPresets["testnet"]
+	if row.p2pEscrow != "0x2B19e2e2194880A1a8AF9135923e3AeE0bD1adE5" || row.pool == nil ||
+		row.pool.feeManager != "0x2F6f3e1514efA38a3683696FB156d66d450a5DcA" {
+		t.Fatalf("testnet row = %+v pool = %+v", row, row.pool)
+	}
+}

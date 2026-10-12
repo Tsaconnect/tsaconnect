@@ -44,9 +44,9 @@ var bscPresets = map[string]chainPreset{
 			releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000}, // 0.01 BNB
 	},
 	"testnet": {
-		p2pEscrow:     "0x4C7199285A2c84af77594ab172208637f9872717", // Plan A Task 12, deployed 2026-10-08
+		p2pEscrow:     "0x2B19e2e2194880A1a8AF9135923e3AeE0bD1adE5", // Plan C2 Task 14, deployed 2026-10-12 (block 136370349)
 		eip712Version: "2", purpose: P2PPurposePool,
-		pool: &poolPreset{feeManager: "0x0DDcE6B830FcFE035d433bc1F1a7b8200acEfB76", tokens: []string{"USDT"},
+		pool: &poolPreset{feeManager: "0x2F6f3e1514efA38a3683696FB156d66d450a5DcA", tokens: []string{"USDT"},
 			releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000},
 	},
 }

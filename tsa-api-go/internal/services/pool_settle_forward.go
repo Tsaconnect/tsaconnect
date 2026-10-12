@@ -153,7 +153,14 @@ func (s *ITService) forwardSlice(ctx context.Context, d *PoolDesk, sl *models.P2
 	// attempt ceiling, lookup by reference) — never a re-send per settle tick.
 	if fresh && src.forwarder != nil {
 		if err := src.forwarder.Forward(ctx, fwd.ID); err != nil {
-			log.Printf("[liquidity] forward=%s deferred to the re-drive: %s", fwd.ID, RedactAlertText(err.Error()))
+			// A refusal at submission (or no settlement bank) fails the row,
+			// and a failed row is the operator's, never the re-drive's.
+			var cur models.P2PSettlementForward
+			if s.db.WithContext(ctx).Select("status").First(&cur, "id = ?", fwd.ID).Error == nil && cur.Status == models.P2PForwardFailed {
+				log.Printf("[liquidity] forward=%s failed, left to an operator: %s", fwd.ID, RedactAlertText(err.Error()))
+			} else {
+				log.Printf("[liquidity] forward=%s deferred to the re-drive: %s", fwd.ID, RedactAlertText(err.Error()))
+			}
 		}
 	}
 	return fwd, nil

@@ -102,7 +102,6 @@ func newC1Rehearsal(t *testing.T) *c1Rehearsal {
 	}
 	db := rehearsalDB(t)
 	cfg := config.Load()
-	overrideRehearsalPool(t, cfg)
 	bs := NewBlockchainService(cfg)
 	reg := NewP2PEscrowRegistry(bs, cfg)
 	pool, ok := reg.PoolChain()
@@ -184,26 +183,6 @@ func newC1Rehearsal(t *testing.T) *c1Rehearsal {
 		r.lps = append(r.lps, c1LP{pm: &lp, addr: addr, pk: pk})
 	}
 	return r
-}
-
-// overrideRehearsalPool points chain 97 at another testnet pool (Plan C2's
-// fresh deploy) when LIQ_REH_POOL_ESCROW and LIQ_REH_POOL_FEEMANAGER are set:
-// test-only, the preset row stays as it is. Chain 97 only.
-func overrideRehearsalPool(t *testing.T, cfg *config.Config) {
-	t.Helper()
-	esc, fm := os.Getenv("LIQ_REH_POOL_ESCROW"), os.Getenv("LIQ_REH_POOL_FEEMANAGER")
-	if esc == "" && fm == "" {
-		return
-	}
-	cc, ok := cfg.P2PChains[97]
-	if !ok || cc.Pool == nil || !common.IsHexAddress(esc) || !common.IsHexAddress(fm) {
-		t.Fatalf("pool override needs a chain-97 pool row and two addresses")
-	}
-	pool := *cc.Pool
-	pool.FeeManager = common.HexToAddress(fm).Hex()
-	cc.EscrowAddress, cc.Pool = common.HexToAddress(esc).Hex(), &pool
-	cfg.P2PChains[97] = cc
-	t.Logf("rehearsal pool override: escrow %s FeeManager %s", cc.EscrowAddress, pool.FeeManager)
 }
 
 // warmRPC opens a few connections to the pool chain's RPC right before a

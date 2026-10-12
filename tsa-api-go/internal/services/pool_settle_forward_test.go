@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -298,5 +299,27 @@ func TestPoolForward_DelayedNoticeReadsOnlyPoolReferences(t *testing.T) {
 	r.it.notePoolPayoutsDelayed(context.Background())
 	if len(bus.published) != 1 {
 		t.Fatalf("delayed notices = %d, want 1 (the pool forward only)", len(bus.published))
+	}
+}
+
+// A forward the provider refused at submission is failed, never re-driven:
+// the log names the operator queue, not the re-drive.
+func TestPoolForward_ProviderRejectionLogsFailedNotDeferred(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, gw, _ := r.wireForwards(t)
+	gw.err = &ProviderRejectedError{Err: errors.New("insufficient balance")}
+	logs := captureLog(t)
+	intent := r.openPaid(t, "5000")
+	_ = r.advance(t, intent.ID)
+	fw := r.forwards(t)
+	if len(fw) != 1 || fw[0].Status != models.P2PForwardFailed {
+		t.Fatalf("forwards = %+v, want one failed forward", fw)
+	}
+	out := logs.String()
+	if strings.Contains(out, "deferred to the re-drive") {
+		t.Fatalf("a provider-rejected forward logged as re-driven:\n%s", out)
+	}
+	if !strings.Contains(out, "forward="+fw[0].ID.String()+" failed") {
+		t.Fatalf("no failed log line for forward %s:\n%s", fw[0].ID, out)
 	}
 }

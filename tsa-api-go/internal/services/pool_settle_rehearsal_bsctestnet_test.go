@@ -227,7 +227,9 @@ func (r *c2Rehearsal) logSettled(t *testing.T, intent models.ITIntent) {
 	}
 	t.Logf("  delivery tx=%s %s", intent.TxHash, r.txInfo(intent.TxHash))
 	var legs []models.RampLeg
-	r.db.Where("intent_id = ?", intent.ID).Find(&legs)
+	if err := r.db.Where("order_id = ?", intent.ID).Find(&legs).Error; err != nil {
+		t.Fatalf("read ramp legs: %v", err)
+	}
 	for _, l := range legs {
 		t.Logf("  ramp leg %s kind=%s status=%s tx=%s", l.ID, l.Kind, l.Status, l.TxHash)
 	}
