@@ -92,6 +92,13 @@ type P2PSettlementForward struct {
 	AlertedAt   *time.Time `json:"alertedAt,omitempty"`
 	SubmittedAt *time.Time `json:"submittedAt,omitempty"`
 	SettledAt   *time.Time `json:"settledAt,omitempty"`
+	// StartedAt is committed BEFORE the gateway call (plan C2 P6, the C1 C-1
+	// rule for naira). Once set, money may have left: the row is never failed
+	// except on a first-attempt provider refusal or the provider's own FAILED,
+	// and it is only ever re-asked on the same reference after a lookup.
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+	// FeeKobo is the provider's actual fee for the confirmed transfer (S47).
+	FeeKobo *string `gorm:"type:numeric(38,0)" json:"feeKobo,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

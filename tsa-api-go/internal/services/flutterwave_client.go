@@ -888,6 +888,12 @@ const fwTransferSearchSpan = 24 * time.Hour
 // The shape was built from Flutterwave's published v4 schema and has not been
 // confirmed against the live API; see IT_SELL_FW_ABSENCE_TRUSTED.
 func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, reference string, around time.Time) (FWTransfer, bool, error) {
+	return c.findTransferByReference(ctx, reference, around, fwTransferSearchSpan, fwTransferListMaxPages)
+}
+
+// findTransferByReference is FindTransferByReference over a caller-chosen
+// window (around ± span) and page cap; every rule above holds unchanged.
+func (c *FlutterwaveClient) findTransferByReference(ctx context.Context, reference string, around time.Time, span time.Duration, maxPages int) (FWTransfer, bool, error) {
 	if !c.IsEnabled() {
 		return FWTransfer{}, false, ErrFlutterwaveDisabled
 	}
@@ -895,10 +901,10 @@ func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, referen
 	if reference == "" {
 		return FWTransfer{}, false, errors.New("flutterwave list-transfers: reference required")
 	}
-	lo, hi := around.Add(-fwTransferSearchSpan).UTC(), around.Add(fwTransferSearchSpan).UTC()
+	lo, hi := around.Add(-span).UTC(), around.Add(span).UTC()
 	var match *FWTransfer
 	cursor := ""
-	for page := 0; page < fwTransferListMaxPages; page++ {
+	for page := 0; page < maxPages; page++ {
 		q := url.Values{}
 		q.Set("from", lo.Format("2006-01-02"))
 		if upper := fwUpperBoundDate(hi, time.Now()); upper != "" {
@@ -941,7 +947,7 @@ func (c *FlutterwaveClient) FindTransferByReference(ctx context.Context, referen
 		}
 		cursor = next
 	}
-	return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: more than %d pages in window; scan incomplete", fwTransferListMaxPages)
+	return FWTransfer{}, false, fmt.Errorf("flutterwave list-transfers: more than %d pages in window; scan incomplete", maxPages)
 }
 
 type fwListedTransfer struct {

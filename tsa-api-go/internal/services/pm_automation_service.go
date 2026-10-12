@@ -657,9 +657,9 @@ func (s *PMAutomationService) HandlePayoutStatus(ctx context.Context, p PayoutSt
 		status := strings.ToLower(strings.TrimSpace(p.Status))
 		switch status {
 		case "success":
-			return s.forwards.Confirm(ctx, p.MerchantTxRef, true, "")
+			return s.forwards.ConfirmPayout(ctx, p.MerchantTxRef, p.PayoutID, true, "")
 		case "failed":
-			return s.forwards.Confirm(ctx, p.MerchantTxRef, false, "payout "+p.PayoutID+" (event "+p.EventID+")")
+			return s.forwards.ConfirmPayout(ctx, p.MerchantTxRef, p.PayoutID, false, "payout "+p.PayoutID+" (event "+p.EventID+")")
 		default:
 			return nil // pending or unknown — await a terminal result
 		}
