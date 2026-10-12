@@ -595,29 +595,23 @@ func (s *ITService) chainEvidenceFor(ctx context.Context, sd *saleDesk, db *gorm
 	}
 	gen := probe.EndpointGeneration()
 	if leg.TxHash != "" {
-		_, _, terr := probe.TransactionByHash(ctx, common.HexToHash(leg.TxHash))
-		switch {
-		case terr == nil:
+		known, terr := txHashKnown(ctx, probe, leg.TxHash)
+		if terr != nil {
+			return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
+		}
+		if known {
 			ev.HashKnown = true
 			ev.Reason = "the node still knows " + leg.TxHash
 			return ev, nil
-		case !errors.Is(terr, ethereum.NotFound):
-			return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
 		}
 	}
 	addr := common.HexToAddress(sd.wallet.Address())
-	head, err := probe.BlockNumber(ctx)
+	head, pending, latest, err := walletNoncesAtHead(ctx, probe, addr)
 	if err != nil {
-		return nil, fmt.Errorf("%s: head block: %w", sd.label, err)
+		return nil, fmt.Errorf("%s: %w", sd.label, err)
 	}
-	if ev.PendingNonce, err = probe.PendingNonceAt(ctx, addr); err != nil {
-		return nil, fmt.Errorf("%s: pending nonce: %w", sd.label, err)
-	}
-	if ev.LatestNonce, err = probe.NonceAt(ctx, addr, new(big.Int).SetUint64(head)); err != nil {
-		return nil, fmt.Errorf("%s: nonce at block %d: %w", sd.label, head, err)
-	}
+	ev.PendingNonce, ev.LatestNonce = pending, latest
 	if ev.PendingNonce != ev.LatestNonce {
-		// A block mined after H reads as "pending" here: a refusal, never an allowance.
 		ev.Reason = fmt.Sprintf("the wallet has %d pending transaction(s)", ev.PendingNonce-ev.LatestNonce)
 		return ev, nil
 	}

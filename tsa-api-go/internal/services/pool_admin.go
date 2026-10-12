@@ -257,18 +257,12 @@ func poolSliceReleaseStuck(sl *models.P2PTrade, now time.Time) bool {
 // release can neither land nor has landed, else why not.
 func (d *PoolDesk) releaseClearEvidence(ctx context.Context, sl *models.P2PTrade) (string, error) {
 	gen := d.c.Probe.EndpointGeneration()
-	t, err := d.c.Escrow.ReadTrade(HashID(sl.ID))
-	if err != nil {
-		return "", err
-	}
-	if !t.Exists || (t.Status != OnChainP2PStatusPending && t.Status != OnChainP2PStatusPaid) || !SameEVMAddress(t.Buyer.Hex(), d.c.Treasury.Address()) {
-		return fmt.Sprintf("the escrow holds the trade as %v — the reconciler settles it", t.Status), nil
-	}
 	if h := sl.ReleaseTxHash; h != "" {
-		if _, _, err := d.c.Probe.TransactionByHash(ctx, common.HexToHash(h)); !errors.Is(err, ethereum.NotFound) {
-			if err != nil {
-				return "", err
-			}
+		known, err := txHashKnown(ctx, d.c.Probe, h)
+		if err != nil {
+			return "", err
+		}
+		if known {
 			return "the node still knows " + h, nil
 		}
 		if r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(h)); !errors.Is(err, ethereum.NotFound) {
@@ -293,6 +287,16 @@ func (d *PoolDesk) releaseClearEvidence(ctx context.Context, sl *models.P2PTrade
 	}
 	if found != "" {
 		return "a release of this trade is logged in " + found, nil
+	}
+	// Re-review N-1: the escrow's view is read last, at a block no earlier
+	// than the nonce reads — a release that mined during the checks (its log
+	// not yet indexed) reads as Released here.
+	t, err := d.c.Escrow.ReadTrade(HashID(sl.ID))
+	if err != nil {
+		return "", err
+	}
+	if !t.Exists || (t.Status != OnChainP2PStatusPending && t.Status != OnChainP2PStatusPaid) || !SameEVMAddress(t.Buyer.Hex(), d.c.Treasury.Address()) {
+		return fmt.Sprintf("the escrow holds the trade as %v — the reconciler settles it", t.Status), nil
 	}
 	if err := endpointSteady(d.c.Probe, gen); err != nil {
 		return "", err

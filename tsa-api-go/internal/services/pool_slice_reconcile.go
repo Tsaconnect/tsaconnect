@@ -426,7 +426,8 @@ func (s *ITService) FindSliceResolve(ctx context.Context, slice *models.P2PTrade
 // chain's evidence, all read from one endpoint: the claim is older than
 // sliceResolveClaimStaleAfter, the trade is still Disputed, the release key
 // has no transaction pending (its pending nonce equals its nonce at the
-// head), and no TradeResolved for the trade was ever logged. A dropped
+// head), no TradeResolved for the trade was ever logged, and — read last,
+// after those (re-review N-1) — the trade is still Disputed. A dropped
 // resolve that resurfaces later is harmless: every resolve of a slice goes the
 // same way (the F21 decision never flips — a to-the-LP decision drops the
 // slice, a to-the-treasury one blocks the refund), the escrow accepts only
@@ -442,33 +443,26 @@ func (s *ITService) SliceResolveClaimAbandoned(ctx context.Context, slice *model
 		return false, nil
 	}
 	gen := d.c.Probe.EndpointGeneration()
-	t, err := d.c.Escrow.ReadTrade(HashID(slice.ID))
-	if err != nil || !t.Exists || t.Status != OnChainP2PStatusDisputed {
-		return false, err
-	}
 	if idle, err := d.releaseKeyIdle(ctx); err != nil || !idle {
 		return false, err // a release-key transaction is in flight: it may be this resolve
 	}
 	if found, err := d.findSliceTx(ctx, slice, topicTradeResolved); err != nil || found != "" {
 		return false, err
 	}
+	// Re-review N-1: read "still Disputed" last, at a block no earlier than the
+	// nonce reads — a resolve that mined during the checks (its log not yet
+	// indexed) reads as Resolved here.
+	t, err := d.c.Escrow.ReadTrade(HashID(slice.ID))
+	if err != nil || !t.Exists || t.Status != OnChainP2PStatusDisputed {
+		return false, err
+	}
 	return endpointSteady(d.c.Probe, gen) == nil, nil
 }
 
 // releaseKeyIdle: the release key has no transaction pending — its pending
-// nonce equals its nonce at the head (read once). A block mined between the
-// reads reads as "pending": a refusal, never an allowance.
+// nonce equals its nonce at the head (walletNoncesAtHead).
 func (d *PoolDesk) releaseKeyIdle(ctx context.Context) (bool, error) {
-	key := common.HexToAddress(d.c.Sender.Address())
-	head, err := d.c.Probe.BlockNumber(ctx)
-	if err != nil {
-		return false, err
-	}
-	pending, err := d.c.Probe.PendingNonceAt(ctx, key)
-	if err != nil {
-		return false, err
-	}
-	latest, err := d.c.Probe.NonceAt(ctx, key, new(big.Int).SetUint64(head))
+	_, pending, latest, err := walletNoncesAtHead(ctx, d.c.Probe, common.HexToAddress(d.c.Sender.Address()))
 	if err != nil {
 		return false, err
 	}

@@ -14,13 +14,15 @@ import (
 )
 
 type fakeFeeReader struct {
-	kobo  *big.Int
-	err   error
-	calls int
+	kobo        *big.Int
+	err         error
+	calls       int
+	hadDeadline bool
 }
 
-func (f *fakeFeeReader) TransferFeeKobo(context.Context, string) (*big.Int, error) {
+func (f *fakeFeeReader) TransferFeeKobo(ctx context.Context, _ string) (*big.Int, error) {
 	f.calls++
+	_, f.hadDeadline = ctx.Deadline()
 	return f.kobo, f.err
 }
 
@@ -323,5 +325,46 @@ func TestForwarder_FeeIsReadByTheSweepNotTheWebhook(t *testing.T) {
 	}
 	if got := r.forward(t); got.FeeKobo == nil || *got.FeeKobo != "1075" || fees.calls != 1 {
 		t.Fatalf("fee=%v calls=%d, want 1075 read once by the sweep", got.FeeKobo, fees.calls)
+	}
+}
+
+// Re-review N-2: a fee the provider will not give is asked with a doubling
+// backoff, at most p2pForwardFeeMaxReads times, each call under its own
+// timeout — it never competes with merchant payouts on every tick for a day.
+func TestForwarder_FeeReadBacksOffAndStopsAtTheCap(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999100000014", "1500.00")); err != nil {
+		t.Fatal(err)
+	}
+	fees := &fakeFeeReader{err: errors.New("fee not in the response")}
+	r.fwd.SetFeeReader(fees)
+	if err := r.fwd.Confirm(context.Background(), r.forward(t).Reference, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	r.fwd.withClock(func() time.Time { return now })
+	tick := func() {
+		t.Helper()
+		if _, err := r.fwd.RecordSettledFees(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tick()
+	if fees.calls != 1 || !fees.hadDeadline {
+		t.Fatalf("calls=%d deadline=%v, want one bounded read", fees.calls, fees.hadDeadline)
+	}
+	tick()
+	if fees.calls != 1 {
+		t.Fatalf("calls=%d, want none inside the backoff", fees.calls)
+	}
+	for end := now.Add(p2pForwardFeeWindow - time.Hour); now.Before(end); {
+		now = now.Add(5 * time.Minute) // every sweep tick of the fee window
+		tick()
+	}
+	if fees.calls != p2pForwardFeeMaxReads {
+		t.Fatalf("calls=%d, want the read capped at %d", fees.calls, p2pForwardFeeMaxReads)
+	}
+	if got := r.forward(t); got.FeeKobo != nil {
+		t.Fatalf("fee=%v, want none recorded", *got.FeeKobo)
 	}
 }

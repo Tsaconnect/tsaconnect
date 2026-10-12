@@ -99,6 +99,11 @@ type P2PSettlementForward struct {
 	StartedAt *time.Time `json:"startedAt,omitempty"`
 	// FeeKobo is the provider's actual fee for the confirmed transfer (S47).
 	FeeKobo *string `gorm:"type:numeric(38,0)" json:"feeKobo,omitempty"`
+	// FeeReads counts failed fee reads; FeeNextReadAt is when the sweep may ask
+	// again (re-review N-2: capped, doubling backoff — the reads share the
+	// provider's rate limit with live merchant payouts).
+	FeeReads      int        `gorm:"not null;default:0" json:"-"`
+	FeeNextReadAt *time.Time `json:"-"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

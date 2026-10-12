@@ -3,6 +3,7 @@ package services
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"math/big"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -466,5 +468,93 @@ func TestPoolSlice_ResolveClaimNeverClearedWhenAResolveIsLogged(t *testing.T) {
 		Address: common.HexToAddress(poolTestEscrow), Topics: []common.Hash{topicTradeResolved, common.BytesToHash(id[:])}}}}
 	if gone, err := r.it.SliceResolveClaimAbandoned(context.Background(), &sl); gone || err != nil {
 		t.Fatalf("abandoned=%v err=%v, want kept while a resolve is logged", gone, err)
+	}
+}
+
+// minedDuringNonceRead is a probe on which a transaction mines while the
+// release key's nonce is read: whatever ReadTrade said before that read is stale.
+type minedDuringNonceRead struct {
+	TreasuryTxProbe
+	mine func()
+}
+
+func (m *minedDuringNonceRead) NonceAt(ctx context.Context, a common.Address, b *big.Int) (uint64, error) {
+	if m.mine != nil {
+		m.mine()
+		m.mine = nil
+	}
+	return m.TreasuryTxProbe.NonceAt(ctx, a, b)
+}
+
+// Re-review N-1: a resolve that mines between the status read and the nonce
+// reads, with the log scan lagging the head, must not read as abandoned —
+// "still Disputed" is read after the idle and log checks.
+func TestPoolSlice_ResolveClaimKeptWhenTheResolveMinesDuringTheChecks(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, sl := disputedPaidSlice(t, r, 31*time.Minute)
+	id := HashID(sl.ID)
+	r.chain.setTrade(id, OnChainP2PStatusDisputed)
+	r.chain.latest = r.chain.nextNonce
+	r.desk.c.Probe = &minedDuringNonceRead{TreasuryTxProbe: r.desk.c.Probe, mine: func() { r.chain.setTrade(id, OnChainP2PStatusResolved) }}
+	if gone, err := r.it.SliceResolveClaimAbandoned(context.Background(), &sl); gone || err != nil {
+		t.Fatalf("abandoned=%v err=%v, want kept: the trade is Resolved and its log not yet indexed", gone, err)
+	}
+}
+
+// Re-review N-1: the same order for a super admin's clear-release.
+func TestPoolSlice_ClearStuckReleaseRefusedWhenTheReleaseMinesDuringTheChecks(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	intent, sl := stuckRelease(t, r)
+	id := HashID(sl.ID)
+	r.desk.c.Probe = &minedDuringNonceRead{TreasuryTxProbe: r.desk.c.Probe, mine: func() { r.chain.setTrade(id, OnChainP2PStatusReleased) }}
+	if err := r.it.ClearPoolSliceRelease(context.Background(), uuid.New(), intent.ID, sl.ID, "note"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want refused: the release landed during the checks", err)
+	}
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", sl.ID)
+	if got.Status != models.P2PTradeStatusReleasing || got.ReleaseTxHash != sl.ReleaseTxHash {
+		t.Fatalf("slice = %s %q, want untouched", got.Status, got.ReleaseTxHash)
+	}
+}
+
+// Re-review N-5: a logged resolve back to the LP is never a proof that the
+// slice reached the treasury, even where the transfer check alone would pass
+// — and its hash is not written over the claim.
+func TestPoolSlice_ProofRefusesALoggedResolveToTheLP(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, sl := disputedPaidSlice(t, r, time.Minute)
+	id := HashID(sl.ID)
+	r.chain.setTrade(id, OnChainP2PStatusResolved)
+	h := common.HexToHash("0x" + strings.Repeat("3f", 32))
+	r.chain.receipts[h] = r.chain.head
+	r.sender.receipts[h] = resolveReceipt(id, false, r.chain.trades[id].Amount, r.chain.head)
+	r.verifier.credited[strings.ToLower(h.Hex())] = r.chain.trades[id].Amount // isolate the direction check
+	r.desk.c.Probe = &logProbe{TreasuryTxProbe: r.desk.c.Probe, logs: []types.Log{{BlockNumber: r.chain.head, TxHash: h,
+		Address: common.HexToAddress(poolTestEscrow), Topics: []common.Hash{topicTradeResolved, common.BytesToHash(id[:])}}}}
+	if ok, err := r.desk.proveSliceRelease(context.Background(), &sl, 1); ok || err != nil {
+		t.Fatalf("proved=%v err=%v, want a resolve to the LP refused", ok, err)
+	}
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", sl.ID)
+	if got.ReleaseTxHash != sl.ReleaseTxHash {
+		t.Fatalf("release hash = %q, want the claim %q kept", got.ReleaseTxHash, sl.ReleaseTxHash)
+	}
+}
+
+// knowsEveryHash is a node that still has every transaction it is asked about.
+type knowsEveryHash struct{ TreasuryTxProbe }
+
+func (knowsEveryHash) TransactionByHash(context.Context, common.Hash) (*types.Transaction, bool, error) {
+	return nil, true, nil
+}
+
+// Re-review N-3: the shared txHashKnown check — a release the node still
+// knows can still land, so it is never cleared.
+func TestPoolSlice_ClearStuckReleaseRefusedWhileTheNodeKnowsTheHash(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	intent, sl := stuckRelease(t, r)
+	r.desk.c.Probe = knowsEveryHash{r.desk.c.Probe}
+	if err := r.it.ClearPoolSliceRelease(context.Background(), uuid.New(), intent.ID, sl.ID, "note"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("err = %v, want refused while the node knows the release", err)
 	}
 }

@@ -1108,7 +1108,9 @@ func (f *P2PSettlementForwarder) RecordFee(ctx context.Context, id uuid.UUID) er
 	if fwd.Status != models.P2PForwardSettled || fwd.FeeKobo != nil || fwd.PayoutID == "" {
 		return nil
 	}
-	fee, err := f.fees.TransferFeeKobo(ctx, fwd.PayoutID)
+	readCtx, cancel := context.WithTimeout(ctx, p2pForwardFeeReadTimeout)
+	defer cancel()
+	fee, err := f.fees.TransferFeeKobo(readCtx, fwd.PayoutID)
 	if err != nil {
 		return err
 	}
@@ -1121,6 +1123,17 @@ func (f *P2PSettlementForwarder) RecordFee(ctx context.Context, id uuid.UUID) er
 // unread LP fee themselves).
 const p2pForwardFeeWindow = 24 * time.Hour
 
+// The fee pass's limits (re-review N-2): each provider call is bounded, a
+// failed read waits a doubling backoff, and a forward is asked at most
+// p2pForwardFeeMaxReads times (about five hours) before it is left to the
+// operator.
+const (
+	p2pForwardFeeReadTimeout   = 15 * time.Second
+	p2pForwardFeeMaxReads      = 6
+	p2pForwardFeeReadRetryBase = 10 * time.Minute
+	p2pForwardFeeReadRetryMax  = 4 * time.Hour
+)
+
 // RecordSettledFees reads the provider's fee for recently settled forwards
 // that have none yet (S47), on the sweep's cadence — never on the disburse
 // webhook's path (merchant-impact residual 3). It moves no money.
@@ -1128,17 +1141,30 @@ func (f *P2PSettlementForwarder) RecordSettledFees(ctx context.Context) (int, er
 	if f.fees == nil {
 		return 0, nil
 	}
-	var ids []uuid.UUID
-	if err := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
+	now := f.now()
+	var due []models.P2PSettlementForward
+	if err := f.db.WithContext(ctx).Select("id", "fee_reads").
 		Where("status = ? AND fee_kobo IS NULL AND COALESCE(payout_id, '') <> '' AND settled_at > ?",
-			models.P2PForwardSettled, f.now().Add(-p2pForwardFeeWindow)).
-		Order("settled_at ASC").Limit(p2pForwardSweepBatch).Pluck("id", &ids).Error; err != nil {
+			models.P2PForwardSettled, now.Add(-p2pForwardFeeWindow)).
+		Where("fee_reads < ? AND (fee_next_read_at IS NULL OR fee_next_read_at <= ?)", p2pForwardFeeMaxReads, now).
+		Order("settled_at ASC").Limit(p2pForwardSweepBatch).Find(&due).Error; err != nil {
 		return 0, err
 	}
 	n := 0
-	for _, id := range ids {
-		if err := f.RecordFee(ctx, id); err != nil {
-			log.Printf("[p2p forward] forward=%s fee not read yet: %s", id, RedactAlertText(err.Error()))
+	for _, fwd := range due {
+		if err := f.RecordFee(ctx, fwd.ID); err != nil {
+			reads := fwd.FeeReads + 1
+			next := now.Add(doublingBackoff(p2pForwardFeeReadRetryBase, p2pForwardFeeReadRetryMax, reads))
+			if uerr := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).Where("id = ?", fwd.ID).
+				Updates(map[string]any{"fee_reads": reads, "fee_next_read_at": next}).Error; uerr != nil {
+				return n, uerr
+			}
+			if reads >= p2pForwardFeeMaxReads {
+				log.Printf("[p2p forward] ALERT p2p_forward_fee_unread forward=%s after %d reads — record the provider's fee by hand: %s",
+					fwd.ID, reads, RedactAlertText(err.Error()))
+			} else {
+				log.Printf("[p2p forward] forward=%s fee not read yet (read %d): %s", fwd.ID, reads, RedactAlertText(err.Error()))
+			}
 			continue
 		}
 		n++

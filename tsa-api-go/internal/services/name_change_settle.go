@@ -176,13 +176,19 @@ func (s *NameChangeService) minRefund(ch *models.UserNameChange) *big.Int {
 }
 
 // refundBackoff is how long after the attempt-th failed send the sweep waits
-// before the next: base, doubling, capped.
+// before the next.
 func refundBackoff(attempt int) time.Duration {
-	d := nameChangeRefundRetryBase
-	for i := 1; i < attempt && d < nameChangeRefundRetryMax; i++ {
+	return doublingBackoff(nameChangeRefundRetryBase, nameChangeRefundRetryMax, attempt)
+}
+
+// doublingBackoff is the wait after the attempt-th failure: base, doubling,
+// capped at ceiling.
+func doublingBackoff(base, ceiling time.Duration, attempt int) time.Duration {
+	d := base
+	for i := 1; i < attempt && d < ceiling; i++ {
 		d *= 2
 	}
-	return min(d, nameChangeRefundRetryMax)
+	return min(d, ceiling)
 }
 
 // refund sends amount (base units) of a stablecoin fee back to the proven

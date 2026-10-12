@@ -68,6 +68,32 @@ func ProbeReceipts(ctx context.Context, rpc RawRPCCaller) error {
 	return fmt.Errorf("%w: no transaction in the last 5 blocks", ErrReceiptsUnreadable)
 }
 
+// walletNoncesAtHead is the shared nonce evidence (re-review N-3): the head,
+// then addr's pending nonce, then its nonce at that head. A block mined
+// between the reads shows as pending > latest — a refusal, never an allowance.
+func walletNoncesAtHead(ctx context.Context, p TreasuryTxProbe, addr common.Address) (head, pending, latest uint64, err error) {
+	if head, err = p.BlockNumber(ctx); err != nil {
+		return 0, 0, 0, fmt.Errorf("head block: %w", err)
+	}
+	if pending, err = p.PendingNonceAt(ctx, addr); err != nil {
+		return 0, 0, 0, fmt.Errorf("pending nonce: %w", err)
+	}
+	if latest, err = p.NonceAt(ctx, addr, new(big.Int).SetUint64(head)); err != nil {
+		return 0, 0, 0, fmt.Errorf("nonce at block %d: %w", head, err)
+	}
+	return head, pending, latest, nil
+}
+
+// txHashKnown: the node still knows the transaction, pending or mined. Only
+// NotFound reads as forgotten; any other error is returned.
+func txHashKnown(ctx context.Context, p TreasuryTxProbe, h string) (bool, error) {
+	_, _, err := p.TransactionByHash(ctx, common.HexToHash(h))
+	if errors.Is(err, ethereum.NotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // TreasuryTxProbe is what the dropped-transaction check asks a chain (spec
 // §5.4). *ethclient.Client satisfies it.
 type TreasuryTxProbe interface {

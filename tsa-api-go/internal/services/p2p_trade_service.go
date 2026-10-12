@@ -2313,6 +2313,10 @@ func (s *P2PTradeService) PrepareAdminResolveDispute(ctx context.Context, tradeI
 		}
 		return nil, err
 	}
+	// Re-review N-4: the slice reconciler owns a pool slice's resolve (F21).
+	if err := hideSlice(&trade); err != nil {
+		return nil, err
+	}
 	if trade.Status != models.P2PTradeStatusDisputed {
 		return nil, fmt.Errorf("%w: trade status=%s (only disputed can be resolved)",
 			ErrInvalidTransition, trade.Status)
@@ -2374,6 +2378,10 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTradeNotFound
 		}
+		return nil, err
+	}
+	// Re-review N-4: the slice reconciler owns a pool slice's resolve (F21).
+	if err := hideSlice(&trade); err != nil {
 		return nil, err
 	}
 	if trade.Status == models.P2PTradeStatusResolved {

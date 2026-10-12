@@ -37,6 +37,8 @@ func createSettlementForwardTable(t *testing.T, db *gorm.DB) {
 		settled_at     DATETIME,
 		started_at     DATETIME,
 		fee_kobo       TEXT,
+		fee_reads      INTEGER NOT NULL DEFAULT 0,
+		fee_next_read_at DATETIME,
 		created_at     DATETIME,
 		updated_at     DATETIME
 	)`).Error; err != nil {
