@@ -607,11 +607,6 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	return nil
 }
 
-// poolCustodyF22Returned is F22's "handed back to the LP" marker (plan C2 P13):
-// that slice's USDT left the treasury. Same value as Task 3's poolF22Returned;
-// fold into it once both land.
-const poolCustodyF22Returned = "pool_f22:returned"
-
 // poolCustodyReceived sums VerifyTransfer over the releases of every slice of
 // the intent that is at the treasury (released, or disputed/resolved and not
 // dropped; never one an operator handed back to its LP — plan C2 P1) and
@@ -633,7 +628,7 @@ func (o *ConversionOrchestrator) poolCustodyReceived(ctx context.Context, order 
 	if err := o.db.WithContext(ctx).Model(&models.P2PTrade{}).
 		Where("it_intent_id = ? AND release_tx_hash NOT IN ? AND COALESCE(cancel_reason, '') <> ?"+
 			" AND (status IN ? OR (status IN ? AND dropped_at IS NULL))",
-			intentID, []string{"", "reconciled"}, poolCustodyF22Returned,
+			intentID, []string{"", "reconciled"}, poolF22Returned,
 			[]string{models.P2PTradeStatusReleased},
 			[]string{models.P2PTradeStatusResolved, models.P2PTradeStatusDisputed}).
 		Order("created_at").Pluck("release_tx_hash", &hashes).Error; err != nil {
