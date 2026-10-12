@@ -198,7 +198,14 @@ type poolSettleRig struct {
 
 func newPoolSettleRig(t *testing.T, freeWhole ...int64) *poolSettleRig {
 	t.Helper()
-	r := &poolSettleRig{poolOpenRig: newPoolOpenRig(t)}
+	return poolSettleRigOn(t, newPoolOpenRig(t), freeWhole...)
+}
+
+// poolSettleRigOn adds the settle side to an open rig (SQLite above, or a
+// temp Postgres in the concurrency tests).
+func poolSettleRigOn(t *testing.T, base *poolOpenRig, freeWhole ...int64) *poolSettleRig {
+	t.Helper()
+	r := &poolSettleRig{poolOpenRig: base}
 	for _, free := range freeWhole {
 		lp, _ := r.addLP(t, free)
 		r.db.Model(&models.PaymentMerchant{}).Where("id = ?", lp.ID).Updates(map[string]any{
@@ -211,7 +218,11 @@ func newPoolSettleRig(t *testing.T, freeWhole ...int64) *poolSettleRig {
 	if err := r.db.Exec(models.RampLegsOneLiveSaleIndexSQL).Error; err != nil {
 		t.Fatal(err)
 	}
-	createSettlementForwardTable(t, r.db)
+	if r.db.Dialector.Name() == "sqlite" {
+		createSettlementForwardTable(t, r.db)
+	} else if err := r.db.AutoMigrate(&models.P2PSettlementForward{}); err != nil {
+		t.Fatal(err)
+	}
 	r.verifier = &settleVerifier{credited: map[string]*big.Int{}}
 	r.sender = &poolReleaseSender{chain: r.chain, verifier: r.verifier, receipts: map[common.Hash]*types.Receipt{}}
 	r.trades.SetPoolSlices(r.it, r.sender)

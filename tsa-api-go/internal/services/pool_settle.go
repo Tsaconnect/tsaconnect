@@ -354,10 +354,3 @@ func (s *ITService) reevaluatePoolOrder(ctx context.Context, d *PoolDesk, id uui
 	})
 	return parked, err
 }
-
-// poolProven: Task 8 fills this — LP forwards (§12.5).
-func (s *ITService) poolProven(ctx context.Context, d *PoolDesk, intent *models.ITIntent, proven []models.P2PTrade) {
-}
-
-// poolSettleBooks: Task 8 fills this — the books (§12.7).
-func (s *ITService) poolSettleBooks(tx *gorm.DB, intent *models.ITIntent) error { return nil }

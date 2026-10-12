@@ -19,6 +19,7 @@ import (
 )
 
 type recordingSaleVerifier struct {
+	mu                    sync.Mutex // concurrent settle passes (pool Postgres test)
 	credited              *big.Int
 	err                   error
 	calls                 int
@@ -29,6 +30,8 @@ func (v *recordingSaleVerifier) VerifyTransfer(context.Context, string, string, 
 	return nil, errors.New("unused")
 }
 func (v *recordingSaleVerifier) VerifyTransferFrom(_ context.Context, hash, token, from, to string) (*big.Int, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.calls++
 	v.hash, v.token, v.from, v.to = hash, token, from, to
 	return v.credited, v.err

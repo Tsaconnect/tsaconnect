@@ -442,6 +442,9 @@ func (s *P2PTradeClaimSource) claimAndCredit(
 	return forward, fresh, nil
 }
 
+// p2pForwardInsertSavepoint scopes insertForwardAndCredit's INSERT.
+const p2pForwardInsertSavepoint = "p2p_forward_insert"
+
 // insertForwardAndCredit inserts the forward row and credits the merchant's
 // ledger on tx, returning fresh=false when this ref was already processed (the
 // winner's row is returned and nothing is credited). The caller owns the
@@ -462,8 +465,17 @@ func (s *P2PTradeClaimSource) insertForwardAndCredit(
 		Status:      models.P2PForwardPending,
 		Reference:   p2pForwardRefPrefix + uuid.New().String(),
 	}
+	// A savepoint around the INSERT: on Postgres a failed statement aborts the
+	// whole transaction, so without it the winner below could never be read
+	// and every replay would surface as an error instead of fresh=false.
+	if err := tx.SavePoint(p2pForwardInsertSavepoint).Error; err != nil {
+		return nil, false, err
+	}
 	if err := tx.Create(forward).Error; err != nil {
 		if isUniqueViolation(err) {
+			if rbErr := tx.RollbackTo(p2pForwardInsertSavepoint).Error; rbErr != nil {
+				return nil, false, rbErr
+			}
 			// Re-read on provider_ref ALONE. trade_id is unique too, so
 			// matching on either key would let a DISTINCT second credit
 			// bound to this trade read back the FIRST credit's row and
@@ -477,6 +489,15 @@ func (s *P2PTradeClaimSource) insertForwardAndCredit(
 			var winner models.P2PSettlementForward
 			readErr := tx.Where("provider_ref = ?", ref).First(&winner).Error
 			if readErr == nil {
+				// The winner must be THIS trade's forward. A ref that already
+				// owns some OTHER trade's row is not a replay of this one:
+				// returning it would make this trade read as paid (a pool slice
+				// whose LP was never credited; a P2P trade whose crypto is then
+				// released against no credit).
+				if winner.TradeID != trade.ID || winner.PMID != pm.ID {
+					return nil, false, fmt.Errorf("credit %s already settled trade %s; it must not settle trade %s",
+						ref, winner.TradeID, trade.ID)
+				}
 				return &winner, false, nil
 			}
 			if !errors.Is(readErr, gorm.ErrRecordNotFound) {
