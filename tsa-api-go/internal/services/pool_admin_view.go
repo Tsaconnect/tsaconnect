@@ -89,9 +89,9 @@ func (s *ITService) PoolOrderDetail(ctx context.Context, intentID uuid.UUID) (*P
 		case err == nil:
 			v.Forward = &PoolForwardView{ID: fwd.ID, Status: fwd.Status, Amount: fwd.Amount, PayoutID: fwd.PayoutID,
 				FailureReason: fwd.FailureReason, FeeKobo: fwd.FeeKobo, StartedAt: fwd.StartedAt}
-		case errors.Is(err, gorm.ErrRecordNotFound) && sl.Status == models.P2PTradeStatusReleased &&
-			!poolOrderHoldsMoney(intent.Status) && sl.CancelReason == "":
-			v.SliceAction = []string{"pay-lp", "returned"} // F22 on an unpaid or terminal order, neither exit taken (review I-5)
+		case errors.Is(err, gorm.ErrRecordNotFound) && sl.Status == models.P2PTradeStatusReleased && sl.CancelReason == "" &&
+			poolF22Open(intent.Status, sl.DroppedAt):
+			v.SliceAction = []string{"pay-lp", "returned"} // F22, neither exit taken (review I-5)
 		}
 		out.Slices = append(out.Slices, v)
 	}

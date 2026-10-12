@@ -134,3 +134,17 @@ func TestOrchestrator_PoolCustodyCountsAReleaseOnce(t *testing.T) {
 		t.Fatalf("VerifyTransfer calls = %d, want 1 per distinct release", r.transfers.calls)
 	}
 }
+
+// Review I-1: a slice the order dropped and its LP then self-released is the
+// LP's own USDT at the treasury — never her custody. Here it would turn a
+// short delivery (60 of 100) into a full one.
+func TestOrchestrator_PoolCustodyIgnoresADroppedSelfRelease(t *testing.T) {
+	r := newConversionRig(t)
+	intent := seedPoolCustody(t, r, "0xrelA")
+	seedCustodySlice(t, r, intent, models.P2PTradeStatusReleased, "0xselfdropped", "", true)
+	r.transfers.amountByTx = map[string]*big.Int{"0xrelA": big.NewInt(60_000000), "0xselfdropped": big.NewInt(40_000000)}
+	mustAdvance(t, r)
+	if got := r.reload(t); got.TokenAmount != "60" {
+		t.Fatalf("amount = %s, want 60 — the dropped self-release is not hers", got.TokenAmount)
+	}
+}

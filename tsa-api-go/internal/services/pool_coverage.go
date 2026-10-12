@@ -109,20 +109,27 @@ const (
 	poolF22Returned = "pool_f22:returned"
 )
 
-// sliceAtTreasury (plan C2 P1): the slice's USDT is, or may already be, at
-// the conversion treasury — releasing, released, a broadcast release not yet
-// resolved, or disputed/resolved while it still backs its order (F21 drops a
-// slice it sends back to the LP, so a non-dropped dispute of a paid order goes
-// to the treasury). R for S18 and the S37 refund's "zero slices" test. Proof
-// is separate (proveSliceRelease).
+// sliceAtTreasury (plan C2 P1) is the ONE answer to "is this slice's USDT
+// at the treasury for its order": R for S18 (claim, re-evaluation,
+// re-delivery), the S37 refund's "zero slices" test, converted custody and
+// the settle total. True for releasing, a broadcast release not yet resolved,
+// and released or disputed/resolved while the slice still backs its order
+// (F21 drops a slice it sends back to the LP, so a non-dropped dispute of a
+// paid order goes to the treasury). Proof is separate (proveSliceRelease).
+//
+// A dropped slice its LP then self-released (F22, review I-1) is the LP's
+// own USDT that happens to sit at the treasury: never hers, never R — its LP
+// is paid or handed it back by an operator (F22). A dropped slice is never
+// releasing: AutoRelease's flip needs dropped_at NULL and a drop refuses a
+// releasing slice.
 func sliceAtTreasury(status string, droppedAt *time.Time, releaseTxHash, cancelReason string) bool {
 	if cancelReason == poolF22Returned {
 		return false // re-review I-B: an operator handed this slice's USDT back to its LP
 	}
 	switch status {
-	case models.P2PTradeStatusReleasing, models.P2PTradeStatusReleased:
+	case models.P2PTradeStatusReleasing:
 		return true
-	case models.P2PTradeStatusDisputed, models.P2PTradeStatusResolved:
+	case models.P2PTradeStatusReleased, models.P2PTradeStatusDisputed, models.P2PTradeStatusResolved:
 		return droppedAt == nil
 	case models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid:
 		// Review C-1: a recorded release hash means it was broadcast and is not

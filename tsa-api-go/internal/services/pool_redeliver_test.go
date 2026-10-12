@@ -320,3 +320,28 @@ func TestPoolRedeliver_StaleDecisionIsRefused(t *testing.T) {
 		t.Fatalf("stale decision = %v, want refused: generation 2 exists", err)
 	}
 }
+
+// Review m-2: the F22 pay-LP exit is refused for a slice that still backs a
+// paid order — its LP is the automatic forward's, never an operator's.
+func TestPoolSlice_F22PayRefusedWhileTheSliceBacksAPaidOrder(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	r.sender.noMine = true
+	intent := r.openPaid(t, "5000")
+	_ = r.advance(t, intent.ID) // delivering, its release broadcast
+	sl := r.slicesOf(t, intent.ID)[0]
+	_, gw, _ := r.wireForwards(t) // wired after the tick: only the operator call could pay
+	id := HashID(sl.ID)
+	r.chain.setTrade(id, OnChainP2PStatusReleased) // the release lands
+	h := common.HexToHash(sl.ReleaseTxHash)
+	r.chain.receipts[h] = r.chain.head
+	r.sender.receipts[h] = releaseReceipt(id, common.HexToAddress(poolTestTreasury), r.chain.trades[id].Amount, r.chain.head)
+	r.verifier.credited[strings.ToLower(h.Hex())] = r.chain.trades[id].Amount
+	if _, err := r.it.PayPoolSliceLP(context.Background(), uuid.New(), sl.ID, "pay by hand"); !errors.Is(err, ErrITBadState) {
+		t.Fatalf("pay-lp on a delivering order's slice = %v, want refused", err)
+	}
+	var cur models.P2PTrade
+	r.db.First(&cur, "id = ?", sl.ID)
+	if cur.CancelReason != "" || len(gw.calls) != 0 {
+		t.Fatalf("cancel_reason=%q calls=%d, want no F22 marker and no transfer", cur.CancelReason, len(gw.calls))
+	}
+}

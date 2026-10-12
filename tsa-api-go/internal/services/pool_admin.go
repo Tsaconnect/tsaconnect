@@ -92,9 +92,9 @@ func poolRefundSlices(slices []models.P2PTrade) (at []string, live []uuid.UUID) 
 	return at, live
 }
 
-// PayPoolSliceLP is F22's operator exit (P13): an LP self-released a slice of
-// an order that does not hold her naira; the operator pays the LP at the
-// snapshot rate. Proven release first; the F22 marker (CAS under the slice
+// PayPoolSliceLP is F22's operator exit (P13): an LP self-released a slice
+// that does not back an order holding her naira (poolF22Open, checked under
+// the locks in forwardSlice); the operator pays the LP at the snapshot rate. Proven release first; the F22 marker (CAS under the slice
 // row lock) and the forward's unique trade_id make a second call a refusal,
 // never a second payment.
 func (s *ITService) PayPoolSliceLP(ctx context.Context, adminID, sliceID uuid.UUID, note string) (*models.P2PSettlementForward, error) {
@@ -138,19 +138,19 @@ func (s *ITService) NotePoolSliceReturned(ctx context.Context, adminID, sliceID 
 		return ErrTradeNotFound
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// C1 lock order: the intent, then the slice. Re-review I-B: F22 is for
-		// an order that does not hold her naira — once it does (paid, parked,
-		// delivering, settled) the slice backs her delivery and is never "returned".
+		// C1 lock order: the intent, then the slice. Re-review I-B: a slice
+		// that still backs an order holding her naira (paid, parked,
+		// delivering, settled) backs her delivery and is never "returned".
 		var in models.ITIntent
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").First(&in, "id = ?", *pre.ITIntentID).Error; err != nil {
 			return err
 		}
-		if poolOrderHoldsMoney(in.Status) {
-			return fmt.Errorf("%w: the order is %s — its slices back her delivery; F22 \"returned\" is only for an unpaid or terminal order", ErrITBadState, in.Status)
-		}
 		var sl models.P2PTrade
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&sl, "id = ?", sliceID).Error; err != nil {
 			return ErrTradeNotFound
+		}
+		if !poolF22Open(in.Status, sl.DroppedAt) {
+			return fmt.Errorf("%w: the order is %s and this slice backs her delivery; F22 \"returned\" is only for a slice that no longer backs a paid order", ErrITBadState, in.Status)
 		}
 		if sl.Status != models.P2PTradeStatusReleased && sl.Status != models.P2PTradeStatusResolved {
 			return fmt.Errorf("%w: slice %s is %s — only USDT that left escrow can be handed back", ErrITBadState, sl.ID, sl.Status)
@@ -163,7 +163,7 @@ func (s *ITService) NotePoolSliceReturned(ctx context.Context, adminID, sliceID 
 			return fmt.Errorf("%w: the LP was already paid naira for this slice", ErrITBadState)
 		}
 		res := tx.Model(&models.P2PTrade{}).Where("id = ? AND COALESCE(cancel_reason, '') = ''", sl.ID).
-			Updates(map[string]any{"cancel_reason": poolF22Returned, "dropped_at": time.Now().UTC()})
+			Updates(map[string]any{"cancel_reason": poolF22Returned, "dropped_at": gorm.Expr("COALESCE(dropped_at, ?)", time.Now().UTC())})
 		if res.Error != nil {
 			return res.Error
 		}
@@ -242,6 +242,14 @@ func (s *ITService) RefundPoolBuyOverride(ctx context.Context, adminID, intentID
 	}
 	log.Printf("[liquidity] ALERT liquidity_pool_refund_override intent=%s admin=%s treasury_held_units=%s — company holds that USDT; sweep it", intentID, adminID, held)
 	return s.getIntent(ctx, intentID)
+}
+
+// poolF22Open: F22's operator exits (pay the LP, or record the USDT handed
+// back) apply to a slice that does not back an order holding her naira —
+// the order is unpaid or terminal, or the slice was dropped (review I-1, m-2).
+// A slice still backing a paid order is paid by the automatic forward only.
+func poolF22Open(orderStatus string, droppedAt *time.Time) bool {
+	return droppedAt != nil || !poolOrderHoldsMoney(orderStatus)
 }
 
 // poolOrderActions are the operator actions the server allows right now (P20).

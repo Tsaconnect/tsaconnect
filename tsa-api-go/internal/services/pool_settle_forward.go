@@ -102,6 +102,10 @@ func (s *ITService) forwardSlice(ctx context.Context, d *PoolDesk, sl *models.P2
 			return errPoolForwardRefused
 		case !operator && (cur.DroppedAt != nil || !poolOrderHoldsMoney(in.Status)):
 			return errPoolForwardRefused // F22 unpaid: alerted by the reconciler, decided by an operator
+		case operator && !poolF22Open(in.Status, cur.DroppedAt):
+			// Review m-2: a slice still backing a paid order is the automatic
+			// forward's (poolProven / CompletePoolBooks), never an operator's.
+			return fmt.Errorf("%w: the slice backs a paid order; its LP is paid automatically", errPoolForwardRefused)
 		case operator:
 			// Review I-5: F22's one durable marker, under this row lock — the
 			// LP is paid naira OR handed the USDT back (NotePoolSliceReturned

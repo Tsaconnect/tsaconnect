@@ -78,6 +78,9 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 		case sl.Status == models.P2PTradeStatusCancelled, sl.Status == models.P2PTradeStatusResolved:
 		case sl.CancelReason == poolF22Returned:
 			// Handed back to its LP by an operator: never at the treasury.
+		case sl.Status == models.P2PTradeStatusReleased && sl.DroppedAt != nil:
+			// Review I-1: dropped, then self-released by its LP — the LP's own
+			// USDT (F22's operator exit), never R.
 		default:
 			return nil, fmt.Errorf("%w: slice %s is still %s — re-deliver once every earlier slice is released or cancelled", ErrITBadState, sl.ID, sl.Status)
 		}

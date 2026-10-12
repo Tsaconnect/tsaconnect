@@ -608,8 +608,9 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 }
 
 // poolCustodyReceived sums VerifyTransfer over the releases of every slice of
-// the intent that is at the treasury (released, or disputed/resolved and not
-// dropped; never one an operator handed back to its LP — plan C2 P1) and
+// the intent that is at the treasury by sliceAtTreasury (released, disputed or
+// resolved, and still backing the order — never a dropped self-release or one
+// an operator handed back to its LP — plan C2 P1, review I-1) and
 // carries a real hash, each distinct hash once. reused names the first hash
 // any other record names (recordsNamingDelivery, a superset of
 // claimedFromDelivery's claims): one release can never back two records.
@@ -624,15 +625,19 @@ func (o *ConversionOrchestrator) poolCustodyReceived(ctx context.Context, order 
 	if err != nil {
 		return nil, "", fmt.Errorf("conversion: pool record %s has no intent reference: %w", order.ID, err)
 	}
-	var hashes []string
-	if err := o.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("it_intent_id = ? AND release_tx_hash NOT IN ? AND COALESCE(cancel_reason, '') <> ?"+
-			" AND (status IN ? OR (status IN ? AND dropped_at IS NULL))",
-			intentID, []string{"", "reconciled"}, poolF22Returned,
-			[]string{models.P2PTradeStatusReleased},
-			[]string{models.P2PTradeStatusResolved, models.P2PTradeStatusDisputed}).
-		Order("created_at").Pluck("release_tx_hash", &hashes).Error; err != nil {
+	var slices []models.P2PTrade
+	if err := o.db.WithContext(ctx).Where("it_intent_id = ? AND release_tx_hash NOT IN ? AND status IN ?",
+		intentID, []string{"", "reconciled"},
+		[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusResolved, models.P2PTradeStatusDisputed}).
+		Order("created_at").Find(&slices).Error; err != nil {
 		return nil, "", err
+	}
+	var hashes []string
+	for _, sl := range slices {
+		if sliceAtTreasury(sl.Status, sl.DroppedAt, sl.ReleaseTxHash, sl.CancelReason) &&
+			!strings.HasPrefix(sl.ReleaseTxHash, sliceResolveClaimPrefix) { // a resolve claim is not a transaction yet
+			hashes = append(hashes, sl.ReleaseTxHash)
+		}
 	}
 	if len(hashes) == 0 {
 		return nil, "", errors.New("conversion: no proven pool release yet")

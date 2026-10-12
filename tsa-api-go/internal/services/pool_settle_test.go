@@ -329,3 +329,56 @@ func usdt18Units(t *testing.T, canonical string) string {
 	}
 	return c.String()
 }
+
+// Review I-1 / F22: a slice the order dropped and its LP then self-released
+// is the LP's own USDT at the treasury — never R. A late payment the other
+// slice cannot cover parks (re-deliver / refund open); it never sits in
+// delivering short, and the LP's F22 exit is offered whatever the order holds.
+func TestPoolSlice_DroppedThenSelfReleasedIsNotR(t *testing.T) {
+	r := newPoolSettleRig(t, 60, 45)
+	intent, _, err := r.open(t, "100000") // A 60 + B 12.419593
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := r.slicesOf(t, intent.ID)[0]
+	id := HashID(a.ID)
+	r.chain.setTrade(id, OnChainP2PStatusReleased) // the LP self-released after the canceller dropped it
+	self := releaseHashOf(id)
+	r.chain.receipts[self] = r.chain.head
+	r.sender.receipts[self] = releaseReceipt(id, common.HexToAddress(poolTestTreasury), r.chain.trades[id].Amount, r.chain.head)
+	r.verifier.credited[strings.ToLower(self.Hex())] = r.chain.trades[id].Amount
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", a.ID).Updates(map[string]any{
+		"status": models.P2PTradeStatusReleased, "release_tx_hash": self.Hex(), "dropped_at": time.Now()})
+	if ok, err := lateClaim(t, r.poolOpenRig, intent, 99_000); !ok || err != nil { // live ≈ 71.69: B alone is short
+		t.Fatalf("late claim %v %v", ok, err)
+	}
+	_ = r.advance(t, intent.ID)
+	got := r.intent(t, intent.ID)
+	if got.Status != models.ITStatusBuyAwaitingRate || !strings.HasPrefix(got.FailureReason, models.ITFailurePoolSlicesShort) {
+		t.Fatalf("intent = %s %q, want parked %s (the dropped self-release is not hers)", got.Status, got.FailureReason, models.ITFailurePoolSlicesShort)
+	}
+	if acts := r.it.poolOrderActions(context.Background(), &got); !contains(acts, "refund") {
+		t.Fatalf("actions = %v, want refund open (no slice of hers is at the treasury)", acts)
+	}
+	detail, err := r.it.PoolOrderDetail(context.Background(), intent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range detail.Slices {
+		if v.ID == a.ID && !contains(v.SliceAction, "pay-lp") {
+			t.Fatalf("slice A actions = %v, want the F22 exit offered on a dropped self-release", v.SliceAction)
+		}
+	}
+	// Re-delivery treats A as the LP's (never "still released"): once B is
+	// terminal it is decided on owed = live − 0.
+	b := r.slicesOf(t, intent.ID)[1]
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", b.ID).Update("status", models.P2PTradeStatusCancelled)
+	r.it.SetTreasuryMarketRate(&fixedTreasuryRate{rate: poolMid})
+	if _, err := r.it.RedeliverPoolBuy(context.Background(), uuid.New(), intent.ID, "re-deliver"); errors.Is(err, ErrITBadState) {
+		t.Fatalf("redeliver = %v, want decided (A is not one of her slices)", err)
+	}
+	// F22's other exit is open too, though the order holds her naira.
+	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), a.ID, "0xreturn", "handed back"); err != nil {
+		t.Fatalf("returned = %v, want allowed on a dropped self-release", err)
+	}
+}
