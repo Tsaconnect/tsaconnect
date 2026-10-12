@@ -97,7 +97,7 @@ func poolRefundSlices(slices []models.P2PTrade) (at []string, live []uuid.UUID) 
 // the locks in forwardSlice); the operator pays the LP at the snapshot rate. Proven release first; the F22 marker (CAS under the slice
 // row lock) and the forward's unique trade_id make a second call a refusal,
 // never a second payment.
-func (s *ITService) PayPoolSliceLP(ctx context.Context, adminID, sliceID uuid.UUID, note string) (*models.P2PSettlementForward, error) {
+func (s *ITService) PayPoolSliceLP(ctx context.Context, adminID, intentID, sliceID uuid.UUID, note string) (*models.P2PSettlementForward, error) {
 	if note = strings.TrimSpace(note); note == "" {
 		return nil, ErrITOperatorNoteRequired
 	}
@@ -106,8 +106,8 @@ func (s *ITService) PayPoolSliceLP(ctx context.Context, adminID, sliceID uuid.UU
 		return nil, ErrPoolSettleUnwired
 	}
 	var sl models.P2PTrade
-	if err := s.db.WithContext(ctx).First(&sl, "id = ?", sliceID).Error; err != nil || !sl.IsPoolSlice() {
-		return nil, ErrTradeNotFound
+	if err := s.db.WithContext(ctx).First(&sl, "id = ? AND it_intent_id = ?", sliceID, intentID).Error; err != nil || !sl.IsPoolSlice() {
+		return nil, ErrTradeNotFound // review m-8: never a slice of another order
 	}
 	proven, err := d.proveSliceRelease(ctx, &sl, s.saleDepth())
 	if err != nil || !proven {
@@ -129,13 +129,13 @@ func (s *ITService) PayPoolSliceLP(ctx context.Context, adminID, sliceID uuid.UU
 // cancel_reason = pool_f22:returned and dropped_at — taken under the slice's
 // row lock. It refuses when any forward exists for the slice (automatic or
 // F22): an LP gets naira OR the USDT back, never both (review I-5).
-func (s *ITService) NotePoolSliceReturned(ctx context.Context, adminID, sliceID uuid.UUID, txHash, note string) error {
+func (s *ITService) NotePoolSliceReturned(ctx context.Context, adminID, intentID, sliceID uuid.UUID, txHash, note string) error {
 	if note = strings.TrimSpace(note); note == "" {
 		return ErrITOperatorNoteRequired
 	}
 	var pre models.P2PTrade
-	if err := s.db.WithContext(ctx).Select("id", "it_intent_id").First(&pre, "id = ?", sliceID).Error; err != nil || !pre.IsPoolSlice() {
-		return ErrTradeNotFound
+	if err := s.db.WithContext(ctx).Select("id", "it_intent_id").First(&pre, "id = ? AND it_intent_id = ?", sliceID, intentID).Error; err != nil || !pre.IsPoolSlice() {
+		return ErrTradeNotFound // review m-8: never a slice of another order
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// C1 lock order: the intent, then the slice. Re-review I-B: a slice

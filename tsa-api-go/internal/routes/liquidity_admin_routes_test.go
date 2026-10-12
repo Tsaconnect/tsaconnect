@@ -29,10 +29,10 @@ func (routesPoolAdmin) ResendPoolBuy(context.Context, uuid.UUID, uuid.UUID, stri
 func (routesPoolAdmin) RefundPoolBuyOverride(context.Context, uuid.UUID, uuid.UUID, string) (*models.ITIntent, error) {
 	return &models.ITIntent{}, nil
 }
-func (routesPoolAdmin) PayPoolSliceLP(context.Context, uuid.UUID, uuid.UUID, string) (*models.P2PSettlementForward, error) {
+func (routesPoolAdmin) PayPoolSliceLP(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (*models.P2PSettlementForward, error) {
 	return &models.P2PSettlementForward{}, nil
 }
-func (routesPoolAdmin) NotePoolSliceReturned(context.Context, uuid.UUID, uuid.UUID, string, string) error {
+func (routesPoolAdmin) NotePoolSliceReturned(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) error {
 	return nil
 }
 

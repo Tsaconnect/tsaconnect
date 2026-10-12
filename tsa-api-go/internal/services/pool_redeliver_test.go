@@ -118,7 +118,7 @@ func TestPoolSlice_F22OperatorPaysLPOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		_, _ = r.it.PayPoolSliceLP(context.Background(), uuid.New(), sl.ID, "paid at the snapshot rate per policy")
+		_, _ = r.it.PayPoolSliceLP(context.Background(), uuid.New(), *sl.ITIntentID, sl.ID, "paid at the snapshot rate per policy")
 	}
 	if len(gw.calls) != 1 || len(r.forwards(t)) != 1 {
 		t.Fatalf("calls=%d forwards=%d, want exactly one", len(gw.calls), len(r.forwards(t)))
@@ -138,10 +138,10 @@ func TestPoolSlice_F22ReturnedThenPayRefused(t *testing.T) {
 	if _, err := r.trades.ReconcileTrade(context.Background(), sl.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), sl.ID, "0xreturn", "sent back by hand"); err != nil {
+	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), *sl.ITIntentID, sl.ID, "0xreturn", "sent back by hand"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.it.PayPoolSliceLP(context.Background(), uuid.New(), sl.ID, "pay too?"); err == nil || len(gw.calls) != 0 {
+	if _, err := r.it.PayPoolSliceLP(context.Background(), uuid.New(), *sl.ITIntentID, sl.ID, "pay too?"); err == nil || len(gw.calls) != 0 {
 		t.Fatalf("pay after return = %v calls=%d, want refused", err, len(gw.calls))
 	}
 }
@@ -159,7 +159,7 @@ func TestPoolSlice_F22ReturnedThenLatePaymentHasAnExit(t *testing.T) {
 	sl := r.slicesOf(t, intent.ID)[0]
 	r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusReleased)
 	_, _ = r.trades.ReconcileTrade(context.Background(), sl.ID)
-	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), sl.ID, "0xreturn", "sent back"); err != nil {
+	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), *sl.ITIntentID, sl.ID, "0xreturn", "sent back"); err != nil {
 		t.Fatal(err)
 	}
 	// A late payment: nothing backs her order any more → parked short.
@@ -187,7 +187,7 @@ func TestPoolSlice_F22ReturnedRefusedWhileTheOrderHoldsMoney(t *testing.T) {
 	intent := r.openPaid(t, "5000")
 	_ = r.advance(t, intent.ID) // delivering
 	sl := r.slicesOf(t, intent.ID)[0]
-	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), sl.ID, "0xreturn", "note"); !errors.Is(err, ErrITBadState) {
+	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), *sl.ITIntentID, sl.ID, "0xreturn", "note"); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("returned on a delivering order = %v, want refused", err)
 	}
 }
@@ -209,7 +209,7 @@ func TestPoolSlice_F22ReturnedRefusedOnceTheLPWasForwarded(t *testing.T) {
 	if len(r.forwards(t)) != 1 || a.CancelReason != "" {
 		t.Fatalf("setup: forwards=%d cancel_reason=%q, want A forwarded with no F22 marker", len(r.forwards(t)), a.CancelReason)
 	}
-	err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), a.ID, "0xreturn", "sent back by hand")
+	err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), *a.ITIntentID, a.ID, "0xreturn", "sent back by hand")
 	if !errors.Is(err, ErrITBadState) {
 		t.Fatalf("returned after a forward = %v, want refused", err)
 	}
@@ -336,12 +336,46 @@ func TestPoolSlice_F22PayRefusedWhileTheSliceBacksAPaidOrder(t *testing.T) {
 	r.chain.receipts[h] = r.chain.head
 	r.sender.receipts[h] = releaseReceipt(id, common.HexToAddress(poolTestTreasury), r.chain.trades[id].Amount, r.chain.head)
 	r.verifier.credited[strings.ToLower(h.Hex())] = r.chain.trades[id].Amount
-	if _, err := r.it.PayPoolSliceLP(context.Background(), uuid.New(), sl.ID, "pay by hand"); !errors.Is(err, ErrITBadState) {
+	if _, err := r.it.PayPoolSliceLP(context.Background(), uuid.New(), *sl.ITIntentID, sl.ID, "pay by hand"); !errors.Is(err, ErrITBadState) {
 		t.Fatalf("pay-lp on a delivering order's slice = %v, want refused", err)
 	}
 	var cur models.P2PTrade
 	r.db.First(&cur, "id = ?", sl.ID)
 	if cur.CancelReason != "" || len(gw.calls) != 0 {
 		t.Fatalf("cancel_reason=%q calls=%d, want no F22 marker and no transfer", cur.CancelReason, len(gw.calls))
+	}
+}
+
+// Review m-8: a slice action names its order; a slice of another order (or
+// an order id that is not its own) is not found — never acted on.
+func TestPoolSlice_F22ActionsRefuseAnotherOrdersSlice(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, gw, _ := r.wireForwards(t)
+	intent, _, err := r.open(t, "5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl := r.slicesOf(t, intent.ID)[0]
+	id := HashID(sl.ID)
+	r.chain.setTrade(id, OnChainP2PStatusReleased)
+	self := releaseHashOf(id)
+	r.chain.receipts[self] = r.chain.head
+	r.sender.receipts[self] = releaseReceipt(id, common.HexToAddress(poolTestTreasury), r.chain.trades[id].Amount, r.chain.head)
+	r.verifier.credited[strings.ToLower(self.Hex())] = r.chain.trades[id].Amount
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("release_tx_hash", self.Hex())
+	if _, err := r.trades.ReconcileTrade(context.Background(), sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	other := uuid.New()
+	if _, err := r.it.PayPoolSliceLP(context.Background(), uuid.New(), other, sl.ID, "wrong order"); !errors.Is(err, ErrTradeNotFound) {
+		t.Fatalf("pay-lp under another order = %v, want not found", err)
+	}
+	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), other, sl.ID, "0xreturn", "wrong order"); !errors.Is(err, ErrTradeNotFound) {
+		t.Fatalf("returned under another order = %v, want not found", err)
+	}
+	var cur models.P2PTrade
+	r.db.First(&cur, "id = ?", sl.ID)
+	if len(gw.calls) != 0 || cur.CancelReason != "" {
+		t.Fatalf("calls=%d cancel_reason=%q, want nothing done", len(gw.calls), cur.CancelReason)
 	}
 }

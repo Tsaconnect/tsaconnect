@@ -23,8 +23,8 @@ type PoolOrdersAdmin interface {
 	RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
 	ResendPoolBuy(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
 	RefundPoolBuyOverride(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
-	PayPoolSliceLP(ctx context.Context, adminID, sliceID uuid.UUID, note string) (*models.P2PSettlementForward, error)
-	NotePoolSliceReturned(ctx context.Context, adminID, sliceID uuid.UUID, txHash, note string) error
+	PayPoolSliceLP(ctx context.Context, adminID, intentID, sliceID uuid.UUID, note string) (*models.P2PSettlementForward, error)
+	NotePoolSliceReturned(ctx context.Context, adminID, intentID, sliceID uuid.UUID, txHash, note string) error
 }
 
 // ForwardRechecker is the operator's "recheck by reference" on any settlement
@@ -120,7 +120,14 @@ func operatorNote(c *gin.Context) (*models.User, poolSliceActionBody, bool) {
 	return user, body, true
 }
 
-func (h *ITHandler) poolSliceAction(c *gin.Context, act func(ctx context.Context, adminID, sliceID uuid.UUID, body poolSliceActionBody) (any, error)) {
+// poolSliceAction runs a slice action for the order in the route: the
+// service refuses a slice of any other order (review m-8).
+func (h *ITHandler) poolSliceAction(c *gin.Context, act func(ctx context.Context, adminID, intentID, sliceID uuid.UUID, body poolSliceActionBody) (any, error)) {
+	intentID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
+		return
+	}
 	sliceID, err := uuid.Parse(strings.TrimSpace(c.Param("sliceId")))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid slice id")
@@ -130,7 +137,7 @@ func (h *ITHandler) poolSliceAction(c *gin.Context, act func(ctx context.Context
 	if !ok {
 		return
 	}
-	out, err := act(c.Request.Context(), user.ID, sliceID, body)
+	out, err := act(c.Request.Context(), user.ID, intentID, sliceID, body)
 	if err != nil {
 		poolAdminError(c, err)
 		return
@@ -140,15 +147,15 @@ func (h *ITHandler) poolSliceAction(c *gin.Context, act func(ctx context.Context
 
 // POST …/slices/:sliceId/pay-lp — F22: pay the LP at the snapshot rate.
 func (h *ITHandler) AdminPayPoolSliceLP(c *gin.Context) {
-	h.poolSliceAction(c, func(ctx context.Context, admin, id uuid.UUID, b poolSliceActionBody) (any, error) {
-		return h.poolAdmin.PayPoolSliceLP(ctx, admin, id, b.Note)
+	h.poolSliceAction(c, func(ctx context.Context, admin, intentID, id uuid.UUID, b poolSliceActionBody) (any, error) {
+		return h.poolAdmin.PayPoolSliceLP(ctx, admin, intentID, id, b.Note)
 	})
 }
 
 // POST …/slices/:sliceId/returned — F22: record a hand return of the USDT.
 func (h *ITHandler) AdminNotePoolSliceReturned(c *gin.Context) {
-	h.poolSliceAction(c, func(ctx context.Context, admin, id uuid.UUID, b poolSliceActionBody) (any, error) {
-		return nil, h.poolAdmin.NotePoolSliceReturned(ctx, admin, id, strings.TrimSpace(b.TxHash), b.Note)
+	h.poolSliceAction(c, func(ctx context.Context, admin, intentID, id uuid.UUID, b poolSliceActionBody) (any, error) {
+		return nil, h.poolAdmin.NotePoolSliceReturned(ctx, admin, intentID, id, strings.TrimSpace(b.TxHash), b.Note)
 	})
 }
 

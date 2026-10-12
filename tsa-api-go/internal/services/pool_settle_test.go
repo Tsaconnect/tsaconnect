@@ -378,7 +378,7 @@ func TestPoolSlice_DroppedThenSelfReleasedIsNotR(t *testing.T) {
 		t.Fatalf("redeliver = %v, want decided (A is not one of her slices)", err)
 	}
 	// F22's other exit is open too, though the order holds her naira.
-	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), a.ID, "0xreturn", "handed back"); err != nil {
+	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), *a.ITIntentID, a.ID, "0xreturn", "handed back"); err != nil {
 		t.Fatalf("returned = %v, want allowed on a dropped self-release", err)
 	}
 }

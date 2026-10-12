@@ -12,9 +12,10 @@ import (
 )
 
 type fakePoolAdmin struct {
-	err  error
-	last string
-	note string
+	err    error
+	last   string
+	note   string
+	intent uuid.UUID // the order id a slice action was given
 }
 
 func (f *fakePoolAdmin) PoolOrderDetail(context.Context, uuid.UUID) (*services.PoolOrderDetail, error) {
@@ -32,12 +33,12 @@ func (f *fakePoolAdmin) RefundPoolBuyOverride(_ context.Context, _, _ uuid.UUID,
 	f.last, f.note = "refund-override", n
 	return &models.ITIntent{ID: uuid.New()}, f.err
 }
-func (f *fakePoolAdmin) PayPoolSliceLP(_ context.Context, _, _ uuid.UUID, n string) (*models.P2PSettlementForward, error) {
-	f.last, f.note = "pay-lp", n
+func (f *fakePoolAdmin) PayPoolSliceLP(_ context.Context, _, intent, _ uuid.UUID, n string) (*models.P2PSettlementForward, error) {
+	f.last, f.note, f.intent = "pay-lp", n, intent
 	return &models.P2PSettlementForward{ID: uuid.New()}, f.err
 }
-func (f *fakePoolAdmin) NotePoolSliceReturned(_ context.Context, _, _ uuid.UUID, _, n string) error {
-	f.last, f.note = "returned", n
+func (f *fakePoolAdmin) NotePoolSliceReturned(_ context.Context, _, intent, _ uuid.UUID, _, n string) error {
+	f.last, f.note, f.intent = "returned", n, intent
 	return f.err
 }
 
@@ -111,5 +112,22 @@ func TestLiquidityAdmin_RefusalIsAConflict(t *testing.T) {
 		if w := walletDo(r, http.MethodPost, "/o/"+uuid.NewString()+"/slices/"+uuid.NewString()+"/pay-lp", map[string]string{"note": "n"}); w.Code != http.StatusConflict {
 			t.Fatalf("%v: pay-lp code = %d, want 409", e, w.Code)
 		}
+	}
+}
+
+// Review m-8: a slice action hands the service the order id in its route, so
+// the service can refuse a slice of another order.
+func TestLiquidityAdmin_SliceActionsPassTheRouteOrder(t *testing.T) {
+	f := &fakePoolAdmin{}
+	r := poolAdminServer(f)
+	id := uuid.New()
+	for _, act := range []string{"pay-lp", "returned"} {
+		f.intent = uuid.Nil
+		if w := walletDo(r, http.MethodPost, "/o/"+id.String()+"/slices/"+uuid.NewString()+"/"+act, map[string]string{"note": "n"}); w.Code != http.StatusOK || f.intent != id {
+			t.Fatalf("%s = %d intent=%s, want the route's order %s", act, w.Code, f.intent, id)
+		}
+	}
+	if w := walletDo(r, http.MethodPost, "/o/not-a-uuid/slices/"+uuid.NewString()+"/pay-lp", map[string]string{"note": "n"}); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad order id = %d, want 400", w.Code)
 	}
 }

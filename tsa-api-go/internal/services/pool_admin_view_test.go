@@ -72,7 +72,7 @@ func TestPoolOrderDetail_SelfReleasedSliceOffersF22UntilTaken(t *testing.T) {
 	if got := d.Slices[0].SliceAction; len(got) != 2 || got[0] != "pay-lp" || got[1] != "returned" {
 		t.Fatalf("slice actions = %v, want [pay-lp returned]", got)
 	}
-	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), sl.ID, "0xreturn", "sent back by hand"); err != nil {
+	if err := r.it.NotePoolSliceReturned(context.Background(), uuid.New(), *sl.ITIntentID, sl.ID, "0xreturn", "sent back by hand"); err != nil {
 		t.Fatal(err)
 	}
 	d, err = r.it.PoolOrderDetail(context.Background(), intent.ID)
