@@ -44,6 +44,12 @@ type ITHandler struct {
 	// §13 Q6). Nil: the routes are not registered.
 	cwAdmin  CompanyWalletAdmin
 	cwLowUSD float64
+	// poolAdmin serves the TSA Liquidity pool-order console (plan C2 §15).
+	// Nil: the routes are not registered.
+	poolAdmin PoolOrdersAdmin
+	// fwdRecheck re-asks the provider about any settlement forward. Nil: the
+	// recheck route is not registered.
+	fwdRecheck ForwardRechecker
 }
 
 // PaymentChecker is the narrow seam over jobs.InboundCreditPoller that
