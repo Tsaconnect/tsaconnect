@@ -18,6 +18,10 @@ import (
 // package variables.
 var topicTradeReleased = crypto.Keccak256Hash([]byte("TradeReleased(bytes32,address,uint256,uint256)"))
 
+// topicTradeResolved is P2PEscrowV3's TradeResolved(bytes32 indexed tradeId,
+// bool releasedToBuyer, uint256, uint256) (P2PEscrowV3.sol:219).
+var topicTradeResolved = crypto.Keccak256Hash([]byte("TradeResolved(bytes32,bool,uint256,uint256)"))
+
 // proveSliceRelease is §12.4.3 (plan C2 P3): the slice's USDT reached the
 // conversion treasury, proven on its own receipt need blocks deep and on one
 // RPC endpoint — never by a balance (R3: the lane holds other orders' money).
@@ -35,16 +39,24 @@ func (d *PoolDesk) proveSliceRelease(ctx context.Context, sl *models.P2PTrade, n
 	}
 	hash := sl.ReleaseTxHash
 	if !d.hashMovesSlice(ctx, sl, hash, t.Status) {
-		if t.Status != OnChainP2PStatusReleased {
-			return false, nil // a resolve we did not send: reconcileSliceResolved alerts it
+		var found string
+		if t.Status == OnChainP2PStatusReleased {
+			found, err = d.findReleaseTx(ctx, sl)
+		} else {
+			// Review I-3: F21's resolve whose hash never replaced its claim
+			// (a crash, or the 3 s write failed) is found the same way.
+			var ev *P2PTradeResolvedEvent
+			if found, ev, err = d.findSliceResolve(ctx, sl); ev != nil && !ev.ReleasedToBuyer {
+				return false, nil // resolved back to its LP: never at the treasury
+			}
 		}
-		found, err := d.findReleaseTx(ctx, sl)
 		if err != nil || found == "" {
 			return false, err
 		}
-		// The chain says Released and its own log names the transaction: the
-		// recorded value (none, "reconciled", or an attempt that did not
-		// release it) is replaced only if no one changed it meanwhile.
+		// The chain says Released (or Resolved to the treasury) and its own log
+		// names the transaction: the recorded value (none, "reconciled", a
+		// resolve claim, or an attempt that did not move it) is replaced only
+		// if no one changed it meanwhile.
 		res := d.c.DB.WithContext(ctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", sl.ID, sl.ReleaseTxHash).
 			Update("release_tx_hash", found)
 		if res.Error != nil || res.RowsAffected != 1 {
@@ -90,10 +102,34 @@ func (d *PoolDesk) hashMovesSlice(ctx context.Context, sl *models.P2PTrade, hash
 }
 
 // findReleaseTx finds a slice's release transaction from the escrow's
-// TradeReleased(tradeId) log, scanned in LogChunk windows from the open's
-// block (an LP self-release, F22, or a release whose recorded attempt was
-// superseded). "" means not found — never a proof.
+// TradeReleased(tradeId) log (an LP self-release, F22, or a release whose
+// recorded attempt was superseded). "" means not found — never a proof.
 func (d *PoolDesk) findReleaseTx(ctx context.Context, sl *models.P2PTrade) (string, error) {
+	return d.findSliceTx(ctx, sl, topicTradeReleased)
+}
+
+// findSliceResolve finds F21's resolve of a slice from the escrow's
+// TradeResolved(tradeId) log and reads its direction from that receipt
+// (review I-3). "" means not found.
+func (d *PoolDesk) findSliceResolve(ctx context.Context, sl *models.P2PTrade) (string, *P2PTradeResolvedEvent, error) {
+	h, err := d.findSliceTx(ctx, sl, topicTradeResolved)
+	if err != nil || h == "" {
+		return "", nil, err
+	}
+	r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(h))
+	if err != nil || r == nil || r.Status != types.ReceiptStatusSuccessful {
+		return "", nil, err
+	}
+	ev, err := parseTradeResolvedFromReceipt(r, common.HexToAddress(d.c.EscrowAddr), HashID(sl.ID))
+	if err != nil {
+		return "", nil, err
+	}
+	return h, ev, nil
+}
+
+// findSliceTx finds the last un-removed escrow log with topic for the slice's
+// trade id, scanned in LogChunk windows from the open's block.
+func (d *PoolDesk) findSliceTx(ctx context.Context, sl *models.P2PTrade, topic common.Hash) (string, error) {
 	if sl.OpenTxHash == "" {
 		return "", nil
 	}
@@ -107,7 +143,7 @@ func (d *PoolDesk) findReleaseTx(ctx context.Context, sl *models.P2PTrade) (stri
 	}
 	id := HashID(sl.ID)
 	q := ethereum.FilterQuery{Addresses: []common.Address{common.HexToAddress(d.c.EscrowAddr)},
-		Topics: [][]common.Hash{{topicTradeReleased}, {common.BytesToHash(id[:])}}}
+		Topics: [][]common.Hash{{topic}, {common.BytesToHash(id[:])}}}
 	sc := newLogScanner(d.c.LogChunk)
 	found := ""
 	err = sc.scanLogs(ctx, d.c.Probe, q, r.BlockNumber.Uint64(), head, saleScanCallTimeout, func(logs []types.Log, _ uint64) error {

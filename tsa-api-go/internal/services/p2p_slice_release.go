@@ -35,6 +35,16 @@ func sliceReconciledHash(t *models.P2PTrade) string {
 	return "reconciled"
 }
 
+// sliceResolveClaimAbandoned (review I-3): the only proof that clears a
+// resolve claim no hash ever replaced.
+func (s *P2PTradeService) sliceResolveClaimAbandoned(ctx context.Context, t *models.P2PTrade) bool {
+	if s.poolSlices == nil || !strings.HasPrefix(t.ReleaseTxHash, sliceResolveClaimPrefix) {
+		return false
+	}
+	gone, err := s.poolSlices.SliceResolveClaimAbandoned(ctx, t)
+	return err == nil && gone
+}
+
 // sliceHashProvenReverted (re-review I-A/I-C): the only proof that clears a
 // slice's recorded hash. "" and a resolve claim are never reverted.
 func (s *P2PTradeService) sliceHashProvenReverted(ctx context.Context, t *models.P2PTrade) bool {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -348,5 +349,122 @@ func TestReconcileOrphanOpen_UnresolvedPastAnHourAlerts(t *testing.T) {
 	r.trades.ReconcileTrade(context.Background(), old.ID)
 	if n := strings.Count(buf.String(), "ALERT liquidity_pool_slice_open_unresolved slice="+old.ID.String()); n != 1 {
 		t.Fatalf("alerted %d times within the hour, want 1", n)
+	}
+}
+
+// resolveReceipt is a mined adminResolve's receipt: TradeResolved(tradeId,
+// toBuyer, amount, 0) from the pool escrow.
+func resolveReceipt(id [32]byte, toBuyer bool, amount *big.Int, block uint64) *types.Receipt {
+	flag := make([]byte, 32)
+	if toBuyer {
+		flag[31] = 1
+	}
+	data := append(append(flag, common.LeftPadBytes(amount.Bytes(), 32)...), make([]byte, 32)...)
+	return &types.Receipt{Status: types.ReceiptStatusSuccessful, BlockNumber: new(big.Int).SetUint64(block),
+		Logs: []*types.Log{{Address: common.HexToAddress(poolTestEscrow), Data: data,
+			Topics: []common.Hash{topicTradeResolved, common.BytesToHash(id[:])}}}}
+}
+
+// disputedPaidSlice pays a one-slice order and leaves its slice disputed in
+// the DB with F21's resolve claim recorded, claimed `age` ago — the state a
+// crash between the claim and the hash write leaves behind.
+func disputedPaidSlice(t *testing.T, r *poolSettleRig, age time.Duration) (*models.ITIntent, models.P2PTrade) {
+	t.Helper()
+	intent := r.openPaid(t, "5000")
+	sl := r.slicesOf(t, intent.ID)[0]
+	claim := sliceResolveClaimPrefix + strconv.FormatInt(time.Now().Add(-age).Unix(), 10)
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Updates(map[string]any{
+		"status": models.P2PTradeStatusDisputed, "release_tx_hash": claim})
+	r.db.First(&sl, "id = ?", sl.ID)
+	return intent, sl
+}
+
+// Review I-3 (crash after the broadcast): the resolve landed to the treasury
+// but its hash never replaced the claim. The escrow's TradeResolved log names
+// it: the reconciler records it and settles the slice, and the order delivers.
+func TestPoolSlice_LostResolveHashIsFoundByTheLogScan(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	intent, sl := disputedPaidSlice(t, r, time.Minute)
+	id := HashID(sl.ID)
+	r.chain.setTrade(id, OnChainP2PStatusResolved)
+	h := common.HexToHash("0x" + strings.Repeat("3d", 32))
+	r.chain.receipts[h] = r.chain.head
+	r.sender.receipts[h] = resolveReceipt(id, true, r.chain.trades[id].Amount, r.chain.head)
+	r.verifier.credited[strings.ToLower(h.Hex())] = r.chain.trades[id].Amount
+	r.desk.c.Probe = &logProbe{TreasuryTxProbe: r.desk.c.Probe, logs: []types.Log{{BlockNumber: r.chain.head, TxHash: h,
+		Address: common.HexToAddress(poolTestEscrow), Topics: []common.Hash{topicTradeResolved, common.BytesToHash(id[:])}}}}
+	if _, err := r.trades.ReconcileTrade(context.Background(), sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", sl.ID)
+	if got.Status != models.P2PTradeStatusResolved || !strings.EqualFold(got.ReleaseTxHash, h.Hex()) {
+		t.Fatalf("slice = %s %q, want resolved on the logged resolve", got.Status, got.ReleaseTxHash)
+	}
+	_ = r.advance(t, intent.ID)
+	if len(r.legs(t, intent.ID)) != 1 || len(r.chain.resolves) != 0 {
+		t.Fatalf("legs=%d resolves=%d, want delivered and no second resolve", len(r.legs(t, intent.ID)), len(r.chain.resolves))
+	}
+}
+
+// Review I-3: the settle proof finds the lost resolve by itself too, before
+// the reconciler has run.
+func TestPoolSlice_ProofFindsALostResolve(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	intent, sl := disputedPaidSlice(t, r, time.Minute)
+	id := HashID(sl.ID)
+	r.chain.setTrade(id, OnChainP2PStatusResolved)
+	h := common.HexToHash("0x" + strings.Repeat("3e", 32))
+	r.chain.receipts[h] = r.chain.head
+	r.sender.receipts[h] = resolveReceipt(id, true, r.chain.trades[id].Amount, r.chain.head)
+	r.verifier.credited[strings.ToLower(h.Hex())] = r.chain.trades[id].Amount
+	r.desk.c.Probe = &logProbe{TreasuryTxProbe: r.desk.c.Probe, logs: []types.Log{{BlockNumber: r.chain.head, TxHash: h,
+		Address: common.HexToAddress(poolTestEscrow), Topics: []common.Hash{topicTradeResolved, common.BytesToHash(id[:])}}}}
+	_ = r.advance(t, intent.ID)
+	if len(r.legs(t, intent.ID)) != 1 {
+		t.Fatal("the logged resolve to the treasury is a proof: want delivered")
+	}
+}
+
+// Review I-3 (crash between the claim and Send): no resolve landed and none is
+// in flight. A young claim, or one while the release key has a transaction
+// pending, is never cleared; an old one is, and the reconciler resolves again.
+func TestPoolSlice_AbandonedResolveClaimIsCleared(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, sl := disputedPaidSlice(t, r, time.Minute)
+	r.chain.setTrade(HashID(sl.ID), OnChainP2PStatusDisputed)
+	r.chain.latest = r.chain.nextNonce // the release key is idle
+	ctx := context.Background()
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil || len(r.chain.resolves) != 0 {
+		t.Fatalf("young claim: err=%v resolves=%d, want left alone", err, len(r.chain.resolves))
+	}
+	old := sliceResolveClaimPrefix + strconv.FormatInt(time.Now().Add(-31*time.Minute).Unix(), 10)
+	r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("release_tx_hash", old)
+	r.chain.latest = r.chain.nextNonce - 1 // something of the release key's is pending
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil || len(r.chain.resolves) != 0 {
+		t.Fatalf("pending tx: err=%v resolves=%d, want left alone", err, len(r.chain.resolves))
+	}
+	r.chain.latest = r.chain.nextNonce
+	if _, err := r.trades.ReconcileTrade(ctx, sl.ID); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	r.db.First(&got, "id = ?", sl.ID)
+	if len(r.chain.resolves) != 1 || !r.chain.resolves[0] || got.ReleaseTxHash == old {
+		t.Fatalf("resolves=%v hash=%q, want the claim cleared and one resolve to the treasury", r.chain.resolves, got.ReleaseTxHash)
+	}
+}
+
+// Review I-3: a logged resolve is never treated as abandoned, however old.
+func TestPoolSlice_ResolveClaimNeverClearedWhenAResolveIsLogged(t *testing.T) {
+	r := newPoolSettleRig(t, 50)
+	_, sl := disputedPaidSlice(t, r, 31*time.Minute)
+	id := HashID(sl.ID)
+	r.chain.setTrade(id, OnChainP2PStatusDisputed)
+	r.chain.latest = r.chain.nextNonce
+	r.desk.c.Probe = &logProbe{TreasuryTxProbe: r.desk.c.Probe, logs: []types.Log{{BlockNumber: r.chain.head, TxHash: common.HexToHash("0x01"),
+		Address: common.HexToAddress(poolTestEscrow), Topics: []common.Hash{topicTradeResolved, common.BytesToHash(id[:])}}}}
+	if gone, err := r.it.SliceResolveClaimAbandoned(context.Background(), &sl); gone || err != nil {
+		t.Fatalf("abandoned=%v err=%v, want kept while a resolve is logged", gone, err)
 	}
 }
