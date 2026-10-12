@@ -31,6 +31,10 @@ var (
 	ErrInsufficientRemaining = errors.New("p2p: trade amount exceeds ad remaining")
 	ErrSelfTrade             = errors.New("p2p: seller cannot open a trade on their own ad")
 	ErrInvalidTransition     = errors.New("p2p: invalid state transition")
+	// ErrSliceReleaseInFlight: a pool slice's release was already sent (or is
+	// being sent by another caller); AutoRelease refuses to send it again and
+	// the reconciler decides it from the recorded hash.
+	ErrSliceReleaseInFlight  = errors.New("p2p: pool slice release already in flight")
 	ErrForbidden             = errors.New("p2p: not authorized for this action")
 	ErrRateStale             = errors.New("p2p: rate source is stale; cannot quote")
 	ErrAmountOverflow        = errors.New("p2p: amount exceeds uint96 maximum supported by contract")
@@ -1919,15 +1923,17 @@ func (s *P2PTradeService) confirmReleaseCore(ctx context.Context, trade *models.
 		"amountToBuyer": ev.AmountToBuyer.String(),
 		"feeToSystem":   ev.FeeToSystem.String(),
 	})
-	s.emit(events.P2PTradeReleased, trade.SellerID, actorOf(auditActor), "Trade released", "", map[string]any{"tradeId": trade.ID})
-	if trade.Funding == models.P2PTradeFundingDepositedByTaker {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "Crypto received in your wallet", "", map[string]any{"tradeId": trade.ID})
-		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to merchant; %s in platform fee.",
-			ev.AmountToBuyer, ev.FeeToSystem))
-	} else {
-		s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "USDT received in your wallet", "", map[string]any{"tradeId": trade.ID})
-		s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to buyer; %s in platform fee.",
-			ev.AmountToBuyer, ev.FeeToSystem))
+	if !trade.IsPoolSlice() { // an LP sees pool events (plan C2 Task 8), never a P2P trade push
+		s.emit(events.P2PTradeReleased, trade.SellerID, actorOf(auditActor), "Trade released", "", map[string]any{"tradeId": trade.ID})
+		if trade.Funding == models.P2PTradeFundingDepositedByTaker {
+			s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "Crypto received in your wallet", "", map[string]any{"tradeId": trade.ID})
+			s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to merchant; %s in platform fee.",
+				ev.AmountToBuyer, ev.FeeToSystem))
+		} else {
+			s.emit(events.P2PTradeReleased, trade.BuyerID, actorOf(auditActor), "USDT received in your wallet", "", map[string]any{"tradeId": trade.ID})
+			s.systemMsg(ctx, trade.ID, fmt.Sprintf("Trade released. %s base units sent to buyer; %s in platform fee.",
+				ev.AmountToBuyer, ev.FeeToSystem))
+		}
 	}
 	return trade, nil
 }
@@ -1993,6 +1999,13 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 		trade.Status != models.P2PTradeStatusReleasing {
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
+	// A pool slice is sent at most once per release: only the caller whose
+	// flip to releasing won (on a slice with no recorded hash) may broadcast.
+	// A slice already releasing, or carrying a hash, has a release in flight
+	// that only the reconciler decides — never a second Send.
+	if trade.IsPoolSlice() && (trade.Status == models.P2PTradeStatusReleasing || trade.ReleaseTxHash != "") {
+		return nil, fmt.Errorf("%w: slice=%s status=%s tx=%q", ErrSliceReleaseInFlight, trade.ID, trade.Status, trade.ReleaseTxHash)
+	}
 	escrow, _, _, err := s.resolve(trade.ChainID)
 	if err != nil {
 		return nil, err
@@ -2002,14 +2015,20 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	if trade.Status != models.P2PTradeStatusReleasing {
 		// A pending_payment trade the expiry canceller has decided
 		// (dropped_at, plan C1 P15) is never released by the system.
-		res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+		q := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 			Where("id = ? AND (status = ? OR (status = ? AND dropped_at IS NULL))", trade.ID,
-				models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment).
-			Updates(map[string]any{"status": models.P2PTradeStatusReleasing, "updated_at": s.clock.Now()})
+				models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment)
+		if trade.IsPoolSlice() {
+			q = q.Where("release_tx_hash = ''") // the CAS that makes this caller the only sender
+		}
+		res := q.Updates(map[string]any{"status": models.P2PTradeStatusReleasing, "updated_at": s.clock.Now()})
 		if res.Error != nil {
 			return nil, res.Error
 		}
 		if res.RowsAffected == 0 {
+			if trade.IsPoolSlice() {
+				return nil, fmt.Errorf("%w: slice=%s lost the release flip", ErrSliceReleaseInFlight, trade.ID)
+			}
 			return nil, ErrInvalidTransition
 		}
 	}
@@ -2040,13 +2059,26 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	txHash, err := signer.Send(ctx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
 	})
+	if trade.IsPoolSlice() {
+		recorded := txHash
+		if recorded == "" {
+			recorded = uncertainTxHash(err) // re-review I-C: an uncertain broadcast carries its hash in the error
+		}
+		s.recordSliceReleaseHash(ctx, trade.ID, recorded) // plan C2 P2: before anything can fail
+	}
 	if err != nil {
-		rollback()
+		// Review C-1: a slice whose release may have been broadcast stays
+		// `releasing` (at the treasury) until its hash is proven reverted.
+		if !trade.IsPoolSlice() || errors.Is(err, ErrTxNotBroadcast) {
+			rollback()
+		}
 		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
 	}
 	ev, err := escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
 	if err != nil {
-		rollback()
+		if !trade.IsPoolSlice() {
+			rollback()
+		}
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
 	return s.confirmReleaseCore(ctx, &trade, txHash, nil, ev)
@@ -2682,6 +2714,29 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 		}
 		return ReconcileResult{}, nil
 	case OnChainP2PStatusPending:
+		if trade.IsPoolSlice() && s.clock.Now().Sub(trade.UpdatedAt) > releasingStaleAfter &&
+			(trade.Status == models.P2PTradeStatusReleasing || (trade.ReleaseTxHash != "" &&
+				(trade.Status == models.P2PTradeStatusPendingPayment || trade.Status == models.P2PTradeStatusPaid))) {
+			if !s.sliceHashProvenReverted(ctx, &trade) {
+				// Review C-1 / re-review I-C: still possibly at the treasury.
+				if trade.ReleaseTxHash == "" {
+					s.noteSliceUnresolved(ctx, &trade, "liquidity_pool_release_unrecorded")
+				}
+				s.rotateSlice(ctx, &trade)
+				return ReconcileResult{}, nil
+			}
+			// Proven reverted (re-review m-3 covers pending/paid with a hash too):
+			// back to paid with the hash cleared — guarded on that exact hash.
+			res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+				Where("id = ? AND release_tx_hash = ? AND status IN ?", trade.ID, trade.ReleaseTxHash,
+					[]string{models.P2PTradeStatusReleasing, models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+				Updates(map[string]any{"status": models.P2PTradeStatusPaid, "release_tx_hash": "", "updated_at": s.clock.Now()})
+			if res.Error != nil {
+				return ReconcileResult{}, res.Error
+			}
+			return ReconcileResult{Changed: res.RowsAffected > 0, FromStatus: trade.Status, ToStatus: models.P2PTradeStatusPaid,
+				Reason: "pool slice release proven reverted"}, nil
+		}
 		// Release tx lost — DB stuck in `releasing` for too long. Revert
 		// to `paid` so the seller can retry. We assume the prepared-but-
 		// never-broadcast window is bounded by the user's session; older
@@ -2746,7 +2801,7 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 				}).
 			Updates(map[string]any{
 				"status":          models.P2PTradeStatusReleased,
-				"release_tx_hash": "reconciled",
+				"release_tx_hash": sliceReconciledHash(trade),
 				"released_at":     now,
 				"updated_at":      now,
 			})
