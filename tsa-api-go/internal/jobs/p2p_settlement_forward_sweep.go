@@ -16,6 +16,11 @@ type SettlementForwardSweeper interface {
 	// SweepUnconfirmed alerts on forwards submitted to the payout provider that
 	// were never answered, and returns how many it newly alerted on.
 	SweepUnconfirmed(ctx context.Context) (int, error)
+
+	// RecordSettledFees reads the provider's fee for recently settled
+	// forwards — here, off the disburse webhook's path — and returns how many
+	// it recorded. It moves no money.
+	RecordSettledFees(ctx context.Context) (int, error)
 }
 
 // P2PForwardSweepJob makes the silences audible, and re-drives the forwards
@@ -80,6 +85,13 @@ func (j *P2PForwardSweepJob) Run(ctx context.Context) error {
 		log.Printf("[p2p-forward-sweep] %v", sweepErr)
 	} else if stale > 0 {
 		log.Printf("[p2p-forward-sweep] alerted on %d unanswered settlement forward(s)", stale)
+	}
+
+	// The fee read is bookkeeping: its failure never fails the tick.
+	if n, err := j.sweeper.RecordSettledFees(ctx); err != nil {
+		log.Printf("[p2p-forward-sweep] fees: %v", err)
+	} else if n > 0 {
+		log.Printf("[p2p-forward-sweep] recorded the fee of %d settled forward(s)", n)
 	}
 
 	if redriveErr != nil {

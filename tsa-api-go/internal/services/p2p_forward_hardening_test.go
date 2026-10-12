@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +68,11 @@ func TestForwarder_TimeoutKeepsPendingNeverFailed(t *testing.T) {
 	f := r.startTimedOut(t, "999100000002")
 	if f.Status != models.P2PForwardPending || f.StartedAt == nil || f.NeedsAttention() || !ngnEqual(r.availableNGN(t), "1500.00") {
 		t.Fatalf("forward = %s started=%v, want pending, started, credited", f.Status, f.StartedAt)
+	}
+	// Merchant impact (review residual 2): the operator queue shows the stored
+	// reason, so the warning lives there, not only in the log line.
+	if !strings.Contains(f.FailureReason, "may have paid — never pay by hand") {
+		t.Fatalf("stored reason = %q, want the never-pay-by-hand warning", f.FailureReason)
 	}
 }
 
@@ -291,5 +297,31 @@ func TestTransferFee_DecodesExactly(t *testing.T) {
 	}
 	if _, err := decodeFWTransferFeeKobo(json.RawMessage(`"-1.00"`)); err == nil {
 		t.Fatal("a negative fee must be an error")
+	}
+}
+
+// Merchant impact (review residual 3): the disburse webhook's Confirm makes
+// no provider call for the fee — the sweep reads it on its own cadence, once.
+func TestForwarder_FeeIsReadByTheSweepNotTheWebhook(t *testing.T) {
+	r := newForwardRig(t, "1500.00")
+	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999100000013", "1500.00")); err != nil {
+		t.Fatal(err)
+	}
+	fees := &fakeFeeReader{kobo: big.NewInt(1075)}
+	r.fwd.SetFeeReader(fees)
+	f := r.forward(t)
+	if err := r.fwd.Confirm(context.Background(), f.Reference, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if fees.calls != 0 {
+		t.Fatalf("fee reads on the webhook = %d, want 0", fees.calls)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := r.fwd.RecordSettledFees(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := r.forward(t); got.FeeKobo == nil || *got.FeeKobo != "1075" || fees.calls != 1 {
+		t.Fatalf("fee=%v calls=%d, want 1075 read once by the sweep", got.FeeKobo, fees.calls)
 	}
 }

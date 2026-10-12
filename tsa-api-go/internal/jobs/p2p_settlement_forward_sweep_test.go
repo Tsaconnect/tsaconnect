@@ -13,8 +13,11 @@ type fakeForwardSweeper struct {
 	swept      int
 	sweepErr   error
 
+	feeErr error
+
 	redriveCalls int
 	sweepCalls   int
+	feeCalls     int
 }
 
 func (f *fakeForwardSweeper) RedrivePending(context.Context) (int, error) {
@@ -25,6 +28,11 @@ func (f *fakeForwardSweeper) RedrivePending(context.Context) (int, error) {
 func (f *fakeForwardSweeper) SweepUnconfirmed(context.Context) (int, error) {
 	f.sweepCalls++
 	return f.swept, f.sweepErr
+}
+
+func (f *fakeForwardSweeper) RecordSettledFees(context.Context) (int, error) {
+	f.feeCalls++
+	return 0, f.feeErr
 }
 
 // The job's original tick only alerted on `submitted` forwards. A forward held
@@ -53,5 +61,17 @@ func TestP2PForwardSweepJob_StaleAlertingSurvivesARedriveFailure(t *testing.T) {
 	}
 	if f.sweepCalls != 1 {
 		t.Fatalf("SweepUnconfirmed called %d times, want 1 — a re-drive failure silenced the staleness alert", f.sweepCalls)
+	}
+}
+
+// The fee read rides the sweep's cadence (off the disburse webhook); its
+// failure never fails the tick.
+func TestP2PForwardSweepJob_RecordsFeesWithoutFailingTheTick(t *testing.T) {
+	f := &fakeForwardSweeper{feeErr: errors.New("provider 503")}
+	if err := NewP2PForwardSweepJob(f).Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v, want nil (a fee read is bookkeeping)", err)
+	}
+	if f.feeCalls != 1 {
+		t.Fatalf("RecordSettledFees called %d times, want 1", f.feeCalls)
 	}
 }

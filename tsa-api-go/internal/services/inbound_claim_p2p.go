@@ -907,7 +907,7 @@ func (f *P2PSettlementForwarder) noteLookupFailed(ctx context.Context, fwd *mode
 	msg := RedactAlertText(cause.Error())
 	if err := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
 		Where("id = ? AND status = ?", fwd.ID, models.P2PForwardPending).
-		Update("failure_reason", truncateReason("outcome unknown (lookup): "+msg)).Error; err != nil {
+		Update("failure_reason", truncateReason(p2pForwardUnknownWarning+" (lookup): "+msg)).Error; err != nil {
 		log.Printf("[p2p forward] forward=%s could not record lookup outcome: %s", fwd.ID, RedactAlertText(err.Error()))
 	}
 	log.Printf("[p2p forward] ALERT p2p_forward_outcome_unknown forward=%s trade=%s lookup=%s — may have paid: never pay by hand",
@@ -934,10 +934,15 @@ func (f *P2PSettlementForwarder) Recheck(ctx context.Context, id uuid.UUID) erro
 	return f.reask(ctx, &fwd, fwd.Attempts < p2pForwardMaxAttempts)
 }
 
+// p2pForwardUnknownWarning leads the stored reason of a started forward whose
+// outcome is unknown: the operator queue shows it, so the warning lives on the
+// row, not only in a log line (merchant-impact residual 2).
+const p2pForwardUnknownWarning = "outcome unknown — may have paid — never pay by hand"
+
 // noteOutcomeUnknown records an ambiguous outcome on a started row: counted
 // (the ceiling stops the re-POST, never fails it) and alerted.
 func (f *P2PSettlementForwarder) noteOutcomeUnknown(ctx context.Context, fwd *models.P2PSettlementForward, cause error) {
-	reason := "outcome unknown: " + RedactAlertText(cause.Error())
+	reason := p2pForwardUnknownWarning + ": " + RedactAlertText(cause.Error())
 	attempts, _, err := f.countAttempt(ctx, fwd, reason)
 	if err != nil {
 		log.Printf("[p2p forward] forward=%s could not count the attempt: %s", fwd.ID, RedactAlertText(err.Error()))
@@ -1079,12 +1084,10 @@ func (f *P2PSettlementForwarder) ConfirmPayout(ctx context.Context, reference, p
 	return nil
 }
 
-// afterSettled records the fee and runs the settled hook. Neither can undo
-// the settlement; a fee that cannot be read yet is read on a later call.
+// afterSettled runs the settled hook; it cannot undo the settlement. The
+// fee is read later by RecordSettledFees on the sweep's cadence, never here
+// on the disburse webhook's path.
 func (f *P2PSettlementForwarder) afterSettled(ctx context.Context, id uuid.UUID) {
-	if err := f.RecordFee(ctx, id); err != nil {
-		log.Printf("[p2p forward] forward=%s fee not read yet: %s", id, RedactAlertText(err.Error()))
-	}
 	if f.onSettled != nil {
 		var fwd models.P2PSettlementForward
 		if f.db.WithContext(ctx).First(&fwd, "id = ?", id).Error == nil && fwd.Status == models.P2PForwardSettled {
@@ -1111,6 +1114,36 @@ func (f *P2PSettlementForwarder) RecordFee(ctx context.Context, id uuid.UUID) er
 	}
 	return f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
 		Where("id = ? AND fee_kobo IS NULL", id).Update("fee_kobo", fee.String()).Error
+}
+
+// p2pForwardFeeWindow bounds the fee pass: a settled forward's fee is read
+// for a day after it settled, then left to the operator (pool books alert an
+// unread LP fee themselves).
+const p2pForwardFeeWindow = 24 * time.Hour
+
+// RecordSettledFees reads the provider's fee for recently settled forwards
+// that have none yet (S47), on the sweep's cadence — never on the disburse
+// webhook's path (merchant-impact residual 3). It moves no money.
+func (f *P2PSettlementForwarder) RecordSettledFees(ctx context.Context) (int, error) {
+	if f.fees == nil {
+		return 0, nil
+	}
+	var ids []uuid.UUID
+	if err := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
+		Where("status = ? AND fee_kobo IS NULL AND COALESCE(payout_id, '') <> '' AND settled_at > ?",
+			models.P2PForwardSettled, f.now().Add(-p2pForwardFeeWindow)).
+		Order("settled_at ASC").Limit(p2pForwardSweepBatch).Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		if err := f.RecordFee(ctx, id); err != nil {
+			log.Printf("[p2p forward] forward=%s fee not read yet: %s", id, RedactAlertText(err.Error()))
+			continue
+		}
+		n++
+	}
+	return n, nil
 }
 
 // SweepUnconfirmed alerts on forwards that were submitted and never answered.
