@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -26,13 +28,38 @@ type PoolSliceOrders interface {
 	// SliceOrderHoldsMoney: the order holds her naira, whether or not the
 	// slice still backs it. A read, for alerts only.
 	SliceOrderHoldsMoney(ctx context.Context, slice *models.P2PTrade) (bool, error)
-	// DecideSliceResolve is F21's decision, taken under the intent's row lock
-	// (the claim's lock, review M7): true = resolve to the treasury; false =
-	// back to the LP, with dropped_at written in the same transaction.
-	DecideSliceResolve(ctx context.Context, slice *models.P2PTrade) (bool, error)
 	// SliceOpenGone: the slice's open can never land (S44, review I1).
 	SliceOpenGone(ctx context.Context, slice *models.P2PTrade) (bool, error)
+	// SliceHashReverted: the slice's recorded release_tx_hash is a real hash
+	// whose receipt is reverted `need` deep — the one proof that lets a
+	// recorded hash be cleared or replaced (re-review I-A). "" or a claim is
+	// never "reverted" (re-review I-C).
+	SliceHashReverted(ctx context.Context, slice *models.P2PTrade) (bool, error)
+	// ClaimSliceResolve is F21's decision AND its exclusive right to send, in
+	// one transaction under the intent's then the slice's row lock (the
+	// per-slice serialisation C1 already uses): returns the decision and a
+	// claim token written into release_tx_hash, or claim "" when a hash or
+	// another claim is already recorded (that caller must not send).
+	ClaimSliceResolve(ctx context.Context, slice *models.P2PTrade) (toTreasury bool, claim string, err error)
+	// FindSliceResolve (review I-3): F21's resolve of the slice found from
+	// the escrow's own TradeResolved log, with its direction read from that
+	// receipt — for a slice whose recorded hash is missing or still a claim.
+	// "" means not found.
+	FindSliceResolve(ctx context.Context, slice *models.P2PTrade) (string, *P2PTradeResolvedEvent, error)
+	// SliceResolveClaimAbandoned (review I-3): the slice's resolve claim is
+	// older than sliceResolveClaimStaleAfter and the chain proves no resolve
+	// landed and none is in flight — the only evidence that clears a claim.
+	SliceResolveClaimAbandoned(ctx context.Context, slice *models.P2PTrade) (bool, error)
 }
+
+// sliceResolveClaimPrefix marks release_tx_hash as claimed by one F21 sender
+// (re-review I-A): "resolving:<unix seconds>". Never a hash.
+const sliceResolveClaimPrefix = "resolving:"
+
+// sliceResolveClaimStaleAfter: a claim this old whose resolve neither landed
+// nor sits in the release key's mempool was never sent (a crash between the
+// claim's commit and Send) or was dropped (review I-3).
+const sliceResolveClaimStaleAfter = 30 * time.Minute
 
 // SetPoolSlices wires the pool's answers and the release key. Called once at
 // boot when the pool desk exists.
@@ -78,8 +105,9 @@ func (s *P2PTradeService) rotateSlice(ctx context.Context, t *models.P2PTrade) {
 }
 
 // notePaidSliceLost (review I3): a slice of a paid order left escrow other
-// than to the treasury. Until plan C2 there is no automatic remedy; an
-// operator must see it at once.
+// than to the treasury. The settle engine re-evaluates the order (S18: carry
+// on, or park pool_slices_short for re-delivery or the S37 override); an
+// operator sees it at once.
 func (s *P2PTradeService) notePaidSliceLost(ctx context.Context, trade *models.P2PTrade, how string) {
 	if s.poolSlices == nil {
 		return
@@ -121,20 +149,45 @@ func (s *P2PTradeService) reconcileSliceDisputed(ctx context.Context, trade *mod
 		log.Printf("[liquidity] ALERT liquidity_pool_slice_disputed slice=%s intent=%s", trade.ID, trade.ITIntentID)
 		s.pauseSliceLP(ctx, trade)
 	}
-	if trade.ReleaseTxHash != "" || s.poolSlices == nil || s.poolSender == nil {
-		// Waiting for our resolve to mine (or for the pool to be wired): rotate
-		// so a disputed slice never holds the head of the reconciler's window.
+	if s.poolSlices == nil || s.poolSender == nil {
+		// Waiting for the pool to be wired: rotate so a disputed slice never
+		// holds the head of the reconciler's window.
 		if !first {
 			s.rotateSlice(ctx, trade)
 		}
 		return ReconcileResult{Changed: first, FromStatus: trade.Status, ToStatus: models.P2PTradeStatusDisputed, Reason: "pool slice disputed"}, nil
 	}
-	// Review M7: decided under the intent's row lock, so an honoured claim
-	// racing this cannot be paid against a slice going back to the LP; the
-	// unpaid branch drops the slice in that same transaction.
-	paid, err := s.poolSlices.DecideSliceResolve(ctx, trade)
+	if trade.ReleaseTxHash != "" {
+		// I-7 under re-review I-A's rule: a recorded hash (a resolve, a claim, a
+		// stale release) is replaced only once proven reverted — or, for a
+		// claim, proven abandoned (review I-3); otherwise wait.
+		if !s.sliceHashProvenReverted(ctx, trade) && !s.sliceResolveClaimAbandoned(ctx, trade) {
+			if strings.HasPrefix(trade.ReleaseTxHash, sliceResolveClaimPrefix) || s.clock.Now().Sub(trade.UpdatedAt) > 30*time.Minute {
+				s.noteSliceUnresolved(ctx, trade, "liquidity_pool_resolve_unresolved")
+			}
+			s.rotateSlice(ctx, trade)
+			return ReconcileResult{Changed: first, FromStatus: trade.Status, ToStatus: models.P2PTradeStatusDisputed, Reason: "pool slice resolve in flight"}, nil
+		}
+		res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, trade.ReleaseTxHash).
+			Update("release_tx_hash", "")
+		if res.Error != nil || res.RowsAffected != 1 {
+			s.rotateSlice(ctx, trade) // changed under us: the next pass re-reads it
+			return ReconcileResult{Changed: first, FromStatus: trade.Status, ToStatus: models.P2PTradeStatusDisputed, Reason: "pool slice resolve moved"}, res.Error
+		}
+		log.Printf("[liquidity] ALERT liquidity_pool_resolve_cleared slice=%s intent=%s was=%q — no resolve landed or is in flight; deciding again",
+			trade.ID, trade.ITIntentID, trade.ReleaseTxHash)
+		trade.ReleaseTxHash = ""
+	}
+	// Re-review I-A: decide AND claim the send under the intent's then the
+	// slice's row lock; a concurrent reconciler finds the claim and stops. The
+	// unpaid branch drops the slice in that same transaction (review M7).
+	paid, claim, err := s.poolSlices.ClaimSliceResolve(ctx, trade)
 	if err != nil {
 		return ReconcileResult{}, err
+	}
+	if claim == "" {
+		s.rotateSlice(ctx, trade)
+		return ReconcileResult{Changed: first, FromStatus: trade.Status, ToStatus: models.P2PTradeStatusDisputed, Reason: "pool slice resolve claimed elsewhere"}, nil
 	}
 	escrow, _, _, err := s.resolve(trade.ChainID)
 	if err != nil {
@@ -145,10 +198,16 @@ func (s *P2PTradeService) reconcileSliceDisputed(ctx context.Context, trade *mod
 	hash, err := s.poolSender.Send(ctx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminResolve(HashID(trade.ID), paid, s.poolSender.Address())
 	})
+	if hash == "" {
+		hash = uncertainTxHash(err)
+	}
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	if hash != "" {
-		s.db.WithContext(wctx).Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("release_tx_hash", hash)
+	switch {
+	case hash != "": // the real hash replaces our own claim, never anything else
+		s.db.WithContext(wctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", hash)
+	case errors.Is(err, ErrTxNotBroadcast): // provably unsent: release the claim
+		s.db.WithContext(wctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", "")
 	}
 	if err != nil {
 		s.rotateSlice(wctx, trade)
@@ -180,21 +239,41 @@ func (s *P2PTradeService) pauseSliceLP(ctx context.Context, trade *models.P2PTra
 // reconcileSliceResolved settles a resolved slice from the resolve's own
 // receipt (never a dispute row): released to the treasury, or refunded to the LP.
 func (s *P2PTradeService) reconcileSliceResolved(ctx context.Context, trade *models.P2PTrade) (ReconcileResult, error) {
-	if trade.ReleaseTxHash == "" {
-		log.Printf("[liquidity] ALERT liquidity_pool_slice_resolved_unknown slice=%s — resolved on-chain without our resolve hash; manual review", trade.ID)
-		s.rotateSlice(ctx, trade)
-		return ReconcileResult{}, nil
-	}
-	escrow, _, _, err := s.resolve(trade.ChainID)
-	if err != nil {
-		return ReconcileResult{}, err
-	}
-	ev, err := escrow.VerifyTradeResolved(trade.ReleaseTxHash, HashID(trade.ID))
-	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("verify slice resolve: %s", RedactAlertText(err.Error()))
+	var ev *P2PTradeResolvedEvent
+	if trade.ReleaseTxHash == "" || strings.HasPrefix(trade.ReleaseTxHash, sliceResolveClaimPrefix) {
+		// Review I-3: our resolve's hash never replaced its claim (or none was
+		// recorded): the escrow's own log names it. The found hash replaces
+		// the recorded value only if no one changed it meanwhile.
+		found := ""
+		if s.poolSlices != nil {
+			var err error
+			if found, ev, err = s.poolSlices.FindSliceResolve(ctx, trade); err != nil {
+				log.Printf("[liquidity] resolve scan slice=%s: %s", trade.ID, RedactAlertText(err.Error()))
+			}
+		}
+		if found == "" {
+			log.Printf("[liquidity] ALERT liquidity_pool_slice_resolved_unknown slice=%s — resolved on-chain, its resolve not found yet; manual review if this repeats", trade.ID)
+			s.rotateSlice(ctx, trade)
+			return ReconcileResult{}, nil
+		}
+		res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, trade.ReleaseTxHash).
+			Update("release_tx_hash", found)
+		if res.Error != nil || res.RowsAffected != 1 {
+			s.rotateSlice(ctx, trade)
+			return ReconcileResult{}, res.Error
+		}
+		trade.ReleaseTxHash = found
+	} else {
+		escrow, _, _, err := s.resolve(trade.ChainID)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+		if ev, err = escrow.VerifyTradeResolved(trade.ReleaseTxHash, HashID(trade.ID)); err != nil {
+			return ReconcileResult{}, fmt.Errorf("verify slice resolve: %s", RedactAlertText(err.Error()))
+		}
 	}
 	now := s.clock.Now()
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		r := tx.Model(&models.P2PTrade{}).Where("id = ? AND status NOT IN ?", trade.ID,
 			[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusCancelled, models.P2PTradeStatusResolved}).
 			Updates(map[string]any{"status": models.P2PTradeStatusResolved, "updated_at": now})
@@ -219,9 +298,10 @@ func (s *P2PTradeService) reconcileSliceResolved(ctx context.Context, trade *mod
 }
 
 // noteSliceSelfRelease is F22: released on-chain without our AutoRelease
-// (the slice never went through releasing). Unpaid: alerted, never forwarded
-// (C2). Paid: the USDT reached the treasury early; C2's settle must account
-// for it, so it is alerted too (review I3).
+// (the slice never went through releasing). Unpaid, or dropped: alerted,
+// never forwarded automatically — an operator pays the LP or hands the USDT
+// back. Paid: the USDT reached the treasury early; the settle engine proves it
+// and forwards its LP, and it is alerted too (review I3).
 func (s *P2PTradeService) noteSliceSelfRelease(ctx context.Context, trade *models.P2PTrade) {
 	if trade.Status != models.P2PTradeStatusPendingPayment || s.poolSlices == nil {
 		return
@@ -233,7 +313,7 @@ func (s *P2PTradeService) noteSliceSelfRelease(ctx context.Context, trade *model
 		log.Printf("[liquidity] ALERT liquidity_pool_slice_self_released slice=%s intent=%s — never forwarded automatically (F22)",
 			trade.ID, trade.ITIntentID)
 	default:
-		log.Printf("[liquidity] ALERT liquidity_pool_paid_slice_lost slice=%s intent=%s how=self_released — the USDT is at the treasury; plan C2 accounts for it",
+		log.Printf("[liquidity] ALERT liquidity_pool_paid_slice_lost slice=%s intent=%s how=self_released — the USDT is at the treasury; the settle engine proves and forwards it (F22)",
 			trade.ID, trade.ITIntentID)
 	}
 }
@@ -270,29 +350,123 @@ func poolOrderHoldsMoney(status string) bool {
 	return false
 }
 
-// DecideSliceResolve is F21's decision under the intent's FOR UPDATE (review
-// M7): the claim and S18 take the same lock, so whichever commits first wins.
-func (s *ITService) DecideSliceResolve(ctx context.Context, slice *models.P2PTrade) (bool, error) {
-	if slice == nil || slice.ITIntentID == nil {
-		return false, nil
+// decideSliceResolveTx is F21's decision under the intent's FOR UPDATE (review
+// M7), inside ClaimSliceResolve's transaction: the claim and S18 take the same
+// lock, so whichever commits first wins. True = resolve to the treasury;
+// false = back to the LP, with dropped_at written in the same transaction.
+func (s *ITService) decideSliceResolveTx(tx *gorm.DB, slice *models.P2PTrade) (bool, error) {
+	var intent models.ITIntent
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").First(&intent, "id = ?", *slice.ITIntentID).Error; err != nil {
+		return false, err
 	}
-	toTreasury := false
+	var cur models.P2PTrade
+	if err := tx.Select("id", "dropped_at").First(&cur, "id = ?", slice.ID).Error; err != nil {
+		return false, err
+	}
+	toTreasury := poolOrderHoldsMoney(intent.Status) && cur.DroppedAt == nil
+	if !toTreasury && cur.DroppedAt == nil {
+		return false, tx.Model(&models.P2PTrade{}).Where("id = ?", cur.ID).Update("dropped_at", time.Now().UTC()).Error
+	}
+	return toTreasury, nil
+}
+
+// ClaimSliceResolve (re-review I-A): F21's decision and its exclusive right to
+// send, under the intent's then the slice's row lock — the serialisation C1
+// already uses. claim "" when a hash or another claim is recorded.
+func (s *ITService) ClaimSliceResolve(ctx context.Context, slice *models.P2PTrade) (bool, string, error) {
+	if slice == nil || slice.ITIntentID == nil {
+		return false, "", nil
+	}
+	toTreasury, claim := false, ""
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var intent models.ITIntent
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").First(&intent, "id = ?", *slice.ITIntentID).Error; err != nil {
+		var err error
+		if toTreasury, err = s.decideSliceResolveTx(tx, slice); err != nil { // takes the intent's FOR UPDATE
 			return err
 		}
 		var cur models.P2PTrade
-		if err := tx.Select("id", "dropped_at").First(&cur, "id = ?", slice.ID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "release_tx_hash").First(&cur, "id = ?", slice.ID).Error; err != nil {
 			return err
 		}
-		toTreasury = poolOrderHoldsMoney(intent.Status) && cur.DroppedAt == nil
-		if !toTreasury && cur.DroppedAt == nil {
-			return tx.Model(&models.P2PTrade{}).Where("id = ?", cur.ID).Update("dropped_at", time.Now().UTC()).Error
+		if cur.ReleaseTxHash != "" {
+			return nil
 		}
-		return nil
+		token := fmt.Sprintf("%s%d", sliceResolveClaimPrefix, time.Now().Unix())
+		res := tx.Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ''", slice.ID).Update("release_tx_hash", token)
+		if res.Error == nil && res.RowsAffected == 1 {
+			claim = token
+		}
+		return res.Error
 	})
-	return toTreasury, err
+	return toTreasury, claim, err
+}
+
+// SliceHashReverted (re-review I-A/I-C): the recorded hash is a real hash
+// whose receipt failed `need` deep. Read without waiting (review I-8).
+func (s *ITService) SliceHashReverted(ctx context.Context, slice *models.P2PTrade) (bool, error) {
+	d := s.poolDesk
+	if slice == nil || d == nil || d.c.Token.ChainID != slice.ChainID || slice.ReleaseTxHash == "" ||
+		strings.HasPrefix(slice.ReleaseTxHash, sliceResolveClaimPrefix) {
+		return false, nil
+	}
+	gen := d.c.Probe.EndpointGeneration()
+	need := s.saleDepth()
+	return receiptDeep(ctx, d.c.Probe, slice.ReleaseTxHash, types.ReceiptStatusFailed, need, gen)
+}
+
+// FindSliceResolve (review I-3): the slice's resolve from the escrow's log.
+func (s *ITService) FindSliceResolve(ctx context.Context, slice *models.P2PTrade) (string, *P2PTradeResolvedEvent, error) {
+	d := s.poolDesk
+	if slice == nil || d == nil || d.c.Token.ChainID != slice.ChainID {
+		return "", nil, nil
+	}
+	return d.findSliceResolve(ctx, slice)
+}
+
+// SliceResolveClaimAbandoned (review I-3) clears a resolve claim only on the
+// chain's evidence, all read from one endpoint: the claim is older than
+// sliceResolveClaimStaleAfter, the trade is still Disputed, the release key
+// has no transaction pending (its pending nonce equals its nonce at the
+// head), no TradeResolved for the trade was ever logged, and — read last,
+// after those (re-review N-1) — the trade is still Disputed. A dropped
+// resolve that resurfaces later is harmless: every resolve of a slice goes the
+// same way (the F21 decision never flips — a to-the-LP decision drops the
+// slice, a to-the-treasury one blocks the refund), the escrow accepts only
+// the first, and the log scan above records whichever landed.
+func (s *ITService) SliceResolveClaimAbandoned(ctx context.Context, slice *models.P2PTrade) (bool, error) {
+	d := s.poolDesk
+	if slice == nil || !d.settleWired() || d.c.Token.ChainID != slice.ChainID ||
+		!strings.HasPrefix(slice.ReleaseTxHash, sliceResolveClaimPrefix) {
+		return false, nil
+	}
+	at, err := strconv.ParseInt(strings.TrimPrefix(slice.ReleaseTxHash, sliceResolveClaimPrefix), 10, 64)
+	if err != nil || d.now().Sub(time.Unix(at, 0)) < sliceResolveClaimStaleAfter {
+		return false, nil
+	}
+	gen := d.c.Probe.EndpointGeneration()
+	if idle, err := d.releaseKeyIdle(ctx); err != nil || !idle {
+		return false, err // a release-key transaction is in flight: it may be this resolve
+	}
+	if found, err := d.findSliceTx(ctx, slice, topicTradeResolved); err != nil || found != "" {
+		return false, err
+	}
+	// Re-review N-1: read "still Disputed" last, at a block no earlier than the
+	// nonce reads — a resolve that mined during the checks (its log not yet
+	// indexed) reads as Resolved here.
+	t, err := d.c.Escrow.ReadTrade(HashID(slice.ID))
+	if err != nil || !t.Exists || t.Status != OnChainP2PStatusDisputed {
+		return false, err
+	}
+	return endpointSteady(d.c.Probe, gen) == nil, nil
+}
+
+// releaseKeyIdle: the release key has no transaction pending — its pending
+// nonce equals its nonce at the head (walletNoncesAtHead).
+func (d *PoolDesk) releaseKeyIdle(ctx context.Context) (bool, error) {
+	_, pending, latest, err := walletNoncesAtHead(ctx, d.c.Probe, common.HexToAddress(d.c.Sender.Address()))
+	if err != nil {
+		return false, err
+	}
+	return pending == latest, nil
 }
 
 // SliceOpenGone is S44 (review I1): the open can never land. A slice counts

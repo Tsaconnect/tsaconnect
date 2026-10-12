@@ -126,6 +126,8 @@ func companyWalletAdminError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "resend_refused")
 	case errors.Is(err, services.ErrConversionUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, msg, "conversion_unavailable")
+	case errors.Is(err, services.ErrPoolCannotFill), errors.Is(err, services.ErrPoolClosed), errors.Is(err, services.ErrPoolSettleUnwired):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "pool_unavailable")
 	case errors.Is(err, services.ErrITBadState), errors.Is(err, services.ErrLegNotPending):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, msg, "bad_state")
 	case errors.Is(err, services.ErrStableIntentNotFound), strings.Contains(msg, "intent not found"):

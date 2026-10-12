@@ -429,7 +429,20 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	}
 	// VerifyTransfer sums EVERY matching Transfer log in the transaction, so a
 	// delivery split across several transfers in one tx is credited in full.
-	received, err := verifier.VerifyTransfer(ctx, order.TxHash, lane.tokenAddress(order.Token), o.treasury.Address())
+	var received *big.Int
+	var err error
+	if order.Holder == models.HolderPool {
+		// S22 (plan C2 P14): a pool order's leg is every slice released to the
+		// treasury, each proven on its own receipt and claimed by no other record.
+		var reused string
+		received, reused, err = o.poolCustodyReceived(ctx, order, lane, verifier)
+		if err == nil && reused != "" {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_delivery_reused_total=1 order=%s tx=%s", order.ID, reused)
+			return o.toRecovery(ctx, order, fmt.Sprintf("pool release %s already backs another order", reused), nil)
+		}
+	} else {
+		received, err = verifier.VerifyTransfer(ctx, order.TxHash, lane.tokenAddress(order.Token), o.treasury.Address())
+	}
 	if err != nil {
 		if errors.Is(err, ErrTransferReverted) || errors.Is(err, ErrTransferWrongRecipient) {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_delivery_bad_total=1 order=%s tx=%s err=%v", order.ID, order.TxHash, err)
@@ -469,22 +482,25 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	// THIS order's money: Paycrest reporting one hash against two orders
 	// would otherwise let the second bridge out of the treasury's own float.
 	// Only what other orders have not already claimed is this order's.
-	claimed, err := o.claimedFromDelivery(ctx, order, srcDecimals)
-	if errors.Is(err, errUnreadableClaim) {
-		// A corrupt row will not fix itself on the next tick; park it.
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_claim_unreadable_total=1 order=%s tx=%s err=%v", order.ID, order.TxHash, err)
-		return o.toRecovery(ctx, order, err.Error(), nil)
-	}
-	if err != nil {
-		return err
-	}
-	if claimed.Sign() > 0 {
-		received = new(big.Int).Sub(received, claimed)
-		if received.Sign() <= 0 {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_delivery_reused_total=1 order=%s tx=%s already_claimed=%s",
-				order.ID, order.TxHash, claimed)
-			return o.toRecovery(ctx, order,
-				fmt.Sprintf("delivery %s is already fully claimed by another order", order.TxHash), nil)
+	// A pool order's per-hash claim was checked above, on every release.
+	if order.Holder != models.HolderPool {
+		claimed, err := o.claimedFromDelivery(ctx, order, srcDecimals)
+		if errors.Is(err, errUnreadableClaim) {
+			// A corrupt row will not fix itself on the next tick; park it.
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_claim_unreadable_total=1 order=%s tx=%s err=%v", order.ID, order.TxHash, err)
+			return o.toRecovery(ctx, order, err.Error(), nil)
+		}
+		if err != nil {
+			return err
+		}
+		if claimed.Sign() > 0 {
+			received = new(big.Int).Sub(received, claimed)
+			if received.Sign() <= 0 {
+				log.Printf("[ramp-conversion] ALERT ramp_conversion_delivery_reused_total=1 order=%s tx=%s already_claimed=%s",
+					order.ID, order.TxHash, claimed)
+				return o.toRecovery(ctx, order,
+					fmt.Sprintf("delivery %s is already fully claimed by another order", order.TxHash), nil)
+			}
 		}
 	}
 
@@ -591,6 +607,68 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	return nil
 }
 
+// poolCustodyReceived sums VerifyTransfer over the releases of every slice of
+// the intent that is at the treasury by sliceAtTreasury (released, disputed or
+// resolved, and still backing the order — never a dropped self-release or one
+// an operator handed back to its LP — plan C2 P1, review I-1) and
+// carries a real hash, each distinct hash once. reused names the first hash
+// any other record names (recordsNamingDelivery, a superset of
+// claimedFromDelivery's claims): one release can never back two records.
+//
+// Releasing slices, and pending slices with a recorded but unresolved hash,
+// are deliberately not summed: they are not proven. The settle engine hands
+// off only after every kept slice is proven, so on a correct path every
+// release is already here.
+func (o *ConversionOrchestrator) poolCustodyReceived(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane,
+	verifier ERC20TransferVerifier) (*big.Int, string, error) {
+	intentID, err := uuid.Parse(strings.TrimPrefix(order.Reference, ITConversionRefPrefix))
+	if err != nil {
+		return nil, "", fmt.Errorf("conversion: pool record %s has no intent reference: %w", order.ID, err)
+	}
+	var slices []models.P2PTrade
+	if err := o.db.WithContext(ctx).Where("it_intent_id = ? AND release_tx_hash NOT IN ? AND status IN ?",
+		intentID, []string{"", "reconciled"},
+		[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusResolved, models.P2PTradeStatusDisputed}).
+		Order("created_at").Find(&slices).Error; err != nil {
+		return nil, "", err
+	}
+	var hashes []string
+	for _, sl := range slices {
+		if sliceAtTreasury(sl.Status, sl.DroppedAt, sl.ReleaseTxHash, sl.CancelReason) &&
+			!strings.HasPrefix(sl.ReleaseTxHash, sliceResolveClaimPrefix) { // a resolve claim is not a transaction yet
+			hashes = append(hashes, sl.ReleaseTxHash)
+		}
+	}
+	if len(hashes) == 0 {
+		return nil, "", errors.New("conversion: no proven pool release yet")
+	}
+	total := new(big.Int)
+	seen := make(map[string]bool, len(hashes))
+	for _, h := range hashes {
+		// One release transaction is verified and counted once, however many
+		// slice rows carry it (a resolve can restate a slice's hash).
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		// Any other record naming this release, whatever its holder, means it
+		// already backs (or is about to back) another order.
+		others, err := o.recordsNamingDelivery(ctx, order, h, false)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(others) > 0 {
+			return nil, h, nil
+		}
+		got, err := verifier.VerifyTransfer(ctx, h, lane.tokenAddress(order.Token), o.treasury.Address())
+		if err != nil {
+			return nil, "", err
+		}
+		total.Add(total, got)
+	}
+	return total, "", nil
+}
+
 // claimedFromDelivery totals what other converted buys have already taken
 // custody of from this order's delivery transaction, in the source token's
 // base units. A claim is custody actually recorded — holder moved off
@@ -606,12 +684,7 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 var errUnreadableClaim = errors.New("conversion: unreadable claim on a delivery")
 
 func (o *ConversionOrchestrator) claimedFromDelivery(ctx context.Context, order *models.PaycrestOrderRecord, decimals int) (*big.Int, error) {
-	var others []models.PaycrestOrderRecord
-	err := o.db.WithContext(ctx).
-		Where("tx_hash = ? AND chain_key = ? AND token = ? AND route_kind = ? AND direction = ? AND id <> ? AND holder IN ?",
-			order.TxHash, order.ChainKey, order.Token, models.RouteKindConverted, models.PaycrestDirectionBuy, order.ID,
-			[]string{models.HolderTreasury, models.HolderUser}).
-		Find(&others).Error
+	others, err := o.recordsNamingDelivery(ctx, order, order.TxHash, true)
 	if err != nil {
 		return nil, fmt.Errorf("conversion: read claims on delivery %s: %w", order.TxHash, err)
 	}
@@ -627,6 +700,26 @@ func (o *ConversionOrchestrator) claimedFromDelivery(ctx context.Context, order 
 		claimed.Add(claimed, amount)
 	}
 	return claimed, nil
+}
+
+// recordsNamingDelivery reads the other records whose delivery is txHash.
+// claimsOnly narrows it to recorded custody claims (claimedFromDelivery's
+// source: a converted buy, same token and chain, holder moved to the treasury
+// or the user); without it, every other record naming the hash is returned,
+// whatever its holder — the pool's per-hash reuse rule (plan C2 P14).
+func (o *ConversionOrchestrator) recordsNamingDelivery(ctx context.Context, order *models.PaycrestOrderRecord, txHash string,
+	claimsOnly bool) ([]models.PaycrestOrderRecord, error) {
+	q := o.db.WithContext(ctx).Where("tx_hash = ? AND id <> ?", txHash, order.ID)
+	if claimsOnly {
+		q = q.Where("chain_key = ? AND token = ? AND route_kind = ? AND direction = ? AND holder IN ?",
+			order.ChainKey, order.Token, models.RouteKindConverted, models.PaycrestDirectionBuy,
+			[]string{models.HolderTreasury, models.HolderUser})
+	}
+	var others []models.PaycrestOrderRecord
+	if err := q.Find(&others).Error; err != nil {
+		return nil, err
+	}
+	return others, nil
 }
 
 // errIfOutOfGas passes on only the one failure an operator must act on: a

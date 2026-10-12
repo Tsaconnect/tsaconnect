@@ -17,7 +17,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
-const escrowCallTarget = "0x4C7199285A2c84af77594ab172208637f9872717"
+const escrowCallTarget = "0x2B19e2e2194880A1a8AF9135923e3AeE0bD1adE5"
 
 // orderSigner records broadcasts in one ordered log shared with the hook.
 type orderSigner struct {

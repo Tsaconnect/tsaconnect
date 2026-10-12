@@ -417,17 +417,7 @@ func (s *P2PTradeClaimSource) claimAndCredit(
 	pm *models.PaymentMerchant,
 	ref string,
 ) (*models.P2PSettlementForward, bool, error) {
-	forward := &models.P2PSettlementForward{
-		ID:          uuid.New(),
-		TradeID:     trade.ID,
-		PMID:        pm.ID,
-		ProviderRef: ref,
-		Currency:    normaliseCurrency(trade.FiatCurrency),
-		Amount:      trade.FiatAmount,
-		Status:      models.P2PForwardPending,
-		Reference:   p2pForwardRefPrefix + uuid.New().String(),
-	}
-
+	var forward *models.P2PSettlementForward
 	fresh := true
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// The expiry canceller decides under this same row lock (plan C1
@@ -442,47 +432,94 @@ func (s *P2PTradeClaimSource) claimAndCredit(
 			return fmt.Errorf("%w: trade %s expired and is being cancelled; credit %s must not settle it",
 				ErrInvalidTransition, trade.ID, ref)
 		}
-		if err := tx.Create(forward).Error; err != nil {
-			if isUniqueViolation(err) {
-				// Re-read on provider_ref ALONE. trade_id is unique too, so
-				// matching on either key would let a DISTINCT second credit
-				// bound to this trade read back the FIRST credit's row and
-				// report success — after which the matcher stamps the second
-				// credit `matched` with no ledger entry anywhere for its money.
-				// That is a real transfer silently absorbed.
-				//
-				// Into a FRESH struct: the one we just tried to insert carries
-				// a primary key, and GORM would fold that into the WHERE and
-				// find nothing.
-				var winner models.P2PSettlementForward
-				readErr := tx.Where("provider_ref = ?", ref).First(&winner).Error
-				if readErr == nil {
-					fresh = false
-					*forward = winner
-					return nil
-				}
-				if !errors.Is(readErr, gorm.ErrRecordNotFound) {
-					return readErr
-				}
-				// No row owns this ref, so the collision was on trade_id (or
-				// the reference): other money has already settled this trade.
-				// Erroring holds the credit for an operator, which is the only
-				// safe outcome — reporting success would mark it settled and
-				// nobody would ever be credited for it.
-				return fmt.Errorf("trade %s is already settled by a different credit; credit %s must not be absorbed into it",
-					trade.ID, ref)
-			}
-			return err
-		}
-		// Ledger FIRST, always. This is the merchant's claim on the money and
-		// it must exist before any transfer is attempted — the invariant the
-		// MCGP sell leg breaks by debiting on-chain before it pays out.
-		return s.pm.CreditInTx(tx, pm.ID, forward.Currency, forward.Amount)
+		var err error
+		forward, fresh, err = s.insertForwardAndCredit(tx, trade, pm, ref)
+		return err
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("p2p accept: claim and credit: %w", err)
 	}
 	return forward, fresh, nil
+}
+
+// p2pForwardInsertSavepoint scopes insertForwardAndCredit's INSERT.
+const p2pForwardInsertSavepoint = "p2p_forward_insert"
+
+// insertForwardAndCredit inserts the forward row and credits the merchant's
+// ledger on tx, returning fresh=false when this ref was already processed (the
+// winner's row is returned and nothing is credited). The caller owns the
+// transaction and whatever lock decides the trade may settle.
+func (s *P2PTradeClaimSource) insertForwardAndCredit(
+	tx *gorm.DB,
+	trade *models.P2PTrade,
+	pm *models.PaymentMerchant,
+	ref string,
+) (*models.P2PSettlementForward, bool, error) {
+	forward := &models.P2PSettlementForward{
+		ID:          uuid.New(),
+		TradeID:     trade.ID,
+		PMID:        pm.ID,
+		ProviderRef: ref,
+		Currency:    normaliseCurrency(trade.FiatCurrency),
+		Amount:      trade.FiatAmount,
+		Status:      models.P2PForwardPending,
+		Reference:   p2pForwardRefPrefix + uuid.New().String(),
+	}
+	// A savepoint around the INSERT: on Postgres a failed statement aborts the
+	// whole transaction, so without it the winner below could never be read
+	// and every replay would surface as an error instead of fresh=false.
+	if err := tx.SavePoint(p2pForwardInsertSavepoint).Error; err != nil {
+		return nil, false, err
+	}
+	if err := tx.Create(forward).Error; err != nil {
+		if isUniqueViolation(err) {
+			if rbErr := tx.RollbackTo(p2pForwardInsertSavepoint).Error; rbErr != nil {
+				return nil, false, rbErr
+			}
+			// Re-read on provider_ref ALONE. trade_id is unique too, so
+			// matching on either key would let a DISTINCT second credit
+			// bound to this trade read back the FIRST credit's row and
+			// report success — after which the matcher stamps the second
+			// credit `matched` with no ledger entry anywhere for its money.
+			// That is a real transfer silently absorbed.
+			//
+			// Into a FRESH struct: the one we just tried to insert carries
+			// a primary key, and GORM would fold that into the WHERE and
+			// find nothing.
+			var winner models.P2PSettlementForward
+			readErr := tx.Where("provider_ref = ?", ref).First(&winner).Error
+			if readErr == nil {
+				// The winner must be THIS trade's forward. A ref that already
+				// owns some OTHER trade's row is not a replay of this one:
+				// returning it would make this trade read as paid (a pool slice
+				// whose LP was never credited; a P2P trade whose crypto is then
+				// released against no credit).
+				if winner.TradeID != trade.ID || winner.PMID != pm.ID {
+					return nil, false, fmt.Errorf("credit %s already settled trade %s; it must not settle trade %s",
+						ref, winner.TradeID, trade.ID)
+				}
+				return &winner, false, nil
+			}
+			if !errors.Is(readErr, gorm.ErrRecordNotFound) {
+				return nil, false, readErr
+			}
+			// No row owns this ref, so the collision was on trade_id (or
+			// the reference): other money has already settled this trade.
+			// Erroring holds the credit for an operator, which is the only
+			// safe outcome — reporting success would mark it settled and
+			// nobody would ever be credited for it.
+			return nil, false, fmt.Errorf("trade %s is already settled by a different credit; credit %s must not be absorbed into it",
+				trade.ID, ref)
+		}
+		return nil, false, err
+	}
+	// Ledger FIRST, always. This is the merchant's claim on the money and
+	// it must exist before any transfer is attempted — the invariant the
+	// MCGP sell leg breaks by debiting on-chain before it pays out.
+	if err := s.pm.CreditInTx(tx, pm.ID, forward.Currency, forward.Amount); err != nil {
+		return nil, false, err
+	}
+	return forward, true, nil
 }
 
 // settleTrade marks the trade paid and releases the escrowed crypto to the
@@ -622,6 +659,31 @@ type P2PSettlementForwarder struct {
 	// senderName is the display name stamped on the outgoing transfer.
 	senderName string
 	now        func() time.Time
+
+	// fees reads the actual fee of a settled transfer (S47); lookup finds a
+	// started forward's transfer by reference before anything re-asks
+	// (review I-1); onSettled runs after a forward settles. All optional.
+	fees      PayoutFeeReader
+	lookup    TransferLookup
+	onSettled func(context.Context, *models.P2PSettlementForward)
+}
+
+// TransferLookup finds a forward's transfer at the provider by its reference.
+// found=false with a nil error is only ever a complete scan's answer.
+// *FlutterwaveClient satisfies it.
+type TransferLookup interface {
+	FindForwardTransfer(ctx context.Context, reference string, around time.Time) (FWTransfer, bool, error)
+}
+
+// p2pForwardSlowRecheck paces a started forward past the re-POST ceiling: it
+// is still looked up by reference, hourly, forever — never re-POSTed, never
+// failed (re-review I-D).
+const p2pForwardSlowRecheck = time.Hour
+
+func (f *P2PSettlementForwarder) SetFeeReader(r PayoutFeeReader)     { f.fees = r }
+func (f *P2PSettlementForwarder) SetTransferLookup(l TransferLookup) { f.lookup = l }
+func (f *P2PSettlementForwarder) SetOnSettled(fn func(context.Context, *models.P2PSettlementForward)) {
+	f.onSettled = fn
 }
 
 // NewP2PSettlementForwarder wires the forward. balances may be nil, which skips
@@ -645,9 +707,20 @@ func (f *P2PSettlementForwarder) withClock(now func() time.Time) *P2PSettlementF
 
 // Forward submits the transfer for one settlement forward.
 //
-// It never debits. The only debit in this file is in Confirm, on a confirmed
-// success. Re-callable: a forward that is not `pending` has either already been
-// submitted or already been resolved, and returns without touching anything.
+// It never debits. The only debit in this file is in ConfirmPayout, on a
+// confirmed success. Re-callable: a forward that is not `pending` has either
+// already been submitted or already been resolved, and returns without touching
+// anything.
+//
+// ── started_at: once money may have left, nothing here says "NOT paid" ──
+//
+// started_at is committed BEFORE the gateway call. From then on a timeout, a
+// 5xx, a refusal on a retry, an unreadable balance or an exhausted ceiling
+// leaves the row `pending` and alerts p2p_forward_outcome_unknown; a re-drive
+// looks the reference up first and only then re-asks on the same reference.
+// The row is failed only on a first-attempt ProviderRejectedError or on the
+// provider's own FAILED (review C-2): a `failed` row is an operator's cue to
+// pay by hand, and doing that for a transfer that did land pays twice.
 func (f *P2PSettlementForwarder) Forward(ctx context.Context, forwardID uuid.UUID) error {
 	var fwd models.P2PSettlementForward
 	if err := f.db.WithContext(ctx).First(&fwd, "id = ?", forwardID).Error; err != nil {
@@ -655,6 +728,11 @@ func (f *P2PSettlementForwarder) Forward(ctx context.Context, forwardID uuid.UUI
 	}
 	if fwd.Status != models.P2PForwardPending {
 		return nil
+	}
+	if fwd.StartedAt != nil {
+		// Review C-2/I-1: look up by reference, then re-ask; never fail.
+		// Past the ceiling (re-review I-D) only the lookup runs.
+		return f.reask(ctx, &fwd, fwd.Attempts < p2pForwardMaxAttempts)
 	}
 	if f.gateway == nil {
 		return f.hold(ctx, &fwd, "no payout gateway configured")
@@ -667,6 +745,7 @@ func (f *P2PSettlementForwarder) Forward(ctx context.Context, forwardID uuid.UUI
 	if strings.TrimSpace(pm.SettlementBankCode) == "" || strings.TrimSpace(pm.SettlementAccountNumber) == "" {
 		// Terminal until the merchant record is fixed. Their proceeds are on
 		// the ledger and the existing withdrawal path can still pay them.
+		// Nothing was started, so nothing can have been paid.
 		if aErr := f.fail(ctx, &fwd, ErrForwardNoSettlementAccount.Error()); aErr != nil {
 			return aErr
 		}
@@ -682,7 +761,36 @@ func (f *P2PSettlementForwarder) Forward(ctx context.Context, forwardID uuid.UUI
 		return err
 	}
 
-	payoutID, err := f.gateway.InitiatePayout(ctx, PayoutRequest{
+	first, err := f.markStarted(ctx, &fwd)
+	if err != nil {
+		return err
+	}
+	if !first {
+		return nil // another attempt started it between our read and our mark; it owns the call
+	}
+	payoutID, err := f.gateway.InitiatePayout(ctx, f.payoutRequest(pm, &fwd))
+	if err != nil {
+		if providerRefusalIsFinal(err, true) {
+			// REJECTED AT SUBMISSION on the reference's first attempt. No
+			// transfer exists at the provider, so no webhook will ever arrive
+			// to correct this — the exact hole that strands value on the MCGP
+			// sell leg. The balance stays credited and this becomes an
+			// operator's problem immediately, not silently.
+			if fErr := f.failNoTransfer(ctx, &fwd, "rejected at submission: "+RedactAlertText(err.Error())); fErr != nil {
+				return fErr
+			}
+			return err
+		}
+		f.noteOutcomeUnknown(ctx, &fwd, err)
+		return err
+	}
+	return f.markSubmitted(ctx, &fwd, payoutID)
+}
+
+// payoutRequest is the transfer for one forward. Every attempt for a forward
+// sends the same reference: it is the provider's idempotency key.
+func (f *P2PSettlementForwarder) payoutRequest(pm *models.PaymentMerchant, fwd *models.P2PSettlementForward) PayoutRequest {
+	return PayoutRequest{
 		BankCode:      pm.SettlementBankCode,
 		AccountNumber: pm.SettlementAccountNumber,
 		AccountName:   pm.SettlementAccountName,
@@ -694,28 +802,19 @@ func (f *P2PSettlementForwarder) Forward(ctx context.Context, forwardID uuid.UUI
 		SourceCurrency: fwd.Currency,
 		Reference:      fwd.Reference,
 		SenderName:     f.senderName,
-	})
-	if err != nil {
-		// REJECTED AT SUBMISSION. No transfer exists at the provider, so no
-		// webhook will ever arrive to correct this — the exact hole that
-		// strands value on the MCGP sell leg. The balance stays credited and
-		// this becomes an operator's problem immediately, not silently.
-		if fErr := f.fail(ctx, &fwd, "rejected at submission: "+err.Error()); fErr != nil {
-			return fErr
-		}
-		return err
 	}
+}
+
+// markSubmitted records the provider's acceptance of a started forward.
+func (f *P2PSettlementForwarder) markSubmitted(ctx context.Context, fwd *models.P2PSettlementForward, payoutID string) error {
 	if strings.TrimSpace(payoutID) == "" {
-		// Accepted, but with nothing to correlate a later webhook against. We
-		// cannot tell a success from a failure for this transfer ever again, so
-		// it must not be treated as in-flight and must never be debited on a
-		// guess. Alert now.
-		if fErr := f.fail(ctx, &fwd, "provider accepted the transfer but returned no payout id; disbursement cannot be confirmed"); fErr != nil {
-			return fErr
-		}
+		// Accepted, but with nothing to correlate a webhook against. The
+		// provider took it, so it may pay: never failed, never debited on a
+		// guess. The reference lookup or the disburse webhook (both keyed by
+		// reference) resolves it.
+		f.noteOutcomeUnknown(ctx, fwd, errors.New("provider accepted the transfer but returned no payout id"))
 		return errors.New("p2p forward: provider returned no payout id")
 	}
-
 	now := f.now()
 	return f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
 		Where("id = ? AND status = ?", fwd.ID, models.P2PForwardPending).
@@ -726,6 +825,130 @@ func (f *P2PSettlementForwarder) Forward(ctx context.Context, forwardID uuid.UUI
 			"failure_reason": "",
 			"alerted_at":     nil,
 		}).Error
+}
+
+// markStarted commits started_at before the gateway call. true only for the
+// attempt that set it.
+func (f *P2PSettlementForwarder) markStarted(ctx context.Context, fwd *models.P2PSettlementForward) (bool, error) {
+	if fwd.StartedAt != nil {
+		return false, nil
+	}
+	now := f.now()
+	res := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
+		Where("id = ? AND status = ? AND started_at IS NULL", fwd.ID, models.P2PForwardPending).
+		Update("started_at", now)
+	if res.Error != nil || res.RowsAffected == 0 {
+		return false, res.Error
+	}
+	fwd.StartedAt = &now
+	return true, nil
+}
+
+// reask resolves a started row (review I-1, re-review I-D): ask the provider
+// for the reference first. FAILED fails it; success (fwSucceeded) settles it;
+// any other known status marks it submitted. A lookup ERROR is a read that
+// failed, not an attempt: it is noted without counting and nothing is
+// re-POSTed. Not found re-asks on the same reference — unless post is false
+// (past the ceiling): then it only notes.
+func (f *P2PSettlementForwarder) reask(ctx context.Context, fwd *models.P2PSettlementForward, post bool) error {
+	if f.lookup != nil {
+		tr, found, err := f.lookup.FindForwardTransfer(ctx, fwd.Reference, forwardAttemptTime(fwd))
+		switch {
+		case err != nil:
+			f.noteLookupFailed(ctx, fwd, err)
+			return err
+		case found && strings.EqualFold(strings.TrimSpace(tr.Status), "FAILED"):
+			return f.failNoTransfer(ctx, fwd, "provider reports the transfer failed ("+tr.ID+")")
+		case found && fwSucceeded(tr.Status): // re-review m-1: the codebase's one success rule
+			return f.ConfirmPayout(ctx, fwd.Reference, tr.ID, true, "")
+		case found:
+			return f.markSubmitted(ctx, fwd, tr.ID)
+		}
+	}
+	if !post {
+		f.noteLookupFailed(ctx, fwd, errors.New("not found by reference; not re-asked past the ceiling"))
+		return nil
+	}
+	if f.gateway == nil {
+		f.noteOutcomeUnknown(ctx, fwd, errors.New("no payout gateway configured"))
+		return nil
+	}
+	pm, err := f.pm.GetByID(ctx, fwd.PMID)
+	if err != nil {
+		return err
+	}
+	payoutID, err := f.gateway.InitiatePayout(ctx, f.payoutRequest(pm, fwd)) // same reference: the provider's idempotency key
+	if err != nil {
+		// Never final on a retry, even a ProviderRejectedError: the first
+		// call may have created the transfer this one is refused against.
+		f.noteOutcomeUnknown(ctx, fwd, err)
+		return err
+	}
+	return f.markSubmitted(ctx, fwd, payoutID)
+}
+
+// forwardAttemptTime is when the forward's transfer was first asked for: the
+// lookup's window is centred on it. A submitted row from before started_at
+// existed falls back to its submission, then its creation.
+func forwardAttemptTime(fwd *models.P2PSettlementForward) time.Time {
+	switch {
+	case fwd.StartedAt != nil:
+		return *fwd.StartedAt
+	case fwd.SubmittedAt != nil:
+		return *fwd.SubmittedAt
+	}
+	return fwd.CreatedAt
+}
+
+// noteLookupFailed records a failed or empty lookup on a started row without
+// counting an attempt (re-review I-D); the write bumps updated_at, which paces
+// the slow re-check.
+func (f *P2PSettlementForwarder) noteLookupFailed(ctx context.Context, fwd *models.P2PSettlementForward, cause error) {
+	msg := RedactAlertText(cause.Error())
+	if err := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
+		Where("id = ? AND status = ?", fwd.ID, models.P2PForwardPending).
+		Update("failure_reason", truncateReason(p2pForwardUnknownWarning+" (lookup): "+msg)).Error; err != nil {
+		log.Printf("[p2p forward] forward=%s could not record lookup outcome: %s", fwd.ID, RedactAlertText(err.Error()))
+	}
+	log.Printf("[p2p forward] ALERT p2p_forward_outcome_unknown forward=%s trade=%s lookup=%s — may have paid: never pay by hand",
+		fwd.ID, fwd.TradeID, msg)
+}
+
+// Recheck is an operator's "recheck by reference" (re-review I-D, Task 11):
+// the same lookup-first path; it can settle, submit or (on the provider's own
+// FAILED) fail the row — never fail it as unpaid otherwise.
+func (f *P2PSettlementForwarder) Recheck(ctx context.Context, id uuid.UUID) error {
+	var fwd models.P2PSettlementForward
+	if err := f.db.WithContext(ctx).First(&fwd, "id = ?", id).Error; err != nil {
+		return err
+	}
+	switch {
+	case fwd.Status == models.P2PForwardSubmitted:
+		// Accepted already: only ask; a re-POST has nothing to add.
+		return f.reask(ctx, &fwd, false)
+	case fwd.Status != models.P2PForwardPending:
+		return nil
+	case fwd.StartedAt == nil:
+		return f.Forward(ctx, id)
+	}
+	return f.reask(ctx, &fwd, fwd.Attempts < p2pForwardMaxAttempts)
+}
+
+// p2pForwardUnknownWarning leads the stored reason of a started forward whose
+// outcome is unknown: the operator queue shows it, so the warning lives on the
+// row, not only in a log line (merchant-impact residual 2).
+const p2pForwardUnknownWarning = "outcome unknown — may have paid — never pay by hand"
+
+// noteOutcomeUnknown records an ambiguous outcome on a started row: counted
+// (the ceiling stops the re-POST, never fails it) and alerted.
+func (f *P2PSettlementForwarder) noteOutcomeUnknown(ctx context.Context, fwd *models.P2PSettlementForward, cause error) {
+	reason := p2pForwardUnknownWarning + ": " + RedactAlertText(cause.Error())
+	attempts, _, err := f.countAttempt(ctx, fwd, reason)
+	if err != nil {
+		log.Printf("[p2p forward] forward=%s could not count the attempt: %s", fwd.ID, RedactAlertText(err.Error()))
+	}
+	log.Printf("[p2p forward] ALERT p2p_forward_outcome_unknown forward=%s trade=%s pm=%s attempt=%d reason=%s — may have paid: never pay by hand; the re-drive asks the provider by reference",
+		fwd.ID, fwd.TradeID, fwd.PMID, attempts, reason)
 }
 
 // checkBalance refuses to submit a transfer the payout account cannot fund.
@@ -775,11 +998,19 @@ func (f *P2PSettlementForwarder) checkBalance(ctx context.Context, fwd *models.P
 	return fmt.Errorf("p2p forward: payout account shows no %s balance line", fwd.Currency)
 }
 
-// Confirm resolves a submitted forward from the provider's disburse webhook.
+// Confirm is ConfirmPayout without a payout id.
+func (f *P2PSettlementForwarder) Confirm(ctx context.Context, reference string, success bool, reason string) error {
+	return f.ConfirmPayout(ctx, reference, "", success, reason)
+}
+
+// ConfirmPayout resolves a forward from the provider's disburse webhook or a
+// reference lookup.
 //
 // success=true is the ONLY path that debits available_ngn, and the debit and
 // the status write commit together. Anything else leaves the merchant credited.
-func (f *P2PSettlementForwarder) Confirm(ctx context.Context, reference string, success bool, reason string) error {
+// A started row that is still `pending` (its first call timed out) settles too
+// (review I-1), and payoutID fills a missing payout_id.
+func (f *P2PSettlementForwarder) ConfirmPayout(ctx context.Context, reference, payoutID string, success bool, reason string) error {
 	ref := strings.TrimSpace(reference)
 	if !strings.HasPrefix(ref, p2pForwardRefPrefix) {
 		return nil // not ours
@@ -797,19 +1028,26 @@ func (f *P2PSettlementForwarder) Confirm(ctx context.Context, reference string, 
 	}
 
 	if !success {
-		// The transfer did not land, so the money never left. The ledger entry
-		// is correct as it stands and must NOT be debited.
-		return f.fail(ctx, &fwd, "provider reported the transfer failed: "+reason)
+		// The provider says the transfer did not land, so the money never
+		// left. The ledger entry is correct as it stands and must NOT be
+		// debited.
+		return f.failNoTransfer(ctx, &fwd, "provider reported the transfer failed: "+reason)
 	}
 
 	now := f.now()
-	return f.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	updates := map[string]any{
+		"status":     models.P2PForwardSettled,
+		"settled_at": now,
+	}
+	if id := strings.TrimSpace(payoutID); id != "" {
+		updates["payout_id"] = gorm.Expr("CASE WHEN COALESCE(payout_id, '') = '' THEN ? ELSE payout_id END", id)
+	}
+	settled := false
+	err = f.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.P2PSettlementForward{}).
-			Where("id = ? AND status = ?", fwd.ID, models.P2PForwardSubmitted).
-			Updates(map[string]any{
-				"status":     models.P2PForwardSettled,
-				"settled_at": now,
-			})
+			Where("id = ? AND (status = ? OR (status = ? AND started_at IS NOT NULL))",
+				fwd.ID, models.P2PForwardSubmitted, models.P2PForwardPending).
+			Updates(updates)
 		if res.Error != nil {
 			return res.Error
 		}
@@ -826,16 +1064,112 @@ func (f *P2PSettlementForwarder) Confirm(ctx context.Context, reference string, 
 			// reserved against another in-flight trade in the meantime.
 			//
 			// Returning an error rolls the whole transaction back, INCLUDING
-			// the `settled` write above, so the row stays `submitted`: visible
-			// to the sweep, and retried on the next webhook redelivery once the
-			// reservation clears. The merchant currently holds both the cash
-			// and the ledger entry — the safe side of the invariant, but still
-			// wrong and still ours to correct.
+			// the `settled` write above, so the row stays where it was:
+			// visible to the sweep, and retried on the next webhook redelivery
+			// once the reservation clears. The merchant currently holds both
+			// the cash and the ledger entry — the safe side of the invariant,
+			// but still wrong and still ours to correct.
 			return fmt.Errorf("p2p forward: disbursement confirmed for %s but the %s ledger could not be debited (free balance short of %s); merchant is over-credited",
 				fwd.ID, fwd.Currency, fwd.Amount)
 		}
+		settled = true
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if settled {
+		f.afterSettled(ctx, fwd.ID)
+	}
+	return nil
+}
+
+// afterSettled runs the settled hook; it cannot undo the settlement. The
+// fee is read later by RecordSettledFees on the sweep's cadence, never here
+// on the disburse webhook's path.
+func (f *P2PSettlementForwarder) afterSettled(ctx context.Context, id uuid.UUID) {
+	if f.onSettled != nil {
+		var fwd models.P2PSettlementForward
+		if f.db.WithContext(ctx).First(&fwd, "id = ?", id).Error == nil && fwd.Status == models.P2PForwardSettled {
+			f.onSettled(ctx, &fwd)
+		}
+	}
+}
+
+// RecordFee writes the provider's actual fee on a settled forward once (S47).
+func (f *P2PSettlementForwarder) RecordFee(ctx context.Context, id uuid.UUID) error {
+	if f.fees == nil {
+		return nil
+	}
+	var fwd models.P2PSettlementForward
+	if err := f.db.WithContext(ctx).First(&fwd, "id = ?", id).Error; err != nil {
+		return err
+	}
+	if fwd.Status != models.P2PForwardSettled || fwd.FeeKobo != nil || fwd.PayoutID == "" {
+		return nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, p2pForwardFeeReadTimeout)
+	defer cancel()
+	fee, err := f.fees.TransferFeeKobo(readCtx, fwd.PayoutID)
+	if err != nil {
+		return err
+	}
+	return f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
+		Where("id = ? AND fee_kobo IS NULL", id).Update("fee_kobo", fee.String()).Error
+}
+
+// p2pForwardFeeWindow bounds the fee pass: a settled forward's fee is read
+// for a day after it settled, then left to the operator (pool books alert an
+// unread LP fee themselves).
+const p2pForwardFeeWindow = 24 * time.Hour
+
+// The fee pass's limits (re-review N-2): each provider call is bounded, a
+// failed read waits a doubling backoff, and a forward is asked at most
+// p2pForwardFeeMaxReads times (about five hours) before it is left to the
+// operator.
+const (
+	p2pForwardFeeReadTimeout   = 15 * time.Second
+	p2pForwardFeeMaxReads      = 6
+	p2pForwardFeeReadRetryBase = 10 * time.Minute
+	p2pForwardFeeReadRetryMax  = 4 * time.Hour
+)
+
+// RecordSettledFees reads the provider's fee for recently settled forwards
+// that have none yet (S47), on the sweep's cadence — never on the disburse
+// webhook's path (merchant-impact residual 3). It moves no money.
+func (f *P2PSettlementForwarder) RecordSettledFees(ctx context.Context) (int, error) {
+	if f.fees == nil {
+		return 0, nil
+	}
+	now := f.now()
+	var due []models.P2PSettlementForward
+	if err := f.db.WithContext(ctx).Select("id", "fee_reads").
+		Where("status = ? AND fee_kobo IS NULL AND COALESCE(payout_id, '') <> '' AND settled_at > ?",
+			models.P2PForwardSettled, now.Add(-p2pForwardFeeWindow)).
+		Where("fee_reads < ? AND (fee_next_read_at IS NULL OR fee_next_read_at <= ?)", p2pForwardFeeMaxReads, now).
+		Order("settled_at ASC").Limit(p2pForwardSweepBatch).Find(&due).Error; err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, fwd := range due {
+		if err := f.RecordFee(ctx, fwd.ID); err != nil {
+			reads := fwd.FeeReads + 1
+			next := now.Add(doublingBackoff(p2pForwardFeeReadRetryBase, p2pForwardFeeReadRetryMax, reads))
+			if uerr := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).Where("id = ?", fwd.ID).
+				Updates(map[string]any{"fee_reads": reads, "fee_next_read_at": next}).Error; uerr != nil {
+				return n, uerr
+			}
+			if reads >= p2pForwardFeeMaxReads {
+				log.Printf("[p2p forward] ALERT p2p_forward_fee_unread forward=%s after %d reads — record the provider's fee by hand: %s",
+					fwd.ID, reads, RedactAlertText(err.Error()))
+			} else {
+				log.Printf("[p2p forward] forward=%s fee not read yet (read %d): %s", fwd.ID, reads, RedactAlertText(err.Error()))
+			}
+			continue
+		}
+		n++
+	}
+	return n, nil
 }
 
 // SweepUnconfirmed alerts on forwards that were submitted and never answered.
@@ -867,7 +1201,27 @@ func (f *P2PSettlementForwarder) SweepUnconfirmed(ctx context.Context) (int, err
 			return i, err
 		}
 	}
-	return len(stale), nil
+
+	// A started forward past the re-POST ceiling is still looked up hourly by
+	// the re-drive, but nothing will ever re-send it: alarm once.
+	var stuck []models.P2PSettlementForward
+	if err := f.db.WithContext(ctx).
+		Where("status = ? AND started_at < ? AND attempts >= ? AND alerted_at IS NULL",
+			models.P2PForwardPending, cutoff, p2pForwardMaxAttempts).
+		Order("started_at ASC").
+		Limit(p2pForwardSweepBatch).
+		Find(&stuck).Error; err != nil {
+		return len(stale), err
+	}
+	for i := range stuck {
+		fwd := &stuck[i]
+		log.Printf("[p2p forward] ALARM forward=%s trade=%s pm=%s reference=%s outcome unknown past the ceiling — ask the provider by reference before anything; never pay by hand (merchant remains credited %s %s)",
+			fwd.ID, fwd.TradeID, fwd.PMID, fwd.Reference, fwd.Currency, fwd.Amount)
+		if err := f.markAlerted(ctx, fwd.ID); err != nil {
+			return len(stale) + i, err
+		}
+	}
+	return len(stale) + len(stuck), nil
 }
 
 // ListNeedingAttention returns forwards where the merchant is credited but no
@@ -906,10 +1260,13 @@ func (f *P2PSettlementForwarder) ListNeedingAttention(ctx context.Context) ([]mo
 // The alarm follows the write rather than preceding it for the same reason: a
 // row this call did not resolve is not a merchant this call can say went
 // unpaid.
+//
+// It never fails a STARTED row (review C-2): once started_at is set money may
+// have left, and only failNoTransfer — on the provider's proof — may fail it.
 func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettlementForward, reason string) error {
 	now := f.now()
 	res := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
-		Where("id = ? AND status = ?", fwd.ID, fwd.Status).
+		Where("id = ? AND status = ? AND started_at IS NULL", fwd.ID, fwd.Status).
 		Updates(map[string]any{
 			"status":         models.P2PForwardFailed,
 			"failure_reason": truncateReason(reason),
@@ -919,6 +1276,13 @@ func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettle
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
+		var cur models.P2PSettlementForward
+		if err := f.db.WithContext(ctx).Select("status", "started_at").First(&cur, "id = ?", fwd.ID).Error; err == nil &&
+			cur.StartedAt != nil && (cur.Status == models.P2PForwardPending || cur.Status == models.P2PForwardSubmitted) {
+			log.Printf("[p2p forward] ALERT p2p_forward_outcome_unknown forward=%s trade=%s pm=%s started, so held, not failed (%s) — may have paid: never pay by hand",
+				fwd.ID, fwd.TradeID, fwd.PMID, RedactAlertText(reason))
+			return nil
+		}
 		log.Printf("[p2p forward] forward=%s trade=%s pm=%s moved out of %q before it could be failed (%s); leaving it to whoever owns it now",
 			fwd.ID, fwd.TradeID, fwd.PMID, fwd.Status, reason)
 		return nil
@@ -926,6 +1290,21 @@ func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettle
 	log.Printf("[p2p forward] ALARM forward=%s trade=%s pm=%s NOT paid: %s — merchant remains credited %s %s, ledger untouched",
 		fwd.ID, fwd.TradeID, fwd.PMID, reason, fwd.Currency, fwd.Amount)
 	return nil
+}
+
+// failNoTransfer fails a forward the provider has proved never paid: a
+// first-attempt refusal, or the provider's own FAILED. The one path that may
+// fail a started row (review C-2).
+func (f *P2PSettlementForwarder) failNoTransfer(ctx context.Context, fwd *models.P2PSettlementForward, reason string) error {
+	now := f.now()
+	res := f.db.WithContext(ctx).Model(&models.P2PSettlementForward{}).
+		Where("id = ? AND status IN ?", fwd.ID, []string{models.P2PForwardPending, models.P2PForwardSubmitted}).
+		Updates(map[string]any{"status": models.P2PForwardFailed, "failure_reason": truncateReason(reason), "alerted_at": now})
+	if res.Error == nil && res.RowsAffected == 1 {
+		log.Printf("[p2p forward] ALARM forward=%s trade=%s pm=%s NOT paid (provider-proven): %s — merchant remains credited %s %s",
+			fwd.ID, fwd.TradeID, fwd.PMID, reason, fwd.Currency, fwd.Amount)
+	}
+	return res.Error
 }
 
 // hold leaves a forward retryable and records why it has not been sent. Unlike
@@ -952,6 +1331,11 @@ func (f *P2PSettlementForwarder) fail(ctx context.Context, fwd *models.P2PSettle
 // mark an in-flight transfer `failed`, which reads to an operator as a merchant
 // nobody paid — and paying them by hand pays them twice.
 func (f *P2PSettlementForwarder) hold(ctx context.Context, fwd *models.P2PSettlementForward, reason string) error {
+	if fwd.StartedAt != nil {
+		// A started row is never counted toward failure (review C-2).
+		f.noteOutcomeUnknown(ctx, fwd, errors.New(reason))
+		return nil
+	}
 	attempts, counted, err := f.countAttempt(ctx, fwd, reason)
 	if err != nil {
 		return err
@@ -1025,7 +1409,10 @@ func (f *P2PSettlementForwarder) RedrivePending(ctx context.Context) (int, error
 	cutoff := f.now().Add(-p2pForwardRedriveAfter)
 	var due []models.P2PSettlementForward
 	if err := f.db.WithContext(ctx).
-		Where("status = ? AND created_at < ?", models.P2PForwardPending, cutoff).
+		// A started row past the re-POST ceiling stays in, but only hourly:
+		// it is still looked up by reference, forever (re-review I-D).
+		Where("status = ? AND created_at < ? AND (started_at IS NULL OR attempts < ? OR updated_at < ?)",
+			models.P2PForwardPending, cutoff, p2pForwardMaxAttempts, f.now().Add(-p2pForwardSlowRecheck)).
 		Order("created_at ASC").
 		Limit(p2pForwardSweepBatch).
 		Find(&due).Error; err != nil {

@@ -139,6 +139,9 @@ type ITService struct {
 	// poolDesk is the TSA Liquidity pool (spec 2026-10-08; plan C1 P4). Nil:
 	// the pool is dormant (no pool chain, or not wired).
 	poolDesk *PoolDesk
+	// poolForwards pays each LP for a proven slice through the P2P settlement
+	// forwarder (decision 2, plan C2 P7). Nil: proven slices wait, alerted.
+	poolForwards *P2PTradeClaimSource
 	// converted gates OPENING converted buys and the attach-hash pre-check
 	// (spec §15.5). Nothing that settles, sends or hands off reads it (N1).
 	converted ConvertedBuys

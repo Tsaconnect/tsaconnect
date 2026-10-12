@@ -143,6 +143,15 @@ const (
 	// LiquidityPausedByAdmin: an LP was paused — by an admin, or automatically
 	// after disputing a pool slice (spec F21, §19). Data: "reason".
 	LiquidityPausedByAdmin = "liquidity.paused_by_admin"
+	// LiquidityFill: TSA Connect sold some of an LP's stock (a pool slice was
+	// proven released, plan C2). Never names the buyer. Data: "sliceId",
+	// "units" (decimal token string), "naira".
+	LiquidityFill = "liquidity.fill"
+	// LiquidityPayoutSent / LiquidityPayoutDelayed: the LP's naira for a fill
+	// landed, or is held back (a short payout balance, an unknown outcome).
+	// Data: "forwardId", "naira".
+	LiquidityPayoutSent    = "liquidity.payout_sent"
+	LiquidityPayoutDelayed = "liquidity.payout_delayed"
 
 	// TP reward events — fired by the payout-computation engine
 	// (services.RewardService, fee/TP overhaul SP5). The notification dispatcher

@@ -1,6 +1,8 @@
 package services
 
 import (
+	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"time"
@@ -100,9 +102,46 @@ func minimalCoveringSubset(p []PoolPendingSlice, owed *big.Int) ([]int, *big.Int
 	return best, bestTotal, best != nil
 }
 
-// orderSlices is an order's released units (R) and its pending slices, all
-// generations, canonical. C1 counts `released` only; plan C2 narrows R to
-// releases proven 5 deep and adds F21's resolve-to-treasury.
+// F22 markers on a slice's cancel_reason (review I-5): one exit per slice,
+// taken under the slice's row lock by a CAS from the empty string.
+const (
+	poolF22Paid     = "pool_f22:paid"
+	poolF22Returned = "pool_f22:returned"
+)
+
+// sliceAtTreasury (plan C2 P1) is the ONE answer to "is this slice's USDT
+// at the treasury for its order": R for S18 (claim, re-evaluation,
+// re-delivery), the S37 refund's "zero slices" test, converted custody and
+// the settle total. True for releasing, a broadcast release not yet resolved,
+// and released or disputed/resolved while the slice still backs its order
+// (F21 drops a slice it sends back to the LP, so a non-dropped dispute of a
+// paid order goes to the treasury). Proof is separate (proveSliceRelease).
+//
+// A dropped slice its LP then self-released (F22, review I-1) is the LP's
+// own USDT that happens to sit at the treasury: never hers, never R — its LP
+// is paid or handed it back by an operator (F22). A dropped slice is never
+// releasing: AutoRelease's flip needs dropped_at NULL and a drop refuses a
+// releasing slice.
+func sliceAtTreasury(status string, droppedAt *time.Time, releaseTxHash, cancelReason string) bool {
+	if cancelReason == poolF22Returned {
+		return false // re-review I-B: an operator handed this slice's USDT back to its LP
+	}
+	switch status {
+	case models.P2PTradeStatusReleasing:
+		return true
+	case models.P2PTradeStatusReleased, models.P2PTradeStatusDisputed, models.P2PTradeStatusResolved:
+		return droppedAt == nil
+	case models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid:
+		// Review C-1: a recorded release hash means it was broadcast and is not
+		// proven gone (Task 1 clears the hash when it is): it may land.
+		return releaseTxHash != ""
+	}
+	return false
+}
+
+// orderSlices is an order's at-treasury units (R) and its pending slices,
+// all generations, canonical (plan C2 P1: R counts releasing and F21's
+// resolve-to-treasury too).
 func (d *PoolDesk) orderSlices(tx *gorm.DB, intentID uuid.UUID) (*big.Int, []PoolPendingSlice, error) {
 	var rows []models.P2PTrade
 	if err := tx.Where("it_intent_id = ?", intentID).Order("created_at").Find(&rows).Error; err != nil {
@@ -113,19 +152,56 @@ func (d *PoolDesk) orderSlices(tx *gorm.DB, intentID uuid.UUID) (*big.Int, []Poo
 	for _, r := range rows {
 		units := d.toCanonical(r.TokenAmount)
 		switch {
-		case r.Status == models.P2PTradeStatusReleased:
+		case sliceAtTreasury(r.Status, r.DroppedAt, r.ReleaseTxHash, r.CancelReason):
 			released.Add(released, units)
-		case r.Status == models.P2PTradeStatusPendingPayment && r.OpenedAt != nil && r.DroppedAt == nil:
+		case (r.Status == models.P2PTradeStatusPendingPayment || r.Status == models.P2PTradeStatusPaid) && r.OpenedAt != nil && r.DroppedAt == nil:
 			pending = append(pending, PoolPendingSlice{ID: r.ID, Units: units, CreatedAt: r.CreatedAt})
 		}
 	}
 	return released, pending, nil
 }
 
-// dropSlices marks slices as no longer backing their order (plan C1 P1).
-func (d *PoolDesk) dropSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) error {
-	if len(ids) == 0 {
-		return nil
+// errPoolSlicesMoved: a slice the caller decided to drop was released (or
+// left its live state) between the caller's read and the drop. The decision
+// was taken on a stale view, so the caller's transaction is rolled back and
+// the order is decided again on the next pass.
+var errPoolSlicesMoved = fmt.Errorf("%w: a slice of the order moved while it was decided (a release was broadcast) — decide again", ErrITBadState)
+
+// dropSlices marks live slices as no longer backing their order (plan C1
+// P1) and returns the ids it actually dropped. A slice whose release was
+// broadcast (releasing, or a recorded hash) is at the treasury and is never
+// dropped (plan C2 P1, review C-1), whatever a caller read before
+// AutoRelease's flip landed — so a caller must compare what was dropped with
+// what it asked for (dropAllSlices).
+func (d *PoolDesk) dropSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) ([]uuid.UUID, error) {
+	var dropped []uuid.UUID
+	for _, id := range ids {
+		res := tx.Model(&models.P2PTrade{}).
+			Where("id = ? AND dropped_at IS NULL AND release_tx_hash = '' AND status IN ?", id,
+				[]string{models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
+			Update("dropped_at", at)
+		if res.Error != nil {
+			return dropped, res.Error
+		}
+		if res.RowsAffected == 1 {
+			dropped = append(dropped, id)
+		}
 	}
-	return tx.Model(&models.P2PTrade{}).Where("id IN ? AND dropped_at IS NULL", ids).Update("dropped_at", at).Error
+	return dropped, nil
+}
+
+// dropAllSlices drops every id or refuses with errPoolSlicesMoved: a
+// decision (park, cover, refund) that read a slice as live must never stand
+// once that slice turned out to be releasing — the caller's transaction rolls
+// back and the order is decided again.
+func (d *PoolDesk) dropAllSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) error {
+	dropped, err := d.dropSlices(tx, ids, at)
+	if err != nil {
+		return err
+	}
+	if len(dropped) != len(ids) {
+		log.Printf("[liquidity] ALERT liquidity_pool_drop_raced asked=%d dropped=%d — a slice moved under the decision; not applied", len(ids), len(dropped))
+		return errPoolSlicesMoved
+	}
+	return nil
 }

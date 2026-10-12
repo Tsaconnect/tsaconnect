@@ -241,21 +241,6 @@ func TestPoolAllocator_ExcludesLPsAlreadyInTheOrder(t *testing.T) {
 	}
 }
 
-// Review I3: until plan C2 ships the settle path, a mainnet pool row never
-// builds an order desk (no refund, no release, and cancelByTimeout is
-// permissionless after 60 min). Testnet stays rehearsable. Plan B's LP
-// onboarding does not use the desk, so it is unaffected.
-func TestNewPoolDesk_OrdersRefusedOnMainnetUntilSettleShips(t *testing.T) {
-	for _, id := range []int64{56, 146, 1, 8453} {
-		if _, err := NewPoolDesk(PoolDeskConfig{Token: PoolToken{ChainID: id, Decimals: 18}}); !errors.Is(err, ErrPoolOrdersAwaitSettle) {
-			t.Fatalf("chain %d: NewPoolDesk = %v, want ErrPoolOrdersAwaitSettle", id, err)
-		}
-	}
-	if _, err := NewPoolDesk(PoolDeskConfig{Token: PoolToken{ChainID: 97, Decimals: 18}}); !errors.Is(err, errPoolDeskIncomplete) {
-		t.Fatalf("BSC testnet: NewPoolDesk = %v, want only the incomplete-desk refusal", err)
-	}
-}
-
 // Review M-15: an undecodable voucher hash fails closed (the ad reads as
 // cancelled and is closed), and says so in an alert.
 func TestAllocator_UndecodableVoucherAlerts(t *testing.T) {

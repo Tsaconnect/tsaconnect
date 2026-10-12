@@ -16,6 +16,13 @@ const (
 	// An operator attached Flutterwave's on-chain hash to a converted buy it
 	// delivered without one (route 2, spec §15.5 N5).
 	ITAuditConversionHashAttached = "it.stable_buy.conversion_hash_attached"
+	// TSA Liquidity operator actions (plan C2).
+	ITAuditPoolRedelivered    = "it.pool.redelivered"
+	ITAuditPoolSliceLPPaid    = "it.pool.slice_lp_paid"
+	ITAuditPoolSliceReturned  = "it.pool.slice_returned"
+	ITAuditPoolRefundOverride = "it.pool.refund_override"
+	// A super admin cleared a stuck slice release on the chain's evidence.
+	ITAuditPoolSliceReleaseCleared = "it.pool.slice_release_cleared"
 )
 
 // ITIntentAuditLog is the append-only record of operator actions on a parked

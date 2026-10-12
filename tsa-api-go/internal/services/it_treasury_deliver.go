@@ -71,18 +71,73 @@ func RampLegsOneLiveSaleIndexPresent(db *gorm.DB) (bool, error) {
 	return n > 0, nil
 }
 
+// saleDesk is one wallet that sells to buyers from its own lane (spec S20):
+// the company wallet, or the TSA pool's view of the conversion treasury.
+type saleDesk struct {
+	wallet     *CompanyWallet
+	label      string                                                                // "company wallet" | "TSA pool": refusal and log text
+	tag        string                                                                // log prefix: "[it treasury buy]" | "[liquidity]"
+	scope      func(*gorm.DB) *gorm.DB                                               // the provider filter (P7 lint forms only)
+	owns       func(*models.ITIntent) bool                                           // providerTerms-based ownership
+	checkOrder func(*models.ITIntent, *big.Int) error                                // per-order check at the send
+	onSettle   func(tx *gorm.DB, intent *models.ITIntent, leg *models.RampLeg) error // extra writes in the settle transaction; nil = none
+}
+
+// companySale is the company wallet's desk; nil without a wallet.
+func (s *ITService) companySale() *saleDesk {
+	if !s.HasCompanyWallet() {
+		return nil
+	}
+	return &saleDesk{wallet: s.wallet, label: "company wallet", tag: "[it treasury buy]",
+		scope: scopeCompanyWalletBuys, owns: isCompanyWalletBuy, checkOrder: s.companyWalletOrderCheck}
+}
+
+// companyBooks is the company wallet's desk for the paths that never touch
+// the chain (listing, settling): with no wallet it is the desk's records side
+// alone, so those keep working while the wallet is dormant, as they always have.
+func (s *ITService) companyBooks() *saleDesk {
+	if sd := s.companySale(); sd != nil {
+		return sd
+	}
+	return &saleDesk{label: "company wallet", tag: "[it treasury buy]", scope: scopeCompanyWalletBuys, owns: isCompanyWalletBuy}
+}
+
+// companyWalletOrderCheck is step 0 of a company-wallet send (spec §5.4): the
+// per-order maximum, at the send itself. Every pricing path enforces it, and
+// only an operator's recorded waiver (deliver anyway) lifts it. An amount
+// above it here is a bug upstream, so it stops and alerts instead of paying
+// out; not stock short, so the watcher reports it as a blocked send.
+func (s *ITService) companyWalletOrderCheck(intent *models.ITIntent, units *big.Int) error {
+	if maxUnits := s.treasuryLimits().maxUnits; units.Cmp(maxUnits) > 0 && !intent.MaxWaived {
+		log.Printf("[it treasury buy] ALERT ramp_treasury_send_above_maximum intent=%s amount=%s max=%s — not sent; no waiver is recorded",
+			intent.ID, units, maxUnits)
+		return fmt.Errorf("%w: %s above the per-order maximum %s with no waiver recorded — not sent",
+			ErrStableBuyAboveMaximum, FormatStableUnits(units.String()), FormatStableUnits(maxUnits.String()))
+	}
+	return nil
+}
+
 func (s *ITService) treasuryLegs(db *gorm.DB) *GormRampLegStore { return &GormRampLegStore{DB: db} }
 
 // PendingTreasuryBuys lists company-wallet buys the watcher must advance:
-// paid (to start sending) and delivering (to send or prove).
+// paid (to start sending) and delivering (to send or prove). It needs no
+// wallet: the list is read even while the company wallet is dormant.
 func (s *ITService) PendingTreasuryBuys(ctx context.Context) (received, delivering []uuid.UUID, err error) {
+	return s.pendingSaleBuys(ctx, s.companyBooks())
+}
+
+// pendingSaleBuys lists the desk's buys the watcher must advance.
+func (s *ITService) pendingSaleBuys(ctx context.Context, sd *saleDesk) (received, delivering []uuid.UUID, err error) {
+	if sd == nil {
+		return nil, nil, ErrTreasuryUnavailable
+	}
 	type row struct {
 		ID     uuid.UUID
 		Status string
 	}
 	var rows []row
-	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).Select("id", "status").
-		Where("provider = ? AND direction = ? AND status IN ?", models.ITProviderTreasury, models.ITDirectionBuy,
+	if err := sd.scope(s.db.WithContext(ctx)).Select("id", "status").
+		Where("direction = ? AND status IN ?", models.ITDirectionBuy,
 			[]string{models.ITStatusPaymentReceived, models.ITStatusDelivering}).
 		Scan(&rows).Error; err != nil {
 		return nil, nil, err
@@ -118,15 +173,17 @@ func liveSaleLegOn(ctx context.Context, db *gorm.DB, orderID uuid.UUID) (*models
 	return &legs[0], nil
 }
 
-func (s *ITService) treasuryIntent(ctx context.Context, intentID uuid.UUID) (*models.ITIntent, error) {
-	if !s.HasCompanyWallet() {
+// saleIntent is the desk's own buy, or an error: no desk, or another
+// provider's order.
+func (s *ITService) saleIntent(ctx context.Context, sd *saleDesk, intentID uuid.UUID) (*models.ITIntent, error) {
+	if sd == nil || sd.wallet == nil {
 		return nil, ErrTreasuryUnavailable
 	}
 	intent, err := s.getIntent(ctx, intentID)
 	if err != nil {
 		return nil, err
 	}
-	if intent.Direction != models.ITDirectionBuy || !isCompanyWalletBuy(intent) {
+	if intent.Direction != models.ITDirectionBuy || !sd.owns(intent) {
 		return nil, ErrITBadState
 	}
 	return intent, nil
@@ -135,7 +192,12 @@ func (s *ITService) treasuryIntent(ctx context.Context, intentID uuid.UUID) (*mo
 // SendTreasuryBuy starts a company-wallet delivery, at most once per order
 // (spec §5.4). Safe to call every tick: with a live sale leg it does nothing.
 func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) error {
-	intent, err := s.treasuryIntent(ctx, intentID)
+	return s.sendSale(ctx, s.companySale(), intentID)
+}
+
+// sendSale starts the desk's delivery of one order, at most once per order.
+func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UUID) error {
+	intent, err := s.saleIntent(ctx, sd, intentID)
 	if err != nil {
 		return err
 	}
@@ -171,63 +233,57 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 		return err
 	}
 	switch {
-	case rec == nil && s.wallet.IsConversionTreasury(intent.DestAddress):
-		log.Printf("[it treasury buy] ALERT ramp_treasury_send_to_conversion_without_record intent=%s", intent.ID)
+	case rec == nil && sd.wallet.IsConversionTreasury(intent.DestAddress):
+		log.Printf("%s ALERT ramp_treasury_send_to_conversion_without_record intent=%s", sd.tag, intent.ID)
 		return fmt.Errorf("%w: a sale to the conversion treasury needs its conversion record", ErrITBadState)
 	case rec != nil && rec.Status != models.PaycrestStatusAwaitingPayment && rec.Status != models.PaycrestStatusPending:
-		log.Printf("[it treasury buy] ALERT ramp_treasury_send_to_conversion_without_record intent=%s record=%s status=%s",
-			intent.ID, rec.ID, rec.Status)
+		log.Printf("%s ALERT ramp_treasury_send_to_conversion_without_record intent=%s record=%s status=%s",
+			sd.tag, intent.ID, rec.ID, rec.Status)
 		return fmt.Errorf("%w: its conversion record is %s", ErrITBadState, rec.Status)
 	}
 	chain, token := strings.ToLower(intent.DestChain), strings.ToUpper(intent.Asset)
-	lane := s.wallet.Lane(chain)
+	lane := sd.wallet.Lane(chain)
 	if lane == nil || lane.SponsorLane == nil {
-		return fmt.Errorf("company wallet: no lane on %s", chain)
+		return fmt.Errorf("%s: no lane on %s", sd.label, chain)
 	}
 	units, ok := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
 	if !ok || units.Sign() <= 0 {
 		return fmt.Errorf("it treasury buy: intent %s has no asset amount", intent.ID)
 	}
-	// 0. The per-order maximum, at the send itself: every pricing path enforces
-	// it, and only an operator's recorded waiver (deliver anyway) lifts it. An
-	// amount above it here is a bug upstream, so it stops and alerts instead of
-	// paying out; not stock short, so the watcher reports it as a blocked send.
-	if maxUnits := s.treasuryLimits().maxUnits; units.Cmp(maxUnits) > 0 && !intent.MaxWaived {
-		log.Printf("[it treasury buy] ALERT ramp_treasury_send_above_maximum intent=%s amount=%s max=%s — not sent; no waiver is recorded",
-			intent.ID, units, maxUnits)
-		return fmt.Errorf("%w: %s above the per-order maximum %s with no waiver recorded — not sent",
-			ErrStableBuyAboveMaximum, FormatStableUnits(units.String()), FormatStableUnits(maxUnits.String()))
+	// 0. The desk's per-order check, at the send itself.
+	if err := sd.checkOrder(intent, units); err != nil {
+		return err
 	}
-	tr := s.wallet.Treasury()
+	tr := sd.wallet.Treasury()
 	// 1. Kill switch (the lane has no value caps: CompanyWalletCaps, D63).
 	// 2. Gas. 3. Fresh stock, never part.
 	if err := tr.CheckCaps(chain, StableFromBaseUnits(units), 0); err != nil {
-		return fmt.Errorf("company wallet: %w", err)
+		return fmt.Errorf("%s: %w", sd.label, err)
 	}
 	if err := tr.requireGas(ctx, lane, treasuryERC20Gas); err != nil {
 		return err
 	}
-	bal, err := s.wallet.Balance(ctx, chain, token, true)
+	bal, err := sd.wallet.Balance(ctx, chain, token, true)
 	if err != nil {
 		return err
 	}
 	if bal.Cmp(units) < 0 {
-		log.Printf("[it treasury buy] METRIC ramp_treasury_stock_short intent=%s chain=%s token=%s needed=%s balance=%s",
-			intent.ID, chain, token, units, bal)
+		log.Printf("%s METRIC ramp_treasury_stock_short intent=%s chain=%s token=%s needed=%s balance=%s",
+			sd.tag, intent.ID, chain, token, units, bal)
 		return fmt.Errorf("%w: needed %s, balance %s", ErrTreasuryStockShort, units, bal)
 	}
-	amount, err := s.wallet.ToTokenUnits(chain, token, units)
+	amount, err := sd.wallet.ToTokenUnits(chain, token, units)
 	if err != nil {
 		return err
 	}
 	// 4. Where a re-send's chain scan would start (a read: nothing is sent).
-	probe := s.wallet.Probe(chain)
+	probe := sd.wallet.Probe(chain)
 	if probe == nil {
-		return fmt.Errorf("company wallet: no probe on %s", chain)
+		return fmt.Errorf("%s: no probe on %s", sd.label, chain)
 	}
 	fromBlock, err := probe.BlockNumber(ctx)
 	if err != nil {
-		return fmt.Errorf("company wallet: head block on %s: %w", chain, err)
+		return fmt.Errorf("%s: head block on %s: %w", sd.label, chain, err)
 	}
 	// 5. Reserve the leg under a row lock on the intent, still delivering: an
 	// operator's refund (MarkStableBuyRefunded) takes the same lock, so a
@@ -235,7 +291,7 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 	legs := s.treasuryLegs(s.db)
 	leg := &models.RampLeg{
 		OrderID: intent.ID, Kind: models.RampLegKindSale,
-		ChainKey: chain, Token: token, FromAddr: s.wallet.Address(), ToAddr: intent.DestAddress,
+		ChainKey: chain, Token: token, FromAddr: sd.wallet.Address(), ToAddr: intent.DestAddress,
 		Amount: amount.String(), Status: models.RampLegStatusPending, CreatedAt: time.Now().UTC(), FromBlock: fromBlock,
 	}
 	var existing *models.RampLeg
@@ -257,7 +313,7 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 		}
 		// The same gate as a re-send, a refund and deliver-anyway: no earlier
 		// attempt may still pay her.
-		reason, err := s.secondPaymentGate(ctx, tx, intent.ID, uuid.Nil)
+		reason, err := s.saleGate(ctx, sd, tx, intent.ID, uuid.Nil)
 		if err != nil {
 			return err
 		}
@@ -293,32 +349,37 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 		if !attempted {
 			// Provably never left: free the leg; the next tick sends attempt n+1.
 			if ferr := legs.Fail(detached(ctx), leg.ID, "not broadcast: "+RedactAlertText(err.Error())); ferr != nil {
-				log.Printf("[it treasury buy] ALERT ramp_treasury_leg_fail_unrecorded intent=%s leg=%s err=%s", intent.ID, leg.ID, RedactAlertText(ferr.Error()))
+				log.Printf("%s ALERT ramp_treasury_leg_fail_unrecorded intent=%s leg=%s err=%s", sd.tag, intent.ID, leg.ID, RedactAlertText(ferr.Error()))
 			}
 			return err
 		}
 		if hash != "" {
 			if serr := legs.SetTxHash(detached(ctx), leg.ID, hash, ""); serr != nil {
-				log.Printf("[it treasury buy] ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s", intent.ID, leg.ID, hash, RedactAlertText(serr.Error()))
+				log.Printf("%s ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(serr.Error()))
 			}
 		}
 		// Uncertain: the leg stays pending and is only ever observed, never
 		// re-sent by the machine.
-		log.Printf("[it treasury buy] ALERT ramp_treasury_broadcast_uncertain intent=%s leg=%s tx=%q err=%s", intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
+		log.Printf("%s ALERT ramp_treasury_broadcast_uncertain intent=%s leg=%s tx=%q err=%s", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
 		return nil
 	}
 	if err := legs.SetTxHash(detached(ctx), leg.ID, hash, ""); err != nil {
-		log.Printf("[it treasury buy] ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s — record it by hand", intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
+		log.Printf("%s ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s — record it by hand", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
 		return err
 	}
-	log.Printf("[it treasury buy] METRIC ramp_treasury_sent intent=%s chain=%s token=%s amount=%s tx=%s", intent.ID, chain, token, amount, hash)
+	log.Printf("%s METRIC ramp_treasury_sent intent=%s chain=%s token=%s amount=%s tx=%s", sd.tag, intent.ID, chain, token, amount, hash)
 	return nil
 }
 
 // FinalizeTreasuryBuy proves a sent sale on chain and settles the order —
 // only on a receipt showing wallet → her address ≥ the amount (spec §5.4).
 func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID) error {
-	intent, err := s.treasuryIntent(ctx, intentID)
+	return s.finalizeSale(ctx, s.companySale(), intentID)
+}
+
+// finalizeSale proves the desk's sent sale on chain and settles the order.
+func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uuid.UUID) error {
+	intent, err := s.saleIntent(ctx, sd, intentID)
 	if err != nil {
 		return err
 	}
@@ -330,91 +391,78 @@ func (s *ITService) FinalizeTreasuryBuy(ctx context.Context, intentID uuid.UUID)
 		return err
 	}
 	if leg.Status == models.RampLegStatusConfirmed {
-		return s.settleTreasuryBuy(ctx, intent, leg, leg.AmountReceived)
+		return s.settleSale(ctx, sd, intent, leg, leg.AmountReceived)
 	}
 	stalled := time.Since(leg.CreatedAt) > s.treasuryLimits().sendStall
 	if leg.TxHash == "" {
 		if stalled {
-			log.Printf("[it treasury buy] ALERT ramp_treasury_send_stalled intent=%s leg=%s tx=none", intent.ID, leg.ID)
+			log.Printf("%s ALERT ramp_treasury_send_stalled intent=%s leg=%s tx=none", sd.tag, intent.ID, leg.ID)
 			return fmt.Errorf("%w: leg %s never recorded a hash", ErrTreasurySendStalled, leg.ID)
 		}
 		return nil
 	}
-	verifier, probe := s.wallet.Verifier(leg.ChainKey), s.wallet.Probe(leg.ChainKey)
+	verifier, probe := sd.wallet.Verifier(leg.ChainKey), sd.wallet.Probe(leg.ChainKey)
 	if verifier == nil || probe == nil {
-		return fmt.Errorf("company wallet: no verifier or probe on %s", leg.ChainKey)
+		return fmt.Errorf("%s: no verifier or probe on %s", sd.label, leg.ChainKey)
 	}
 	gen := probe.EndpointGeneration() // the verdict and its depth come from one endpoint
-	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, s.wallet.TokenAddress(leg.ChainKey, leg.Token),
-		s.wallet.Address(), intent.DestAddress)
+	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, sd.wallet.TokenAddress(leg.ChainKey, leg.Token),
+		sd.wallet.Address(), intent.DestAddress)
 	switch ClassifyTransfer(credited, verr) {
 	case TransferProven:
 		want, _ := new(big.Int).SetString(leg.Amount, 10)
 		if want == nil || credited.Cmp(want) < 0 {
 			// A short credit never improves: it is a stall, alerted at once.
-			log.Printf("[it treasury buy] ALERT ramp_treasury_underdelivered intent=%s tx=%s credited=%s want=%s",
-				intent.ID, leg.TxHash, credited, leg.Amount)
+			log.Printf("%s ALERT ramp_treasury_underdelivered intent=%s tx=%s credited=%s want=%s",
+				sd.tag, intent.ID, leg.TxHash, credited, leg.Amount)
 			return fmt.Errorf("%w: %s credited %s of %s", ErrTreasurySendStalled, leg.TxHash, credited, leg.Amount)
 		}
-		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusSuccessful, gen)
+		deep, err := receiptDeep(ctx, probe, leg.TxHash, types.ReceiptStatusSuccessful, s.saleDepth(), gen)
 		if err != nil || !deep {
 			return err // not deep enough yet: the next tick looks again
 		}
-		return s.settleTreasuryBuy(ctx, intent, leg, credited.String())
+		return s.settleSale(ctx, sd, intent, leg, credited.String())
 	case TransferRefuted:
 		// Reverted: it moved nothing — but only a receipt RAMP_TREASURY_CONFIRMATIONS
 		// deep says so for good; a shallow one can be reorged into a success.
 		// Until then the leg stays live: no re-send, no refund.
-		deep, err := s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed, gen)
+		deep, err := receiptDeep(ctx, probe, leg.TxHash, types.ReceiptStatusFailed, s.saleDepth(), gen)
 		if err != nil || !deep {
 			return err
 		}
 		// Free the leg; the next tick sends attempt n+1.
-		log.Printf("[it treasury buy] METRIC ramp_treasury_send_reverted intent=%s tx=%s", intent.ID, leg.TxHash)
+		log.Printf("%s METRIC ramp_treasury_send_reverted intent=%s tx=%s", sd.tag, intent.ID, leg.TxHash)
 		if err := s.treasuryLegs(s.db).Fail(ctx, leg.ID, "reverted: "+verr.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
 			return err
 		}
 		return nil
 	default:
 		if stalled {
-			log.Printf("[it treasury buy] ALERT ramp_treasury_send_stalled intent=%s leg=%s tx=%s", intent.ID, leg.ID, leg.TxHash)
+			log.Printf("%s ALERT ramp_treasury_send_stalled intent=%s leg=%s tx=%s", sd.tag, intent.ID, leg.ID, leg.TxHash)
 			return fmt.Errorf("%w: %s unproven", ErrTreasurySendStalled, leg.TxHash)
 		}
 		return nil
 	}
 }
 
-// saleConfirmed: the sale's receipt has status want (success for a settle,
-// failed for a revert) and is at least RAMP_TREASURY_CONFIRMATIONS blocks deep
-// (review minor). The status is checked here too, so the verifier's verdict and
-// this depth read can never disagree about what happened. An unreadable
-// receipt or head, a status other than want, or an RPC endpoint change since
-// gen (the caller's verdict and this read may be different nodes' answers)
-// reads as "not yet".
-func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg, want, gen uint64) (bool, error) {
-	probe := s.wallet.Probe(leg.ChainKey)
-	if probe == nil {
-		return false, fmt.Errorf("company wallet: no probe on %s", leg.ChainKey)
-	}
-	receipt, err := probe.TransactionReceipt(ctx, common.HexToHash(leg.TxHash))
-	if err != nil || receipt == nil || receipt.BlockNumber == nil || receipt.Status != want {
-		return false, nil
-	}
-	head, err := probe.BlockNumber(ctx)
-	if err != nil {
-		return false, nil
-	}
-	if endpointSteady(probe, gen) != nil {
-		return false, nil
-	}
-	mined := receipt.BlockNumber.Uint64()
-	need := uint64(s.treasuryLimits().confirmations)
-	return head >= mined && head-mined+1 >= need, nil
+// saleDepth is RAMP_TREASURY_CONFIRMATIONS, at least 1: the depth a sale's
+// receipt needs before a settle or a revert is final (review minor).
+func (s *ITService) saleDepth() uint64 {
+	return uint64(max(1, s.treasuryLimits().confirmations))
 }
 
-// settleTreasuryBuy confirms the leg and settles the intent in one
-// transaction (Decision D55): never settled without the hash and the proof.
+// settleTreasuryBuy confirms the company-wallet leg and settles the intent.
 func (s *ITService) settleTreasuryBuy(ctx context.Context, intent *models.ITIntent, leg *models.RampLeg, received string) error {
+	return s.settleSale(ctx, s.companyBooks(), intent, leg, received)
+}
+
+// settleSale confirms the leg and settles the intent in one transaction
+// (Decision D55): never settled without the hash and the proof. The desk's
+// onSettle writes join that transaction.
+func (s *ITService) settleSale(ctx context.Context, sd *saleDesk, intent *models.ITIntent, leg *models.RampLeg, received string) error {
+	if sd == nil {
+		return ErrTreasuryUnavailable
+	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := s.treasuryLegs(tx).Confirm(ctx, leg.ID, received, time.Now()); err != nil {
 			if !errors.Is(err, ErrLegNotPending) {
@@ -439,10 +487,16 @@ func (s *ITService) settleTreasuryBuy(ctx context.Context, intent *models.ITInte
 		// Decision C7: a converted buy hands its proven leg to the orchestrator
 		// in this same transaction — never a settled intent with nothing
 		// driving the bridge. No record: a direct buy, nothing to do.
-		return s.handoffConversion(ctx, tx, intent, leg.TxHash)
+		if err := s.handoffConversion(ctx, tx, intent, leg.TxHash); err != nil {
+			return err
+		}
+		if sd.onSettle != nil {
+			return sd.onSettle(tx, intent, leg)
+		}
+		return nil
 	})
 	if err == nil {
-		log.Printf("[it treasury buy] METRIC ramp_treasury_settled intent=%s tx=%s", intent.ID, leg.TxHash)
+		log.Printf("%s METRIC ramp_treasury_settled intent=%s tx=%s", sd.tag, intent.ID, leg.TxHash)
 	}
 	return err
 }
@@ -481,16 +535,21 @@ type ResendEvidence struct {
 // stall window first, then chainEvidence on the leg, then secondPaymentGate
 // over every other sale of the order.
 func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent, leg *models.RampLeg) (*ResendEvidence, error) {
+	return s.saleEvidence(ctx, s.companySale(), intent, leg)
+}
+
+// saleEvidence is resendEvidence for the desk's sale leg.
+func (s *ITService) saleEvidence(ctx context.Context, sd *saleDesk, intent *models.ITIntent, leg *models.RampLeg) (*ResendEvidence, error) {
 	if stall := s.treasuryLimits().sendStall; time.Since(leg.CreatedAt) <= stall {
 		return &ResendEvidence{TxHash: leg.TxHash, Nonce: leg.Nonce, Reason: fmt.Sprintf("inside the %s stall window", stall)}, nil
 	}
-	ev, err := s.chainEvidence(ctx, s.db, leg)
+	ev, err := s.chainEvidenceFor(ctx, sd, s.db, leg)
 	if err != nil || !ev.Allowed {
 		return ev, err
 	}
 	// The leg itself is proved above; every other sale of the order passes the
 	// same gate as the automatic send, a refund and deliver-anyway.
-	reason, err := s.secondPaymentGate(ctx, s.db, intent.ID, leg.ID)
+	reason, err := s.saleGate(ctx, sd, s.db, intent.ID, leg.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -525,37 +584,34 @@ func (s *ITService) resendEvidence(ctx context.Context, intent *models.ITIntent,
 // and every read must come from one RPC endpoint: a failover anywhere between
 // the first read and the end of the scan makes the scan untrusted.
 // db reads the other orders' sale legs (the caller's transaction, if any).
-func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.RampLeg) (*ResendEvidence, error) {
+func (s *ITService) chainEvidenceFor(ctx context.Context, sd *saleDesk, db *gorm.DB, leg *models.RampLeg) (*ResendEvidence, error) {
+	if sd == nil || sd.wallet == nil {
+		return nil, ErrTreasuryUnavailable
+	}
 	ev := &ResendEvidence{TxHash: leg.TxHash, Nonce: leg.Nonce}
-	probe := s.wallet.Probe(leg.ChainKey)
+	probe := sd.wallet.Probe(leg.ChainKey)
 	if probe == nil {
-		return nil, fmt.Errorf("company wallet: no dropped-transaction probe on %s", leg.ChainKey)
+		return nil, fmt.Errorf("%s: no dropped-transaction probe on %s", sd.label, leg.ChainKey)
 	}
 	gen := probe.EndpointGeneration()
 	if leg.TxHash != "" {
-		_, _, terr := probe.TransactionByHash(ctx, common.HexToHash(leg.TxHash))
-		switch {
-		case terr == nil:
+		known, terr := txHashKnown(ctx, probe, leg.TxHash)
+		if terr != nil {
+			return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
+		}
+		if known {
 			ev.HashKnown = true
 			ev.Reason = "the node still knows " + leg.TxHash
 			return ev, nil
-		case !errors.Is(terr, ethereum.NotFound):
-			return nil, fmt.Errorf("company wallet: dropped check: %w", terr)
 		}
 	}
-	addr := common.HexToAddress(s.wallet.Address())
-	head, err := probe.BlockNumber(ctx)
+	addr := common.HexToAddress(sd.wallet.Address())
+	head, pending, latest, err := walletNoncesAtHead(ctx, probe, addr)
 	if err != nil {
-		return nil, fmt.Errorf("company wallet: head block: %w", err)
+		return nil, fmt.Errorf("%s: %w", sd.label, err)
 	}
-	if ev.PendingNonce, err = probe.PendingNonceAt(ctx, addr); err != nil {
-		return nil, fmt.Errorf("company wallet: pending nonce: %w", err)
-	}
-	if ev.LatestNonce, err = probe.NonceAt(ctx, addr, new(big.Int).SetUint64(head)); err != nil {
-		return nil, fmt.Errorf("company wallet: nonce at block %d: %w", head, err)
-	}
+	ev.PendingNonce, ev.LatestNonce = pending, latest
 	if ev.PendingNonce != ev.LatestNonce {
-		// A block mined after H reads as "pending" here: a refusal, never an allowance.
 		ev.Reason = fmt.Sprintf("the wallet has %d pending transaction(s)", ev.PendingNonce-ev.LatestNonce)
 		return ev, nil
 	}
@@ -578,7 +634,7 @@ func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.
 		}
 		ev.DeepBlock = head - (need - 1)
 		if ev.DeepNonce, err = probe.NonceAt(ctx, addr, new(big.Int).SetUint64(ev.DeepBlock)); err != nil {
-			return nil, fmt.Errorf("company wallet: nonce at block %d: %w", ev.DeepBlock, err)
+			return nil, fmt.Errorf("%s: nonce at block %d: %w", sd.label, ev.DeepBlock, err)
 		}
 		if ev.DeepNonce <= *leg.Nonce {
 			ev.Reason = fmt.Sprintf("nonce %d is consumed at the head but not yet %d blocks deep (the wallet's nonce at block %d is %d) — wait",
@@ -587,7 +643,7 @@ func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.
 		}
 		ev.NonceConsumed = true
 	}
-	found, others, from, serr := s.scanSaleTransfers(ctx, db, probe, leg, head)
+	found, others, from, serr := s.scanSaleTransfersFor(ctx, sd, db, probe, leg, head)
 	if serr == nil {
 		serr = endpointSteady(probe, gen)
 	}
@@ -615,7 +671,7 @@ func (s *ITService) chainEvidence(ctx context.Context, db *gorm.DB, leg *models.
 // reference_sonic_rpc_logs). The window is small on purpose: a busy
 // stablecoin has transfers in every few blocks, and an unfiltered query over
 // thousands of blocks is exactly what RPCs cap or time out.
-func (s *ITService) scanSaleTransfers(ctx context.Context, db *gorm.DB, probe TreasuryTxProbe, leg *models.RampLeg, head uint64) (found, others []string, from uint64, err error) {
+func (s *ITService) scanSaleTransfersFor(ctx context.Context, sd *saleDesk, db *gorm.DB, probe TreasuryTxProbe, leg *models.RampLeg, head uint64) (found, others []string, from uint64, err error) {
 	if leg.FromBlock == 0 {
 		return nil, nil, 0, errors.New("the send recorded no start block")
 	}
@@ -623,12 +679,12 @@ func (s *ITService) scanSaleTransfers(ctx context.Context, db *gorm.DB, probe Tr
 	if head < from {
 		return nil, nil, from, fmt.Errorf("head %d is before the send's block %d", head, from)
 	}
-	token := common.HexToAddress(s.wallet.TokenAddress(leg.ChainKey, leg.Token))
+	token := common.HexToAddress(sd.wallet.TokenAddress(leg.ChainKey, leg.Token))
 	topic := common.HexToHash(erc20TransferTopic)
 	q := ethereum.FilterQuery{
 		Addresses: []common.Address{token},
 		Topics: [][]common.Hash{{topic},
-			{common.BytesToHash(common.HexToAddress(s.wallet.Address()).Bytes())},
+			{common.BytesToHash(common.HexToAddress(sd.wallet.Address()).Bytes())},
 			{common.BytesToHash(common.HexToAddress(leg.ToAddr).Bytes())}},
 	}
 	scanner := newLogScanner(saleScanChunk)
@@ -717,6 +773,11 @@ func otherOrdersSaleHashes(ctx context.Context, db *gorm.DB, leg *models.RampLeg
 // refuses. An unreadable chain is an error, which every caller treats as a
 // refusal.
 func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID, except uuid.UUID) (string, error) {
+	return s.saleGate(ctx, s.companySale(), db, intentID, except)
+}
+
+// saleGate is secondPaymentGate over the desk's wallet.
+func (s *ITService) saleGate(ctx context.Context, sd *saleDesk, db *gorm.DB, intentID, except uuid.UUID) (string, error) {
 	var legs []models.RampLeg
 	if err := db.WithContext(ctx).Where("order_id = ? AND kind = ?", intentID, models.RampLegKindSale).
 		Order("attempt ASC").Find(&legs).Error; err != nil {
@@ -736,10 +797,10 @@ func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID
 			// may still hold it: it is a dropped send in all but name. Without
 			// a nonce it was never signed, and chainEvidence needs only the
 			// trusted scan.
-			if !s.HasCompanyWallet() {
+			if sd == nil || sd.wallet == nil {
 				return "", ErrTreasuryUnavailable
 			}
-			ev, err := s.chainEvidence(ctx, db, leg)
+			ev, err := s.chainEvidenceFor(ctx, sd, db, leg)
 			if err != nil {
 				return "", err
 			}
@@ -747,10 +808,10 @@ func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID
 				return fmt.Sprintf("attempt %d may still land or have landed: %s", leg.Attempt, ev.Reason), nil
 			}
 		case strings.HasPrefix(leg.Error, "reverted:"):
-			if !s.HasCompanyWallet() {
+			if sd == nil || sd.wallet == nil {
 				return "", ErrTreasuryUnavailable
 			}
-			deep, err := s.saleRefutedDeep(ctx, leg)
+			deep, err := s.saleRefutedDeepFor(ctx, sd, leg)
 			if err != nil {
 				return "", err
 			}
@@ -768,28 +829,33 @@ func (s *ITService) secondPaymentGate(ctx context.Context, db *gorm.DB, intentID
 // saleRefutedDeep: the leg's own transaction still reads as refuted (reverted,
 // or paid no one we sent to) and its receipt is RAMP_TREASURY_CONFIRMATIONS
 // deep — the same depth a settle needs.
-func (s *ITService) saleRefutedDeep(ctx context.Context, leg *models.RampLeg) (bool, error) {
+func (s *ITService) saleRefutedDeepFor(ctx context.Context, sd *saleDesk, leg *models.RampLeg) (bool, error) {
 	if leg.TxHash == "" {
 		return false, nil
 	}
-	verifier, probe := s.wallet.Verifier(leg.ChainKey), s.wallet.Probe(leg.ChainKey)
+	verifier, probe := sd.wallet.Verifier(leg.ChainKey), sd.wallet.Probe(leg.ChainKey)
 	if verifier == nil || probe == nil {
-		return false, fmt.Errorf("company wallet: no verifier or probe on %s", leg.ChainKey)
+		return false, fmt.Errorf("%s: no verifier or probe on %s", sd.label, leg.ChainKey)
 	}
 	gen := probe.EndpointGeneration()
-	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, s.wallet.TokenAddress(leg.ChainKey, leg.Token),
-		s.wallet.Address(), leg.ToAddr)
+	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, sd.wallet.TokenAddress(leg.ChainKey, leg.Token),
+		sd.wallet.Address(), leg.ToAddr)
 	if ClassifyTransfer(credited, verr) != TransferRefuted {
 		return false, nil
 	}
-	return s.saleConfirmed(ctx, leg, types.ReceiptStatusFailed, gen)
+	return receiptDeep(ctx, probe, leg.TxHash, types.ReceiptStatusFailed, s.saleDepth(), gen)
 }
 
 // ResendTreasuryBuy is an operator's re-send of a stalled sale, allowed only
 // when resendEvidence allows it. It fails the leg (audited, with the
 // evidence); the next watcher tick sends a fresh attempt.
 func (s *ITService) ResendTreasuryBuy(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error) {
-	intent, err := s.treasuryIntent(ctx, intentID)
+	return s.resendSale(ctx, s.companySale(), adminID, intentID, note)
+}
+
+// resendSale is an operator's re-send of the desk's stalled sale.
+func (s *ITService) resendSale(ctx context.Context, sd *saleDesk, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error) {
+	intent, err := s.saleIntent(ctx, sd, intentID)
 	if err != nil {
 		return nil, err
 	}
@@ -803,7 +869,7 @@ func (s *ITService) ResendTreasuryBuy(ctx context.Context, adminID, intentID uui
 	if leg == nil || leg.Status != models.RampLegStatusPending {
 		return nil, fmt.Errorf("%w: no pending send to replace", ErrITBadState)
 	}
-	ev, err := s.resendEvidence(ctx, intent, leg)
+	ev, err := s.saleEvidence(ctx, sd, intent, leg)
 	if err != nil {
 		return nil, err
 	}
@@ -826,6 +892,6 @@ func (s *ITService) ResendTreasuryBuy(ctx context.Context, adminID, intentID uui
 	}); err != nil {
 		return nil, err
 	}
-	log.Printf("[it treasury buy] ALERT ramp_treasury_resend_authorised intent=%s leg=%s tx=%q admin=%s", intent.ID, leg.ID, leg.TxHash, adminID)
+	log.Printf("%s ALERT ramp_treasury_resend_authorised intent=%s leg=%s tx=%q admin=%s", sd.tag, intent.ID, leg.ID, leg.TxHash, adminID)
 	return s.getIntent(ctx, intent.ID)
 }

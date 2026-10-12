@@ -29,7 +29,14 @@ import (
 // real: the treasury lane, its nonce watch, receipts 2 deep, and the release
 // key's cancelByTimeout (permissionless on the escrow).
 
-const rehearsalSchema = "liq_c1_rehearsal"
+// rehearsalSchema defaults to C1's; LIQ_REH_SCHEMA keeps another rehearsal
+// (the C2 fork and real-chain runs) in its own schema.
+func rehearsalSchema() string {
+	if s := os.Getenv("LIQ_REH_SCHEMA"); s != "" && strings.HasPrefix(s, "liq_") && !strings.ContainsAny(s, " ;\"'") {
+		return s
+	}
+	return "liq_c1_rehearsal"
+}
 
 type c1Rehearsal struct {
 	db     *gorm.DB
@@ -59,10 +66,10 @@ func rehearsalDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("postgres: %v", err)
 	}
-	if err := admin.Exec("CREATE SCHEMA IF NOT EXISTS " + rehearsalSchema).Error; err != nil {
+	if err := admin.Exec("CREATE SCHEMA IF NOT EXISTS " + rehearsalSchema()).Error; err != nil {
 		t.Fatalf("schema: %v", err)
 	}
-	scoped, err := testutil.DSNWithSchema(dsn, rehearsalSchema)
+	scoped, err := testutil.DSNWithSchema(dsn, rehearsalSchema())
 	if err != nil {
 		t.Fatal(err)
 	}

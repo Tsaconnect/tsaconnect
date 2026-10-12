@@ -68,7 +68,7 @@ const (
 	// orchestrator's custody step still has to prove it.
 	HolderCompanyWallet = "company_wallet"
 	HolderFlutterwave   = "flutterwave"
-	HolderPool          = "tsa_pool" // a converted pool order's leg (spec S22; custody is plan C2)
+	HolderPool          = "tsa_pool" // a converted pool order's leg (spec S22): custody is summed from its slices' releases
 
 	FaultPlatform = "platform"
 	FaultUser     = "user"

@@ -14,7 +14,7 @@ import (
 const (
 	poolTestChain  int64 = 97
 	poolTestUSDT         = "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7" // Plan A Task 12 mock, 18 dp
-	poolTestEscrow       = "0x4C7199285A2c84af77594ab172208637f9872717"
+	poolTestEscrow       = "0x2B19e2e2194880A1a8AF9135923e3AeE0bD1adE5"
 )
 
 // usdt18 is whole × 10^18 (the pool token's base units).

@@ -197,7 +197,7 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 		return nil, nil, err
 	}
 	// 3–5. Broadcast, prove, re-pick once per failed slice.
-	opens, repicks, feeBroken := d.openAndProve(ctx, intent, p, written)
+	opens, repicks, feeBroken := d.openAndProve(ctx, intent, p, written, nil)
 	// 6/7. Success or failure, on a context that survives the 8 s cap.
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -330,7 +330,10 @@ type sliceOpen struct {
 
 // openAndProve broadcasts every slice, proves them, and re-picks once per
 // slice that provably never broadcast while ≥ 2 s remain (§12.2 steps 3–5).
-func (d *PoolDesk) openAndProve(ctx context.Context, intent *models.ITIntent, p *PoolPrice, written []models.P2PTrade) ([]*sliceOpen, int, bool) {
+// exclude names LPs a re-pick must never choose beyond those already in
+// this burst (a re-delivery's S41 set: every LP holding a live or released
+// slice of the order, earlier generations included — review m-3).
+func (d *PoolDesk) openAndProve(ctx context.Context, intent *models.ITIntent, p *PoolPrice, written []models.P2PTrade, exclude map[uuid.UUID]bool) ([]*sliceOpen, int, bool) {
 	opens := d.opensFor(ctx, written)
 	d.broadcast(ctx, opens)
 	deadline := d.now().Add(d.proveWindow)
@@ -347,7 +350,7 @@ func (d *PoolDesk) openAndProve(ctx context.Context, intent *models.ITIntent, p 
 		if dl, ok := ctx.Deadline(); ok && time.Until(dl) < poolRepickMinLeft {
 			continue
 		}
-		more, err := d.repick(ctx, intent, p, o, opens)
+		more, err := d.repick(ctx, intent, p, o, opens, exclude)
 		if err != nil {
 			log.Printf("[liquidity] re-pick for intent=%s failed: %s", intent.ID, RedactAlertText(err.Error()))
 			continue
@@ -552,13 +555,17 @@ func (d *PoolDesk) reclaim(ctx context.Context, o *sliceOpen) {
 }
 
 // repick allocates the failed slice's units again, under the lock, excluding
-// every LP already in the order (S41), within the remaining slice budget.
-func (d *PoolDesk) repick(ctx context.Context, intent *models.ITIntent, p *PoolPrice, failed *sliceOpen, opens []*sliceOpen) ([]*sliceOpen, error) {
+// every LP already in the order (S41: this burst's, plus also), within the
+// remaining slice budget.
+func (d *PoolDesk) repick(ctx context.Context, intent *models.ITIntent, p *PoolPrice, failed *sliceOpen, opens []*sliceOpen, also map[uuid.UUID]bool) ([]*sliceOpen, error) {
 	units, err := ChainToCanonicalUnits(failed.units, d.c.Token.Decimals)
 	if err != nil {
 		return nil, err
 	}
-	exclude := map[uuid.UUID]bool{}
+	exclude := make(map[uuid.UUID]bool, len(also))
+	for id := range also {
+		exclude[id] = true
+	}
 	live := 0
 	for _, o := range opens {
 		if o.ad.PMID != nil {
@@ -578,7 +585,7 @@ func (d *PoolDesk) repick(ctx context.Context, intent *models.ITIntent, p *PoolP
 		if err != nil {
 			return err
 		}
-		written, err = d.writeSlices(tx, intent.ID, 1, p, plan)
+		written, err = d.writeSlices(tx, intent.ID, failed.slice.Generation, p, plan) // a re-delivery re-picks in its own generation
 		return err
 	})
 	d.closeCancelledAds(ctx, closeAfter) // F23, after the lock's transaction ends (review C2)

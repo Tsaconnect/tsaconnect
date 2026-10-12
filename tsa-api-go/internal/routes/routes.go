@@ -1261,6 +1261,26 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				cw.POST("/orders/:id/resend", ith.AdminResendTreasuryBuy)
 			}
 		}
+		// TSA Liquidity pool orders (plan C2, spec §15): detail for P2P admins,
+		// money actions for super admins. Registered only with the pool desk.
+		if ith.PoolOrdersEnabled() {
+			lq := api.Group("/admin/liquidity/orders")
+			lq.Use(adminAuth, middleware.RequireP2PAdmin())
+			{
+				lq.GET("/:id", ith.AdminPoolOrder)
+				act := lq.Group("", middleware.RequireSuperAdmin())
+				act.POST("/:id/redeliver", ith.AdminRedeliverPoolBuy)
+				act.POST("/:id/resend", ith.AdminResendPoolBuy)
+				act.POST("/:id/refund-override", ith.AdminRefundPoolBuyOverride)
+				act.POST("/:id/slices/:sliceId/pay-lp", ith.AdminPayPoolSliceLP)
+				act.POST("/:id/slices/:sliceId/returned", ith.AdminNotePoolSliceReturned)
+				act.POST("/:id/slices/:sliceId/clear-release", ith.AdminClearPoolSliceRelease)
+			}
+		}
+		// Any settlement forward, merchant or LP (re-review I-D).
+		if ith.ForwardRecheckEnabled() {
+			api.POST("/admin/p2p/forwards/:id/recheck", adminAuth, middleware.RequireP2PAdmin(), middleware.RequireSuperAdmin(), ith.AdminRecheckForward)
+		}
 	} else {
 		log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY / MCGP_SWAP_B_ADDRESS not set")
 	}

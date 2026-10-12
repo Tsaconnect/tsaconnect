@@ -80,6 +80,8 @@ var emailEvents = map[string]bool{
 	events.LiquidityVoucherExpiring: true,
 	// An auto-pause (F21) stops the LP earning; they must hear it out of the app.
 	events.LiquidityPausedByAdmin: true,
+	// An LP's naira is late: they hear it out of the app (plan C2).
+	events.LiquidityPayoutDelayed: true,
 }
 
 // pushEvents is the curated allowlist of event types that also fire an Expo
@@ -150,6 +152,9 @@ var pushEvents = map[string]bool{
 	events.P2PWithdrawConfirmed:         true,
 	events.LiquidityVoucherExpiring:     true,
 	events.LiquidityPausedByAdmin:       true,
+	events.LiquidityFill:                true,
+	events.LiquidityPayoutSent:          true,
+	events.LiquidityPayoutDelayed:       true,
 	// TP reward level-up (fee/TP overhaul SP8 §7 + task #27): out-of-app Expo push
 	// so the user learns they crossed a level and have MCGP to claim. TPPrizeDue is
 	// intentionally excluded — it's an ADMIN-ops notify for manual fulfilment, not

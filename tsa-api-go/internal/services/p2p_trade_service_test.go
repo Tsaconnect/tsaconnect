@@ -2018,6 +2018,68 @@ func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) 
 	_ = tokenAmt
 }
 
+// Re-review N-4: a pool slice is never resolved through the manual admin
+// confirm — the slice reconciler owns it (F21), so a to-LP resolve is dropped
+// with the slice rather than left counting toward the order.
+func TestConfirmAdminResolve_RefusesAPoolSlice(t *testing.T) {
+	svc, esc, merchantID, _, adID, _, db := buyAdFixture(t)
+	userID := seedVerifiedUser(t, db)
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, "0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
+	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto", nil); err != nil {
+		t.Fatalf("PrepareRaiseDispute: %v", err)
+	}
+	if _, err := svc.ConfirmRaiseDispute(context.Background(), trade.ID, merchantID, "0xdisp"); err != nil {
+		t.Fatalf("ConfirmRaiseDispute: %v", err)
+	}
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("it_intent_id", uuid.New())
+	esc.resolvedEvent = &P2PTradeResolvedEvent{TradeID: HashID(trade.ID), ReleasedToBuyer: false,
+		AmountMoved: big.NewInt(0), FeeToSystem: big.NewInt(0)}
+	if _, err := svc.ConfirmAdminResolveDispute(context.Background(), trade.ID, uuid.New(), "0xresolve"); !errors.Is(err, ErrTradeNotFound) {
+		t.Fatalf("err = %v, want the slice refused", err)
+	}
+	var got models.P2PTrade
+	db.First(&got, "id = ?", trade.ID)
+	if got.Status != models.P2PTradeStatusDisputed || got.ReleaseTxHash != "" {
+		t.Fatalf("slice = %s %q, want untouched", got.Status, got.ReleaseTxHash)
+	}
+}
+
+// Re-review N-4 (prepare side): no admin resolve tx is ever built for a pool
+// slice, and its dispute row is left untouched.
+func TestPrepareAdminResolve_RefusesAPoolSlice(t *testing.T) {
+	svc, _, merchantID, _, adID, _, db := buyAdFixture(t)
+	userID := seedVerifiedUser(t, db)
+	userPm := seedPaymentMethod(t, db, userID, "NGN")
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, "0x000000000000000000000000000000000000beef",
+		OpenTradeParams{FiatAmount: "1300", PaymentMethodID: userPm})
+	if err != nil {
+		t.Fatalf("OpenTrade: %v", err)
+	}
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
+	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto", nil); err != nil {
+		t.Fatalf("PrepareRaiseDispute: %v", err)
+	}
+	if _, err := svc.ConfirmRaiseDispute(context.Background(), trade.ID, merchantID, "0xdisp"); err != nil {
+		t.Fatalf("ConfirmRaiseDispute: %v", err)
+	}
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("it_intent_id", uuid.New())
+	tx, err := svc.PrepareAdminResolveDispute(context.Background(), trade.ID, uuid.New(), "0xadmin", false, "note")
+	if !errors.Is(err, ErrTradeNotFound) || tx != nil {
+		t.Fatalf("tx=%v err=%v, want the slice refused", tx != nil, err)
+	}
+	var d models.P2PDispute
+	db.First(&d, "trade_id = ?", trade.ID)
+	if d.ResolvedBy != nil || d.Resolution != "" {
+		t.Fatalf("dispute resolved_by=%v resolution=%q, want untouched", d.ResolvedBy, d.Resolution)
+	}
+}
+
 // ─── Reconciler funding-awareness ──────────────────────────────────────────
 
 // seedBuyAdWithTrade creates an active buy-ad and a pending_payment JIT trade

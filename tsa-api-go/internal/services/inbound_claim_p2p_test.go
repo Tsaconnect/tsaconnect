@@ -35,6 +35,10 @@ func createSettlementForwardTable(t *testing.T, db *gorm.DB) {
 		alerted_at     DATETIME,
 		submitted_at   DATETIME,
 		settled_at     DATETIME,
+		started_at     DATETIME,
+		fee_kobo       TEXT,
+		fee_reads      INTEGER NOT NULL DEFAULT 0,
+		fee_next_read_at DATETIME,
 		created_at     DATETIME,
 		updated_at     DATETIME
 	)`).Error; err != nil {
@@ -411,7 +415,7 @@ func TestP2PForward_RejectedAtSubmissionLeavesTheBalanceCredited(t *testing.T) {
 	// is ever sent, so nothing downstream can ever correct it. The balance must
 	// already be the merchant's and must stay that way.
 	r := newForwardRig(t, "1500.00")
-	r.gateway.err = errors.New("insufficient funds in payout balance")
+	r.gateway.err = &ProviderRejectedError{Err: errors.New("insufficient funds in payout balance")}
 
 	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000004", "1500.00")); err != nil {
 		t.Fatalf("Accept must not fail because the forward did: %v", err)
@@ -435,11 +439,11 @@ func TestP2PForward_RejectedAtSubmissionLeavesTheBalanceCredited(t *testing.T) {
 	}
 }
 
-func TestP2PForward_AcceptedWithNoPayoutIDFailsRatherThanWaitingForever(t *testing.T) {
-	// The provider took the transfer but gave us nothing to correlate a webhook
-	// against. We can never learn whether it succeeded, so treating it as
-	// in-flight would leave it waiting for a confirmation that cannot arrive.
-	// Alert now; never debit on a guess.
+func TestP2PForward_AcceptedWithNoPayoutIDIsHeldNeverFailed(t *testing.T) {
+	// The provider took the transfer but gave us no id. It may pay, so the row
+	// is never failed as unpaid (review C-2): it stays pending and started,
+	// alerted as outcome unknown, and the reference lookup or the disburse
+	// webhook (both keyed by reference) resolves it. Never debit on a guess.
 	r := newForwardRig(t, "1500.00")
 	r.gateway.payoutID = ""
 
@@ -451,11 +455,11 @@ func TestP2PForward_AcceptedWithNoPayoutIDFailsRatherThanWaitingForever(t *testi
 		t.Fatalf("available_ngn = %q, want 1500.00", got)
 	}
 	f := r.forward(t)
-	if f.Status != models.P2PForwardFailed {
-		t.Fatalf("forward status = %q, want failed", f.Status)
+	if f.Status != models.P2PForwardPending || f.StartedAt == nil {
+		t.Fatalf("forward status = %q started=%v, want pending and started", f.Status, f.StartedAt)
 	}
-	if f.AlertedAt == nil {
-		t.Fatal("no alert raised for an unconfirmable transfer")
+	if !strings.Contains(f.FailureReason, "outcome unknown") {
+		t.Fatalf("failure_reason = %q, want it to say the outcome is unknown", f.FailureReason)
 	}
 }
 
@@ -687,7 +691,7 @@ func TestP2PForward_ConfirmIgnoresForeignReferences(t *testing.T) {
 
 func TestP2PForward_ListNeedingAttentionSurfacesUnpaidMerchants(t *testing.T) {
 	r := newForwardRig(t, "1500.00")
-	r.gateway.err = errors.New("rejected")
+	r.gateway.err = &ProviderRejectedError{Err: errors.New("rejected")}
 	if err := r.src.Accept(context.Background(), r.trade.ID, p2pInboundCredit("999000000014", "1500.00")); err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
