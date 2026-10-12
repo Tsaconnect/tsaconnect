@@ -273,3 +273,23 @@ func TestInsertForwardAndCredit_ReplayCreditsOnce(t *testing.T) {
 		t.Fatalf("available = %s, want one credit", r.availableNGN(t))
 	}
 }
+
+// Review m-11: the fee is decoded exactly (decimal text → kobo), never through
+// float64 — half a kobo rounds up, and a large value keeps every digit.
+func TestTransferFee_DecodesExactly(t *testing.T) {
+	for raw, want := range map[string]string{
+		`"10.075"`:            "1008",
+		`10.075`:              "1008",
+		`"90071992547409.93"`: "9007199254740993",
+		`[0.1, 0.2]`:          "30",
+		`{"value":"1e1"}`:     "1000",
+	} {
+		got, err := decodeFWTransferFeeKobo(json.RawMessage(raw))
+		if err != nil || got.String() != want {
+			t.Fatalf("%s → %v %v, want %s kobo", raw, got, err, want)
+		}
+	}
+	if _, err := decodeFWTransferFeeKobo(json.RawMessage(`"-1.00"`)); err == nil {
+		t.Fatal("a negative fee must be an error")
+	}
+}

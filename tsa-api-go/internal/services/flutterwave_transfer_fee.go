@@ -28,15 +28,34 @@ func (c *FlutterwaveClient) TransferFeeKobo(ctx context.Context, payoutID string
 
 // decodeFWTransferFeeKobo reads a v4 transfer's `fee`, whose live shape is
 // unmeasured (flutterwave_client.go:1052-1075; Task 17 probes it): a number, a
-// numeric string or an array (FWFeeAmount), or an object with `value`/`amount`.
-// Absent, null, "" or anything else is an error: a zero fee would overstate
-// the keep.
+// numeric string or an array of them (summed), or an object with
+// `value`/`amount`. Absent, null, "" or anything else is an error: a zero fee
+// would overstate the keep. Decoded exactly from the decimal text (review
+// m-11: the books are big.Int, never float64); half a kobo rounds up.
 func decodeFWTransferFeeKobo(raw json.RawMessage) (*big.Int, error) {
+	naira, err := decodeFWFeeNaira(raw)
+	if err != nil {
+		return nil, err
+	}
+	if naira.Sign() < 0 {
+		return nil, fmt.Errorf("flutterwave transfer fee: negative %s", naira.FloatString(2))
+	}
+	kobo := new(big.Rat).Mul(naira, big.NewRat(100, 1))
+	q, r := new(big.Int).QuoRem(kobo.Num(), kobo.Denom(), new(big.Int))
+	if new(big.Int).Mul(r, big.NewInt(2)).Cmp(kobo.Denom()) >= 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	return q, nil
+}
+
+// decodeFWFeeNaira is the fee in naira as an exact rational.
+func decodeFWFeeNaira(raw json.RawMessage) (*big.Rat, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" || string(raw) == `""` {
 		return nil, errors.New("flutterwave transfer: no fee on the transfer")
 	}
-	if raw[0] == '{' {
+	switch raw[0] {
+	case '{':
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return nil, fmt.Errorf("flutterwave transfer fee: %w", err)
@@ -48,19 +67,37 @@ func decodeFWTransferFeeKobo(raw json.RawMessage) (*big.Int, error) {
 		if !ok {
 			return nil, fmt.Errorf("flutterwave transfer fee: unrecognised object %s", raw)
 		}
-		return decodeFWTransferFeeKobo(inner)
+		return decodeFWFeeNaira(inner)
+	case '[':
+		var elems []json.RawMessage
+		if err := json.Unmarshal(raw, &elems); err != nil {
+			return nil, fmt.Errorf("flutterwave transfer fee: invalid array %s: %w", raw, err)
+		}
+		sum := new(big.Rat)
+		for _, e := range elems {
+			v, err := decodeFWFeeNaira(e)
+			if err != nil {
+				return nil, err
+			}
+			sum.Add(sum, v)
+		}
+		return sum, nil
+	case '"':
+		var str string
+		if err := json.Unmarshal(raw, &str); err != nil {
+			return nil, fmt.Errorf("flutterwave transfer fee: %w", err)
+		}
+		raw = json.RawMessage(strings.TrimSpace(str))
 	}
-	var amt FWFeeAmount
-	if err := amt.UnmarshalJSON(raw); err != nil {
-		return nil, err
+	var num json.Number
+	if err := json.Unmarshal(raw, &num); err != nil {
+		return nil, fmt.Errorf("flutterwave transfer fee: not a number %s", raw)
 	}
-	if amt.Float64() < 0 {
-		return nil, fmt.Errorf("flutterwave transfer fee: negative %v", amt.Float64())
+	v, ok := new(big.Rat).SetString(num.String())
+	if !ok {
+		return nil, fmt.Errorf("flutterwave transfer fee: not a number %s", raw)
 	}
-	f := new(big.Float).Mul(big.NewFloat(amt.Float64()), big.NewFloat(100))
-	f.Add(f, big.NewFloat(0.5))
-	k, _ := f.Int(nil)
-	return k, nil
+	return v, nil
 }
 
 // Forward-transfer lookups scan a narrow window (re-review I-D): started_at
