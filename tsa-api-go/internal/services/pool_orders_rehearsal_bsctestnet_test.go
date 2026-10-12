@@ -29,7 +29,14 @@ import (
 // real: the treasury lane, its nonce watch, receipts 2 deep, and the release
 // key's cancelByTimeout (permissionless on the escrow).
 
-const rehearsalSchema = "liq_c1_rehearsal"
+// rehearsalSchema defaults to C1's; LIQ_REH_SCHEMA keeps another rehearsal
+// (the C2 fork and real-chain runs) in its own schema.
+func rehearsalSchema() string {
+	if s := os.Getenv("LIQ_REH_SCHEMA"); s != "" && strings.HasPrefix(s, "liq_") && !strings.ContainsAny(s, " ;\"'") {
+		return s
+	}
+	return "liq_c1_rehearsal"
+}
 
 type c1Rehearsal struct {
 	db     *gorm.DB
@@ -59,10 +66,10 @@ func rehearsalDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("postgres: %v", err)
 	}
-	if err := admin.Exec("CREATE SCHEMA IF NOT EXISTS " + rehearsalSchema).Error; err != nil {
+	if err := admin.Exec("CREATE SCHEMA IF NOT EXISTS " + rehearsalSchema()).Error; err != nil {
 		t.Fatalf("schema: %v", err)
 	}
-	scoped, err := testutil.DSNWithSchema(dsn, rehearsalSchema)
+	scoped, err := testutil.DSNWithSchema(dsn, rehearsalSchema())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +102,7 @@ func newC1Rehearsal(t *testing.T) *c1Rehearsal {
 	}
 	db := rehearsalDB(t)
 	cfg := config.Load()
+	overrideRehearsalPool(t, cfg)
 	bs := NewBlockchainService(cfg)
 	reg := NewP2PEscrowRegistry(bs, cfg)
 	pool, ok := reg.PoolChain()
@@ -176,6 +184,26 @@ func newC1Rehearsal(t *testing.T) *c1Rehearsal {
 		r.lps = append(r.lps, c1LP{pm: &lp, addr: addr, pk: pk})
 	}
 	return r
+}
+
+// overrideRehearsalPool points chain 97 at another testnet pool (Plan C2's
+// fresh deploy) when LIQ_REH_POOL_ESCROW and LIQ_REH_POOL_FEEMANAGER are set:
+// test-only, the preset row stays as it is. Chain 97 only.
+func overrideRehearsalPool(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	esc, fm := os.Getenv("LIQ_REH_POOL_ESCROW"), os.Getenv("LIQ_REH_POOL_FEEMANAGER")
+	if esc == "" && fm == "" {
+		return
+	}
+	cc, ok := cfg.P2PChains[97]
+	if !ok || cc.Pool == nil || !common.IsHexAddress(esc) || !common.IsHexAddress(fm) {
+		t.Fatalf("pool override needs a chain-97 pool row and two addresses")
+	}
+	pool := *cc.Pool
+	pool.FeeManager = common.HexToAddress(fm).Hex()
+	cc.EscrowAddress, cc.Pool = common.HexToAddress(esc).Hex(), &pool
+	cfg.P2PChains[97] = cc
+	t.Logf("rehearsal pool override: escrow %s FeeManager %s", cc.EscrowAddress, pool.FeeManager)
 }
 
 // warmRPC opens a few connections to the pool chain's RPC right before a
