@@ -76,7 +76,7 @@ var poolSites = []providerSite{
 		send, hold := s.routedDeliveryAmounts(i, big.NewInt(100))
 		return send.Int64() == 100 && hold.Int64() == 100
 	}},
-	// C1 has no settle path: the S37 refund is plan C2's (P3).
+	// The generic refund never runs a pool buy's: S37's refundPoolBuy does (P3).
 	{"MarkStableBuyRefunded", models.ITStatusBuyAwaitingRate, func(t *testing.T, s *ITService, _ uuid.UUID, i *models.ITIntent) bool {
 		_, err := s.MarkStableBuyRefunded(context.Background(), uuid.New(), i.ID, "note")
 		var got models.ITIntent

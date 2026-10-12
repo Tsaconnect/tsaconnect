@@ -47,8 +47,8 @@ func (s *ITService) PoolCanFill(ctx context.Context, units *big.Int, set PoolSet
 
 // OpenPoolConvertedBuy opens a converted pool order (§11.1): the pool chain's
 // token delivered to the conversion treasury, and its record (holder tsa_pool,
-// the leg's own decimals) in the open's transaction. Custody is plan C2's
-// (S22): until it writes the handoff hash, takeCustody waits.
+// the leg's own decimals) in the open's transaction. Custody (S22): until the
+// settle engine hands off with the first release's hash, takeCustody waits.
 func (s *ITService) OpenPoolConvertedBuy(ctx context.Context, userID uuid.UUID, p *PoolPrice, in ConvertedOpen) (*models.ITIntent, *StableBuyInstructions, *models.PaycrestOrderRecord, error) {
 	if !s.HasPool() || p == nil {
 		return nil, nil, nil, ErrPoolClosed

@@ -488,7 +488,7 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 
 // claimPool claims a pool buy (spec §12.3) under the pool lock with the
 // intent row locked — the lock the expiry canceller (decideSliceCancel) and
-// F21 (DecideSliceResolve) decide under, so whoever locks the intent first
+// F21 (ClaimSliceResolve) decide under, so whoever locks the intent first
 // wins (P1, M7). The owed units are the honoured quote's, or for a buy priced
 // live (S18) the current mid and settings'. Either way they must be covered
 // by this order's slices that still back it (never a dropped one, review

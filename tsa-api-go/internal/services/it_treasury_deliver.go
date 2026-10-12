@@ -451,22 +451,6 @@ func (s *ITService) saleDepth() uint64 {
 	return uint64(max(1, s.treasuryLimits().confirmations))
 }
 
-// saleConfirmed: the company-wallet sale's receipt has status want (success
-// for a settle, failed for a revert) and is RAMP_TREASURY_CONFIRMATIONS deep,
-// read on endpoint gen — receiptDeep on the company wallet's probe. The status
-// is checked there too, so the verifier's verdict and the depth read can never
-// disagree about what happened; anything unreadable reads as "not yet".
-func (s *ITService) saleConfirmed(ctx context.Context, leg *models.RampLeg, want, gen uint64) (bool, error) {
-	var probe TreasuryTxProbe
-	if s.HasCompanyWallet() {
-		probe = s.wallet.Probe(leg.ChainKey)
-	}
-	if probe == nil {
-		return false, fmt.Errorf("company wallet: no probe on %s", leg.ChainKey)
-	}
-	return receiptDeep(ctx, probe, leg.TxHash, want, s.saleDepth(), gen)
-}
-
 // settleTreasuryBuy confirms the company-wallet leg and settles the intent.
 func (s *ITService) settleTreasuryBuy(ctx context.Context, intent *models.ITIntent, leg *models.RampLeg, received string) error {
 	return s.settleSale(ctx, s.companyBooks(), intent, leg, received)

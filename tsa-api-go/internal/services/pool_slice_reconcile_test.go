@@ -152,7 +152,7 @@ func TestReconcileOrphanOpen_SliceNeedsConsumedNonce(t *testing.T) {
 	}
 }
 
-// Review I3: until C2 settles, a slice of a PAID order that is cancelled
+// Review I3: before her delivery, a slice of a PAID order that is cancelled
 // on-chain (cancelByTimeout is permissionless after 60 min) or resolved back
 // to its LP is money with no stock behind it. That is never silent.
 func TestPoolSlice_PaidSliceLostAlerts(t *testing.T) {

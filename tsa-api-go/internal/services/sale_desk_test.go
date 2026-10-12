@@ -85,7 +85,7 @@ func TestSaleDesk_OnSettleIsInTheSettleTransaction(t *testing.T) {
 	}
 }
 
-// receiptDeep (Task 1) is saleConfirmed's rule, shared with the release proof.
+// receiptDeep (Task 1) is the sale settle's rule, shared with the release proof.
 func TestReceiptDeep_NeedsDepthStatusAndOneEndpoint(t *testing.T) {
 	p := &fakeTxProbe{head: 100, receiptBlock: 96}
 	if ok, _ := receiptDeep(context.Background(), p, "0xsale", 1, 5, p.EndpointGeneration()); !ok {

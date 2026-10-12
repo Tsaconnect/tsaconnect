@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // F21 on Postgres (review M7): the decision takes the intent's FOR UPDATE, a
@@ -38,14 +39,26 @@ func TestPoolSlice_DisputeDecidedUnderIntentLock_Postgres(t *testing.T) {
 	}
 
 	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("status", models.ITStatusPendingPayment)
-	toTreasury, err := r.it.DecideSliceResolve(ctx, &sl)
+	toTreasury, err := decideSliceResolve(r, &sl)
 	var got models.P2PTrade
 	r.db.First(&got, "id = ?", sl.ID)
 	if err != nil || toTreasury || got.DroppedAt == nil {
 		t.Fatalf("unpaid: toTreasury=%v err=%v dropped=%v, want back to the LP and dropped", toTreasury, err, got.DroppedAt)
 	}
 	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("status", models.ITStatusPaymentReceived)
-	if again, err := r.it.DecideSliceResolve(ctx, &got); err != nil || again {
+	if again, err := decideSliceResolve(r, &got); err != nil || again {
 		t.Fatalf("a dropped slice flipped to the treasury: %v %v", again, err)
 	}
+}
+
+// decideSliceResolve runs F21's decision in its own transaction, as
+// ClaimSliceResolve does.
+func decideSliceResolve(r *poolOpenRig, sl *models.P2PTrade) (bool, error) {
+	toTreasury := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		toTreasury, err = r.it.decideSliceResolveTx(tx, sl)
+		return err
+	})
+	return toTreasury, err
 }

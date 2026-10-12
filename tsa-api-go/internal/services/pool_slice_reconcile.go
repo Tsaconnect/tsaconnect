@@ -28,10 +28,6 @@ type PoolSliceOrders interface {
 	// SliceOrderHoldsMoney: the order holds her naira, whether or not the
 	// slice still backs it. A read, for alerts only.
 	SliceOrderHoldsMoney(ctx context.Context, slice *models.P2PTrade) (bool, error)
-	// DecideSliceResolve is F21's decision, taken under the intent's row lock
-	// (the claim's lock, review M7): true = resolve to the treasury; false =
-	// back to the LP, with dropped_at written in the same transaction.
-	DecideSliceResolve(ctx context.Context, slice *models.P2PTrade) (bool, error)
 	// SliceOpenGone: the slice's open can never land (S44, review I1).
 	SliceOpenGone(ctx context.Context, slice *models.P2PTrade) (bool, error)
 	// SliceHashReverted: the slice's recorded release_tx_hash is a real hash
@@ -109,8 +105,9 @@ func (s *P2PTradeService) rotateSlice(ctx context.Context, t *models.P2PTrade) {
 }
 
 // notePaidSliceLost (review I3): a slice of a paid order left escrow other
-// than to the treasury. Until plan C2 there is no automatic remedy; an
-// operator must see it at once.
+// than to the treasury. The settle engine re-evaluates the order (S18: carry
+// on, or park pool_slices_short for re-delivery or the S37 override); an
+// operator sees it at once.
 func (s *P2PTradeService) notePaidSliceLost(ctx context.Context, trade *models.P2PTrade, how string) {
 	if s.poolSlices == nil {
 		return
@@ -301,9 +298,10 @@ func (s *P2PTradeService) reconcileSliceResolved(ctx context.Context, trade *mod
 }
 
 // noteSliceSelfRelease is F22: released on-chain without our AutoRelease
-// (the slice never went through releasing). Unpaid: alerted, never forwarded
-// (C2). Paid: the USDT reached the treasury early; C2's settle must account
-// for it, so it is alerted too (review I3).
+// (the slice never went through releasing). Unpaid, or dropped: alerted,
+// never forwarded automatically — an operator pays the LP or hands the USDT
+// back. Paid: the USDT reached the treasury early; the settle engine proves it
+// and forwards its LP, and it is alerted too (review I3).
 func (s *P2PTradeService) noteSliceSelfRelease(ctx context.Context, trade *models.P2PTrade) {
 	if trade.Status != models.P2PTradeStatusPendingPayment || s.poolSlices == nil {
 		return
@@ -315,7 +313,7 @@ func (s *P2PTradeService) noteSliceSelfRelease(ctx context.Context, trade *model
 		log.Printf("[liquidity] ALERT liquidity_pool_slice_self_released slice=%s intent=%s — never forwarded automatically (F22)",
 			trade.ID, trade.ITIntentID)
 	default:
-		log.Printf("[liquidity] ALERT liquidity_pool_paid_slice_lost slice=%s intent=%s how=self_released — the USDT is at the treasury; plan C2 accounts for it",
+		log.Printf("[liquidity] ALERT liquidity_pool_paid_slice_lost slice=%s intent=%s how=self_released — the USDT is at the treasury; the settle engine proves and forwards it (F22)",
 			trade.ID, trade.ITIntentID)
 	}
 }
@@ -352,24 +350,10 @@ func poolOrderHoldsMoney(status string) bool {
 	return false
 }
 
-// DecideSliceResolve is F21's decision under the intent's FOR UPDATE (review
-// M7): the claim and S18 take the same lock, so whichever commits first wins.
-func (s *ITService) DecideSliceResolve(ctx context.Context, slice *models.P2PTrade) (bool, error) {
-	if slice == nil || slice.ITIntentID == nil {
-		return false, nil
-	}
-	toTreasury := false
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var err error
-		toTreasury, err = s.decideSliceResolveTx(tx, slice)
-		return err
-	})
-	return toTreasury, err
-}
-
-// decideSliceResolveTx is DecideSliceResolve's body inside the caller's
-// transaction: takes the intent's FOR UPDATE, decides, and drops the slice
-// when it goes back to the LP.
+// decideSliceResolveTx is F21's decision under the intent's FOR UPDATE (review
+// M7), inside ClaimSliceResolve's transaction: the claim and S18 take the same
+// lock, so whichever commits first wins. True = resolve to the treasury;
+// false = back to the LP, with dropped_at written in the same transaction.
 func (s *ITService) decideSliceResolveTx(tx *gorm.DB, slice *models.P2PTrade) (bool, error) {
 	var intent models.ITIntent
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").First(&intent, "id = ?", *slice.ITIntentID).Error; err != nil {

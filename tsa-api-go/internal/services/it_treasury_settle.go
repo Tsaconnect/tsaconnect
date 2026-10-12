@@ -168,8 +168,9 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 			return termsErr
 		}
 		if terms.pool {
-			// Plan C1 P3: the pool's refund is S37's (zero slices releasing or
-			// released, inside the pool lock) — plan C2 builds it.
+			// Plan C1 P3: the pool's refund is S37's (refundPoolBuy: no slice at
+			// the treasury, inside the pool lock); this generic path never runs
+			// it — reached only when the pool desk is not wired.
 			return fmt.Errorf("%w: a TSA pool buy is refunded only through its own path", ErrITBadState)
 		}
 		provider = models.ITIntentProvider(&intent) // the audit row names the raw value
