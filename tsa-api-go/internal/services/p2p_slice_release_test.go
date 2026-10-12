@@ -185,6 +185,45 @@ func TestReconcileToReleased_SliceKeepsItsReleaseHash(t *testing.T) {
 	}
 }
 
+// The race the full PG gate exposed: the reconciler read the slice before
+// AutoRelease recorded its hash, then wrote "reconciled" over the real one.
+// A recorded hash survives the reconciler's stale read.
+func TestReconcileToReleased_SliceStaleReadKeepsTheRecordedHash(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	sl := seedReleasableSlice(t, svc) // read with no hash
+	db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("release_tx_hash", "0xreal")
+	if _, err := svc.reconcileToReleased(context.Background(), sl, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	var got models.P2PTrade
+	db.First(&got, "id = ?", sl.ID)
+	if got.Status != models.P2PTradeStatusReleased || got.ReleaseTxHash != "0xreal" {
+		t.Fatalf("slice = %s hash=%q, want released keeping 0xreal", got.Status, got.ReleaseTxHash)
+	}
+}
+
+// The other order of the same race: the reconciler's "reconciled" marker
+// lands before AutoRelease records its hash. The marker is not a hash, so the
+// real one still replaces it — the proof never depends on the log scan alone.
+func TestRecordSliceReleaseHash_ReplacesTheReconciledMarker(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, _, _ := newService(t, db)
+	sl := seedReleasableSlice(t, svc)
+	db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Updates(map[string]any{"status": models.P2PTradeStatusReleased, "release_tx_hash": "reconciled"})
+	svc.recordSliceReleaseHash(context.Background(), sl.ID, "0xreal")
+	var got models.P2PTrade
+	db.First(&got, "id = ?", sl.ID)
+	if got.ReleaseTxHash != "0xreal" {
+		t.Fatalf("hash = %q, want 0xreal over the marker", got.ReleaseTxHash)
+	}
+	svc.recordSliceReleaseHash(context.Background(), sl.ID, "0xother")
+	db.First(&got, "id = ?", sl.ID)
+	if got.ReleaseTxHash != "0xreal" {
+		t.Fatalf("hash = %q, want a recorded hash never overwritten", got.ReleaseTxHash)
+	}
+}
+
 // A release is sent at most once per slice: a second AutoRelease on a slice
 // left `releasing` with its hash (a verify that never saw the receipt) never
 // reaches Send — and neither does one on a paid slice still carrying a hash.

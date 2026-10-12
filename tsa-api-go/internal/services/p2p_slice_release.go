@@ -8,31 +8,36 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // recordSliceReleaseHash records a release attempt's hash on a pool slice
-// BEFORE its receipt is read (plan C2 P2) — only into an empty column: a
-// recorded hash is never overwritten unless proven reverted, and that path
-// clears it first (re-review I-A). Detached: the caller's context may end.
+// BEFORE its receipt is read (plan C2 P2) — only into an empty column or over
+// the reconciler's "reconciled" marker (a concurrent reconcile that saw the
+// release land first; the marker is not a hash): a recorded hash is never
+// overwritten unless proven reverted, and that path clears it first
+// (re-review I-A). Detached: the caller's context may end.
 func (s *P2PTradeService) recordSliceReleaseHash(ctx context.Context, id uuid.UUID, hash string) {
 	if hash == "" {
 		return
 	}
-	res := s.db.WithContext(detached(ctx)).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ''", id).
+	res := s.db.WithContext(detached(ctx)).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash IN ('', 'reconciled')", id).
 		Update("release_tx_hash", hash)
 	if res.Error != nil || res.RowsAffected != 1 {
 		log.Printf("[liquidity] ALERT liquidity_pool_release_hash_unrecorded slice=%s tx=%s — a hash is already recorded, or the write failed", id, hash)
 	}
 }
 
-// sliceReconciledHash is the release_tx_hash reconcileToReleased writes: a
-// slice keeps a real hash (the settle proof reads it); everything else gets
-// today's "reconciled" marker.
-func sliceReconciledHash(t *models.P2PTrade) string {
-	if t.IsPoolSlice() && t.ReleaseTxHash != "" && t.ReleaseTxHash != "reconciled" {
-		return t.ReleaseTxHash
+// reconciledReleaseHash is the release_tx_hash reconcileToReleased writes:
+// an ordinary trade gets today's "reconciled" marker; a slice keeps whatever
+// real hash the ROW holds at write time (the settle proof reads it) — decided
+// in SQL, so a hash AutoRelease recorded after the reconciler's read is never
+// overwritten (a stale read would otherwise clobber it).
+func reconciledReleaseHash(t *models.P2PTrade) any {
+	if !t.IsPoolSlice() {
+		return "reconciled"
 	}
-	return "reconciled"
+	return gorm.Expr("CASE WHEN release_tx_hash IN ('', 'reconciled') THEN 'reconciled' ELSE release_tx_hash END")
 }
 
 // sliceResolveClaimAbandoned (review I-3): the only proof that clears a

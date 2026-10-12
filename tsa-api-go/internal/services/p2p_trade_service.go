@@ -2803,7 +2803,7 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 				}).
 			Updates(map[string]any{
 				"status":          models.P2PTradeStatusReleased,
-				"release_tx_hash": sliceReconciledHash(trade),
+				"release_tx_hash": reconciledReleaseHash(trade),
 				"released_at":     now,
 				"updated_at":      now,
 			})
