@@ -2078,6 +2078,25 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 	return escrow.PrepareCancelByTimeout(HashID(trade.ID), callerAddress)
 }
 
+// cancelledOnChainElsewhere: when the chain already says Cancelled, reconcile
+// the trade (the same transition the reconciler applies) and return the
+// refreshed row; ok=false when the chain says otherwise or cannot be read.
+func (s *P2PTradeService) cancelledOnChainElsewhere(ctx context.Context, escrow P2PEscrowAdapter, trade *models.P2PTrade) (*models.P2PTrade, bool) {
+	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	if err != nil || onchain == nil || !onchain.Exists || onchain.Status != OnChainP2PStatusCancelled {
+		return nil, false
+	}
+	if _, err := s.ReconcileTrade(ctx, trade.ID); err != nil {
+		log.Printf("[p2p ConfirmCancel] trade=%s reconcile after a lost cancel failed: %v", trade.ID, err)
+		return nil, false
+	}
+	var fresh models.P2PTrade
+	if err := s.db.WithContext(ctx).First(&fresh, "id = ?", trade.ID).Error; err != nil || fresh.Status != models.P2PTradeStatusCancelled {
+		return nil, false
+	}
+	return &fresh, true
+}
+
 // releasePMSellReservationTx releases the NGN payout reservation a PM sell trade
 // held, when that trade is cancelled. It resolves the trade's ad pm_id within the
 // supplied transaction and, if the ad is a PM ad and the PM ledger is wired,
@@ -2150,6 +2169,13 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 	}
 	ev, err := escrow.VerifyTradeCancelled(txHash, HashID(trade.ID))
 	if err != nil {
+		// Her cancel may have lost to another cancelByTimeout (the expiry
+		// canceller's, or the counterparty's) and reverted. The trade is still
+		// cancelled on chain: apply it now rather than show an error until the
+		// reconciler's next pass.
+		if done, ok := s.cancelledOnChainElsewhere(ctx, escrow, &trade); ok {
+			return done, nil
+		}
 		return nil, fmt.Errorf("verify on-chain cancel: %w", err)
 	}
 	// Sanity check: on-chain cancelled amount matches our recorded amount.

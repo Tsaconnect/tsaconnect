@@ -171,7 +171,8 @@ func (m *P2PMessageService) List(ctx context.Context, tradeID, requestor uuid.UU
 // be admin-gated.
 func (m *P2PMessageService) AdminList(ctx context.Context, tradeID uuid.UUID, f MessageFilter) ([]models.P2PMessage, error) {
 	var n int64
-	if err := m.db.WithContext(ctx).Model(&models.P2PTrade{}).Where("id = ?", tradeID).Count(&n).Error; err != nil {
+	// A pool slice answers as missing, like AdminTradeDetail.
+	if err := m.db.WithContext(ctx).Model(&models.P2PTrade{}).Scopes(notPoolSlice).Where("id = ?", tradeID).Count(&n).Error; err != nil {
 		return nil, err
 	}
 	if n == 0 {

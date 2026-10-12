@@ -18,6 +18,9 @@ const (
 	P2PAlertPaidTradeCancelled P2PAlertKind = "paid_trade_cancelled"
 	P2PAlertDisputeFiled       P2PAlertKind = "dispute_filed"
 	P2PAlertPaidUnreleased     P2PAlertKind = "paid_unreleased"
+	// P2PAlertExpiredWithProof: the expiry canceller did not refund an expired
+	// direct trade whose buyer saved payment proof without marking paid on-chain.
+	P2PAlertExpiredWithProof P2PAlertKind = "expired_with_proof"
 )
 
 const p2pAlertReasonMax = 300
@@ -61,6 +64,10 @@ func (n *InboundHoldNotifier) NotifyP2P(_ context.Context, a P2PAlert) error {
 		subject = fmt.Sprintf("P2P trade paid %s without release — %s", a.Age, size)
 		title = "A paid P2P trade has not been released"
 		todo = "The seller has not released the crypto. Check the trade and chase the seller, or let the buyer dispute."
+	case P2PAlertExpiredWithProof:
+		subject = "P2P trade expired with payment proof — " + size
+		title = "An expired P2P trade has payment proof but no on-chain mark-paid"
+		todo = "The buyer saved payment proof but her on-chain mark-paid never landed, so it was not auto-cancelled. Check the proof and chat: the buyer can still mark paid or dispute; either party can cancel by timeout."
 	default:
 		subject = "P2P trade alert — " + size
 		title = "P2P trade alert"
@@ -92,7 +99,7 @@ func (n *InboundHoldNotifier) NotifyP2P(_ context.Context, a P2PAlert) error {
 		switch a.Kind {
 		case P2PAlertDisputeFiled:
 			ctaText, ctaURL = "Open the dispute", n.consoleBaseURL+"/p2p-disputes/"+a.TradeID.String()
-		case P2PAlertPaidUnreleased:
+		case P2PAlertPaidUnreleased, P2PAlertExpiredWithProof:
 			ctaText, ctaURL = "Open the trade", n.consoleBaseURL+"/p2p-trades/"+a.TradeID.String()
 		}
 	}

@@ -107,6 +107,12 @@ func (s *P2PTradeService) gasNeedTradeTurn(ctx context.Context, userID uuid.UUID
 		err = canRelease(userID, t)
 	case P2PGasCancelTrade:
 		err = canCancelByTimeout(userID, t, s.clock.Now())
+		// The expiry canceller decided it (dropped_at): the release key is
+		// already sending cancelByTimeout, so hers would revert NotPending.
+		// PrepareCancel itself stays permissionless.
+		if err == nil && t.DroppedAt != nil {
+			err = refuse(fmt.Errorf("%w: trade is already being cancelled", ErrInvalidTransition))
+		}
 	case P2PGasDispute:
 		_, err = canDispute(userID, t)
 	}
