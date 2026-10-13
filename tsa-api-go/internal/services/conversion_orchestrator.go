@@ -950,7 +950,7 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		return o.failLeg(detached(ctx), leg.ID, err.Error())
 	}
 
-	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, order.Token, bridge, route)
+	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(o.legSend(ctx, leg.ID, route.Tool), lane, order.Token, bridge, route)
 	if err != nil {
 		if broadcastAttempted {
 			// Might have landed: keep the leg pending so no second route runs.
@@ -962,11 +962,6 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 			return ferr
 		}
 		return errIfOutOfGas(err)
-	}
-	// Detached: the broadcast already happened, so losing this write to a
-	// cancelled request would strand the leg with no hash.
-	if err := o.legs.SetTxHash(detached(ctx), leg.ID, txHash, route.Tool); err != nil {
-		return err
 	}
 	log.Printf("[ramp-conversion] order=%s bridge#%d chain=%s->%s token=%s sent=%s of %s tx=%s tool=%s",
 		order.ID, attempt, lane.ChainKey, dst.chainKey, dst.symbol, bridge, amount, txHash, route.Tool)
@@ -1349,16 +1344,13 @@ func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *mo
 	if existing != nil {
 		return nil
 	}
-	txHash, attempted, err := o.treasury.TransferToken(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), dst.lane, dst.symbol, order.WalletAddress, shortfall)
+	txHash, attempted, err := o.treasury.TransferToken(o.legSend(ctx, leg.ID, ""), dst.lane, dst.symbol, order.WalletAddress, shortfall)
 	if err != nil {
 		if attempted {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_broadcast_uncertain_total=1 order=%s leg=%s err=%v", order.ID, leg.ID, err)
 			return nil
 		}
 		return o.failLeg(detached(ctx), leg.ID, err.Error())
-	}
-	if err := o.legs.SetTxHash(detached(ctx), leg.ID, txHash, ""); err != nil {
-		return err
 	}
 	log.Printf("[ramp-conversion] order=%s deliver#%d chain=%s token=%s amount=%s tx=%s",
 		order.ID, attempt, dst.lane.ChainKey, dst.symbol, shortfall, txHash)
@@ -1547,16 +1539,13 @@ func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.Paycr
 	if existing != nil {
 		return nil
 	}
-	txHash, attempted, err := o.treasury.TransferToken(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, order.Token, order.WalletAddress, amount)
+	txHash, attempted, err := o.treasury.TransferToken(o.legSend(ctx, leg.ID, ""), lane, order.Token, order.WalletAddress, amount)
 	if err != nil {
 		if attempted {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_broadcast_uncertain_total=1 order=%s leg=%s err=%v", order.ID, leg.ID, err)
 			return nil
 		}
 		return o.failLeg(detached(ctx), leg.ID, err.Error())
-	}
-	if err := o.legs.SetTxHash(detached(ctx), leg.ID, txHash, ""); err != nil {
-		return err
 	}
 	log.Printf("[ramp-conversion] order=%s refund#%d chain=%s token=%s amount=%s tx=%s fault=%s — awaiting on-chain confirmation",
 		order.ID, attempt, lane.ChainKey, leg.Token, amount, txHash, fault)
@@ -2417,7 +2406,7 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		return o.resolveAdminRefund(ctx, adminID, &order, reserved)
 	}
 
-	txHash, attempted, err := o.treasury.TransferToken(WithOperationRef(ctx, "ramp_leg:"+newLeg.ID.String()), lane, token, order.WalletAddress, amount)
+	txHash, attempted, err := o.treasury.TransferToken(o.legSend(ctx, newLeg.ID, ""), lane, token, order.WalletAddress, amount)
 	if err != nil {
 		if attempted {
 			// Something may have landed: the leg MUST stay pending — never
@@ -2435,11 +2424,6 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		if ferr := o.failLeg(detached(ctx), newLeg.ID, err.Error()); ferr != nil {
 			return nil, ferr
 		}
-		return nil, err
-	}
-	// Detached: the transfer already broadcast, so this write must survive
-	// the caller's own context ending — exactly refund()'s own pattern.
-	if err := o.legs.SetTxHash(detached(ctx), newLeg.ID, txHash, ""); err != nil {
 		return nil, err
 	}
 	newLeg.TxHash = txHash
@@ -2484,9 +2468,21 @@ func (o *ConversionOrchestrator) resolveAdminRefund(ctx context.Context, adminID
 	return pending, nil
 }
 
+// legSend is the send context of a treasury leg: the leg is the operation
+// (a retry never gets a new nonce), and its hash (and LiFi tool) is written
+// on the still-pending leg in the key lane's allocation transaction — the leg
+// and the signed call commit together, so a refund or re-drive that won the
+// leg first means nothing is signed, and a committed call always shows on its
+// leg.
+func (o *ConversionOrchestrator) legSend(ctx context.Context, legID uuid.UUID, tool string) context.Context {
+	return WithPreBroadcast(WithOperationRef(ctx, "ramp_leg:"+legID.String()), func(hctx context.Context, _ uint64, hash string) error {
+		return o.legs.SetTxHash(hctx, legID, hash, tool)
+	})
+}
+
 // detached returns a short-lived context that survives the caller's own
 // cancellation, for writes that MUST land because the broadcast already
-// happened — the same pattern as recordSponsorshipTx in sponsor_lane.go.
+// happened.
 //
 // The cancel func cannot be deferred here (the context has to outlive this
 // call), so it is registered with AfterFunc instead: the timer is released as

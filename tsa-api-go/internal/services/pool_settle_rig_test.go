@@ -114,7 +114,7 @@ func (p *poolReleaseSender) Address() string { return "0x00000000000000000000000
 func (p *poolReleaseSender) SignAndBroadcast(context.Context, []byte) (string, error) {
 	return "", errors.New("the release key only signs through Send")
 }
-func (p *poolReleaseSender) Send(_ context.Context, chainID int64, build func() ([]byte, error)) (string, error) {
+func (p *poolReleaseSender) Send(ctx context.Context, chainID int64, build func() ([]byte, error)) (string, error) {
 	unsigned, err := build()
 	if err != nil {
 		return "", notBroadcast(err)
@@ -129,6 +129,10 @@ func (p *poolReleaseSender) Send(_ context.Context, chainID int64, build func() 
 	var id [32]byte
 	copy(id[:], raw)
 	hash := releaseHashOf(id)
+	// Stands in for the key lane: the caller's pre-broadcast write first.
+	if err := emulatePreBroadcast(ctx, u.Nonce, hash.Hex()); err != nil {
+		return "", notBroadcast(err)
+	}
 	if strings.HasPrefix(u.Data, "adminRelease:") && !noMine {
 		p.chain.cmu.Lock()
 		t := p.chain.trades[id]

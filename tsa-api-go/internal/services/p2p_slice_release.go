@@ -6,27 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
-
-// recordSliceReleaseHash records a release attempt's hash on a pool slice
-// BEFORE its receipt is read (plan C2 P2) — only into an empty column or over
-// the reconciler's "reconciled" marker (a concurrent reconcile that saw the
-// release land first; the marker is not a hash): a recorded hash is never
-// overwritten unless proven reverted, and that path clears it first
-// (re-review I-A). Detached: the caller's context may end.
-func (s *P2PTradeService) recordSliceReleaseHash(ctx context.Context, id uuid.UUID, hash string) {
-	if hash == "" {
-		return
-	}
-	res := s.db.WithContext(detached(ctx)).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash IN ('', 'reconciled')", id).
-		Update("release_tx_hash", hash)
-	if res.Error != nil || res.RowsAffected != 1 {
-		log.Printf("[liquidity] ALERT liquidity_pool_release_hash_unrecorded slice=%s tx=%s — a hash is already recorded, or the write failed", id, hash)
-	}
-}
 
 // reconciledReleaseHash is the release_tx_hash reconcileToReleased writes:
 // an ordinary trade gets today's "reconciled" marker; a slice keeps whatever

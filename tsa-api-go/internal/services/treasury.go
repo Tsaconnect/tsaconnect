@@ -557,9 +557,11 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		// Exact-amount approval, never MaxUint256: the spender is a
 		// third-party router that changes weekly. lane.send carries the
 		// nonce lock and the broadcastAttempted contract.
-		approveCtx := ctx
+		// The caller's pre-broadcast hook records the ROUTE (the leg's
+		// transaction), never the approve.
+		approveCtx := WithPreBroadcast(ctx, nil)
 		if ref := operationRef(ctx); ref != "" {
-			approveCtx = WithOperationRef(ctx, ref+":approve")
+			approveCtx = WithOperationRef(approveCtx, ref+":approve")
 		}
 		approveHash, attempted, aerr := lane.send(approveCtx, func() ([]byte, error) {
 			return lane.Native.PrepareERC20Approve(tokenAddr, lane.Signer.Address(), route.ApprovalAddress, amount)
@@ -610,16 +612,16 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 	return t.TransferTokenRecorded(ctx, lane, token, to, amount, nil)
 }
 
-// TransferTokenRecorded is TransferToken with a hook that receives the
-// prepared transaction's nonce before it is broadcast (review C1): the company
-// wallet writes it on its sale leg, so a broadcast whose hash is lost can still
-// be told apart from one that never happened. A hook error means nothing was
-// broadcast. Same uncertain-broadcast contract as ExecuteRoute, and the same
+// TransferTokenRecorded is TransferToken with a pre-broadcast hook run inside
+// the key lane's allocation transaction (LaneHook): the company wallet writes
+// the nonce and hash on its sale leg in the same commit as the signed call, so
+// the leg and the lane can never disagree. A hook error means nothing was
+// committed or broadcast. Same uncertain-broadcast contract as ExecuteRoute, and the same
 // CheckCaps-first obligation: this method only checks the kill switch, that the
 // lane can pay for the gas, and the recipient's shape, not the value caps. An
 // attempted broadcast that errored returns the signed transaction's hash when
 // the signer knows it, so the caller can later ask the chain about it.
-func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared func(nonce uint64) error) (string, bool, error) {
+func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared LaneHook) (string, bool, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}
@@ -662,14 +664,15 @@ const treasuryEscrowCallGas uint64 = 300_000
 
 // CallEscrowRecorded calls a P2P escrow from the treasury (spec 2026-10-08
 // S21, S43): the pool's slice opens. Same contract as TransferTokenRecorded —
-// kill switch, gas, nonce recorded by onPrepared BEFORE broadcast, an uncertain
+// kill switch, gas, nonce and hash written by the hook in the allocation's own
+// transaction BEFORE broadcast, an uncertain
 // broadcast reported as attempted with its hash when known — plus two guards a
 // transfer does not need:
 //   - escrow must be on the lane's EscrowCalls (never on Routers: a LiFi route
 //     can never reach the escrow, and this can never reach a router);
 //   - the prepared transaction must target escrow with zero value on this
 //     lane's chain, so a build that went wrong is refused, never signed.
-func (t *Treasury) CallEscrowRecorded(ctx context.Context, lane *TreasuryLane, escrow string, build func() ([]byte, error), onPrepared func(nonce uint64) error) (string, bool, error) {
+func (t *Treasury) CallEscrowRecorded(ctx context.Context, lane *TreasuryLane, escrow string, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
 	b, err := t.StartEscrowBurst(ctx, lane, escrow, 1)
 	if err != nil {
 		return "", false, err
@@ -712,9 +715,9 @@ func (t *Treasury) StartEscrowBurst(ctx context.Context, lane *TreasuryLane, esc
 }
 
 // Call sends one escrow call of the burst: the kill switch again (in memory),
-// then the prepared tx's guards, the key lane's nonce floor, onPrepared and the
-// broadcast under its send lock. Same contract as CallEscrowRecorded.
-func (b *EscrowBurst) Call(ctx context.Context, build func() ([]byte, error), onPrepared func(nonce uint64) error) (string, bool, error) {
+// then the prepared tx's guards, the key lane's nonce floor, the hook (in the
+// allocation's transaction) and the broadcast under its send lock. Same contract as CallEscrowRecorded.
+func (b *EscrowBurst) Call(ctx context.Context, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
 	lane, escrow := b.lane, b.escrow
 	if lane.Guard.Killed() {
 		return "", false, ErrTreasuryKilled

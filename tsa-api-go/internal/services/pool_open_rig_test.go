@@ -119,22 +119,39 @@ func (f *poolOpenChain) PrepareAdminResolve(id [32]byte, releaseToBuyer bool, _ 
 
 func (f *poolOpenChain) PrepareCancelByTimeout(id [32]byte, _ string) ([]byte, error) {
 	f.cmu.Lock()
+	t := f.trades[id]
+	f.cmu.Unlock()
+	if t == nil || t.Status != OnChainP2PStatusPending {
+		f.cmu.Lock()
+		f.cancels = append(f.cancels, id)
+		f.cmu.Unlock()
+		return nil, errors.New("estimate gas (would revert): execution reverted: NotPending")
+	}
+	return json.Marshal(blockchain.UnsignedTx{To: poolTestEscrow, Value: "0", ChainID: "97", Data: "cancelByTimeout:" + hex.EncodeToString(id[:])})
+}
+
+// sent applies a release-key transaction the sender actually sent (the key
+// lane's hook passed): a cancel unlocks the LP's stock unless it never mines.
+func (f *poolOpenChain) sent(unsigned []byte) {
+	var u blockchain.UnsignedTx
+	if json.Unmarshal(unsigned, &u) != nil || !strings.HasPrefix(u.Data, "cancelByTimeout:") {
+		return
+	}
+	raw, _ := hex.DecodeString(strings.TrimPrefix(u.Data, "cancelByTimeout:"))
+	var id [32]byte
+	copy(id[:], raw)
+	f.cmu.Lock()
 	f.cancels = append(f.cancels, id)
 	t := f.trades[id]
 	noMine := f.cancelNoMine
-	f.cmu.Unlock()
-	if t == nil || t.Status != OnChainP2PStatusPending {
-		return nil, errors.New("estimate gas (would revert): execution reverted: NotPending")
+	if t == nil || noMine || t.Status != OnChainP2PStatusPending {
+		f.cmu.Unlock()
+		return
 	}
-	if noMine {
-		return json.Marshal(blockchain.UnsignedTx{To: poolTestEscrow, Value: "0", ChainID: "97", Data: "cancelByTimeout"})
-	}
-	f.cmu.Lock()
 	t.Status = OnChainP2PStatusCancelled
 	f.cmu.Unlock()
 	b, _ := f.ReadBalance(t.Seller.Hex(), "")
 	f.setBalance(t.Seller.Hex(), new(big.Int).Add(b.Available, t.Amount), new(big.Int).Sub(b.Locked, t.Amount))
-	return json.Marshal(blockchain.UnsignedTx{To: poolTestEscrow, Value: "0", ChainID: "97", Data: "cancelByTimeout"})
 }
 
 // setTrade rewrites a landed trade's on-chain status (an LP's own action).
@@ -155,6 +172,31 @@ func (f *poolOpenChain) ReadTradeFeeSnapshot(id [32]byte) (uint16, uint16, bool)
 
 // ── the treasury's signer ──
 func (f *poolOpenChain) Address() string { return poolTestTreasury }
+
+// signRaw / broadcastRaw make the fake a raw signer, so the key lane runs its
+// real outbox over it: the pre-broadcast hook commits before broadcastRaw.
+func (f *poolOpenChain) signRaw(unsigned []byte) ([]byte, string, error) {
+	var u blockchain.UnsignedTx
+	if err := json.Unmarshal(unsigned, &u); err != nil {
+		return nil, "", notBroadcast(err)
+	}
+	var id [32]byte
+	if raw, err := hex.DecodeString(u.Data); err == nil && len(raw) == 32 {
+		copy(id[:], raw)
+	}
+	f.cmu.Lock()
+	po := f.opens[id]
+	f.cmu.Unlock()
+	return unsigned, common.BytesToHash(po.tradeID[:]).Hex(), nil
+}
+
+func (f *poolOpenChain) broadcastRaw(raw []byte, hash string) (string, error) {
+	got, err := f.SignAndBroadcast(context.Background(), raw)
+	if err != nil {
+		return "", broadcastUncertainError{err: err, txHash: hash}
+	}
+	return got, nil
+}
 func (f *poolOpenChain) SignAndBroadcast(_ context.Context, unsigned []byte) (string, error) {
 	var u blockchain.UnsignedTx
 	if err := json.Unmarshal(unsigned, &u); err != nil {

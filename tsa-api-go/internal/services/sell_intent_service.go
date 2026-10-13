@@ -1101,8 +1101,9 @@ func (s *SellIntentService) ClearToppedUp(ctx context.Context, id uuid.UUID) err
 }
 
 // RecordTopUp writes down the top-up a claimed sale was actually sent.
+// Inside a key lane hook, LaneDB is the lane's allocation transaction.
 func (s *SellIntentService) RecordTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
-	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+	return LaneDB(ctx, s.db).Model(&models.RampSellIntent{}).
 		Where("id = ?", id).
 		Updates(map[string]any{"top_up_tx_hash": txHash, "top_up_wei": amountWei}).Error
 }
@@ -1137,8 +1138,9 @@ func (s *SellIntentService) ClearDestToppedUp(ctx context.Context, id uuid.UUID)
 }
 
 // RecordDestTopUp writes down the destination top-up actually sent.
+// Inside a key lane hook, LaneDB is the lane's allocation transaction.
 func (s *SellIntentService) RecordDestTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
-	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+	return LaneDB(ctx, s.db).Model(&models.RampSellIntent{}).
 		Where("id = ?", id).
 		Updates(map[string]any{"dest_top_up_tx_hash": txHash, "dest_top_up_wei": amountWei}).Error
 }

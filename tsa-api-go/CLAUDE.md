@@ -167,24 +167,45 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     network I/O: choose the nonce (max(pending, mined, every allocation + 1); never a hole), run the fee
     gate, sign, write the allocation (`key_lane_nonces`: unique `(chain_id, address, nonce)`, the call's
     fingerprint keccak(to|data|value), the caller's operation key) and its signing (`key_lane_txs`,
-    raw bytes, status `signed`), commit. Every statement's error rolls the transaction back.
-  - **B.** After the commit, outside every lock: the caller's `onPrepared` hook gets the committed
-    nonce (then the allocation is marked handed), the bytes are broadcast, and a short transaction
-    records the outcome (`accepted` / `uncertain` / `refused`).
-  - **C.** A nonce is never released to another call. A definitely refused signing leaves its
-    allocation `abandoned`; the same operation retried re-signs the SAME call there (priced above
-    every earlier signing), and otherwise the upkeep fills it with a 0-value self-transfer (`filled`;
-    the operation then fails with `ErrOperationFilled`). A signed allocation whose caller never took
-    it (hook failed, process died) is abandoned, never broadcast.
+    raw bytes, status `signed`), run the caller's **pre-broadcast hook**, commit. The hook
+    (`services.WithPreBroadcast(ctx, LaneHook)`, or the `*Recorded` helpers) is the caller's own
+    business write — DB only, through `services.LaneDB(ctx, db)`, which is that same transaction — so
+    the caller's state and the signed call commit together or not at all; a hook error rolls
+    everything back and nothing signed survives. Callers: treasury sale legs (`sendSale`: leg nonce +
+    hash, only while pending), conversion bridge/delivery/refund legs (`legSend`: hash + tool, only
+    while pending — a refund that won the leg means nothing is signed), pool slice opens
+    (`open_nonce` + `open_tx_hash`), pool slice releases (`release_tx_hash`, only while releasing),
+    slice resolves (hash replaces the claim), expiry cancels (the cancel DECISION — `dropped_at`
+    under the row lock — is taken in the hook), gas top-ups and authorization relays (the
+    sponsorship / intent row's hash), the name-change fee refund (`fee_tx_hash`). An approve never
+    inherits its route's hook. IT operator ops write their row before the call and resolve by the
+    contract ref, so they need none.
+  - **B.** After the commit, outside every lock: the bytes are broadcast and a short transaction
+    records the outcome (`accepted` / `uncertain` / `refused`). Once committed the call is IN FLIGHT:
+    a broadcast the node refused or that timed out returns its hash with `ErrPendingBroadcast`
+    (attempted = true; never matches `ErrTxNotBroadcast`) — callers treat it as uncertain, never as
+    "not sent". `attempted = false` means nothing was committed.
+  - **C.** A committed signing IS its nonce's transaction until the chain mines that nonce (statuses
+    `signed` → `sent` → `mined` only; there is no abandoned or filled state). Refused or lost, the
+    upkeep re-broadcasts the same bytes or speeds up the SAME call until it mines. Only a hole NO
+    process allocated is ever filled, and only by a super-admin (`fill-gap`).
   - **D.** A signing the node lacks 15 s on is re-broadcast byte for byte once, then sped up with the
     SAME call — decided, signed and committed under the lock (the bump counted in the committed row),
     broadcast after: one +12.5% step per bump since the last ACCEPTED signing, above every earlier
-    signing, at least today's price, never above min(3 × today's price, `keyLaneFeeCeilingGwei`), at
-    most `BumpLimit` (3) bumps, through the fee gate. Past a cap the lane holds.
+    signing, at least today's price, never above min(3 × today's price, `keyLaneFeeCeilingGwei`) or
+    the allocation's admin-raised `price_cap`, at most `BumpLimit` (3) bumps, through the full fee gate
+    INCLUDING the lane's reservations (the watch job's too). Past a cap the lane holds; a speed-up the
+    balance cannot pay never holds — every tick retries it, so a top-up re-arms the lane by itself.
   - **E.** `services.WithOperationRef(ctx, ref)` is the allocation's idempotency key: the same
     operation retried (release `p2p_release:<trade>`, cancel, resolve, IT op `it_op:<call hash>`,
-    treasury legs `ramp_leg:<leg>` with `:approve`/`:route`) gets its existing allocation and current
-    hash, never a new nonce. A mined allocation frees its key.
+    treasury legs `ramp_leg:<leg>` with `:approve`/`:route`) gets its existing allocation and its
+    honest status — the current hash, with `ErrPendingBroadcast` until a node accepted a signing —
+    before any fee read or hold can call it "not sent"; never a new nonce. A different call under the
+    same key is refused. A mined allocation frees its key.
+  - Every allocation update (outcomes, speed-ups, admin actions, marking mined) runs under the lane
+    lock and names the row's `version`; a stale copy or a mined row is never written back
+    (`errStaleAllocation`). `FinalHash` / receipt waits follow only signings of the SAME call
+    fingerprint. The fee gate's committed spend is two statements, never one per allocation.
   - First use of a lane on an empty table reads the pending nonce twice a second apart (an old
     process may still be sending) and the mined nonce, and starts above all of them.
   - Receipt waits (`waitFollowingReplacements`: IT operator receipts, gas-drip confirms, the
@@ -214,8 +235,13 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     `POST /api/admin/signer/lanes/fill-gap {chainId, address, nonce}` (a 0-value self-transfer at a
     hole NO process allocated; refused for any nonce in the record or already mined);
     `POST .../retry {chainId, address, nonce}` (raises a held nonce's bump limit by 3; the fee cap still
-    applies); `POST .../clear-hold {chainId, address}` (after checking the chain by hand). Each writes a
-    `p2p_audit_logs` row; no key material is ever read or logged.
+    applies); `POST .../raise-price-cap {chainId, address, nonce, maxGasPriceWei}` (the exit from a
+    fee-cap hold: that allocation's own speed-up ceiling — above every signing of it, at most 10× the
+    chain's default ceiling — plus a fresh bump count; audited with the old and new cap);
+    `POST .../clear-hold {chainId, address}` (after checking the chain by hand). Each writes a
+    `p2p_audit_logs` row; no key material is ever read or logged. A call that can never mine (e.g.
+    the node rejects it permanently) holds the lane at the cap: raise the cap, or stop and inspect —
+    nothing ever replaces a committed call.
   `MCGPSwapService.signMu` is only the operator SEQUENCE lock (held across receipt waits).
 - **IT operator role is verified, not assumed.** The IT key is wired but dormant (`HasOperator` false,
   every operator op refused) until `operators(<key>)` reads true on the swap — at boot or on the 60 s

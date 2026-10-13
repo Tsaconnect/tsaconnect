@@ -2064,17 +2064,21 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 		// A slice's release is what the release lane's pool reservation is
 		// held for: it spends it rather than being refused by it.
 		sendCtx = ReservedSend(sendCtx)
+		// Plan C2 P2: the slice's release hash commits in the key lane's
+		// allocation transaction, with the signed release, or nothing does.
+		sendCtx = WithPreBroadcast(sendCtx, func(hctx context.Context, _ uint64, hash string) error {
+			res := LaneDB(hctx, s.db).Model(&models.P2PTrade{}).
+				Where("id = ? AND status = ? AND release_tx_hash IN ('', 'reconciled')", trade.ID, models.P2PTradeStatusReleasing).
+				Update("release_tx_hash", hash)
+			if res.Error == nil && res.RowsAffected != 1 {
+				return fmt.Errorf("%w: slice=%s no longer releasing without a hash", ErrSliceReleaseInFlight, trade.ID)
+			}
+			return res.Error
+		})
 	}
 	txHash, err := signer.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
 	})
-	if trade.IsPoolSlice() {
-		recorded := txHash
-		if recorded == "" {
-			recorded = uncertainTxHash(err) // re-review I-C: an uncertain broadcast carries its hash in the error
-		}
-		s.recordSliceReleaseHash(ctx, trade.ID, recorded) // plan C2 P2: before anything can fail
-	}
 	if err != nil {
 		// Review C-1: a slice whose release may have been broadcast stays
 		// `releasing` (at the treasury) until its hash is proven reverted.

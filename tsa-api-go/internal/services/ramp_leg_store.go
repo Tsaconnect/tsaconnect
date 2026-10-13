@@ -84,10 +84,22 @@ func (s *GormRampLegStore) Reserve(ctx context.Context, leg *models.RampLeg) (*m
 	return &existing, nil
 }
 
+// SetTxHash records a pending leg's transaction. A caller runs it as its
+// key lane pre-broadcast hook (ctx from the lane: LaneDB is the lane's
+// allocation transaction), so the leg and the signed call commit together; a
+// leg no longer pending (a refund won it) is ErrLegNotPending and nothing is
+// signed.
 func (s *GormRampLegStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, tool string) error {
-	return s.DB.WithContext(ctx).Model(&models.RampLeg{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"tx_hash": txHash, "lifi_tool": tool}).Error
+	res := LaneDB(ctx, s.DB).Model(&models.RampLeg{}).
+		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
+		Updates(map[string]any{"tx_hash": txHash, "lifi_tool": tool})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrLegNotPending
+	}
+	return nil
 }
 
 // SetAmount rewrites a reserved leg's amount before it is broadcast (the

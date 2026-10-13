@@ -512,8 +512,9 @@ func (d *PoolDesk) opensFor(ctx context.Context, slices []models.P2PTrade) []*sl
 }
 
 // broadcast opens each slice from the conversion treasury through one
-// EscrowBurst: EscrowCalls enforced, nonce written on the slice before
-// broadcast (once: a second attempt finds it set and sends nothing), and the
+// EscrowBurst: EscrowCalls enforced, nonce and hash written on the slice in
+// the key lane's allocation transaction (once: a second attempt finds it set
+// and commits nothing), and the
 // whole burst on one RPC endpoint generation (S43). Pre-merge review I-1: the
 // reads come first — the burst's gas once, every slice's open prepared
 // (gas price, estimate) in parallel — so each send under the lane lock is
@@ -561,9 +562,12 @@ func (d *PoolDesk) broadcast(ctx context.Context, opens []*sliceOpen) {
 			u := pre.tx
 			u.Nonce = n
 			return json.Marshal(u)
-		}, func(nonce uint64) error {
-			res := d.c.DB.WithContext(ctx).Model(&models.P2PTrade{}).
-				Where("id = ? AND open_nonce IS NULL", o.slice.ID).Update("open_nonce", int64(nonce))
+		}, func(hctx context.Context, nonce uint64, txHash string) error {
+			// In the key lane's allocation transaction: the slice's nonce and
+			// hash commit with the signed open, or nothing does.
+			res := LaneDB(hctx, d.c.DB).Model(&models.P2PTrade{}).
+				Where("id = ? AND open_nonce IS NULL", o.slice.ID).
+				Updates(map[string]any{"open_nonce": int64(nonce), "open_tx_hash": txHash})
 			if res.Error == nil && res.RowsAffected != 1 {
 				return errors.New("slice already carries an open nonce")
 			}
@@ -573,16 +577,6 @@ func (d *PoolDesk) broadcast(ctx context.Context, opens []*sliceOpen) {
 		if err != nil && !attempted {
 			o.failed = true
 			log.Printf("[liquidity] slice=%s open not sent: %s", o.slice.ID, RedactAlertText(err.Error()))
-		}
-		if hash != "" {
-			// Detached: the hash must land even when the 8 s cap has fired. A
-			// lost write is reconciled by the recorded nonce (S44), never forgotten.
-			hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-			if err := d.c.DB.WithContext(hctx).Model(&models.P2PTrade{}).Where("id = ?", o.slice.ID).Update("open_tx_hash", hash).Error; err != nil {
-				log.Printf("[liquidity] ALERT liquidity_pool_open_hash_unrecorded slice=%s nonce_recorded=true err=%s",
-					o.slice.ID, RedactAlertText(err.Error()))
-			}
-			cancel()
 		}
 	}
 }

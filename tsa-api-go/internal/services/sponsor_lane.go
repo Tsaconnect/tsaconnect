@@ -109,13 +109,17 @@ func (l *SponsorLane) send(ctx context.Context, build func() ([]byte, error)) (t
 	return l.sendRecorded(ctx, build, nil)
 }
 
-// sendRecorded is send with the nonce handed to onPrepared before the
-// broadcast (KeyLane.SendRecorded).
-func (l *SponsorLane) sendRecorded(ctx context.Context, build func() ([]byte, error), onPrepared func(uint64) error) (string, bool, error) {
+// sendRecorded is send with hook as the pre-broadcast write, inside the key
+// lane's allocation transaction (KeyLane.SendRecorded). A nil hook keeps one
+// the caller attached to ctx.
+func (l *SponsorLane) sendRecorded(ctx context.Context, build func() ([]byte, error), hook LaneHook) (string, bool, error) {
 	if l.KeyLane == nil {
 		return "", false, errNoKeyLane
 	}
-	return l.KeyLane.sendWith(ctx, l.Signer, build, onPrepared)
+	if hook != nil {
+		ctx = WithPreBroadcast(ctx, hook)
+	}
+	return l.KeyLane.sendWith(ctx, l.Signer, build)
 }
 
 func (l *SponsorLane) tokenAddress(symbol string) string {
@@ -143,21 +147,6 @@ func releaseSponsorshipRow(ctx context.Context, store sponsorshipStore, id uuid.
 	defer cancel()
 	if err := store.Release(releaseCtx, id); err != nil {
 		log.Printf("[ramp-sponsor] ALERT ramp_sponsor_release_failed_total=1 id=%s err=%v", id, err)
-	}
-}
-
-// recordSponsorshipTx writes the broadcast tx hash on a context that survives
-// the caller's own cancellation/deadline, for the same reason
-// releaseSponsorshipRow does: the broadcast already happened by the time this
-// runs, so a request ctx that dies between broadcast and this write must not
-// leave the row stuck with an empty tx hash — that stalls the once-per-order
-// slot as ErrSponsorshipInProgress forever and drops the top-up out of the
-// daily-cap count.
-func recordSponsorshipTx(ctx context.Context, store sponsorshipStore, id uuid.UUID, txHash, amountWei string) {
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if err := store.SetTxHash(recordCtx, id, txHash, amountWei); err != nil {
-		log.Printf("[ramp-sponsor] ALERT ramp_sponsor_record_failed_total=1 id=%s tx=%s err=%v", id, txHash, err)
 	}
 }
 

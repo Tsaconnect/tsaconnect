@@ -117,7 +117,7 @@ func TestKeyLane_DroppedTxIsRebroadcastIdenticallyNeverResigned(t *testing.T) {
 func TestKeyLane_MissingBytesHoldsTheLaneNoReuse(t *testing.T) {
 	var log []string
 	clock := time.Unix(1_700_000_000, 0)
-	lane := soloLane(&orderSigner{log: &log, addr: sponsorTestSigner}, nil)
+	lane := soloLane(nonRawSigner{&orderSigner{log: &log, addr: sponsorTestSigner}}, nil)
 	lane.now = func() time.Time { return clock }
 	ctx := context.Background()
 	build := func() ([]byte, error) { u, _ := unsignedOn(0, 5); return u, nil }
@@ -136,9 +136,18 @@ func TestKeyLane_MissingBytesHoldsTheLaneNoReuse(t *testing.T) {
 	}
 	_ = lane.ClearHold(context.Background())
 	var pinned uint64
-	if _, _, err := lane.SendRecorded(ctx, build, func(n uint64) error { pinned = n; return nil }); err != nil || pinned != 6 {
+	if _, _, err := lane.SendRecorded(ctx, build, func(_ context.Context, n uint64, _ string) error { pinned = n; return nil }); err != nil || pinned != 6 {
 		t.Fatalf("after the hold: nonce %d err=%v, want 6 (never 5 again)", pinned, err)
 	}
+}
+
+// nonRawSigner hides a fake's raw signing: a signer that can only sign and
+// broadcast together, so the lane never holds its bytes.
+type nonRawSigner struct{ o *orderSigner }
+
+func (n nonRawSigner) Address() string { return n.o.Address() }
+func (n nonRawSigner) SignAndBroadcast(ctx context.Context, u []byte) (string, error) {
+	return n.o.SignAndBroadcast(ctx, u)
 }
 
 // A lagging, load-balanced RPC reporting an old pending nonce after the lane

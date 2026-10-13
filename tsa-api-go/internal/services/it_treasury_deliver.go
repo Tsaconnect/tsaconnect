@@ -337,38 +337,34 @@ func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UU
 	if existing != nil {
 		return nil // another tick holds the live sale
 	}
-	// 6. Send, writing the nonce on the leg before the broadcast (review C1).
-	// 7. Record the hash on a context that outlives ours.
-	// The leg is the operation: a retry of this same leg never gets a new nonce.
-	hash, attempted, err := tr.TransferTokenRecorded(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, token, intent.DestAddress, amount, func(nonce uint64) error {
-		res := s.db.WithContext(detached(ctx)).Model(&models.RampLeg{}).
-			Where("id = ? AND status = ?", leg.ID, models.RampLegStatusPending).Update("nonce", nonce)
-		if res.Error == nil && res.RowsAffected != 1 {
-			return fmt.Errorf("leg %s is no longer pending", leg.ID)
-		}
-		return res.Error
-	})
+	// 6. Send. The leg's nonce and hash are written in the key lane's own
+	// allocation transaction, only while the leg is still pending: the leg and
+	// the signed call commit together or not at all, so a refund that won the
+	// leg first means nothing is ever signed, and a committed call always
+	// shows on its leg. The leg is the operation: a retry of this same leg
+	// never gets a new nonce.
+	hash, attempted, err := tr.TransferTokenRecorded(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, token, intent.DestAddress, amount,
+		func(hctx context.Context, nonce uint64, txHash string) error {
+			res := LaneDB(hctx, s.db).Model(&models.RampLeg{}).
+				Where("id = ? AND status = ?", leg.ID, models.RampLegStatusPending).
+				Updates(map[string]any{"nonce": nonce, "tx_hash": txHash})
+			if res.Error == nil && res.RowsAffected != 1 {
+				return fmt.Errorf("leg %s is no longer pending", leg.ID)
+			}
+			return res.Error
+		})
 	if err != nil {
 		if !attempted {
-			// Provably never left: free the leg; the next tick sends attempt n+1.
+			// Nothing was committed: free the leg; the next tick sends attempt n+1.
 			if ferr := legs.Fail(detached(ctx), leg.ID, "not broadcast: "+RedactAlertText(err.Error())); ferr != nil {
 				log.Printf("%s ALERT ramp_treasury_leg_fail_unrecorded intent=%s leg=%s err=%s", sd.tag, intent.ID, leg.ID, RedactAlertText(ferr.Error()))
 			}
 			return err
 		}
-		if hash != "" {
-			if serr := legs.SetTxHash(detached(ctx), leg.ID, hash, ""); serr != nil {
-				log.Printf("%s ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(serr.Error()))
-			}
-		}
-		// Uncertain: the leg stays pending and is only ever observed, never
-		// re-sent by the machine.
+		// Committed and in flight (the lane keeps sending it): the leg already
+		// carries its hash, and is only ever observed, never re-sent.
 		log.Printf("%s ALERT ramp_treasury_broadcast_uncertain intent=%s leg=%s tx=%q err=%s", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
 		return nil
-	}
-	if err := legs.SetTxHash(detached(ctx), leg.ID, hash, ""); err != nil {
-		log.Printf("%s ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s — record it by hand", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
-		return err
 	}
 	log.Printf("%s METRIC ramp_treasury_sent intent=%s chain=%s token=%s amount=%s tx=%s", sd.tag, intent.ID, chain, token, amount, hash)
 	return nil

@@ -283,7 +283,11 @@ func TestSendTreasuryBuy_NotBroadcastAfterSigningWaitsForTheNonceToBeConsumed(t 
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err == nil {
 		t.Fatal("want the refusal reported")
 	}
-	if legs := r.legs(t); len(legs) != 1 || legs[0].Nonce == nil || *legs[0].Nonce != 7 {
+	// The key lane's outbox can no longer leave this shape (a committed sale
+	// is in flight, never "not broadcast"); a leg the pre-outbox release left
+	// has it, so the recovery path is kept: give the refused leg its nonce.
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("nonce", 7)
+	if legs := r.legs(t); len(legs) != 1 || legs[0].Nonce == nil || *legs[0].Nonce != 7 || legs[0].Status != models.RampLegStatusFailed {
 		t.Fatalf("legs = %+v, want the signed nonce 7 recorded", legs)
 	}
 	r.signer.err = nil
@@ -450,6 +454,9 @@ func TestResendTreasuryBuy_MinedButHashLostIsRefused(t *testing.T) {
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatal(err)
 	}
+	// A nonce with no hash is a pre-outbox leg's shape (the key lane now
+	// commits both with the signed call); the recovery path is kept for it.
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("nonce", 7)
 	leg := r.legs(t)[0]
 	if leg.TxHash != "" || leg.Nonce == nil || *leg.Nonce != 7 || leg.FromBlock != 100 {
 		t.Fatalf("leg = %+v, want the nonce and start block recorded before the broadcast", leg)

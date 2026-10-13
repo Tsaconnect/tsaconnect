@@ -7,13 +7,13 @@ import (
 )
 
 // Key lane nonce allocation statuses (an outbox: signed and committed first,
-// broadcast after the commit, outcome recorded after that).
+// broadcast after the commit, outcome recorded after that). A committed
+// allocation IS its nonce's transaction until the chain mines that nonce:
+// there is no state in which it is given up or replaced by another call.
 const (
-	KeyLaneNonceSigned    = "signed"    // committed with its signing; not yet broadcast (or the outcome not yet recorded)
-	KeyLaneNonceSent      = "sent"      // broadcast at least once (accepted, or the outcome unknown)
-	KeyLaneNonceAbandoned = "abandoned" // its call never left (definitely refused, or the caller never took it): filled unless the caller retries the same operation
-	KeyLaneNonceFilled    = "filled"    // a 0-value self-transfer was signed in place of an abandoned call, or at a hole no process allocated
-	KeyLaneNonceMined     = "mined"     // the chain's mined nonce has passed it
+	KeyLaneNonceSigned = "signed" // committed with its signing; no broadcast of it accepted yet
+	KeyLaneNonceSent   = "sent"   // broadcast at least once (accepted, or the outcome unknown)
+	KeyLaneNonceMined  = "mined"  // the chain's mined nonce has passed it
 )
 
 // Key lane signing statuses.
@@ -42,9 +42,13 @@ type KeyLaneNonce struct {
 	Fingerprint string    `gorm:"size:66;not null" json:"fingerprint"` // keccak256(to|data|value)
 	Status      string    `gorm:"size:16;not null;index" json:"status"`
 	Role        string    `gorm:"size:64" json:"role"`
-	// Handed: the caller has the nonce (its onPrepared hook returned). A
-	// signed allocation the caller never took is abandoned, never broadcast.
-	Handed bool `gorm:"not null;default:false" json:"handed"`
+	// Version is bumped by every update; an update names the version it read
+	// (and never touches a mined row), so a stale copy can never be written
+	// back over newer state.
+	Version int64 `gorm:"not null;default:0" json:"version"`
+	// PriceCap, when set, is a super-admin's per-allocation ceiling on a
+	// speed-up's gas price (wei), replacing the default cap (audited).
+	PriceCap string `gorm:"size:80" json:"priceCap"`
 	// AcceptedHash / AcceptedPrice: the last signing of this call the node
 	// accepted — what a speed-up steps from.
 	AcceptedHash  string    `gorm:"size:66" json:"acceptedHash"`

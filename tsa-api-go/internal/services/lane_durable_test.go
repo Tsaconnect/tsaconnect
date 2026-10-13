@@ -364,8 +364,10 @@ func TestKeyLane_SpeedUpsAreCappedAndBasedOnTheLastAcceptedPrice(t *testing.T) {
 			break
 		}
 	}
-	for _, tx := range node.atNonce(5)[1:] {
-		if tx.Hash() != common.HexToHash(h5) {
+	seen := map[common.Hash]bool{common.HexToHash(h5): true}
+	for _, tx := range node.atNonce(5) { // each signing once (a re-broadcast repeats its bytes)
+		if !seen[tx.Hash()] {
+			seen[tx.Hash()] = true
 			prices = append(prices, tx.GasPrice())
 		}
 	}
@@ -613,25 +615,38 @@ func TestKeyLane_FeeGateCountsOnlyUnpaidSpend(t *testing.T) {
 	}
 }
 
-// Review 7: the caller's persisted nonce always has a lane row — the hook
-// runs after the allocation and the signing are recorded.
-func TestKeyLane_OnPreparedRunsAfterTheAllocationIsRecorded(t *testing.T) {
+// The pre-broadcast hook runs INSIDE the allocation transaction: it sees the
+// allocation and its signing, and its error rolls all of it back — nothing
+// signed survives and the nonce is not taken.
+func TestKeyLane_HookRunsInsideTheAllocationTransaction(t *testing.T) {
 	store := sqliteLaneStore(t)
 	key := newEcdsaKey()
 	node := newChainNode(56)
 	clock := time.Now()
 	lane := durableLane(t, store, key, node, &clock)
-	_, _, err := lane.SendRecorded(context.Background(), callTo(56, callA, "aa", 3), func(n uint64) error {
+	_, _, err := lane.SendRecorded(context.Background(), callTo(56, callA, "aa", 3), func(hctx context.Context, n uint64, hash string) error {
 		var alloc, txs int64
-		store.DB.Model(&models.KeyLaneNonce{}).Where("nonce = ?", n).Count(&alloc)
-		store.DB.Model(&models.KeyLaneTx{}).Where("nonce = ? AND raw_tx IS NOT NULL", n).Count(&txs)
-		if alloc != 1 || txs != 1 {
-			t.Errorf("at the hook: %d allocations, %d recorded signings for nonce %d; want 1 and 1", alloc, txs, n)
+		LaneDB(hctx, store.DB).Model(&models.KeyLaneNonce{}).Where("nonce = ?", n).Count(&alloc)
+		LaneDB(hctx, store.DB).Model(&models.KeyLaneTx{}).Where("nonce = ? AND hash = ? AND raw_tx IS NOT NULL", n, strings.ToLower(hash)).Count(&txs)
+		if alloc != 1 || txs != 1 || len(node.txs) != 0 {
+			t.Errorf("at the hook: %d allocations, %d signings for nonce %d, %d broadcasts; want 1, 1, 0", alloc, txs, n, len(node.txs))
 		}
-		return nil
+		return errors.New("the caller's row moved")
 	})
-	if err != nil {
+	if err == nil || !errors.Is(err, ErrTxNotBroadcast) {
+		t.Fatalf("err = %v, want the hook's refusal as not broadcast", err)
+	}
+	var allocs, signings int64
+	store.DB.Model(&models.KeyLaneNonce{}).Count(&allocs)
+	store.DB.Model(&models.KeyLaneTx{}).Count(&signings)
+	if allocs != 0 || signings != 0 || len(node.txs) != 0 {
+		t.Fatalf("after a hook error: %d allocations, %d signings, %d broadcasts; want none", allocs, signings, len(node.txs))
+	}
+	if _, _, err := lane.Send(context.Background(), callTo(56, callB, "bb", 3)); err != nil {
 		t.Fatal(err)
+	}
+	if got := node.atNonce(3); len(got) != 1 || *got[0].To() != callB {
+		t.Fatalf("nonce 3 must be free for the next call: %v", got)
 	}
 }
 

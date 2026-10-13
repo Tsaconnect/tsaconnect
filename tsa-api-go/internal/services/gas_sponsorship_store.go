@@ -38,8 +38,10 @@ func (s *GormSponsorshipStore) Reserve(ctx context.Context, row *models.GasSpons
 	return &existing, nil
 }
 
+// SetTxHash writes the sent tx on the row; inside a key lane hook (ctx from
+// the lane) it is part of the lane's allocation transaction.
 func (s *GormSponsorshipStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
-	return s.DB.WithContext(ctx).Model(&models.GasSponsorship{}).
+	return LaneDB(ctx, s.DB).Model(&models.GasSponsorship{}).
 		Where("id = ?", id).
 		Updates(map[string]any{"tx_hash": txHash, "amount_wei": amountWei}).Error
 }

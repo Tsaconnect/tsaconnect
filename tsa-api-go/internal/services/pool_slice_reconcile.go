@@ -196,7 +196,17 @@ func (s *P2PTradeService) reconcileSliceDisputed(ctx context.Context, trade *mod
 	// PrepareAdminResolve's bool is the contract's releaseToBuyer: the buyer
 	// of a slice is the conversion treasury.
 	// A slice's resolve is one of the pool's reserved release-key calls.
-	hash, err := s.poolSender.Send(ReservedSend(WithOperationRef(ctx, "p2p_resolve:"+trade.ID.String())), trade.ChainID, func() ([]byte, error) {
+	// The real hash replaces our own claim in the key lane's allocation
+	// transaction, with the signed resolve, or nothing commits.
+	sendCtx := WithPreBroadcast(ReservedSend(WithOperationRef(ctx, "p2p_resolve:"+trade.ID.String())),
+		func(hctx context.Context, _ uint64, hash string) error {
+			res := LaneDB(hctx, s.db).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", hash)
+			if res.Error == nil && res.RowsAffected != 1 {
+				return fmt.Errorf("slice %s: the resolve claim moved", trade.ID)
+			}
+			return res.Error
+		})
+	hash, err := s.poolSender.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminResolve(HashID(trade.ID), paid, s.poolSender.Address())
 	})
 	if hash == "" {
@@ -205,9 +215,9 @@ func (s *P2PTradeService) reconcileSliceDisputed(ctx context.Context, trade *mod
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 	switch {
-	case hash != "": // the real hash replaces our own claim, never anything else
+	case hash != "": // a retried resolve (its allocation already committed) replaces a fresh claim
 		s.db.WithContext(wctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", hash)
-	case errors.Is(err, ErrTxNotBroadcast): // provably unsent: release the claim
+	case errors.Is(err, ErrTxNotBroadcast): // nothing committed: release the claim
 		s.db.WithContext(wctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", "")
 	}
 	if err != nil {

@@ -122,16 +122,16 @@ func TestKeyLane_ConcurrentRolesOnALaggingRPCGetConsecutiveNonces(t *testing.T) 
 	}
 }
 
-// Outbox rule C: a definitely refused signing never frees its nonce for
-// another call — the next call takes the next nonce (the refused one is
-// filled by the upkeep unless its own operation retries).
+// Outbox rule C: a definitely refused signing is committed and in flight —
+// reported as ErrPendingBroadcast with its hash, never "not sent" — and never
+// frees its nonce: the next call takes the next nonce.
 func TestKeyLane_DefiniteRejectionNeverReusesTheNonce(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	node := &laneNode{id: 56, err: errors.New("transaction underpriced")}
 	lane := NewSignerRegistry().Lane("r", key, node)
 	build := func() ([]byte, error) { return unsignedOn(56, 3) }
-	if _, attempted, err := lane.Send(context.Background(), build); attempted || !errors.Is(err, ErrTxNotBroadcast) {
-		t.Fatalf("attempted=%v err=%v, want a definite refusal", attempted, err)
+	if h, attempted, err := lane.Send(context.Background(), build); !attempted || h == "" || !errors.Is(err, ErrPendingBroadcast) || errors.Is(err, ErrTxNotBroadcast) {
+		t.Fatalf("hash=%q attempted=%v err=%v, want in flight", h, attempted, err)
 	}
 	node.err = nil
 	if _, _, err := lane.Send(context.Background(), build); err != nil {
@@ -164,16 +164,16 @@ func TestKeyLane_RecordHookRunsBeforeBroadcastAndAFailureSendsNothing(t *testing
 	node := &laneNode{id: 56}
 	lane := NewSignerRegistry().Lane("r", key, node)
 	build := func() ([]byte, error) { return unsignedOn(56, 3) }
-	_, attempted, err := lane.SendRecorded(context.Background(), build, func(uint64) error { return errors.New("db down") })
+	_, attempted, err := lane.SendRecorded(context.Background(), build, func(context.Context, uint64, string) error { return errors.New("db down") })
 	if attempted || err == nil || len(node.sent()) != 0 {
 		t.Fatalf("attempted=%v err=%v sent=%v, want nothing broadcast", attempted, err, node.sent())
 	}
 	var recorded uint64
-	if _, _, err := lane.SendRecorded(context.Background(), build, func(n uint64) error { recorded = n; return nil }); err != nil {
+	if _, _, err := lane.SendRecorded(context.Background(), build, func(_ context.Context, n uint64, _ string) error { recorded = n; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if recorded != 4 || node.sent()[0] != 4 {
-		t.Fatalf("recorded %d sent %v, want 4: the abandoned 3 is never given to another call", recorded, node.sent())
+	if recorded != 3 || node.sent()[0] != 3 {
+		t.Fatalf("recorded %d sent %v, want 3: a failed hook committed nothing, so 3 was never taken", recorded, node.sent())
 	}
 }
 

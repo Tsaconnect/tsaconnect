@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"strings"
 
@@ -29,6 +30,8 @@ type signerLaneRequest struct {
 	ChainID int64   `json:"chainId" binding:"required"`
 	Address string  `json:"address" binding:"required"`
 	Nonce   *uint64 `json:"nonce"`
+	// MaxGasPriceWei is raise-price-cap's new per-allocation ceiling (wei, decimal).
+	MaxGasPriceWei string `json:"maxGasPriceWei"`
 }
 
 // Lanes is GET /api/admin/signer/lanes.
@@ -73,6 +76,31 @@ func (h *SignerAdminHandler) Retry(c *gin.Context) {
 	}
 	h.audit(c, "signer.lane_speed_up_retry", req, nil)
 	utils.SuccessResponse(c, http.StatusOK, "speed-up retry armed", nil)
+}
+
+// RaisePriceCap is POST /api/admin/signer/lanes/raise-price-cap {chainId,
+// address, nonce, maxGasPriceWei}: the exit from a lane held at the speed-up
+// fee cap. That one allocation gets its own gas-price ceiling (above every
+// signing of it, at most 10× the chain's default ceiling) and a fresh bump
+// count; the hold clears and the upkeep re-prices the SAME call. Audited with
+// the previous and the new cap.
+func (h *SignerAdminHandler) RaisePriceCap(c *gin.Context) {
+	req, lane, ok := h.lane(c)
+	if !ok {
+		return
+	}
+	capWei, valid := new(big.Int).SetString(strings.TrimSpace(req.MaxGasPriceWei), 10)
+	if req.Nonce == nil || !valid || capWei.Sign() <= 0 {
+		utils.ErrorResponse(c, http.StatusBadRequest, "nonce and a positive maxGasPriceWei are required")
+		return
+	}
+	prev, err := lane.RaisePriceCap(c.Request.Context(), *req.Nonce, capWei)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+		return
+	}
+	h.audit(c, "signer.lane_price_cap_raised", req, map[string]any{"previousCapWei": prev, "capWei": capWei.String()})
+	utils.SuccessResponse(c, http.StatusOK, "price cap raised", nil)
 }
 
 // ClearHold is POST /api/admin/signer/lanes/clear-hold {chainId, address}.

@@ -201,5 +201,17 @@ func (f *fakeReleaseSigner) Send(ctx context.Context, _ int64, build func() ([]b
 	if err != nil {
 		return "", notBroadcast(err)
 	}
+	// Stands in for the key lane: the caller's pre-broadcast write first
+	// (nothing is sent if it fails), unless the send is refused outright.
+	if hash := f.hash; !errors.Is(f.err, ErrTxNotBroadcast) {
+		if f.err != nil {
+			hash = uncertainTxHash(f.err)
+		}
+		var u blockchain.UnsignedTx
+		_ = json.Unmarshal(unsigned, &u)
+		if err := emulatePreBroadcast(ctx, u.Nonce, hash); err != nil {
+			return "", notBroadcast(err)
+		}
+	}
 	return f.SignAndBroadcast(ctx, unsigned)
 }

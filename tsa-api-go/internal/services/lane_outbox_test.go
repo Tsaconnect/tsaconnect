@@ -129,11 +129,12 @@ func TestKeyLane_UniqueViolationDoesNotWedge_Postgres(t *testing.T) {
 	testUniqueViolationDoesNotWedge(t, &GormKeyLaneStore{DB: db})
 }
 
-// Outbox C + E: a definitely refused signing is never released to another
-// call. The same operation retried before the upkeep fills it re-signs the
-// SAME call at the SAME nonce; once filled (a 0-value self-transfer), the
-// operation is refused for good.
-func TestKeyLane_RefusedCallIsRetriedOrFilledNeverReused(t *testing.T) {
+// Outbox C + E (textbook outbox): a definitely refused signing stays its
+// nonce's call. The caller is told it is IN FLIGHT (ErrPendingBroadcast with
+// its hash — never "not sent"), a retry of the same operation gets the same
+// honest answer, another call never takes the nonce, and once the key can pay
+// the upkeep sends the SAME call again — never a filler.
+func TestKeyLane_RefusedCallStaysInFlightUntilSentNeverFilled(t *testing.T) {
 	store := sqliteLaneStore(t)
 	key := newEcdsaKey()
 	node := newChainNode(56)
@@ -142,62 +143,54 @@ func TestKeyLane_RefusedCallIsRetriedOrFilledNeverReused(t *testing.T) {
 	lane := durableLane(t, store, key, node, &clock)
 	opA := WithOperationRef(context.Background(), "leg:A")
 	node.refuse = func(tx *types.Transaction, _ int) error {
-		if tx.Nonce() == 3 && *tx.To() == callA {
+		if tx.Nonce() == 3 {
 			return errors.New("insufficient funds for gas * price + value")
 		}
 		return nil
 	}
-	if _, attempted, err := lane.Send(opA, callTo(56, callA, "aa", 3)); attempted || !errors.Is(err, ErrTxNotBroadcast) {
-		t.Fatalf("attempted=%v err=%v, want a definite refusal", attempted, err)
+	h, attempted, err := lane.Send(opA, callTo(56, callA, "aa", 3))
+	if !attempted || h == "" || !errors.Is(err, ErrPendingBroadcast) || errors.Is(err, ErrTxNotBroadcast) || uncertainTxHash(err) != h {
+		t.Fatalf("hash=%q attempted=%v err=%v, want in flight with its hash", h, attempted, err)
+	}
+	// The retry: the same allocation, still honestly not accepted.
+	h2, attempted, err := lane.Send(opA, callTo(56, callA, "aa", 3))
+	if h2 != h || !attempted || !errors.Is(err, ErrPendingBroadcast) {
+		t.Fatalf("retry: hash=%q attempted=%v err=%v, want %s pending", h2, attempted, err, h)
 	}
 	// Another call never takes 3.
-	if _, _, err := lane.Send(context.Background(), callTo(56, callB, "bb", 3)); err != nil {
+	if _, _, err := lane.Send(context.Background(), callTo(56, callB, "bb", 3)); err != nil && !errors.Is(err, ErrPendingBroadcast) {
 		t.Fatal(err)
 	}
-	if got := node.atNonce(4); len(got) != 1 || *got[0].To() != callB {
-		t.Fatalf("call B must go to 4: %v", got)
-	}
-	// The same operation retried: the same call at 3.
-	node.refuse = nil
-	if _, _, err := lane.Send(opA, callTo(56, callA, "aa", 3)); err != nil {
-		t.Fatal(err)
-	}
-	for _, tx := range node.atNonce(3) {
-		if *tx.To() != callA {
-			t.Fatalf("nonce 3 carried another call: %s", tx.To())
+	for _, tx := range node.atNonce(4) {
+		if *tx.To() != callB {
+			t.Fatalf("nonce 4 carried %s", tx.To())
 		}
 	}
-	// A second operation refused and never retried: the upkeep fills it.
-	opC := WithOperationRef(context.Background(), "leg:C")
-	node.refuse = func(tx *types.Transaction, _ int) error {
-		if *tx.To() == common.HexToAddress("0x00000000000000000000000000000000000000cc") {
-			return errors.New("transaction underpriced")
-		}
-		return nil
-	}
-	cc := common.HexToAddress("0x00000000000000000000000000000000000000cc")
-	_, _, _ = lane.Send(opC, callTo(56, cc, "cc", 3))
-	var c models.KeyLaneNonce
-	store.DB.Where("op_key = ?", "leg:C").First(&c)
+	// Funded: the upkeep sends the same call (a speed-up of A), no filler.
 	node.mu.Lock()
-	node.mined = uint64(c.Nonce)
+	node.refuse = nil
 	node.mu.Unlock()
 	clock = clock.Add(keyLaneGapGrace + time.Second)
 	if err := lane.Watch(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	fill := node.atNonce(uint64(c.Nonce))
-	last := fill[len(fill)-1]
-	if !strings.EqualFold(last.To().Hex(), lane.Address()) || last.Value().Sign() != 0 {
-		t.Fatalf("the abandoned nonce must be filled with a 0-value self-transfer, got to=%s", last.To())
+	at3 := node.atNonce(3)
+	for _, tx := range at3 {
+		if *tx.To() != callA || common.Bytes2Hex(tx.Data()) != "aa" {
+			t.Fatalf("nonce 3 carried another call: to=%s data=%x", tx.To(), tx.Data())
+		}
 	}
-	if _, _, err := lane.Send(opC, callTo(56, cc, "cc", 3)); !errors.Is(err, ErrOperationFilled) {
-		t.Fatalf("a filled operation retried: %v, want ErrOperationFilled", err)
+	if len(at3) < 2 {
+		t.Fatalf("nonce 3 saw %d signings, want the refused one and its re-send", len(at3))
+	}
+	h3, _, err := lane.Send(opA, callTo(56, callA, "aa", 3))
+	if err != nil || h3 != at3[len(at3)-1].Hash().Hex() {
+		t.Fatalf("after acceptance the retry = %s, %v; want the accepted signing %s, no error", h3, err, at3[len(at3)-1].Hash().Hex())
 	}
 }
 
 // Review 6 / E: a caller retrying the same operation never gets a new nonce
-// — whether the first try's hook failed or it was sent.
+// — whether the first try's hook failed (nothing committed) or it was sent.
 func TestKeyLane_SameOperationNeverGetsASecondNonce(t *testing.T) {
 	store := sqliteLaneStore(t)
 	key := newEcdsaKey()
@@ -205,7 +198,7 @@ func TestKeyLane_SameOperationNeverGetsASecondNonce(t *testing.T) {
 	clock := time.Now()
 	lane := durableLane(t, store, key, node, &clock)
 	op := WithOperationRef(context.Background(), "release:T1")
-	if _, _, err := lane.SendRecorded(op, callTo(56, callA, "aa", 0), func(uint64) error { return errors.New("db down") }); err == nil {
+	if _, _, err := lane.SendRecorded(op, callTo(56, callA, "aa", 0), func(context.Context, uint64, string) error { return errors.New("db down") }); err == nil {
 		t.Fatal("the hook's failure must be returned")
 	}
 	h1, _, err := lane.Send(op, callTo(56, callA, "aa", 0)) // the caller retries

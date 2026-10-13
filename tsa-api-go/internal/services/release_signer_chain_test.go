@@ -146,11 +146,15 @@ func TestChainReleaseSigner_SendRefusesATxNamingNoChain(t *testing.T) {
 	}
 }
 
-// chainCountingSender proves AutoRelease builds inside Send, on the trade's chain.
+// chainCountingSender proves AutoRelease builds inside Send, on the trade's
+// chain. Like the key lane, it runs the caller's pre-broadcast hook first: a
+// send the hook declines (nothing committed) is not counted and never reaches
+// onSent (the fake chain applying what was sent).
 type chainCountingSender struct {
 	fakeReleaseSigner
 	sendChains []int64
 	direct     int
+	onSent     func(unsigned []byte)
 }
 
 func (c *chainCountingSender) SignAndBroadcast(ctx context.Context, u []byte) (string, error) {
@@ -158,8 +162,30 @@ func (c *chainCountingSender) SignAndBroadcast(ctx context.Context, u []byte) (s
 	return c.fakeReleaseSigner.SignAndBroadcast(ctx, u)
 }
 func (c *chainCountingSender) Send(ctx context.Context, chainID int64, build func() ([]byte, error)) (string, error) {
+	declined := false
+	if hook := preBroadcastHook(ctx); hook != nil {
+		ctx = WithPreBroadcast(ctx, func(hctx context.Context, n uint64, h string) error {
+			if err := hook(hctx, n, h); err != nil {
+				declined = true
+				return err
+			}
+			return nil
+		})
+	}
+	var unsigned []byte
+	hash, err := c.fakeReleaseSigner.Send(ctx, chainID, func() ([]byte, error) {
+		u, err := build()
+		unsigned = u
+		return u, err
+	})
+	if declined {
+		return hash, err
+	}
 	c.sendChains = append(c.sendChains, chainID)
-	return c.fakeReleaseSigner.Send(ctx, chainID, build)
+	if c.onSent != nil && unsigned != nil && !errors.Is(err, ErrTxNotBroadcast) {
+		c.onSent(unsigned)
+	}
+	return hash, err
 }
 
 func TestAutoRelease_BuildsUnderTheSignersChainLock(t *testing.T) {

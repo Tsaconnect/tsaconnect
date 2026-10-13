@@ -231,8 +231,12 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 		return AuthorizationRelayResult{}, fmt.Errorf("%w: %v", ErrSimulationUnavailable, err)
 	}
 
-	txHash, broadcastAttempted, err := lane.send(ctx, func() ([]byte, error) {
+	// The sponsorship row's hash commits in the key lane's allocation
+	// transaction, with the signed relay (or neither does).
+	txHash, broadcastAttempted, err := lane.sendRecorded(ctx, func() ([]byte, error) {
 		return lane.Builder.BuildUnsignedTx(lane.Signer.Address(), token, calldata)
+	}, func(hctx context.Context, _ uint64, hash string) error {
+		return a.store.SetTxHash(hctx, row.ID, hash, "")
 	})
 	if err != nil {
 		if broadcastAttempted {
@@ -245,7 +249,6 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 		releaseOurFault()
 		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: broadcast: %w", err)
 	}
-	recordSponsorshipTx(ctx, a.store, row.ID, txHash, "")
 	log.Printf("[ramp-sponsor] relayed authorization order=%s chain=%s token=%s tx=%s", orderID, lane.ChainKey, order.Token, txHash)
 	return AuthorizationRelayResult{TxHash: txHash}, nil
 }

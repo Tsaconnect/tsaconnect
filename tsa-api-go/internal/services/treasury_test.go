@@ -910,18 +910,19 @@ func TestTreasury_CanPayForGas(t *testing.T) {
 // broadcast; a nonce that cannot be recorded is never broadcast.
 func TestTreasury_TransferTokenRecordedHandsOverTheNonceFirst(t *testing.T) {
 	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	lane.Signer = rawRelaySigner{signer}
 	native.transferNonce = 42
 	ctx := context.Background()
 	var got uint64
 	callsAtHook := -1
-	_, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(n uint64) error {
+	_, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(_ context.Context, n uint64, _ string) error {
 		got, callsAtHook = n, signer.calls()
 		return nil
 	})
 	if err != nil || !attempted || got != 42 || callsAtHook != 0 || signer.calls() != 1 {
 		t.Fatalf("err=%v attempted=%v nonce=%d broadcasts-at-hook=%d broadcasts=%d", err, attempted, got, callsAtHook, signer.calls())
 	}
-	_, attempted, err = tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(uint64) error {
+	_, attempted, err = tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(context.Context, uint64, string) error {
 		return errors.New("db down")
 	})
 	if err == nil || attempted || signer.calls() != 1 {

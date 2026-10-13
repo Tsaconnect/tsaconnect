@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/big"
 	"strings"
@@ -221,7 +222,17 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 	// The treasury's value caps read USD: a $1 stablecoin's amount is its value.
 	usd, _ := new(big.Float).Quo(new(big.Float).SetInt(amount),
 		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(ch.PayDecimals)), nil))).Float64()
-	txHash, attempted, err := s.rail.Refund(ctx, ch.PayChain, ch.PayToken, ch.PayFrom, amount, usd)
+	// The refund's hash commits on the claimed row in the key lane's
+	// allocation transaction, with the signed transfer (or neither does).
+	sendCtx := WithPreBroadcast(ctx, func(hctx context.Context, _ uint64, hash string) error {
+		res := LaneDB(hctx, s.db).Model(&models.UserNameChange{}).
+			Where("id = ? AND fee_status = ?", ch.ID, models.NameChangeFeeRefundSending).Update("fee_tx_hash", hash)
+		if res.Error == nil && res.RowsAffected != 1 {
+			return errors.New("name change refund: the claim moved")
+		}
+		return res.Error
+	})
+	txHash, attempted, err := s.rail.Refund(sendCtx, ch.PayChain, ch.PayToken, ch.PayFrom, amount, usd)
 	switch {
 	case err == nil:
 		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeRefundSending}, models.NameChangeFeeRefunded, txHash)

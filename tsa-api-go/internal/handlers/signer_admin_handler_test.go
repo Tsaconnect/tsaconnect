@@ -94,3 +94,49 @@ func TestSignerAdmin_FillGapSendsASelfTransferAndAudits(t *testing.T) {
 		t.Fatalf("clear-hold on an unheld lane = %d", w2.Code)
 	}
 }
+
+// The raise-price-cap route sets one allocation's own speed-up ceiling and
+// audits the old and new cap; a cap not above the call's signing, or a body
+// without one, is refused.
+func TestSignerAdmin_RaisePriceCapAudits(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`CREATE TABLE p2p_audit_logs (id text primary key, actor_id text, trade_id text, ad_id text, action text, metadata text, created_at datetime)`)
+	key, _ := crypto.GenerateKey()
+	reg := services.NewSignerRegistry()
+	lane := reg.Lane("pm_release", key, &adminNode{})
+	if _, _, err := lane.Send(context.Background(), func() ([]byte, error) {
+		return json.Marshal(blockchain.UnsignedTx{Nonce: 5, GasPrice: "1000000000", GasLimit: 21000,
+			To: "0x00000000000000000000000000000000000000aa", Value: "0", ChainID: "56"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := &SignerAdminHandler{DB: db, Registry: reg}
+	post := func(body map[string]any) *httptest.ResponseRecorder {
+		raw, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/admin/signer/lanes/raise-price-cap", bytes.NewReader(raw))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("user", &models.User{ID: uuid.New()})
+		h.RaisePriceCap(c)
+		return w
+	}
+	if w := post(map[string]any{"chainId": 56, "address": lane.Address(), "nonce": 5}); w.Code != http.StatusBadRequest {
+		t.Fatalf("no cap = %d", w.Code)
+	}
+	if w := post(map[string]any{"chainId": 56, "address": lane.Address(), "nonce": 5, "maxGasPriceWei": "1000000000"}); w.Code != http.StatusConflict {
+		t.Fatalf("cap at the signing's own price = %d", w.Code)
+	}
+	if w := post(map[string]any{"chainId": 56, "address": lane.Address(), "nonce": 5, "maxGasPriceWei": "40000000000"}); w.Code != http.StatusOK {
+		t.Fatalf("raise = %d %s", w.Code, w.Body.String())
+	}
+	var action, meta string
+	db.Raw(`SELECT action, metadata FROM p2p_audit_logs`).Row().Scan(&action, &meta)
+	if action != "signer.lane_price_cap_raised" || !strings.Contains(meta, `"capWei":"40000000000"`) || !strings.Contains(meta, `"previousCapWei":""`) {
+		t.Fatalf("audit = %s %s", action, meta)
+	}
+}
