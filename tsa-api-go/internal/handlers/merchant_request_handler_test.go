@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -163,8 +164,12 @@ func createMerchantTestUser(t *testing.T, db *gorm.DB, role string) *models.User
 	return user
 }
 
+// ginTestMode sets gin's global mode once: the race tests build contexts from
+// several goroutines, and gin.SetMode is an unguarded global write.
+var ginTestMode sync.Once
+
 func newMerchantContext(method, path string, body interface{}, user *models.User) (*httptest.ResponseRecorder, *gin.Context) {
-	gin.SetMode(gin.TestMode)
+	ginTestMode.Do(func() { gin.SetMode(gin.TestMode) })
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	var reqBody []byte

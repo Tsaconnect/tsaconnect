@@ -170,5 +170,5 @@ func (s *P2PTradeService) lpBoundTo(ctx context.Context, userID uuid.UUID, chain
 		return false
 	}
 	row, err := s.pm.GetByUserIDKind(ctx, userID, models.PaymentMerchantKindLP)
-	return err == nil && row.IsLP() && row.PoolChainID != nil && *row.PoolChainID == chainID
+	return err == nil && row.PoolChainID != nil && *row.PoolChainID == chainID
 }

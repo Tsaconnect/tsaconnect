@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
@@ -41,8 +44,9 @@ func pgRequest(t *testing.T, db *gorm.DB, userID uuid.UUID, businessType string)
 // user, approved by two admins at the same moment, both succeed: two rows, one
 // per kind, role=merchant from the merchant approval only. The race is forced:
 // while the first approval is writing its payment_merchants row, the second
-// approval runs (or is held back by the user-row lock) before the first one
-// finishes. Neither approval touches the other's row.
+// approval runs before the first one finishes. The (user_id, kind) index keeps
+// the rows apart; this passes with or without the user-row lock, so it is not
+// coverage for that lock (review M1). Neither approval touches the other's row.
 func TestApproveMerchantRequest_ConcurrentMerchantAndLPApprovals_OnPostgres(t *testing.T) {
 	for _, first := range []string{models.BusinessTypeP2PMerchant, models.BusinessTypeLiquidityProvider} {
 		t.Run("first="+first, func(t *testing.T) {
@@ -64,13 +68,12 @@ func TestApproveMerchantRequest_ConcurrentMerchantAndLPApprovals_OnPostgres(t *t
 
 			secondCode := 0
 			secondDone := make(chan struct{})
-			started := false
+			var started atomic.Bool
 			if err := db.Callback().Create().Before("gorm:create").Register("test:approval_race", func(tx *gorm.DB) {
 				pm, ok := tx.Statement.Dest.(*models.PaymentMerchant)
-				if !ok || started || pm.IsLP() != firstIsLP {
+				if !ok || pm.IsLP() != firstIsLP || !started.CompareAndSwap(false, true) {
 					return
 				}
-				started = true
 				go func() {
 					defer close(secondDone)
 					secondCode = approveAs(t, h, pgUser(t, db, models.RoleAdmin), ids[second])
@@ -113,10 +116,10 @@ func TestApproveMerchantRequest_ConcurrentMerchantAndLPApprovals_OnPostgres(t *t
 	}
 }
 
-// Two admins approve the same LP request at once. The user-row lock runs them
-// one after the other and the second finds the first's row through the
-// kind-scoped lookup; the role index and ON CONFLICT DO NOTHING are only the
-// backstop. Both succeed, and the user has exactly one LP row.
+// Two admins approve the same LP request at once. The (user_id, kind) index
+// with ON CONFLICT DO NOTHING is the guarantee: the loser inserts nothing and
+// reloads the winner's row. The user-row lock only serializes the two, so this
+// passes with or without it (review M1). Both succeed, one LP row.
 func TestApproveLPRequest_DoubleApproveSameRequestOneRow_OnPostgres(t *testing.T) {
 	db := testutil.TempPostgres(t, "mr_double_", &models.User{}, &models.MerchantRequest{}, &models.PaymentMerchant{})
 	if err := config.MigratePaymentMerchantRoleIndex(db); err != nil {
@@ -144,5 +147,100 @@ func TestApproveLPRequest_DoubleApproveSameRequestOneRow_OnPostgres(t *testing.T
 	db.Where("user_id = ?", applicant.ID).Find(&rows)
 	if len(rows) != 1 || !rows[0].IsLP() {
 		t.Fatalf("rows = %+v, want exactly one LP row", rows)
+	}
+}
+
+// Review M2: between the deploy and the one-off, on Postgres, a second-role
+// approval is a 409 second_role_not_enabled and nothing is applied. ON
+// CONFLICT DO NOTHING absorbs the old (user_id) index's violation without
+// aborting the transaction, so the handler sees the refusal and rolls back.
+func TestApproveLPRequest_BeforeOneOffIs409_OnPostgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "mr_preoneoff_", &models.User{}, &models.MerchantRequest{}, &models.PaymentMerchant{})
+	if err := config.MigratePaymentMerchantRoleIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE UNIQUE INDEX uq_payment_merchants_user ON payment_merchants (user_id)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	h := lpHandler(t, db, true)
+	applicant := pgUser(t, db, models.RoleMerchant)
+	merchant := &models.PaymentMerchant{ID: uuid.New(), UserID: applicant.ID, Name: "Ada Foods", Status: models.PaymentMerchantStatusActive}
+	if err := db.Create(merchant).Error; err != nil {
+		t.Fatal(err)
+	}
+	id := pgRequest(t, db, applicant.ID, models.BusinessTypeLiquidityProvider)
+
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+id+"/approve", map[string]any{"note": "ok"}, pgUser(t, db, models.RoleAdmin))
+	c.Params = gin.Params{{Key: "id", Value: id}}
+	h.ApproveMerchantRequest(c)
+	var body map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusConflict || body["code"] != "second_role_not_enabled" {
+		t.Fatalf("approve = %d %v, want 409 second_role_not_enabled", w.Code, body)
+	}
+	var mr models.MerchantRequest
+	db.First(&mr, "id = ?", id)
+	if mr.Status != models.MerchantRequestStatusPending || mr.ReviewedBy != nil {
+		t.Fatalf("request = %s reviewed_by=%v, want still pending and unreviewed", mr.Status, mr.ReviewedBy)
+	}
+	var rows []models.PaymentMerchant
+	db.Where("user_id = ?", applicant.ID).Find(&rows)
+	if len(rows) != 1 || rows[0].ID != merchant.ID || rows[0].IsLP() || rows[0].Status != models.PaymentMerchantStatusActive {
+		t.Fatalf("rows = %+v, want only the untouched merchant row", rows)
+	}
+	var role string
+	db.Model(&models.User{}).Where("id = ?", applicant.ID).Pluck("role", &role)
+	if role != models.RoleMerchant {
+		t.Fatalf("role = %s, want merchant unchanged", role)
+	}
+}
+
+// Review M9: the second of two concurrent approvals of one request loaded it
+// while still pending. It must not overwrite the first admin's review: the
+// request update only moves a pending request, and a lost race answers 200
+// with the request as the winner left it.
+func TestApproveLPRequest_ConcurrentSecondApprovalKeepsFirstReview_OnPostgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "mr_review_", &models.User{}, &models.MerchantRequest{}, &models.PaymentMerchant{})
+	if err := config.MigratePaymentMerchantRoleIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	h := lpHandler(t, db, true)
+	applicant := pgUser(t, db, models.RoleUser)
+	id := pgRequest(t, db, applicant.ID, models.BusinessTypeLiquidityProvider)
+	first, second := pgUser(t, db, models.RoleAdmin), pgUser(t, db, models.RoleAdmin)
+
+	secondCode := 0
+	secondDone := make(chan struct{})
+	var started atomic.Bool
+	if err := db.Callback().Create().Before("gorm:create").Register("test:review_race", func(tx *gorm.DB) {
+		if _, ok := tx.Statement.Dest.(*models.PaymentMerchant); !ok || !started.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer close(secondDone)
+			secondCode = approveAs(t, h, second, id) // loads the request while it is still pending
+		}()
+		select {
+		case <-secondDone:
+		case <-time.After(1500 * time.Millisecond):
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstCode := approveAs(t, h, first, id)
+	<-secondDone
+	if firstCode != http.StatusOK || secondCode != http.StatusOK {
+		t.Fatalf("codes first=%d second=%d, want both 200", firstCode, secondCode)
+	}
+	var mr models.MerchantRequest
+	db.First(&mr, "id = ?", id)
+	if mr.Status != models.MerchantRequestStatusApproved || mr.ReviewedBy == nil || *mr.ReviewedBy != first.ID {
+		t.Fatalf("request = %s reviewed_by=%v, want approved by the first admin %s", mr.Status, mr.ReviewedBy, first.ID)
+	}
+	var n int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", applicant.ID).Count(&n)
+	if n != 1 {
+		t.Fatalf("rows = %d, want one LP row", n)
 	}
 }

@@ -73,6 +73,10 @@ type PMOnboardingService struct {
 	poolChainID int64
 	accounts    AccountNameResolver
 	poolGate    PoolOpener
+
+	// companyPMID is IT_PM_ID: its user buys every pool slice, so it is never
+	// approved or activated as an LP (review M5).
+	companyPMID string
 }
 
 // NewPMOnboardingService returns a PMOnboardingService.
@@ -137,10 +141,16 @@ func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *model
 
 // ApproveFromRequestTx is ApproveFromRequest inside the caller's transaction,
 // so the merchant-request handler settles the row and its kind in the same
-// transaction as the request's status and the user's role (review I2). It
-// locks the user row first (SELECT … FOR NO KEY UPDATE): two approvals for one
-// user run one after the other; each writes only its own kind's row (owner,
-// 2026-10-13: one user may hold both roles).
+// transaction as the request's status and the user's role (review I2). Each
+// approval writes only its own kind's row (owner, 2026-10-13: one user may
+// hold both roles).
+//
+// The (user_id, kind) unique index with ON CONFLICT DO NOTHING in
+// upsertPendingRow is what guarantees one row per role, with or without the
+// user-row lock taken first (review M1). The lock is defence in depth: it
+// runs two approvals for one user one after the other, so neither reads the
+// user's rows while the other is half-written. Nothing depends on it today,
+// and the concurrency tests pass without it; keep it anyway.
 func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm.DB, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
 	kind, ok := models.PaymentMerchantKindFor(req.BusinessType)
 	if !ok {
@@ -155,11 +165,17 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 		poolChainID = &id
 	}
 	tx = tx.WithContext(ctx)
-	// NO KEY UPDATE serializes two approvals for the user without blocking rows
-	// that merely reference it (KEY SHARE). Find: a missing user has no role.
+	// NO KEY UPDATE serializes two approvals for the user (defence in depth,
+	// see above) without blocking rows that merely reference it (KEY SHARE).
+	// Find: a missing user has no role.
 	var locked []models.User
 	if err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).Select("id").Where("id = ?", req.UserID).Find(&locked).Error; err != nil {
 		return nil, fmt.Errorf("pm_onboarding: lock user: %w", err)
+	}
+	if kind == models.PaymentMerchantKindLP {
+		if err := s.refuseCompanyUserAsLP(ctx, tx, req.UserID); err != nil {
+			return nil, err
+		}
 	}
 	pm, err := s.upsertPendingRow(ctx, tx, req, kind, poolChainID)
 	if err != nil {
@@ -469,6 +485,9 @@ func (s *PMOnboardingService) ActivateLP(ctx context.Context, pmID, userID uuid.
 	}
 	if pm.Status != models.PaymentMerchantStatusApproved {
 		return nil, ErrInvalidPMTransition
+	}
+	if err := s.RefuseCompanyUserAsLP(ctx, userID); err != nil {
+		return nil, err
 	}
 	chainID, ok := s.LiquidityChainID()
 	if !ok || pm.PoolChainID == nil || *pm.PoolChainID != chainID || s.poolGate == nil || !s.poolGate.Open() || s.accounts == nil {

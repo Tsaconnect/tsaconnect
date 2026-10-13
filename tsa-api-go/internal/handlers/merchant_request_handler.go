@@ -651,6 +651,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	// one. A refused approval rolls all of it back, never half-applied.
 	if isPMRequestType(req.BusinessType) || (!isPMRetry && !isPayRetry) {
 		var pmErr error
+		lostRace := false
 		txErr := h.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			if isPMRequestType(req.BusinessType) {
 				if _, pmErr = h.PMOnboarding.ApproveFromRequestTx(ctx, tx, &req); pmErr != nil {
@@ -664,13 +665,21 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			// "merchant" (the admin-console marketplace role) does NOT apply to
 			// TSA Pay — accepting payments is a separate capability, not a
 			// marketplace-merchant grant.
-			if err := tx.Model(&req).Updates(map[string]interface{}{
+			// Only a still-pending request moves (review M9): a concurrent
+			// approval that committed first keeps its reviewer and note, and
+			// this one rolls back and sends no second notification.
+			upd := tx.Model(&req).Where("status = ?", models.MerchantRequestStatusPending).Updates(map[string]interface{}{
 				"status":      models.MerchantRequestStatusApproved,
 				"reviewed_by": admin.ID,
 				"reviewed_at": now,
 				"admin_note":  input.Note,
-			}).Error; err != nil {
-				return err
+			})
+			if upd.Error != nil {
+				return upd.Error
+			}
+			if upd.RowsAffected == 0 {
+				lostRace = true
+				return errApprovalRaceLost
 			}
 
 			// Nor to a liquidity provider (plan B P2): that role admits the
@@ -694,12 +703,23 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		case pmErr != nil && errors.Is(pmErr, services.ErrLiquidityUnavailable):
 			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
 			return
+		case pmErr != nil && errors.Is(pmErr, services.ErrCompanyUserCannotBeLP):
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"This applicant is the company payment merchant and can't provide liquidity. Nothing was approved.", services.CompanyAccountNotEligibleCode)
+			return
 		case pmErr != nil && errors.Is(pmErr, services.ErrInvalidPMTransition):
 			utils.ErrorResponse(c, http.StatusConflict, "This liquidity provider is already live")
 			return
 		case pmErr != nil:
 			log.Printf("ApproveMerchantRequest: PM approval failed for request %s: %v", req.ID, pmErr)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Payment merchant setup failed and nothing was approved — try again")
+			return
+		case lostRace:
+			if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
+				log.Printf("ApproveMerchantRequest: reload error: %v", err)
+			}
+			redactMerchantRequest(c, admin, &req)
+			utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
 			return
 		case txErr != nil:
 			log.Printf("ApproveMerchantRequest: transaction error: %v", txErr)
@@ -754,6 +774,10 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	redactMerchantRequest(c, admin, &req)
 	utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
 }
+
+// errApprovalRaceLost rolls back an approval whose request another approval
+// already moved out of pending.
+var errApprovalRaceLost = errors.New("merchant request is no longer pending")
 
 // approvalMessage is the notification text for an approved request. TSA Pay
 // applicants sell nothing on the marketplace, so they must not be told they
@@ -886,11 +910,7 @@ func isPMRequestType(t string) bool {
 // (review I2). (nil, nil) when there is none; an error is never read as "no
 // row" (review M6).
 func (h *MerchantRequestHandler) pmRowFor(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
-	row, err := services.NewPMService(h.DB).GetByUserIDKind(ctx, userID, kind)
-	if errors.Is(err, services.ErrPMNotFound) {
-		return nil, nil
-	}
-	return row, err
+	return services.OptionalPM(services.NewPMService(h.DB).GetByUserIDKind(ctx, userID, kind))
 }
 
 // walletTaken reports whether another user's payment_merchants row already
@@ -919,6 +939,13 @@ func (h *MerchantRequestHandler) prepareLPRequest(ctx context.Context, user *mod
 	// Only a REJECTED LP row may re-apply (its approval resets it, review I2).
 	if row != nil && row.Status != models.PaymentMerchantStatusRejected {
 		return http.StatusBadRequest, "You already have a liquidity provider profile", ""
+	}
+	switch err := h.PMOnboarding.RefuseCompanyUserAsLP(ctx, user.ID); {
+	case errors.Is(err, services.ErrCompanyUserCannotBeLP):
+		return http.StatusForbidden, "This account can't provide liquidity", services.CompanyAccountNotEligibleCode
+	case err != nil:
+		log.Printf("SubmitMerchantRequest: company PM check failed for %s: %v", user.ID, err)
+		return http.StatusInternalServerError, "Failed to check your profile", ""
 	}
 	verified, legal, err := services.KYCIdentity(ctx, h.DB, user.ID)
 	if err != nil {

@@ -104,4 +104,17 @@ func TestPaymentMerchantRoleIndex_OneOffRefusesWithoutTheRightNewIndex_OnPostgre
 	if err := dropOneRoleIndex(t, db); err == nil || oldIndexCount(db) != 1 {
 		t.Fatalf("one-off accepted an index on the wrong columns: %v", err)
 	}
+	// Review M3: the right name and columns on another table are refused too.
+	if err := db.Exec(`DROP INDEX ` + PaymentMerchantRoleIndexName).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE TABLE other_roles (user_id uuid, kind text)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`CREATE UNIQUE INDEX ` + PaymentMerchantRoleIndexName + ` ON other_roles (user_id, kind)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := dropOneRoleIndex(t, db); err == nil || oldIndexCount(db) != 1 {
+		t.Fatalf("one-off accepted the index on another table: %v", err)
+	}
 }

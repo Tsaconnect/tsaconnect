@@ -105,6 +105,15 @@ func (s *PMService) GetByUserIDKind(ctx context.Context, userID uuid.UUID, kind 
 	return firstPM(wherePMKind(s.db.WithContext(ctx).Where("user_id = ?", userID), kind).Order("created_at DESC"))
 }
 
+// OptionalPM reads a by-user lookup's not-found as "no row" (nil, nil); any
+// other error is returned, never read as "no row".
+func OptionalPM(row *models.PaymentMerchant, err error) (*models.PaymentMerchant, error) {
+	if errors.Is(err, ErrPMNotFound) {
+		return nil, nil
+	}
+	return row, err
+}
+
 func firstPM(q *gorm.DB) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
 	err := q.First(&pm).Error

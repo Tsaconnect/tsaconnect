@@ -125,3 +125,22 @@ func TestCompanyPMCheck_RefusesAnLPRow(t *testing.T) {
 		t.Fatal("IT_PM_ID naming an LP row must fail gate 7")
 	}
 }
+
+// Review M4: the slice buyer is never an LP's user.
+func TestCompanyPMUser_RefusesAnLPRow(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.PaymentMerchant{}); err != nil {
+		t.Fatal(err)
+	}
+	lp := models.PaymentMerchant{ID: uuid.New(), UserID: uuid.New(), Name: "ADA OBI", Kind: models.PaymentMerchantKindLP, Status: models.PaymentMerchantStatusActive}
+	db.Create(&lp)
+	prev := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = prev })
+	if user, err := companyPMUser(&config.Config{ITPMID: lp.ID.String()}); err == nil {
+		t.Fatalf("slice buyer = %s, want IT_PM_ID naming an LP row refused", user)
+	}
+}

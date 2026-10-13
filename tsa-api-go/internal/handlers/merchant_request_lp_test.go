@@ -357,3 +357,36 @@ func TestRejectLPRequest_NeedsP2PAdmin(t *testing.T) {
 		})
 	}
 }
+
+// Review M5: the company PM's user cannot apply as, or be approved as, an LP.
+func TestLPRequest_CompanyUserRefused(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := lpHandler(t, db, true)
+	u := createMerchantTestUser(t, db, "merchant")
+	verifyUser(t, db, u, "ADA OBI")
+	company := &models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "TSA", Status: models.PaymentMerchantStatusActive}
+	db.Create(company)
+	h.PMOnboarding.SetCompanyPMID(company.ID.String())
+
+	if code, body := submitLP(t, h, u); code != http.StatusForbidden || body["code"] != "company_account_not_eligible" {
+		t.Fatalf("submit = %d %v, want 403 company_account_not_eligible", code, body)
+	}
+
+	// A request that predates IT_PM_ID naming this user is refused at approval.
+	id := pgRequest(t, db, u.ID, models.BusinessTypeLiquidityProvider)
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+id+"/approve", map[string]any{"note": "ok"}, createMerchantTestUser(t, db, "admin"))
+	c.Params = gin.Params{{Key: "id", Value: id}}
+	h.ApproveMerchantRequest(c)
+	var body map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusConflict || body["code"] != "company_account_not_eligible" {
+		t.Fatalf("approve = %d %v, want 409 company_account_not_eligible", w.Code, body)
+	}
+	var mr models.MerchantRequest
+	db.First(&mr, "id = ?", id)
+	var n int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", u.ID).Count(&n)
+	if mr.Status != models.MerchantRequestStatusPending || n != 1 {
+		t.Fatalf("request=%s rows=%d: half-applied", mr.Status, n)
+	}
+}

@@ -3,17 +3,14 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
-	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -32,31 +29,15 @@ func releaseBroadcasters(bs *services.BlockchainService, cfg *config.Config) map
 	return out
 }
 
-// companyPMCheck is gate 7: IT_PM_ID names an active payment merchant (the
-// slice buyer identity, spec S10).
+// companyPMCheck is gate 7: IT_PM_ID names an active, non-LP payment
+// merchant (the slice buyer identity, spec S10).
 func companyPMCheck(cfg *config.Config) func(context.Context) error {
 	return func(ctx context.Context) error {
-		if cfg.ITPMID == "" {
-			return errors.New("IT_PM_ID is not set")
-		}
-		id, err := uuid.Parse(cfg.ITPMID)
-		if err != nil {
-			return fmt.Errorf("IT_PM_ID is not a UUID: %w", err)
-		}
 		if config.DB == nil {
 			return errors.New("IT_PM_ID: no database")
 		}
-		var pm models.PaymentMerchant
-		if err := config.DB.WithContext(ctx).First(&pm, "id = ?", id).Error; err != nil {
-			return fmt.Errorf("IT_PM_ID: %w", err)
-		}
-		if !pm.IsActive() {
-			return fmt.Errorf("IT_PM_ID %s is %s, not active", id, pm.Status)
-		}
-		if pm.IsLP() {
-			return fmt.Errorf("IT_PM_ID %s is a liquidity provider, not the company payment merchant", id)
-		}
-		return nil
+		_, err := services.LoadCompanyPM(ctx, config.DB, cfg.ITPMID)
+		return err
 	}
 }
 

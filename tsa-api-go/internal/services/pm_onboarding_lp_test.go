@@ -497,3 +497,48 @@ func TestApproveFromRequest_WaitsOnTheUserRowLock_OnPostgres(t *testing.T) {
 		t.Fatal("a key-share lock on the user row stalled the approval")
 	}
 }
+
+// companyRow seeds IT_PM_ID's merchant row for userID and pins it on svc.
+func companyRow(t *testing.T, svc *PMOnboardingService, userID uuid.UUID) {
+	t.Helper()
+	pm := &models.PaymentMerchant{ID: uuid.New(), UserID: userID, Name: "TSA", Status: models.PaymentMerchantStatusActive}
+	if err := svc.db.Create(pm).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc.SetCompanyPMID(pm.ID.String())
+}
+
+// Review M5: the company PM's user (the slice buyer) is never an LP, so the
+// pool can never sit on both sides of a slice.
+func TestApproveFromRequest_CompanyUserCannotBeLP(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	svc := NewPMOnboardingService(db, nil)
+	svc.SetLiquidity(97, nil, nil)
+	userID := uuid.New()
+	companyRow(t, svc, userID)
+	if _, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(userID)); !errors.Is(err, ErrCompanyUserCannotBeLP) {
+		t.Fatalf("err = %v, want ErrCompanyUserCannotBeLP", err)
+	}
+	var n int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ? AND kind = ?", userID, models.PaymentMerchantKindLP).Count(&n)
+	if n != 0 {
+		t.Fatalf("LP rows = %d, want none for the company user", n)
+	}
+	// Another user is unaffected.
+	if _, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(uuid.New())); err != nil {
+		t.Fatalf("other user's LP approval: %v", err)
+	}
+}
+
+func TestActivateLP_RefusesTheCompanyUser(t *testing.T) {
+	svc, acc, userID, lp := lpOnboarding(t, "ADA OBI", true)
+	companyRow(t, svc, userID) // IT_PM_ID repointed after the LP was approved
+	if _, err := svc.ActivateLP(context.Background(), lp.ID, userID); !errors.Is(err, ErrCompanyUserCannotBeLP) || acc.calls != 0 {
+		t.Fatalf("err=%v resolves=%d, want ErrCompanyUserCannotBeLP before any bank call", err, acc.calls)
+	}
+	var raw models.PaymentMerchant
+	svc.db.First(&raw, "id = ?", lp.ID)
+	if raw.Status != models.PaymentMerchantStatusApproved {
+		t.Fatalf("status = %s: the company user went live as an LP", raw.Status)
+	}
+}

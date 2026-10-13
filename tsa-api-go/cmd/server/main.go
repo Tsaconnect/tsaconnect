@@ -1240,6 +1240,7 @@ func main() {
 	var pmOnboarding *services.PMOnboardingService
 	if prov := pmProvisioner(cfg, fwClient, fwCustomerID, nombaClient); prov != nil {
 		pmOnboarding = services.NewPMOnboardingService(config.DB, prov)
+		pmOnboarding.SetCompanyPMID(cfg.ITPMID)
 		mrh.PMOnboarding = pmOnboarding
 		log.Printf("[pm] onboarding service ready (provider=%s)", cfg.ResolveFiatProvider())
 	} else {

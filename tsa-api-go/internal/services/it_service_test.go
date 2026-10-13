@@ -432,3 +432,38 @@ func TestOpenBuyOrder_WorksWithoutPMAndKeepsPrior(t *testing.T) {
 		t.Fatalf("prior status = %s, want pending_payment", prior.Status)
 	}
 }
+
+// Review M4: IT_PM_ID pointed at an LP row is never the company PM, whatever
+// the row carries. LoadCompanyPM is the one check every IT_PM_ID reader shares.
+func TestCompanyPM_RefusesAnLPRow(t *testing.T) {
+	s := newITTestService(t)
+	lp := &models.PaymentMerchant{ID: uuid.New(), UserID: uuid.New(), Name: "ADA OBI", Kind: models.PaymentMerchantKindLP,
+		Status: models.PaymentMerchantStatusActive, InboundAccountNumber: "2998287753"}
+	if err := s.db.Create(lp).Error; err != nil {
+		t.Fatal(err)
+	}
+	s.SetCompanyPMID(lp.ID.String())
+	if pm, err := s.CompanyPM(context.Background()); err != nil || pm != nil {
+		t.Fatalf("CompanyPM = %+v %v, want nil for an LP row", pm, err)
+	}
+	if _, err := LoadCompanyPM(context.Background(), s.db, lp.ID.String()); !errors.Is(err, ErrCompanyPMUnusable) {
+		t.Fatalf("LoadCompanyPM(LP) = %v, want ErrCompanyPMUnusable", err)
+	}
+}
+
+func TestLoadCompanyPM_RequiresAnActiveMerchantRow(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	paused := &models.PaymentMerchant{ID: uuid.New(), UserID: uuid.New(), Name: "TSA", Status: models.PaymentMerchantStatusPaused}
+	active := &models.PaymentMerchant{ID: uuid.New(), UserID: uuid.New(), Name: "TSA", Status: models.PaymentMerchantStatusActive}
+	s.db.Create(paused)
+	s.db.Create(active)
+	for _, id := range []string{"", "not-a-uuid", uuid.NewString(), paused.ID.String()} {
+		if _, err := LoadCompanyPM(ctx, s.db, id); !errors.Is(err, ErrCompanyPMUnusable) {
+			t.Fatalf("LoadCompanyPM(%q) = %v, want ErrCompanyPMUnusable", id, err)
+		}
+	}
+	if pm, err := LoadCompanyPM(ctx, s.db, active.ID.String()); err != nil || pm.ID != active.ID {
+		t.Fatalf("LoadCompanyPM(active) = %+v %v", pm, err)
+	}
+}

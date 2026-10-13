@@ -24,8 +24,8 @@
 --    returns nothing), the old index can be restored with
 --   CREATE UNIQUE INDEX CONCURRENTLY uq_payment_merchants_user ON payment_merchants (user_id);
 --
--- SAFETY: refuses, dropping nothing, unless the new index exists, is valid and
--- unique, and is on exactly (user_id, kind). Run: psql -v ON_ERROR_STOP=1 -f <this file>
+-- SAFETY: refuses, dropping nothing, unless the new index exists on
+-- payment_merchants, is valid and unique, and is on exactly (user_id, kind). Run: psql -v ON_ERROR_STOP=1 -f <this file>
 
 BEGIN;
 
@@ -34,8 +34,9 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_index
     WHERE indexrelid = to_regclass('uq_payment_merchants_user_kind')
+      AND indrelid = 'payment_merchants'::regclass
       AND indisvalid AND indisunique
-      AND pg_get_indexdef(indexrelid) LIKE '%(user_id, kind)'
+      AND pg_get_indexdef(indexrelid) LIKE '%(user\_id, kind)'
   ) THEN
     RAISE EXCEPTION 'uq_payment_merchants_user_kind is missing, invalid or not on (user_id, kind); deploy the release first';
   END IF;

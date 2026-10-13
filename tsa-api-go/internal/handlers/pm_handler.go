@@ -146,11 +146,7 @@ type pmStatusResponse struct {
 // other than not-found are returned; a not-found is just a nil row.
 func (h *PMHandler) pmRoles(ctx context.Context, userID uuid.UUID) (merchant, lp *models.PaymentMerchant, err error) {
 	read := func(kind string) (*models.PaymentMerchant, error) {
-		row, err := h.pmStatus.GetByUserIDKind(ctx, userID, kind)
-		if errors.Is(err, services.ErrPMNotFound) {
-			return nil, nil
-		}
-		return row, err
+		return services.OptionalPM(h.pmStatus.GetByUserIDKind(ctx, userID, kind))
 	}
 	if merchant, err = read(models.PaymentMerchantKindMerchant); err != nil {
 		return nil, nil, err
@@ -609,6 +605,8 @@ func (h *PMHandler) activateLP(c *gin.Context, pm *models.PaymentMerchant, userI
 		utils.ErrorResponseWithCode(c, http.StatusBadGateway, "We couldn't verify your settlement account right now. Try again shortly.", "settlement_account_unresolved")
 	case errors.Is(err, services.ErrLiquidityUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available right now", "liquidity_unavailable")
+	case errors.Is(err, services.ErrCompanyUserCannotBeLP):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "This account can't provide liquidity", services.CompanyAccountNotEligibleCode)
 	case services.KYCRefusalCode(err) != "":
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before activating", services.KYCRefusalCode(err))
 	case errors.Is(err, services.ErrPMNotFound):
