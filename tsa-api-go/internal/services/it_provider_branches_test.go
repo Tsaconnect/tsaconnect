@@ -477,7 +477,7 @@ func (l *providerLint) boundProviderFindings(call *ast.CallExpr) []string {
 		arg := ast.Unparen(call.Args[argIdx])
 		switch {
 		case op == "=" && l.providerConst(arg) == "ITProviderTreasury":
-		case op == "in" && (isCallTo(arg, "flutterwaveFulfilledProviders") || isCallTo(arg, "poolProviders")):
+		case op == "in" && (isCallTo(arg, "flutterwaveFulfilledProviders") || isCallTo(arg, "poolProviders") || isCallTo(arg, "companyWalletProviders")):
 		default:
 			out = append(out, pos+": it_intents provider filter not built from providerTerms")
 		}

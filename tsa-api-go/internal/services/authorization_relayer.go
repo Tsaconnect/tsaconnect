@@ -207,14 +207,9 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 	}
 	releaseRow := func() { releaseSponsorshipRow(ctx, a.store, row.ID) }
 
-	bal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
-	if err != nil {
-		releaseRow()
-		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: read sponsor balance: %w", err)
-	}
 	// Floors are alert-only: refused only when the sponsor cannot pay this
-	// relay's own fee.
-	if err := lane.requireFee(bal, authorizationGasUnits, nil); err != nil {
+	// relay's own fee (its lane re-checks at the send).
+	if err := lane.canPay(ctx, authorizationGasUnits, nil); err != nil {
 		releaseRow()
 		return AuthorizationRelayResult{}, err
 	}

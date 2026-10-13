@@ -118,18 +118,12 @@ func TestSponsorGuard_ReleaseGasSkippedAfterDayRoll(t *testing.T) {
 	}
 }
 
-// Floors are alert-only (owner 2026-10-13): below the floor only alerts; the
-// one refusal is a balance that cannot pay the transaction's own need.
-func TestSponsorGuard_FloorAlertsAndOnlyTheFeeRefuses(t *testing.T) {
+// Floors are alert-only (owner 2026-10-13): the guard's floor only alerts; the
+// one refusal is the key lane's fee gate (KeyLane.requireFee).
+func TestSponsorGuard_FloorOnlyAlerts(t *testing.T) {
 	g, _ := newTestGuard(t)
 	if !g.AlertFloor(big.NewInt(999)) || g.AlertFloor(big.NewInt(1_000)) {
 		t.Fatal("AlertFloor must report below-floor only")
-	}
-	if err := g.RequireFee(big.NewInt(999), big.NewInt(500)); err != nil {
-		t.Fatalf("below the floor but able to pay: %v", err)
-	}
-	if err := g.RequireFee(big.NewInt(499), big.NewInt(500)); !errors.Is(err, ErrRelayerUnderfunded) {
-		t.Fatalf("unable to pay: want ErrRelayerUnderfunded, got %v", err)
 	}
 }
 

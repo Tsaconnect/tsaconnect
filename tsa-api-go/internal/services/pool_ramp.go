@@ -20,35 +20,29 @@ func (s *ITService) PoolLegOpen(ctx context.Context) bool {
 	if !s.HasPool() || s.payInChannelNow() != PayInCentral || CurrentPoolSettings().OrdersStopped {
 		return false
 	}
-	return s.poolDesk.c.Gates.Open() && s.poolReleaseGasOK(ctx, CurrentPoolSettings().SliceCap)
-}
-
-// poolSliceOutstandingStatuses are the slice states that still need one
-// release-key transaction each: adminRelease once paid, cancelByTimeout (sent
-// by the expiry canceller with the release key) if never paid, adminResolve if
-// disputed.
-var poolSliceOutstandingStatuses = []string{
-	models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-	models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed,
+	return s.poolDesk.c.Gates.Open() && s.poolReleaseGasOK(ctx, CurrentPoolSettings().SliceCap, false)
 }
 
 // poolReleaseGasOK asks the gates whether the release key can pay for every
-// release-key transaction already owed on the pool chain (each live slice of
-// every open order) plus this order's `releases` — not this order alone, which
-// would let N open orders each pass on the same balance. A count that cannot be
-// read fails closed. Read outside the pool lock: two opens racing past it can
-// both count the same balance once; gasFeeBuffer (2×) covers that one extra
-// order's worth.
-func (s *ITService) poolReleaseGasOK(ctx context.Context, releases int) bool {
+// release-key call already owed on the pool chain (each live slice of every
+// open order, ReleaseCommitments, cached a few seconds) plus this order's
+// `releases` — not this order alone, which would let N open orders each pass
+// on the same balance. A count that cannot be read fails closed. Read outside
+// the pool lock: two opens racing past it can both count the same balance
+// once; gasFeeBuffer (2x) covers that one extra order's worth. fresh: an open
+// counts now; a quote (PoolLegOpen) may reuse a count a few seconds old.
+func (s *ITService) poolReleaseGasOK(ctx context.Context, releases int, fresh bool) bool {
 	d := s.poolDesk
-	var outstanding int64
-	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("it_intent_id IS NOT NULL AND chain_id = ? AND status IN ?", d.c.Token.ChainID, poolSliceOutstandingStatuses).
-		Count(&outstanding).Error; err != nil {
+	units := d.c.ReleaseCommitments.Units
+	if fresh {
+		units = d.c.ReleaseCommitments.UnitsFresh
+	}
+	owed, err := units(ctx)
+	if err != nil {
 		log.Printf("[liquidity] ALERT liquidity_pool_release_commitments_unreadable_total=1 err=%s", RedactAlertText(err.Error()))
 		return false
 	}
-	return d.c.Gates.ReleaseGasOK(ctx, int(outstanding)+releases)
+	return d.c.Gates.ReleaseGasOK(ctx, int(owed/poolReleaseCallGas)+releases)
 }
 
 // PoolVenue is the pool's one direct venue: its chain key and token.

@@ -102,6 +102,18 @@ func poolProviders() []string {
 	return out
 }
 
+// companyWalletProviders is the provider column values a company-wallet query
+// lists (its owed deliveries, LaneCommitments).
+func companyWalletProviders() []string {
+	var out []string
+	for _, p := range knownITProviders {
+		if t, err := providerTerms(&models.ITIntent{Provider: p}); err == nil && t.companyWallet {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func isCompanyWalletBuy(i *models.ITIntent) bool {
 	t, err := providerTerms(i)
 	return err == nil && t.companyWallet

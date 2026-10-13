@@ -257,7 +257,11 @@ func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade
 		}
 	}
 	e.sentAt[tr.ID] = now
-	hash, err := e.c.Signer.Send(ctx, tr.ChainID, func() ([]byte, error) {
+	sendCtx := ctx
+	if tr.IsPoolSlice() {
+		sendCtx = ReservedSend(ctx) // a slice's cancel is one of the pool's reserved release-key calls
+	}
+	hash, err := e.c.Signer.Send(sendCtx, tr.ChainID, func() ([]byte, error) {
 		return escrow.PrepareCancelByTimeout(HashID(tr.ID), e.c.Signer.Address())
 	})
 	if err != nil {

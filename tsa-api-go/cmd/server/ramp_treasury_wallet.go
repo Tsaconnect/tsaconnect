@@ -103,6 +103,12 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 		log.Printf("[ramp-company-wallet] dormant: no usable chain in RAMP_TREASURY_WALLET_CHAINS=%v", cfg.RampTreasuryWalletChains)
 		return nil
 	}
+	// Each lane keeps back the transfers its paid, undelivered sales owe.
+	for chain, lane := range lanes {
+		if lane.KeyLane != nil && config.DB != nil {
+			lane.KeyLane.AddReservation("company_wallet_owed_"+chain, services.NewCompanyWalletCommitments(config.DB, chain).Reservation)
+		}
+	}
 	// No value caps on the lane (review C2): the maximum is enforced where
 	// orders are priced, and free stock is the real per-token limit (§4.1).
 	treasury := services.NewTreasury(lanes, services.CompanyWalletCaps(), nil)

@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
 // RelayerService sponsors gas for user-signed EIP-2771 ForwardRequests.
@@ -48,7 +46,7 @@ var (
 	ErrRelayerUnderfunded    = errors.New("the sending wallet cannot pay for this transaction's gas")
 	ErrSimulationReverted    = errors.New("transaction would revert")
 	ErrSimulationUnavailable = errors.New("could not simulate the transaction; try again")
-	ErrRoleSeparation        = errors.New("relayer key must not also be owner or guardian")
+	ErrRoleSeparation        = errors.New("relayer key must not also be owner, operator, or guardian")
 )
 
 // ForwardRequest mirrors ERC2771Forwarder.ForwardRequestData.
@@ -156,7 +154,7 @@ const forwarderExecuteABI = `[
 ]`
 
 type RelayerService struct {
-	signer    ReleaseSigner
+	signer ReleaseSigner
 	// lane is the relayer key's KeyLane on Sonic (lock + nonce floor),
 	// shared with every other role on the same key. Before it existed the
 	// relayer built and broadcast with no lock at all.
@@ -198,7 +196,7 @@ func NewRelayerService(
 	}
 	var lane *KeyLane
 	if signer != nil {
-		lane = NewKeyLane(signer, 0)
+		lane = soloLane(signer, chainBalances{chain})
 	}
 	return &RelayerService{
 		signer: signer, lane: lane, chain: chain, builder: builder,
@@ -238,15 +236,12 @@ func (r *RelayerService) SetKillSwitch(on bool) {
 	r.guard.SetKillSwitch(on)
 }
 
-// AssertRoleSeparation fails startup if the relayer key is the swap's owner or
-// a guardian: a relayer key is hot — it broadcasts constantly from a server — so
-// it must never hold a role that can upgrade, pause or re-key the contract.
-//
-// Being an operator is allowed since the signer consolidation (owner decision
-// 2026-10-13: relayer, IT operator, PM release and gas sponsor are one OPERATOR
-// key). That is a deliberate trade-off, not an oversight: a compromise of the
-// relayer is then a compromise of the operator (debit cap 5,000/tx and
-// 25,000/h, credit cap 10,000/tx). It is logged loudly at boot every time.
+// AssertRoleSeparation reports an error when the relayer key holds a
+// privileged role on the swap — owner, operator or guardian. A relayer key is
+// hot (it broadcasts constantly from a server), so a compromise of it must not
+// be a compromise of the operator, whose debits move users' MCGP (owner
+// decision 2026-10-13: the relayer keeps its own key). Boot treats an error as
+// "relayer dormant", never as a reason to stop the whole API.
 func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRoleReader) error {
 	if !r.IsEnabled() || roles == nil {
 		return nil
@@ -260,22 +255,19 @@ func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRo
 	if strings.EqualFold(owner, addr) {
 		return fmt.Errorf("%w: relayer is the owner", ErrRoleSeparation)
 	}
+	isOp, err := roles.IsOperator(ctx, addr)
+	if err != nil {
+		return fmt.Errorf("relayer: read operator: %w", err)
+	}
+	if isOp {
+		return fmt.Errorf("%w: relayer is an operator", ErrRoleSeparation)
+	}
 	isGuard, err := roles.IsGuardian(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("relayer: read guardian: %w", err)
 	}
 	if isGuard {
 		return fmt.Errorf("%w: relayer is a guardian", ErrRoleSeparation)
-	}
-	isOp, err := roles.IsOperator(ctx, addr)
-	if err != nil {
-		// Informational only now; an unreadable operator flag is not a reason
-		// to refuse to start.
-		log.Printf("[relayer] could not read operators(%s): %v", addr, err)
-		return nil
-	}
-	if isOp {
-		log.Printf("[relayer] WARNING relayer_is_operator=1 address=%s — the gasless relayer signs with the swap OPERATOR key (signer consolidation trade-off: a relayer compromise is an operator compromise, bounded by the swap's debit/credit caps)", addr)
 	}
 	return nil
 }
@@ -300,8 +292,7 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		return "", err
 	}
 
-	balance, err := r.checkBalance(ctx)
-	if err != nil {
+	if err := r.checkBalance(ctx); err != nil {
 		return "", err
 	}
 
@@ -346,22 +337,27 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 			return nil, err
 		}
 		built = true
-		if err := r.requireFee(balance, unsigned); err != nil {
-			return nil, notBroadcast(err)
-		}
 		return unsigned, nil
 	})
-	if errors.Is(err, ErrRelayerUnderfunded) {
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrRelayerUnderfunded):
+		// The key lane's fee gate: this relay's own fee (plus the lane's
+		// reservation) is more than the relayer holds.
 		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "underfunded")
 		return "", err
-	}
-	if err != nil && !built {
+	case !built:
 		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "build")
 		return "", fmt.Errorf("relayer: build tx: %w", err)
-	}
-	if err != nil {
+	case errors.Is(err, ErrTxNotBroadcast):
+		// Refused before it reached any mempool (a definite node refusal, a
+		// tx the lane would not sign): nothing was broadcast.
+		releaseOurFault()
+		r.metrics.RelayAttempt("rejected", "not_broadcast")
+		return "", fmt.Errorf("relayer: not broadcast: %w", err)
+	default:
 		releaseOurFault()
 		r.metrics.RelayAttempt("error", "broadcast")
 		return "", fmt.Errorf("relayer: broadcast: %w", err)
@@ -459,32 +455,16 @@ func (r *RelayerService) checkMinSponsored(a AllowedCall, data []byte) error {
 }
 
 // checkBalance reads the relayer's native balance and raises the refill ALERT
-// below its floor. The floor never refuses (owner 2026-10-13): requireFee asks
-// whether this relay's own transaction can be paid.
-func (r *RelayerService) checkBalance(ctx context.Context) (*big.Int, error) {
+// below its floor. The floor never refuses (owner 2026-10-13): the key lane's
+// fee gate decides whether this relay's own transaction can be paid.
+func (r *RelayerService) checkBalance(ctx context.Context) error {
 	bal, err := r.chain.BalanceAt(ctx, common.HexToAddress(r.signer.Address()), nil)
 	if err != nil {
 		r.metrics.RelayAttempt("error", "balance")
-		return nil, fmt.Errorf("relayer: read balance: %w", err)
+		return fmt.Errorf("relayer: read balance: %w", err)
 	}
 	r.guard.AlertFloor(bal)
-	return bal, nil
-}
-
-// requireFee refuses a prepared relay the relayer cannot pay for: its gas
-// limit at its gas price, times gasFeeBuffer.
-func (r *RelayerService) requireFee(balance *big.Int, unsigned []byte) error {
-	var u blockchain.UnsignedTx
-	if err := json.Unmarshal(unsigned, &u); err != nil {
-		return fmt.Errorf("relayer: read the prepared tx: %w", err)
-	}
-	price, ok := new(big.Int).SetString(u.GasPrice, 10)
-	if !ok {
-		// A builder that sets no price (a test fake) cannot be priced; the
-		// node refuses an unpayable send as a definite "insufficient funds".
-		return nil
-	}
-	return r.guard.RequireFee(balance, feeNeed(u.GasLimit, price, nil))
+	return nil
 }
 
 // simulate runs the exact call through eth_call first. A revert here means the

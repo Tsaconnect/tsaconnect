@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
@@ -37,17 +40,21 @@ func alertRawSignerKeyInProduction(cfg *config.Config, keyName string) {
 	}
 }
 
-// Signer consolidation (plan 2026-10-13): six hot keys become two.
-//   - OPERATOR = PM_RELEASE_PRIVATE_KEY. The IT operator, gasless relayer and
-//     gas sponsor (Sonic + ramp lanes) sign with it whenever their own var is
-//     unset. Every role on one key and chain shares that key's KeyLane, so
-//     sharing is nonce-safe.
+// Signer consolidation (plan 2026-10-13; owner decisions the same day): six
+// hot keys become three.
+//   - OPERATOR = PM_RELEASE_PRIVATE_KEY. The IT operator and the gas sponsor
+//     (Sonic + ramp lanes) sign with it whenever their own var is unset. Every
+//     role on one key and chain shares that key's KeyLane, so sharing is
+//     nonce-safe.
+//   - RELAYER = RELAYER_PRIVATE_KEY, its own key: never the operator (a hot
+//     relayer key must not be able to debit users' MCGP). Unset = dormant.
 //   - TREASURY = RAMP_TREASURY_PRIVATE_KEY (conversion + pool treasury).
 //
 // The company wallet (RAMP_TREASURY_WALLET_PRIVATE_KEY) is its own class in
-// Phase 1: it must differ from both.
+// Phase 1: it must differ from all of them.
 const (
 	signerClassOperator      = "operator"
+	signerClassRelayer       = "relayer"
 	signerClassTreasury      = "treasury"
 	signerClassCompanyWallet = "company_wallet"
 )
@@ -57,7 +64,7 @@ const (
 var signerKeyClass = map[string]string{
 	"PM_RELEASE_PRIVATE_KEY":           signerClassOperator,
 	"IT_OPERATOR_PRIVATE_KEY":          signerClassOperator,
-	"RELAYER_PRIVATE_KEY":              signerClassOperator,
+	"RELAYER_PRIVATE_KEY":              signerClassRelayer,
 	"RAMP_SPONSOR_PRIVATE_KEY":         signerClassOperator,
 	"RAMP_TREASURY_PRIVATE_KEY":        signerClassTreasury,
 	"RAMP_TREASURY_WALLET_PRIVATE_KEY": signerClassCompanyWallet,
@@ -72,7 +79,6 @@ type operatorRole struct {
 func operatorRoles(cfg *config.Config) []operatorRole {
 	return []operatorRole{
 		{"it_operator", "IT_OPERATOR_PRIVATE_KEY", &cfg.ITOperatorPrivateKey},
-		{"relayer", "RELAYER_PRIVATE_KEY", &cfg.RelayerPrivateKey},
 		{"gas_sponsor", "RAMP_SPONSOR_PRIVATE_KEY", &cfg.RampSponsorPrivateKey},
 	}
 }
@@ -87,8 +93,8 @@ func signerAddress(hexKey string) string {
 }
 
 // resolveSignerRoles runs once, right after config load and before any signer
-// is built: each operator role whose own var is unset signs with the OPERATOR
-// key from here on. A role var that is set and differs from the OPERATOR keeps
+// is built: each operator role (IT operator, gas sponsor — never the relayer)
+// whose own var is unset signs with the OPERATOR key from here on. A role var that is set and differs from the OPERATOR keeps
 // its own key (today's behaviour) with a DEPRECATED line naming it; one equal
 // to the OPERATOR is fine. Never logs key material, only addresses.
 func resolveSignerRoles(cfg *config.Config) {
@@ -111,6 +117,9 @@ func resolveSignerRoles(cfg *config.Config) {
 				r.role, r.envVar, signerAddress(own), opAddr)
 		}
 	}
+	if strings.TrimSpace(cfg.RelayerPrivateKey) == "" {
+		log.Printf("[signer] role=relayer dormant: RELAYER_PRIVATE_KEY unset — the relayer keeps its own key and never falls back to the operator")
+	}
 }
 
 // logSignerSummary prints one line per hot address: its class, the roles that
@@ -127,4 +136,47 @@ func logSignerSummary(cfg *config.Config, reg *services.SignerRegistry) {
 		}
 		log.Printf("[signer] %s=%s roles=%s lanes=%v", label, s.Address, strings.Join(s.Roles, ","), s.Chains)
 	}
+}
+
+// buildRelayer is the gasless relayer on its key's lane, or nil with a line
+// saying why.
+func buildRelayer(cfg *config.Config, lane *services.KeyLane, client *blockchain.EVMClient) *services.RelayerService {
+	limits := services.RelayerLimits{
+		SponsorLimits: services.SponsorLimits{
+			PerUserPerWindow: cfg.RelayerPerUserPerHour,
+			Window:           time.Hour,
+			DailyGasBudget:   bigFromDecimal(cfg.RelayerDailyGasBudget),
+			BalanceFloor:     bigFromDecimal(cfg.RelayerBalanceFloorWei),
+		},
+		MaxDeadline:  cfg.RelayerMaxDeadline,
+		GasCeiling:   cfg.RelayerGasCeiling,
+		MinSponsored: bigFromDecimal(cfg.RelayerMinSponsored),
+	}
+	allow := []services.AllowedCall{
+		// spend(to, amount, ref) — amount is calldata word 1.
+		{Target: cfg.MCGPSwapBAddress, Selector: services.SelectorOf("spend(address,uint256,bytes32)"), AmountWordIndex: 1},
+	}
+	relayer, err := services.NewRelayerService(lane.Signer(), services.EVMRelayChain{Client: client},
+		services.EVMRelayTxBuilder{Client: client}, cfg.MCGPForwarderAddress, allow, limits, nil, nil)
+	if err != nil {
+		log.Printf("[config] relayer init failed; gasless dormant: %v", err)
+		return nil
+	}
+	relayer.UseKeyLane(lane)
+	return relayer
+}
+
+// operatorRoleProbe re-reads operators(<IT operator>) on the swap every
+// minute: IT, bills and MCGP checkout come up once it reads true (after the
+// PM's addOperator, or a boot read error), and go dormant if it turns false.
+// A failing read or a missing role fails the tick, so the scheduler's
+// failure-streak ALERT fires while it lasts.
+type operatorRoleProbe struct{ swap *services.MCGPSwapService }
+
+func (p operatorRoleProbe) Name() string            { return "it-operator-role-probe" }
+func (p operatorRoleProbe) Interval() time.Duration { return time.Minute }
+func (p operatorRoleProbe) Run(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return p.swap.ProbeOperatorRole(ctx)
 }

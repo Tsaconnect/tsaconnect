@@ -396,27 +396,24 @@ func main() {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
 				alertRawSignerKeyInProduction(cfg, "IT_OPERATOR_PRIVATE_KEY")
-				itAddr := crypto.PubkeyToAddress(key.PublicKey).Hex()
-				roleCtx, roleCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				isOp, roleErr := services.SwapRoleReader{Swap: mcgpSwapService}.IsOperator(roleCtx, itAddr)
-				roleCancel()
-				if roleErr != nil {
-					log.Printf("[config] WARNING could not read operators(%s) on the swap: %v — IT stays on; a non-operator key reverts every debit", itAddr, roleErr)
-				}
-				if roleErr == nil && !isOp {
-					// The fallback to the OPERATOR key lands here until the PM
-					// has called addOperator(<operator>) (PM-1).
-					log.Printf("[config] ALERT signer_role_missing=1 role=it_operator address=%s swap=%s — not an operator on the swap; IT dormant until the PM adds it (addOperator) or IT_OPERATOR_PRIVATE_KEY is restored",
-						itAddr, cfg.MCGPSwapBAddress)
+				// The operator's key lane is shared with every other role on the
+				// same key on Sonic; OperatorSequence keeps its own sequence lock
+				// on top (MCGPSwapService.signMu).
+				if lane := blockchainService.Signers().Lane("it_operator", key, sonicClient); lane == nil {
+					log.Printf("[config] IT dormant: no Sonic chain id for the operator's key lane")
 				} else {
-					// The operator's key lane is shared with every other role on
-					// the same key on Sonic; OperatorSequence keeps its own
-					// sequence lock on top (MCGPSwapService.signMu).
-					if lane := blockchainService.Signers().Lane("it_operator", key, sonicClient); lane != nil {
-						mcgpSwapService.SetOperatorLane(lane)
-					} else {
-						mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
+					mcgpSwapService.SetOperatorLane(lane)
+					// IT, bills and MCGP checkout are wired now but stay dormant
+					// (HasOperator false, every operator op refused) until
+					// operators(<key>) reads true — here, or on the 60 s re-probe
+					// (it-operator-role-probe) after a read error or before the
+					// PM's addOperator.
+					roleCtx, roleCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if err := mcgpSwapService.ProbeOperatorRole(roleCtx); err != nil {
+						log.Printf("[config] ALERT signer_role_missing=1 role=it_operator address=%s swap=%s err=%s — IT dormant until operators() reads true (re-probed every 60 s)",
+							mcgpSwapService.OperatorAddress(), cfg.MCGPSwapBAddress, services.RedactAlertText(err.Error()))
 					}
+					roleCancel()
 					itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 					itService.SetCompanyPMID(cfg.ITPMID)
 					itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
@@ -427,7 +424,7 @@ func main() {
 						AccountName:   cfg.InboundCentralAccountName,
 					})
 					itHandler = handlers.NewITHandler(config.DB, itService, currencyRegistry)
-					log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
+					log.Printf("[config] IT (Instant Transfer) wired; operator=%s verified=%t", mcgpSwapService.OperatorAddress(), mcgpSwapService.HasOperator())
 				}
 			}
 		} else {
@@ -449,47 +446,32 @@ func main() {
 				log.Printf("[config] relayer key invalid; gasless dormant: %v", kerr)
 			} else {
 				alertRawSignerKeyInProduction(cfg, "RELAYER_PRIVATE_KEY")
-				// The relayer's key lane is shared with every other role on the
-				// same key on Sonic (it used to send with no lock at all).
-				keyLane := blockchainService.Signers().Lane("relayer", key, sonicClient)
-				var signer services.ReleaseSigner = services.NewLocalKeyReleaseSigner(key, sonicClient)
-				if keyLane != nil {
-					signer = keyLane.Signer()
+				// The relayer keeps its own key (owner 2026-10-13): never the
+				// operator's, treasury's or company wallet's.
+				if err := assertDistinctKey("RELAYER_PRIVATE_KEY", key, map[string]string{
+					"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
+					"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
+					"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
+					"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
+					"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
+				}); err != nil {
+					fatalf("[config] REFUSING TO START: %v", err)
 				}
-				limits := services.RelayerLimits{
-					SponsorLimits: services.SponsorLimits{
-						PerUserPerWindow: cfg.RelayerPerUserPerHour,
-						Window:           time.Hour,
-						DailyGasBudget:   bigFromDecimal(cfg.RelayerDailyGasBudget),
-						BalanceFloor:     bigFromDecimal(cfg.RelayerBalanceFloorWei),
-					},
-					MaxDeadline:  cfg.RelayerMaxDeadline,
-					GasCeiling:   cfg.RelayerGasCeiling,
-					MinSponsored: bigFromDecimal(cfg.RelayerMinSponsored),
-				}
-				allow := []services.AllowedCall{
-					// spend(to, amount, ref) — amount is calldata word 1.
-					{Target: cfg.MCGPSwapBAddress, Selector: services.SelectorOf("spend(address,uint256,bytes32)"), AmountWordIndex: 1},
-				}
-				relayer, rerr := services.NewRelayerService(
-					signer, services.EVMRelayChain{Client: sonicClient},
-					services.EVMRelayTxBuilder{Client: sonicClient},
-					cfg.MCGPForwarderAddress, allow, limits, nil, nil,
-				)
-				if rerr == nil {
-					relayer.UseKeyLane(keyLane)
-				}
-				if rerr != nil {
-					log.Printf("[config] relayer init failed; gasless dormant: %v", rerr)
-				} else if serr := relayer.AssertRoleSeparation(context.Background(), services.SwapRoleReader{Swap: mcgpSwapService}); serr != nil {
-					// Hard-fail rather than run: a relayer key that is the swap
-					// owner or a guardian turns a hot-key compromise into one that
-					// can upgrade or pause the swap. Operator is allowed (signer
-					// consolidation) and logged by AssertRoleSeparation.
-					log.Fatalf("[config] REFUSING TO START: %v", serr)
-				} else {
-					mcgpSwapHandler = mcgpSwapHandler.WithRelayer(relayer, cfg.MCGPSwapBAddress)
-					log.Printf("[config] gasless relaying enabled; forwarder=%s relayer=%s", cfg.MCGPForwarderAddress, signer.Address())
+				if keyLane := blockchainService.Signers().Lane("relayer", key, sonicClient); keyLane == nil {
+					log.Printf("[config] gasless dormant: no Sonic chain id for the relayer's key lane")
+				} else if relayer := buildRelayer(cfg, keyLane, sonicClient); relayer != nil {
+					roleCtx, roleCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					serr := relayer.AssertRoleSeparation(roleCtx, services.SwapRoleReader{Swap: mcgpSwapService})
+					roleCancel()
+					if serr != nil {
+						// A relayer that holds (or may hold) a swap role is never
+						// run — but it takes only gasless relaying down, not the API.
+						log.Printf("[config] ALERT relayer_role_check_failed=1 relayer=%s err=%s — gasless dormant; the app self-pays",
+							keyLane.Address(), services.RedactAlertText(serr.Error()))
+					} else {
+						mcgpSwapHandler = mcgpSwapHandler.WithRelayer(relayer, cfg.MCGPSwapBAddress)
+						log.Printf("[config] gasless relaying enabled; forwarder=%s relayer=%s", cfg.MCGPForwarderAddress, keyLane.Address())
+					}
 				}
 			}
 		} else {
@@ -546,7 +528,7 @@ func main() {
 	var billHandler *handlers.BillHandler
 	var billService *services.BillService
 	clubkonnect := services.NewClubkonnectClient(cfg)
-	if clubkonnect.IsEnabled() && mcgpSwapService.HasOperator() {
+	if clubkonnect.IsEnabled() && mcgpSwapService.OperatorConfigured() {
 		billPaymentService := services.NewBillPaymentService(config.DB, mcgpSwapService)
 		billService = services.NewBillService(
 			config.DB, clubkonnect, billPaymentService, mcgpSwapService,
@@ -568,6 +550,9 @@ func main() {
 	// internal/jobs/scheduler.go for the rationale and the Phase 2 migration
 	// path to River.
 	scheduler := jobs.NewScheduler()
+	if mcgpSwapService.OperatorConfigured() {
+		scheduler.Register(operatorRoleProbe{swap: mcgpSwapService}, jobs.AlertOnFailureStreak())
+	}
 	// Cancelled at shutdown. Background work started outside the scheduler (an
 	// on-demand inbound check) derives from it so it stops with everything else.
 	workerCtx, workerCancel := context.WithCancel(context.Background())
@@ -672,7 +657,7 @@ func main() {
 	// MCGP checkout pays from Spendable MCGP through the operator debit path
 	// (the same signer bills use). Without the operator MCGP checkout answers
 	// "unavailable" and stablecoin checkout is unaffected.
-	if mcgpSwapService.HasOperator() {
+	if mcgpSwapService.OperatorConfigured() {
 		orderMcgp := services.NewOrderSpendablePaymentService(config.DB, mcgpSwapService, eventBus)
 		orderMcgp.SetAbuseLimits(services.OrderMcgpAbuseLimits{
 			MaxOpenHolds:     cfg.OrderMcgpMaxOpenHolds,
@@ -1401,7 +1386,12 @@ func main() {
 		// Sonic PM auto-release (adminRelease/adminResolve) needs the release
 		// key to be an escrow admin; cancelByTimeout does not. The BSC pool
 		// checks its own escrow in its gates.
-		if ok, err := p2pEscrowService.IsAdmin(releaseSigner.Address()); err == nil && !ok {
+		ok, err := p2pEscrowService.IsAdmin(releaseSigner.Address())
+		switch {
+		case err != nil:
+			log.Printf("[pm] WARNING could not read isAdmin(%s) on the Sonic P2P escrow: %s — PM auto-release reverts if it is not an admin (PM-2: addAdmin)",
+				releaseSigner.Address(), services.RedactAlertText(err.Error()))
+		case !ok:
 			log.Printf("[pm] WARNING signer_role_missing=1 role=pm_release address=%s — not an admin on the Sonic P2P escrow: PM auto-release reverts until the PM calls addAdmin(%s) (PM-2)",
 				releaseSigner.Address(), releaseSigner.Address())
 		}

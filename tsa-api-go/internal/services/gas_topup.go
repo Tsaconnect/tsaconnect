@@ -417,13 +417,9 @@ func (g *GasTopUp) CheckTopUp(ctx context.Context, chainID int64, amount *big.In
 	if lane.TopUpMaxWei != nil && amount.Cmp(lane.TopUpMaxWei) > 0 {
 		return ErrTopUpTooExpensive
 	}
-	bal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
-	if err != nil {
-		return fmt.Errorf("sponsor: read sponsor balance: %w", err)
-	}
 	// Floors are alert-only: refused only when the sponsor cannot pay this
-	// top-up (amount + its own fee).
-	if err := lane.requireFee(bal, topUpGasUnits, amount); err != nil {
+	// top-up (amount + its own fee) on top of what its lane keeps back.
+	if err := lane.canPay(ctx, topUpGasUnits, amount); err != nil {
 		return err
 	}
 	return lane.Guard.CanReserveGas(topUpGasUnits)
@@ -552,14 +548,10 @@ func (g *GasTopUp) sendTopUp(ctx context.Context, s topUpSend) (GasTopUpResult, 
 		}
 	}
 
-	sponsorBal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
-	if err != nil {
-		release()
-		return GasTopUpResult{}, fmt.Errorf("sponsor: read sponsor balance: %w", err)
-	}
 	// Floors are alert-only: the sponsor sends while it can pay this top-up
-	// (amount + its own fee); below the floor it only raises the refill ALERT.
-	if err := lane.requireFee(sponsorBal, topUpGasUnits, amount); err != nil {
+	// (amount + its own fee) on top of its lane's reservation; below the floor
+	// it only raises the refill ALERT. The lane re-checks at the send.
+	if err := lane.canPay(ctx, topUpGasUnits, amount); err != nil {
 		release()
 		return GasTopUpResult{}, err
 	}

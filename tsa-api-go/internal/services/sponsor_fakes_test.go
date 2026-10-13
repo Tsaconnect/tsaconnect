@@ -3,9 +3,9 @@ package services
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math/big"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -207,7 +208,15 @@ func (f *fakeSponsorBuilder) BuildUnsignedCall(_, to string, callData []byte, va
 	if f.err != nil {
 		return nil, f.err
 	}
-	return []byte(`{"unsigned":true}`), nil
+	limit := gasLimit
+	if limit == 0 {
+		limit = 100_000
+	}
+	v := "0"
+	if value != nil {
+		v = value.String()
+	}
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: "1000000000", GasLimit: limit, To: to, Value: v})
 }
 
 // lastCall is the mutex-guarded accessor for what BuildUnsignedCall was last
@@ -279,7 +288,7 @@ func (f *fakeSponsorNative) PrepareNativeTransfer(_, to string, amountWei *big.I
 	if f.prepareErr != nil {
 		return nil, f.prepareErr
 	}
-	return []byte(`{"native":true}`), nil
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: f.gasPrice.String(), GasLimit: 21_000, To: to, Value: amountWei.String()})
 }
 
 func (f *fakeSponsorNative) EstimateGas(ethereum.CallMsg) (uint64, error) {
@@ -364,7 +373,7 @@ func (f *fakeSponsorNative) PrepareERC20Approve(tokenAddress, owner, spender str
 	if f.approveErr != nil {
 		return nil, f.approveErr
 	}
-	return []byte(`{"approve":true}`), nil
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: f.gasPrice.String(), GasLimit: 60_000, To: tokenAddress, Value: "0"})
 }
 
 // approveCall is the mutex-guarded accessor for the last PrepareERC20Approve
@@ -383,7 +392,7 @@ func (f *fakeSponsorNative) PrepareERC20Transfer(tokenAddress, from, to string, 
 	if f.transferErr != nil {
 		return nil, f.transferErr
 	}
-	return []byte(`{"transfer":true,"nonce":` + strconv.FormatUint(f.transferNonce, 10) + `}`), nil
+	return json.Marshal(blockchain.UnsignedTx{Nonce: f.transferNonce, GasPrice: f.gasPrice.String(), GasLimit: 60_000, To: tokenAddress, Value: "0"})
 }
 
 // transferCall is the mutex-guarded accessor for the last

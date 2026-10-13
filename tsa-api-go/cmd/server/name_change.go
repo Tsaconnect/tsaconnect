@@ -38,7 +38,7 @@ func buildNameChanges(cfg *config.Config, swap *services.MCGPSwapService, treasu
 	}, bus, time.Now)
 
 	mcgp, stable := false, false
-	if swap != nil && swap.HasOperator() {
+	if swap != nil && swap.OperatorConfigured() {
 		svc.SetMCGP(services.NewBillPaymentService(config.DB, swap).ForPurpose(models.BillPayPurposeNameChange), swap)
 		mcgp = true
 	}

@@ -304,27 +304,28 @@ func (t *Treasury) CheckCaps(chainKey string, orderUSD, inFlightUSD float64) err
 // the same allowance the gas top-up makes for a transfer it cannot estimate.
 const treasuryERC20Gas = topUpFallbackTransferGas
 
-// requireGas refuses unless the lane's native balance pays for `units` of gas
-// at the current price — the question that decides whether a transaction can
-// go out, rather than whether the balance is above an arbitrary floor. A lane
-// below its floor that can still pay keeps working; the floor only raises the
-// refill ALERT (the guard logs it). Checked before anything is sent, because a
-// half-sent conversion — an approve with no route after it — is worse than
-// one that never started.
+// requireGas refuses unless the lane's key can pay for `units` of gas at the
+// current price (× gasFeeBuffer) on top of what its lane keeps back for
+// deliveries other orders are already owed (KeyLane reservations; a delivery
+// itself runs as a ReservedSend) — the question that decides whether a
+// transaction can go out, rather than whether the balance is above an
+// arbitrary floor. A lane below its floor that can still pay keeps working;
+// the floor only raises the refill ALERT. Checked before anything is sent,
+// because a half-sent conversion — an approve with no route after it — is
+// worse than one that never started. Same gate as the key lane's per-send one.
 func (t *Treasury) requireGas(ctx context.Context, lane *TreasuryLane, units uint64) error {
-	bal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
+	price, err := lane.Native.SuggestGasPrice()
 	if err != nil {
-		return fmt.Errorf("treasury: read native balance: %w", err)
+		return fmt.Errorf("treasury: gas price on %s: %w", lane.ChainKey, err)
 	}
-	lane.Guard.AlertFloor(bal) // a refill warning, not a stop
-	cost, err := lane.gasCost(units)
+	bal, err := lane.nonceLane().canPayAs(ctx, lane.Signer.Address(), units, price, nil)
+	if bal != nil {
+		lane.Guard.AlertFloor(bal) // a refill warning, not a stop
+	}
 	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_gas_short_total=1 chain=%s gas=%d err=%s",
+			lane.ChainKey, units, RedactAlertText(err.Error()))
 		return fmt.Errorf("treasury: %w", err)
-	}
-	if bal.Cmp(cost) < 0 {
-		log.Printf("[ramp-conversion] ALERT ramp_treasury_gas_short_total=1 chain=%s balance=%s needed=%s gas=%d",
-			lane.ChainKey, bal, cost, units)
-		return fmt.Errorf("%w: %s holds %s wei, needs %s for %d gas", ErrRelayerUnderfunded, lane.ChainKey, bal, cost, units)
 	}
 	return nil
 }
@@ -367,8 +368,15 @@ func (t *Treasury) CanPayForGas(ctx context.Context, chainKey string, units uint
 	if !ok {
 		return false
 	}
-	cost := new(big.Int).Mul(new(big.Int).SetUint64(units), reading.price)
-	return reading.balance.Cmp(cost) >= 0
+	// The same rule as the lane's fee gate: buffered, plus what the lane keeps
+	// back for deliveries already owed (fails closed when unreadable).
+	reserved, err := lane.nonceLane().reserved(ctx, reading.price)
+	if err != nil {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_commitments_unreadable_total=1 chain=%s err=%s", lane.ChainKey, RedactAlertText(err.Error()))
+		return false
+	}
+	need := feeNeed(units, reading.price, reserved)
+	return reading.balance.Cmp(need) >= 0
 }
 
 func (t *Treasury) gasReadingFor(ctx context.Context, lane *TreasuryLane) (gasReading, bool) {
@@ -429,6 +437,9 @@ const maxRouteGasLimit uint64 = 5_000_000
 // willing to cancel; ExecuteRoute abandons the wait for the lane's lock (not
 // a wait already broadcast) the moment ctx is done.
 func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token string, amount *big.Int, route *LiFiRoute) (string, bool, error) {
+	// A route delivers an order already owed: it spends the reservation held
+	// for it rather than being refused by it.
+	ctx = ReservedSend(ctx)
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}
@@ -589,6 +600,9 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 // attempted broadcast that errored returns the signed transaction's hash when
 // the signer knows it, so the caller can later ask the chain about it.
 func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared func(nonce uint64) error) (string, bool, error) {
+	// A transfer delivers (or refunds) an order already owed: it spends the
+	// reservation held for it rather than being refused by it.
+	ctx = ReservedSend(ctx)
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}

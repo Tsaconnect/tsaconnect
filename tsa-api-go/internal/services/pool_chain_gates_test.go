@@ -223,7 +223,8 @@ func TestPoolGates_ReleaseGasIsALiveFeeCheckNotTheFloor(t *testing.T) {
 	if !g.ReleaseGasOK(context.Background(), 4) {
 		t.Fatal("below the floor but able to pay its releases: the pool must stay open")
 	}
-	c.gasPrice = big.NewInt(5e9) // 4 × 300k × 5 gwei × 2 = 0.012 > 0.005
+	c.gasPrice = big.NewInt(5e9)           // 4 × 300k × 5 gwei × 2 = 0.012 > 0.005
+	g = NewPoolChainGates(healthyGates(c)) // a fresh reading (they are reused for a few seconds)
 	if g.ReleaseGasOK(context.Background(), 4) {
 		t.Fatal("a key that cannot pay this order's releases must refuse the open")
 	}

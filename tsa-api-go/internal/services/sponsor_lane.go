@@ -82,7 +82,7 @@ type SponsorLane struct {
 
 	// KeyLane is the key's one send lane on this chain, from the boot
 	// SignerRegistry: the lock from nonce read to broadcast and the nonce
-	// floor, shared with every other role signing with this key on this chain
+	// floor and fee gate, shared with every other role signing with this key on this chain
 	// (PendingNonceAt hands two concurrent builds the same nonce; one then
 	// fails as "nonce too low" after we already told the user it was sent).
 	// Signer must be KeyLane.Signer(). Nil (a lane built in a test) means a
@@ -98,8 +98,16 @@ func (l *SponsorLane) nonceLane() *KeyLane {
 	if l.KeyLane != nil {
 		return l.KeyLane
 	}
-	l.privateOnce.Do(func() { l.private = &KeyLane{} })
+	l.privateOnce.Do(func() { l.private = soloLane(nil, sponsorLaneBalances{l}) })
 	return l.private
+}
+
+// sponsorLaneBalances reads the lane's own Chain at call time (a test may swap
+// it after the lane's first send).
+type sponsorLaneBalances struct{ l *SponsorLane }
+
+func (b sponsorLaneBalances) GetBalance(address string) (*big.Int, error) {
+	return chainBalances{b.l.Chain}.GetBalance(address)
 }
 
 // send builds and broadcasts one tx on the key's lane (lock + nonce floor).

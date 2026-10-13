@@ -145,29 +145,42 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
   not yet implemented). Ignored outside production. When it lets a raw key through in
   production, boot logs `ALERT raw_signer_key_in_production=1 key=<NAME>` once per key —
   never the key material — so the exposure is visible in every log sink.
-- **Two hot keys, one lane per key and chain** (signer consolidation 2026-10-13,
-  `docs/plans/2026-10-13-signer-key-consolidation.md` outside the repo). OPERATOR =
-  `PM_RELEASE_PRIVATE_KEY`; the IT operator, relayer and gas sponsor sign with it when their own
-  var is unset (`resolveSignerRoles`, boot lines `[signer] role=… signs with the operator` /
-  `[signer] DEPRECATED role=…`). TREASURY = `RAMP_TREASURY_PRIVATE_KEY`. Every signing path takes
-  its `services.KeyLane` (nonce lock + 30 s nonce floor, step-back only on a definite refusal) from
-  the one `SignerRegistry` (`BlockchainService.Signers()`), keyed by (address, chain id); boot
-  prints `[signer] operator=… roles=… lanes=[…]` per address. `MCGPSwapService.signMu` is only the
-  operator SEQUENCE lock (held across receipt waits) — never the nonce lock. `assertDistinctKey`
-  is class-based: operator roles may share a key; OPERATOR = TREASURY, and the company wallet on
-  either, refuse to start. The relayer may be the swap operator (boot
-  `WARNING relayer_is_operator=1`), never its owner or a guardian. The IT key must be
-  `operators()` on the swap or IT goes dormant (`ALERT signer_role_missing=1 role=it_operator`);
-  a release key that is not a Sonic escrow admin logs `WARNING signer_role_missing=1
-  role=pm_release`. `SignAndBroadcast` on any signer outside `release_signer*.go` fails the lint
-  test. Never use the OPERATOR address by hand: a manual tx collides with server nonces.
-- **Floors are alert-only** (owner 2026-10-13). A send is refused (`ErrRelayerUnderfunded`) only
-  when the wallet cannot pay its own transaction: gas units × live gas price × `gasFeeBuffer` (2)
-  plus any value sent (`feeNeed`). Fixed floors (`SONIC_GAS_FLOOR_WEI`, `RAMP_SPONSOR_BALANCE_FLOOR_WEI_*`,
-  `RELAYER_BALANCE_FLOOR_WEI`, the pool `releaseGasFloorWei`, `RAMP_TREASURY_NATIVE_FLOOR_WEI_*`)
-  only raise `*_underfunded_total` / float-monitor ALERTs. A pool open asks whether the release key
-  can pay every release-key call already owed on the pool chain (live slices) plus this order's
-  `SliceCap` (`ITService.poolReleaseGasOK`).
+- **Three hot keys, one lane per key and chain** (signer consolidation 2026-10-13 + owner
+  decisions the same day; `docs/plans/2026-10-13-signer-key-consolidation.md` outside the repo).
+  OPERATOR = `PM_RELEASE_PRIVATE_KEY`: PM/pool releases and cancels, and the IT operator and gas
+  sponsor whenever their own var is unset (`resolveSignerRoles`; boot lines `[signer] role=… signs
+  with the operator` / `[signer] DEPRECATED role=…`). RELAYER = `RELAYER_PRIVATE_KEY`, its own key:
+  never falls back (unset = gasless dormant), and boot refuses it equal to any other key; a relayer
+  that is the swap's owner, operator or guardian (or whose role read fails) leaves gasless dormant
+  with `ALERT relayer_role_check_failed=1`, never stops the API. TREASURY = `RAMP_TREASURY_PRIVATE_KEY`.
+  `assertDistinctKey` is class-based: only operator roles may share a key; the company wallet must
+  differ from all of them.
+- **KeyLane** (`services/release_signer_lanes.go`): every signing path takes its lane from the one
+  `SignerRegistry` (`BlockchainService.Signers()`), keyed by (address, chain id); boot prints
+  `[signer] operator=… roles=… lanes=[…]`. A lane holds the nonce lock, a nonce floor (aged from
+  each send; when the chain's pending nonce sits at a transaction we sent more than 15 s ago and the
+  node does not have it, the lane reuses that nonce — `ALERT key_lane_nonce_gap_recovered_total`),
+  and the ONE fee gate: the prepared tx's gas limit × gas price × `gasFeeBuffer` (2) + value + the
+  lane's reservations, failing closed when unpriceable or unreadable (`ALERT key_lane_cannot_pay_total`,
+  `ErrRelayerUnderfunded`). Reservations (`AddReservation`, `services.LaneCommitments`, counted from
+  the DB and cached 5 s) keep back what in-flight work is owed: the pool release key keeps the live
+  slices' release/cancel/resolve calls; the pool treasury lane its pool orders' deliveries; each
+  conversion lane its converting orders' routes; each company-wallet lane its paid, undelivered sales.
+  The owed sends themselves run as `services.ReservedSend(ctx)`. Lanes are built only in that file
+  (lint `TestKeyLanes_OnlyFromTheRegistry`); `SignAndBroadcast` on any signer outside
+  `release_signer*.go` fails `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
+  `MCGPSwapService.signMu` is only the operator SEQUENCE lock (held across receipt waits).
+- **IT operator role is verified, not assumed.** The IT key is wired but dormant (`HasOperator` false,
+  every operator op refused) until `operators(<key>)` reads true on the swap — at boot or on the 60 s
+  `it-operator-role-probe` job (failure-streak alerted; `ALERT signer_role_missing=1 role=it_operator`).
+  A release key that is not a Sonic escrow admin logs `WARNING signer_role_missing=1 role=pm_release`.
+  Never use the OPERATOR address by hand: a manual tx collides with server nonces.
+- **Floors are alert-only** (owner 2026-10-13): `SONIC_GAS_FLOOR_WEI`, `RAMP_SPONSOR_BALANCE_FLOOR_WEI_*`,
+  `RELAYER_BALANCE_FLOOR_WEI`, the pool `releaseGasFloorWei` and `RAMP_TREASURY_NATIVE_FLOOR_WEI_*`
+  only raise `*_underfunded_total` / float-monitor ALERTs; the lane fee gate decides. A pool open
+  asks whether the release key can pay every slice call already owed plus this order's `SliceCap`
+  (`ITService.poolReleaseGasOK`, fresh count on an open; quotes reuse a 5 s count and a 5 s
+  balance/price reading, falling back to one up to 30 s old on a failed read).
 - **Rollout order matters.** As of 2026-09, production runs with `ENV` not exactly
   `"production"` — that is what currently keeps IT/bills/gasless/ramp-sponsorship alive with
   their raw keys. Flipping `ENV=production` alone would silently take all of them dormant.
@@ -311,7 +324,7 @@ P2P trading (Sonic) and the TSA Liquidity pool chain (BSC):
 - Pool settings are the `pool_*` `fee_configs` rows (admin console); `pool_order_max = 0` is the incident stop (no new pool orders). `pool_order_max` can never exceed `RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER`.
 - The expiry canceller (`jobs/p2p_expiry_canceller.go`, every minute, failure-streak alerted) is always on whenever the PM release key is set: it cancels unpaid pool slices and also cancels expired ordinary P2P trades 30 min after the expiry notice. Every tick defers while the central-account statement (the inbound poller, when Flutterwave is configured) is stale, so a paid order is never cancelled on a blind spot.
 - **Never pay a failed PM sell payout by hand.** A failed payout leaves the trade `pending_payment` with `cancel_reason` "pm payout failed (…)", and the expiry canceller refunds the seller's deposit on-chain; a hand payout on top of that pays the user twice.
-- Release-key calls go only through `ChainSender.Send` (one lock per chain); `.SignAndBroadcast` on a `ChainSender` outside `release_signer*.go` fails `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
+- Release-key calls go only through `ChainSender.Send` (the key's KeyLane per chain); `.SignAndBroadcast` on any signer outside `release_signer*.go` fails `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
 
 **Direct-P2P launch-readiness behaviour (Sonic, manual ads; PM/LP behaviour unchanged):**
 - **Mark-paid is on-chain.** `POST /p2p/trades/:id/mark-paid/prepare` `{proofImageUrl, callerAddress?}` → `{unsignedTx, trade}` (fiat payer only; proof saved after the tx builds), then the app signs/broadcasts and `POST .../mark-paid/confirm` `{txHash}` verifies the `TradePaid` receipt and flips `paid`. `markPaidCore` is shared with the reconciler (chain Paid + DB pending now also notifies both parties). The old `POST .../mark-paid` answers 409 `{code:"app_update_required"}` and changes nothing.
@@ -343,7 +356,7 @@ P2P trading (Sonic) and the TSA Liquidity pool chain (BSC):
     - unchanged: `marketplace_sonic_gas_sent` (checkout funding's own send metric).
   - **Check the escrows answer the V3 `trades()` layout.** `cast call <escrow> "trades(bytes32)" 0x00…00 --rpc-url <rpc>` on the Sonic and BSC escrows must return 12 words. A shorter answer means a pre-V3 escrow: every `ReadTrade` (reconciler, confirm, backfill) then costs 2 RPCs and records no fee snapshot.
   - The Sonic sponsor lane is built whenever a sponsor key exists (`RAMP_SPONSOR_PRIVATE_KEY`, else the OPERATOR), so `assertDistinctKey` can stop boot even with `MARKETPLACE_SONIC_GAS` off. Fund the sponsor address with **at least 10 S** first, or the float monitor ALERTs.
-  - **Funding after the signer consolidation:** OPERATOR on Sonic 15–20 S (releases, IT ops, gas top-ups, relayer); OPERATOR on BSC ≥ 0.025 BNB (pool releases/cancels; ≥ 0.03 if `bsc` is in `RAMP_SPONSOR_CHAINS`); OPERATOR on each `RAMP_SPONSOR_CHAINS` chain ≥ 2× its alert floor; TREASURY on BSC ≥ 0.02–0.025 BNB, and on every `RAMP_TREASURY_CHAINS` lane it serves.
+  - **Funding after the signer consolidation:** OPERATOR on Sonic 15–20 S (releases, IT ops, gas top-ups); RELAYER keeps its own S; OPERATOR on BSC ≥ 0.025 BNB (pool releases/cancels; ≥ 0.03 if `bsc` is in `RAMP_SPONSOR_CHAINS`); OPERATOR on each `RAMP_SPONSOR_CHAINS` chain ≥ 2× its alert floor; TREASURY on BSC ≥ 0.02–0.025 BNB, and on every `RAMP_TREASURY_CHAINS` lane it serves.
 - **Settings:** `P2P_FIXED_RATE_BAND_BPS=2000`, `P2P_PAID_UNRELEASED_ALERT_AFTER=2h`, `P2P_GAS_TOPUPS_PER_DAY=6` (see `.env.example`). The defaults live only in `config` (`DefaultP2P*`); a non-positive override falls back to them.
 
 P2P trade-milestone emails (opened/paid/released/cancelled/disputed/resolved/expired) are sent to both parties via `notification_service.go` (role-aware, respect `mute_email`); per-message chat does not email. No CTA link — the app is mobile-only with no universal-link setup, so the email tells the user to open the app.

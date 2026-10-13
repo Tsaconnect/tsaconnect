@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -60,6 +62,13 @@ type MCGPSwapService struct {
 	// self-heals from PendingNonceAt as before.
 	operatorLane *KeyLane
 
+	// operatorVerified is whether operators(<operator>) is true on the swap, as
+	// last read (ProbeOperatorRole). Until it is, IT, bills and MCGP checkout
+	// read as dormant (HasOperator) and every operator op is refused before it
+	// is built: a non-operator key reverts every debit, and a boot-time read
+	// error must not leave the money paths open on a guess.
+	operatorVerified atomic.Bool
+
 	// signMu is the operator SEQUENCE lock: it orders operator operations, and
 	// OperatorSequence holds it across receipt waits (up to 60 s). It is never
 	// the nonce lock — holding the shared KeyLane that long would stall PM
@@ -95,21 +104,64 @@ func NewMCGPSwapService(client *blockchain.EVMClient, cfg *config.Config) *MCGPS
 func (s *MCGPSwapService) SetOperatorSigner(signer ReleaseSigner) {
 	s.operator, s.operatorLane = signer, nil
 	if signer != nil {
-		s.operatorLane = NewKeyLane(signer, 0)
+		s.operatorLane = soloLane(signer, nil)
 	}
+	s.operatorVerified.Store(signer != nil) // a directly-wired signer is trusted (tests)
 }
 
 // SetOperatorLane wires the operator EOA through its key's shared KeyLane
 // (SignerRegistry). nil ⇒ IT operator ops disabled.
+//
+// The operator starts unverified: ProbeOperatorRole turns it on once
+// operators(<address>) reads true.
 func (s *MCGPSwapService) SetOperatorLane(lane *KeyLane) {
 	s.operator, s.operatorLane = nil, lane
 	if lane != nil {
 		s.operator = lane.Signer()
 	}
+	s.operatorVerified.Store(false)
 }
 
+// ErrOperatorRoleMissing: the operator key is wired but not (yet) verified as
+// an operator on the swap.
+var ErrOperatorRoleMissing = errors.New("the IT operator key is not a verified operator on the swap")
+
+// ProbeOperatorRole reads operators(<operator>) on the swap and records the
+// answer. A read error leaves the last answer standing (a boot read error
+// leaves it unverified, i.e. dormant) and is returned; so is a "no", so a
+// failure-streak alert fires while the role is missing.
+func (s *MCGPSwapService) ProbeOperatorRole(ctx context.Context) error {
+	if s == nil || s.operator == nil {
+		return nil
+	}
+	addr := s.operator.Address()
+	ok, err := s.callBool(ctx, "operators", common.HexToAddress(addr))
+	if err != nil {
+		return fmt.Errorf("read operators(%s): %w", addr, err)
+	}
+	was := s.operatorVerified.Swap(ok)
+	if ok && !was {
+		log.Printf("[config] IT operator %s verified on the swap — IT, bills and MCGP checkout live", addr)
+	}
+	if !ok {
+		if was {
+			log.Printf("[config] ALERT signer_role_missing=1 role=it_operator address=%s — operators() turned false; IT dormant", addr)
+		}
+		return fmt.Errorf("%w: operators(%s) is false — the PM must call addOperator", ErrOperatorRoleMissing, addr)
+	}
+	return nil
+}
+
+// OperatorConfigured reports whether an operator key is wired at all (boot
+// wiring of IT, bills and checkout), verified or not.
+func (s *MCGPSwapService) OperatorConfigured() bool { return s != nil && s.operator != nil }
+
 // HasOperator reports whether the IT operator signer is configured.
-func (s *MCGPSwapService) HasOperator() bool { return s != nil && s.operator != nil }
+//
+// It is false until the key is verified on the swap (ProbeOperatorRole).
+func (s *MCGPSwapService) HasOperator() bool {
+	return s != nil && s.operator != nil && s.operatorVerified.Load()
+}
 
 // OperatorAddress returns the IT operator EOA address (empty if unset).
 func (s *MCGPSwapService) OperatorAddress() string {
@@ -447,6 +499,9 @@ func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte
 func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData []byte) (string, error) {
 	if s.operator == nil {
 		return "", notBroadcast(fmt.Errorf("IT operator signer not configured"))
+	}
+	if !s.operatorVerified.Load() {
+		return "", notBroadcast(ErrOperatorRoleMissing)
 	}
 	hash, _, err := s.operatorLane.Send(ctx, func() ([]byte, error) {
 		unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)

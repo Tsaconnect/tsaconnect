@@ -72,6 +72,13 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		return nil, nil
 	}
 
+	// Each lane keeps back what converted buys already in flight from it owe
+	// (their route + approve), so a new open or send never spends it.
+	for chain, lane := range lanes {
+		if lane.KeyLane != nil && config.DB != nil {
+			lane.KeyLane.AddReservation("treasury_converting_"+chain, services.NewConversionTreasuryCommitments(config.DB, chain).Reservation)
+		}
+	}
 	treasury := services.NewTreasury(lanes, caps, nil)
 	// An empty address means the configured lanes disagree about their
 	// signer (NewTreasury already logged the mismatch ALERT) — a hard

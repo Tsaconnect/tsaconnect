@@ -5,7 +5,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/services/ramp"
@@ -24,15 +23,7 @@ import (
 // company wallet can refuse a sale to it with no conversion record (§15.5 N1,
 // Plan C6). The key is only read here, never used to sign.
 func conversionTreasuryAddress(cfg *config.Config) string {
-	raw := strings.TrimPrefix(strings.TrimSpace(cfg.RampTreasuryPrivateKey), "0x")
-	if raw == "" {
-		return ""
-	}
-	key, err := crypto.HexToECDSA(raw)
-	if err != nil {
-		return "" // buildRampConversion reports the bad key
-	}
-	return crypto.PubkeyToAddress(key.PublicKey).Hex()
+	return signerAddress(cfg.RampTreasuryPrivateKey) // "" when unset or bad; buildRampConversion reports a bad key
 }
 
 // newCompanyWallet builds the company wallet knowing the conversion treasury.

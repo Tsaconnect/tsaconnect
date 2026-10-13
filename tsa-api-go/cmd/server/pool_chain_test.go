@@ -38,12 +38,12 @@ func TestRegisterPoolJobs_ProbeAndReleaseFloat(t *testing.T) {
 }
 
 // Signer consolidation (2026-10-13): the release key is the OPERATOR, which
-// the IT operator, relayer and gas sponsor may share (one KeyLane per key and
-// chain makes that nonce-safe). Sharing it with the TREASURY or the company
-// wallet still refuses to start.
+// the IT operator and gas sponsor may share (one KeyLane per key and chain
+// makes that nonce-safe). Sharing it with the relayer (its own key, owner
+// decision), the TREASURY or the company wallet refuses to start.
 func TestBuildReleaseSigner_RefusesAKeySharedAcrossSignerClasses(t *testing.T) {
 	for other, refuse := range map[string]bool{
-		"IT_OPERATOR_PRIVATE_KEY": false, "RELAYER_PRIVATE_KEY": false, "RAMP_SPONSOR_PRIVATE_KEY": false,
+		"IT_OPERATOR_PRIVATE_KEY": false, "RELAYER_PRIVATE_KEY": true, "RAMP_SPONSOR_PRIVATE_KEY": false,
 		"RAMP_TREASURY_WALLET_PRIVATE_KEY": true, "RAMP_TREASURY_PRIVATE_KEY": true,
 	} {
 		cfg := testConfig(t)

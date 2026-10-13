@@ -26,11 +26,12 @@ var fatalf = log.Fatalf
 // assertDistinctKey refuses to start when key's address matches an entry in
 // others (a name -> hex-private-key map) of a DIFFERENT signer class
 // (signerKeyClass). Since the signer consolidation the operator roles — PM
-// release, IT operator, relayer, gas sponsor — may share one key: every role
-// on one key and chain sends through that key's one KeyLane, so sharing no
-// longer races a nonce. Across classes it stays fatal: an OPERATOR key equal to
-// the TREASURY key (which holds user funds in transit) or to the company
-// wallet would turn one compromise into both. An unparsable entry in others is
+// release, IT operator, gas sponsor — may share one key: every role on one key
+// and chain sends through that key's one KeyLane, so sharing no longer races a
+// nonce. Across classes it stays fatal: the relayer on the OPERATOR key would
+// let a hot relayer compromise debit users' MCGP, and an OPERATOR or relayer
+// key equal to the TREASURY key (user funds in transit) or the company wallet
+// would turn one compromise into both. An unparsable entry in others is
 // skipped rather than failing the boot on a malformed but irrelevant key —
 // that key's own builder is responsible for validating it.
 func assertDistinctKey(name string, key *ecdsa.PrivateKey, others map[string]string) error {

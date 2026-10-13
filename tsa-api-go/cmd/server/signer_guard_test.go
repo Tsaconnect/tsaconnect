@@ -71,7 +71,6 @@ func captureLog(t *testing.T, fn func()) string {
 func TestResolveSignerRoles_FallsBackToTheOperatorOnlyWhenUnset(t *testing.T) {
 	roles := map[string]func(*config.Config) *string{
 		"IT_OPERATOR_PRIVATE_KEY":  func(c *config.Config) *string { return &c.ITOperatorPrivateKey },
-		"RELAYER_PRIVATE_KEY":      func(c *config.Config) *string { return &c.RelayerPrivateKey },
 		"RAMP_SPONSOR_PRIVATE_KEY": func(c *config.Config) *string { return &c.RampSponsorPrivateKey },
 	}
 	for name, field := range roles {
@@ -100,6 +99,17 @@ func TestResolveSignerRoles_FallsBackToTheOperatorOnlyWhenUnset(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Owner decision 2026-10-13: the relayer keeps its own key — it never falls
+// back to the operator.
+func TestResolveSignerRoles_RelayerNeverFallsBack(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.PMReleasePrivateKey = testKeyA
+	out := captureLog(t, func() { resolveSignerRoles(cfg) })
+	if cfg.RelayerPrivateKey != "" || !strings.Contains(out, "role=relayer dormant") {
+		t.Fatalf("relayer key = %q, log = %s; want unset and a dormant line", cfg.RelayerPrivateKey, out)
 	}
 }
 
@@ -140,7 +150,10 @@ func TestAssertDistinctKey_ClassRule(t *testing.T) {
 		refuse      bool
 	}{
 		{"PM_RELEASE_PRIVATE_KEY", "IT_OPERATOR_PRIVATE_KEY", false},
-		{"RAMP_SPONSOR_PRIVATE_KEY", "RELAYER_PRIVATE_KEY", false},
+		{"RAMP_SPONSOR_PRIVATE_KEY", "RELAYER_PRIVATE_KEY", true},
+		{"RELAYER_PRIVATE_KEY", "PM_RELEASE_PRIVATE_KEY", true},
+		{"RELAYER_PRIVATE_KEY", "IT_OPERATOR_PRIVATE_KEY", true},
+		{"RELAYER_PRIVATE_KEY", "RAMP_TREASURY_PRIVATE_KEY", true},
 		{"RAMP_SPONSOR_PRIVATE_KEY", "PM_RELEASE_PRIVATE_KEY", false},
 		{"PM_RELEASE_PRIVATE_KEY", "RAMP_TREASURY_PRIVATE_KEY", true},
 		{"RAMP_TREASURY_PRIVATE_KEY", "IT_OPERATOR_PRIVATE_KEY", true},

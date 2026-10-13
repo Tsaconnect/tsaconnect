@@ -2058,7 +2058,13 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	}
 	// Spec S8/S39: the nonce read in PrepareAdminRelease and the broadcast run
 	// under this chain's release-key lock, shared with every other release-key job.
-	txHash, err := signer.Send(ctx, trade.ChainID, func() ([]byte, error) {
+	sendCtx := ctx
+	if trade.IsPoolSlice() {
+		// A slice's release is what the release lane's pool reservation is
+		// held for: it spends it rather than being refused by it.
+		sendCtx = ReservedSend(ctx)
+	}
+	txHash, err := signer.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
 	})
 	if trade.IsPoolSlice() {

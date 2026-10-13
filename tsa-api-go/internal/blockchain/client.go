@@ -239,6 +239,19 @@ func (c *EVMClient) SendRawTransaction(signedTx []byte) (string, error) {
 	return tx.Hash().Hex(), nil
 }
 
+// TransactionKnown reports whether the node holds txHash, pending or mined.
+// Not-found is (false, nil); any other failure is an error, never a "no".
+func (c *EVMClient) TransactionKnown(ctx context.Context, txHash string) (bool, error) {
+	_, _, err := c.Client.TransactionByHash(ctx, common.HexToHash(txHash))
+	if errors.Is(err, ethereum.NotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // GetTransactionReceipt retrieves the receipt for a mined transaction.
 func (c *EVMClient) GetTransactionReceipt(txHash string) (*types.Receipt, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

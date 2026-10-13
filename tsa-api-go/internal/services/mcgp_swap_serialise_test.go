@@ -142,6 +142,7 @@ func operatorOnSharedLane(t *testing.T) (*MCGPSwapService, *SignerRegistry, *lan
 	chain := &fixedChain{nonce: 100}
 	svc.chain = chain
 	svc.SetOperatorLane(reg.Lane("it_operator", key, node))
+	svc.operatorVerified.Store(true) // as ProbeOperatorRole does once operators() reads true
 	// Same key, same chain: the gas sponsor's lane after the fallback.
 	if reg.Lane("gas_sponsor", key, node) != svc.operatorLane {
 		t.Fatal("setup: one key on one chain must be one lane")
@@ -221,5 +222,21 @@ func TestOperatorDebit_EstimateGasRevertDoesNotBurnANonce(t *testing.T) {
 	}
 	if got := node.sent(); len(got) != 1 || got[0] != 100 {
 		t.Fatalf("nonces %v, want only 100", got)
+	}
+}
+
+// Until operators(<key>) is verified on the swap, the wired operator is
+// dormant: HasOperator is false and every op is refused before it is built.
+func TestOperator_UnverifiedKeyIsDormantAndSendsNothing(t *testing.T) {
+	svc, _, node, _ := operatorOnSharedLane(t)
+	svc.operatorVerified.Store(false)
+	if svc.HasOperator() || !svc.OperatorConfigured() {
+		t.Fatalf("HasOperator=%v OperatorConfigured=%v, want dormant but configured", svc.HasOperator(), svc.OperatorConfigured())
+	}
+	if _, err := svc.OperatorSettleDebit(context.Background(), [32]byte{1}); !errors.Is(err, ErrOperatorRoleMissing) || !errors.Is(err, ErrTxNotBroadcast) {
+		t.Fatalf("err = %v, want ErrOperatorRoleMissing (not broadcast)", err)
+	}
+	if len(node.sent()) != 0 {
+		t.Fatal("nothing may be sent")
 	}
 }

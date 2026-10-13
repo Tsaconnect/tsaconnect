@@ -63,12 +63,10 @@ func (c *ChainReleaseSigner) Send(ctx context.Context, chainID int64, build func
 	if lane == nil {
 		return "", notBroadcast(fmt.Errorf("release signer: no broadcaster for chain %d", chainID))
 	}
+	// The lane refuses a tx naming no chain or another chain than its own.
 	hash, _, err := lane.Send(ctx, func() ([]byte, error) {
 		unsigned, err := build()
 		if err != nil {
-			return nil, notBroadcast(err)
-		}
-		if err := ownTx(lane, unsigned); err != nil {
 			return nil, notBroadcast(err)
 		}
 		return unsigned, nil
@@ -94,19 +92,4 @@ func (c *ChainReleaseSigner) SignAndBroadcast(ctx context.Context, unsigned []by
 		}
 	}
 	return "", notBroadcast(fmt.Errorf("release signer: no broadcaster for chain %d", id))
-}
-
-// ownTx refuses a tx that names no chain or another chain than the lane's.
-func ownTx(l *KeyLane, unsigned []byte) error {
-	var u blockchain.UnsignedTx
-	if err := json.Unmarshal(unsigned, &u); err != nil {
-		return fmt.Errorf("decode unsigned tx: %w", err)
-	}
-	if u.ChainID == "" {
-		return fmt.Errorf("release signer: the transaction names no chain") // as SignAndBroadcast refuses
-	}
-	if u.ChainID != strconv.FormatInt(l.ChainID(), 10) {
-		return fmt.Errorf("release signer: a tx built for chain %s was sent on chain %d", u.ChainID, l.ChainID())
-	}
-	return nil
 }

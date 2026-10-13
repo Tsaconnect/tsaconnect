@@ -165,11 +165,17 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 		log.Printf("[liquidity] ALERT liquidity_pool_honour_window_unsafe %s", err)
 		return nil, nil, err
 	}
-	if !d.c.Gates.Open() || !s.poolReleaseGasOK(ctx, p.Settings.SliceCap) {
+	if !d.c.Gates.Open() || !s.poolReleaseGasOK(ctx, p.Settings.SliceCap, true) {
 		return nil, nil, ErrPoolClosed
 	}
 	if err := d.c.Nonces.Check(ctx); err != nil {
 		return nil, nil, err // ErrTreasuryNonceStuck, or an unreadable nonce: closed either way
+	}
+	// Count what earlier orders are owed now, not from a quote's cached count,
+	// so the check below keeps their deliveries back (fails closed).
+	if _, err := d.c.TreasuryCommitments.UnitsFresh(ctx); err != nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_treasury_commitments_unreadable_total=1 err=%s", RedactAlertText(err.Error()))
+		return nil, nil, fmt.Errorf("%w: the treasury's commitments cannot be read", ErrPoolClosed)
 	}
 	if !d.c.Treasury.CanPayForGas(ctx, d.ChainKey(), treasuryEscrowCallGas*uint64(p.Settings.SliceCap+1)) {
 		return nil, nil, fmt.Errorf("%w: the treasury cannot pay to open slices", ErrPoolClosed)

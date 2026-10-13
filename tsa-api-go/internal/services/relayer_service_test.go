@@ -80,7 +80,7 @@ func (f *fakeRelayBuilder) BuildUnsignedTx(_, _ string, _ []byte) ([]byte, error
 	if f.err != nil {
 		return nil, f.err
 	}
-	return []byte(`{"unsigned":true}`), nil
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: "1000000000", GasLimit: 300_000, To: forwarderHex, Value: "0"})
 }
 
 type attempt struct{ outcome, reason string }
@@ -489,9 +489,9 @@ func TestRelayer_DoesNotBroadcastWhenSimulationErrorsTransiently(t *testing.T) {
 	}
 }
 
-// Signer consolidation (owner 2026-10-13): the relayer may be the swap
-// operator (one OPERATOR key); owner and guardian stay refused.
-func TestRelayer_AssertRoleSeparationRejectsOwnerAndGuardianOnly(t *testing.T) {
+// Owner decision 2026-10-13: the relayer keeps its own key — owner, operator
+// and guardian are all refused (boot then leaves the relayer dormant).
+func TestRelayer_AssertRoleSeparationRejectsOwnerOperatorGuardian(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name  string
@@ -499,8 +499,7 @@ func TestRelayer_AssertRoleSeparationRejectsOwnerAndGuardianOnly(t *testing.T) {
 		want  bool
 	}{
 		{"relayer is owner", fakeRoles{owner: relayerAddr}, true},
-		{"relayer is operator (allowed, warned)", fakeRoles{owner: userAddr, operator: true}, false},
-		{"relayer is operator and guardian", fakeRoles{owner: userAddr, operator: true, guardian: true}, true},
+		{"relayer is operator", fakeRoles{owner: userAddr, operator: true}, true},
 		{"relayer is guardian", fakeRoles{owner: userAddr, guardian: true}, true},
 		{"cleanly separated", fakeRoles{owner: userAddr}, false},
 	}
@@ -698,5 +697,20 @@ func TestRelayer_ConcurrentRelaysOnTheKeyLaneGetDistinctNonces(t *testing.T) {
 	}
 	if len(seen) != 3 || !seen[9] || !seen[10] || !seen[11] {
 		t.Fatalf("nonces %v, want 9, 10, 11", node.sent())
+	}
+}
+
+// Review item 7: a relay the node definitely refused (nothing broadcast) is
+// recorded as not broadcast, not as a broadcast error.
+func TestRelayer_DefiniteRefusalIsRecordedAsNotBroadcast(t *testing.T) {
+	r := newRig(t)
+	r.signer.err = notBroadcast(errors.New("transaction underpriced"))
+	_, err := r.svc.Relay(context.Background(), userAddr, r.req())
+	if !errors.Is(err, ErrTxNotBroadcast) {
+		t.Fatalf("err = %v, want not broadcast", err)
+	}
+	last := r.metrics.attempts[len(r.metrics.attempts)-1]
+	if last.outcome != "rejected" || last.reason != "not_broadcast" {
+		t.Fatalf("metric = %+v, want rejected/not_broadcast", last)
 	}
 }
