@@ -22,7 +22,6 @@ import { marketLoadError, type MarketError } from '@/utils/p2pMarketError';
 import { getChainByChainId } from '../../constants/chains';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
-import { LpCtaCard } from '@/components/liquidity/LpCtaCard';
 import { liquidityApi, type PoolCard } from '@/services/liquidityApi';
 import { poolCardView } from '@/utils/poolCard';
 import { RAILS, railLabel } from '../../constants/rails';
@@ -78,7 +77,7 @@ const P2PMarketScreen: React.FC = () => {
   const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
   const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
-  const { isPm, kind, lpStatus, liquidityAvailable, loading: pmLoading } = useIsPaymentMerchant();
+  const { isPm, loading: pmLoading } = useIsPaymentMerchant();
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
   // Minimum trade amount (fiat, in the selected currency). Shows ads whose
@@ -295,7 +294,6 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        <LpCtaCard isPm={isPm} kind={kind} lpStatus={lpStatus} liquidityAvailable={liquidityAvailable} loading={pmLoading} />
 
         {(() => {
           const v = poolCardView(poolCard, adSide);
