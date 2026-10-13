@@ -78,7 +78,7 @@ const P2PMarketScreen: React.FC = () => {
   const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
   const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
-  const { isPm, kind, liquidityAvailable, loading: pmLoading } = useIsPaymentMerchant();
+  const { isPm, kind, lpStatus, liquidityAvailable, loading: pmLoading } = useIsPaymentMerchant();
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
   // Minimum trade amount (fiat, in the selected currency). Shows ads whose
@@ -276,7 +276,7 @@ const P2PMarketScreen: React.FC = () => {
             : `Sell ${token} to a merchant for ${currency.code}. Deposit + escrow happen at trade open.`}
         </Text>
 
-        {shouldShowPmCta({ isPmView, isPm: isPm || kind === 'lp', loading: pmLoading }) && (
+        {shouldShowPmCta({ isPmView, isPm, loading: pmLoading }) && (
           <PressableScale onPress={() => router.push(PM_MERCHANT_REQUEST_ROUTE as never)} style={{ marginBottom: spacing.lg }}>
             <AccentCard padding="md">
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
@@ -296,7 +296,7 @@ const P2PMarketScreen: React.FC = () => {
         )}
 
         {(() => {
-          const cta = lpCta({ isPm, kind, liquidityAvailable, loading: pmLoading });
+          const cta = lpCta({ isPm, kind, lpStatus, liquidityAvailable, loading: pmLoading });
           return cta ? (
             <PressableScale onPress={() => router.push(cta.route as never)} style={{ marginBottom: spacing.lg }}>
               <AccentCard padding="md">

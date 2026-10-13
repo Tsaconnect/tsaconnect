@@ -188,6 +188,16 @@ export type MerchantGate =
 // original rule: in the normal flow, any existing request blocks a new one.
 const ADD_ON_BUSINESS_TYPES = ['p2p_merchant', 'payment_acceptance', 'liquidity_provider'];
 
+/**
+ * The my-request ?type= filter for a form: an add-on form gates on a request of
+ * its own type, so a newer request of another type (say an approved
+ * p2p_merchant) never hides a pending LP application. Undefined = the newest
+ * request of any type, as before.
+ */
+export function requestTypeFilter(formType: string): string | undefined {
+  return ADD_ON_BUSINESS_TYPES.includes(formType) ? formType : undefined;
+}
+
 // A TSA Pay application needs a verified identity (the server refuses it with
 // the money-in code, kyc_verification_required), so an unverified applicant is sent to verification instead of
 // a form she could not submit. Only the form is replaced: a request she already
@@ -445,11 +455,19 @@ export default function MerchantRequestScreen() {
     try {
       // Fetch the existing request and the real PM status together. getMyPmStatus
       // is dormant-safe (returns {isPm:false} on any error), so it never blocks.
-      const [res, pmStatus] = await Promise.all([getMyMerchantRequest(), getMyPmStatus()]);
+      // An add-on form also fetches its own type's request for the gate; the
+      // role cache and prefill below keep reading the untyped newest request.
+      const filter = requestTypeFilter(businessType);
+      const [res, typed, pmStatus] = await Promise.all([
+        getMyMerchantRequest(),
+        filter ? getMyMerchantRequest(filter) : Promise.resolve(null),
+        getMyPmStatus(),
+      ]);
       setPmActive(pmStatus.isPm);
       setLpAvailable(!!pmStatus.liquidityAvailable);
+      if (filter) setExistingRequest(typed?.success ? typed.data ?? null : null);
       if (res.success && res.data) {
-        setExistingRequest(res.data);
+        if (!filter) setExistingRequest(res.data);
         // TSA Pay (payment_acceptance) approvals never grant the marketplace
         // RoleMerchant server-side (Task 4's deliberate design) — caching
         // role='merchant' here would show the "Go to Merchant Dashboard" gate

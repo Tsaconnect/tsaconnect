@@ -18,6 +18,7 @@ import { useCurrency } from '@/contexts/CurrencyContext';
 import { useTheme } from '@/theme';
 import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
 import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
+import { merchantDashboardCta } from '@/utils/pmCta';
 import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { TSA_PAY_APPLY } from '@/constants/routes';
 import {
@@ -48,10 +49,12 @@ export default function MerchantDashboard() {
   const {
     isPm,
     status: pmStatus,
+    kind: pmKind,
     activationNeedsId,
     loading: pmLoading,
     reload: reloadPmStatus,
   } = useIsPaymentMerchant();
+  const pmCard = merchantDashboardCta({ isPm, status: pmStatus, kind: pmKind, loading: pmLoading });
   const { load: payMerchant } = useOwnPayMerchant();
 
   const loadDashboard = useCallback(async () => {
@@ -214,9 +217,9 @@ export default function MerchantDashboard() {
               still has to activate to go live: with a BVN/NIN that mints their
               NGN account, or (central inbound) a single confirm. Takes priority
               over the upgrade CTA. */}
-          {!pmLoading && !isPm && pmStatus === 'approved' && (
+          {pmCard === 'activate' && (
             <PressableScale
-              onPress={() => router.push('/merchants/activate-pm' as any)}
+              onPress={() => router.push('/merchants/activate-pm?role=merchant' as any)}
               style={{ marginBottom: spacing.lg }}
             >
               <AccentCard padding="md" railColor={colors.success}>
@@ -240,9 +243,10 @@ export default function MerchantDashboard() {
 
           {/* PM upgrade CTA — visible only to merchants with no existing PM
               (or a rejected one). Hidden for active (isPm), approved-awaiting-
-              activation, and paused PMs — they're already merchants. Absent
-              while status is loading. Routes to the locked PM form. */}
-          {!pmLoading && !isPm && pmStatus !== 'approved' && pmStatus !== 'paused' && (
+              activation, and paused PMs — they're already merchants. An LP
+              with no merchant row sees it too. Absent while status is
+              loading. Routes to the locked PM form. */}
+          {pmCard === 'upgrade' && (
             <PressableScale
               onPress={() => router.push('/merchants/merchant-request?type=p2p_merchant' as any)}
               style={{ marginBottom: spacing.lg }}

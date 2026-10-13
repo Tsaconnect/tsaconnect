@@ -16,7 +16,7 @@
 
 // ─── shouldShowPmCta ─────────────────────────────────────────────────────────
 
-import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
+import { shouldShowPmCta, merchantDashboardCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
 
 describe('shouldShowPmCta — PM CTA visibility predicate', () => {
   it('returns true when pm param is set and user is NOT a PM', () => {
@@ -43,5 +43,28 @@ describe('PM_MERCHANT_REQUEST_ROUTE — routing target contract', () => {
 
   it('routes to /merchants/merchant-request', () => {
     expect(PM_MERCHANT_REQUEST_ROUTE).toContain('/merchants/merchant-request');
+  });
+});
+
+// ─── merchantDashboardCta ────────────────────────────────────────────────────
+//
+// An LP-only user's /p2p/pm/me top level is the LP row, so its status must
+// never produce the merchant activation card (which would 404 on ?kind=merchant).
+
+describe('merchantDashboardCta', () => {
+  it('offers merchant activation only for an approved MERCHANT row', () => {
+    expect(merchantDashboardCta({ isPm: false, status: 'approved', kind: 'merchant', loading: false })).toBe('activate');
+    expect(merchantDashboardCta({ isPm: false, status: 'approved', kind: 'lp', loading: false })).toBe('upgrade');
+  });
+  it('lets an LP of any status upgrade to payment merchant', () => {
+    for (const status of ['approved', 'active', 'paused', 'rejected']) {
+      expect(merchantDashboardCta({ isPm: false, status, kind: 'lp', loading: false })).toBe('upgrade');
+    }
+  });
+  it('keeps the merchant rules', () => {
+    expect(merchantDashboardCta({ isPm: true, status: 'active', kind: 'merchant', loading: false })).toBeNull();
+    expect(merchantDashboardCta({ isPm: false, status: 'paused', kind: 'merchant', loading: false })).toBeNull();
+    expect(merchantDashboardCta({ isPm: false, status: '', loading: false })).toBe('upgrade');
+    expect(merchantDashboardCta({ isPm: false, status: 'approved', kind: 'merchant', loading: true })).toBeNull();
   });
 });

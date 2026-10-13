@@ -17,11 +17,15 @@
 // activation is a single confirm. The server then requires the merchant's own
 // identity verification instead, refused with a KYC code the shared prompt
 // handles.
+//
+// One user may hold both roles (owner, 2026-10-13). The `role` param (lp |
+// merchant) names the row to activate and is sent as ?kind=; without it the
+// screen follows the top-level kind and the API picks the row, as before.
 
 import React, { useMemo, useState } from 'react';
 import { View, TextInput, ScrollView, Alert, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Stack, router } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import { Button, Chip, Icon, Spinner, Text } from '@/components/ui';
 import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
@@ -41,6 +45,13 @@ export function isValidPmIdNumber(v: string): boolean {
 }
 
 type ActivationResult = Awaited<ReturnType<typeof activatePmAccount>>;
+type ActivationKind = 'merchant' | 'lp';
+
+/** Sends the id and the role only when given, so a single-role activation is the request it always was. */
+function activate(activationKind?: ActivationKind, id?: { idType: PmIdType; idNumber: string }) {
+  if (activationKind) return activatePmAccount(id?.idType, id?.idNumber, activationKind);
+  return id ? activatePmAccount(id.idType, id.idNumber) : activatePmAccount();
+}
 
 type Outcome =
   | { kind: 'success'; title: string; message: string; route: string }
@@ -84,24 +95,30 @@ function reportActivation(res: ActivationResult, kind?: string) {
 export default function ActivatePmScreen() {
   const { colors } = useTheme();
   const { activationNeedsId, kind, loading } = useIsPaymentMerchant();
-  const isLp = kind === 'lp';
+  const { role } = useLocalSearchParams<{ role?: string }>();
+  const isLp = role === 'lp' || (role !== 'merchant' && kind === 'lp');
+  const activationKind: ActivationKind | undefined = role === 'lp' || role === 'merchant' ? role : undefined;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
       <Stack.Screen options={{ title: isLp ? 'Activate liquidity provider' : 'Activate Payment Merchant' }} />
-      {loading ? <Spinner /> : isLp || !activationNeedsId ? <CentralActivation kind={kind} /> : <IdActivationForm />}
+      {loading ? <Spinner /> : isLp || !activationNeedsId ? (
+        <CentralActivation kind={isLp ? 'lp' : 'merchant'} activationKind={activationKind} />
+      ) : (
+        <IdActivationForm activationKind={activationKind} />
+      )}
     </SafeAreaView>
   );
 }
 
 /** Central inbound: nothing to mint, so activation is a single confirm. */
-function CentralActivation({ kind }: { kind?: string }) {
+function CentralActivation({ kind, activationKind }: { kind: ActivationKind; activationKind?: ActivationKind }) {
   const { spacing } = useTheme();
   const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async () => {
     setSubmitting(true);
-    const res = await activatePmAccount();
+    const res = await activate(activationKind);
     setSubmitting(false);
     reportActivation(res, kind);
   };
@@ -125,7 +142,7 @@ function CentralActivation({ kind }: { kind?: string }) {
 }
 
 /** Virtual-account mode: the BVN/NIN mints the account buyers pay into. */
-function IdActivationForm() {
+function IdActivationForm({ activationKind }: { activationKind?: ActivationKind }) {
   const { colors, spacing, radius, fonts, type } = useTheme();
   const [idType, setIdType] = useState<PmIdType>('BVN');
   const [idNumber, setIdNumber] = useState('');
@@ -140,9 +157,9 @@ function IdActivationForm() {
       return;
     }
     setSubmitting(true);
-    const res = await activatePmAccount(idType, idNumber);
+    const res = await activate(activationKind, { idType, idNumber });
     setSubmitting(false);
-    reportActivation(res);
+    reportActivation(res, 'merchant');
   };
 
   return (

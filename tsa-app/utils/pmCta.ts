@@ -27,3 +27,23 @@ export interface PmCtaOptions {
 export function shouldShowPmCta({ isPmView, isPm, loading }: PmCtaOptions): boolean {
   return isPmView && !isPm && !loading;
 }
+
+export interface MerchantDashboardCtaInput {
+  isPm: boolean;
+  status: string;
+  kind?: string;
+  loading: boolean;
+}
+
+/**
+ * The merchant dashboard's PM card. /p2p/pm/me's top level is the LP row for an
+ * LP who is not (yet) a merchant, so its status says nothing about the merchant
+ * role: read it as "no merchant row".
+ */
+export function merchantDashboardCta(i: MerchantDashboardCtaInput): 'activate' | 'upgrade' | null {
+  if (i.loading || i.isPm) return null;
+  const merchantStatus = i.kind === 'lp' ? '' : i.status;
+  if (merchantStatus === 'approved') return 'activate';
+  if (merchantStatus === 'paused') return null;
+  return 'upgrade';
+}
