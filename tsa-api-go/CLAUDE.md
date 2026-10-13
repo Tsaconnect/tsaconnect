@@ -179,8 +179,12 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     under the row lock — is taken in the hook), gas top-ups and authorization relays (the
     sponsorship / intent row's hash), the name-change fee refund (`fee_tx_hash`). An approve never
     inherits its route's hook: a bridge leg's approve records `approve_tx_hash` through its own
-    (`WithApproveHook`); a leg whose approve committed but whose `:route` operation was never
-    allocated (proved in the lane store) is freed after 2 min and the route goes on a new attempt.
+    (`WithApproveHook`); a leg whose approve committed but whose route did not is freed after 2 min
+    only through `KeyLane.RetireOp` — atomic under the lane lock: refused if the `:route` operation
+    holds an allocation, else a tombstone (`key_lane_retired_ops`) refuses any later allocation of it
+    (`ErrOperationRetired`, not sent) — and then only while the leg records no route hash
+    (`FailUnsent`); the route goes on a new attempt. This is the only "never allocated ⇒ free" path:
+    every other leg is failed only on its own send's not-attempted answer.
     IT operator ops write their row before the call and resolve by the contract ref, so they need
     none. In-memory bookkeeping (the P2P drip memory) runs after the commit, never in a hook.
     An error from the allocation transaction that is not the body's own refusal is re-checked in the
@@ -195,8 +199,10 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     the SAME call until it mines. A call that can NEVER be sent — refused for the RPC's tx-fee cap,
     intrinsic gas too low, over the block gas limit (`permanentlyUnsendable`) — or that a super-admin
     cancels (`POST .../cancel`) is replaced at its nonce by a 0-value self-transfer priced above every
-    earlier signing (same caps); once that mines the allocation is `cancelled`, its operation key
-    freed, and verifiers report `ErrCallCancelled`: the sale/conversion leg fails cleanly and the
+    earlier signing (same caps); once the cancel's receipt is `keyLaneCancelDepth` (5) blocks deep
+    against the latest block the allocation is `cancelled`, its operation key freed, and verifiers
+    report `ErrCallCancelled` (shallower it stays in flight, re-read every tick: a reorg that puts the
+    original in resolves it as mined and the caller sees success): the sale/conversion leg fails cleanly and the
     next tick sends a new attempt (new operation, new nonce). The cancel is never followed as the
     call's receipt. Only a hole NO process allocated — strictly below the highest allocated nonce —
     is ever filled, and only by a super-admin (`fill-gap`).

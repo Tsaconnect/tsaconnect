@@ -74,6 +74,7 @@ type KeyLane struct {
 	nonces   laneNonceReader   // nil: holds never clear by themselves
 	pending  lanePendingReader // nil: no first-use floor read
 	pricer   laneGasPricer     // nil: no speed-up (a stuck tx then holds the lane)
+	receipts laneReceiptReader // nil: a cancel is never resolved (it stays in flight)
 	store    KeyLaneStore      // never nil: the database at boot, memory otherwise
 	roles    string
 
@@ -117,6 +118,20 @@ type laneNonceReader interface {
 type lanePendingReader interface {
 	PendingNonce(ctx context.Context, address string) (uint64, error)
 }
+
+// laneReceiptReader reads one receipt without waiting (ethereum.NotFound while
+// unmined) and the latest block: what proves a cancel deep enough to be final.
+type laneReceiptReader interface {
+	TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error)
+	BlockNumber(ctx context.Context) (uint64, error)
+}
+
+// keyLaneCancelDepth is how deep (blocks, counting its own, against the
+// latest block) a cancel's receipt must be before the call is final as
+// cancelled — the depth pool releases and treasury sales are proven at
+// (RAMP_TREASURY_CONFIRMATIONS' default). Until then a reorg could still put
+// the original call in, so its operation stays in flight.
+const keyLaneCancelDepth = 5
 
 // laneGasPricer is today's gas price, for a speed-up.
 type laneGasPricer interface {
@@ -525,6 +540,13 @@ func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func
 		existing, err := q.ByOp(op)
 		if err != nil {
 			return err
+		}
+		if existing == nil {
+			if retired, err := q.Retired(op); err != nil {
+				return err
+			} else if retired {
+				return notBroadcast(fmt.Errorf("%w: %q", ErrOperationRetired, op))
+			}
 		}
 		if existing != nil {
 			if existing.Fingerprint != fp {
@@ -1239,7 +1261,8 @@ func (l *KeyLane) fillHole(ctx context.Context, nonce uint64) (string, error) {
 }
 
 // ErrCallCancelled: the call's nonce mined the lane's cancel (a 0-value
-// self-transfer) — the call provably never executed and never will. The
+// self-transfer), keyLaneCancelDepth deep — the call provably never executed
+// and never will. Shallower, the call is still in flight. The
 // caller fails its operation and retries it as a NEW operation (new nonce).
 var ErrCallCancelled = errors.New("the key lane cancelled this call: its nonce mined a 0-value self-transfer, the call never executed")
 
@@ -1372,18 +1395,24 @@ func (l *KeyLane) reviewCancel(ctx context.Context, signer ReleaseSigner, a *mod
 }
 
 // resolveCancels settles every cancelling allocation the mined nonce has
-// passed: which of its two calls mined decides it — the cancel (status
-// cancelled: the call never executed; its operation key freed) or the call
-// itself (mined). Reads happen outside the lock; an allocation neither
-// signing of which the node knows is left for the next tick.
+// passed, re-read on every tick from receipts (non-waiting): a receipt of the
+// call's OWN signing means the call executed — mined, whatever was decided
+// before (a reorg that put the original in); a cancel receipt
+// keyLaneCancelDepth deep against the latest block makes it final as
+// cancelled (its operation key freed; verifiers report ErrCallCancelled).
+// Anything shallower, missing or unreadable stays in flight for the next tick.
 func (l *KeyLane) resolveCancels(ctx context.Context, mined uint64) {
-	if l.lookup == nil {
+	if l.receipts == nil {
 		return
 	}
 	rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
 	defer cancel()
 	address := l.Address()
 	list, err := l.store.Cancelling(rctx, l.chainID, address, mined)
+	if err != nil || len(list) == 0 {
+		return
+	}
+	head, err := l.receipts.BlockNumber(rctx)
 	if err != nil {
 		return
 	}
@@ -1394,33 +1423,42 @@ func (l *KeyLane) resolveCancels(ctx context.Context, mined uint64) {
 		if err != nil {
 			continue
 		}
-		known := func(ts []models.KeyLaneTx) (bool, error) {
+		minedAt := func(ts []models.KeyLaneTx) (uint64, bool, error) {
 			for _, t := range ts {
-				ok, err := l.lookup.TransactionKnown(rctx, t.Hash)
-				if err != nil || ok {
-					return ok, err
+				r, err := l.receipts.TransactionReceipt(rctx, common.HexToHash(t.Hash))
+				if errors.Is(err, ethereum.NotFound) || (err == nil && (r == nil || r.BlockNumber == nil)) {
+					continue
 				}
+				if err != nil {
+					return 0, false, err
+				}
+				return r.BlockNumber.Uint64(), true, nil
 			}
-			return false, nil
+			return 0, false, nil
 		}
-		cancelled, err1 := known(sameCall(txs, cfp))
-		executed, err2 := known(sameCall(txs, a.Fingerprint))
-		if err1 != nil || err2 != nil || cancelled == executed {
-			continue // unknowable yet (or contradictory): next tick
+		_, executed, err1 := minedAt(sameCall(txs, a.Fingerprint))
+		cancelBlock, cancelMined, err2 := minedAt(sameCall(txs, cfp))
+		if err1 != nil || err2 != nil {
+			continue // unreadable: next tick
+		}
+		var to string
+		switch {
+		case executed:
+			to = models.KeyLaneNonceMined
+		case cancelMined && head >= cancelBlock && head-cancelBlock+1 >= keyLaneCancelDepth:
+			to = models.KeyLaneNonceCancelled
+		default:
+			continue // not mined yet, or the cancel not yet deep: in flight
 		}
 		_ = l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error {
 			x, err := l.allocByID(q, a.ID)
 			if err != nil || x == nil || x.Version != a.Version {
 				return err
 			}
-			if cancelled {
-				x.Status, x.OpKey = models.KeyLaneNonceCancelled, ""
-			} else {
-				x.Status, x.OpKey = models.KeyLaneNonceMined, ""
-			}
+			x.Status, x.OpKey = to, ""
 			return q.Save(x)
 		})
-		log.Printf("[signer] key lane nonce %d resolved: cancelled=%v (chain=%d address=%s)", a.Nonce, cancelled, l.chainID, address)
+		log.Printf("[signer] key lane nonce %d resolved %s (chain=%d address=%s head=%d)", a.Nonce, to, l.chainID, address, head)
 	}
 }
 
@@ -1452,15 +1490,26 @@ func (l *KeyLane) RequestCancel(ctx context.Context, nonce uint64) error {
 	return nil
 }
 
-// OpAllocated reports whether the operation key op holds a live allocation
-// on this lane for address (committed, not yet mined): the proof that an
-// operation was — or was never — committed.
-func (l *KeyLane) OpAllocated(ctx context.Context, address, op string) (bool, error) {
+// ErrOperationRetired: the caller retired this operation (RetireOp) after
+// proving it was never allocated; it is never sent (nothing is committed).
+var ErrOperationRetired = errors.New("key lane: this operation was retired and is never sent")
+
+// RetireOp atomically gives up on operation op, under the lane lock: if it
+// holds an allocation (committed, unmined) it is NOT retired (allocated
+// true: the caller keeps its record in flight on it); otherwise a tombstone
+// refuses every later allocation for op (ErrOperationRetired, attempted
+// false). A caller frees its record only after a successful retire — and only
+// while that record still shows no hash (a send of op that committed AND
+// mined before the retire freed its key, but its hook wrote the hash).
+func (l *KeyLane) RetireOp(ctx context.Context, address, op string) (allocated bool, err error) {
 	if l == nil || op == "" {
-		return false, nil
+		return false, errors.New("key lane: nothing to retire")
 	}
-	a, err := l.store.ByOp(ctx, l.chainID, address, op)
-	return a != nil, err
+	err = l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error {
+		allocated, err = q.RetireOp(op)
+		return err
+	})
+	return allocated, err
 }
 
 // CallCancelled reports whether hash's allocation on this lane resolved as
@@ -2034,6 +2083,7 @@ func newBroadcasterLane(key *ecdsa.PrivateKey, bc ReleaseBroadcaster, chainID in
 	l.lookup, _ = bc.(laneTxLookup)
 	l.nonces, _ = bc.(laneNonceReader)
 	l.pricer, _ = bc.(laneGasPricer)
+	l.receipts, _ = bc.(laneReceiptReader)
 	return l
 }
 

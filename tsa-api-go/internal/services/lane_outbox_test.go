@@ -125,7 +125,7 @@ func TestKeyLane_UniqueViolationDoesNotWedge_SQLite(t *testing.T) {
 }
 
 func TestKeyLane_UniqueViolationDoesNotWedge_Postgres(t *testing.T) {
-	db := testutil.TempPostgres(t, "key_lane_wedge_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{})
+	db := testutil.TempPostgres(t, "key_lane_wedge_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{}, &models.KeyLaneRetiredOp{})
 	testUniqueViolationDoesNotWedge(t, &GormKeyLaneStore{DB: db})
 }
 

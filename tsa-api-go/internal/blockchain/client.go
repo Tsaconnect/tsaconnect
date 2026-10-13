@@ -311,6 +311,11 @@ func (c *EVMClient) TransactionReceipt(ctx context.Context, hash common.Hash) (*
 	return c.Client.TransactionReceipt(ctx, hash)
 }
 
+// BlockNumber is the chain's latest block number.
+func (c *EVMClient) BlockNumber(ctx context.Context) (uint64, error) {
+	return c.Client.BlockNumber(ctx)
+}
+
 // TransactionKnown is TxKnown on this client.
 func (c *EVMClient) TransactionKnown(ctx context.Context, txHash string) (bool, error) {
 	return TxKnown(ctx, c.Client, txHash)

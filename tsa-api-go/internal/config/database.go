@@ -85,6 +85,7 @@ func AutoMigrate() error {
 		&models.KeyLaneNonce{},
 		&models.KeyLaneTx{},
 		&models.KeyLaneState{},
+		&models.KeyLaneRetiredOp{},
 		// Per-currency PM fiat balances. Supersedes payment_merchants'
 		// available_ngn/reserved_ngn, which can only express one implicit NGN
 		// balance; both are written until the legacy columns are dropped.

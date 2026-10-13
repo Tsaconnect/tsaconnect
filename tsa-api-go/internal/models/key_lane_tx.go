@@ -111,3 +111,16 @@ type KeyLaneState struct {
 }
 
 func (KeyLaneState) TableName() string { return "key_lane_states" }
+
+// KeyLaneRetiredOp is a tombstone: an operation key the caller gave up on,
+// proven (under the lane lock) never to have been allocated. Any later
+// allocation for it is refused, so a slow or concurrent attempt of the
+// retired operation can never be sent after the caller moved on.
+type KeyLaneRetiredOp struct {
+	ChainID   int64     `gorm:"primaryKey;autoIncrement:false" json:"chainId"`
+	Address   string    `gorm:"primaryKey;size:42" json:"address"` // lower-case
+	OpKey     string    `gorm:"primaryKey;size:200" json:"opKey"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func (KeyLaneRetiredOp) TableName() string { return "key_lane_retired_ops" }

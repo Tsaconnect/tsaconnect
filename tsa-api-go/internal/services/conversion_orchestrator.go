@@ -2498,10 +2498,11 @@ func (o *ConversionOrchestrator) resolveAdminRefund(ctx context.Context, adminID
 const bridgeRouteGrace = 2 * time.Minute
 
 // resumeBridgeAfterApprove: a bridge leg whose approve was committed but
-// whose route never was. Past the grace, if the lane store holds no
-// allocation for the leg's ':route' operation, the attempt is failed (no
-// funds moved: only an allowance was set) so the next tick sends the route
-// on a new attempt.
+// whose route never was. Past the grace the leg's ':route' operation is
+// RETIRED in the lane store (atomic: refused if it holds an allocation) and
+// only then is the attempt failed (no funds moved: only an allowance was
+// set), so the next tick sends the route on a new attempt — and the old
+// route can never go out too.
 func (o *ConversionOrchestrator) resumeBridgeAfterApprove(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
 	if o.now().Before(leg.CreatedAt.Add(bridgeRouteGrace)) {
 		return nil // the approve is in flight: the leg is too
@@ -2510,16 +2511,24 @@ func (o *ConversionOrchestrator) resumeBridgeAfterApprove(ctx context.Context, o
 	if lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil {
 		return nil
 	}
-	allocated, err := lane.KeyLane.OpAllocated(ctx, lane.Signer.Address(), "ramp_leg:"+leg.ID.String()+":route")
-	if err != nil || allocated {
-		if allocated {
-			log.Printf("[ramp-conversion] ALERT ramp_conversion_route_unrecorded_total=1 order=%s leg=%s — the route is committed but not on the leg", order.ID, leg.ID)
-		}
+	// Atomic, under the lane lock: either the route was allocated (the leg
+	// stays in flight on it) or its operation key is tombstoned so no slow or
+	// concurrent attempt of it can ever be sent — only then is the leg freed,
+	// and only while it still records no route hash.
+	allocated, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), "ramp_leg:"+leg.ID.String()+":route")
+	if err != nil {
 		return err
 	}
-	log.Printf("[ramp-conversion] order=%s bridge#%d approve %s committed, route never sent: retrying the route on a new attempt",
+	if allocated {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_route_unrecorded_total=1 order=%s leg=%s — the route is committed but not on the leg", order.ID, leg.ID)
+		return nil
+	}
+	log.Printf("[ramp-conversion] order=%s bridge#%d approve %s committed, route never sent: retired; retrying the route on a new attempt",
 		order.ID, leg.Attempt, leg.ApproveTxHash)
-	return o.failLeg(detached(ctx), leg.ID, "approve only: the route was never sent")
+	if err := o.legs.FailUnsent(detached(ctx), leg.ID, "approve only: the route was never sent"); err != nil && !errors.Is(err, ErrLegNotPending) {
+		return err
+	}
+	return nil
 }
 
 // followLeg runs the treasury's followCall on a leg (its recorded hash moves

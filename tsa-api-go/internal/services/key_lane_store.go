@@ -15,6 +15,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // KeyLaneStore is the DB-authoritative outbox of a hot key's nonces
@@ -79,6 +80,11 @@ type KeyLaneTxn interface {
 	// MarkMined marks allocations below mined as mined and drops the raw
 	// bytes of their signings.
 	MarkMined(mined uint64) error
+	// RetireOp tombstones opKey if it holds no allocation (allocated=false);
+	// Retired reports a tombstone. Both under the lane lock, so a retire and
+	// an allocation for the same key can never both win.
+	RetireOp(opKey string) (allocated bool, err error)
+	Retired(opKey string) (bool, error)
 	// Hold is the lane's shared hold; SetHold writes it (nil nonce clears).
 	Hold() (*models.KeyLaneState, error)
 	SetHold(nonce *uint64, reason string, at time.Time) error
@@ -433,6 +439,26 @@ func (q *gormLaneTxn) MarkMined(mined uint64) error {
 
 func (q *gormLaneTxn) DB() *gorm.DB { return q.db }
 
+func (q *gormLaneTxn) RetireOp(opKey string) (bool, error) {
+	if a, err := q.ByOp(opKey); err != nil || a != nil {
+		return a != nil, err
+	}
+	// No live allocation (a MINED one freed its key: the caller's own record,
+	// written by its hook, proves that case): tombstone the key so no later
+	// allocation for it is ever made.
+	return false, q.db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&models.KeyLaneRetiredOp{ChainID: q.chainID, Address: q.address, OpKey: opKey, CreatedAt: time.Now()}).Error
+}
+
+func (q *gormLaneTxn) Retired(opKey string) (bool, error) {
+	if opKey == "" {
+		return false, nil
+	}
+	var n int64
+	err := q.lane().Model(&models.KeyLaneRetiredOp{}).Where("op_key = ?", opKey).Count(&n).Error
+	return n > 0, err
+}
+
 func (q *gormLaneTxn) Hold() (*models.KeyLaneState, error) {
 	var rows []models.KeyLaneState
 	if err := q.lane().Limit(1).Find(&rows).Error; err != nil || len(rows) == 0 {
@@ -743,6 +769,22 @@ func (q *memLaneTxn) MarkMined(mined uint64) error {
 }
 
 func (q *memLaneTxn) DB() *gorm.DB { return nil }
+
+func (q *memLaneTxn) RetireOp(opKey string) (bool, error) {
+	if a, _ := q.ByOp(opKey); a != nil {
+		return true, nil
+	}
+	if q.m.states == nil {
+		q.m.states = map[string]models.KeyLaneState{}
+	}
+	q.m.states["retired:"+q.stateKey()+":"+opKey] = models.KeyLaneState{}
+	return false, nil
+}
+
+func (q *memLaneTxn) Retired(opKey string) (bool, error) {
+	_, ok := q.m.states["retired:"+q.stateKey()+":"+opKey]
+	return ok && opKey != "", nil
+}
 
 func (q *memLaneTxn) stateKey() string { return fmt.Sprintf("%d:%s", q.chainID, q.address) }
 

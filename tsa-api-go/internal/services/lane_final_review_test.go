@@ -11,7 +11,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/testutil"
 )
 
 // Regression tests for the final key-lane review (items 1–10).
@@ -24,7 +26,7 @@ func rawSaleLane(t *testing.T, r *deliverRig, node *chainNode, clock *time.Time)
 	tl := r.s.companySale().wallet.Treasury().Lane("base")
 	tl.Signer = raw
 	kl := soloLane(raw, nil)
-	kl.pricer, kl.nonces, kl.lookup = node, node, node
+	kl.pricer, kl.nonces, kl.lookup, kl.receipts = node, node, node, node
 	kl.now = func() time.Time { return *clock }
 	tl.KeyLane = kl
 	return raw, kl
@@ -182,13 +184,32 @@ func TestSendSale_FeeCapRefusalIsCancelledAndTheRetryPaysOnce(t *testing.T) {
 		t.Fatalf("the cancel must never be followed as the call's receipt: %s", final)
 	}
 	node.mu.Lock()
-	node.mined = 8 // the cancel mined
+	node.mined = 8 // the cancel mined, one block deep
 	node.mu.Unlock()
+	node.mine(cancelTx.Hash(), 100, 100)
+	if err := kl.Watch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Shallower than the settle depth: still in flight — no verifier may
+	// fail the leg the original could still land in after a reorg.
+	if c, _ := kl.CallCancelled(ctx, h1); c {
+		t.Fatal("a cancel 1 block deep must not be final")
+	}
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if legs := r.legs(t); legs[0].Status != models.RampLegStatusPending {
+		t.Fatalf("leg = %s, want still pending under a shallow cancel", legs[0].Status)
+	}
+	if _, _, err := kl.Send(WithOperationRef(ctx, "ramp_leg:"+r.legs(t)[0].ID.String()), func() ([]byte, error) { return nil, errors.New("unused") }); !errors.Is(err, ErrPendingBroadcast) || errors.Is(err, ErrCallCancelled) {
+		t.Fatalf("the operation under a shallow cancel = %v, want in flight", err)
+	}
+	node.mine(cancelTx.Hash(), 100, 100+keyLaneCancelDepth-1) // now keyLaneCancelDepth deep
 	if err := kl.Watch(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if c, err := kl.CallCancelled(ctx, h1); err != nil || !c {
-		t.Fatalf("CallCancelled = %v %v, want true", c, err)
+		t.Fatalf("CallCancelled = %v %v, want true at depth", c, err)
 	}
 	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatalf("finalize of a cancelled sale: %v", err)
@@ -456,5 +477,167 @@ func TestKeyLane_CommitErrorAfterCommitIsInFlight(t *testing.T) {
 	}
 	if got := node.atNonce(5); len(got) != 1 || !strings.EqualFold(got[0].Hash().Hex(), h) {
 		t.Fatalf("nonce 5 = %v, want the committed call sent exactly once", got)
+	}
+}
+
+// A reorg replaces a still-shallow cancel with the ORIGINAL call: each tick
+// re-reads the receipts, the allocation resolves as the call mined, and the
+// caller sees the original's success — never a cancel, never a retry.
+func TestSendSale_ReorgThatLandsTheOriginalOverAShallowCancelSettles(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	node := newChainNode(137)
+	node.mined = 7
+	clock := time.Now()
+	raw, kl := rawSaleLane(t, r, node, &clock)
+	node.refuse = func(tx *types.Transaction, _ int) error {
+		if !strings.EqualFold(tx.To().Hex(), raw.Address()) {
+			return errors.New("tx fee (1.10 ether) exceeds the configured cap (1.00 ether)")
+		}
+		return nil
+	}
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	h1 := r.legs(t)[0].TxHash
+	if err := kl.Watch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var cancelHash common.Hash
+	for _, tx := range node.atNonce(7) {
+		if strings.EqualFold(tx.To().Hex(), raw.Address()) {
+			cancelHash = tx.Hash()
+		}
+	}
+	node.mu.Lock()
+	node.mined = 8
+	node.mu.Unlock()
+	node.mine(cancelHash, 100, 101) // the cancel mined, 2 deep
+	if err := kl.Watch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The reorg: block 100 is replaced; nonce 7 is now the original call.
+	node.mu.Lock()
+	delete(node.receipts, cancelHash)
+	node.mu.Unlock()
+	node.mine(common.HexToHash(h1), 100, 110)
+	if err := kl.Watch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := kl.CallCancelled(ctx, h1); c {
+		t.Fatal("the original mined: never cancelled")
+	}
+	a, _ := kl.store.Allocation(ctx, kl.chainID, raw.Address(), h1)
+	if a == nil || a.Status != models.KeyLaneNonceMined {
+		t.Fatalf("allocation = %+v, want mined as the original call", a)
+	}
+	r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatal(err)
+	}
+	legs := r.legs(t)
+	if len(legs) != 1 || legs[0].Status != models.RampLegStatusConfirmed || !strings.EqualFold(legs[0].TxHash, h1) {
+		t.Fatalf("legs = %+v, want the original confirmed and no retry", legs)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusSettled {
+		t.Fatalf("intent = %s, want settled", got.Status)
+	}
+}
+
+// A bridge leg's approve committed, its route not yet: the route's slow
+// allocation (its hook still inside the allocation transaction) races the
+// free. RetireOp under the lane lock decides it — exactly one route is ever
+// broadcast, in either order.
+func testRetiredRouteNeverRacesTheRetry(t *testing.T, store *GormKeyLaneStore, routeFirst bool) {
+	if err := store.DB.AutoMigrate(&models.RampLeg{}); err != nil {
+		t.Fatal(err)
+	}
+	legs := &GormRampLegStore{DB: store.DB}
+	node := newChainNode(56)
+	node.mined = 3
+	clock := time.Now()
+	lane := durableLane(t, store, newEcdsaKey(), node, &clock)
+	ctx := context.Background()
+	orderID := uuid.New()
+	newLeg := func(attempt int) *models.RampLeg {
+		l := &models.RampLeg{OrderID: orderID, Kind: models.RampLegKindBridge, Attempt: attempt, ChainKey: "bsc", Token: "USDT",
+			Amount: "1", Status: models.RampLegStatusPending, ApproveTxHash: "0xapprove", CreatedAt: time.Now()}
+		if err := store.DB.Create(l).Error; err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	sendRoute := func(leg *models.RampLeg, hold chan struct{}, started chan struct{}) error {
+		op := "ramp_leg:" + leg.ID.String() + ":route"
+		_, _, err := lane.SendRecorded(WithOperationRef(ctx, op), callTo(56, callB, "bb", 3), func(hctx context.Context, _ uint64, hash string) error {
+			if started != nil {
+				close(started)
+				<-hold
+			}
+			return legs.SetTxHash(hctx, leg.ID, hash, "across")
+		})
+		return err
+	}
+	// The resume step, as resumeBridgeAfterApprove takes it.
+	free := func(leg *models.RampLeg) bool {
+		allocated, err := lane.RetireOp(ctx, lane.Address(), "ramp_leg:"+leg.ID.String()+":route")
+		if err != nil {
+			t.Error(err)
+			return false
+		}
+		if allocated {
+			return false
+		}
+		return legs.FailUnsent(ctx, leg.ID, "approve only: the route was never sent") == nil
+	}
+	leg := newLeg(1)
+	freed := false
+	if routeFirst {
+		hold, started := make(chan struct{}), make(chan struct{})
+		done := make(chan error, 1)
+		go func() { done <- sendRoute(leg, hold, started) }()
+		<-started
+		res := make(chan bool, 1)
+		go func() { res <- free(leg) }() // blocks on the lane lock
+		time.Sleep(100 * time.Millisecond)
+		close(hold)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		freed = <-res
+	} else {
+		freed = free(leg)
+		if err := sendRoute(leg, nil, nil); !errors.Is(err, ErrOperationRetired) || !errors.Is(err, ErrTxNotBroadcast) {
+			t.Fatalf("the retired route = %v, want refused, not sent", err)
+		}
+	}
+	if freed { // the retry: a new attempt sends its own route
+		if err := sendRoute(newLeg(2), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	routes := 0
+	for _, tx := range node.txs {
+		if *tx.To() == callB {
+			routes++
+		}
+	}
+	if routes != 1 || freed == routeFirst {
+		t.Fatalf("routes broadcast = %d (freed=%v, routeFirst=%v), want exactly one and the leg freed only when the route never committed", routes, freed, routeFirst)
+	}
+}
+
+func TestBridge_RetiredRouteNeverRacesTheRetry_SQLite(t *testing.T) {
+	for name, routeFirst := range map[string]bool{"route_first": true, "retire_first": false} {
+		t.Run(name, func(t *testing.T) { testRetiredRouteNeverRacesTheRetry(t, sqliteLaneStore(t), routeFirst) })
+	}
+}
+
+func TestBridge_RetiredRouteNeverRacesTheRetry_Postgres(t *testing.T) {
+	for name, routeFirst := range map[string]bool{"route_first": true, "retire_first": false} {
+		t.Run(name, func(t *testing.T) {
+			db := testutil.TempPostgres(t, "key_lane_retire_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{}, &models.KeyLaneRetiredOp{}, &models.RampLeg{})
+			testRetiredRouteNeverRacesTheRetry(t, &GormKeyLaneStore{DB: db}, routeFirst)
+		})
 	}
 }

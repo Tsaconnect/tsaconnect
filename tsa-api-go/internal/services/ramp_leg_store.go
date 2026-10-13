@@ -29,6 +29,7 @@ type rampLegStore interface {
 	SetAmount(ctx context.Context, id uuid.UUID, amount string) error
 	Confirm(ctx context.Context, id uuid.UUID, amountReceived string, at time.Time) error
 	Fail(ctx context.Context, id uuid.UUID, reason string) error
+	FailUnsent(ctx context.Context, id uuid.UUID, reason string) error
 	ForOrder(ctx context.Context, orderID uuid.UUID) ([]models.RampLeg, error)
 	NextAttempt(ctx context.Context, orderID uuid.UUID, kind string) (int, error)
 }
@@ -157,6 +158,22 @@ func (s *GormRampLegStore) Fail(ctx context.Context, id uuid.UUID, reason string
 	res := s.DB.WithContext(ctx).Model(&models.RampLeg{}).
 		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
 		Updates(map[string]any{"status": models.RampLegStatusFailed, "error": reason})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrLegNotPending
+	}
+	return nil
+}
+
+// FailUnsent is Fail for a leg that recorded no transaction hash: a leg
+// whose send committed (its hook wrote the hash) is never freed by it
+// (ErrLegNotPending).
+func (s *GormRampLegStore) FailUnsent(ctx context.Context, id uuid.UUID, reason string) error {
+	res := s.DB.WithContext(ctx).Model(&models.RampLeg{}).
+		Where("id = ? AND status = ? AND (tx_hash = '' OR tx_hash IS NULL)", id, models.RampLegStatusPending).
+		Updates(map[string]any{"status": models.RampLegStatusFailed, "error": truncateRunes(reason, 512)})
 	if res.Error != nil {
 		return res.Error
 	}

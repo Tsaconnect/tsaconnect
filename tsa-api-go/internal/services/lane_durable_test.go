@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
+	"github.com/ethereum/go-ethereum"
 	"math/big"
 	"strings"
 	"sync"
@@ -44,6 +45,38 @@ type chainNode struct {
 	ioInLock   atomic.Int32
 	pendingSeq []uint64 // PendingNonce answers, in order (last repeats)
 	pendingN   int
+	// receipts: mined transactions and their block; head the latest block.
+	receipts map[common.Hash]uint64
+	head     uint64
+}
+
+func (n *chainNode) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
+	n.io()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	b, ok := n.receipts[h]
+	if !ok {
+		return nil, ethereum.NotFound
+	}
+	return &types.Receipt{Status: types.ReceiptStatusSuccessful, BlockNumber: new(big.Int).SetUint64(b), TxHash: h}, nil
+}
+
+func (n *chainNode) BlockNumber(context.Context) (uint64, error) {
+	n.io()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.head, nil
+}
+
+// mine records tx h mined at block, and moves the head.
+func (n *chainNode) mine(h common.Hash, block, head uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.receipts == nil {
+		n.receipts = map[common.Hash]uint64{}
+	}
+	n.receipts[h] = block
+	n.head = head
 }
 
 func (n *chainNode) io() {
@@ -165,7 +198,7 @@ func sqliteLaneStore(t *testing.T) *GormKeyLaneStore {
 	sqlDB, _ := db.DB()
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := db.AutoMigrate(&models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{}); err != nil {
+	if err := db.AutoMigrate(&models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{}, &models.KeyLaneRetiredOp{}); err != nil {
 		t.Fatal(err)
 	}
 	return &GormKeyLaneStore{DB: db}
@@ -263,7 +296,7 @@ func TestKeyLane_TwoProcessesNeverShareANonce_SQLite(t *testing.T) {
 }
 
 func TestKeyLane_TwoProcessesNeverShareANonce_Postgres(t *testing.T) {
-	db := testutil.TempPostgres(t, "key_lane_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{})
+	db := testutil.TempPostgres(t, "key_lane_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{}, &models.KeyLaneRetiredOp{})
 	testTwoProcessesNeverShareANonce(t, &GormKeyLaneStore{DB: db})
 }
 
