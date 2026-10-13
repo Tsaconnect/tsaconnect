@@ -1,21 +1,27 @@
 // smart-contracts/deploy/p2p-escrow.js
-const { resolveChain, writeLedger, readLedger, transferOwnershipIfNeeded } = require("./lib");
+const { getAddress } = require("ethers");
+const { resolveChain, writeLedger, readLedger, handOverOwnership } = require("./lib");
+
+const sameAddr = (a, b) => getAddress(a) === getAddress(b);
 
 // wireEscrow runs the onlyOwner per-chain setup on a P2PEscrowV3 the caller
 // owns: system wallet, accepted tokens + their FeeManager symbols, MCGP, Permit2,
-// forwarder and FeeManager. Every setter is idempotent, so it is safe to re-run
-// on a partly-wired proxy (deploy/deterministic-escrow.js resumes this way).
+// forwarder and FeeManager. Each value is read first and its setter is sent
+// only when it differs, so re-running on a partly-wired proxy resends nothing
+// already done (deploy/deterministic-escrow.js resumes this way). On a fresh
+// proxy every value is unset, so the txs are exactly the setter list.
 async function wireEscrow(esc, { cfg, tokens, systemWallet, feeManager }) {
-  await (await esc.setSystemWallet(systemWallet)).wait();
+  const send = async (tx) => (await tx).wait();
+  if (!sameAddr(await esc.systemWallet(), systemWallet)) await send(esc.setSystemWallet(systemWallet));
   for (const [sym, addr] of Object.entries(tokens)) {
     if (!addr) continue; // e.g. MCGP null on BSC
-    await (await esc.setTokenAcceptance(addr, true)).wait();
-    await (await esc.setTokenSymbol(addr, sym)).wait();
+    if (!(await esc.acceptedTokens(addr))) await send(esc.setTokenAcceptance(addr, true));
+    if ((await esc.tokenSymbol(addr)) !== sym) await send(esc.setTokenSymbol(addr, sym));
   }
-  if (tokens.MCGP) await (await esc.setMcgpToken(tokens.MCGP)).wait();
-  if (cfg.permit2) await (await esc.setPermit2(cfg.permit2)).wait();
-  if (cfg.forwarder) await (await esc.setTrustedForwarder(cfg.forwarder)).wait();
-  if (feeManager) await (await esc.setFeeManager(feeManager)).wait();
+  if (tokens.MCGP && !sameAddr(await esc.mcgpToken(), tokens.MCGP)) await send(esc.setMcgpToken(tokens.MCGP));
+  if (cfg.permit2 && !sameAddr(await esc.permit2(), cfg.permit2)) await send(esc.setPermit2(cfg.permit2));
+  if (cfg.forwarder && !sameAddr(await esc.trustedForwarder(), cfg.forwarder)) await send(esc.setTrustedForwarder(cfg.forwarder));
+  if (feeManager && !sameAddr(await esc.feeManager(), feeManager)) await send(esc.setFeeManager(feeManager));
 }
 
 // Options (all optional; none given = the behaviour this module always had):
@@ -44,7 +50,7 @@ async function deploy(hre, { chain, feeManager, deferOwnership = false, admins, 
   const fm = feeManager || (chain ? null : readLedger(network.name).FeeManager?.proxy);
   await wireEscrow(esc, { cfg, tokens: tokenMap, systemWallet: sysWallet, feeManager: fm });
 
-  if (!deferOwnership) await transferOwnershipIfNeeded(esc, deployerAddr, finalOwner);
+  if (!deferOwnership) await handOverOwnership("P2PEscrowV3", [esc], finalOwner);
 
   const impl = await upgrades.erc1967.getImplementationAddress(proxy);
   if (!chain) writeLedger(network.name, writeLedgerKey || "P2PEscrowV3", { proxy, impl });

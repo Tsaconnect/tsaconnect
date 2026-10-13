@@ -1,5 +1,5 @@
 // smart-contracts/deploy/product-escrow.js
-const { resolveChain, writeLedger, readLedger, transferOwnershipIfNeeded } = require("./lib");
+const { resolveChain, writeLedger, readLedger, handOverOwnership } = require("./lib");
 
 async function deploy(hre, { chain, feeManager } = {}) {
   const { ethers, upgrades, network } = hre;
@@ -25,7 +25,7 @@ async function deploy(hre, { chain, feeManager } = {}) {
   const fm = feeManager || (chain ? null : readLedger(network.name).FeeManager?.proxy);
   if (fm) await (await esc.setFeeManager(fm)).wait();
 
-  await transferOwnershipIfNeeded(esc, deployerAddr, finalOwner);
+  await handOverOwnership("ProductEscrowV2", [esc], finalOwner);
 
   const impl = await upgrades.erc1967.getImplementationAddress(proxy);
   if (!chain) writeLedger(network.name, "ProductEscrowV2", { proxy, impl });

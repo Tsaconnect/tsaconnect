@@ -73,15 +73,6 @@ function reuseFromLedger(hre, key, chain) {
   return readLedger(hre.network.name)[key] || null;
 }
 
-// transferOwnershipIfNeeded hands a freshly-wired contract from the deployer
-// (which must own it to run the onlyOwner setup) to the configured owner. It is
-// a no-op when they are the same address. Returns true if a transfer happened.
-async function transferOwnershipIfNeeded(contract, deployerAddr, finalOwner) {
-  if (getAddress(finalOwner) === getAddress(deployerAddr)) return false;
-  await (await contract.transferOwnership(finalOwner)).wait();
-  return true;
-}
-
 // assertOwnerConfirm is the pre-deploy guard for an irreversible one-step
 // Ownable handover (review m1): the hot deployer key must never be the final
 // owner, and the owner address must be typed twice. Throws before anything is
@@ -95,28 +86,37 @@ function assertOwnerConfirm({ label, owner, confirm, deployerAddr, ownerVar, con
   }
 }
 
-// handOverOwnership moves every contract from the deployer to finalOwner as the
-// LAST step of a run, after the caller has asserted the wiring. It reads every
-// owner() back (even when a transfer throws) so a split handover is never
-// silent, and throws unless all of them end at finalOwner. No-op transfers for
-// contracts already owned by finalOwner.
+// handOverOwnership is the one ownership helper every deploy script uses: it
+// moves each contract from the deployer (which must own it to run the
+// onlyOwner setup) to finalOwner as the LAST step of a run. Contracts already
+// owned by finalOwner are skipped, so finalOwner == deployer sends nothing.
+// Every owner() is read back afterwards (even when a transfer throws) so a
+// split handover is never silent; a failing read-back is logged and never
+// masks the transfer error. Throws unless every contract ends at finalOwner.
 async function handOverOwnership(label, contracts, finalOwner) {
   const want = getAddress(finalOwner);
+  let transferError = null;
   try {
     for (const c of contracts) {
       if (getAddress(await c.owner()) !== want) await (await c.transferOwnership(want)).wait();
     }
-  } finally {
-    const owners = [];
+  } catch (e) {
+    transferError = e;
+  }
+  let owners = null;
+  try {
+    owners = [];
     for (const c of contracts) owners.push(getAddress(await c.owner()));
     console.log(`${label}: owner() read back — ${owners.join(", ")}`);
     if (new Set(owners).size > 1) {
       console.error(`${label}: SPLIT OWNERSHIP — finish the transfer from the current owner before anything else`);
     }
+  } catch (readError) {
+    console.error(`${label}: owner() read-back failed (${readError.message}) — check every owner() by hand`);
+    if (!transferError) throw readError;
   }
-  for (const c of contracts) {
-    if (getAddress(await c.owner()) !== want) throw new Error(`${label}: owner() is not ${want} on every contract`);
-  }
+  if (transferError) throw transferError;
+  if (owners.some((o) => o !== want)) throw new Error(`${label}: owner() is not ${want} on every contract`);
 }
 
 module.exports = {
@@ -128,5 +128,4 @@ module.exports = {
   readLedger,
   writeLedger,
   reuseFromLedger,
-  transferOwnershipIfNeeded,
 };
