@@ -55,7 +55,7 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	}
 
 	lanes, missing := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
-		chains: cfg.RampTreasuryChains, guardPrefix: "ramp_treasury_",
+		chains: cfg.RampTreasuryChains, guardPrefix: "ramp_treasury_", role: "treasury",
 		logTag: "[ramp-conversion]", metric: "ramp_treasury", needRouters: true,
 	})
 	if len(missing) > 0 {
@@ -173,6 +173,7 @@ type treasuryLaneSpec struct {
 	chains      []string
 	network     string // "" = mainnet
 	guardPrefix string // the lane guard's namespace, so two treasuries never share a kill switch
+	role        string // the signer role named in the registry's boot summary
 	logTag      string
 	metric      string
 	// needRouters: only a treasury that executes LiFi routes needs a router
@@ -198,7 +199,7 @@ func buildTreasuryLanes(cfg *config.Config, chains *services.BlockchainService, 
 			missing = append(missing, chain)
 			continue
 		}
-		lane := buildSponsorLaneOn(chains, network, chain, key, spec.guardPrefix+chain, services.SponsorLimits{
+		lane := buildSponsorLaneOn(chains, network, chain, spec.role, key, spec.guardPrefix+chain, services.SponsorLimits{
 			BalanceFloor: floor,
 		}, nil)
 		if lane == nil {

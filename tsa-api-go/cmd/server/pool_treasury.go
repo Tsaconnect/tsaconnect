@@ -51,7 +51,7 @@ func poolTreasuryFor(cfg *config.Config, chains *services.BlockchainService, con
 		return nil
 	}
 	lanes, missing := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
-		chains: []string{pool.ChainKey}, network: pool.Network, guardPrefix: "ramp_treasury_",
+		chains: []string{pool.ChainKey}, network: pool.Network, guardPrefix: "ramp_treasury_", role: "treasury",
 		logTag: "[liquidity]", metric: "liquidity_pool_treasury", needRouters: false,
 	})
 	lane := lanes[pool.ChainKey]

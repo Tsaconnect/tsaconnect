@@ -68,20 +68,26 @@ func rampLaneTokensOn(chains *services.BlockchainService, network, chain string)
 
 // buildSponsorLane is buildSponsorLaneOn on mainnet, where every sponsor lane
 // and the conversion treasury's lanes live.
-func buildSponsorLane(chains *services.BlockchainService, chain string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
-	return buildSponsorLaneOn(chains, "mainnet", chain, key, guardName, limits, topUpMaxWei)
+func buildSponsorLane(chains *services.BlockchainService, chain, role string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
+	return buildSponsorLaneOn(chains, "mainnet", chain, role, key, guardName, limits, topUpMaxWei)
 }
 
 // buildSponsorLaneOn builds one SponsorLane for chain on network — the shape
 // both the gas sponsor and the ramp treasury need (chain client,
 // EVMRelayChain, EVMRelayTxBuilder, NewLocalKeyReleaseSigner,
 // NewSponsorGuard). Returns nil when chain has no configured RPC client on
-// that network. guardName namespaces the guard's own kill switch/daily
+// that network. Its send lane comes from the process's SignerRegistry
+// (chains.Signers()), so role shares one nonce lock and floor with every other
+// role on the same key and chain. guardName namespaces the guard's own kill switch/daily
 // counter (e.g. "ramp_sponsor_base" vs "ramp_treasury_base") so the two lane
 // types never share one.
-func buildSponsorLaneOn(chains *services.BlockchainService, network, chain string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
+func buildSponsorLaneOn(chains *services.BlockchainService, network, chain, role string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
 	client := chains.ClientForNetwork(network, chain)
 	if client == nil {
+		return nil
+	}
+	keyLane := chains.Signers().Lane(role, key, client)
+	if keyLane == nil {
 		return nil
 	}
 	// Ramp lanes do not rate-limit per user, so no PerUserPerWindow and
@@ -93,7 +99,8 @@ func buildSponsorLaneOn(chains *services.BlockchainService, network, chain strin
 		Chain:       services.EVMRelayChain{Client: client},
 		Builder:     services.EVMRelayTxBuilder{Client: client},
 		Native:      client,
-		Signer:      services.NewLocalKeyReleaseSigner(key, client),
+		Signer:      keyLane.Signer(),
+		KeyLane:     keyLane,
 		Guard:       services.NewSponsorGuard(guardName, limits, nil),
 		Tokens:      rampLaneTokensOn(chains, network, chain),
 		TopUpMaxWei: topUpMaxWei,
@@ -118,7 +125,7 @@ func newIntentSponsorship(orders *services.PaycrestOrderService, lanes map[strin
 // or nil with a line saying why. There is exactly one: P2P top-ups use it
 // whenever it exists and the marketplace funding while MARKETPLACE_SONIC_GAS
 // is on (marketplaceSonicGas). A second lane on the same key would hold its
-// own send lock and could hand two txs the same nonce. It is a separate
+// own guard; the nonce lock is the key's KeyLane either way. It is a separate
 // sponsorship holding ONLY the Sonic lane, so it can never give a sale or a
 // TSA Pay intent from Sonic a source-chain top-up. Floor and ceiling are
 // SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI (the old MARKETPLACE_SONIC_GAS_*
@@ -154,7 +161,7 @@ func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainSer
 		log.Printf("[sonic-gas] ALERT sonic_gas_skipped_total=1 reason=invalid SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI / RAMP_SPONSOR_DAILY_GAS_BUDGET")
 		return nil
 	}
-	lane := buildSponsorLane(chains, "sonic", key, "sonic_gas", services.SponsorLimits{
+	lane := buildSponsorLane(chains, "sonic", "gas_sponsor", key, "sonic_gas", services.SponsorLimits{
 		DailyGasBudget: budget, BalanceFloor: floor,
 	}, topUpMax)
 	if lane == nil {
@@ -255,7 +262,7 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 			log.Printf("[ramp-sponsor] ALERT ramp_sponsor_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
 			continue
 		}
-		lane := buildSponsorLane(chains, chain, key, "ramp_sponsor_"+chain, services.SponsorLimits{
+		lane := buildSponsorLane(chains, chain, "gas_sponsor", key, "ramp_sponsor_"+chain, services.SponsorLimits{
 			DailyGasBudget: dailyBudget,
 			BalanceFloor:   floor,
 		}, topUpMax)

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -193,5 +194,55 @@ func TestKeyLane_RefusesATxBuiltForAnotherChain(t *testing.T) {
 	_, attempted, err := lane.Send(context.Background(), func() ([]byte, error) { return unsignedOn(97, 0) })
 	if attempted || !errors.Is(err, ErrTxNotBroadcast) || len(node.sent()) != 0 {
 		t.Fatalf("attempted=%v err=%v sent=%v", attempted, err, node.sent())
+	}
+}
+
+// Two treasuries on one key and chain (a pool-only treasury and the conversion
+// treasury, or the company wallet once it moves onto the treasury key) share
+// one KeyLane: a pool slice on one and a transfer on the other, while the
+// RPC's pending view lags at 7, sign 7 then 8 — never one nonce twice.
+func TestKeyLane_TwoTreasuriesOnOneKeyNeverReuseANonce(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	node := &laneNode{id: 8453}
+	shared := NewSignerRegistry().Lane("treasury", key, node)
+	onShared := func() (*Treasury, *TreasuryLane) {
+		tr, lane, native, _ := newTestTreasuryWithFakes(t)
+		lane.EscrowCalls = []common.Address{common.HexToAddress(escrowCallTarget)}
+		lane.Signer, lane.KeyLane = shared.Signer(), shared
+		lane.Native = signableTransfers{native}
+		return tr, lane
+	}
+	pool, poolLane := onShared()
+	conv, convLane := onShared()
+	ctx := context.Background()
+	if _, _, err := pool.CallEscrowRecorded(ctx, poolLane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 7), nil); err != nil {
+		t.Fatalf("slice: %v", err)
+	}
+	if _, _, err := conv.TransferTokenRecorded(ctx, convLane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	if got := node.sent(); len(got) != 2 || got[0] != 7 || got[1] != 8 {
+		t.Fatalf("nonces %v, want 7 then 8", got)
+	}
+}
+
+// A gas-sponsor lane and a ramp lane on the same key and chain share the
+// lock: a sponsor top-up sent right after a release (both reading a lagging
+// pending nonce) takes the next nonce.
+func TestKeyLane_SponsorLaneSharesTheReleaseKeysLane(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	reg := NewSignerRegistry()
+	node := &laneNode{id: 8453}
+	release := NewChainReleaseSigner(reg, key, map[int64]ReleaseBroadcaster{8453: node})
+	kl := reg.Lane("gas_sponsor", key, node)
+	sponsor := &SponsorLane{ChainKey: "base", Signer: kl.Signer(), KeyLane: kl}
+	if _, err := release.Send(context.Background(), 8453, func() ([]byte, error) { return unsignedOn(8453, 2) }); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sponsor.send(context.Background(), func() ([]byte, error) { return unsignedOn(8453, 2) }); err != nil {
+		t.Fatal(err)
+	}
+	if got := node.sent(); len(got) != 2 || got[0] != 2 || got[1] != 3 {
+		t.Fatalf("nonces %v, want 2 then 3", got)
 	}
 }

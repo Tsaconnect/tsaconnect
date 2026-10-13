@@ -61,7 +61,7 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 		return nil
 	}
 	lanes, _ := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
-		chains: cfg.RampTreasuryWalletChains, guardPrefix: "ramp_company_wallet_",
+		chains: cfg.RampTreasuryWalletChains, guardPrefix: "ramp_company_wallet_", role: "company_wallet",
 		logTag: "[ramp-company-wallet]", metric: "ramp_company_wallet", needRouters: false,
 	})
 	decimals := map[string]map[string]int{}

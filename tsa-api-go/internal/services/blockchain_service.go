@@ -44,6 +44,18 @@ type TransactionVerification struct {
 type BlockchainService struct {
 	clients map[string]*blockchain.EVMClient // keyed by "network:chain" e.g. "mainnet:sonic"
 	cfg     *config.Config
+	// signers is the process's one SignerRegistry: every hot key's send lane
+	// per (address, chain id), handed to every role that signs (see KeyLane).
+	signers *SignerRegistry
+}
+
+// Signers is the process's SignerRegistry, nil on a BlockchainService not
+// built by NewBlockchainService (a test's), which hands out private lanes.
+func (b *BlockchainService) Signers() *SignerRegistry {
+	if b == nil {
+		return nil
+	}
+	return b.signers
 }
 
 // NewBlockchainService creates a BlockchainService connected to all configured chains
@@ -52,6 +64,7 @@ func NewBlockchainService(cfg *config.Config) *BlockchainService {
 	bs := &BlockchainService{
 		clients: make(map[string]*blockchain.EVMClient),
 		cfg:     cfg,
+		signers: NewSignerRegistry(),
 	}
 
 	for network, netCfg := range cfg.Networks {

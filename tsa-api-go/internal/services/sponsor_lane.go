@@ -80,42 +80,43 @@ type SponsorLane struct {
 	Tokens      map[string]string // SYMBOL -> contract address, from BlockchainService.TokenAddress
 	TopUpMaxWei *big.Int          // refuse a single top-up above this
 
-	// sendMu serialises nonce read -> broadcast. PendingNonceAt hands two
-	// concurrent builds the same nonce; one then fails as "nonce too low"
-	// after we already told the user it was sent. Same fix as
-	// MCGPSwapService.signMu.
-	sendMu sync.Mutex
+	// KeyLane is the key's one send lane on this chain, from the boot
+	// SignerRegistry: the lock from nonce read to broadcast and the nonce
+	// floor, shared with every other role signing with this key on this chain
+	// (PendingNonceAt hands two concurrent builds the same nonce; one then
+	// fails as "nonce too low" after we already told the user it was sent).
+	// Signer must be KeyLane.Signer(). Nil (a lane built in a test) means a
+	// private lane, created on first send.
+	KeyLane *KeyLane
+
+	privateOnce sync.Once
+	private     *KeyLane
 }
 
-// send builds and broadcasts one tx. broadcastAttempted separates a build
-// failure (nothing left this process, safe to free the order's slot) from a
-// broadcast failure, which is not proof of rejection: an RPC timeout can hide
-// a tx the node accepted, so callers must keep the slot on that path. The one
-// exception is a refusal the signer marks ErrTxNotBroadcast (the node said
-// the sender cannot pay): that tx provably never left, so it is reported as
-// not attempted.
+// nonceLane is the lane every send on this SponsorLane goes through.
+func (l *SponsorLane) nonceLane() *KeyLane {
+	if l.KeyLane != nil {
+		return l.KeyLane
+	}
+	l.privateOnce.Do(func() { l.private = &KeyLane{} })
+	return l.private
+}
+
+// send builds and broadcasts one tx on the key's lane (lock + nonce floor).
+// broadcastAttempted separates a build failure (nothing left this process,
+// safe to free the order's slot) from a broadcast failure, which is not proof
+// of rejection: an RPC timeout can hide a tx the node accepted, so callers
+// must keep the slot on that path. The one exception is a refusal the signer
+// marks ErrTxNotBroadcast (e.g. the node said the sender cannot pay): that tx
+// provably never left, so it is reported as not attempted.
 func (l *SponsorLane) send(ctx context.Context, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
-	return sendLocked(ctx, &l.sendMu, l.Signer, build)
+	return l.nonceLane().sendWith(ctx, l.Signer, build, nil)
 }
 
-// sendLocked builds and broadcasts one tx while holding mu from build (its
-// nonce read) to broadcast. Shared by every key that must never hand two
-// concurrent builds the same nonce: a sponsor lane, and each chain of the
-// release signer (spec S8). broadcastAttempted separates a build failure
-// (nothing left this process) from a broadcast failure, which is not proof of
-// rejection; a refusal the signer marks ErrTxNotBroadcast is "not attempted".
-func sendLocked(ctx context.Context, mu *sync.Mutex, signer ReleaseSigner, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
-	mu.Lock()
-	defer mu.Unlock()
-	unsigned, err := build()
-	if err != nil {
-		return "", false, err
-	}
-	txHash, err = signer.SignAndBroadcast(ctx, unsigned)
-	if errors.Is(err, ErrTxNotBroadcast) {
-		return "", false, err
-	}
-	return txHash, true, err
+// sendRecorded is send with the nonce handed to onPrepared before the
+// broadcast (KeyLane.SendRecorded).
+func (l *SponsorLane) sendRecorded(ctx context.Context, build func() ([]byte, error), onPrepared func(uint64) error) (string, bool, error) {
+	return l.nonceLane().sendWith(ctx, l.Signer, build, onPrepared)
 }
 
 func (l *SponsorLane) tokenAddress(symbol string) string {
