@@ -292,7 +292,9 @@ func (g *PoolChainGates) FloatBalances(ctx context.Context) ([]SponsorFloat, err
 const poolReleaseCallGas = treasuryEscrowCallGas
 
 // ReleaseGasOK: paid orders must always be able to release, so a pool open is
-// refused unless the release key can pay for `releases` adminRelease calls at
+// refused unless the release key can pay for `releases` release-key calls — the
+// caller passes every slice still owed one on this chain plus the new order's
+// (ITService.poolReleaseGasOK) — at
 // today's gas price (times gasFeeBuffer). The release floor is alert-only
 // (owner 2026-10-13): below it this logs the refill ALERT and the gas float
 // monitor keeps alerting, but the pool stays open while the key can pay.

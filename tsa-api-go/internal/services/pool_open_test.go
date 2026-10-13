@@ -342,3 +342,32 @@ func TestPoolOpen_WorseAllocationPastTheGuardIsPriceMoved(t *testing.T) {
 		t.Fatalf("intents=%d slices=%d broadcasts=%d, want nothing written or sent", intents, slices, r.chain.broadcasts)
 	}
 }
+
+// Security review of the alert-only floors: the release-gas gate counts every
+// release-key call already owed on the pool chain (each live slice of every
+// open order), not only this order's. Two orders that each fit the balance
+// alone but not together: the second open is refused.
+func TestPoolOpen_ReleaseGasCountsEveryOutstandingSlice(t *testing.T) {
+	r := newPoolOpenRig(t)
+	r.addLP(t, 50)
+	r.addLP(t, 50)
+	cap := CurrentPoolSettings().SliceCap
+	r.gates.maxReleases = cap // the key pays exactly one order's releases
+	first, _, err := r.open(t, "5000")
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if r.gates.asked != cap {
+		t.Fatalf("first open asked for %d releases, want %d (nothing outstanding)", r.gates.asked, cap)
+	}
+	live := len(r.slicesOf(t, first.ID))
+	if live == 0 {
+		t.Fatal("setup: the first order opened no slices")
+	}
+	if _, _, err := r.open(t, "5000"); !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("second open with the first's %d slices still owed = %v, want ErrPoolClosed", live, err)
+	}
+	if r.gates.asked != live+cap {
+		t.Fatalf("second open asked for %d releases, want %d outstanding + %d", r.gates.asked, live, cap)
+	}
+}

@@ -165,7 +165,7 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 		log.Printf("[liquidity] ALERT liquidity_pool_honour_window_unsafe %s", err)
 		return nil, nil, err
 	}
-	if !d.c.Gates.Open() || !d.c.Gates.ReleaseGasOK(ctx, p.Settings.SliceCap) {
+	if !d.c.Gates.Open() || !s.poolReleaseGasOK(ctx, p.Settings.SliceCap) {
 		return nil, nil, ErrPoolClosed
 	}
 	if err := d.c.Nonces.Check(ctx); err != nil {

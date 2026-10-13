@@ -239,6 +239,10 @@ type fakePoolGate struct {
 	open   bool
 	gasOK  bool
 	closed string
+	// maxReleases, when > 0, is how many release-key calls the key can pay
+	// for; asked records the last count requested.
+	maxReleases int
+	asked       int
 }
 
 func (g *fakePoolGate) Open() bool {
@@ -246,10 +250,15 @@ func (g *fakePoolGate) Open() bool {
 	defer g.mu.Unlock()
 	return g.open && g.closed == ""
 }
-func (g *fakePoolGate) Status() PoolGateStatus                                { return PoolGateStatus{Open: g.Open()} }
-func (g *fakePoolGate) Check(context.Context) PoolGateStatus                  { return g.Status() }
-func (g *fakePoolGate) Close(reason string)                                   { g.mu.Lock(); g.closed = reason; g.mu.Unlock() }
-func (g *fakePoolGate) ReleaseGasOK(context.Context, int) bool                    { return g.gasOK }
+func (g *fakePoolGate) Status() PoolGateStatus               { return PoolGateStatus{Open: g.Open()} }
+func (g *fakePoolGate) Check(context.Context) PoolGateStatus { return g.Status() }
+func (g *fakePoolGate) Close(reason string)                  { g.mu.Lock(); g.closed = reason; g.mu.Unlock() }
+func (g *fakePoolGate) ReleaseGasOK(_ context.Context, releases int) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.asked = releases
+	return g.gasOK && (g.maxReleases == 0 || releases <= g.maxReleases)
+}
 func (g *fakePoolGate) ReprobeReceipts(context.Context)                       {}
 func (g *fakePoolGate) Enabled() bool                                         { return true }
 func (g *fakePoolGate) FloatBalances(context.Context) ([]SponsorFloat, error) { return nil, nil }

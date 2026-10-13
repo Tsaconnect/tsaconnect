@@ -123,7 +123,7 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 	if owed.Sign() <= 0 {
 		return s.resumeRedelivered(ctx, adminID, intent, p, nil, seen, note, meta)
 	}
-	if !d.c.Gates.Open() || !d.c.Gates.ReleaseGasOK(ctx, p.Settings.SliceCap) {
+	if !d.c.Gates.Open() || !s.poolReleaseGasOK(ctx, p.Settings.SliceCap) {
 		return nil, ErrPoolClosed
 	}
 	if err := d.c.Nonces.Check(ctx); err != nil {
