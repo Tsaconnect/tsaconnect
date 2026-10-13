@@ -212,7 +212,9 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 		releaseRow()
 		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: read sponsor balance: %w", err)
 	}
-	if err := lane.Guard.CheckFloor(bal); err != nil {
+	// Floors are alert-only: refused only when the sponsor cannot pay this
+	// relay's own fee.
+	if err := lane.requireFee(bal, authorizationGasUnits, nil); err != nil {
 		releaseRow()
 		return AuthorizationRelayResult{}, err
 	}

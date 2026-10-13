@@ -154,7 +154,7 @@ func (w *GasFloatMonitor) Run(ctx context.Context) error {
 		}
 		switch {
 		case f.BalanceWei.Cmp(f.FloorWei) < 0:
-			log.Printf("[gas-float-monitor] ALERT %s_float_empty_total=1 chain=%s address=%s balance_wei=%s floor_wei=%s — sponsorship on this chain is OFF until refilled",
+			log.Printf("[gas-float-monitor] ALERT %s_float_empty_total=1 chain=%s address=%s balance_wei=%s floor_wei=%s — refill now; sends continue only while the balance pays each transaction's own gas",
 				w.prefix, f.Chain, f.Address, f.BalanceWei, f.FloorWei)
 		case f.BalanceWei.Cmp(new(big.Int).Mul(f.FloorWei, big.NewInt(2))) < 0:
 			log.Printf("[gas-float-monitor] ALERT %s_float_low_total=1 chain=%s address=%s balance_wei=%s floor_wei=%s — refill soon",

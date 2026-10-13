@@ -401,8 +401,9 @@ func (g *GasTopUp) CanSponsorChain(chainID int64) bool { return g.intentLane(cha
 
 // CheckTopUp is sendTopUp's lane-side refusals, asked BEFORE anything is
 // signed so a quote that would later be refused its gas is refused up front:
-// a live lane on chainID, `amount` within its per-top-up ceiling, the sponsor's
-// float above its floor, and room left in its daily gas budget. It sends and
+// a live lane on chainID, `amount` within its per-top-up ceiling, the sponsor
+// able to pay `amount` plus the top-up's own fee (its floor only alerts), and
+// room left in its daily gas budget. It sends and
 // reserves nothing, so it can pass and the send still be refused later (the
 // float spent meanwhile) — the send re-checks everything.
 func (g *GasTopUp) CheckTopUp(ctx context.Context, chainID int64, amount *big.Int) error {
@@ -420,7 +421,9 @@ func (g *GasTopUp) CheckTopUp(ctx context.Context, chainID int64, amount *big.In
 	if err != nil {
 		return fmt.Errorf("sponsor: read sponsor balance: %w", err)
 	}
-	if err := lane.Guard.CheckFloor(bal); err != nil {
+	// Floors are alert-only: refused only when the sponsor cannot pay this
+	// top-up (amount + its own fee).
+	if err := lane.requireFee(bal, topUpGasUnits, amount); err != nil {
 		return err
 	}
 	return lane.Guard.CanReserveGas(topUpGasUnits)
@@ -514,7 +517,8 @@ type topUpSend struct {
 
 // sendTopUp is the send side both paths share: skip when the wallet already
 // holds `need`, refuse a shortfall over the lane's ceiling, the path's caps,
-// the sponsor's float floor and daily gas budget, then broadcast and wait for
+// whether the sponsor can pay amount + fee (the floor only alerts) and its daily
+// gas budget, then broadcast and wait for
 // the receipt.
 func (g *GasTopUp) sendTopUp(ctx context.Context, s topUpSend) (GasTopUpResult, error) {
 	lane := s.lane
@@ -553,7 +557,9 @@ func (g *GasTopUp) sendTopUp(ctx context.Context, s topUpSend) (GasTopUpResult, 
 		release()
 		return GasTopUpResult{}, fmt.Errorf("sponsor: read sponsor balance: %w", err)
 	}
-	if err := lane.Guard.CheckFloor(sponsorBal); err != nil {
+	// Floors are alert-only: the sponsor sends while it can pay this top-up
+	// (amount + its own fee); below the floor it only raises the refill ALERT.
+	if err := lane.requireFee(sponsorBal, topUpGasUnits, amount); err != nil {
 		release()
 		return GasTopUpResult{}, err
 	}

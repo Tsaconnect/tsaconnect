@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -13,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
 // ── doubles ──────────────────────────────────────────────────────────────
@@ -396,14 +398,40 @@ func TestRelayer_RateLimitWindowRolls(t *testing.T) {
 	}
 }
 
-func TestRelayer_RefusesWhenBalanceBelowFloor(t *testing.T) {
+// pricedRelayBuilder prepares a relay costing 300k gas at 1 gwei: its own fee,
+// with gasFeeBuffer, is 6e14 wei.
+type pricedRelayBuilder struct{}
+
+func (pricedRelayBuilder) BuildUnsignedTx(_, _ string, _ []byte) ([]byte, error) {
+	return json.Marshal(blockchain.UnsignedTx{Nonce: 1, GasPrice: "1000000000", GasLimit: 300_000,
+		To: forwarderHex, Value: "0", ChainID: "146"})
+}
+
+// Floors are alert-only (owner 2026-10-13): a relayer below its floor that can
+// still pay this relay's own fee relays (and alerts).
+func TestRelayer_BelowFloorButAbleToPayStillRelays(t *testing.T) {
 	r := newRig(t)
-	r.chain.balance = big.NewInt(1e16) // floor is 1e17
+	r.svc.builder = pricedRelayBuilder{}
+	r.chain.balance = big.NewInt(1e16) // floor is 1e17; the relay needs 6e14
+	if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); err != nil {
+		t.Fatalf("below the floor but able to pay: %v", err)
+	}
+	if r.signer.calls() != 1 {
+		t.Fatalf("broadcasts = %d, want 1", r.signer.calls())
+	}
+}
+
+// A relayer that cannot pay this relay's own fee refuses with the existing
+// error class and broadcasts nothing.
+func TestRelayer_RefusesWhenItCannotPayTheRelaysFee(t *testing.T) {
+	r := newRig(t)
+	r.svc.builder = pricedRelayBuilder{}
+	r.chain.balance = big.NewInt(1e14) // the relay needs 6e14
 	_, err := r.svc.Relay(context.Background(), userAddr, r.req())
 	if !errors.Is(err, ErrRelayerUnderfunded) {
 		t.Fatalf("expected ErrRelayerUnderfunded, got %v", err)
 	}
-	if r.signer.broadcastCalls != 0 {
+	if r.signer.calls() != 0 {
 		t.Fatal("must not broadcast transactions that will fail for gas")
 	}
 }

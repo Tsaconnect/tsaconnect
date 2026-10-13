@@ -249,7 +249,7 @@ func (g *fakePoolGate) Open() bool {
 func (g *fakePoolGate) Status() PoolGateStatus                                { return PoolGateStatus{Open: g.Open()} }
 func (g *fakePoolGate) Check(context.Context) PoolGateStatus                  { return g.Status() }
 func (g *fakePoolGate) Close(reason string)                                   { g.mu.Lock(); g.closed = reason; g.mu.Unlock() }
-func (g *fakePoolGate) ReleaseGasOK(context.Context) bool                     { return g.gasOK }
+func (g *fakePoolGate) ReleaseGasOK(context.Context, int) bool                    { return g.gasOK }
 func (g *fakePoolGate) ReprobeReceipts(context.Context)                       {}
 func (g *fakePoolGate) Enabled() bool                                         { return true }
 func (g *fakePoolGate) FloatBalances(context.Context) ([]SponsorFloat, error) { return nil, nil }

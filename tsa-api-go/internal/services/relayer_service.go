@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
 // RelayerService sponsors gas for user-signed EIP-2771 ForwardRequests.
@@ -43,7 +45,7 @@ var (
 	ErrBelowMinSponsored     = errors.New("amount is below the minimum we sponsor gas for")
 	ErrRateLimited           = errors.New("too many sponsored transactions; try again shortly")
 	ErrDailyCapExceeded      = errors.New("daily gas-sponsorship budget exhausted")
-	ErrRelayerUnderfunded    = errors.New("relayer balance is below its floor")
+	ErrRelayerUnderfunded    = errors.New("the sending wallet cannot pay for this transaction's gas")
 	ErrSimulationReverted    = errors.New("transaction would revert")
 	ErrSimulationUnavailable = errors.New("could not simulate the transaction; try again")
 	ErrRoleSeparation        = errors.New("relayer key must not also be owner or guardian")
@@ -298,7 +300,8 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		return "", err
 	}
 
-	if err := r.checkBalance(ctx); err != nil {
+	balance, err := r.checkBalance(ctx)
+	if err != nil {
 		return "", err
 	}
 
@@ -343,8 +346,16 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 			return nil, err
 		}
 		built = true
+		if err := r.requireFee(balance, unsigned); err != nil {
+			return nil, notBroadcast(err)
+		}
 		return unsigned, nil
 	})
+	if errors.Is(err, ErrRelayerUnderfunded) {
+		releaseOurFault()
+		r.metrics.RelayAttempt("rejected", "underfunded")
+		return "", err
+	}
 	if err != nil && !built {
 		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "build")
@@ -447,17 +458,33 @@ func (r *RelayerService) checkMinSponsored(a AllowedCall, data []byte) error {
 	return nil
 }
 
-func (r *RelayerService) checkBalance(ctx context.Context) error {
+// checkBalance reads the relayer's native balance and raises the refill ALERT
+// below its floor. The floor never refuses (owner 2026-10-13): requireFee asks
+// whether this relay's own transaction can be paid.
+func (r *RelayerService) checkBalance(ctx context.Context) (*big.Int, error) {
 	bal, err := r.chain.BalanceAt(ctx, common.HexToAddress(r.signer.Address()), nil)
 	if err != nil {
 		r.metrics.RelayAttempt("error", "balance")
-		return fmt.Errorf("relayer: read balance: %w", err)
+		return nil, fmt.Errorf("relayer: read balance: %w", err)
 	}
-	if err := r.guard.CheckFloor(bal); err != nil {
-		r.metrics.RelayAttempt("rejected", "underfunded")
-		return err
+	r.guard.AlertFloor(bal)
+	return bal, nil
+}
+
+// requireFee refuses a prepared relay the relayer cannot pay for: its gas
+// limit at its gas price, times gasFeeBuffer.
+func (r *RelayerService) requireFee(balance *big.Int, unsigned []byte) error {
+	var u blockchain.UnsignedTx
+	if err := json.Unmarshal(unsigned, &u); err != nil {
+		return fmt.Errorf("relayer: read the prepared tx: %w", err)
 	}
-	return nil
+	price, ok := new(big.Int).SetString(u.GasPrice, 10)
+	if !ok {
+		// A builder that sets no price (a test fake) cannot be priced; the
+		// node refuses an unpayable send as a definite "insufficient funds".
+		return nil
+	}
+	return r.guard.RequireFee(balance, feeNeed(u.GasLimit, price, nil))
 }
 
 // simulate runs the exact call through eth_call first. A revert here means the

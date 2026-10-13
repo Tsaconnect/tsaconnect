@@ -316,7 +316,7 @@ func (t *Treasury) requireGas(ctx context.Context, lane *TreasuryLane, units uin
 	if err != nil {
 		return fmt.Errorf("treasury: read native balance: %w", err)
 	}
-	_ = lane.Guard.CheckFloor(bal) // a refill warning, not a stop
+	lane.Guard.AlertFloor(bal) // a refill warning, not a stop
 	cost, err := lane.gasCost(units)
 	if err != nil {
 		return fmt.Errorf("treasury: %w", err)

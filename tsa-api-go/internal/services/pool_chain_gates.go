@@ -20,6 +20,7 @@ type PoolChainReader interface {
 	CallContract(ctx context.Context, call ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 	CodeAt(ctx context.Context, account common.Address, blockNumber *big.Int) ([]byte, error)
 	BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+	SuggestGasPrice(ctx context.Context) (*big.Int, error)
 }
 
 // PoolChainGatesConfig is everything the TSA Liquidity boot gates read
@@ -58,7 +59,7 @@ type PoolGate interface {
 	Status() PoolGateStatus
 	Check(ctx context.Context) PoolGateStatus
 	Close(reason string)
-	ReleaseGasOK(ctx context.Context) bool
+	ReleaseGasOK(ctx context.Context, releases int) bool
 	ReprobeReceipts(ctx context.Context)
 	Enabled() bool
 	FloatBalances(ctx context.Context) ([]SponsorFloat, error)
@@ -286,9 +287,38 @@ func (g *PoolChainGates) FloatBalances(ctx context.Context) ([]SponsorFloat, err
 	return []SponsorFloat{{Chain: g.c.ChainKey, Address: g.c.ReleaseAdmin, BalanceWei: bal, FloorWei: g.c.ReleaseGasFloorWei}}, nil
 }
 
+// poolReleaseCallGas budgets one adminRelease of a slice from the release key:
+// the same allowance the treasury makes for one escrow call.
+const poolReleaseCallGas = treasuryEscrowCallGas
+
 // ReleaseGasOK: paid orders must always be able to release, so a pool open is
-// refused below the floor (Plan C1 calls this).
-func (g *PoolChainGates) ReleaseGasOK(ctx context.Context) bool {
+// refused unless the release key can pay for `releases` adminRelease calls at
+// today's gas price (times gasFeeBuffer). The release floor is alert-only
+// (owner 2026-10-13): below it this logs the refill ALERT and the gas float
+// monitor keeps alerting, but the pool stays open while the key can pay.
+func (g *PoolChainGates) ReleaseGasOK(ctx context.Context, releases int) bool {
 	fl, err := g.FloatBalances(ctx)
-	return err == nil && len(fl) == 1 && fl[0].BalanceWei != nil && fl[0].BalanceWei.Cmp(fl[0].FloorWei) >= 0
+	if err != nil || len(fl) != 1 || fl[0].BalanceWei == nil {
+		return false
+	}
+	bal := fl[0].BalanceWei
+	if bal.Cmp(fl[0].FloorWei) < 0 {
+		log.Printf("[liquidity] ALERT liquidity_pool_release_below_floor_total=1 chain=%s address=%s balance_wei=%s floor_wei=%s — refill; opens continue while the key can pay its releases",
+			g.c.ChainKey, g.c.ReleaseAdmin, bal, fl[0].FloorWei)
+	}
+	price, err := g.c.Chain.SuggestGasPrice(ctx)
+	if err != nil || price == nil {
+		log.Printf("[liquidity] release gas price on %s unreadable: %s", g.c.ChainKey, RedactAlertText(fmt.Sprint(err)))
+		return false
+	}
+	if releases < 1 {
+		releases = 1
+	}
+	need := feeNeed(poolReleaseCallGas*uint64(releases), price, nil)
+	if bal.Cmp(need) < 0 {
+		log.Printf("[liquidity] ALERT liquidity_pool_release_gas_short_total=1 chain=%s address=%s balance_wei=%s needed_wei=%s releases=%d",
+			g.c.ChainKey, g.c.ReleaseAdmin, bal, need, releases)
+		return false
+	}
+	return true
 }

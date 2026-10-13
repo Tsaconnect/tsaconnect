@@ -12,14 +12,15 @@ import (
 	"gorm.io/gorm"
 )
 
-// PoolLegOpen: the pool can take a naira buy now — wired, gates open, release
-// gas above its floor, central account active, not stopped (§11.1 RampLegs).
+// PoolLegOpen: the pool can take a naira buy now — wired, gates open, the
+// release key able to pay an order's releases, central account active, not
+// stopped (§11.1 RampLegs).
 func (s *ITService) PoolLegOpen(ctx context.Context) bool {
 	if !s.HasPool() || s.payInChannelNow() != PayInCentral || CurrentPoolSettings().OrdersStopped {
 		return false
 	}
 	d := s.poolDesk
-	return d.c.Gates.Open() && d.c.Gates.ReleaseGasOK(ctx)
+	return d.c.Gates.Open() && d.c.Gates.ReleaseGasOK(ctx, CurrentPoolSettings().SliceCap)
 }
 
 // PoolVenue is the pool's one direct venue: its chain key and token.
