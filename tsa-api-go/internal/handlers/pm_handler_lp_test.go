@@ -213,3 +213,60 @@ func TestApproveLPRequest_LiveRowIsNeverARetry(t *testing.T) {
 		t.Fatalf("row = %+v: the re-approval overwrote the verified settlement name", raw)
 	}
 }
+
+// Owner 2026-10-13: the top level describes the merchant row, and the lp block
+// the LP row, for a user who holds both.
+func TestGetMyPMStatus_DualRoleTopLevelIsMerchantAndLPBlockIsLP(t *testing.T) {
+	user := testRegularUser()
+	lp := approvedLPRow(user.ID)
+	merchant := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Kind: models.PaymentMerchantKindMerchant, Status: models.PaymentMerchantStatusActive}
+	h := &PMHandler{auto: &fakePMAutomation{}}
+	h.pmStatus = &fakePMStatusGetter{pm: merchant, lp: lp}
+	h.SetLPActivator(&fakeLPActivator{})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/p2p/pm/me", nil)
+	buildPMStatusRouter(h, user).ServeHTTP(w, req)
+	var resp struct {
+		Data struct {
+			IsPm   bool   `json:"isPm"`
+			Status string `json:"status"`
+			Kind   string `json:"kind"`
+			LP     *struct {
+				Status      string `json:"status"`
+				PoolChainID *int64 `json:"poolChainId"`
+			} `json:"lp"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	d := resp.Data
+	if !d.IsPm || d.Status != "active" || d.Kind != "merchant" || d.LP == nil || d.LP.Status != "approved" || d.LP.PoolChainID == nil {
+		t.Fatalf("status = %+v lp = %+v", d, d.LP)
+	}
+}
+
+func TestActivatePM_KindQueryPicksTheRole(t *testing.T) {
+	user := testRegularUser()
+	lp := approvedLPRow(user.ID)
+	merchant := &models.PaymentMerchant{ID: uuid.New(), UserID: user.ID, Kind: models.PaymentMerchantKindMerchant, Status: models.PaymentMerchantStatusApproved}
+	for _, tc := range []struct {
+		query           string
+		wantLP, wantMer int
+		status          int
+	}{
+		{"?kind=lp", 1, 0, http.StatusOK},
+		{"?kind=merchant", 0, 1, http.StatusOK},
+		{"", 0, 1, http.StatusOK}, // no kind: the merchant row, as today
+		{"?kind=bogus", 0, 0, http.StatusBadRequest},
+	} {
+		lpAct := &fakeLPActivator{out: lp}
+		merAct := &fakePMActivator{out: merchant, noIdentity: true}
+		h := &PMHandler{auto: &fakePMAutomation{}}
+		h.pmStatus = &fakePMStatusGetter{pm: merchant, lp: lp}
+		h.SetActivator(merAct)
+		h.SetLPActivator(lpAct)
+		w := activatePostPath(buildActivateRouter(h, user), "/p2p/pm/activate"+tc.query, `{}`)
+		if w.Code != tc.status || lpAct.calls != tc.wantLP || merAct.calls != tc.wantMer {
+			t.Fatalf("%q: code=%d lp=%d merchant=%d", tc.query, w.Code, lpAct.calls, merAct.calls)
+		}
+	}
+}

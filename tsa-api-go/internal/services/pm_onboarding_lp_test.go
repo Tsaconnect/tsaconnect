@@ -48,22 +48,30 @@ func TestApproveFromRequest_LPNeedsAPoolChain(t *testing.T) {
 	}
 }
 
-// Roadmap risk 4: never both a merchant and an LP.
-func TestApproveFromRequest_KindConflictRefused(t *testing.T) {
+// Owner 2026-10-13: one user may hold both roles, each in its own row.
+func TestApproveFromRequest_MerchantThenLPMakesTwoRowsLeavingTheMerchantAlone(t *testing.T) {
 	db := newSQLiteForOnboarding(t)
 	svc := NewPMOnboardingService(db, nil)
 	svc.SetLiquidity(97, nil, nil)
 	userID := uuid.New()
-	if _, err := svc.ApproveFromRequest(context.Background(), fakeMerchantRequest(userID)); err != nil {
+	m, err := svc.ApproveFromRequest(context.Background(), fakeMerchantRequest(userID))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(userID)); !errors.Is(err, ErrPMKindConflict) {
-		t.Fatalf("err = %v, want ErrPMKindConflict", err)
+	db.Model(m).Update("status", models.PaymentMerchantStatusActive)
+	lp, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(userID))
+	if err != nil || !lp.IsLP() || lp.ID == m.ID {
+		t.Fatalf("lp = %+v err = %v", lp, err)
 	}
-	var n int64
-	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", userID).Count(&n)
-	if n != 1 {
-		t.Fatalf("%d rows for the user, want 1", n)
+	var after models.PaymentMerchant
+	db.First(&after, "id = ?", m.ID)
+	if after.Status != models.PaymentMerchantStatusActive || after.SettlementAccountName != m.SettlementAccountName || after.IsLP() {
+		t.Fatalf("merchant row changed by the LP approval: %+v", after)
+	}
+	// Re-approving the LP request reuses the LP row, never the merchant row.
+	again, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(userID))
+	if err != nil || again.ID != lp.ID {
+		t.Fatalf("re-approve = %v %v", again, err)
 	}
 }
 
@@ -132,14 +140,39 @@ func TestApprovePM_RefusesAnLPRow(t *testing.T) {
 }
 
 type fakeAccounts struct {
-	name  string
-	err   error
-	calls int
+	name          string
+	err           error
+	calls         int
+	bank, account string // the last Resolve call
 }
 
-func (f *fakeAccounts) Resolve(_ context.Context, _, _ string) (NombaLookupResult, error) {
+func (f *fakeAccounts) Resolve(_ context.Context, bank, account string) (NombaLookupResult, error) {
 	f.calls++
+	f.bank, f.account = bank, account
 	return NombaLookupResult{AccountName: f.name}, f.err
+}
+
+// Owner 2026-10-13: a dual user's LP activation checks the LP's own settlement
+// account (bank lookup and S34 name match), never the merchant's, and leaves
+// the merchant row alone. A guard: ActivateLP already resolves by row id.
+func TestActivateLP_DualUserUsesOwnSettlementBankNotMerchants(t *testing.T) {
+	svc, acc, userID, lp := lpOnboarding(t, "ADA OBI", true)
+	m := &models.PaymentMerchant{ID: uuid.New(), UserID: userID, Name: "Ada Foods Ltd", Kind: models.PaymentMerchantKindMerchant,
+		Status: models.PaymentMerchantStatusActive, SettlementBankCode: "044", SettlementAccountNumber: "9999999999",
+		SettlementAccountName: "ADA FOODS LTD"}
+	svc.db.Create(m)
+	out, err := svc.ActivateLP(context.Background(), lp.ID, userID) // KYC is the user's, already verified
+	if err != nil || out.Status != models.PaymentMerchantStatusActive {
+		t.Fatalf("activate = %+v %v", out, err)
+	}
+	if acc.account != lp.SettlementAccountNumber || acc.bank != lp.SettlementBankCode || acc.account == m.SettlementAccountNumber {
+		t.Fatalf("resolved %s/%s, want the LP's %s/%s", acc.bank, acc.account, lp.SettlementBankCode, lp.SettlementAccountNumber)
+	}
+	var after models.PaymentMerchant
+	svc.db.First(&after, "id = ?", m.ID)
+	if after.SettlementAccountName != "ADA FOODS LTD" || after.SettlementAccountNumber != "9999999999" || after.Status != models.PaymentMerchantStatusActive {
+		t.Fatalf("merchant row touched by LP activation: %+v", after)
+	}
 }
 
 // approvedLP: an approved LP for a Didit-verified user (legal name ADA OBI).
@@ -462,5 +495,50 @@ func TestApproveFromRequest_WaitsOnTheUserRowLock_OnPostgres(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("a key-share lock on the user row stalled the approval")
+	}
+}
+
+// companyRow seeds IT_PM_ID's merchant row for userID and pins it on svc.
+func companyRow(t *testing.T, svc *PMOnboardingService, userID uuid.UUID) {
+	t.Helper()
+	pm := &models.PaymentMerchant{ID: uuid.New(), UserID: userID, Name: "TSA", Status: models.PaymentMerchantStatusActive}
+	if err := svc.db.Create(pm).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc.SetCompanyPMID(pm.ID.String())
+}
+
+// Review M5: the company PM's user (the slice buyer) is never an LP, so the
+// pool can never sit on both sides of a slice.
+func TestApproveFromRequest_CompanyUserCannotBeLP(t *testing.T) {
+	db := newSQLiteForOnboarding(t)
+	svc := NewPMOnboardingService(db, nil)
+	svc.SetLiquidity(97, nil, nil)
+	userID := uuid.New()
+	companyRow(t, svc, userID)
+	if _, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(userID)); !errors.Is(err, ErrCompanyUserCannotBeLP) {
+		t.Fatalf("err = %v, want ErrCompanyUserCannotBeLP", err)
+	}
+	var n int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ? AND kind = ?", userID, models.PaymentMerchantKindLP).Count(&n)
+	if n != 0 {
+		t.Fatalf("LP rows = %d, want none for the company user", n)
+	}
+	// Another user is unaffected.
+	if _, err := svc.ApproveFromRequest(context.Background(), fakeLPRequest(uuid.New())); err != nil {
+		t.Fatalf("other user's LP approval: %v", err)
+	}
+}
+
+func TestActivateLP_RefusesTheCompanyUser(t *testing.T) {
+	svc, acc, userID, lp := lpOnboarding(t, "ADA OBI", true)
+	companyRow(t, svc, userID) // IT_PM_ID repointed after the LP was approved
+	if _, err := svc.ActivateLP(context.Background(), lp.ID, userID); !errors.Is(err, ErrCompanyUserCannotBeLP) || acc.calls != 0 {
+		t.Fatalf("err=%v resolves=%d, want ErrCompanyUserCannotBeLP before any bank call", err, acc.calls)
+	}
+	var raw models.PaymentMerchant
+	svc.db.First(&raw, "id = ?", lp.ID)
+	if raw.Status != models.PaymentMerchantStatusApproved {
+		t.Fatalf("status = %s: the company user went live as an LP", raw.Status)
 	}
 }

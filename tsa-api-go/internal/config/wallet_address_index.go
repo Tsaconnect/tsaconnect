@@ -91,33 +91,12 @@ func migrateWalletAddressUniqueness(db *gorm.DB) {
 
 func isPostgres(db *gorm.DB) bool { return db.Dialector.Name() == "postgres" }
 
-// walletAddressCIIndexReady: the index exists and — on Postgres, where a failed
-// CONCURRENTLY build leaves an INVALID index behind — is usable.
 func walletAddressCIIndexReady(db *gorm.DB) bool {
-	if isPostgres(db) {
-		var valid bool
-		err := db.Raw(`SELECT COALESCE(bool_and(i.indisvalid), false)
-			FROM pg_index i
-			JOIN pg_class c ON c.oid = i.indexrelid
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE c.relname = ? AND n.nspname = current_schema()`, walletAddressCIIndex).Scan(&valid).Error
-		return err == nil && valid
-	}
-	return db.Migrator().HasIndex("users", walletAddressCIIndex)
+	return uniqueIndexReady(db, "users", walletAddressCIIndex)
 }
 
 func buildWalletAddressCIIndex(db *gorm.DB) error {
-	const on = ` ON users (LOWER(wallet_address)) WHERE wallet_address <> ''`
-	if !isPostgres(db) {
-		return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS ` + walletAddressCIIndex + on).Error
-	}
-	// An INVALID leftover from an interrupted build would satisfy IF NOT EXISTS
-	// and never enforce anything; drop it first. CONCURRENTLY cannot run inside
-	// a transaction — AutoMigrate's Exec calls are not in one.
-	if err := db.Exec(`DROP INDEX CONCURRENTLY IF EXISTS ` + walletAddressCIIndex).Error; err != nil {
-		return err
-	}
-	return db.Exec(`CREATE UNIQUE INDEX CONCURRENTLY ` + walletAddressCIIndex + on).Error
+	return buildUniqueIndex(db, walletAddressCIIndex, ` ON users (LOWER(wallet_address)) WHERE wallet_address <> ''`)
 }
 
 func keepLegacyWalletAddressIndex(db *gorm.DB) {

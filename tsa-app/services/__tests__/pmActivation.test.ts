@@ -65,4 +65,28 @@ describe('activatePmAccount', () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse(init.body)).toEqual({ idType: 'BVN', idNumber: '22233344455' });
   });
+
+  it('names the role in the query when asked to (one user may hold both)', async () => {
+    respond({ status: 'active' });
+    await activatePmAccount(undefined, undefined, 'lp');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toMatch(/\/p2p\/pm\/activate\?kind=lp$/);
+    expect(JSON.parse(init.body)).toEqual({});
+  });
+
+  it('sends no kind when none is given', async () => {
+    respond({ status: 'active' });
+    await activatePmAccount();
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).not.toContain('kind=');
+  });
+});
+
+describe('getMyPmStatus lp block', () => {
+  it('passes through the LP role alongside the merchant top level', async () => {
+    respond({ isPm: true, status: 'active', kind: 'merchant', lp: { status: 'approved', poolChainId: 56 } });
+    const s = await getMyPmStatus();
+    expect(s.kind).toBe('merchant');
+    expect(s.lp).toEqual({ status: 'approved', poolChainId: 56 });
+  });
 });

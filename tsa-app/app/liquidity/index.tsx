@@ -110,7 +110,7 @@ export default function LiquidityScreen() {
           <Card padding="md" style={{ gap: spacing.sm }}>
             <Text variant="bodyMed" weight="700">You&apos;re approved</Text>
             <Text variant="caption" color="textSecondary">Activate to start adding {sym}.</Text>
-            <Button title="Activate" variant="primary" onPress={() => router.push('/merchants/activate-pm' as never)} />
+            <Button title="Activate" variant="primary" onPress={() => router.push('/merchants/activate-pm?role=lp' as never)} />
           </Card>
         )}
         {(stage === 'active' || stage === 'paused') && (

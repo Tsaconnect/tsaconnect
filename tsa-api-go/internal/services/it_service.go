@@ -278,21 +278,18 @@ func (s *ITService) CompanyPM(ctx context.Context) (*models.PaymentMerchant, err
 	// IT ALWAYS uses the explicitly-configured IT_PM_ID — never auto-pick another
 	// merchant. If it's unset or not an active PM with an inbound account, return
 	// nil so callers surface "payments unavailable" rather than misrouting funds.
-	if s.companyPMID == "" {
-		return nil, nil
-	}
-	var pm models.PaymentMerchant
-	err := s.db.WithContext(ctx).
-		Where("id = ? AND status = ? AND inbound_account_number <> ''",
-			s.companyPMID, models.PaymentMerchantStatusActive).
-		First(&pm).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	// LoadCompanyPM also refuses an LP row (review M4).
+	pm, err := LoadCompanyPM(ctx, s.db, s.companyPMID)
+	if errors.Is(err, ErrCompanyPMUnusable) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &pm, nil
+	if pm.InboundAccountNumber == "" {
+		return nil, nil
+	}
+	return pm, nil
 }
 
 // ─────────────────────────────── rate ─────────────────────────────────────

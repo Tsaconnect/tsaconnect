@@ -164,11 +164,11 @@ func (s *P2PTradeService) ChainsFor(ctx context.Context, userID uuid.UUID) []P2P
 	return append(chains, P2PChainInfo{ChainID: pool.ChainID, Assets: pool.Assets, Purpose: config.P2PPurposePool, Decimals: pool.Decimals})
 }
 
-// lpBoundTo reports whether the user's PM row, any status, is an LP on chainID.
+// lpBoundTo reports whether the user's LP row, any status, is on chainID.
 func (s *P2PTradeService) lpBoundTo(ctx context.Context, userID uuid.UUID, chainID int64) bool {
 	if s.pm == nil {
 		return false
 	}
-	row, err := s.pm.GetByUserID(ctx, userID)
-	return err == nil && row.IsLP() && row.PoolChainID != nil && *row.PoolChainID == chainID
+	row, err := s.pm.GetByUserIDKind(ctx, userID, models.PaymentMerchantKindLP)
+	return err == nil && row.PoolChainID != nil && *row.PoolChainID == chainID
 }

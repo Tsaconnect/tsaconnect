@@ -403,12 +403,12 @@ func AutoMigrate() error {
 	         WHERE provider = 'bank_transfer'
 	           AND lower(bank_name) LIKE '%kuda%'`)
 
-	// One PM per user: the upsert in PMOnboardingService relies on ON CONFLICT on
-	// user_id, which requires a unique constraint (not just a non-unique index).
-	// Idempotent — IF NOT EXISTS keeps repeat boots safe. At most one row exists
-	// (the TSA seed) so there is no uniqueness violation to worry about.
-	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_merchants_user
-	    ON payment_merchants (user_id)`)
+	// One row per (user, role): a user may be both a payment merchant and an
+	// LP (owner, 2026-10-13). Built CONCURRENTLY on the live table; the old
+	// one-per-user index is dropped only by deploy/one-off/2026-10-13-…sql.
+	if err := MigratePaymentMerchantRoleIndex(DB); err != nil {
+		log.Printf("[Migrate] WARNING %s: %v — a second role cannot be added until it exists", PaymentMerchantRoleIndexName, err)
+	}
 
 	// PM (payment-merchant) inbound account must be unique — PMAutomationService
 	// resolves the PM by destination account on every inbound Nomba credit
@@ -682,4 +682,16 @@ func MigratePoolSliceIndexes(db *gorm.DB) error {
 	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pool_slice_per_order_gen_ad
 	    ON p2p_trades (it_intent_id, generation, ad_id)
 	    WHERE it_intent_id IS NOT NULL AND status <> 'cancelled'`).Error
+}
+
+// PaymentMerchantRoleIndexName keeps one payment_merchants row per (user, kind).
+const PaymentMerchantRoleIndexName = "uq_payment_merchants_user_kind"
+
+// MigratePaymentMerchantRoleIndex builds the role index without locking out
+// writes, rebuilding an INVALID leftover. Returns at once when it is ready.
+func MigratePaymentMerchantRoleIndex(db *gorm.DB) error {
+	if uniqueIndexReady(db, "payment_merchants", PaymentMerchantRoleIndexName) {
+		return nil
+	}
+	return buildUniqueIndex(db, PaymentMerchantRoleIndexName, ` ON payment_merchants (user_id, kind)`)
 }

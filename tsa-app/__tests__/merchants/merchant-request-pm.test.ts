@@ -29,6 +29,7 @@ import {
   initBusinessType,
   isPickerLocked,
   resolveMerchantGate,
+  requestTypeFilter,
   type PmFields,
 } from '@/app/merchants/merchant-request';
 
@@ -489,5 +490,32 @@ describe('rejected → Apply Again: businessType stays in PM mode', () => {
     expect(businessType).toBe('p2p_merchant');
     // And the picker must still be locked
     expect(isPickerLocked('p2p_merchant')).toBe(true);
+  });
+});
+
+// ─── one user, two roles (owner, 2026-10-13) ─────────────────────────────────
+//
+// The add-on forms gate on a request of their OWN type, fetched with
+// my-request?type=, so a newer approved p2p_merchant request never hides a
+// pending LP application (and vice versa).
+
+describe('requestTypeFilter', () => {
+  it('filters by the add-on types', () => {
+    for (const t of ['p2p_merchant', 'payment_acceptance', 'liquidity_provider']) {
+      expect(requestTypeFilter(t)).toBe(t);
+    }
+  });
+  it('does not filter the general types', () => {
+    for (const t of ['general_products', 'digital_products', 'service_provider', '']) {
+      expect(requestTypeFilter(t)).toBeUndefined();
+    }
+  });
+});
+
+describe('resolveMerchantGate — LP form with its own typed request', () => {
+  it('a pending LP request shows the LP pending screen', () => {
+    const existingRequest = { status: 'pending', businessType: 'liquidity_provider' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'liquidity_provider', pmActive: true }))
+      .toEqual({ screen: 'pending', pm: false, lp: true });
   });
 });

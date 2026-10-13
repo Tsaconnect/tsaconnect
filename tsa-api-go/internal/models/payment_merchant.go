@@ -18,7 +18,7 @@ const (
 
 // Payment-merchant kinds (TSA Liquidity spec §7.1, decision 11). An LP is a
 // PaymentMerchant of kind lp: the same request → approval → activation path.
-// uq_payment_merchants_user keeps one row per user, so never both.
+// uq_payment_merchants_user_kind keeps one row per (user, kind): a user may hold both (owner, 2026-10-13).
 const (
 	PaymentMerchantKindMerchant = "merchant"
 	PaymentMerchantKindLP       = "lp"

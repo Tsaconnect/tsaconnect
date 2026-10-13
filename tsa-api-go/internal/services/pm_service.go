@@ -83,32 +83,57 @@ func (s *PMService) GetByAccountRef(ctx context.Context, ref string) (*models.Pa
 	return &pm, nil
 }
 
-// GetActiveByUserID looks up the ACTIVE PaymentMerchant whose UserID matches
-// the given user. Non-active rows (pending, paused) are not returned.
-// Returns ErrPMNotFound when no active PM row exists for the user.
-func (s *PMService) GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
-	var pm models.PaymentMerchant
-	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive).
-		First(&pm).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrPMNotFound
+// wherePMKind narrows q to one kind. Anything but lp reads as merchant, the
+// column default — the one kind rule every per-role read shares.
+func wherePMKind(q *gorm.DB, kind string) *gorm.DB {
+	if kind == models.PaymentMerchantKindLP {
+		return q.Where("kind = ?", models.PaymentMerchantKindLP)
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &pm, nil
+	return q.Where("kind <> ?", models.PaymentMerchantKindLP)
 }
 
-// GetActiveByUserIDKind is GetActiveByUserID limited to one kind. Anything
-// but lp reads as merchant, the column default.
+// GetActiveByUserIDKind is the user's ACTIVE row of one kind.
 func (s *PMService) GetActiveByUserIDKind(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
-	q := s.db.WithContext(ctx).Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive)
-	if kind == models.PaymentMerchantKindLP {
-		q = q.Where("kind = ?", models.PaymentMerchantKindLP)
-	} else {
-		q = q.Where("kind <> ?", models.PaymentMerchantKindLP)
+	q := wherePMKind(s.db.WithContext(ctx).Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive), kind)
+	return firstPM(q)
+}
+
+// GetByUserIDKind is the user's row of one kind, any status. A user holds at
+// most one row per kind (uq_payment_merchants_user_kind); a merchant read
+// never returns the LP row, nor an LP read the merchant row.
+func (s *PMService) GetByUserIDKind(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
+	return firstPM(wherePMKind(s.db.WithContext(ctx).Where("user_id = ?", userID), kind).Order("created_at DESC"))
+}
+
+// GetRolesByUserID is the user's merchant and LP rows (either may be nil) in
+// one read; the kind split is wherePMKind's rule (anything but lp is merchant).
+func (s *PMService) GetRolesByUserID(ctx context.Context, userID uuid.UUID) (merchant, lp *models.PaymentMerchant, err error) {
+	var rows []models.PaymentMerchant
+	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at DESC").Find(&rows).Error; err != nil {
+		return nil, nil, err
 	}
+	for i := range rows {
+		row := &rows[i]
+		switch {
+		case row.IsLP() && lp == nil:
+			lp = row
+		case !row.IsLP() && merchant == nil:
+			merchant = row
+		}
+	}
+	return merchant, lp, nil
+}
+
+// OptionalPM reads a by-user lookup's not-found as "no row" (nil, nil); any
+// other error is returned, never read as "no row".
+func OptionalPM(row *models.PaymentMerchant, err error) (*models.PaymentMerchant, error) {
+	if errors.Is(err, ErrPMNotFound) {
+		return nil, nil
+	}
+	return row, err
+}
+
+func firstPM(q *gorm.DB) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
 	err := q.First(&pm).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -126,25 +151,6 @@ func (s *PMService) LPIDs(ctx context.Context) ([]uuid.UUID, error) {
 	err := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
 		Where("kind = ?", models.PaymentMerchantKindLP).Pluck("id", &ids).Error
 	return ids, err
-}
-
-// GetByUserID looks up the most recent PaymentMerchant for a user regardless of
-// status (pending/approved/active/paused/rejected). Used by the status read so
-// the app can distinguish "approved, needs activation" from "active".
-// Returns ErrPMNotFound when the user has no PM row.
-func (s *PMService) GetByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
-	var pm models.PaymentMerchant
-	err := s.db.WithContext(ctx).
-		Where("user_id = ?", userID).
-		Order("created_at DESC").
-		First(&pm).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrPMNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &pm, nil
 }
 
 // GetByID looks up a PM by its primary key UUID.
@@ -410,12 +416,8 @@ func (s *PMService) ListAll(ctx context.Context) ([]models.PaymentMerchant, erro
 // ListByKind is ListAll narrowed to one kind ("" = every row).
 func (s *PMService) ListByKind(ctx context.Context, kind string) ([]models.PaymentMerchant, error) {
 	q := s.db.WithContext(ctx).Order("created_at DESC")
-	switch kind {
-	case "":
-	case models.PaymentMerchantKindLP:
-		q = q.Where("kind = ?", models.PaymentMerchantKindLP)
-	default:
-		q = q.Where("kind <> ?", models.PaymentMerchantKindLP)
+	if kind != "" {
+		q = wherePMKind(q, kind)
 	}
 	pms := []models.PaymentMerchant{}
 	if err := q.Find(&pms).Error; err != nil {

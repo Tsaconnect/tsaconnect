@@ -680,12 +680,28 @@ func TestPMHandler_ListPMs_NilService(t *testing.T) {
 // fakePMStatusGetter is a narrow fake for the PMStatusGetter interface used by
 // GetMyPMStatus; avoids depending on the full PMService.
 type fakePMStatusGetter struct {
-	pm  *models.PaymentMerchant
+	pm  *models.PaymentMerchant // either kind; served on the read of its own kind
+	lp  *models.PaymentMerchant // a second, LP, row for dual-role tests
 	err error
 }
 
-func (f *fakePMStatusGetter) GetByUserID(_ context.Context, _ uuid.UUID) (*models.PaymentMerchant, error) {
-	return f.pm, f.err
+func (f *fakePMStatusGetter) GetRolesByUserID(_ context.Context, _ uuid.UUID) (merchant, lp *models.PaymentMerchant, err error) {
+	if errors.Is(f.err, services.ErrPMNotFound) {
+		return nil, nil, nil // the real read returns no rows, never ErrPMNotFound
+	}
+	if f.err != nil {
+		return nil, nil, f.err
+	}
+	for _, row := range []*models.PaymentMerchant{f.pm, f.lp} {
+		switch {
+		case row == nil:
+		case row.IsLP():
+			lp = row
+		default:
+			merchant = row
+		}
+	}
+	return merchant, lp, nil
 }
 
 // buildPMStatusRouter wires a GET /p2p/pm/me route and injects the given user
@@ -1153,8 +1169,12 @@ func buildActivateRouter(h *PMHandler, user *models.User) *gin.Engine {
 }
 
 func activatePost(router *gin.Engine, body string) *httptest.ResponseRecorder {
+	return activatePostPath(router, "/p2p/pm/activate", body)
+}
+
+func activatePostPath(router *gin.Engine, path, body string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/p2p/pm/activate", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", path, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, req)
 	return w

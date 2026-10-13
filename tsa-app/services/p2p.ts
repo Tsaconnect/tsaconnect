@@ -880,6 +880,16 @@ export interface MyPmStatus {
   activationNeedsSettlementMatch?: boolean;
   /** Whether TSA Liquidity is configured and open for applications. */
   liquidityAvailable?: boolean;
+  /**
+   * The caller's LP row, whatever the top level shows. The top level is the
+   * merchant row when there is one (owner, 2026-10-13: one user may hold both).
+   */
+  lp?: MyLpRole;
+}
+
+export interface MyLpRole {
+  status: string;
+  poolChainId?: number;
 }
 
 const NO_PM: MyPmStatus = { isPm: false, status: '', activationNeedsId: true };
@@ -902,6 +912,7 @@ export async function getMyPmStatus(): Promise<MyPmStatus> {
       poolChainId?: number;
       activationNeedsSettlementMatch?: boolean;
       liquidityAvailable?: boolean;
+      lp?: MyLpRole;
     }>(
       'GET',
       '/p2p/pm/me'
@@ -915,6 +926,7 @@ export async function getMyPmStatus(): Promise<MyPmStatus> {
         poolChainId: res.data.poolChainId,
         activationNeedsSettlementMatch: res.data.activationNeedsSettlementMatch,
         liquidityAvailable: res.data.liquidityAvailable,
+        ...(res.data.lp ? { lp: res.data.lp } : {}),
       };
     }
     return NO_PM;
@@ -933,12 +945,15 @@ export type PmIdType = 'BVN' | 'NIN';
  * false) call it with no arguments: nothing is minted and no id is sent. On
  * success the caller's PM flips to `active`.
  *
+ * `kind` names the role to activate for a user who holds both; without it the
+ * API activates the merchant row if there is one, else the LP row.
+ *
  * Returns the raw ApiResponse so the caller can surface the server message on
  * validation (400) / not-approved (409) / not-found (404) errors.
  */
-export function activatePmAccount(idType?: PmIdType, idNumber?: string) {
+export function activatePmAccount(idType?: PmIdType, idNumber?: string, kind?: 'merchant' | 'lp') {
   const body = idType && idNumber ? { idType, idNumber: idNumber.trim() } : {};
-  return request<{ status: string }>('POST', '/p2p/pm/activate', body);
+  return request<{ status: string }>('POST', '/p2p/pm/activate', body, kind ? { query: { kind } } : undefined);
 }
 
 // ─── Sellers ────────────────────────────────────────────────────────────────

@@ -36,12 +36,19 @@ jest.mock('@/components/ui', () => {
     Spinner: () => null,
   };
 });
-jest.mock('expo-router', () => ({
-  __esModule: true,
-  router: { replace: jest.fn() },
-  Stack: { Screen: () => null },
-}));
-const mockStatus = { isPm: false, status: 'approved', activationNeedsId: true, loading: false, reload: jest.fn() };
+const mockParams: { role?: string } = {};
+jest.mock('expo-router', () => {
+  const react = jest.requireActual('react');
+  const { Text: RNText } = jest.requireActual('react-native');
+  return {
+    __esModule: true,
+    router: { replace: jest.fn() },
+    useLocalSearchParams: () => mockParams,
+    Stack: { Screen: (props: any) => react.createElement(RNText, { accessibilityLabel: 'title' }, props.options?.title) },
+  };
+});
+const mockStatus: { isPm: boolean; status: string; activationNeedsId: boolean; kind?: string; loading: boolean; reload: jest.Mock } =
+  { isPm: false, status: 'approved', activationNeedsId: true, loading: false, reload: jest.fn() };
 jest.mock('@/hooks/useIsPaymentMerchant', () => ({
   __esModule: true,
   useIsPaymentMerchant: () => mockStatus,
@@ -73,6 +80,8 @@ async function render() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  delete mockParams.role;
+  mockStatus.kind = undefined;
   jest.spyOn(Alert, 'alert').mockImplementation(() => {});
 });
 
@@ -95,7 +104,7 @@ describe('ActivatePmScreen', () => {
     await act(async () => {
       await button.props.onPress();
     });
-    expect(activatePmAccount).toHaveBeenCalledWith();
+    expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, undefined);
   });
 
   it('sends an unverified merchant to verification instead of a generic failure', async () => {
@@ -115,5 +124,47 @@ describe('ActivatePmScreen', () => {
       'Verify your identity before activating as a payment merchant'
     );
     expect(Alert.alert).not.toHaveBeenCalledWith('Activation failed', expect.anything());
+  });
+
+  // One user may hold both roles (owner, 2026-10-13): the role param, not the
+  // top-level kind, says which row this screen activates.
+  it('activates the LP role of a merchant who is also an LP', async () => {
+    mockParams.role = 'lp';
+    mockStatus.kind = 'merchant';
+    mockStatus.activationNeedsId = true;
+    await render();
+    const [title] = tree.root.findAll((n) => n.props.accessibilityLabel === 'title');
+    expect(title.props.children).toBe('Activate liquidity provider');
+    expect(idInputs()).toHaveLength(0);
+    const [button] = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Activate');
+    await act(async () => {
+      await button.props.onPress();
+    });
+    expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, 'lp');
+  });
+
+  it('sends no kind when no role is named', async () => {
+    mockStatus.kind = 'merchant';
+    mockStatus.activationNeedsId = false;
+    await render();
+    const [button] = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Activate');
+    await act(async () => {
+      await button.props.onPress();
+    });
+    expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, undefined);
+  });
+
+  it('activates the merchant role when named, even for an LP-only top level', async () => {
+    mockParams.role = 'merchant';
+    mockStatus.kind = 'lp';
+    mockStatus.activationNeedsId = false;
+    await render();
+    const [title] = tree.root.findAll((n) => n.props.accessibilityLabel === 'title');
+    expect(title.props.children).toBe('Activate Payment Merchant');
+    const [button] = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Activate');
+    await act(async () => {
+      await button.props.onPress();
+    });
+    expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, 'merchant');
   });
 });

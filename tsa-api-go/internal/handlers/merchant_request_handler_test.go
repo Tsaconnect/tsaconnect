@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE IF NOT EXISTS payment_merchants (
 			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL UNIQUE,
+			user_id TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'pending',
 			kind TEXT NOT NULL DEFAULT 'merchant', pool_chain_id INTEGER,
@@ -115,7 +116,8 @@ func setupMerchantTestDB(t *testing.T) *gorm.DB {
 			reviewed_at DATETIME,
 			review_note TEXT,
 			created_at DATETIME,
-			updated_at DATETIME
+			updated_at DATETIME,
+			UNIQUE (user_id, kind)
 		)`,
 	}
 	for _, s := range sqls {
@@ -162,8 +164,12 @@ func createMerchantTestUser(t *testing.T, db *gorm.DB, role string) *models.User
 	return user
 }
 
+// ginTestMode sets gin's global mode once: the race tests build contexts from
+// several goroutines, and gin.SetMode is an unguarded global write.
+var ginTestMode sync.Once
+
 func newMerchantContext(method, path string, body interface{}, user *models.User) (*httptest.ResponseRecorder, *gin.Context) {
-	gin.SetMode(gin.TestMode)
+	ginTestMode.Do(func() { gin.SetMode(gin.TestMode) })
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	var reqBody []byte
@@ -1136,7 +1142,7 @@ func TestSubmitMerchantRequest_FailedProvisioningResubmitBlocked(t *testing.T) {
 	}
 
 	// Critical-2: assert exactly one payment_merchants row (no new row created).
-	// The schema's UNIQUE(user_id) is a backstop, not the thing under test — the
+	// The schema's UNIQUE(user_id, kind) is a backstop, not the thing under test — the
 	// real signal is that the type-scoped duplicate check returns 400 before the
 	// submit ever reaches PM provisioning, so no second row is even attempted.
 	var count int64

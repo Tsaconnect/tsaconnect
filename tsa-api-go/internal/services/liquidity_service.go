@@ -109,7 +109,7 @@ type LPAdminView struct {
 }
 
 // LiquidityService is the LP read side (spec §15). It never takes another
-// user's id: every read is scoped by payment_merchants.user_id = caller.
+// user's id: every read is scoped by the caller's LP row.
 type LiquidityService struct {
 	db        *gorm.DB
 	pm        *PMService
@@ -143,14 +143,12 @@ func (s *LiquidityService) Me(ctx context.Context, userID uuid.UUID) (*Liquidity
 		out.Chain = &LiquidityChain{ID: tok.ChainID, Key: tok.ChainKey, Name: s.chainName}
 		out.Token = &LiquidityToken{Symbol: tok.Symbol, Address: tok.Address, Decimals: tok.Decimals}
 	}
-	pm, err := s.pm.GetByUserID(ctx, userID)
+	pm, err := s.pm.GetByUserIDKind(ctx, userID, models.PaymentMerchantKindLP)
 	switch {
 	case errors.Is(err, ErrPMNotFound):
 		return s.fromRequest(ctx, userID, out)
 	case err != nil:
 		return nil, err
-	case !pm.IsLP():
-		return out, nil // a payment merchant is never an LP (decision 11)
 	}
 	out.Wallet = pm.OperatorWalletAddress
 	out.OwedNgn = pm.AvailableNGN
@@ -268,8 +266,8 @@ func (s *LiquidityService) Activity(ctx context.Context, userID uuid.UUID, typ, 
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	pm, err := s.pm.GetByUserID(ctx, userID)
-	if errors.Is(err, ErrPMNotFound) || (err == nil && !pm.IsLP()) {
+	pm, err := s.pm.GetByUserIDKind(ctx, userID, models.PaymentMerchantKindLP)
+	if errors.Is(err, ErrPMNotFound) {
 		return nil, ErrNotLiquidityProvider
 	}
 	if err != nil {

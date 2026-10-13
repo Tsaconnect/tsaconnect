@@ -8,8 +8,11 @@
 //   - On success:    { isPm, status, activationNeedsId, kind, poolChainId, liquidityAvailable } from the server, loading: false
 //   - On any error:  the loading defaults with loading: false (fail-open)
 //
-// `kind` is the caller's marketplace standing ('lp' | 'merchant' | ...); `liquidityAvailable`
-// is false until the pool chain is configured (the LP CTA stays hidden).
+// `kind` is the top-level row's kind: the merchant row when the user has one,
+// otherwise the LP row. `lpStatus` is the user's LP row status whatever the top
+// level shows (one user may hold both roles), undefined when there is no LP row.
+// `liquidityAvailable` is false until the pool chain is configured (the LP CTA
+// stays hidden).
 //
 // `status` is the raw PM status ('' | 'pending' | 'approved' | 'active' | ...).
 // `isPm` is true only for a live (active) PM; callers use status === 'approved'
@@ -29,6 +32,7 @@ export interface IsPaymentMerchantState {
   activationNeedsId: boolean;
   kind?: string;
   poolChainId?: number;
+  lpStatus?: string;
   liquidityAvailable: boolean;
   loading: boolean;
   reload: () => void;
@@ -40,6 +44,7 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
   const [activationNeedsId, setActivationNeedsId] = useState(true);
   const [kind, setKind] = useState<string | undefined>(undefined);
   const [poolChainId, setPoolChainId] = useState<number | undefined>(undefined);
+  const [lpStatus, setLpStatus] = useState<string | undefined>(undefined);
   const [liquidityAvailable, setLiquidityAvailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
@@ -57,6 +62,7 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
           setActivationNeedsId(s.activationNeedsId);
           setKind(s.kind);
           setPoolChainId(s.poolChainId);
+          setLpStatus(s.lp?.status);
           setLiquidityAvailable(!!s.liquidityAvailable);
         }
       })
@@ -69,6 +75,7 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
           setActivationNeedsId(true);
           setKind(undefined);
           setPoolChainId(undefined);
+          setLpStatus(undefined);
           setLiquidityAvailable(false);
         }
       })
@@ -80,5 +87,5 @@ export function useIsPaymentMerchant(): IsPaymentMerchantState {
     };
   }, [nonce]);
 
-  return { isPm, status, activationNeedsId, kind, poolChainId, liquidityAvailable, loading, reload };
+  return { isPm, status, activationNeedsId, kind, poolChainId, lpStatus, liquidityAvailable, loading, reload };
 }

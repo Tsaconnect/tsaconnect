@@ -27,10 +27,16 @@ type PMAutomation interface {
 }
 
 // PMStatusGetter is the narrow interface used by GetMyPMStatus / ActivatePM to
-// look up a PaymentMerchant by user ID. *services.PMService satisfies it; tests
-// can inject a fake without the full service graph.
+// look up a user's merchant and LP rows. *services.PMService satisfies it;
+// tests can inject a fake without the full service graph.
 type PMStatusGetter interface {
-	GetByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error)
+	GetRolesByUserID(ctx context.Context, userID uuid.UUID) (merchant, lp *models.PaymentMerchant, err error)
+}
+
+// pmRoleStatus is one role's standing, for the role the top level does not describe.
+type pmRoleStatus struct {
+	Status      string `json:"status"`
+	PoolChainID *int64 `json:"poolChainId,omitempty"`
 }
 
 // PMApprover approves a pending PaymentMerchant by id (admin approval from the
@@ -131,6 +137,15 @@ type pmStatusResponse struct {
 	PoolChainID                    *int64 `json:"poolChainId,omitempty"`
 	ActivationNeedsSettlementMatch bool   `json:"activationNeedsSettlementMatch"`
 	LiquidityAvailable             bool   `json:"liquidityAvailable"`
+	// LP is the user's LP row whatever the top level shows; the top level is
+	// the merchant row when there is one (owner, 2026-10-13: one user may hold both).
+	LP *pmRoleStatus `json:"lp,omitempty"`
+}
+
+// pmRoles is the caller's merchant and LP rows (either may be nil). Errors
+// other than not-found are returned; a not-found is just a nil row.
+func (h *PMHandler) pmRoles(ctx context.Context, userID uuid.UUID) (merchant, lp *models.PaymentMerchant, err error) {
+	return h.pmStatus.GetRolesByUserID(ctx, userID)
 }
 
 // activationNeedsID is true unless an activator is wired and says otherwise.
@@ -158,11 +173,26 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 		return
 	}
 
-	pm, err := h.pmStatus.GetByUserID(c.Request.Context(), user.ID)
-	if err == nil {
+	merchant, lp, err := h.pmRoles(c.Request.Context(), user.ID)
+	if err != nil {
+		// Unexpected error — log and fail open (UX-safe; never 503).
+		log.Printf("[pm handler] GetMyPMStatus user=%s: %v", user.ID, err)
+		utils.SuccessResponse(c, http.StatusOK, "PM status", none)
+		return
+	}
+	resp := none
+	if lp != nil {
+		resp.LP = &pmRoleStatus{Status: lp.Status, PoolChainID: lp.PoolChainID}
+	}
+	// The top level is the merchant row when there is one, else the LP row:
+	// exactly today's response for every single-role user.
+	pm := merchant
+	if pm == nil {
+		pm = lp
+	}
+	if pm != nil {
 		// isPm is true only for a live (active) merchant — an active LP is not a
 		// PM; "approved" reports back so the app can prompt activation.
-		resp := none
 		resp.IsPm = pm.Status == models.PaymentMerchantStatusActive && !pm.IsLP()
 		resp.Status = pm.Status
 		resp.Kind = pm.Kind
@@ -171,16 +201,8 @@ func (h *PMHandler) GetMyPMStatus(c *gin.Context) {
 			resp.PoolChainID = pm.PoolChainID
 			resp.ActivationNeedsSettlementMatch = true
 		}
-		utils.SuccessResponse(c, http.StatusOK, "PM status", resp)
-		return
 	}
-	if errors.Is(err, services.ErrPMNotFound) {
-		utils.SuccessResponse(c, http.StatusOK, "PM status", none)
-		return
-	}
-	// Unexpected error — log and fail open (UX-safe; never 503).
-	log.Printf("[pm handler] GetMyPMStatus user=%s: %v", user.ID, err)
-	utils.SuccessResponse(c, http.StatusOK, "PM status", none)
+	utils.SuccessResponse(c, http.StatusOK, "PM status", resp)
 }
 
 // pmListItem is the safe projection returned by ListPMs and the lifecycle
@@ -204,6 +226,7 @@ type pmListItem struct {
 	ReviewedAt              *time.Time `json:"reviewedAt"`
 	Kind                    string     `json:"kind"`
 	PoolChainID             *int64     `json:"poolChainId,omitempty"`
+	UserID                  string     `json:"userId"`
 	// LP is set only on the ?kind=lp list (review I7).
 	LP *services.LPAdminView `json:"lp,omitempty"`
 }
@@ -229,6 +252,7 @@ func toPMListItem(p *models.PaymentMerchant) pmListItem {
 		ReviewedAt:              p.ReviewedAt,
 		Kind:                    p.Kind,
 		PoolChainID:             p.PoolChainID,
+		UserID:                  p.UserID.String(),
 	}
 }
 
@@ -476,16 +500,30 @@ func (h *PMHandler) ActivatePM(c *gin.Context) {
 		return
 	}
 
-	// Resolve the caller's PM (never trust a client-supplied id — activation is
-	// always for the authenticated user's own PM).
-	pm, err := h.pmStatus.GetByUserID(c.Request.Context(), user.ID)
+	// Resolve the caller's row of the asked role (never trust a client-supplied
+	// id — activation is always for the authenticated user's own row). No kind:
+	// the merchant row if there is one, else the LP row (today's behaviour for
+	// every single-role user).
+	kind := c.Query("kind")
+	if kind != "" && kind != models.PaymentMerchantKindMerchant && kind != models.PaymentMerchantKindLP {
+		utils.ErrorResponse(c, http.StatusBadRequest, "kind must be merchant or lp")
+		return
+	}
+	merchant, lp, err := h.pmRoles(c.Request.Context(), user.ID)
 	if err != nil {
-		if errors.Is(err, services.ErrPMNotFound) {
-			utils.ErrorResponse(c, http.StatusNotFound, "No payment merchant to activate")
-			return
-		}
 		log.Printf("[pm handler] ActivatePM lookup user=%s: %v", user.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Activation failed")
+		return
+	}
+	pm := merchant
+	switch {
+	case kind == models.PaymentMerchantKindLP:
+		pm = lp
+	case kind == "" && pm == nil:
+		pm = lp
+	}
+	if pm == nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "No payment merchant to activate")
 		return
 	}
 	if pm.IsLP() {
@@ -560,6 +598,8 @@ func (h *PMHandler) activateLP(c *gin.Context, pm *models.PaymentMerchant, userI
 		utils.ErrorResponseWithCode(c, http.StatusBadGateway, "We couldn't verify your settlement account right now. Try again shortly.", "settlement_account_unresolved")
 	case errors.Is(err, services.ErrLiquidityUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available right now", "liquidity_unavailable")
+	case errors.Is(err, services.ErrCompanyUserCannotBeLP):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "This account can't provide liquidity", services.CompanyAccountNotEligibleCode)
 	case services.KYCRefusalCode(err) != "":
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before activating", services.KYCRefusalCode(err))
 	case errors.Is(err, services.ErrPMNotFound):

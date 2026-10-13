@@ -1864,10 +1864,12 @@ export interface CategoryWithDetails extends Category {
   productCount: number;
 }
 
-export async function getMyMerchantRequest(): Promise<ApiResponse> {
+/** The caller's newest merchant request; `type` narrows it to one business type. */
+export async function getMyMerchantRequest(type?: string): Promise<ApiResponse> {
   try {
     const token = await AsyncStorage.getItem('authToken');
-    const response = await fetch(`${API_BASE_URL}/merchant-requests/my-request`, {
+    const query = type ? `?type=${encodeURIComponent(type)}` : '';
+    const response = await fetch(`${API_BASE_URL}/merchant-requests/my-request${query}`, {
       headers: {
         'Authorization': token ? `Bearer ${token}` : '',
         'Content-Type': 'application/json',

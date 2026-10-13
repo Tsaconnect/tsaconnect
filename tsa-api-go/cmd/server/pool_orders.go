@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -132,15 +133,15 @@ func buildPoolDesk(cfg *config.Config, bs *services.BlockchainService, reg *serv
 	return desk, nonces
 }
 
-// companyPMUser is IT_PM_ID's user: every slice's DB buyer (S10).
+// companyPMUser is IT_PM_ID's user: every slice's DB buyer (S10). Never an
+// LP's user (review M4).
 func companyPMUser(cfg *config.Config) (uuid.UUID, error) {
-	id, err := uuid.Parse(cfg.ITPMID)
-	if err != nil || config.DB == nil {
-		return uuid.Nil, fmt.Errorf("IT_PM_ID is unusable for the pool's slice buyer")
+	if config.DB == nil {
+		return uuid.Nil, fmt.Errorf("IT_PM_ID is unusable for the pool's slice buyer: no database")
 	}
-	var pm models.PaymentMerchant
-	if err := config.DB.First(&pm, "id = ?", id).Error; err != nil || !pm.IsActive() {
-		return uuid.Nil, fmt.Errorf("IT_PM_ID %s is not an active payment merchant", id)
+	pm, err := services.LoadCompanyPM(context.Background(), config.DB, cfg.ITPMID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("IT_PM_ID is unusable for the pool's slice buyer: %w", err)
 	}
 	return pm.UserID, nil
 }
