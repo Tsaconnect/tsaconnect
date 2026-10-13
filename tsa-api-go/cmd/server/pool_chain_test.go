@@ -5,8 +5,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestBuildPoolChain_DormantWithoutAPoolRow(t *testing.T) {
@@ -98,5 +103,25 @@ func TestBuildPoolChain_NoClientIsClosedAndStillReChecked(t *testing.T) {
 	registerPoolJobs(s, g)
 	if s.Count() != 2 {
 		t.Fatalf("registered %d, want the gate re-check and the release-gas monitor", s.Count())
+	}
+}
+
+func TestCompanyPMCheck_RefusesAnLPRow(t *testing.T) {
+	cfg := testConfig(t)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.PaymentMerchant{}); err != nil {
+		t.Fatal(err)
+	}
+	lp := models.PaymentMerchant{ID: uuid.New(), UserID: uuid.New(), Name: "ADA OBI", Kind: models.PaymentMerchantKindLP, Status: models.PaymentMerchantStatusActive}
+	db.Create(&lp)
+	cfg.ITPMID = lp.ID.String()
+	prev := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = prev })
+	if err := companyPMCheck(cfg)(context.Background()); err == nil {
+		t.Fatal("IT_PM_ID naming an LP row must fail gate 7")
 	}
 }

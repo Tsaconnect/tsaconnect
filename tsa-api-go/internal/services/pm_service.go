@@ -100,15 +100,29 @@ func (s *PMService) GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*m
 	return &pm, nil
 }
 
-// GetActiveByUserIDKind is GetActiveByUserID limited to one kind. Anything
-// but lp reads as merchant, the column default.
-func (s *PMService) GetActiveByUserIDKind(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
-	q := s.db.WithContext(ctx).Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive)
+// wherePMKind narrows q to one kind. Anything but lp reads as merchant, the
+// column default — the one kind rule every per-role read shares.
+func wherePMKind(q *gorm.DB, kind string) *gorm.DB {
 	if kind == models.PaymentMerchantKindLP {
-		q = q.Where("kind = ?", models.PaymentMerchantKindLP)
-	} else {
-		q = q.Where("kind <> ?", models.PaymentMerchantKindLP)
+		return q.Where("kind = ?", models.PaymentMerchantKindLP)
 	}
+	return q.Where("kind <> ?", models.PaymentMerchantKindLP)
+}
+
+// GetActiveByUserIDKind is the user's ACTIVE row of one kind.
+func (s *PMService) GetActiveByUserIDKind(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
+	q := wherePMKind(s.db.WithContext(ctx).Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive), kind)
+	return firstPM(q)
+}
+
+// GetByUserIDKind is the user's row of one kind, any status. A user holds at
+// most one row per kind (uq_payment_merchants_user_kind); a merchant read
+// never returns the LP row, nor an LP read the merchant row.
+func (s *PMService) GetByUserIDKind(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
+	return firstPM(wherePMKind(s.db.WithContext(ctx).Where("user_id = ?", userID), kind).Order("created_at DESC"))
+}
+
+func firstPM(q *gorm.DB) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
 	err := q.First(&pm).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -410,12 +424,8 @@ func (s *PMService) ListAll(ctx context.Context) ([]models.PaymentMerchant, erro
 // ListByKind is ListAll narrowed to one kind ("" = every row).
 func (s *PMService) ListByKind(ctx context.Context, kind string) ([]models.PaymentMerchant, error) {
 	q := s.db.WithContext(ctx).Order("created_at DESC")
-	switch kind {
-	case "":
-	case models.PaymentMerchantKindLP:
-		q = q.Where("kind = ?", models.PaymentMerchantKindLP)
-	default:
-		q = q.Where("kind <> ?", models.PaymentMerchantKindLP)
+	if kind != "" {
+		q = wherePMKind(q, kind)
 	}
 	pms := []models.PaymentMerchant{}
 	if err := q.Find(&pms).Error; err != nil {

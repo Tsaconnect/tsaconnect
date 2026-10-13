@@ -53,6 +53,9 @@ func companyPMCheck(cfg *config.Config) func(context.Context) error {
 		if !pm.IsActive() {
 			return fmt.Errorf("IT_PM_ID %s is %s, not active", id, pm.Status)
 		}
+		if pm.IsLP() {
+			return fmt.Errorf("IT_PM_ID %s is a liquidity provider, not the company payment merchant", id)
+		}
 		return nil
 	}
 }
