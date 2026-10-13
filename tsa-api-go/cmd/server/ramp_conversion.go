@@ -162,13 +162,7 @@ func rampTreasuryKey(cfg *config.Config, logTag string) (*ecdsa.PrivateKey, bool
 		log.Printf("%s dormant: invalid RAMP_TREASURY_PRIVATE_KEY: %v", logTag, err)
 		return nil, false
 	}
-	if err := assertDistinctKey("RAMP_TREASURY_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_TREASURY_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_TREASURY_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil, false
 	}

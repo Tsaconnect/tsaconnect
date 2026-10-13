@@ -68,26 +68,30 @@ func captureLog(t *testing.T, fn func()) string {
 }
 
 // Role resolution: {unset, = operator, ≠ operator} × each operator role.
-func TestResolveSignerRoles_FallsBackToTheOperatorOnlyWhenUnset(t *testing.T) {
+// roleKey resolves at build time; the role's config field is never written.
+func TestRoleKey_FallsBackToTheOperatorOnlyWhenUnset(t *testing.T) {
 	roles := map[string]func(*config.Config) *string{
-		"IT_OPERATOR_PRIVATE_KEY":  func(c *config.Config) *string { return &c.ITOperatorPrivateKey },
-		"RAMP_SPONSOR_PRIVATE_KEY": func(c *config.Config) *string { return &c.RampSponsorPrivateKey },
+		roleITOperator: func(c *config.Config) *string { return &c.ITOperatorPrivateKey },
+		roleGasSponsor: func(c *config.Config) *string { return &c.RampSponsorPrivateKey },
 	}
-	for name, field := range roles {
+	for role, field := range roles {
 		for _, tc := range []struct {
-			state, own, want string
+			state, own, wantKey, wantVar string
 		}{
-			{"unset", "", testKeyA},
-			{"equal to the operator", "0x" + testKeyA, "0x" + testKeyA},
-			{"its own key", testKeyB, testKeyB},
+			{"unset", "", testKeyA, "PM_RELEASE_PRIVATE_KEY"},
+			{"equal to the operator", "0x" + testKeyA, testKeyA, operatorRoleVar[role]},
+			{"its own key", testKeyB, testKeyB, operatorRoleVar[role]},
 		} {
-			t.Run(name+"/"+tc.state, func(t *testing.T) {
+			t.Run(role+"/"+tc.state, func(t *testing.T) {
 				cfg := testConfig(t)
 				cfg.PMReleasePrivateKey = "0x" + testKeyA
 				*field(cfg) = tc.own
-				out := captureLog(t, func() { resolveSignerRoles(cfg) })
-				if got := *field(cfg); got != tc.want {
-					t.Fatalf("resolved key = %q, want %q", got, tc.want)
+				out := captureLog(t, func() { logSignerRoles(cfg) })
+				if k, v := roleKey(cfg, role); k != tc.wantKey || v != tc.wantVar {
+					t.Fatalf("roleKey = (%q, %s), want (%q, %s)", k, v, tc.wantKey, tc.wantVar)
+				}
+				if *field(cfg) != tc.own {
+					t.Fatalf("the role's config field was rewritten to %q", *field(cfg))
 				}
 				if tc.state == "its own key" && !strings.Contains(out, "DEPRECATED") {
 					t.Fatalf("a distinct role key must log a DEPRECATED line: %s", out)
@@ -102,26 +106,81 @@ func TestResolveSignerRoles_FallsBackToTheOperatorOnlyWhenUnset(t *testing.T) {
 	}
 }
 
+// Security review: the operator secret lives in one config field. After boot
+// wiring with IT_OPERATOR_PRIVATE_KEY / RAMP_SPONSOR_PRIVATE_KEY unset, both
+// fields are still empty while the roles are wired on the operator address.
+func TestBootWiring_RoleFieldsStayEmptyOnTheFallback(t *testing.T) {
+	cfg := poolTestConfig(t, "mainnet")
+	cfg.PMReleasePrivateKey = testKeyA
+	cfg.RampSponsorPrivateKey, cfg.ITOperatorPrivateKey = "", ""
+	cfg.RampSponsorDailyGasBudget = "50000000"
+	cfg.RampSponsorChains = []string{"bsc"}
+	cfg.RampGasSponsorshipEnabled = true
+	cfg.RampSponsorBalanceFloorWei = map[string]string{"bsc": "10000000000000000"}
+	cfg.RampSponsorTopUpMaxWei = map[string]string{"bsc": "500000000000000"}
+	logSignerRoles(cfg)
+	bs := services.NewBlockchainService(cfg)
+	buildReleaseSigner(cfg, bs)
+	if buildRampSponsorship(cfg, bs, nil) == nil {
+		t.Fatal("the ramp sponsor must wire on the operator key")
+	}
+	if cfg.ITOperatorPrivateKey != "" || cfg.RampSponsorPrivateKey != "" {
+		t.Fatal("the operator key was copied into a role field")
+	}
+	op := signerAddress(testKeyA)
+	found := false
+	for _, s := range bs.Signers().Summary() {
+		if s.Address == op {
+			found = strings.Contains(strings.Join(s.Roles, ","), "gas_sponsor") && strings.Contains(strings.Join(s.Roles, ","), "pm_release")
+		}
+	}
+	if !found {
+		t.Fatalf("summary = %+v, want gas_sponsor and pm_release on the operator %s", bs.Signers().Summary(), op)
+	}
+	if k, _ := roleKey(cfg, roleITOperator); signerAddress(k) != op {
+		t.Fatal("the IT operator must resolve to the operator address")
+	}
+}
+
+// Security review: the raw-key ALERT names the key actually used — a role on
+// the fallback is PM_RELEASE_PRIVATE_KEY, never its unset var.
+func TestRawKeyAlert_NamesTheKeyActuallyUsed(t *testing.T) {
+	cfg := poolTestConfig(t, "mainnet")
+	cfg.Env, cfg.AllowRawSignerKeys = "production", true
+	cfg.PMReleasePrivateKey = testKeyA
+	cfg.RampSponsorDailyGasBudget = "50000000"
+	cfg.SonicGasFloorWei, cfg.SonicGasTopUpMaxWei = "5000000000000000000", "500000000000000000"
+	cfg.Networks["mainnet"].Chains["sonic"] = config.ChainConfig{RPCURL: "http://127.0.0.1:1", ChainID: 146}
+	out := captureLog(t, func() { buildSonicGasSponsorship(cfg, services.NewBlockchainService(cfg)) })
+	if !strings.Contains(out, "ALERT raw_signer_key_in_production=1 key=PM_RELEASE_PRIVATE_KEY role=gas_sponsor") {
+		t.Fatalf("log = %s, want the ALERT to name PM_RELEASE_PRIVATE_KEY for role gas_sponsor", out)
+	}
+	if strings.Contains(out, "key=RAMP_SPONSOR_PRIVATE_KEY") {
+		t.Fatal("the ALERT must never name an unset var")
+	}
+}
+
 // Owner decision 2026-10-13: the relayer keeps its own key — it never falls
 // back to the operator.
-func TestResolveSignerRoles_RelayerNeverFallsBack(t *testing.T) {
+func TestLogSignerRoles_RelayerNeverFallsBack(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.PMReleasePrivateKey = testKeyA
-	out := captureLog(t, func() { resolveSignerRoles(cfg) })
+	out := captureLog(t, func() { logSignerRoles(cfg) })
 	if cfg.RelayerPrivateKey != "" || !strings.Contains(out, "role=relayer dormant") {
 		t.Fatalf("relayer key = %q, log = %s; want unset and a dormant line", cfg.RelayerPrivateKey, out)
 	}
 }
 
 // No operator key (unset, or a KMS signer): nothing falls back.
-func TestResolveSignerRoles_NoOperatorNoFallback(t *testing.T) {
+func TestRoleKey_NoOperatorNoFallback(t *testing.T) {
 	for _, cfg := range []*config.Config{
 		{Env: "test"},
 		{Env: "test", PMReleasePrivateKey: testKeyA, PMReleaseSigner: "kms"},
 	} {
-		resolveSignerRoles(cfg)
-		if cfg.ITOperatorPrivateKey != "" || cfg.RelayerPrivateKey != "" || cfg.RampSponsorPrivateKey != "" {
-			t.Fatalf("no usable operator key: roles must stay unset, got %+v", cfg)
+		for _, role := range []string{roleITOperator, roleGasSponsor} {
+			if k, v := roleKey(cfg, role); k != "" || v != "" {
+				t.Fatalf("no usable operator key: %s resolved to %s", role, v)
+			}
 		}
 	}
 }
@@ -129,12 +188,12 @@ func TestResolveSignerRoles_NoOperatorNoFallback(t *testing.T) {
 // Golden: today's production shape (every role var set to its own key) is
 // left exactly as it is — the deploy is behaviour-neutral until Doppler
 // deletes a var.
-func TestResolveSignerRoles_AllDistinctIsUnchanged(t *testing.T) {
+func TestLogSignerRoles_AllDistinctIsUnchanged(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.PMReleasePrivateKey, cfg.ITOperatorPrivateKey, cfg.RelayerPrivateKey, cfg.RampSponsorPrivateKey =
 		testKeyA, testKeyB, testKeyC, "4444444444444444444444444444444444444444444444444444444444444444"
 	before := *cfg
-	resolveSignerRoles(cfg)
+	logSignerRoles(cfg)
 	if cfg.ITOperatorPrivateKey != before.ITOperatorPrivateKey || cfg.RelayerPrivateKey != before.RelayerPrivateKey ||
 		cfg.RampSponsorPrivateKey != before.RampSponsorPrivateKey || cfg.PMReleasePrivateKey != before.PMReleasePrivateKey {
 		t.Fatal("distinct role keys must be kept as they are")
@@ -175,7 +234,7 @@ func TestAssertDistinctKey_ClassRule(t *testing.T) {
 func TestRampTreasuryKey_RefusesTheOperatorKeyAfterFallback(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.PMReleasePrivateKey, cfg.RampTreasuryPrivateKey = testKeyA, testKeyA
-	resolveSignerRoles(cfg)
+	logSignerRoles(cfg)
 	if !refusesToStart(t, func() { rampTreasuryKey(cfg, "[test]") }) {
 		t.Fatal("OPERATOR = TREASURY must refuse to start")
 	}
@@ -190,7 +249,7 @@ func TestBuildCompanyWallet_RefusesTheOperatorOrTreasuryKey(t *testing.T) {
 		cfg := testConfig(t)
 		set(cfg)
 		cfg.RampTreasuryWalletPrivateKey = testKeyA
-		resolveSignerRoles(cfg)
+		logSignerRoles(cfg)
 		if !refusesToStart(t, func() { buildCompanyWallet(cfg, nil) }) {
 			t.Fatal("the company wallet on the operator or treasury key must refuse to start")
 		}
@@ -202,7 +261,7 @@ func TestBuildCompanyWallet_RefusesTheOperatorOrTreasuryKey(t *testing.T) {
 func TestLogSignerSummary_NamesClassesRolesAndLanes(t *testing.T) {
 	cfg := poolTestConfig(t, "mainnet")
 	cfg.PMReleasePrivateKey = testKeyA
-	resolveSignerRoles(cfg)
+	logSignerRoles(cfg)
 	bs := services.NewBlockchainService(cfg)
 	buildReleaseSigner(cfg, bs)
 	poolTreasuryFor(cfg, bs, nil)

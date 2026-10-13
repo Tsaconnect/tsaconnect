@@ -68,13 +68,7 @@ func buildReleaseSigner(cfg *config.Config, bs *services.BlockchainService) serv
 		log.Printf("[pm] invalid PM_RELEASE_PRIVATE_KEY; PM release disabled: %v", err)
 		return nil
 	}
-	if err := assertDistinctKey("PM_RELEASE_PRIVATE_KEY", key, map[string]string{
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("PM_RELEASE_PRIVATE_KEY", key, signerKeysExcept(cfg, "PM_RELEASE_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}

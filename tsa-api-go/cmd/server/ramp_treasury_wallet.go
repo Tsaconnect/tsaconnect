@@ -38,13 +38,7 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 	}
 	// The one protection that holds in prod today: ENV=development there makes
 	// rawSignerKeyAllowed allow every raw key (spec §7 caveat).
-	if err := assertDistinctKey("RAMP_TREASURY_WALLET_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":       cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":   cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":    cfg.PMReleasePrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY":  cfg.RampSponsorPrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY": cfg.RampTreasuryPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_TREASURY_WALLET_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_TREASURY_WALLET_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}

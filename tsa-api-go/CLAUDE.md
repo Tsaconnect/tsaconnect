@@ -148,7 +148,7 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
 - **Three hot keys, one lane per key and chain** (signer consolidation 2026-10-13 + owner
   decisions the same day; `docs/plans/2026-10-13-signer-key-consolidation.md` outside the repo).
   OPERATOR = `PM_RELEASE_PRIVATE_KEY`: PM/pool releases and cancels, and the IT operator and gas
-  sponsor whenever their own var is unset (`resolveSignerRoles`; boot lines `[signer] role=… signs
+  sponsor whenever their own var is unset (`roleKey`, resolved where each signer is built — the operator secret is never copied into the role's config field; raw-key ALERTs name the var actually used, e.g. `key=PM_RELEASE_PRIVATE_KEY role=gas_sponsor`; boot lines `[signer] role=… signs
   with the operator` / `[signer] DEPRECATED role=…`). RELAYER = `RELAYER_PRIVATE_KEY`, its own key:
   never falls back (unset = gasless dormant), and boot refuses it equal to any other key; a relayer
   that is the swap's owner, operator or guardian (or whose role read fails) leaves gasless dormant

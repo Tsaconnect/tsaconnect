@@ -138,26 +138,21 @@ func newIntentSponsorship(orders *services.PaycrestOrderService, lanes map[strin
 // SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI (the old MARKETPLACE_SONIC_GAS_*
 // names still read); guard and metrics are named sonic_gas.
 func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainService) *services.RampSponsorship {
-	if cfg.RampSponsorPrivateKey == "" || chains == nil {
-		log.Printf("[sonic-gas] dormant: RAMP_SPONSOR_PRIVATE_KEY not set — a P2P user or buyer with no S is told to add some")
+	keyHex, keyVar := roleKey(cfg, roleGasSponsor)
+	if keyHex == "" || chains == nil {
+		log.Printf("[sonic-gas] dormant: neither RAMP_SPONSOR_PRIVATE_KEY nor PM_RELEASE_PRIVATE_KEY set — a P2P user or buyer with no S is told to add some")
 		return nil
 	}
 	if !rawSignerKeyAllowed(cfg) {
-		log.Printf("[sonic-gas] dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
+		log.Printf("[sonic-gas] dormant: raw %s refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)", keyVar)
 		return nil
 	}
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampSponsorPrivateKey, "0x"))
+	key, err := crypto.HexToECDSA(keyHex)
 	if err != nil {
-		log.Printf("[sonic-gas] dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
+		log.Printf("[sonic-gas] dormant: invalid %s: %v", keyVar, err)
 		return nil
 	}
-	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_SPONSOR_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}
@@ -175,7 +170,7 @@ func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainSer
 		log.Printf("[sonic-gas] dormant: no sonic mainnet client")
 		return nil
 	}
-	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
+	alertRawRoleKeyInProduction(cfg, roleGasSponsor, keyVar)
 	sponsor := newIntentSponsorship(nil, map[string]*services.SponsorLane{"sonic": lane}, cfg.RampSponsorTopUpUnusedDailyCap)
 	sponsor.SetChainRegistry(chains)
 	log.Printf("[sonic-gas] lane enabled sponsor=%s floor=%s max=%s", lane.Signer.Address(), floor, topUpMax)
@@ -236,28 +231,23 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 		log.Printf("[ramp-sponsor] dormant: RAMP_GAS_SPONSORSHIP is off")
 		return nil
 	}
-	if cfg.RampSponsorPrivateKey == "" || chains == nil {
-		log.Printf("[ramp-sponsor] dormant: RAMP_SPONSOR_PRIVATE_KEY not set")
+	keyHex, keyVar := roleKey(cfg, roleGasSponsor)
+	if keyHex == "" || chains == nil {
+		log.Printf("[ramp-sponsor] dormant: neither RAMP_SPONSOR_PRIVATE_KEY nor PM_RELEASE_PRIVATE_KEY set")
 		return nil
 	}
 	if !rawSignerKeyAllowed(cfg) {
-		log.Printf("[ramp-sponsor] dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
+		log.Printf("[ramp-sponsor] dormant: raw %s refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)", keyVar)
 		return nil
 	}
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampSponsorPrivateKey, "0x"))
+	key, err := crypto.HexToECDSA(keyHex)
 	if err != nil {
-		log.Printf("[ramp-sponsor] dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
+		log.Printf("[ramp-sponsor] dormant: invalid %s: %v", keyVar, err)
 		return nil
 	}
-	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
+	alertRawRoleKeyInProduction(cfg, roleGasSponsor, keyVar)
 	sponsorAddr := crypto.PubkeyToAddress(key.PublicKey)
-	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_SPONSOR_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}

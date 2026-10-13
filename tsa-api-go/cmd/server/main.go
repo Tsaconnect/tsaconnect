@@ -165,10 +165,10 @@ func main() {
 
 	// Load configuration
 	cfg := config.Load()
-	// Signer consolidation: IT operator, relayer and gas sponsor sign with the
-	// OPERATOR key (PM_RELEASE_PRIVATE_KEY) when their own var is unset. Runs
-	// before any signer is built.
-	resolveSignerRoles(cfg)
+	// Signer consolidation: the IT operator and gas sponsor sign with the
+	// OPERATOR key (PM_RELEASE_PRIVATE_KEY) when their own var is unset —
+	// resolved by roleKey where each signer is built; this only logs it.
+	logSignerRoles(cfg)
 
 	// Central inbound mode sends every payer to one company account, so an
 	// unset account number is not a dormant feature — it is a pay-into screen
@@ -386,16 +386,17 @@ func main() {
 		// IT (Instant Transfer) operator signer — dev path uses the local key
 		// (prod MUST use KMS). Built only when the key is set AND a chain client
 		// exists; otherwise IT stays dormant.
-		if !rawSignerKeyAllowed(cfg) && cfg.ITOperatorPrivateKey != "" {
+		itKeyHex, itKeyVar := roleKey(cfg, roleITOperator)
+		if !rawSignerKeyAllowed(cfg) && itKeyHex != "" {
 			// The raw-env-key local signer is a dev/staging convenience. Refuse it
 			// in production unless ALLOW_RAW_SIGNER_KEYS opts back in — the
 			// interim path until the operator key comes from KMS. IT stays dormant.
-			log.Printf("[config] IT dormant: raw IT_OPERATOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
-		} else if cfg.ITOperatorPrivateKey != "" && sonicClient != nil {
-			if key, kerr := crypto.HexToECDSA(cfg.ITOperatorPrivateKey); kerr != nil {
+			log.Printf("[config] IT dormant: raw %s refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)", itKeyVar)
+		} else if itKeyHex != "" && sonicClient != nil {
+			if key, kerr := crypto.HexToECDSA(itKeyHex); kerr != nil {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
-				alertRawSignerKeyInProduction(cfg, "IT_OPERATOR_PRIVATE_KEY")
+				alertRawRoleKeyInProduction(cfg, roleITOperator, itKeyVar)
 				// The operator's key lane is shared with every other role on the
 				// same key on Sonic; OperatorSequence keeps its own sequence lock
 				// on top (MCGPSwapService.signMu).
@@ -428,7 +429,7 @@ func main() {
 				}
 			}
 		} else {
-			log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY not set")
+			log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY and PM_RELEASE_PRIVATE_KEY not set")
 		}
 
 		// Gasless relaying (EIP-2771). Dormant unless BOTH the forwarder address
@@ -448,13 +449,7 @@ func main() {
 				alertRawSignerKeyInProduction(cfg, "RELAYER_PRIVATE_KEY")
 				// The relayer keeps its own key (owner 2026-10-13): never the
 				// operator's, treasury's or company wallet's.
-				if err := assertDistinctKey("RELAYER_PRIVATE_KEY", key, map[string]string{
-					"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-					"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-					"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
-					"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
-					"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-				}); err != nil {
+				if err := assertDistinctKey("RELAYER_PRIVATE_KEY", key, signerKeysExcept(cfg, "RELAYER_PRIVATE_KEY")); err != nil {
 					fatalf("[config] REFUSING TO START: %v", err)
 				}
 				if keyLane := blockchainService.Signers().Lane("relayer", key, sonicClient); keyLane == nil {
