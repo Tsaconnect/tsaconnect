@@ -251,3 +251,10 @@ func (p relayerRoleProbe) Run(ctx context.Context) error {
 	defer cancel()
 	return p.relayer.ProbeRoles(ctx, p.roles)
 }
+
+// keyLaneWatch runs every key lane's upkeep (SignerRegistry.Watch) every 30 s.
+type keyLaneWatch struct{ reg *services.SignerRegistry }
+
+func (w keyLaneWatch) Name() string                  { return "key-lane-watch" }
+func (w keyLaneWatch) Interval() time.Duration       { return 30 * time.Second }
+func (w keyLaneWatch) Run(ctx context.Context) error { return w.reg.Watch(ctx) }

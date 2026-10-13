@@ -337,6 +337,11 @@ func main() {
 	priceService.UseAPIKey(cfg.CoinGeckoAPIKey, cfg.CoinGeckoPro)
 	log.Printf("[price] CoinGecko access: %s", priceService.Plan())
 	blockchainService := services.NewBlockchainService(cfg)
+	// Every hot key's lane writes each transaction it signs to key_lane_txs
+	// before broadcasting it, and a restart seeds from the pending rows.
+	if config.DB != nil {
+		blockchainService.Signers().SetStore(&services.GormKeyLaneStore{DB: config.DB})
+	}
 
 	// Initialize escrow service (sonic chain client). All Sonic-side services
 	// (escrow, product-escrow, service-contact, OTC, P2P) follow SONIC_NETWORK:
@@ -549,6 +554,9 @@ func main() {
 	if mcgpSwapService.OperatorConfigured() {
 		scheduler.Register(operatorRoleProbe{swap: mcgpSwapService}, jobs.AlertOnFailureStreak())
 	}
+	// Key lanes' upkeep: rows the mined nonce has passed, held lanes
+	// (failure-streak alerted while one is held or the mined nonce unreadable).
+	scheduler.Register(keyLaneWatch{reg: blockchainService.Signers()}, jobs.AlertOnFailureStreak())
 	if relayerForProbe != nil {
 		scheduler.Register(relayerRoleProbe{relayer: relayerForProbe, roles: services.SwapRoleReader{Swap: mcgpSwapService}}, jobs.AlertOnFailureStreak())
 	}
@@ -2008,6 +2016,7 @@ func main() {
 	if alert := netlifyProxyAlert(cfg); alert != "" {
 		log.Print(alert)
 	}
+	routes.RegisterSignerAdmin(router, cfg, &handlers.SignerAdminHandler{DB: config.DB, Registry: blockchainService.Signers()})
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
 
 	// Configure HTTP server

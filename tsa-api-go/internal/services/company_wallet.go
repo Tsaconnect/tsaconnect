@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
 var (
@@ -87,11 +88,7 @@ func walletNoncesAtHead(ctx context.Context, p TreasuryTxProbe, addr common.Addr
 // txHashKnown: the node still knows the transaction, pending or mined. Only
 // NotFound reads as forgotten; any other error is returned.
 func txHashKnown(ctx context.Context, p TreasuryTxProbe, h string) (bool, error) {
-	_, _, err := p.TransactionByHash(ctx, common.HexToHash(h))
-	if errors.Is(err, ethereum.NotFound) {
-		return false, nil
-	}
-	return err == nil, err
+	return blockchain.TxKnown(ctx, p, h)
 }
 
 // TreasuryTxProbe is what the dropped-transaction check asks a chain (spec

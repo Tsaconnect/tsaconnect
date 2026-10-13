@@ -134,7 +134,7 @@ func TestKeyLane_MissingBytesHoldsTheLaneNoReuse(t *testing.T) {
 	if len(log) != 1 {
 		t.Fatalf("broadcasts = %d, want only the first", len(log))
 	}
-	lane.ClearHold()
+	_ = lane.ClearHold(context.Background())
 	var pinned uint64
 	if _, _, err := lane.SendRecorded(ctx, build, func(n uint64) error { pinned = n; return nil }); err != nil || pinned != 6 {
 		t.Fatalf("after the hold: nonce %d err=%v, want 6 (never 5 again)", pinned, err)
@@ -331,13 +331,13 @@ func TestTreasury_ExactlyFundedForNOwedDeliveriesSendsAllN(t *testing.T) {
 	lane.KeyLane.AddReservation("owed", func(context.Context) (uint64, error) { return n * treasuryERC20Gas, nil })
 	price := big.NewInt(1_000_000_000)
 	per := feeNeed(treasuryERC20Gas, price, nil)
-	bal := new(big.Int).Mul(per, big.NewInt(n))
+	// Nothing mines in between: each send also counts the earlier ones'
+	// unmined spend against the same balance.
+	withTreasuryBalance(lane, new(big.Int).Mul(per, big.NewInt(n)))
 	for i := 0; i < n; i++ {
-		withTreasuryBalance(lane, bal)
 		if _, _, err := tr.TransferToken(ReservedSend(context.Background()), lane, "USDC", treasuryTestRecipient, big.NewInt(1)); err != nil {
 			t.Fatalf("owed delivery %d: %v", i+1, err)
 		}
-		bal.Sub(bal, per)
 	}
 	if signer.calls() != n {
 		t.Fatalf("broadcasts = %d, want %d", signer.calls(), n)

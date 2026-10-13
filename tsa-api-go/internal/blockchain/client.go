@@ -259,17 +259,25 @@ func (c *EVMClient) SendRawTransaction(signedTx []byte) (string, error) {
 	return tx.Hash().Hex(), nil
 }
 
-// TransactionKnown reports whether the node holds txHash, pending or mined.
-// Not-found is (false, nil); any other failure is an error, never a "no".
-func (c *EVMClient) TransactionKnown(ctx context.Context, txHash string) (bool, error) {
-	_, _, err := c.Client.TransactionByHash(ctx, common.HexToHash(txHash))
+// TxByHashReader is the one read TxKnown needs (*ethclient.Client).
+type TxByHashReader interface {
+	TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error)
+}
+
+// TxKnown reports whether the node holds txHash, pending or mined. Only
+// NotFound reads as "no"; any other failure is an error, never a "no". The one
+// helper every dropped-transaction check uses (key lanes, the company wallet).
+func TxKnown(ctx context.Context, r TxByHashReader, txHash string) (bool, error) {
+	_, _, err := r.TransactionByHash(ctx, common.HexToHash(txHash))
 	if errors.Is(err, ethereum.NotFound) {
 		return false, nil
 	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
+	return err == nil, err
+}
+
+// TransactionKnown is TxKnown on this client.
+func (c *EVMClient) TransactionKnown(ctx context.Context, txHash string) (bool, error) {
+	return TxKnown(ctx, c.Client, txHash)
 }
 
 // GetTransactionReceipt retrieves the receipt for a mined transaction.
