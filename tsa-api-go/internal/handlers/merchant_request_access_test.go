@@ -159,11 +159,12 @@ func TestRejectMerchantRequest_NonStaffGets403BeforeTheLookup(t *testing.T) {
 	}
 }
 
-// Review N3: a user whose p2p_merchant request was approved while PM was
-// dormant (no PM row; role already merchant) is never also approved as an LP.
-// The refusal names the cause so the admin can finish the merchant setup
-// instead of meeting a generic conflict.
-func TestApproveLPRequest_UnfinishedMerchantApprovalIs409WithItsOwnCode(t *testing.T) {
+// Review N3, reversed by the owner (2026-10-13): a user whose p2p_merchant
+// request was approved while PM was dormant (no merchant row; role already
+// merchant) may still be approved as an LP. The LP approval writes only the LP
+// row, leaves the role and the merchant request as they are, and the merchant
+// setup can still be finished by re-approving it.
+func TestApproveLPRequest_AfterAnUnfinishedMerchantApprovalSucceeds(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	h := lpHandler(t, db, true)
 	u := createMerchantTestUser(t, db, "merchant")
@@ -174,20 +175,19 @@ func TestApproveLPRequest_UnfinishedMerchantApprovalIs409WithItsOwnCode(t *testi
 	}
 	var lpReq models.MerchantRequest
 	db.Where("user_id = ? AND business_type = ?", u.ID, models.BusinessTypeLiquidityProvider).First(&lpReq)
-	id := lpReq.ID.String()
-	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+id+"/approve", map[string]any{"note": "ok"}, createMerchantTestUser(t, db, "admin"))
-	c.Params = gin.Params{{Key: "id", Value: id}}
-	h.ApproveMerchantRequest(c)
-	var body map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &body)
-	if w.Code != http.StatusConflict || body["code"] != "other_application_approved" {
-		t.Fatalf("approve = %d %v, want 409 other_application_approved", w.Code, body)
+	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), lpReq.ID.String()); code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200", code)
 	}
-	var n int64
-	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", u.ID).Count(&n)
-	var mr models.MerchantRequest
-	db.First(&mr, "id = ?", id)
-	if n != 0 || mr.Status != models.MerchantRequestStatusPending {
-		t.Fatalf("rows=%d status=%s: a refused approval changed state", n, mr.Status)
+	var rows []models.PaymentMerchant
+	db.Where("user_id = ?", u.ID).Find(&rows)
+	if len(rows) != 1 || !rows[0].IsLP() {
+		t.Fatalf("rows = %+v, want one LP row and no merchant row", rows)
+	}
+	var role string
+	db.Model(&models.User{}).Where("id = ?", u.ID).Pluck("role", &role)
+	var pmReq models.MerchantRequest
+	db.Where("user_id = ? AND business_type = ?", u.ID, models.BusinessTypeP2PMerchant).First(&pmReq)
+	if role != models.RoleMerchant || pmReq.Status != models.MerchantRequestStatusApproved {
+		t.Fatalf("role=%s merchant request=%s: the LP approval touched the merchant side", role, pmReq.Status)
 	}
 }

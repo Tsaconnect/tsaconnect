@@ -2,12 +2,14 @@ package handlers
 
 import (
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
+	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/testutil"
 )
@@ -35,16 +37,17 @@ func pgRequest(t *testing.T, db *gorm.DB, userID uuid.UUID, businessType string)
 	return mr.ID.String()
 }
 
-// Review I2 (O-B3, decision 11): a p2p_merchant and a liquidity_provider
-// request for one user, approved by two admins at the same moment, never leave
-// an LP with role=merchant. The race is forced: while the first approval is
-// writing its payment_merchants row, the second approval runs (or is held
-// back by the user-row lock) before the first one finishes.
+// Owner 2026-10-13: a p2p_merchant and a liquidity_provider request for one
+// user, approved by two admins at the same moment, both succeed: two rows, one
+// per kind, role=merchant from the merchant approval only. The race is forced:
+// while the first approval is writing its payment_merchants row, the second
+// approval runs (or is held back by the user-row lock) before the first one
+// finishes. Neither approval touches the other's row.
 func TestApproveMerchantRequest_ConcurrentMerchantAndLPApprovals_OnPostgres(t *testing.T) {
 	for _, first := range []string{models.BusinessTypeP2PMerchant, models.BusinessTypeLiquidityProvider} {
 		t.Run("first="+first, func(t *testing.T) {
 			db := testutil.TempPostgres(t, "mr_race_", &models.User{}, &models.MerchantRequest{}, &models.PaymentMerchant{})
-			if err := db.Exec(`CREATE UNIQUE INDEX uq_payment_merchants_user ON payment_merchants (user_id)`).Error; err != nil {
+			if err := config.MigratePaymentMerchantRoleIndex(db); err != nil {
 				t.Fatal(err)
 			}
 			h := lpHandler(t, db, true)
@@ -83,27 +86,63 @@ func TestApproveMerchantRequest_ConcurrentMerchantAndLPApprovals_OnPostgres(t *t
 
 			firstCode := approveAs(t, h, pgUser(t, db, models.RoleAdmin), ids[first])
 			<-secondDone
-
-			var role string
-			db.Model(&models.User{}).Where("id = ?", applicant.ID).Pluck("role", &role)
+			if firstCode != http.StatusOK || secondCode != http.StatusOK {
+				t.Fatalf("codes first=%d second=%d, want both 200", firstCode, secondCode)
+			}
 			var rows []models.PaymentMerchant
 			db.Where("user_id = ?", applicant.ID).Find(&rows)
-			if len(rows) != 1 {
-				t.Fatalf("payment_merchants rows = %d, want 1", len(rows))
+			if len(rows) != 2 || rows[0].IsLP() == rows[1].IsLP() {
+				t.Fatalf("rows = %+v, want one merchant and one LP", rows)
 			}
-			if rows[0].IsLP() && role == models.RoleMerchant {
-				t.Fatalf("an LP ended with role=merchant (first=%d second=%d)", firstCode, secondCode)
+			for _, r := range rows {
+				if r.Status != models.PaymentMerchantStatusApproved {
+					t.Fatalf("%s row status = %s", r.Kind, r.Status)
+				}
 			}
-			codes := map[int]int{firstCode: 1}
-			codes[secondCode]++
-			if codes[http.StatusOK] != 1 || codes[http.StatusConflict] != 1 {
-				t.Fatalf("codes first=%d second=%d, want one 200 and one 409", firstCode, secondCode)
+			var role string
+			db.Model(&models.User{}).Where("id = ?", applicant.ID).Pluck("role", &role)
+			if role != models.RoleMerchant {
+				t.Fatalf("role = %s, want merchant (from the merchant approval only)", role)
 			}
-			var statuses []string
-			db.Model(&models.MerchantRequest{}).Where("user_id = ? AND status = ?", applicant.ID, models.MerchantRequestStatusApproved).Pluck("business_type", &statuses)
-			if len(statuses) != 1 || statuses[0] != map[bool]string{true: models.BusinessTypeLiquidityProvider, false: models.BusinessTypeP2PMerchant}[rows[0].IsLP()] {
-				t.Fatalf("approved requests = %v for a %s row: the losing approval was half-applied", statuses, rows[0].Kind)
+			var approved int64
+			db.Model(&models.MerchantRequest{}).Where("user_id = ? AND status = ?", applicant.ID, models.MerchantRequestStatusApproved).Count(&approved)
+			if approved != 2 {
+				t.Fatalf("approved requests = %d, want 2", approved)
 			}
 		})
+	}
+}
+
+// Two admins approve the same LP request at once. The user-row lock runs them
+// one after the other and the second finds the first's row through the
+// kind-scoped lookup; the role index and ON CONFLICT DO NOTHING are only the
+// backstop. Both succeed, and the user has exactly one LP row.
+func TestApproveLPRequest_DoubleApproveSameRequestOneRow_OnPostgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "mr_double_", &models.User{}, &models.MerchantRequest{}, &models.PaymentMerchant{})
+	if err := config.MigratePaymentMerchantRoleIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	h := lpHandler(t, db, true)
+	applicant := pgUser(t, db, models.RoleUser)
+	id := pgRequest(t, db, applicant.ID, models.BusinessTypeLiquidityProvider)
+	admins := []*models.User{pgUser(t, db, models.RoleAdmin), pgUser(t, db, models.RoleAdmin)}
+
+	codes := make([]int, len(admins))
+	var wg sync.WaitGroup
+	for i, admin := range admins {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i] = approveAs(t, h, admin, id)
+		}()
+	}
+	wg.Wait()
+	if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
+		t.Fatalf("codes = %v, want both 200", codes)
+	}
+	var rows []models.PaymentMerchant
+	db.Where("user_id = ?", applicant.ID).Find(&rows)
+	if len(rows) != 1 || !rows[0].IsLP() {
+		t.Fatalf("rows = %+v, want exactly one LP row", rows)
 	}
 }

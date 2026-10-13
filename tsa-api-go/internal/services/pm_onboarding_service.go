@@ -34,14 +34,9 @@ type NombaProvisioner interface {
 // BVN/NIN. The handler validates shape up front; this is the service-side guard.
 var ErrPMKYCRequired = errors.New("a BVN or NIN is required to activate the payment merchant")
 
-// ErrPMKindConflict: the user already has a payment_merchants row of the other
-// kind (decision 11: never both a merchant and an LP).
-var ErrPMKindConflict = errors.New("payment merchant: this account already has a profile of the other kind")
-
-// ErrPMOtherKindApproved: the user's application of the other kind is already
-// approved, though its row may not exist yet (review N3). It is a kind
-// conflict too (errors.Is ErrPMKindConflict).
-var ErrPMOtherKindApproved = fmt.Errorf("%w: an application of the other kind is already approved", ErrPMKindConflict)
+// ErrSecondRoleNotEnabled: the user already has a row of the other kind and
+// the one-row-per-user index (dropped by the 2026-10-13 one-off) still stands.
+var ErrSecondRoleNotEnabled = errors.New("payment merchant: a second role needs the 2026-10-13 one-off index migration")
 
 // ErrLiquidityUnavailable: no pool chain is configured (or the pool is closed
 // for activation), so an LP cannot be approved or activated.
@@ -143,9 +138,9 @@ func (s *PMOnboardingService) ApproveFromRequest(ctx context.Context, req *model
 // ApproveFromRequestTx is ApproveFromRequest inside the caller's transaction,
 // so the merchant-request handler settles the row and its kind in the same
 // transaction as the request's status and the user's role (review I2). It
-// locks the user row first (SELECT … FOR NO KEY UPDATE): two approvals for one user,
-// of either kind, run one after the other, and the second sees the first's row
-// and approved request and refuses with ErrPMKindConflict.
+// locks the user row first (SELECT … FOR NO KEY UPDATE): two approvals for one
+// user run one after the other; each writes only its own kind's row (owner,
+// 2026-10-13: one user may hold both roles).
 func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm.DB, req *models.MerchantRequest) (*models.PaymentMerchant, error) {
 	kind, ok := models.PaymentMerchantKindFor(req.BusinessType)
 	if !ok {
@@ -166,27 +161,9 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 	if err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).Select("id").Where("id = ?", req.UserID).Find(&locked).Error; err != nil {
 		return nil, fmt.Errorf("pm_onboarding: lock user: %w", err)
 	}
-	// An approved request of the other kind is a profile on its way even with
-	// no row yet (e.g. a merchant approved while PM was dormant, whose role is
-	// already merchant). Treating it as no conflict would make an LP with the
-	// console role, so it refuses, with its own error so the admin can finish
-	// (re-approve) that application instead (review N3).
-	var other int64
-	if err := tx.Model(&models.MerchantRequest{}).
-		Where("user_id = ? AND business_type IN ? AND business_type <> ? AND status = ?", req.UserID,
-			[]string{models.BusinessTypeP2PMerchant, models.BusinessTypeLiquidityProvider}, req.BusinessType, models.MerchantRequestStatusApproved).
-		Count(&other).Error; err != nil {
-		return nil, fmt.Errorf("pm_onboarding: other-kind check: %w", err)
-	}
-	if other > 0 {
-		return nil, ErrPMOtherKindApproved
-	}
 	pm, err := s.upsertPendingRow(ctx, tx, req, kind, poolChainID)
 	if err != nil {
 		return nil, fmt.Errorf("pm_onboarding: upsert: %w", err)
-	}
-	if kindOf(pm) != kind {
-		return nil, ErrPMKindConflict
 	}
 	if kind == models.PaymentMerchantKindLP && (pm.Status == models.PaymentMerchantStatusActive || pm.Status == models.PaymentMerchantStatusPaused) {
 		// A live LP's settlement name is the bank's, verified at activation
@@ -230,14 +207,6 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 	}
 
 	return pm, nil
-}
-
-// kindOf reads a row's kind; anything but lp is a merchant.
-func kindOf(pm *models.PaymentMerchant) string {
-	if pm.IsLP() {
-		return models.PaymentMerchantKindLP
-	}
-	return models.PaymentMerchantKindMerchant
 }
 
 // ApprovePM approves an existing PENDING payment_merchants row by id (admin-driven
@@ -377,8 +346,8 @@ func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID 
 
 // upsertPendingRow finds or creates a payment_merchants row of kind for
 // req.UserID. If a row already exists (from a prior failed attempt), it is
-// reloaded so the caller can skip already-completed provisioning steps; the
-// caller compares its kind, since the row may be of the other kind.
+// reloaded so the caller can skip already-completed provisioning steps. Both
+// reads are kind-scoped: the other role's row is never returned.
 //
 // A rejected LP re-applying as an LP is reset to pending in one guarded
 // statement so the approval can advance it (plan B P18); merchant rows are
@@ -388,9 +357,9 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, db *gorm.DB,
 	db = db.WithContext(ctx)
 
 	// Try to find an existing row for this user (from a prior attempt).
-	err := db.Where("user_id = ?", req.UserID).First(&pm).Error
+	err := wherePMKind(db.Where("user_id = ?", req.UserID), kind).First(&pm).Error
 	if err == nil {
-		if kind == models.PaymentMerchantKindLP && pm.IsLP() && pm.Status == models.PaymentMerchantStatusRejected {
+		if kind == models.PaymentMerchantKindLP && pm.Status == models.PaymentMerchantStatusRejected {
 			res := db.Model(&models.PaymentMerchant{}).
 				Where("id = ? AND status = ?", pm.ID, models.PaymentMerchantStatusRejected).
 				Updates(map[string]interface{}{"status": models.PaymentMerchantStatusPending, "review_note": ""})
@@ -439,10 +408,16 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, db *gorm.DB,
 	}
 
 	// If another concurrent insert won the race, reload — into a fresh struct:
-	// pm's own (never written) id would otherwise join the WHERE and miss.
+	// pm's own (never written) id would otherwise join the WHERE and miss. An
+	// empty kind-scoped reload means the old one-row-per-user index refused
+	// the row: the user holds the other role and the one-off has not run.
 	if result.RowsAffected == 0 {
 		var winner models.PaymentMerchant
-		if err := db.Where("user_id = ?", req.UserID).First(&winner).Error; err != nil {
+		err := wherePMKind(db.Where("user_id = ?", req.UserID), kind).First(&winner).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrSecondRoleNotEnabled
+		}
+		if err != nil {
 			return nil, err
 		}
 		return &winner, nil

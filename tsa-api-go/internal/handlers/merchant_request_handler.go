@@ -149,30 +149,21 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 
 	if input.BusinessType == models.BusinessTypeP2PMerchant {
 		// PM upgrade path: existing merchants are allowed. Only an already-active
-		// PM row blocks the submit (prevents a duplicate active PM).
+		// merchant row blocks the submit (prevents a duplicate active PM); an
+		// LP row is the other role and never blocks (owner, 2026-10-13).
 		if h.PMService != nil {
-			_, err := h.PMService.GetActiveByUserID(c.Request.Context(), user.ID)
+			_, err := h.PMService.GetActiveByUserIDKind(c.Request.Context(), user.ID, models.PaymentMerchantKindMerchant)
 			if err == nil {
-				// Active PM found — block.
+				// Active merchant row found — block.
 				utils.ErrorResponse(c, http.StatusBadRequest, "You are already a payment merchant")
 				return
 			}
 			if !errors.Is(err, services.ErrPMNotFound) {
-				log.Printf("SubmitMerchantRequest: GetActiveByUserID error: %v", err)
+				log.Printf("SubmitMerchantRequest: GetActiveByUserIDKind(merchant) error: %v", err)
 				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check payment merchant status")
 				return
 			}
-			// ErrPMNotFound — no active PM, allow submission to continue.
-		}
-		row, err := h.pmRowFor(c.Request.Context(), user.ID)
-		if err != nil {
-			log.Printf("SubmitMerchantRequest: payment_merchants lookup error: %v", err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check payment merchant status")
-			return
-		}
-		if row != nil && row.IsLP() { // any status, rejected included (review I2)
-			utils.ErrorResponse(c, http.StatusBadRequest, "A liquidity provider can't also be a payment merchant")
-			return
+			// ErrPMNotFound — no active merchant row, allow submission to continue.
 		}
 	} else if input.BusinessType != models.BusinessTypePaymentAcceptance && input.BusinessType != models.BusinessTypeLiquidityProvider {
 		// Non-PM, non-TSA-Pay path: a user who is already a merchant cannot
@@ -326,8 +317,9 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Merchant request submitted successfully", req)
 }
 
-// GetMyMerchantRequest handles GET /api/merchant-requests/my-request.
-// Returns the most recent request for the caller, or 200 with nil data if none exists.
+// GetMyMerchantRequest handles GET /api/merchant-requests/my-request[?type=<businessType>].
+// Returns the caller's most recent request (of that type, when given), or 200
+// with nil data if none exists. An unknown type is 400.
 func (h *MerchantRequestHandler) GetMyMerchantRequest(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -335,8 +327,16 @@ func (h *MerchantRequestHandler) GetMyMerchantRequest(c *gin.Context) {
 		return
 	}
 
+	q := h.DB.Where("user_id = ?", user.ID)
+	if t := c.Query("type"); t != "" {
+		if !slices.Contains(models.ValidBusinessTypes, t) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid business type")
+			return
+		}
+		q = q.Where("business_type = ?", t)
+	}
 	var req models.MerchantRequest
-	err := h.DB.Where("user_id = ?", user.ID).Order("created_at DESC").First(&req).Error
+	err := q.Order("created_at DESC").First(&req).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			utils.SuccessResponse(c, http.StatusOK, "No merchant request found", nil)
@@ -484,52 +484,34 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		}
 	}
 
-	// Kind conflicts are refused BEFORE any write, whatever the existing row's
-	// status: upsertPendingRow would reuse even a rejected row (review I2).
-	if isPMRequestType(req.BusinessType) {
-		existingRow, err := h.pmRowFor(c.Request.Context(), req.UserID)
+	// LP approvals (S35, plan B P2): a true admin, a configured pool, a
+	// still-verified applicant and an unregistered wallet, all before any write.
+	if req.BusinessType == models.BusinessTypeLiquidityProvider {
+		if !hasAdminPrivilege(c, admin) {
+			utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a liquidity provider")
+			return
+		}
+		if _, ok := h.PMOnboarding.LiquidityChainID(); !ok {
+			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
+			return
+		}
+		verified, err := services.IsKYCVerified(c.Request.Context(), h.DB, req.UserID)
 		if err != nil {
-			log.Printf("ApproveMerchantRequest: payment_merchants lookup error: %v", err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check payment merchant status")
+			log.Printf("ApproveMerchantRequest: KYC check failed for request %s: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the applicant's identity")
 			return
 		}
-		if req.BusinessType == models.BusinessTypeP2PMerchant && existingRow != nil && existingRow.IsLP() {
-			utils.ErrorResponseWithCode(c, http.StatusConflict, "This applicant is a liquidity provider; one account cannot be both", "pm_kind_conflict")
+		if !verified {
+			utils.ErrorResponseWithCode(c, http.StatusConflict, "The applicant's identity is no longer verified.", "applicant_not_verified")
 			return
 		}
-		// LP approvals (S35, plan B P2): a true admin, a configured pool, a
-		// still-verified applicant, and no merchant profile — all before any write.
-		if req.BusinessType == models.BusinessTypeLiquidityProvider {
-			if !hasAdminPrivilege(c, admin) {
-				utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a liquidity provider")
-				return
-			}
-			if _, ok := h.PMOnboarding.LiquidityChainID(); !ok {
-				utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
-				return
-			}
-			verified, err := services.IsKYCVerified(c.Request.Context(), h.DB, req.UserID)
-			if err != nil {
-				log.Printf("ApproveMerchantRequest: KYC check failed for request %s: %v", req.ID, err)
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the applicant's identity")
-				return
-			}
-			if !verified {
-				utils.ErrorResponseWithCode(c, http.StatusConflict, "The applicant's identity is no longer verified.", "applicant_not_verified")
-				return
-			}
-			if existingRow != nil && !existingRow.IsLP() {
-				utils.ErrorResponseWithCode(c, http.StatusConflict, "This applicant is a payment merchant; one account cannot be both", "pm_kind_conflict")
-				return
-			}
-			if taken, err := h.walletTaken(c.Request.Context(), req.UserID, req.MakerWalletAddress); err != nil {
-				log.Printf("ApproveMerchantRequest: wallet check failed for request %s: %v", req.ID, err)
-				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the wallet")
-				return
-			} else if taken {
-				utils.ErrorResponseWithCode(c, http.StatusConflict, "This wallet is already registered to another payment merchant or liquidity provider", "wallet_in_use")
-				return
-			}
+		if taken, err := h.walletTaken(c.Request.Context(), req.UserID, req.MakerWalletAddress); err != nil {
+			log.Printf("ApproveMerchantRequest: wallet check failed for request %s: %v", req.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the wallet")
+			return
+		} else if taken {
+			utils.ErrorResponseWithCode(c, http.StatusConflict, "This wallet is already registered to another payment merchant or liquidity provider", "wallet_in_use")
+			return
 		}
 	}
 
@@ -612,13 +594,17 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	isPMRetry := false
 	if req.Status == models.MerchantRequestStatusApproved &&
 		isPMRequestType(req.BusinessType) {
-		var pmRow models.PaymentMerchant
-		err := h.DB.Where("user_id = ?", req.UserID).First(&pmRow).Error
+		kind, _ := models.PaymentMerchantKindFor(req.BusinessType)
+		pmRow, err := h.pmRowFor(c.Request.Context(), req.UserID, kind)
 		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			// No PM row at all — resume by provisioning from scratch.
+		case err != nil:
+			log.Printf("ApproveMerchantRequest: payment_merchants lookup error: %v", err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check payment merchant status")
+			return
+		case pmRow == nil:
+			// No row of the request's kind — resume by provisioning from scratch.
 			isPMRetry = true
-		case err == nil && pmRow.ProvisioningStatus != models.PMProvisioningActive &&
+		case pmRow.ProvisioningStatus != models.PMProvisioningActive &&
 			pmRow.Status != models.PaymentMerchantStatusActive && pmRow.Status != models.PaymentMerchantStatusPaused:
 			// Partially-provisioned row — resume where it left off. A live
 			// (active or paused) row is never a retry, whatever its
@@ -659,11 +645,10 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// One transaction settles everything a PM-kind approval writes (review I2):
-	// the payment_merchants row and its kind first, under the user-row lock
-	// (ApproveFromRequestTx), then the request's status and the role. A kind
-	// conflict, or an approval of the other kind for the same user landing at
-	// the same moment, rolls all of it back, so an LP can never be left with
-	// role=merchant and a refused approval is never half-applied.
+	// the row of the request's own kind, then the request's status and the
+	// role, under the user-row lock (ApproveFromRequestTx); the merchant role
+	// is granted only by a p2p_merchant approval and never removed by an LP
+	// one. A refused approval rolls all of it back, never half-applied.
 	if isPMRequestType(req.BusinessType) || (!isPMRetry && !isPayRetry) {
 		var pmErr error
 		txErr := h.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -701,13 +686,10 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		})
 
 		switch {
-		case pmErr != nil && errors.Is(pmErr, services.ErrPMOtherKindApproved):
+		case pmErr != nil && errors.Is(pmErr, services.ErrSecondRoleNotEnabled):
 			utils.ErrorResponseWithCode(c, http.StatusConflict,
-				"This applicant already has an approved application of the other kind (payment merchant or liquidity provider). Finish that one by approving it again; one account cannot be both.",
-				"other_application_approved")
-			return
-		case pmErr != nil && errors.Is(pmErr, services.ErrPMKindConflict):
-			utils.ErrorResponseWithCode(c, http.StatusConflict, "One account cannot be both a payment merchant and a liquidity provider", "pm_kind_conflict")
+				"This applicant already has the other role, and holding both isn't switched on yet. Nothing was approved; try again after the database update.",
+				"second_role_not_enabled")
 			return
 		case pmErr != nil && errors.Is(pmErr, services.ErrLiquidityUnavailable):
 			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
@@ -899,20 +881,16 @@ func isPMRequestType(t string) bool {
 	return ok
 }
 
-// pmRowFor is the user's one payment_merchants row (uq_payment_merchants_user),
-// any status — a REJECTED row still occupies the user's slot, because
-// upsertPendingRow reuses it (review I2). (nil, nil) when there is none; an
-// error is returned, never read as "no row" (review M6).
-func (h *MerchantRequestHandler) pmRowFor(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
-	var row models.PaymentMerchant
-	err := h.DB.WithContext(ctx).Where("user_id = ?", userID).First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+// pmRowFor is the user's payment_merchants row of kind, any status: a
+// REJECTED LP row still holds the LP slot, because upsertPendingRow reuses it
+// (review I2). (nil, nil) when there is none; an error is never read as "no
+// row" (review M6).
+func (h *MerchantRequestHandler) pmRowFor(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
+	row, err := services.NewPMService(h.DB).GetByUserIDKind(ctx, userID, kind)
+	if errors.Is(err, services.ErrPMNotFound) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &row, nil
+	return row, err
 }
 
 // walletTaken reports whether another user's payment_merchants row already
@@ -926,21 +904,21 @@ func (h *MerchantRequestHandler) walletTaken(ctx context.Context, userID uuid.UU
 }
 
 // prepareLPRequest validates a liquidity_provider application and normalises
-// it (spec §8.1, plan B P3): pool configured, no payment-merchant profile of
-// either kind, a Didit-verified legal name (which becomes the business name),
+// it (spec §8.1, plan B P3): pool configured, no live LP profile (a merchant
+// may also be an LP, owner 2026-10-13), a Didit-verified legal name (which becomes the business name),
 // a settlement account and a wallet; caps are always 0. status 0 = proceed.
 func (h *MerchantRequestHandler) prepareLPRequest(ctx context.Context, user *models.User, in *submitMerchantRequestInput) (status int, msg, code string) {
 	if _, ok := h.PMOnboarding.LiquidityChainID(); !ok {
 		return http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable"
 	}
-	row, err := h.pmRowFor(ctx, user.ID)
+	row, err := h.pmRowFor(ctx, user.ID, models.PaymentMerchantKindLP)
 	if err != nil {
 		log.Printf("SubmitMerchantRequest: payment_merchants lookup error: %v", err)
 		return http.StatusInternalServerError, "Failed to check your profile", ""
 	}
 	// Only a REJECTED LP row may re-apply (its approval resets it, review I2).
-	if row != nil && !(row.IsLP() && row.Status == models.PaymentMerchantStatusRejected) {
-		return http.StatusBadRequest, "This account already has a payment merchant or liquidity provider profile", ""
+	if row != nil && row.Status != models.PaymentMerchantStatusRejected {
+		return http.StatusBadRequest, "You already have a liquidity provider profile", ""
 	}
 	verified, legal, err := services.KYCIdentity(ctx, h.DB, user.ID)
 	if err != nil {

@@ -73,27 +73,36 @@ func TestSubmitLPRequest_UsesTheVerifiedLegalNameAndZeroCaps(t *testing.T) {
 	}
 }
 
-// Roadmap risk 4.
-func TestSubmitLPRequest_RefusedWhenUserHasAPMRow(t *testing.T) {
+// Owner 2026-10-13: a merchant may also apply as an LP; only an LP row that is
+// not rejected blocks an LP application.
+func TestSubmitLPRequest_AllowedForAMerchant(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	h := lpHandler(t, db, true)
-	u := createMerchantTestUser(t, db, "user")
+	u := createMerchantTestUser(t, db, "merchant")
 	verifyUser(t, db, u, "ADA OBI")
-	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusApproved})
-	if code, _ := submitLP(t, h, u); code != http.StatusBadRequest {
-		t.Fatalf("submit with a merchant row = %d, want 400", code)
+	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusActive})
+	if code, body := submitLP(t, h, u); code != http.StatusCreated {
+		t.Fatalf("submit with an active merchant row = %d %v, want 201", code, body)
+	}
+
+	lpUser := createMerchantTestUser(t, db, "user")
+	verifyUser(t, db, lpUser, "ADA OBI")
+	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: lpUser.ID, Name: "ADA OBI", Kind: models.PaymentMerchantKindLP, Status: models.PaymentMerchantStatusApproved})
+	if code, _ := submitLP(t, h, lpUser); code != http.StatusBadRequest {
+		t.Fatalf("submit with an approved LP row = %d, want 400", code)
 	}
 }
 
-func TestSubmitPMRequest_RefusedForAnLP(t *testing.T) {
+// Inventory #9: an active LP is not "already a payment merchant".
+func TestSubmitPMRequest_AllowedForAnActiveLP(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	h := lpHandler(t, db, true)
 	u := createMerchantTestUser(t, db, "user")
-	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada LP", Kind: models.PaymentMerchantKindLP, Status: models.PaymentMerchantStatusApproved})
+	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada LP", Kind: models.PaymentMerchantKindLP, Status: models.PaymentMerchantStatusActive})
 	w, c := newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), u)
 	h.SubmitMerchantRequest(c)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("PM submit by an LP = %d, want 400: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusCreated {
+		t.Fatalf("PM submit by an active LP = %d, want 201: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -165,62 +174,105 @@ func TestApproveLPRequest_CreatesLPRowOnPoolChainWithoutRoleFlip(t *testing.T) {
 	}
 }
 
-func TestApproveLPRequest_KindConflictLeavesRequestPending(t *testing.T) {
+func TestApproveLPRequest_ForAMerchantKeepsMerchantRowAndRole(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	h := lpHandler(t, db, true)
-	u := createMerchantTestUser(t, db, "user")
+	u := createMerchantTestUser(t, db, "merchant")
+	m := models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusActive}
+	db.Create(&m)
 	id := lpRequestID(t, db, h, u)
-	// A merchant row appeared after the submit (e.g. an admin-created PM).
-	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusApproved})
-	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), id); code != http.StatusConflict {
-		t.Fatalf("approve = %d, want 409", code)
+	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), id); code != http.StatusOK {
+		t.Fatalf("approve = %d", code)
 	}
-	var mr models.MerchantRequest
-	db.First(&mr, "id = ?", id)
-	if mr.Status != models.MerchantRequestStatusPending {
-		t.Fatalf("status = %s, want pending (nothing half-approved)", mr.Status)
+	var rows []models.PaymentMerchant
+	db.Where("user_id = ?", u.ID).Order("kind").Find(&rows)
+	var role string
+	db.Model(&models.User{}).Where("id = ?", u.ID).Pluck("role", &role)
+	if len(rows) != 2 || rows[0].IsLP() == rows[1].IsLP() || role != models.RoleMerchant {
+		t.Fatalf("rows=%+v role=%s", rows, role)
+	}
+	var after models.PaymentMerchant
+	db.First(&after, "id = ?", m.ID)
+	if after.Status != models.PaymentMerchantStatusActive {
+		t.Fatalf("merchant status = %s", after.Status)
 	}
 }
 
-// Review I2: a REJECTED merchant row still occupies the user's slot; the LP
-// approval must refuse before flipping anything.
-func TestApproveLPRequest_RejectedMerchantRowNeverHalfApproves(t *testing.T) {
+func TestApprovePMRequest_ForAnLPLeavesTheLPRowAlone(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	h := lpHandler(t, db, true)
 	u := createMerchantTestUser(t, db, "user")
-	id := lpRequestID(t, db, h, u)
-	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusRejected})
-	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), id); code != http.StatusConflict {
-		t.Fatalf("approve = %d, want 409", code)
-	}
-	var mr models.MerchantRequest
-	db.First(&mr, "id = ?", id)
-	var reloaded models.User
-	db.First(&reloaded, "id = ?", u.ID)
-	if mr.Status != models.MerchantRequestStatusPending || reloaded.Role != "user" {
-		t.Fatalf("request=%s role=%s: half-approved", mr.Status, reloaded.Role)
-	}
-	// The mirror case: a rejected LP row blocks a p2p_merchant approval before the role flip.
-	u2 := createMerchantTestUser(t, db, "user")
-	w, c := newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), u2)
+	lp := models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "ADA OBI", Kind: models.PaymentMerchantKindLP,
+		Status: models.PaymentMerchantStatusPaused, ProvisioningStatus: models.PMProvisioningActive}
+	db.Create(&lp)
+	w, c := newMerchantContext("POST", "/api/merchant-requests", validPMSubmitInput(), u)
 	h.SubmitMerchantRequest(c)
 	if w.Code != http.StatusCreated {
 		t.Fatal(w.Body.String())
 	}
-	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u2.ID, Name: "Ada LP", Kind: models.PaymentMerchantKindLP, Status: models.PaymentMerchantStatusRejected})
 	var pmReq models.MerchantRequest
-	db.Where("user_id = ?", u2.ID).First(&pmReq)
-	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), pmReq.ID.String()); code != http.StatusConflict {
-		t.Fatalf("PM approve over a rejected LP row = %d, want 409", code)
+	db.Where("user_id = ? AND business_type = ?", u.ID, models.BusinessTypeP2PMerchant).First(&pmReq)
+	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), pmReq.ID.String()); code != http.StatusOK {
+		t.Fatalf("approve = %d", code)
 	}
-	// A fresh struct: re-reading into reloaded would add its old primary key
-	// to the WHERE, miss, and leave u's role in place.
-	var reloaded2 models.User
-	if err := db.First(&reloaded2, "id = ?", u2.ID).Error; err != nil {
+	var after models.PaymentMerchant
+	db.First(&after, "id = ?", lp.ID)
+	if after.Status != models.PaymentMerchantStatusPaused || !after.IsLP() {
+		t.Fatalf("LP row changed by the merchant approval: %+v", after)
+	}
+	// Re-approving the merchant request (isPMRetry) finds the merchant row, not the live LP row.
+	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), pmReq.ID.String()); code != http.StatusOK {
+		t.Fatalf("retry approve = %d", code)
+	}
+}
+
+func TestGetMyMerchantRequest_FiltersByType(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	h := lpHandler(t, db, true)
+	u := createMerchantTestUser(t, db, "user")
+	seedMerchantRequest(t, db, u.ID, models.BusinessTypeLiquidityProvider, models.MerchantRequestStatusPending)
+	seedMerchantRequest(t, db, u.ID, models.BusinessTypeP2PMerchant, models.MerchantRequestStatusApproved) // newer
+	db.Exec(`UPDATE merchant_requests SET created_at = datetime('now', '+1 minute') WHERE user_id = ? AND business_type = ?`,
+		u.ID.String(), models.BusinessTypeP2PMerchant)
+	w, c := newMerchantContext("GET", "/api/merchant-requests/my-request?type=liquidity_provider", nil, u)
+	h.GetMyMerchantRequest(c)
+	var body struct{ Data models.MerchantRequest }
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusOK || body.Data.BusinessType != models.BusinessTypeLiquidityProvider {
+		t.Fatalf("my-request?type=lp = %d %s", w.Code, w.Body.String())
+	}
+	w, c = newMerchantContext("GET", "/api/merchant-requests/my-request?type=bogus", nil, u)
+	h.GetMyMerchantRequest(c)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("bogus type = %d", w.Code)
+	}
+}
+
+// Between the deploy and the one-off the old (user_id) index still stands: a
+// second-role approval fails whole with its own code, never half-applied.
+func TestApproveLPRequest_BeforeOneOffIs409SecondRoleNotEnabled(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	if err := db.Exec(`CREATE UNIQUE INDEX uq_payment_merchants_user ON payment_merchants (user_id)`).Error; err != nil {
 		t.Fatal(err)
 	}
-	if reloaded2.Role != "user" {
-		t.Fatalf("role flipped to %s before the conflict", reloaded2.Role)
+	h := lpHandler(t, db, true)
+	u := createMerchantTestUser(t, db, "merchant")
+	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusActive})
+	id := lpRequestID(t, db, h, u)
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+id+"/approve", map[string]any{"note": "ok"}, createMerchantTestUser(t, db, "admin"))
+	c.Params = gin.Params{{Key: "id", Value: id}}
+	h.ApproveMerchantRequest(c)
+	var body map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if w.Code != http.StatusConflict || body["code"] != "second_role_not_enabled" {
+		t.Fatalf("approve = %d %v, want 409 second_role_not_enabled", w.Code, body)
+	}
+	var mr models.MerchantRequest
+	db.First(&mr, "id = ?", id)
+	var n int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", u.ID).Count(&n)
+	if mr.Status != models.MerchantRequestStatusPending || n != 1 {
+		t.Fatalf("request=%s rows=%d: half-applied", mr.Status, n)
 	}
 }
 
