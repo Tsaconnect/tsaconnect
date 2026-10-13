@@ -78,6 +78,17 @@ setup and do not move the address.
 **Rule: the deployer key must be the same address on every chain.** The
 deployer is the temporary owner in the init calldata.
 
+**Rule: the deployer is a cold key kept for deployments only.** Anyone can
+replay the CREATE2 calldata on a chain we have not used yet, and the address
+it lands at is owned by the deployer, so whoever holds the deployer key can
+claim "our" address on any new chain. The script refuses the operator or
+treasury (hot server keys) as the deployer. The owner supplies the deploy key
+at deploy time; it is never stored.
+
+**Rule: trust an address per chain, never by equality.** The same address on
+another chain is not ours until it is recorded for that chain (here in
+`deploy/deterministic.json`, and in the API's preset row for that chain).
+
 **Env**
 
 | var | default | meaning |

@@ -143,6 +143,14 @@ async function deploy(hre, opts = {}) {
   if (signer && opts.deployer && !same(opts.deployer, deployer)) {
     throw new Error(`deterministic: DET_DEPLOYER ${opts.deployer} is not the configured key ${deployer}`);
   }
+  // The deployer decides who can claim this address on a chain we have not used
+  // yet (anyone can replay the CREATE2 calldata), so it must be a cold key kept
+  // for deployments only, never a hot server key.
+  for (const [role, addr] of [["operator", roles.operator], ["treasury", roles.treasury]]) {
+    if (same(deployer, addr)) {
+      throw new Error(`deterministic: the deployer ${deployer} is the ${role} — use a dedicated cold deploy key, never a hot server key`);
+    }
+  }
   const chainId = (await ethers.provider.getNetwork()).chainId;
   const manifestFile = opts.manifestPath || (create2.isLocalNetwork(hre) ? null : create2.MANIFEST_PATH);
 

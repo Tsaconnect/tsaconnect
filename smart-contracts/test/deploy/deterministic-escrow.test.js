@@ -131,6 +131,16 @@ describe("deploy/deterministic-escrow", function () {
     expect(await create2.hasCode(C.ethers.provider, A.out.proxy)).to.equal(false);
   });
 
+  it("refuses a hot server key (operator or treasury) as the deployer, before deploying anything", async () => {
+    const C = await newChain(31341);
+    const chain = await chainFor(C);
+    const [deployer] = await C.ethers.getSigners();
+    for (const role of ["operator", "treasury"]) {
+      const hot = { ...roles, [role]: deployer.address };
+      await expect(deploy(C, { ...opts, roles: hot, chain })).to.be.rejectedWith(new RegExp(`deployer .* is the ${role}`));
+    }
+  });
+
   it("a front-run CREATE2 only pays our gas: the deployer still owns and wires the proxy", async () => {
     const C = await newChain(31341);
     const chain = await chainFor(C);
