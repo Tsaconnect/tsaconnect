@@ -22,7 +22,7 @@ import { marketLoadError, type MarketError } from '@/utils/p2pMarketError';
 import { getChainByChainId } from '../../constants/chains';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
-import { lpCta } from '@/utils/lpCta';
+import { LpCtaCard } from '@/components/liquidity/LpCtaCard';
 import { liquidityApi, type PoolCard } from '@/services/liquidityApi';
 import { poolCardView } from '@/utils/poolCard';
 import { RAILS, railLabel } from '../../constants/rails';
@@ -295,23 +295,7 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        {(() => {
-          const cta = lpCta({ isPm, kind, lpStatus, liquidityAvailable, loading: pmLoading });
-          return cta ? (
-            <PressableScale onPress={() => router.push(cta.route as never)} style={{ marginBottom: spacing.lg }}>
-              <AccentCard padding="md">
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                  <Icon name="wallet" size={24} color={colors.accent} />
-                  <View style={{ flex: 1 }}>
-                    <Text variant="bodyMed" weight="700">{cta.title}</Text>
-                    <Text variant="caption" color="textSecondary">{cta.subtitle}</Text>
-                  </View>
-                  <Icon name="chevronRight" size={20} color={colors.textMuted} />
-                </View>
-              </AccentCard>
-            </PressableScale>
-          ) : null;
-        })()}
+        <LpCtaCard isPm={isPm} kind={kind} lpStatus={lpStatus} liquidityAvailable={liquidityAvailable} loading={pmLoading} />
 
         {(() => {
           const v = poolCardView(poolCard, adSide);
