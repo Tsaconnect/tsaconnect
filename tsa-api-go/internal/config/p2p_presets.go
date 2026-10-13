@@ -35,12 +35,14 @@ type PoolChainConfig struct {
 
 // bscPresets: BSC is the TSA Liquidity pool chain (decision 6). An empty
 // p2pEscrow leaves it dormant. Chain id and token addresses come from
-// cfg.Networks. Ordinary P2P on BSC is not offered (spec S5).
+// cfg.Networks. Ordinary P2P on BSC is not offered (spec S5). The mainnet row
+// is live: the incident stop is pool_order_max = 0, never emptying the row
+// while slices are open (boot refuses: liquidity_pool_unconfigure_refused).
 var bscPresets = map[string]chainPreset{
 	"mainnet": {
-		p2pEscrow:     "", // filled at the mainnet rollout (spec §25 step 8)
+		p2pEscrow:     "0xeBF3Fc37C57Eff8353bB4c30F51b6899F4ae22cD", // mainnet rollout 2026-10-13; owner PM 0x62bA…1b96, admin = release 0x38cE…2c9
 		eip712Version: "2", purpose: P2PPurposePool,
-		pool: &poolPreset{feeManager: "", tokens: []string{"USDT"},
+		pool: &poolPreset{feeManager: "0x32CBeb22B468da660241c2Bbb635BdFE768A8f6c", tokens: []string{"USDT"},
 			releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000}, // 0.01 BNB
 	},
 	"testnet": {
