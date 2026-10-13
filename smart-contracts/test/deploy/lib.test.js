@@ -3,7 +3,7 @@ const { expect } = require("chai");
 const fs = require("fs");
 const path = require("path");
 const {
-  resolveChain, validateAddresses, requireAddr, readLedger, writeLedger, reuseFromLedger,
+  resolveChain, validateAddresses, requireAddr, readLedger, writeLedger, reuseFromLedger, handOverOwnership,
 } = require("../../deploy/lib");
 
 const VALID = "0x000000000022D473030F116dDEE9F6B43aC78BA3"; // canonical Permit2
@@ -99,6 +99,51 @@ describe("deploy/lib", () => {
       writeLedger(net, "FeeManager", { proxy: "0xFEE" });
       process.env.FORCE_REDEPLOY = "1";
       expect(reuseFromLedger(hre, "FeeManager", undefined)).to.equal(null);
+    });
+  });
+
+  describe("handOverOwnership", () => {
+    const OWNER = "0x000000000000000000000000000000000000dEaD";
+    const fake = ({ owner = VALID, transferErr, readErrAfterTransfer } = {}) => {
+      let current = owner, transferred = false, sent = 0;
+      return {
+        sent: () => sent,
+        owner: async () => {
+          if (transferred && readErrAfterTransfer) throw new Error("rpc down");
+          return current;
+        },
+        transferOwnership: async (to) => {
+          sent++;
+          transferred = true;
+          if (transferErr) throw transferErr;
+          current = to;
+          return { wait: async () => {} };
+        },
+      };
+    };
+
+    it("sends nothing for a contract already owned by finalOwner", async () => {
+      const c = fake({ owner: OWNER });
+      await handOverOwnership("t", [c], OWNER);
+      expect(c.sent()).to.equal(0);
+    });
+
+    it("transfers and reads back", async () => {
+      const c = fake();
+      await handOverOwnership("t", [c], OWNER);
+      expect(c.sent()).to.equal(1);
+      expect(await c.owner()).to.equal(OWNER);
+    });
+
+    it("a failing read-back never masks the transfer error", async () => {
+      const c = fake({ transferErr: new Error("transfer reverted"), readErrAfterTransfer: true });
+      await expect(handOverOwnership("t", [c], OWNER)).to.be.rejectedWith(/transfer reverted/);
+    });
+
+    it("throws when an owner does not end at finalOwner", async () => {
+      const c = fake();
+      c.transferOwnership = async () => ({ wait: async () => {} }); // silently does nothing
+      await expect(handOverOwnership("t", [c], OWNER)).to.be.rejectedWith(/owner\(\) is not/);
     });
   });
 });

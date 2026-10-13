@@ -1,5 +1,5 @@
 // smart-contracts/deploy/service-contact.js
-const { resolveChain, writeLedger, readLedger, transferOwnershipIfNeeded } = require("./lib");
+const { resolveChain, writeLedger, readLedger, handOverOwnership } = require("./lib");
 
 async function deploy(hre, { chain, feeManager, feeAmount = 0n } = {}) {
   const { ethers, upgrades, network } = hre;
@@ -24,7 +24,7 @@ async function deploy(hre, { chain, feeManager, feeAmount = 0n } = {}) {
   const fm = feeManager || (chain ? null : readLedger(network.name).FeeManager?.proxy);
   if (fm) await (await sc.setFeeManager(fm)).wait();
 
-  await transferOwnershipIfNeeded(sc, deployerAddr, finalOwner);
+  await handOverOwnership("ServiceContactV2", [sc], finalOwner);
 
   const impl = await upgrades.erc1967.getImplementationAddress(proxy);
   if (!chain) writeLedger(network.name, "ServiceContactV2", { proxy, impl });

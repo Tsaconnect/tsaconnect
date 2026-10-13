@@ -100,4 +100,15 @@ const chains = {
   },
 };
 
-module.exports = { chains, CANONICAL_PERMIT2 };
+// Signer roles that are the SAME address on every EVM chain since the 2026-10
+// signer consolidation — what lets deploy/deterministic-escrow.js land one
+// escrow address everywhere. The operator (release admin) goes into the proxy's
+// initialize() calldata, so changing it changes the deterministic address.
+// Owner and treasury are per-chain setup, not part of the address.
+const DETERMINISTIC_ROLES = {
+  owner: process.env.DET_OWNER || "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",     // PM
+  operator: process.env.DET_OPERATOR || "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9", // release admin
+  treasury: process.env.DET_TREASURY || "0xA4123022c84E66A5E955fd96C5468A78bE84e205", // systemWallet
+};
+
+module.exports = { chains, CANONICAL_PERMIT2, DETERMINISTIC_ROLES };
