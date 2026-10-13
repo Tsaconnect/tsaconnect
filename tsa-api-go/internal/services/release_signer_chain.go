@@ -53,6 +53,9 @@ func (c *ChainReleaseSigner) Chains() []int64 {
 	return out
 }
 
+// Lane is the signer's KeyLane on chainID, nil when it has none.
+func (c *ChainReleaseSigner) Lane(chainID int64) *KeyLane { return c.byChain[chainID] }
+
 // Send builds (prepare + nonce read), signs and broadcasts on chainID under
 // that chain's lane (lock + nonce floor).
 func (c *ChainReleaseSigner) Send(ctx context.Context, chainID int64, build func() ([]byte, error)) (string, error) {

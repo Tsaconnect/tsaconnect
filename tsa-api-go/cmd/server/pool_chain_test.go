@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
@@ -142,5 +143,21 @@ func TestCompanyPMUser_RefusesAnLPRow(t *testing.T) {
 	t.Cleanup(func() { config.DB = prev })
 	if user, err := companyPMUser(&config.Config{ITPMID: lp.ID.String()}); err == nil {
 		t.Fatalf("slice buyer = %s, want IT_PM_ID naming an LP row refused", user)
+	}
+}
+
+// The release key's lane on the pool chain is the registry's: a sponsor lane
+// on the same key and chain shares its lock and nonce floor.
+func TestBuildReleaseSigner_TakesItsLanesFromTheRegistry(t *testing.T) {
+	cfg := poolTestConfig(t, "mainnet")
+	cfg.PMReleasePrivateKey = testKeyA
+	bs := services.NewBlockchainService(cfg)
+	crs, ok := buildReleaseSigner(cfg, bs).(*services.ChainReleaseSigner)
+	if !ok || crs.Lane(56) == nil {
+		t.Fatalf("release signer = %#v, want a lane on chain 56", crs)
+	}
+	key, _ := crypto.HexToECDSA(testKeyA)
+	if l := buildSponsorLaneOn(bs, "mainnet", "bsc", "gas_sponsor", key, "ramp_sponsor_bsc", services.SponsorLimits{}, nil); l.KeyLane != crs.Lane(56) {
+		t.Fatal("the release key and a sponsor lane on the same key and chain must share one KeyLane")
 	}
 }
