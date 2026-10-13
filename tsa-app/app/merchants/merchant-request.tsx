@@ -455,17 +455,22 @@ export default function MerchantRequestScreen() {
     try {
       // Fetch the existing request and the real PM status together. getMyPmStatus
       // is dormant-safe (returns {isPm:false} on any error), so it never blocks.
-      // An add-on form also fetches its own type's request for the gate; the
+      // An add-on form gates on its own type's request: the newest request
+      // when it is that type (or there is none), else one typed fetch. The
       // role cache and prefill below keep reading the untyped newest request.
       const filter = requestTypeFilter(businessType);
-      const [res, typed, pmStatus] = await Promise.all([
-        getMyMerchantRequest(),
-        filter ? getMyMerchantRequest(filter) : Promise.resolve(null),
-        getMyPmStatus(),
-      ]);
+      const [res, pmStatus] = await Promise.all([getMyMerchantRequest(), getMyPmStatus()]);
       setPmActive(pmStatus.isPm);
       setLpAvailable(!!pmStatus.liquidityAvailable);
-      if (filter) setExistingRequest(typed?.success ? typed.data ?? null : null);
+      if (filter && res.success) {
+        const newestType = res.data?.businessType ?? res.data?.business_type;
+        const typed = !res.data || newestType === filter ? res : await getMyMerchantRequest(filter);
+        if (!typed.success) {
+          Alert.alert('Error', typed.message || 'Could not check your application status. Please try again.');
+          return;
+        }
+        setExistingRequest(typed.data ?? null);
+      }
       if (res.success && res.data) {
         if (!filter) setExistingRequest(res.data);
         // TSA Pay (payment_acceptance) approvals never grant the marketplace

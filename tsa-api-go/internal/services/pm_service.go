@@ -105,6 +105,25 @@ func (s *PMService) GetByUserIDKind(ctx context.Context, userID uuid.UUID, kind 
 	return firstPM(wherePMKind(s.db.WithContext(ctx).Where("user_id = ?", userID), kind).Order("created_at DESC"))
 }
 
+// GetRolesByUserID is the user's merchant and LP rows (either may be nil) in
+// one read; the kind split is wherePMKind's rule (anything but lp is merchant).
+func (s *PMService) GetRolesByUserID(ctx context.Context, userID uuid.UUID) (merchant, lp *models.PaymentMerchant, err error) {
+	var rows []models.PaymentMerchant
+	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Order("created_at DESC").Find(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+	for i := range rows {
+		row := &rows[i]
+		switch {
+		case row.IsLP() && lp == nil:
+			lp = row
+		case !row.IsLP() && merchant == nil:
+			merchant = row
+		}
+	}
+	return merchant, lp, nil
+}
+
 // OptionalPM reads a by-user lookup's not-found as "no row" (nil, nil); any
 // other error is returned, never read as "no row".
 func OptionalPM(row *models.PaymentMerchant, err error) (*models.PaymentMerchant, error) {

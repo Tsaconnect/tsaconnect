@@ -104,7 +104,7 @@ describe('ActivatePmScreen', () => {
     await act(async () => {
       await button.props.onPress();
     });
-    expect(activatePmAccount).toHaveBeenCalledWith();
+    expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, undefined);
   });
 
   it('sends an unverified merchant to verification instead of a generic failure', async () => {
@@ -151,7 +151,7 @@ describe('ActivatePmScreen', () => {
     await act(async () => {
       await button.props.onPress();
     });
-    expect(activatePmAccount).toHaveBeenCalledWith();
+    expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, undefined);
   });
 
   it('activates the merchant role when named, even for an LP-only top level', async () => {

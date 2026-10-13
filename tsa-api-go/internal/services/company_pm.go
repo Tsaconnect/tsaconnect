@@ -58,6 +58,16 @@ func LoadCompanyPM(ctx context.Context, db *gorm.DB, id string) (*models.Payment
 	if pm.IsLP() {
 		return nil, fmt.Errorf("%w: IT_PM_ID %s is a liquidity provider, not the company payment merchant", ErrCompanyPMUnusable, pm.ID)
 	}
+	// The company user buys every slice, so it may hold no LP row either: its
+	// stock would fill its own slices.
+	var lpRows int64
+	if err := db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+		Where("user_id = ? AND kind = ?", pm.UserID, models.PaymentMerchantKindLP).Count(&lpRows).Error; err != nil {
+		return nil, fmt.Errorf("IT_PM_ID %s: LP check: %w", pm.ID, err)
+	}
+	if lpRows > 0 {
+		return nil, fmt.Errorf("%w: IT_PM_ID %s's user is also a liquidity provider", ErrCompanyPMUnusable, pm.ID)
+	}
 	return pm, nil
 }
 

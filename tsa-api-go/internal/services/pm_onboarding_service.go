@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,6 +78,9 @@ type PMOnboardingService struct {
 	// companyPMID is IT_PM_ID: its user buys every pool slice, so it is never
 	// approved or activated as an LP (review M5).
 	companyPMID string
+
+	// secondRoleEnabled latches once the one-row-per-user index is gone.
+	secondRoleEnabled atomic.Bool
 }
 
 // NewPMOnboardingService returns a PMOnboardingService.

@@ -197,8 +197,8 @@ func TestApproveLPRequest_BeforeOneOffIs409_OnPostgres(t *testing.T) {
 
 // Review M9: the second of two concurrent approvals of one request loaded it
 // while still pending. It must not overwrite the first admin's review: the
-// request update only moves a pending request, and a lost race answers 200
-// with the request as the winner left it.
+// request update only moves a pending request, and a race lost to another
+// approval answers 200 with the request as the winner left it.
 func TestApproveLPRequest_ConcurrentSecondApprovalKeepsFirstReview_OnPostgres(t *testing.T) {
 	db := testutil.TempPostgres(t, "mr_review_", &models.User{}, &models.MerchantRequest{}, &models.PaymentMerchant{})
 	if err := config.MigratePaymentMerchantRoleIndex(db); err != nil {
@@ -242,5 +242,40 @@ func TestApproveLPRequest_ConcurrentSecondApprovalKeepsFirstReview_OnPostgres(t 
 	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", applicant.ID).Count(&n)
 	if n != 1 {
 		t.Fatalf("rows = %d, want one LP row", n)
+	}
+}
+
+// A rejection that commits while an approval is in flight leaves the approval
+// with nothing to move: it must answer 409, never "approved".
+func TestApproveLPRequest_LostToAConcurrentRejection_Is409_OnPostgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "mr_reject_race_", &models.User{}, &models.MerchantRequest{}, &models.PaymentMerchant{})
+	if err := config.MigratePaymentMerchantRoleIndex(db); err != nil {
+		t.Fatal(err)
+	}
+	h := lpHandler(t, db, true)
+	applicant := pgUser(t, db, models.RoleUser)
+	id := pgRequest(t, db, applicant.ID, models.BusinessTypeLiquidityProvider)
+	admin := pgUser(t, db, models.RoleAdmin)
+
+	var started atomic.Bool
+	if err := db.Callback().Create().Before("gorm:create").Register("test:reject_race", func(tx *gorm.DB) {
+		if _, ok := tx.Statement.Dest.(*models.PaymentMerchant); !ok || !started.CompareAndSwap(false, true) {
+			return
+		}
+		if err := db.Session(&gorm.Session{NewDB: true}).Model(&models.MerchantRequest{}).Where("id = ?", id).
+			Update("status", models.MerchantRequestStatusRejected).Error; err != nil {
+			t.Errorf("reject: %v", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := approveAs(t, h, admin, id); code != http.StatusConflict {
+		t.Fatalf("code = %d, want 409", code)
+	}
+	var n int64
+	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", applicant.ID).Count(&n)
+	if n != 0 {
+		t.Fatalf("rows = %d, want the approval rolled back", n)
 	}
 }

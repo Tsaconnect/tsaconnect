@@ -685,16 +685,23 @@ type fakePMStatusGetter struct {
 	err error
 }
 
-func (f *fakePMStatusGetter) GetByUserIDKind(_ context.Context, _ uuid.UUID, kind string) (*models.PaymentMerchant, error) {
+func (f *fakePMStatusGetter) GetRolesByUserID(_ context.Context, _ uuid.UUID) (merchant, lp *models.PaymentMerchant, err error) {
+	if errors.Is(f.err, services.ErrPMNotFound) {
+		return nil, nil, nil // the real read returns no rows, never ErrPMNotFound
+	}
 	if f.err != nil {
-		return nil, f.err
+		return nil, nil, f.err
 	}
 	for _, row := range []*models.PaymentMerchant{f.pm, f.lp} {
-		if row != nil && row.IsLP() == (kind == models.PaymentMerchantKindLP) {
-			return row, nil
+		switch {
+		case row == nil:
+		case row.IsLP():
+			lp = row
+		default:
+			merchant = row
 		}
 	}
-	return nil, services.ErrPMNotFound
+	return merchant, lp, nil
 }
 
 // buildPMStatusRouter wires a GET /p2p/pm/me route and injects the given user

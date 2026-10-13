@@ -47,12 +47,6 @@ export function isValidPmIdNumber(v: string): boolean {
 type ActivationResult = Awaited<ReturnType<typeof activatePmAccount>>;
 type ActivationKind = 'merchant' | 'lp';
 
-/** Sends the id and the role only when given, so a single-role activation is the request it always was. */
-function activate(activationKind?: ActivationKind, id?: { idType: PmIdType; idNumber: string }) {
-  if (activationKind) return activatePmAccount(id?.idType, id?.idNumber, activationKind);
-  return id ? activatePmAccount(id.idType, id.idNumber) : activatePmAccount();
-}
-
 type Outcome =
   | { kind: 'success'; title: string; message: string; route: string }
   | { kind: 'kyc' }
@@ -118,7 +112,7 @@ function CentralActivation({ kind, activationKind }: { kind: ActivationKind; act
 
   const handleSubmit = async () => {
     setSubmitting(true);
-    const res = await activate(activationKind);
+    const res = await activatePmAccount(undefined, undefined, activationKind);
     setSubmitting(false);
     reportActivation(res, kind);
   };
@@ -157,7 +151,7 @@ function IdActivationForm({ activationKind }: { activationKind?: ActivationKind 
       return;
     }
     setSubmitting(true);
-    const res = await activate(activationKind, { idType, idNumber });
+    const res = await activatePmAccount(idType, idNumber, activationKind);
     setSubmitting(false);
     reportActivation(res, 'merchant');
   };

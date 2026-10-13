@@ -39,6 +39,20 @@ func TestGetByUserIDKind_ReturnsEachRoleOnly(t *testing.T) {
 	}
 }
 
+func TestGetRolesByUserID_SplitsTheRowsByKind(t *testing.T) {
+	r := newPoolRig(t)
+	ctx := context.Background()
+	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, lpWallet)
+	m := secondRole(t, r.db, lp.UserID, models.PaymentMerchantKindMerchant, models.PaymentMerchantStatusPaused, "0x00000000000000000000000000000000000000a1")
+	svc := NewPMService(r.db)
+	if gotM, gotLP, err := svc.GetRolesByUserID(ctx, lp.UserID); err != nil || gotM == nil || gotM.ID != m.ID || gotLP == nil || gotLP.ID != lp.ID {
+		t.Fatalf("roles = %v %v %v", gotM, gotLP, err)
+	}
+	if gotM, gotLP, err := svc.GetRolesByUserID(ctx, uuid.New()); err != nil || gotM != nil || gotLP != nil {
+		t.Fatalf("stranger = %v %v %v, want none", gotM, gotLP, err)
+	}
+}
+
 func TestChainsFor_DualUserWithNewerMerchantRowStillGetsPoolChain(t *testing.T) {
 	r := newPoolRig(t)
 	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, lpWallet)

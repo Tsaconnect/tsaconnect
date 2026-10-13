@@ -467,3 +467,23 @@ func TestLoadCompanyPM_RequiresAnActiveMerchantRow(t *testing.T) {
 		t.Fatalf("LoadCompanyPM(active) = %+v %v", pm, err)
 	}
 }
+
+// The company user buys every pool slice, so a company PM whose user also
+// holds an LP row (any status) is unusable: its stock could fill its own slices.
+func TestLoadCompanyPM_RefusesACompanyUserWhoIsAlsoAnLP(t *testing.T) {
+	s := newITTestService(t)
+	ctx := context.Background()
+	userID := uuid.New()
+	company := &models.PaymentMerchant{ID: uuid.New(), UserID: userID, Name: "TSA", Status: models.PaymentMerchantStatusActive}
+	lp := &models.PaymentMerchant{ID: uuid.New(), UserID: userID, Name: "TSA", Kind: models.PaymentMerchantKindLP,
+		Status: models.PaymentMerchantStatusPending, InboundAccountNumber: "2998287754"}
+	if err := s.db.Create(company).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Create(lp).Error; err != nil {
+		t.Skipf("schema still allows one row per user: %v", err)
+	}
+	if _, err := LoadCompanyPM(ctx, s.db, company.ID.String()); !errors.Is(err, ErrCompanyPMUnusable) {
+		t.Fatalf("LoadCompanyPM = %v, want ErrCompanyPMUnusable", err)
+	}
+}

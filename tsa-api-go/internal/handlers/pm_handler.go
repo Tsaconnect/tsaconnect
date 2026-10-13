@@ -27,10 +27,10 @@ type PMAutomation interface {
 }
 
 // PMStatusGetter is the narrow interface used by GetMyPMStatus / ActivatePM to
-// look up a user's PaymentMerchant row of one kind. *services.PMService
-// satisfies it; tests can inject a fake without the full service graph.
+// look up a user's merchant and LP rows. *services.PMService satisfies it;
+// tests can inject a fake without the full service graph.
 type PMStatusGetter interface {
-	GetByUserIDKind(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error)
+	GetRolesByUserID(ctx context.Context, userID uuid.UUID) (merchant, lp *models.PaymentMerchant, err error)
 }
 
 // pmRoleStatus is one role's standing, for the role the top level does not describe.
@@ -145,14 +145,7 @@ type pmStatusResponse struct {
 // pmRoles is the caller's merchant and LP rows (either may be nil). Errors
 // other than not-found are returned; a not-found is just a nil row.
 func (h *PMHandler) pmRoles(ctx context.Context, userID uuid.UUID) (merchant, lp *models.PaymentMerchant, err error) {
-	read := func(kind string) (*models.PaymentMerchant, error) {
-		return services.OptionalPM(h.pmStatus.GetByUserIDKind(ctx, userID, kind))
-	}
-	if merchant, err = read(models.PaymentMerchantKindMerchant); err != nil {
-		return nil, nil, err
-	}
-	lp, err = read(models.PaymentMerchantKindLP)
-	return merchant, lp, err
+	return h.pmStatus.GetRolesByUserID(ctx, userID)
 }
 
 // activationNeedsID is true unless an activator is wired and says otherwise.

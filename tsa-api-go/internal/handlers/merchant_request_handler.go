@@ -173,6 +173,20 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 			return
 		}
 	}
+	// Before the one-off drops the one-role index, an application for a second
+	// role could never be approved; refuse it now rather than leave it pending.
+	if kind, ok := models.PaymentMerchantKindFor(input.BusinessType); ok && h.PMOnboarding != nil {
+		switch err := h.PMOnboarding.RefuseSecondRoleWhileDisabled(c.Request.Context(), user.ID, kind); {
+		case errors.Is(err, services.ErrSecondRoleNotEnabled):
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"You can't hold both roles yet. Try again later.", "second_role_not_enabled")
+			return
+		case err != nil:
+			log.Printf("SubmitMerchantRequest: second-role check failed for %s: %v", user.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check your profile")
+			return
+		}
+	}
 	// payment_acceptance and liquidity_provider: no role guard — a marketplace
 	// merchant (or anyone else) may apply to accept payments or provide
 	// liquidity; neither is the admin-console merchant role.
@@ -682,8 +696,9 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 				return errApprovalRaceLost
 			}
 
-			// Nor to a liquidity provider (plan B P2): that role admits the
-			// admin console, which an LP must never reach.
+			// Nor to a liquidity provider (plan B P2): the LP role never grants
+			// the console role. A user who is also an approved payment merchant
+			// holds it through that approval, as every merchant does.
 			if req.BusinessType != models.BusinessTypePaymentAcceptance && req.BusinessType != models.BusinessTypeLiquidityProvider {
 				if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
 					Update("role", models.RoleMerchant).Error; err != nil {
@@ -717,6 +732,13 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		case lostRace:
 			if err := h.DB.Preload("User").First(&req, "id = ?", id).Error; err != nil {
 				log.Printf("ApproveMerchantRequest: reload error: %v", err)
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve merchant request")
+				return
+			}
+			// Another admin decided it first; only an approval is this one's outcome.
+			if req.Status != models.MerchantRequestStatusApproved {
+				utils.ErrorResponse(c, http.StatusConflict, "Request was "+req.Status+" by another admin")
+				return
 			}
 			redactMerchantRequest(c, admin, &req)
 			utils.SuccessResponse(c, http.StatusOK, "Merchant request approved", req)
@@ -910,7 +932,11 @@ func isPMRequestType(t string) bool {
 // (review I2). (nil, nil) when there is none; an error is never read as "no
 // row" (review M6).
 func (h *MerchantRequestHandler) pmRowFor(ctx context.Context, userID uuid.UUID, kind string) (*models.PaymentMerchant, error) {
-	return services.OptionalPM(services.NewPMService(h.DB).GetByUserIDKind(ctx, userID, kind))
+	pms := h.PMService
+	if pms == nil {
+		pms = services.NewPMService(h.DB)
+	}
+	return services.OptionalPM(pms.GetByUserIDKind(ctx, userID, kind))
 }
 
 // walletTaken reports whether another user's payment_merchants row already

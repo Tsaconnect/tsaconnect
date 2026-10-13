@@ -250,15 +250,17 @@ func TestGetMyMerchantRequest_FiltersByType(t *testing.T) {
 
 // Between the deploy and the one-off the old (user_id) index still stands: a
 // second-role approval fails whole with its own code, never half-applied.
+// (The request predates the merchant row here; a submit while both stand is
+// refused up front, below.)
 func TestApproveLPRequest_BeforeOneOffIs409SecondRoleNotEnabled(t *testing.T) {
 	db := setupMerchantTestDB(t)
+	h := lpHandler(t, db, true)
+	u := createMerchantTestUser(t, db, "merchant")
+	id := lpRequestID(t, db, h, u)
 	if err := db.Exec(`CREATE UNIQUE INDEX uq_payment_merchants_user ON payment_merchants (user_id)`).Error; err != nil {
 		t.Fatal(err)
 	}
-	h := lpHandler(t, db, true)
-	u := createMerchantTestUser(t, db, "merchant")
 	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: u.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusActive})
-	id := lpRequestID(t, db, h, u)
 	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+id+"/approve", map[string]any{"note": "ok"}, createMerchantTestUser(t, db, "admin"))
 	c.Params = gin.Params{{Key: "id", Value: id}}
 	h.ApproveMerchantRequest(c)
@@ -273,6 +275,30 @@ func TestApproveLPRequest_BeforeOneOffIs409SecondRoleNotEnabled(t *testing.T) {
 	db.Model(&models.PaymentMerchant{}).Where("user_id = ?", u.ID).Count(&n)
 	if mr.Status != models.MerchantRequestStatusPending || n != 1 {
 		t.Fatalf("request=%s rows=%d: half-applied", mr.Status, n)
+	}
+}
+
+// Before the one-off, a merchant's LP application could never be approved, so
+// it is refused at submit instead of sitting pending; a single-role user is
+// unaffected.
+func TestSubmitLPRequest_BeforeOneOffRefusesASecondRole(t *testing.T) {
+	db := setupMerchantTestDB(t)
+	if err := db.Exec(`CREATE UNIQUE INDEX uq_payment_merchants_user ON payment_merchants (user_id)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	h := lpHandler(t, db, true)
+	pm := createMerchantTestUser(t, db, "merchant")
+	db.Create(&models.PaymentMerchant{ID: uuid.New(), UserID: pm.ID, Name: "Ada PM", Status: models.PaymentMerchantStatusActive})
+	verifyUser(t, db, pm, "ADA OBI")
+	if code, body := submitLP(t, h, pm); code != http.StatusConflict || body["code"] != "second_role_not_enabled" {
+		t.Fatalf("merchant submit = %d %v, want 409 second_role_not_enabled", code, body)
+	}
+	lpRequestID(t, db, h, createMerchantTestUser(t, db, "user")) // a single-role user is unaffected
+	if err := db.Exec(`DROP INDEX uq_payment_merchants_user`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if code, body := submitLP(t, h, pm); code != http.StatusCreated {
+		t.Fatalf("merchant submit after the one-off = %d %v, want 201", code, body)
 	}
 }
 
