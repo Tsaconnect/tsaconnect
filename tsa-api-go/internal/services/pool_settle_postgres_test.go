@@ -199,7 +199,7 @@ func TestPoolSettle_ConcurrentPassesDeliverAndForwardOnce_Postgres(t *testing.T)
 		}
 	}
 	bus.mu.Unlock()
-	if b := r.book(t, intent.ID); fills != 2 || b.SettledAt == nil || b.LPTotalKobo == nil || *b.LPTotalKobo != "9810971" {
-		t.Fatalf("fills=%d books=%+v, want two fills and the order booked once (LP total ₦98,109.71)", fills, b)
+	if b := r.book(t, intent.ID); fills != 2 || b.SettledAt == nil || b.LPTotalKobo == nil || *b.LPTotalKobo != "9793465" {
+		t.Fatalf("fills=%d books=%+v, want two fills and the order booked once (LP total ₦97,934.65)", fills, b)
 	}
 }

@@ -30,14 +30,17 @@ type PoolOrder struct {
 	OpenedUnits    string  `gorm:"type:numeric(78,0);not null" json:"openedUnits"`
 	DeliveredUnits *string `gorm:"type:numeric(78,0)" json:"deliveredUnits,omitempty"`
 	// Live price below what was locked (S18), canonical units.
-	SurplusUnits  string     `gorm:"type:numeric(78,0);not null;default:0" json:"surplusUnits"`
-	TakeKobo      *string    `gorm:"type:numeric(38,0)" json:"takeKobo,omitempty"`
-	LPTotalKobo   *string    `gorm:"type:numeric(38,0)" json:"lpTotalKobo,omitempty"`
-	PayoutFeeKobo *string    `gorm:"type:numeric(38,0)" json:"payoutFeeKobo,omitempty"`
-	KeepKobo      *string    `gorm:"type:numeric(38,0)" json:"keepKobo,omitempty"`
-	SettledAt     *time.Time `json:"settledAt,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	SurplusUnits  string  `gorm:"type:numeric(78,0);not null;default:0" json:"surplusUnits"`
+	TakeKobo      *string `gorm:"type:numeric(38,0)" json:"takeKobo,omitempty"`
+	LPTotalKobo   *string `gorm:"type:numeric(38,0)" json:"lpTotalKobo,omitempty"`
+	PayoutFeeKobo *string `gorm:"type:numeric(38,0)" json:"payoutFeeKobo,omitempty"`
+	// NetworkFeeKobo is the network fee her price carried (its fee line's
+	// naira): the gas the treasury spends on the order, booked as a cost.
+	NetworkFeeKobo *string    `gorm:"type:numeric(38,0)" json:"networkFeeKobo,omitempty"`
+	KeepKobo       *string    `gorm:"type:numeric(38,0)" json:"keepKobo,omitempty"`
+	SettledAt      *time.Time `json:"settledAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
 func (PoolOrder) TableName() string { return "pool_orders" }

@@ -306,7 +306,7 @@ func TestPoolOrdersRehearsal_Open_BSCTestnet(t *testing.T) {
 		r.fund(t, ctx, lp)
 	}
 	user := seedRehearsalBuyer(t, r.db)
-	p, err := r.it.QuotePoolBuy("USDT", "20000", "NGN", poolMid, specPoolSettings())
+	p, err := r.it.QuotePoolBuy(context.Background(), "USDT", "20000", "NGN", poolMid, specPoolSettings())
 	if err != nil {
 		t.Fatalf("quote: %v", err)
 	}

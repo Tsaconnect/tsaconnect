@@ -143,17 +143,31 @@ func sliceAtTreasury(status string, droppedAt *time.Time, releaseTxHash, cancelR
 // all generations, canonical (plan C2 P1: R counts releasing and F21's
 // resolve-to-treasury too).
 func (d *PoolDesk) orderSlices(tx *gorm.DB, intentID uuid.UUID) (*big.Int, []PoolPendingSlice, error) {
+	sizes, pending, err := d.orderSliceUnits(tx, intentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	released := new(big.Int)
+	for _, u := range sizes {
+		released.Add(released, u)
+	}
+	return released, pending, nil
+}
+
+// orderSliceUnits is orderSlices with each at-treasury slice's size: the
+// slices an order's LPs are paid for, which a live re-price costs.
+func (d *PoolDesk) orderSliceUnits(tx *gorm.DB, intentID uuid.UUID) ([]*big.Int, []PoolPendingSlice, error) {
 	var rows []models.P2PTrade
 	if err := tx.Where("it_intent_id = ?", intentID).Order("created_at").Find(&rows).Error; err != nil {
 		return nil, nil, err
 	}
-	released := new(big.Int)
+	var released []*big.Int
 	var pending []PoolPendingSlice
 	for _, r := range rows {
 		units := d.toCanonical(r.TokenAmount)
 		switch {
 		case sliceAtTreasury(r.Status, r.DroppedAt, r.ReleaseTxHash, r.CancelReason):
-			released.Add(released, units)
+			released = append(released, units)
 		case (r.Status == models.P2PTradeStatusPendingPayment || r.Status == models.P2PTradeStatusPaid) && r.OpenedAt != nil && r.DroppedAt == nil:
 			pending = append(pending, PoolPendingSlice{ID: r.ID, Units: units, CreatedAt: r.CreatedAt})
 		}
@@ -204,4 +218,83 @@ func (d *PoolDesk) dropAllSlices(tx *gorm.DB, ids []uuid.UUID, at time.Time) err
 		return errPoolSlicesMoved
 	}
 	return nil
+}
+
+// poolSettleCostRounds bounds poolSettlePrice's search; an order has at most
+// pool_slice_cap pending slices, so a consistent keep set is found in one or
+// two rounds.
+const poolSettleCostRounds = 4
+
+// poolSettlePrice is S18's live price for money that arrived outside the
+// honour window, costed only on the slices that will be paid to an LP: the
+// ones already at the treasury and the pending ones coverage keeps (never a
+// dropped, cancelled or F22-returned slice). Coverage picks the keep set from
+// the price and the price depends on the keep set, so it starts from every
+// pending slice (the dearest price, the smallest amount owed) and re-prices
+// on the kept set until coverage keeps exactly the set it was priced on. An
+// uncovered answer, or no consistent set within poolSettleCostRounds, is
+// returned as not covered: the caller parks pool_slices_short for an operator.
+func (s *ITService) poolSettlePrice(asset, currency string, paid *big.Int, mid *big.Rat, ch PayInChannel,
+	released []*big.Int, pending []PoolPendingSlice) (*PoolPrice, PoolCoverage, error) {
+	releasedSum := sumUnits(released)
+	kept := map[uuid.UUID]bool{}
+	for _, sl := range pending {
+		kept[sl.ID] = true
+	}
+	var p *PoolPrice
+	var cov PoolCoverage
+	for round := 0; round < poolSettleCostRounds; round++ {
+		sizes := append([]*big.Int(nil), released...)
+		for _, sl := range pending {
+			if kept[sl.ID] {
+				sizes = append(sizes, sl.Units)
+			}
+		}
+		var err error
+		if p, err = s.poolQuoteAt(asset, currency, paid, mid, CurrentPoolSettings(), ch, false, sizes); err != nil {
+			return nil, PoolCoverage{}, err
+		}
+		cov = EvaluatePoolCoverage(p.Quote.AssetUnits, releasedSum, pending, p.Settings.MinSliceUnits)
+		if !cov.Covered {
+			return p, cov, nil
+		}
+		next := map[uuid.UUID]bool{}
+		for _, id := range cov.Keep {
+			next[id] = true
+		}
+		if sameIDSet(kept, next) {
+			return p, cov, nil
+		}
+		kept = next
+	}
+	log.Printf("[liquidity] ALERT liquidity_pool_settle_costs_unsettled owed=%s — no keep set prices consistently; parked for an operator", cov.Owed)
+	return p, PoolCoverage{Owed: cov.Owed, Drop: allPendingIDs(pending)}, nil
+}
+
+func sameIDSet(a, b map[uuid.UUID]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if !b[id] {
+			return false
+		}
+	}
+	return true
+}
+
+func allPendingIDs(pending []PoolPendingSlice) []uuid.UUID {
+	out := make([]uuid.UUID, len(pending))
+	for i := range pending {
+		out[i] = pending[i].ID
+	}
+	return out
+}
+
+func sumUnits(units []*big.Int) *big.Int {
+	out := new(big.Int)
+	for _, u := range units {
+		out.Add(out, u)
+	}
+	return out
 }

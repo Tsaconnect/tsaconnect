@@ -407,7 +407,7 @@ func itOrderBody(o *ramp.Order) itOrderView {
 		Rate:          services.FormatMinor(services.StableBuyDisplayRate(i)),
 		EffectiveRate: services.FormatMinor(i.LockedRate),
 		TokenAmount:   services.FormatStableUnits(i.AssetAmount),
-		Fees:          ramp.VenueFees(services.StableBuyFees(i)),
+		Fees:          ramp.VenueFees(services.UserFeeLines(i)),
 		WalletAddress: i.DestAddress,
 		FailureReason: services.UserFacingITFailure(i.FailureReason),
 		CreatedAt:     i.CreatedAt,

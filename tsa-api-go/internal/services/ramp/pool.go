@@ -20,7 +20,7 @@ type poolIT interface {
 	PoolBandBps() int64
 	PoolSettingsNow() services.PoolSettings
 	PoolCanFill(ctx context.Context, units *big.Int, set services.PoolSettings) bool
-	QuotePoolBuy(asset, fiatMajor, currency string, mid *big.Rat, set services.PoolSettings) (*services.PoolPrice, error)
+	QuotePoolBuy(ctx context.Context, asset, fiatMajor, currency string, mid *big.Rat, set services.PoolSettings) (*services.PoolPrice, error)
 	CheckPoolDailyCap(ctx context.Context, userID uuid.UUID, units *big.Int, set services.PoolSettings) error
 	OpenPoolBuy(ctx context.Context, userID uuid.UUID, p *services.PoolPrice, destAddress string) (*models.ITIntent, *services.StableBuyInstructions, error)
 	OpenPoolConvertedBuy(ctx context.Context, userID uuid.UUID, p *services.PoolPrice, in services.ConvertedOpen) (*models.ITIntent, *services.StableBuyInstructions, *models.PaycrestOrderRecord, error)
@@ -79,15 +79,15 @@ func (p *PoolProvider) price(ctx context.Context, r Request) (*services.PoolPric
 		return nil, 0, WrapClass(ErrVenueUnavailable, err)
 	}
 	_, token := p.it.PoolVenue()
-	q, err := p.it.QuotePoolBuy(token, r.FiatAmount, poolFiat, mid, set)
+	q, err := p.it.QuotePoolBuy(ctx, token, r.FiatAmount, poolFiat, mid, set)
 	switch {
 	case errors.Is(err, services.ErrPoolCentralOnly), errors.Is(err, services.ErrPoolOrdersStopped):
 		return nil, 0, ErrLegClosed
+	case errors.Is(err, services.ErrPoolCannotFill):
+		// The quote's own allocation found no plan the stock covers.
+		return nil, 0, WrapClass(ErrAboveMaximum, errStockDoesNotCover) // never names the stock (§23)
 	case err != nil:
 		return nil, 0, classifyTreasuryQuote(err)
-	}
-	if !p.it.PoolCanFill(ctx, q.Quote.AssetUnits, set) {
-		return nil, 0, WrapClass(ErrAboveMaximum, errStockDoesNotCover) // never names the stock (§23)
 	}
 	f, _ := mid.Float64()
 	return q, f, nil
@@ -129,6 +129,8 @@ func (p *PoolProvider) Open(ctx context.Context, k VenueKey, r Request, in Order
 	if err := p.checkAbandonCap(ctx, in.UserID); err != nil {
 		return nil, err
 	}
+	// The open prices on its actual allocation and refuses past this guard.
+	q.Guard = services.PoolPriceGuard{Limit: in.LimitRate, Mode: in.Guard}
 	intent, payInto, err := p.it.OpenPoolBuy(ctx, in.UserID, q, in.WalletAddress)
 	if err != nil {
 		return nil, classifyPoolOpen(err)
@@ -140,6 +142,9 @@ func (p *PoolProvider) Open(ctx context.Context, k VenueKey, r Request, in Order
 // is cancelled in the service), so the router fails over; anything else is
 // the shared IT classification (a DB error mid-write stays outcome-unknown).
 func classifyPoolOpen(err error) error {
+	if errors.Is(err, services.ErrPriceMovedPastQuote) {
+		return err // its allocation priced past her guard: nothing opened; the router re-shows the price
+	}
 	if poolRefused(err) {
 		return WrapClass(ErrVenueUnavailable, err)
 	}

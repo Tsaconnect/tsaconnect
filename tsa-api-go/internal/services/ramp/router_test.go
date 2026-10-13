@@ -175,6 +175,19 @@ func TestRouterQuote_ErrorPrecedence(t *testing.T) {
 	if err := q(ErrNoVenue, errors.New("timeout")); !errors.Is(err, ErrNoVenue) {
 		t.Errorf("no-venue beside an outage → %v (spec: any no-venue wins)", err)
 	}
+	// 2026-10-13: a below-minimum answer beats another provider's outage.
+	if err := q(WrapClass(ErrBelowMinimum, services.ErrStableBuyBelowMinimum), errors.New("timeout")); !errors.Is(err, ErrBelowMinimum) || errors.Is(err, ErrUnavailable) {
+		t.Errorf("below-minimum beside an outage → %v, want below minimum", err)
+	}
+	if err := q(errors.New("timeout"), ErrLegClosed, ErrBelowMinimum, ErrAboveMaximum); !errors.Is(err, ErrBelowMinimum) {
+		t.Errorf("below-minimum among outage/closed/above → %v", err)
+	}
+	if err := q(ErrAboveMaximum, errors.New("timeout")); !errors.Is(err, ErrAboveMaximum) || errors.Is(err, ErrUnavailable) {
+		t.Errorf("above-maximum beside an outage → %v, want above maximum (same rule as below)", err)
+	}
+	if err := q(errors.New("timeout"), ErrAboveMaximum, ErrBelowMinimum); !errors.Is(err, ErrBelowMinimum) {
+		t.Errorf("both beside an outage → %v, want below minimum first", err)
+	}
 	// Decision D13 (spec rev 3 §4.4): a closed leg no longer hides the amount.
 	if err := q(ErrLegClosed, ErrBelowMinimum); !errors.Is(err, ErrBelowMinimum) {
 		t.Errorf("closed + below-minimum, no no-venue → %v", err)

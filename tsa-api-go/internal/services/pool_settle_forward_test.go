@@ -40,8 +40,8 @@ func TestPoolForward_PaysSnapshotLPRate(t *testing.T) {
 	intent := r.openPaid(t, "100000")
 	_ = r.advance(t, intent.ID)
 	fw := r.forwards(t)
-	if len(fw) != 2 || !ngnEqual(fw[0].Amount, "81284.40") || !ngnEqual(fw[1].Amount, "16825.31") || len(gw.calls) != 2 {
-		t.Fatalf("forwards = %+v calls=%d, want ₦81,284.40 and ₦16,825.31 (spec §10.2)", fw, len(gw.calls))
+	if len(fw) != 2 || !ngnEqual(fw[0].Amount, "81284.40") || !ngnEqual(fw[1].Amount, "16650.25") || len(gw.calls) != 2 {
+		t.Fatalf("forwards = %+v calls=%d, want ₦81,284.40 and ₦16,650.25 (spec §10.2 less two slices' costs)", fw, len(gw.calls))
 	}
 	fills := 0
 	for _, ev := range bus.published {
@@ -64,8 +64,8 @@ func TestPoolForward_OncePerSliceOnReplay(t *testing.T) {
 	}
 	var lp models.PaymentMerchant
 	r.db.First(&lp, "id = ?", r.lps[0].ID)
-	if n := len(r.forwards(t)); n != 1 || len(gw.calls) != 1 || !ngnEqual(lp.AvailableNGN, "4905.48") {
-		t.Fatalf("forwards=%d calls=%d available=%s, want one forward, one transfer, ₦4,905.48 credited once", n, len(gw.calls), lp.AvailableNGN)
+	if n := len(r.forwards(t)); n != 1 || len(gw.calls) != 1 || !ngnEqual(lp.AvailableNGN, "4840.60") {
+		t.Fatalf("forwards=%d calls=%d available=%s, want one forward, one transfer, ₦4,840.60 credited once", n, len(gw.calls), lp.AvailableNGN)
 	}
 }
 

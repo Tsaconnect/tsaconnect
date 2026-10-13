@@ -53,7 +53,7 @@ func TestPoolOpen_PayInOnlyAfterAllSlicesProven(t *testing.T) {
 	}
 	var po models.PoolOrder
 	r2.db.First(&po, "intent_id = ? AND generation = 1", intent.ID)
-	if po.SliceCount != 2 || po.OpenedUnits != "72419593" || po.LPRateMinor != "135474" || po.PoolSpreadBps != 50 {
+	if po.SliceCount != 2 || po.OpenedUnits != "72290372" || po.LPRateMinor != "135474" || po.PoolSpreadBps != 50 {
 		t.Fatalf("snapshot = %+v", po)
 	}
 	if slices[0].BuyerID != r2.buyer || slices[0].OpenerID != nil || slices[0].FiatAmount != "81284.40" || slices[0].TokenAmount != "60000000000000000000" {
@@ -99,7 +99,7 @@ func TestPoolOpen_AbortsBurstOnEndpointGenerationChange(t *testing.T) {
 	if byLP[b.ID].Status != models.P2PTradeStatusCancelled || byLP[b.ID].OpenNonce != nil {
 		t.Fatalf("B = %+v, want reclaimed and never broadcast", byLP[b.ID])
 	}
-	if byLP[a.ID].OpenedAt == nil || byLP[c.ID].OpenedAt == nil || byLP[c.ID].TokenAmount != "12419593000000000000" {
+	if byLP[a.ID].OpenedAt == nil || byLP[c.ID].OpenedAt == nil || byLP[c.ID].TokenAmount != "12290372000000000000" {
 		t.Fatalf("A/C = %+v %+v", byLP[a.ID], byLP[c.ID])
 	}
 }
@@ -282,5 +282,63 @@ func TestSameEVMAddress(t *testing.T) {
 		if got := SameEVMAddress(c.x, c.y); got != c.want {
 			t.Errorf("SameEVMAddress(%q, %q) = %v, want %v", c.x, c.y, got, c.want)
 		}
+	}
+}
+
+// Review money-1: the open's actual allocation decides the stored price. A
+// one-slice estimate that opens as two is priced on two; the slices sum to
+// exactly what she is delivered.
+func TestPoolOpen_PricesOnItsActualAllocation(t *testing.T) {
+	r := newPoolOpenRig(t)
+	threeLPs(t, r)
+	p, err := r.it.poolQuoteAt("USDT", "NGN", big.NewInt(10_000_000), poolMid, specPoolSettings(), PayInCentral, true,
+		[]*big.Int{big.NewInt(72_419_593)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), PoolOpenCap)
+	defer cancel()
+	intent, _, err := r.it.OpenPoolBuy(ctx, r.userID, p, testRoutedEVM)
+	if err != nil {
+		t.Fatalf("open = %v", err)
+	}
+	if intent.AssetAmount != "72290372" || p.Quote.AssetUnits.Int64() != 72_340_115 {
+		t.Fatalf("delivered %s (her quote %s, never changed), want 72.290372 on two slices", intent.AssetAmount, p.Quote.AssetUnits)
+	}
+	got := r.intent(t, intent.ID)
+	fees := StableBuyFees(&got)
+	if got.AssetAmount != "72290372" || len(fees) != 3 || fees[1].Units != "70000" || fees[2].Units != "59221" {
+		t.Fatalf("stored = %s %+v, want two slices' costs", got.AssetAmount, fees)
+	}
+	total := new(big.Int)
+	for _, sl := range r.slicesOf(t, intent.ID) {
+		total.Add(total, r.desk.toCanonical(sl.TokenAmount))
+	}
+	if total.Int64() != 72_290_372 {
+		t.Fatalf("slices sum %s, want exactly the delivered 72.290372", total)
+	}
+}
+
+// Worse past her price guard: refused as price-moved before anything is
+// written or sent.
+func TestPoolOpen_WorseAllocationPastTheGuardIsPriceMoved(t *testing.T) {
+	r := newPoolOpenRig(t)
+	threeLPs(t, r)
+	p, err := r.it.poolQuoteAt("USDT", "NGN", big.NewInt(10_000_000), poolMid, specPoolSettings(), PayInCentral, true,
+		[]*big.Int{big.NewInt(72_419_593)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Guard = PoolPriceGuard{Limit: FormatMinor(p.Quote.RatePerUnitMinor.String()), Mode: PriceGuardEnforce}
+	ctx, cancel := context.WithTimeout(context.Background(), PoolOpenCap)
+	defer cancel()
+	if _, _, err := r.it.OpenPoolBuy(ctx, r.userID, p, testRoutedEVM); !errors.Is(err, ErrPriceMovedPastQuote) {
+		t.Fatalf("open = %v, want price moved", err)
+	}
+	var intents, slices int64
+	r.db.Model(&models.ITIntent{}).Count(&intents)
+	r.db.Model(&models.P2PTrade{}).Count(&slices)
+	if intents != 0 || slices != 0 || r.chain.broadcasts != 0 {
+		t.Fatalf("intents=%d slices=%d broadcasts=%d, want nothing written or sent", intents, slices, r.chain.broadcasts)
 	}
 }

@@ -524,10 +524,11 @@ func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, c
 			return err
 		}
 		now := d.now()
-		released, pending, err := d.orderSlices(tx, locked.ID)
+		releasedUnits, pending, err := d.orderSliceUnits(tx, locked.ID)
 		if err != nil {
 			return err
 		}
+		released := sumUnits(releasedUnits)
 		pendingIDs := make([]uuid.UUID, len(pending))
 		for i := range pending {
 			pendingIDs[i] = pending[i].ID
@@ -536,11 +537,13 @@ func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, c
 			res = write(tx) // lost the race: RowsAffected 0, the caller re-checks by ref
 			return res.Error
 		}
-		owed, minSlice := arrival.units, CurrentPoolSettings().MinSliceUnits
 		var p *PoolPrice
-		if !arrival.honoured {
+		var cov PoolCoverage
+		if arrival.honoured {
+			cov = EvaluatePoolCoverage(arrival.units, released, pending, CurrentPoolSettings().MinSliceUnits)
+		} else {
 			var perr error
-			if p, perr = s.poolQuoteAt(locked.Asset, locked.Currency, paid, mid, CurrentPoolSettings(), ch, false); perr != nil {
+			if p, cov, perr = s.poolSettlePrice(locked.Asset, locked.Currency, paid, mid, ch, releasedUnits, pending); perr != nil {
 				parkClaim(claim, "could not price at settlement: "+RedactAlertText(perr.Error())) // review M13
 				parked = parkReasonOf(perr)
 				if err := d.dropAllSlices(tx, pendingIDs, now); err != nil {
@@ -549,9 +552,7 @@ func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, c
 				res = write(tx)
 				return res.Error
 			}
-			owed, minSlice = p.Quote.AssetUnits, p.Settings.MinSliceUnits
 		}
-		cov := EvaluatePoolCoverage(owed, released, pending, minSlice)
 		if !cov.Covered {
 			parkClaim(claim, models.ITFailurePoolSlicesShort+": the amount owed is not covered by this order's locked slices")
 			parked = models.ITFailurePoolSlicesShort

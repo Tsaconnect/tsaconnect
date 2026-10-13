@@ -357,11 +357,11 @@ func (s *P2PTradeClaimSource) reviewGate(ctx context.Context, pm *models.Payment
 	if !ok {
 		return fmt.Errorf("p2p accept: trade %s has unusable fiat_amount %q", trade.ID, trade.FiatAmount)
 	}
-	if gross < defaultMinSellNgnKobo {
+	if gross < fwNGNTransferMinKobo {
 		return &ClaimNeedsReviewError{
 			Code: models.InboundHoldPayoutBelowMinimum,
 			Reason: fmt.Sprintf("P2P trade %s: merchant %q would be sent ₦%s, under the ₦%s transfer minimum. Refund the sender, or assign this credit and pay the merchant by hand",
-				trade.ID, pm.Name, koboToNGNString(gross), koboToNGNString(defaultMinSellNgnKobo)),
+				trade.ID, pm.Name, koboToNGNString(gross), koboToNGNString(fwNGNTransferMinKobo)),
 		}
 	}
 	return nil

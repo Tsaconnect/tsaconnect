@@ -71,6 +71,9 @@ const (
 	FeeKindFunding    = "funding"
 	FeeKindConversion = "conversion"
 	FeeKindNetwork    = "network"
+	// FeeKindPayout is the bank-transfer fee of the naira payouts a buy makes
+	// on her behalf (the pool's LP payouts, one per slice).
+	FeeKindPayout = "payout"
 	// FeeProviderShown is the provider tag on every fee line she sees, ramp
 	// and IT alike (owner rule, review I-4): never the name of the company
 	// the cost is paid to. Set where the line is made, never patched later.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math/big"
 	"strconv"
 	"time"
 
@@ -130,6 +131,15 @@ func (p *itBuyProvider) checkAbandonCap(ctx context.Context, userID uuid.UUID) e
 }
 
 // VenueFees renders a quote's fee lines for the venue JSON (spec §14).
+// shownFees: the pool's costs are shown as one "Fees" line (owner,
+// 2026-10-13); every other provider's lines as priced.
+func shownFees(provider string, fees []services.StableBuyFee, displayRateMinor *big.Int) []services.StableBuyFee {
+	if provider == ProviderPool {
+		return services.PoolUserFeeLines(fees, displayRateMinor)
+	}
+	return fees
+}
+
 func VenueFees(fees []services.StableBuyFee) []VenueFee {
 	out := make([]VenueFee, 0, len(fees))
 	for _, f := range fees {
@@ -155,7 +165,7 @@ func itVenue(provider, chain, token string, q *services.StableBuyQuote, market f
 	return Venue{
 		Handle: EncodeHandle(provider, k), Provider: provider, ChainKey: chain, Token: token,
 		Rate: display, EffectiveRate: effective, SpreadPercent: spread,
-		TokenAmount: services.StableFromBaseUnits(q.AssetUnits), Fees: VenueFees(q.Fees),
+		TokenAmount: services.StableFromBaseUnits(q.AssetUnits), Fees: VenueFees(shownFees(provider, q.Fees, q.DisplayRateMinor)),
 		Kind: models.RouteKindDirect,
 	}
 }
@@ -297,7 +307,7 @@ func convertedVenue(provider string, q *services.StableBuyQuote, pv *services.Pa
 	return Venue{
 		Handle: EncodeHandle(provider, VenueKey{ChainKey: pv.ChainKey, Token: pv.Token}), Provider: provider,
 		ChainKey: pv.ChainKey, Token: pv.Token, Rate: pv.Rate, EffectiveRate: effective, SpreadPercent: spread,
-		TokenAmount: services.StableFromBaseUnits(terms.OwedUnits), Fees: VenueFees(terms.Fees),
+		TokenAmount: services.StableFromBaseUnits(terms.OwedUnits), Fees: VenueFees(shownFees(provider, terms.Fees, q.DisplayRateMinor)),
 		Kind: models.RouteKindConverted, ViaChain: pv.ChainKey, ViaToken: pv.Token,
 		RequestedChain: pv.RequestedChain, RequestedToken: pv.RequestedToken, RequestedChainID: pv.RequestedChainID,
 		RequestedAddress: pv.RequestedAddress, RequestedDecimals: pv.RequestedDecimals,

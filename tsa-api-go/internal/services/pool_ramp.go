@@ -131,13 +131,19 @@ func (s *ITService) PoolCard(ctx context.Context) (*PoolCard, error) {
 	card.Available = true
 	card.Rate = FormatMinor(display.String())
 	card.FundingFeePercent = formatBps(funding.bps)
-	card.MinNgn = FormatMinor(fiatForNet(set.MinSliceUnits, display, funding.bps, true).String())
+	// The smallest order is one effective minimum slice plus its flat costs
+	// (gas and one payout fee), which come off after funding.
+	lpRate := floorRatMinor(poolBaseRate(mid, set))
+	minSlice := poolEffectiveMinSlice(set.MinSliceUnits, lpRate)
+	minLeft := new(big.Int).Add(minSlice, poolNetworkFeeUnits(1, set))
+	minLeft.Add(minLeft, poolPayoutFeeUnits([]*big.Int{minSlice}, lpRate, display))
+	card.MinNgn = FormatMinor(fiatForNet(minLeft, display, funding.bps, true).String())
 	card.MaxNgn = FormatMinor(fiatForNet(maxUnits, display, funding.bps, false).String())
 	return card, nil
 }
 
-// fiatForNet is the whole-naira amount (in kobo) whose pool quote nets about
-// `net` units: net ÷ (1 − f) tokens at the display rate. Rounded up for a
+// fiatForNet is the whole-naira amount (in kobo) that leaves about `net`
+// units after funding: net ÷ (1 − f) tokens at the display rate. Rounded up for a
 // minimum (the quote then clears it), down for a maximum. The quote is the
 // authority; the card only frames it.
 func fiatForNet(net, display *big.Int, fundingBps int64, up bool) *big.Int {

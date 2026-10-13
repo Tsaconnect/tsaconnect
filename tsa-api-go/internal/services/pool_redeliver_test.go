@@ -42,8 +42,8 @@ func TestPoolRedeliver_CountsReleasedSlices(t *testing.T) {
 	r.db.Where("it_intent_id = ? AND generation = 2", intent.ID).Find(&gen2)
 	var snaps int64
 	r.db.Model(&models.PoolOrder{}).Where("intent_id = ?", intent.ID).Count(&snaps)
-	if len(gen2) != 1 || snaps != 2 || r.desk.toCanonical(gen2[0].TokenAmount).Cmp(big.NewInt(12_419_593)) != 0 {
-		t.Fatalf("gen2 = %+v snaps=%d, want one 12.419593 slice and a second snapshot (generation 1 kept)", gen2, snaps)
+	if len(gen2) != 1 || snaps != 2 || r.desk.toCanonical(gen2[0].TokenAmount).Cmp(big.NewInt(12_290_372)) != 0 {
+		t.Fatalf("gen2 = %+v snaps=%d, want one 12.290372 slice and a second snapshot (generation 1 kept)", gen2, snaps)
 	}
 	var lpAd models.P2PAd
 	r.db.First(&lpAd, "id = ?", gen2[0].AdID)

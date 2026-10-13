@@ -12,7 +12,8 @@ import (
 )
 
 // poolSettleBooks is §12.7 at settle (P9), in the settling transaction: the
-// current generation's delivered units, nominal take, LP total and time.
+// current generation's delivered units, nominal take, LP total, the network
+// fee her price carried (the treasury's gas for the order, a cost) and time.
 func (s *ITService) poolSettleBooks(tx *gorm.DB, intent *models.ITIntent) error {
 	var o models.PoolOrder
 	if err := tx.Where("intent_id = ?", intent.ID).Order("generation DESC").First(&o).Error; err != nil {
@@ -37,7 +38,22 @@ func (s *ITService) poolSettleBooks(tx *gorm.DB, intent *models.ITIntent) error 
 	take := PoolTakeKobo(received, int64(o.PoolTakeBps))
 	now := time.Now().UTC()
 	return tx.Model(&models.PoolOrder{}).Where("intent_id = ? AND generation = ? AND settled_at IS NULL", o.IntentID, o.Generation).
-		Updates(map[string]any{"delivered_units": intent.AssetAmount, "take_kobo": take.String(), "lp_total_kobo": lp.String(), "settled_at": now}).Error
+		Updates(map[string]any{"delivered_units": intent.AssetAmount, "take_kobo": take.String(), "lp_total_kobo": lp.String(),
+			"network_fee_kobo": poolNetworkFeeKobo(intent).String(), "settled_at": now}).Error
+}
+
+// poolNetworkFeeKobo is the naira of the network fee line her price carried
+// (zero for an order priced before it was a line).
+func poolNetworkFeeKobo(intent *models.ITIntent) *big.Int {
+	out := new(big.Int)
+	for _, f := range StableBuyFees(intent) {
+		if f.Kind == FeeKindNetwork {
+			if v, ok := new(big.Int).SetString(f.NgnMinor, 10); ok {
+				out.Add(out, v)
+			}
+		}
+	}
+	return out
 }
 
 // CompletePoolBooks is the books' second half (S47): once every forward of a
@@ -159,8 +175,9 @@ func (s *ITService) completeOnePoolBook(ctx context.Context, o *models.PoolOrder
 		log.Printf("[liquidity] METRIC liquidity_pool_funding_estimated intent=%s bps=%d kobo=%s", o.IntentID, o.FundingBps, fund)
 	}
 	lp, _ := new(big.Int).SetString(derefOr(o.LPTotalKobo, "0"), 10)
+	network, _ := new(big.Int).SetString(derefOr(o.NetworkFeeKobo, "0"), 10)
 	keep := new(big.Int).Sub(received, fund)
-	keep.Sub(keep, lp).Sub(keep, fees)
+	keep.Sub(keep, lp).Sub(keep, fees).Sub(keep, network) // the gas the treasury spent is a cost, never kept
 	res := s.db.WithContext(ctx).Model(&models.PoolOrder{}).
 		Where("intent_id = ? AND generation = ? AND keep_kobo IS NULL", o.IntentID, o.Generation).
 		Updates(map[string]any{"payout_fee_kobo": fees.String(), "keep_kobo": keep.String()})
