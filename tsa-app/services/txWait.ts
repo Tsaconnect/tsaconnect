@@ -4,7 +4,7 @@
 // (status 0) used to count as done (R10): an approve that reverted let the
 // deposit go ahead and fail on transferFrom. Shared by escrowFunding (approve)
 // and p2pGas (sponsored top-up).
-import { p2pChainKey } from './p2p';
+import { p2pChainKey, p2pNetwork } from './p2p';
 import { getProvider } from './wallet';
 
 export const DEFAULT_WAIT_MS = 90_000;
@@ -29,7 +29,7 @@ export async function waitMined(
 ): Promise<void> {
   // Default: the chain's primary RPC. Pass the provider that took the
   // broadcast when it may have been a fallback (primary down).
-  const provider = opts.provider ?? getProvider(p2pChainKey(chainId));
+  const provider = opts.provider ?? getProvider(p2pChainKey(chainId), undefined, p2pNetwork(chainId));
   const label = opts.label ?? 'Transaction';
   let timer: ReturnType<typeof setTimeout> | undefined;
   // The race only stops US waiting: ethers keeps polling for the receipt in

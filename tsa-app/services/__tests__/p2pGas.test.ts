@@ -2,6 +2,7 @@ const mockTopUp = jest.fn();
 jest.mock('../p2p', () => ({
   gasApi: { topUp: (...a: any[]) => mockTopUp(...a) },
   p2pChainKey: (id: number) => `chain-${id}`,
+  p2pNetwork: (id: number) => (id === 97 ? 'testnet' : 'mainnet'),
   SONIC_GAS_SPONSOR_CHAIN_IDS: new Set([146]),
 }));
 const mockEnsureGas = jest.fn();
@@ -25,7 +26,7 @@ it('never asks the sponsor off Sonic mainnet (incl. testnet 14601)', async () =>
   await expect(ensureP2PGas({ chainId: 56, walletAddress: W, action: 'release', tradeId: 't' })).resolves.toBe(true);
   await ensureP2PGas({ chainId: 14601, walletAddress: W, action: 'release', tradeId: 't' });
   expect(mockTopUp).not.toHaveBeenCalled();
-  expect(mockEnsureGas).toHaveBeenCalledWith('chain-56', W, expect.any(Function));
+  expect(mockEnsureGas).toHaveBeenCalledWith('chain-56', W, expect.any(Function), 'mainnet');
 });
 
 it('sends the action with its tradeId / adId', async () => {

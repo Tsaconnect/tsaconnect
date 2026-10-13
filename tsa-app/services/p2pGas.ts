@@ -7,7 +7,7 @@
 // failure (cap, proof, dormant, in progress) degrades to the plain balance
 // check instead of blocking; its refusal copy is shown only if that check fails.
 import { Alert } from 'react-native';
-import { gasApi, p2pChainKey, SONIC_GAS_SPONSOR_CHAIN_IDS, type P2PGasTarget } from './p2p';
+import { gasApi, p2pChainKey, p2pNetwork, SONIC_GAS_SPONSOR_CHAIN_IDS, type P2PGasTarget } from './p2p';
 import { ensureGas } from './wallet';
 import { waitMined } from './txWait';
 import { p2pErrorMessage, p2pKycCode, type P2PErrorLike } from './p2pErrors';
@@ -90,5 +90,5 @@ export async function ensureP2PGas(p: EnsureP2PGasParams): Promise<boolean> {
     if (onAlert) onAlert(title, text);
     else Alert.alert(title, text);
   };
-  return ensureGas(p2pChainKey(chainId), walletAddress, alert);
+  return ensureGas(p2pChainKey(chainId), walletAddress, alert, p2pNetwork(chainId));
 }

@@ -497,8 +497,9 @@ export async function ensureGas(
   chainKey: ChainKey,
   address: string,
   onAlert?: (title: string, message: string) => void,
+  network?: NetworkType,
 ): Promise<boolean> {
-  const balance = await nativeBalance(chainKey, address);
+  const balance = await nativeBalance(chainKey, address, network);
   if (balance === null) {
     // RPC blip — can't determine gas; let the broadcast attempt proceed.
     // The chain will reject it with "insufficient funds" if truly empty,
@@ -506,7 +507,7 @@ export async function ensureGas(
     return true;
   }
   if (balance === 0n) {
-    const chain = CHAINS[chainKey];
+    const chain = chainConfigFor(chainKey, network);
     const symbol = chain.nativeCurrency.symbol;
     const name = chain.name;
     const title = 'Not enough gas';

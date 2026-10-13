@@ -19,7 +19,7 @@
 
 import { API_BASE_URL } from '../constants/api/config';
 import { getAuthHeaders } from './walletApi';
-import { getChainByChainId, type ChainKey } from '../constants/chains';
+import { getChainByChainId, networkOfChainId, type ChainKey, type NetworkType } from '../constants/chains';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -1130,6 +1130,16 @@ export function maskedAccountLabel(m: {
 /** ChainKey for a P2P entity's chainId; falls back to 'sonic'. */
 export function p2pChainKey(chainId: number | undefined): ChainKey {
   return (chainId && getChainByChainId(chainId)?.key) || 'sonic';
+}
+
+/**
+ * The network a P2P chain id lives on. P2P (and the liquidity pool) can run on
+ * testnet while the wallet toggle says mainnet, so every RPC read or broadcast
+ * for a P2P chain passes this alongside p2pChainKey: the key alone resolves
+ * against the toggle and would send a chain-97 tx to a BSC mainnet node.
+ */
+export function p2pNetwork(chainId: number | undefined): NetworkType | undefined {
+  return chainId ? networkOfChainId(chainId) : undefined;
 }
 
 /**

@@ -40,6 +40,7 @@ import {
   chainsApi,
   formatTokenAmount,
   p2pChainKey,
+  p2pNetwork,
   p2pTokenDecimals,
   parseTokenAmount,
   poolApi,
@@ -323,7 +324,7 @@ const P2PPoolScreen: React.FC = () => {
       const signed = await signTransaction(unsignedTxToTxLike(prep.data.unsignedTx), w);
 
       setStage('Broadcasting…');
-      const resp = await broadcastTransaction(p2pChainKey(selectedChainId), signed);
+      const resp = await broadcastTransaction(p2pChainKey(selectedChainId), signed, p2pNetwork(selectedChainId));
       broadcastHash = resp.hash;
 
       setStage('Confirming…');
