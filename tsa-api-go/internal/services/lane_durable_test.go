@@ -165,7 +165,7 @@ func sqliteLaneStore(t *testing.T) *GormKeyLaneStore {
 	sqlDB, _ := db.DB()
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := db.AutoMigrate(&models.KeyLaneNonce{}, &models.KeyLaneTx{}); err != nil {
+	if err := db.AutoMigrate(&models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{}); err != nil {
 		t.Fatal(err)
 	}
 	return &GormKeyLaneStore{DB: db}
@@ -263,7 +263,7 @@ func TestKeyLane_TwoProcessesNeverShareANonce_SQLite(t *testing.T) {
 }
 
 func TestKeyLane_TwoProcessesNeverShareANonce_Postgres(t *testing.T) {
-	db := testutil.TempPostgres(t, "key_lane_", &models.KeyLaneNonce{}, &models.KeyLaneTx{})
+	db := testutil.TempPostgres(t, "key_lane_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{})
 	testTwoProcessesNeverShareANonce(t, &GormKeyLaneStore{DB: db})
 }
 

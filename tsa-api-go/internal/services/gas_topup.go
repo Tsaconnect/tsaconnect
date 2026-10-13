@@ -503,6 +503,9 @@ type topUpSend struct {
 	// record is the top-up's pre-broadcast write, run in the key lane's
 	// allocation transaction (ctx carries it: LaneDB); its error sends nothing.
 	record func(ctx context.Context, txHash, amountWei string) error
+	// sent is in-memory bookkeeping run after the commit, once the top-up was
+	// attempted (sent or in flight) — never inside the lane's transaction.
+	sent func()
 }
 
 // sendTopUp is the send side both paths share: skip when the wallet already
@@ -564,6 +567,9 @@ func (g *GasTopUp) sendTopUp(ctx context.Context, s topUpSend) (GasTopUpResult, 
 	txHash, broadcastAttempted, err := lane.sendRecorded(ctx, func() ([]byte, error) {
 		return lane.Native.PrepareNativeTransfer(lane.Signer.Address(), s.wallet, amount)
 	}, hook)
+	if broadcastAttempted && s.sent != nil {
+		s.sent()
+	}
 	if err != nil {
 		if broadcastAttempted {
 			// The top-up may have landed; keep the slot so a retry cannot send

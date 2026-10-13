@@ -126,7 +126,7 @@ func TestKeyLane_SlowHookIsNeverReplacedByAFiller_SQLite(t *testing.T) {
 }
 
 func TestKeyLane_SlowHookIsNeverReplacedByAFiller_Postgres(t *testing.T) {
-	db := testutil.TempPostgres(t, "key_lane_slow_hook_", &models.KeyLaneNonce{}, &models.KeyLaneTx{})
+	db := testutil.TempPostgres(t, "key_lane_slow_hook_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{})
 	testSlowHookIsNeverReplacedByAFiller(t, &GormKeyLaneStore{DB: db})
 }
 
@@ -240,7 +240,7 @@ func TestKeyLane_MinedStatusIsNeverResurrected_SQLite(t *testing.T) {
 }
 
 func TestKeyLane_MinedStatusIsNeverResurrected_Postgres(t *testing.T) {
-	db := testutil.TempPostgres(t, "key_lane_mined_", &models.KeyLaneNonce{}, &models.KeyLaneTx{})
+	db := testutil.TempPostgres(t, "key_lane_mined_", &models.KeyLaneNonce{}, &models.KeyLaneTx{}, &models.KeyLaneState{})
 	testMinedStatusIsNeverResurrected(t, &GormKeyLaneStore{DB: db})
 }
 

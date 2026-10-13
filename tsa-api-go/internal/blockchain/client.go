@@ -305,6 +305,12 @@ func TxKnown(ctx context.Context, r TxByHashReader, txHash string) (bool, error)
 	return err == nil, err
 }
 
+// TransactionReceipt is one non-waiting receipt read (ethereum.NotFound while
+// the transaction is not mined).
+func (c *EVMClient) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	return c.Client.TransactionReceipt(ctx, hash)
+}
+
 // TransactionKnown is TxKnown on this client.
 func (c *EVMClient) TransactionKnown(ctx context.Context, txHash string) (bool, error) {
 	return TxKnown(ctx, c.Client, txHash)

@@ -164,6 +164,7 @@ func rejectedDefinitely(err error) bool {
 		"exceedstheconfiguredcap",
 		"lessthanblockbasefee",
 		"intrinsicgastoolow",
+		"exceedsblockgaslimit",
 	} {
 		if strings.Contains(msg, definite) {
 			return true

@@ -14,6 +14,10 @@ const (
 	KeyLaneNonceSigned = "signed" // committed with its signing; no broadcast of it accepted yet
 	KeyLaneNonceSent   = "sent"   // broadcast at least once (accepted, or the outcome unknown)
 	KeyLaneNonceMined  = "mined"  // the chain's mined nonce has passed it
+	// KeyLaneNonceCancelled: the nonce mined the lane's 0-value self-transfer
+	// (a CANCEL of a call that could never be sent), so the call provably
+	// never executed. Its operation key is freed.
+	KeyLaneNonceCancelled = "cancelled"
 )
 
 // Key lane signing statuses.
@@ -46,6 +50,13 @@ type KeyLaneNonce struct {
 	// (and never touches a mined row), so a stale copy can never be written
 	// back over newer state.
 	Version int64 `gorm:"not null;default:0" json:"version"`
+	// Cancel: the call can never be sent (refused permanently, or a
+	// super-admin asked): the upkeep replaces it at its nonce with a 0-value
+	// self-transfer. Once the nonce mines it resolves to cancelled or mined.
+	Cancel bool `gorm:"not null;default:false" json:"cancel"`
+	// Reserved: an owed call (ReservedSend): its fee is paid from the lane's
+	// reservation, so its speed-ups are gated as the send was.
+	Reserved bool `gorm:"not null;default:false" json:"reserved"`
 	// PriceCap, when set, is a super-admin's per-allocation ceiling on a
 	// speed-up's gas price (wei), replacing the default cap (audited).
 	PriceCap string `gorm:"size:80" json:"priceCap"`
@@ -85,3 +96,18 @@ type KeyLaneTx struct {
 }
 
 func (KeyLaneTx) TableName() string { return "key_lane_txs" }
+
+// KeyLaneState is one lane's shared state: its hold. Every process reads it
+// (in the allocation transaction and on each watch tick), so a hold or an
+// admin's clear on one process applies to all of them.
+type KeyLaneState struct {
+	ChainID    int64      `gorm:"primaryKey;autoIncrement:false" json:"chainId"`
+	Address    string     `gorm:"primaryKey;size:42" json:"address"` // lower-case
+	HeldNonce  *int64     `json:"heldNonce,omitempty"`
+	HeldReason string     `gorm:"size:256" json:"heldReason,omitempty"`
+	HeldSince  *time.Time `json:"heldSince,omitempty"`
+	Version    int64      `gorm:"not null;default:0" json:"version"`
+	UpdatedAt  time.Time  `json:"updatedAt"`
+}
+
+func (KeyLaneState) TableName() string { return "key_lane_states" }

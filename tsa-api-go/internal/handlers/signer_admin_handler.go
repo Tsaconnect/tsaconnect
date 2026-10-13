@@ -103,6 +103,28 @@ func (h *SignerAdminHandler) RaisePriceCap(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "price cap raised", nil)
 }
 
+// Cancel is POST /api/admin/signer/lanes/cancel {chainId, address, nonce}:
+// a committed call that is stuck (it can never be sent, or must not be) is
+// replaced at its nonce by a 0-value self-transfer. Once that mines, the
+// call is cancelled — provably never executed — and its operation fails and
+// is retried as a new one. Audited.
+func (h *SignerAdminHandler) Cancel(c *gin.Context) {
+	req, lane, ok := h.lane(c)
+	if !ok {
+		return
+	}
+	if req.Nonce == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "nonce is required")
+		return
+	}
+	if err := lane.RequestCancel(c.Request.Context(), *req.Nonce); err != nil {
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+		return
+	}
+	h.audit(c, "signer.lane_call_cancel_requested", req, nil)
+	utils.SuccessResponse(c, http.StatusOK, "cancel requested: the lane replaces the call at its nonce", nil)
+}
+
 // ClearHold is POST /api/admin/signer/lanes/clear-hold {chainId, address}.
 func (h *SignerAdminHandler) ClearHold(c *gin.Context) {
 	req, lane, ok := h.lane(c)

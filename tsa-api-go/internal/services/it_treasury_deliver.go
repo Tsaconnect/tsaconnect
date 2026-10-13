@@ -83,18 +83,6 @@ type saleDesk struct {
 	onSettle   func(tx *gorm.DB, intent *models.ITIntent, leg *models.RampLeg) error // extra writes in the settle transaction; nil = none
 }
 
-// laneOn is the desk wallet's key lane on chain (nil without one): where a
-// sale's signings — and any speed-up of them — are recorded.
-func (sd *saleDesk) laneOn(chain string) *KeyLane {
-	if sd == nil || sd.wallet == nil || sd.wallet.Treasury() == nil {
-		return nil
-	}
-	if lane := sd.wallet.Treasury().Lane(chain); lane != nil && lane.SponsorLane != nil {
-		return lane.KeyLane
-	}
-	return nil
-}
-
 // companySale is the company wallet's desk; nil without a wallet.
 func (s *ITService) companySale() *saleDesk {
 	if !s.HasCompanyWallet() {
@@ -417,8 +405,18 @@ func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uui
 		return fmt.Errorf("%s: no verifier or probe on %s", sd.label, leg.ChainKey)
 	}
 	// A sale the key lane sped up mines under the replacement's hash: verify
-	// (and record) whichever signing of the same call mined.
-	leg.TxHash = followMinedHash(ctx, sd.laneOn(leg.ChainKey), s.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash, receiptExists(probe))
+	// (and record) whichever signing of the same call mined. One the lane
+	// CANCELLED never executed: the leg fails and the next tick sends a new
+	// attempt (a new operation, a new nonce) — paid exactly once.
+	var cancelled bool
+	leg.TxHash, cancelled = sd.wallet.Treasury().followCall(ctx, leg.ChainKey, probe, s.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash)
+	if cancelled {
+		log.Printf("%s ALERT ramp_treasury_send_cancelled intent=%s leg=%s tx=%s — the key lane cancelled it; a new attempt follows", sd.tag, intent.ID, leg.ID, leg.TxHash)
+		if err := s.treasuryLegs(s.db).Fail(ctx, leg.ID, "cancelled: "+ErrCallCancelled.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
+			return err
+		}
+		return nil
+	}
 	gen := probe.EndpointGeneration() // the verdict and its depth come from one endpoint
 	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, sd.wallet.TokenAddress(leg.ChainKey, leg.Token),
 		sd.wallet.Address(), intent.DestAddress)
@@ -610,7 +608,7 @@ func (s *ITService) chainEvidenceFor(ctx context.Context, sd *saleDesk, db *gorm
 	gen := probe.EndpointGeneration()
 	if leg.TxHash != "" {
 		// Every signing of the same call (a speed-up replaces the hash).
-		for _, h := range sd.laneOn(leg.ChainKey).signingsOf(ctx, leg.TxHash) {
+		for _, h := range sd.wallet.Treasury().keyLane(leg.ChainKey).signingsOf(ctx, leg.TxHash) {
 			known, terr := txHashKnown(ctx, probe, h)
 			if terr != nil {
 				return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
@@ -823,6 +821,19 @@ func (s *ITService) saleGate(ctx context.Context, sd *saleDesk, db *gorm.DB, int
 			}
 			if !ev.Allowed {
 				return fmt.Sprintf("attempt %d may still land or have landed: %s", leg.Attempt, ev.Reason), nil
+			}
+		case strings.HasPrefix(leg.Error, "cancelled:"):
+			// The key lane's record is the proof: the leg's nonce mined the
+			// lane's cancel, so its call never executed.
+			if sd == nil || sd.wallet == nil {
+				return "", ErrTreasuryUnavailable
+			}
+			cancelled, err := sd.wallet.Treasury().keyLane(leg.ChainKey).CallCancelled(ctx, leg.TxHash)
+			if err != nil {
+				return "", err
+			}
+			if !cancelled {
+				return fmt.Sprintf("attempt %d is not recorded as cancelled by the key lane", leg.Attempt), nil
 			}
 		case strings.HasPrefix(leg.Error, "reverted:"):
 			if sd == nil || sd.wallet == nil {

@@ -15,7 +15,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
+	"gorm.io/gorm"
 )
 
 var (
@@ -558,8 +560,8 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		// third-party router that changes weekly. lane.send carries the
 		// nonce lock and the broadcastAttempted contract.
 		// The caller's pre-broadcast hook records the ROUTE (the leg's
-		// transaction), never the approve.
-		approveCtx := WithPreBroadcast(ctx, nil)
+		// transaction); the approve gets its own (WithApproveHook), if any.
+		approveCtx := WithPreBroadcast(ctx, approveHook(ctx))
 		if ref := operationRef(ctx); ref != "" {
 			approveCtx = WithOperationRef(approveCtx, ref+":approve")
 		}
@@ -604,6 +606,56 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		return "", attempted, fmt.Errorf("treasury: broadcast route: %w", err)
 	}
 	return txHash, true, nil
+}
+
+type approveHookKey struct{}
+
+// WithApproveHook gives ExecuteRoute's approve its own pre-broadcast write
+// (the route keeps the ctx's WithPreBroadcast hook).
+func WithApproveHook(ctx context.Context, hook LaneHook) context.Context {
+	return context.WithValue(ctx, approveHookKey{}, hook)
+}
+
+func approveHook(ctx context.Context) LaneHook {
+	h, _ := ctx.Value(approveHookKey{}).(LaneHook)
+	return h
+}
+
+// keyLane is the treasury's key lane on chainKey (nil without one).
+func (t *Treasury) keyLane(chainKey string) *KeyLane {
+	if t == nil {
+		return nil
+	}
+	if lane := t.Lane(chainKey); lane != nil && lane.SponsorLane != nil {
+		return lane.KeyLane
+	}
+	return nil
+}
+
+// followCall is the one post-send step every verifier keyed by a recorded
+// hash takes first: the call this treasury's lane on chainKey sent under old
+// is followed to whichever signing of the SAME call mined (refused signings
+// included), and that hash is recorded on the row (column, only while it
+// still holds old); cancelled reports that the call's nonce mined the lane's
+// cancel instead (ErrCallCancelled: the call never executed). receipts is a
+// NON-waiting receipt reader on that chain — nil uses the lane's own client
+// when it can read receipts. A read error defers (old is kept).
+func (t *Treasury) followCall(ctx context.Context, chainKey string, receipts receiptReader, db *gorm.DB, model any, column string, id uuid.UUID, old string) (hash string, cancelled bool) {
+	kl := t.keyLane(chainKey)
+	if kl == nil || old == "" {
+		return old, false
+	}
+	if c, err := kl.CallCancelled(ctx, old); err == nil && c {
+		return old, true
+	}
+	if receipts == nil {
+		r, ok := t.Lane(chainKey).Native.(receiptReader)
+		if !ok {
+			return old, false
+		}
+		receipts = r
+	}
+	return followMinedHash(ctx, kl, db, model, column, id, old, receiptExists(receipts)), false
 }
 
 // TransferToken moves a token out of the treasury — a shortfall top-up or a

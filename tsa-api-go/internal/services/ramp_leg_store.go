@@ -25,6 +25,7 @@ var ErrLegNotPending = errors.New("ramp leg is no longer pending")
 type rampLegStore interface {
 	Reserve(ctx context.Context, leg *models.RampLeg) (*models.RampLeg, error)
 	SetTxHash(ctx context.Context, id uuid.UUID, txHash, tool string) error
+	SetApproveHash(ctx context.Context, id uuid.UUID, txHash string) error
 	SetAmount(ctx context.Context, id uuid.UUID, amount string) error
 	Confirm(ctx context.Context, id uuid.UUID, amountReceived string, at time.Time) error
 	Fail(ctx context.Context, id uuid.UUID, reason string) error
@@ -93,6 +94,22 @@ func (s *GormRampLegStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, 
 	res := LaneDB(ctx, s.DB).Model(&models.RampLeg{}).
 		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
 		Updates(map[string]any{"tx_hash": txHash, "lifi_tool": tool})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrLegNotPending
+	}
+	return nil
+}
+
+// SetApproveHash records a pending bridge leg's approve, in the key lane's
+// allocation transaction (the approve's pre-broadcast hook): a leg no longer
+// pending is ErrLegNotPending and the approve is not signed.
+func (s *GormRampLegStore) SetApproveHash(ctx context.Context, id uuid.UUID, txHash string) error {
+	res := LaneDB(ctx, s.DB).Model(&models.RampLeg{}).
+		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
+		Update("approve_tx_hash", txHash)
 	if res.Error != nil {
 		return res.Error
 	}

@@ -34,9 +34,11 @@ type KeyLaneStore interface {
 	HasUnminedAbove(ctx context.Context, chainID int64, address string, nonce uint64) (bool, error)
 	MaxNonce(ctx context.Context, chainID int64, address string) (int64, bool, error)
 	Signings(ctx context.Context, allocID uuid.UUID) ([]models.KeyLaneTx, error)
-	// SigningsOf is every signing (not refused) of the SAME call as hash —
-	// its allocation's signings with hash's own call fingerprint — oldest
-	// first; [hash] when the store does not know it.
+	// SigningsOf is every signing of the SAME call as hash — its
+	// allocation's signings with hash's own call fingerprint, refused ones
+	// included (a "refused" broadcast may still have reached another node) —
+	// oldest first; [hash] when the store does not know it. A cancel (a
+	// self-transfer at the nonce) is another call: never among them.
 	SigningsOf(ctx context.Context, chainID int64, address, hash string) ([]string, error)
 	// FinalHash is the current signing of hash's call (the accepted speed-up),
 	// else hash; never a signing of another call.
@@ -44,6 +46,13 @@ type KeyLaneStore interface {
 	// Committed is what this lane's live allocations at or above fromNonce
 	// will still spend: value + gas limit × price of each one's current signing.
 	Committed(ctx context.Context, chainID int64, address string, fromNonce uint64) (*big.Int, error)
+	// Allocation is the allocation a signing hash belongs to (nil if none).
+	Allocation(ctx context.Context, chainID int64, address, hash string) (*models.KeyLaneNonce, error)
+	// Cancelling is every allocation below the mined nonce still waiting to
+	// be resolved as cancelled or mined.
+	Cancelling(ctx context.Context, chainID int64, address string, below uint64) ([]models.KeyLaneNonce, error)
+	// Hold is the lane's shared state (nil when none was ever written).
+	Hold(ctx context.Context, chainID int64, address string) (*models.KeyLaneState, error)
 }
 
 // errStaleAllocation: an allocation update named a version (or a status)
@@ -70,6 +79,9 @@ type KeyLaneTxn interface {
 	// MarkMined marks allocations below mined as mined and drops the raw
 	// bytes of their signings.
 	MarkMined(mined uint64) error
+	// Hold is the lane's shared hold; SetHold writes it (nil nonce clears).
+	Hold() (*models.KeyLaneState, error)
+	SetHold(nonce *uint64, reason string, at time.Time) error
 	// DB is the transaction itself, for a caller's pre-broadcast write in the
 	// same commit (nil on the in-memory store).
 	DB() *gorm.DB
@@ -145,9 +157,7 @@ func signingsOfCall(txs []models.KeyLaneTx, hash string) []string {
 	}
 	var out []string
 	for _, t := range sameCall(txs, fp) {
-		if t.Status != models.KeyLaneTxRefused {
-			out = append(out, t.Hash)
-		}
+		out = append(out, t.Hash)
 	}
 	if len(out) == 0 {
 		return []string{hash}
@@ -287,6 +297,22 @@ func (s *GormKeyLaneStore) Committed(ctx context.Context, chainID int64, address
 	return s.txn(ctx, chainID, address).Committed(fromNonce)
 }
 
+func (s *GormKeyLaneStore) Allocation(ctx context.Context, chainID int64, address, hash string) (*models.KeyLaneNonce, error) {
+	a, _, err := s.allocationOf(ctx, chainID, address, hash)
+	return a, err
+}
+
+func (s *GormKeyLaneStore) Cancelling(ctx context.Context, chainID int64, address string, below uint64) ([]models.KeyLaneNonce, error) {
+	var out []models.KeyLaneNonce
+	err := s.txn(ctx, chainID, address).lane().Where("nonce < ? AND cancel = ? AND status IN ?", int64(below), true, liveAllocationStatuses).
+		Order("nonce").Find(&out).Error
+	return out, err
+}
+
+func (s *GormKeyLaneStore) Hold(ctx context.Context, chainID int64, address string) (*models.KeyLaneState, error) {
+	return s.txn(ctx, chainID, address).Hold()
+}
+
 type gormLaneTxn struct {
 	db      *gorm.DB
 	chainID int64
@@ -370,7 +396,7 @@ func (q *gormLaneTxn) Save(a *models.KeyLaneNonce) error {
 	res := q.db.Model(&models.KeyLaneNonce{}).
 		Where("id = ? AND version = ? AND status <> ?", a.ID, a.Version, models.KeyLaneNonceMined).
 		Updates(map[string]any{
-			"status": a.Status, "accepted_hash": a.AcceptedHash, "accepted_price": a.AcceptedPrice,
+			"status": a.Status, "op_key": a.OpKey, "cancel": a.Cancel, "accepted_hash": a.AcceptedHash, "accepted_price": a.AcceptedPrice,
 			"bumps": a.Bumps, "accepted_bumps": a.AcceptedBumps, "bump_limit": a.BumpLimit, "price_cap": a.PriceCap,
 			"rebroadcasts": a.Rebroadcasts, "acted_at": a.ActedAt, "version": a.Version + 1, "updated_at": now,
 		})
@@ -386,7 +412,9 @@ func (q *gormLaneTxn) Save(a *models.KeyLaneNonce) error {
 
 func (q *gormLaneTxn) MarkMined(mined uint64) error {
 	if err := q.lane().Model(&models.KeyLaneNonce{}).
-		Where("nonce < ? AND status IN ?", int64(mined), liveAllocationStatuses).
+		// A cancelling allocation is resolved by the watch (cancelled or
+		// mined: which of its two calls mined), never assumed mined.
+		Where("nonce < ? AND status IN ? AND cancel = ?", int64(mined), liveAllocationStatuses, false).
 		// A mined operation is final on chain: its key is freed, so a
 		// caller's later, deliberate retry (after reading the outcome) is a
 		// new operation.
@@ -404,6 +432,37 @@ func (q *gormLaneTxn) MarkMined(mined uint64) error {
 }
 
 func (q *gormLaneTxn) DB() *gorm.DB { return q.db }
+
+func (q *gormLaneTxn) Hold() (*models.KeyLaneState, error) {
+	var rows []models.KeyLaneState
+	if err := q.lane().Limit(1).Find(&rows).Error; err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return &rows[0], nil
+}
+
+func (q *gormLaneTxn) SetHold(nonce *uint64, reason string, at time.Time) error {
+	st := map[string]any{"held_nonce": nil, "held_reason": "", "held_since": nil, "updated_at": time.Now()}
+	if nonce != nil {
+		n := int64(*nonce)
+		st["held_nonce"], st["held_reason"], st["held_since"] = n, truncateRunes(reason, 256), at
+	}
+	cur, err := q.Hold()
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		row := models.KeyLaneState{ChainID: q.chainID, Address: q.address, HeldReason: st["held_reason"].(string), Version: 1}
+		if nonce != nil {
+			n := int64(*nonce)
+			row.HeldNonce, row.HeldSince = &n, &at
+		}
+		return q.db.Create(&row).Error
+	}
+	st["version"] = cur.Version + 1
+	return q.db.Model(&models.KeyLaneState{}).Where("chain_id = ? AND address = ? AND version = ?", q.chainID, q.address, cur.Version).
+		Updates(st).Error
+}
 
 func (q *gormLaneTxn) RecordTx(row *models.KeyLaneTx) error {
 	if row.ID == uuid.Nil {
@@ -429,6 +488,7 @@ type memKeyLaneStore struct {
 	mu     sync.Mutex
 	allocs []*models.KeyLaneNonce
 	txs    []*models.KeyLaneTx
+	states map[string]models.KeyLaneState
 }
 
 func newMemKeyLaneStore() *memKeyLaneStore { return &memKeyLaneStore{} }
@@ -439,7 +499,10 @@ func (m *memKeyLaneStore) WithLock(_ context.Context, chainID int64, address str
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// A failed body must leave nothing behind: work on copies, commit on success.
-	work := &memKeyLaneStore{}
+	work := &memKeyLaneStore{states: map[string]models.KeyLaneState{}}
+	for k, v := range m.states {
+		work.states[k] = v
+	}
 	for _, a := range m.allocs {
 		c := *a
 		work.allocs = append(work.allocs, &c)
@@ -451,7 +514,7 @@ func (m *memKeyLaneStore) WithLock(_ context.Context, chainID int64, address str
 	if err := fn(&memLaneTxn{m: work, chainID: chainID, address: strings.ToLower(address)}); err != nil {
 		return err
 	}
-	m.allocs, m.txs = work.allocs, work.txs
+	m.allocs, m.txs, m.states = work.allocs, work.txs, work.states
 	return nil
 }
 
@@ -529,6 +592,32 @@ func (m *memKeyLaneStore) FinalHash(_ context.Context, chainID int64, address, h
 		return hash, nil
 	}
 	return finalOfCall(a, txs, hash), nil
+}
+
+func (m *memKeyLaneStore) Allocation(_ context.Context, chainID int64, address, hash string) (*models.KeyLaneNonce, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, _ := m.allocationOf(chainID, address, hash)
+	return a, nil
+}
+
+func (m *memKeyLaneStore) Cancelling(_ context.Context, chainID int64, address string, below uint64) ([]models.KeyLaneNonce, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q := m.read(chainID, address)
+	var out []models.KeyLaneNonce
+	for _, a := range m.allocs {
+		if q.mine(a) && uint64(a.Nonce) < below && a.Cancel && containsString(liveAllocationStatuses, a.Status) {
+			out = append(out, *a)
+		}
+	}
+	return out, nil
+}
+
+func (m *memKeyLaneStore) Hold(_ context.Context, chainID int64, address string) (*models.KeyLaneState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.read(chainID, address).Hold()
 }
 
 func (m *memKeyLaneStore) Committed(_ context.Context, chainID int64, address string, fromNonce uint64) (*big.Int, error) {
@@ -638,7 +727,7 @@ func (q *memLaneTxn) Save(a *models.KeyLaneNonce) error {
 
 func (q *memLaneTxn) MarkMined(mined uint64) error {
 	for _, a := range q.m.allocs {
-		if q.mine(a) && uint64(a.Nonce) < mined && containsString(liveAllocationStatuses, a.Status) {
+		if q.mine(a) && uint64(a.Nonce) < mined && !a.Cancel && containsString(liveAllocationStatuses, a.Status) {
 			a.Status, a.OpKey, a.Version = models.KeyLaneNonceMined, "", a.Version+1
 		}
 	}
@@ -654,6 +743,31 @@ func (q *memLaneTxn) MarkMined(mined uint64) error {
 }
 
 func (q *memLaneTxn) DB() *gorm.DB { return nil }
+
+func (q *memLaneTxn) stateKey() string { return fmt.Sprintf("%d:%s", q.chainID, q.address) }
+
+func (q *memLaneTxn) Hold() (*models.KeyLaneState, error) {
+	st, ok := q.m.states[q.stateKey()]
+	if !ok {
+		return nil, nil
+	}
+	return &st, nil
+}
+
+func (q *memLaneTxn) SetHold(nonce *uint64, reason string, at time.Time) error {
+	if q.m.states == nil {
+		q.m.states = map[string]models.KeyLaneState{}
+	}
+	st := q.m.states[q.stateKey()]
+	st.ChainID, st.Address, st.Version = q.chainID, q.address, st.Version+1
+	st.HeldNonce, st.HeldReason, st.HeldSince = nil, "", nil
+	if nonce != nil {
+		n := int64(*nonce)
+		st.HeldNonce, st.HeldReason, st.HeldSince = &n, reason, &at
+	}
+	q.m.states[q.stateKey()] = st
+	return nil
+}
 
 func (q *memLaneTxn) RecordTx(row *models.KeyLaneTx) error {
 	if row.ID == uuid.Nil {

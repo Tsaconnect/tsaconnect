@@ -2079,22 +2079,68 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	txHash, err := signer.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
 	})
+	if txHash == "" {
+		txHash = uncertainTxHash(err)
+	}
+	if trade.IsPoolSlice() && txHash != "" {
+		// The retried path: an allocation this release already holds answers
+		// with its hash without running the hook again, so a slice reset meanwhile
+		// (cleared to paid, hash emptied) gets it here — same conditional write.
+		s.db.WithContext(detached(ctx)).Model(&models.P2PTrade{}).
+			Where("id = ? AND status = ? AND release_tx_hash IN ('', 'reconciled')", trade.ID, models.P2PTradeStatusReleasing).
+			Update("release_tx_hash", txHash)
+	}
 	if err != nil {
-		// Review C-1: a slice whose release may have been broadcast stays
-		// `releasing` (at the treasury) until its hash is proven reverted.
-		if !trade.IsPoolSlice() || errors.Is(err, ErrTxNotBroadcast) {
+		// A slice whose release may have been broadcast stays `releasing` (at
+		// the treasury) until its hash is proven reverted (review C-1). A
+		// release the key lane COMMITTED (ErrPendingBroadcast: it keeps
+		// sending it) is in flight: never rolled back either.
+		if errors.Is(err, ErrTxNotBroadcast) || (!trade.IsPoolSlice() && !errors.Is(err, ErrPendingBroadcast)) {
 			rollback()
 		}
 		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
 	}
-	ev, err := escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
+	// Verified on whichever signing of the call mined (a speed-up during the
+	// wait is the release, not a failure).
+	ev, minedHash, err := s.verifyReleaseFollowing(ctx, escrow, signer, &trade, txHash)
 	if err != nil {
 		if !trade.IsPoolSlice() {
+			// Safe to step back: a retry is the same operation (the lane
+			// answers with this allocation, never a second release), and the
+			// reconciler settles a release that did land.
 			rollback()
 		}
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
-	return s.confirmReleaseCore(ctx, &trade, txHash, nil, ev)
+	return s.confirmReleaseCore(ctx, &trade, minedHash, nil, ev)
+}
+
+// laneOfSender is the release key's lane on chainID, when the sender
+// exposes it (ChainReleaseSigner); nil otherwise.
+func laneOfSender(signer ChainSender, chainID int64) *KeyLane {
+	if ls, ok := signer.(interface{ Lane(int64) *KeyLane }); ok {
+		return ls.Lane(chainID)
+	}
+	return nil
+}
+
+// verifyReleaseFollowing proves a release on its receipt, following the
+// key lane's speed-ups: hash first, then every other signing of the SAME
+// call (one mined in its place); it returns the hash that proved it.
+func (s *P2PTradeService) verifyReleaseFollowing(ctx context.Context, escrow P2PEscrowAdapter, signer ChainSender, trade *models.P2PTrade, hash string) (*P2PTradeReleasedEvent, string, error) {
+	ev, err := escrow.VerifyTradeReleased(hash, HashID(trade.ID))
+	if err == nil {
+		return ev, hash, nil
+	}
+	for _, h := range laneOfSender(signer, trade.ChainID).signingsOf(ctx, hash) {
+		if strings.EqualFold(h, hash) {
+			continue
+		}
+		if ev2, err2 := escrow.VerifyTradeReleased(h, HashID(trade.ID)); err2 == nil {
+			return ev2, h, nil
+		}
+	}
+	return nil, hash, err
 }
 
 // PrepareCancel prepares an unsigned `cancelByTimeout` tx for a trade whose

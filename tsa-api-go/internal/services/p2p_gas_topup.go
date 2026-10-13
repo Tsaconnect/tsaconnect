@@ -221,13 +221,12 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 			return nil
 		},
 		release: func() { p.perUser.ReleaseUser(slot) },
-		// In-memory only (no DB row): noted with the commit, so a drip in
-		// flight already refuses the next one.
-		record: func(context.Context, string, string) error {
+		// In-memory only (no DB row), so never inside the lane's transaction:
+		// noted once the drip is committed (sent or in flight).
+		sent: func() {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			p.lastDrip[user.ID] = p2pDrip{at: p.now(), postBalance: new(big.Int).Set(need)}
-			return nil
 		},
 	})
 	switch {

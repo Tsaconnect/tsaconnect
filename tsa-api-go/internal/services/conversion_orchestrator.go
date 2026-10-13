@@ -950,7 +950,12 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		return o.failLeg(detached(ctx), leg.ID, err.Error())
 	}
 
-	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(o.legSend(ctx, leg.ID, route.Tool), lane, order.Token, bridge, route)
+	// The approve (if one is due) records its hash on the leg in its own
+	// allocation transaction; the route records the leg's tx hash in its.
+	sendCtx := WithApproveHook(o.legSend(ctx, leg.ID, route.Tool), func(hctx context.Context, _ uint64, hash string) error {
+		return o.legs.SetApproveHash(hctx, leg.ID, hash)
+	})
+	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(sendCtx, lane, order.Token, bridge, route)
 	if err != nil {
 		if broadcastAttempted {
 			// Might have landed: keep the leg pending so no second route runs.
@@ -975,6 +980,16 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 // permission to send again: LiFi reports FAILED for tool stalls and
 // source-side ambiguity while the funds can still reach the user later.
 func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
+	if leg.TxHash == "" && leg.ApproveTxHash != "" {
+		// The approve was committed; the route never was (its hook would have
+		// recorded the hash with it). Once nothing can still be running for
+		// this leg, prove it from the lane store and free the attempt: the
+		// next tick sends the route again on a new attempt (the allowance the
+		// approve set — or a fresh approve — covers it). The route's hook only
+		// writes a PENDING leg, so a late route of this attempt can never
+		// commit after this.
+		return o.resumeBridgeAfterApprove(ctx, order, leg)
+	}
 	if leg.TxHash == "" {
 		// Reserved, but no broadcast outcome was ever recorded. There is
 		// nothing to ask LiFi about.
@@ -984,7 +999,9 @@ func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *model
 		}
 		return nil
 	}
-	o.followLeg(ctx, leg)
+	if o.followLeg(ctx, leg) {
+		return nil
+	}
 	st, err := o.status.Status(ctx, leg.TxHash)
 	if err != nil {
 		return fmt.Errorf("conversion: bridge status for order %s: %w", order.ID, err)
@@ -1383,7 +1400,9 @@ func (o *ConversionOrchestrator) observeDeliver(ctx context.Context, order *mode
 // settleTopUp confirms a top-up leg on the strength of the destination chain
 // and settles the order. Unverified means wait — never settle.
 func (o *ConversionOrchestrator) settleTopUp(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, leg *models.RampLeg) error {
-	o.followLeg(ctx, leg)
+	if o.followLeg(ctx, leg) {
+		return nil
+	}
 	credited, err := o.verifyOnDestination(ctx, order, dst, leg.TxHash, "topup")
 	if err != nil || credited == nil {
 		return err // alerted inside; the leg stays pending for the next tick
@@ -1457,7 +1476,9 @@ func (o *ConversionOrchestrator) observeRefund(ctx context.Context, order *model
 	// treasury actually paid from) — unlike a bridge leg, there is no
 	// origin/destination split to resolve here; see RampLeg.AmountReceived's
 	// own doc comment for that distinction.
-	o.followLeg(ctx, leg)
+	if o.followLeg(ctx, leg) {
+		return nil
+	}
 	credited, err := o.verifyTransferOnChain(ctx, order, leg.ChainKey, tokenAddr, leg.TxHash, "refund")
 	if err != nil || credited == nil {
 		return err // alerted inside; the leg stays pending, or the order was parked
@@ -2471,26 +2492,53 @@ func (o *ConversionOrchestrator) resolveAdminRefund(ctx context.Context, adminID
 	return pending, nil
 }
 
-// followLegReceiptWait bounds each receipt read followLeg makes per signing.
-const followLegReceiptWait = 2 * time.Second
+// bridgeRouteGrace is how long after its leg was reserved an approve-only
+// bridge attempt is left alone (ExecuteRoute waits up to 60 s for the
+// approve's receipt before it sends the route).
+const bridgeRouteGrace = 2 * time.Minute
 
-// followLeg moves a leg's recorded hash to the signing of the same call that
-// mined, when its treasury lane sped it up: LiFi, the verifier and the books
-// then read the transaction that actually landed. Only when the lane knows
-// more than one signing of the call does it read anything.
-func (o *ConversionOrchestrator) followLeg(ctx context.Context, leg *models.RampLeg) {
-	if leg == nil || leg.TxHash == "" || o.treasury == nil || o.db == nil {
-		return
+// resumeBridgeAfterApprove: a bridge leg whose approve was committed but
+// whose route never was. Past the grace, if the lane store holds no
+// allocation for the leg's ':route' operation, the attempt is failed (no
+// funds moved: only an allowance was set) so the next tick sends the route
+// on a new attempt.
+func (o *ConversionOrchestrator) resumeBridgeAfterApprove(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
+	if o.now().Before(leg.CreatedAt.Add(bridgeRouteGrace)) {
+		return nil // the approve is in flight: the leg is too
 	}
 	lane := o.treasury.Lane(leg.ChainKey)
-	if lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil || lane.Native == nil {
-		return
+	if lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil {
+		return nil
 	}
-	leg.TxHash = followMinedHash(ctx, lane.KeyLane, o.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash,
-		func(ctx context.Context, h string) (bool, error) {
-			r, err := lane.Native.WaitForReceiptContext(ctx, h, followLegReceiptWait)
-			return err == nil && r != nil, nil // no receipt yet (or unreadable): not this one
-		})
+	allocated, err := lane.KeyLane.OpAllocated(ctx, lane.Signer.Address(), "ramp_leg:"+leg.ID.String()+":route")
+	if err != nil || allocated {
+		if allocated {
+			log.Printf("[ramp-conversion] ALERT ramp_conversion_route_unrecorded_total=1 order=%s leg=%s — the route is committed but not on the leg", order.ID, leg.ID)
+		}
+		return err
+	}
+	log.Printf("[ramp-conversion] order=%s bridge#%d approve %s committed, route never sent: retrying the route on a new attempt",
+		order.ID, leg.Attempt, leg.ApproveTxHash)
+	return o.failLeg(detached(ctx), leg.ID, "approve only: the route was never sent")
+}
+
+// followLeg runs the treasury's followCall on a leg (its recorded hash moves
+// to the signing of the same call that mined); true when the lane cancelled
+// the call — the leg is then failed (it never executed) so the next tick
+// starts a new attempt.
+func (o *ConversionOrchestrator) followLeg(ctx context.Context, leg *models.RampLeg) bool {
+	if leg == nil || leg.TxHash == "" || o.treasury == nil || o.db == nil {
+		return false
+	}
+	var cancelled bool
+	leg.TxHash, cancelled = o.treasury.followCall(ctx, leg.ChainKey, nil, o.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash)
+	if cancelled {
+		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_cancelled_total=1 leg=%s kind=%s tx=%s — the key lane cancelled it", leg.ID, leg.Kind, leg.TxHash)
+		if err := o.failLeg(detached(ctx), leg.ID, "cancelled: "+ErrCallCancelled.Error()); err != nil {
+			log.Printf("[ramp-conversion] fail cancelled leg %s: %v", leg.ID, err)
+		}
+	}
+	return cancelled
 }
 
 // legSend is the send context of a treasury leg: the leg is the operation

@@ -178,24 +178,39 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     slice resolves (hash replaces the claim), expiry cancels (the cancel DECISION — `dropped_at`
     under the row lock — is taken in the hook), gas top-ups and authorization relays (the
     sponsorship / intent row's hash), the name-change fee refund (`fee_tx_hash`). An approve never
-    inherits its route's hook. IT operator ops write their row before the call and resolve by the
-    contract ref, so they need none.
+    inherits its route's hook: a bridge leg's approve records `approve_tx_hash` through its own
+    (`WithApproveHook`); a leg whose approve committed but whose `:route` operation was never
+    allocated (proved in the lane store) is freed after 2 min and the route goes on a new attempt.
+    IT operator ops write their row before the call and resolve by the contract ref, so they need
+    none. In-memory bookkeeping (the P2P drip memory) runs after the commit, never in a hook.
+    An error from the allocation transaction that is not the body's own refusal is re-checked in the
+    store: a commit that happened answers `ErrPendingBroadcast`, never "not sent".
   - **B.** After the commit, outside every lock: the bytes are broadcast and a short transaction
     records the outcome (`accepted` / `uncertain` / `refused`). Once committed the call is IN FLIGHT:
     a broadcast the node refused or that timed out returns its hash with `ErrPendingBroadcast`
     (attempted = true; never matches `ErrTxNotBroadcast`) — callers treat it as uncertain, never as
     "not sent". `attempted = false` means nothing was committed.
   - **C.** A committed signing IS its nonce's transaction until the chain mines that nonce (statuses
-    `signed` → `sent` → `mined` only; there is no abandoned or filled state). Refused or lost, the
-    upkeep re-broadcasts the same bytes or speeds up the SAME call until it mines. Only a hole NO
-    process allocated is ever filled, and only by a super-admin (`fill-gap`).
+    `signed` → `sent` → `mined`). Refused or lost, the upkeep re-broadcasts the same bytes or speeds up
+    the SAME call until it mines. A call that can NEVER be sent — refused for the RPC's tx-fee cap,
+    intrinsic gas too low, over the block gas limit (`permanentlyUnsendable`) — or that a super-admin
+    cancels (`POST .../cancel`) is replaced at its nonce by a 0-value self-transfer priced above every
+    earlier signing (same caps); once that mines the allocation is `cancelled`, its operation key
+    freed, and verifiers report `ErrCallCancelled`: the sale/conversion leg fails cleanly and the
+    next tick sends a new attempt (new operation, new nonce). The cancel is never followed as the
+    call's receipt. Only a hole NO process allocated — strictly below the highest allocated nonce —
+    is ever filled, and only by a super-admin (`fill-gap`).
   - **D.** A signing the node lacks 15 s on is re-broadcast byte for byte once, then sped up with the
     SAME call — decided, signed and committed under the lock (the bump counted in the committed row),
     broadcast after: one +12.5% step per bump since the last ACCEPTED signing, above every earlier
     signing, at least today's price, never above min(3 × today's price, `keyLaneFeeCeilingGwei`) or
     the allocation's admin-raised `price_cap`, at most `BumpLimit` (3) bumps, through the full fee gate
-    INCLUDING the lane's reservations (the watch job's too). Past a cap the lane holds; a speed-up the
-    balance cannot pay never holds — every tick retries it, so a top-up re-arms the lane by itself.
+    INCLUDING the lane's reservations (the watch job's too) — except an owed call's (`ReservedSend`,
+    recorded as `reserved`), gated as its send was, never against its own reservation. Past a cap the
+    lane holds; a speed-up the balance cannot pay never holds — every tick retries it, so a top-up
+    re-arms the lane by itself. A hold is shared state (`key_lane_states`): every process refuses in
+    its allocation transaction and adopts it on its watch; an admin clear on any process clears it
+    for all.
   - **E.** `services.WithOperationRef(ctx, ref)` is the allocation's idempotency key: the same
     operation retried (release `p2p_release:<trade>`, cancel, resolve, IT op `it_op:<call hash>`,
     treasury legs `ramp_leg:<leg>` with `:approve`/`:route`) gets its existing allocation and its
@@ -210,10 +225,13 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     process may still be sending) and the mined nonce, and starts above all of them.
   - Receipt waits (`waitFollowingReplacements`: IT operator receipts, gas-drip confirms, the
     treasury approve) poll EVERY signing of the call, so the original mining after a speed-up still
-    answers. Post-send verifiers keyed by a recorded hash follow it first (`KeyLane.MinedSigning` /
-    `followMinedHash`): sale-leg finalize and its dropped-tx evidence, conversion bridge/top-up/refund
-    legs and pool slice opens verify whichever signing of the same call mined and record that hash on
-    the row. Pool slice releases are proven from the escrow's `TradeReleased` log.
+    answers. Post-send verifiers keyed by a recorded hash go through ONE helper first
+    (`Treasury.followCall`: non-waiting receipt reads over every signing of the same call, refused ones
+    included; a read error defers): sale-leg finalize and its dropped-tx evidence, conversion
+    bridge/top-up/refund legs and pool slice opens verify whichever signing mined and record that hash
+    on the row. AutoRelease verifies the release on each signing of the call; an ordinary trade whose
+    release is committed but not yet accepted stays `releasing`, and a retried slice release writes
+    its allocation's hash back. Pool slice releases are proven from the escrow's `TradeReleased` log.
   - A hole at a nonce NO process allocated (a send from outside the server) holds the lane after
     15 s (`ALERT key_lane_nonce_gap_held_total`); transient read errors never hold. The 30 s
     `key-lane-watch` job marks allocations below the mined nonce `mined` (raw bytes dropped), clears
@@ -242,9 +260,10 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     fee-cap hold: that allocation's own speed-up ceiling — above every signing of it, at most 10× the
     chain's default ceiling — plus a fresh bump count; audited with the old and new cap);
     `POST .../clear-hold {chainId, address}` (after checking the chain by hand). Each writes a
-    `p2p_audit_logs` row; no key material is ever read or logged. A call that can never mine (e.g.
-    the node rejects it permanently) holds the lane at the cap: raise the cap, or stop and inspect —
-    nothing ever replaces a committed call.
+    `p2p_audit_logs` row; no key material is ever read or logged. `POST .../cancel {chainId, address,
+    nonce}` replaces a stuck committed call with the lane's 0-value cancel (its operation then fails
+    with `ErrCallCancelled` and retries as a new one); a call the node refuses for good is cancelled
+    automatically. `fill-gap` is refused for any nonce at or above the highest allocated one.
   `MCGPSwapService.signMu` is only the operator SEQUENCE lock (held across receipt waits).
 - **IT operator role is verified, not assumed.** The IT key is wired but dormant (`HasOperator` false,
   every operator op refused) until `operators(<key>)` reads true on the swap — at boot or on the 60 s
