@@ -318,7 +318,7 @@ func buildPoolOpenRig(t *testing.T, db *gorm.DB) *poolOpenRig {
 
 func (r *poolOpenRig) price(t *testing.T, naira string) *PoolPrice {
 	t.Helper()
-	p, err := r.it.QuotePoolBuy("USDT", naira, "NGN", poolMid, specPoolSettings())
+	p, err := r.it.QuotePoolBuy(context.Background(), "USDT", naira, "NGN", poolMid, specPoolSettings())
 	if err != nil {
 		t.Fatalf("price ₦%s: %v", naira, err)
 	}

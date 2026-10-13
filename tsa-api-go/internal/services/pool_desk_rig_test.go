@@ -94,7 +94,7 @@ func buildDeskRig(t *testing.T, db *gorm.DB, esc *poolEscrowFake, adapter P2PEsc
 	}
 	return &deskRig{db: db, esc: esc, escrow: adapter, trades: trades, desk: &PoolDesk{
 		c:      PoolDeskConfig{DB: db, PM: NewPMService(db), Trades: trades, Stock: stock, Token: tok, Escrow: adapter, EscrowAddr: poolTestEscrow, Now: time.Now},
-		totals: newCachedReader[*big.Int](poolTotalsTTL, poolBalanceFailTTL),
+		cached: newCachedReader[[]poolCandidate](poolTotalsTTL, poolBalanceFailTTL),
 	}}
 }
 

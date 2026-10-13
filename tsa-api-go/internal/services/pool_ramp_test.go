@@ -39,7 +39,7 @@ func TestPoolCard_RateAndLimits(t *testing.T) {
 	r.it.SetTreasuryMarketRate(&fixedTreasuryRate{rate: poolMid})
 	card, err := r.it.PoolCard(context.Background())
 	if err != nil || !card.Enabled || !card.Available || card.Rate != "1361.51" || card.FundingFeePercent != "1.4" ||
-		card.MinNgn != "2762.00" || card.Name != "TSA Connect" || card.Badge != "Recommended" || card.Token.Decimals != 18 {
+		card.MinNgn != "2828.00" || card.Name != "TSA Connect" || card.Badge != "Recommended" || card.Token.Decimals != 18 {
 		t.Fatalf("card = %+v %v", card, err)
 	}
 	maxNgn, _ := new(big.Rat).SetString(card.MaxNgn)

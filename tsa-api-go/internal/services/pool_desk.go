@@ -42,7 +42,7 @@ type PoolDeskConfig struct {
 // wallet.
 type PoolDesk struct {
 	c           PoolDeskConfig
-	totals      *cachedReader[*big.Int]
+	cached      *cachedReader[[]poolCandidate]
 	proveWindow time.Duration // poolProveWindow; tests shorten it
 	breaker     poolOpenBreaker
 }
@@ -72,7 +72,7 @@ func NewPoolDesk(c PoolDeskConfig) (*PoolDesk, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
-	return &PoolDesk{c: c, totals: newCachedReader[*big.Int](poolTotalsTTL, poolBalanceFailTTL), proveWindow: poolProveWindow}, nil
+	return &PoolDesk{c: c, cached: newCachedReader[[]poolCandidate](poolTotalsTTL, poolBalanceFailTTL), proveWindow: poolProveWindow}, nil
 }
 
 func (s *ITService) SetPoolDesk(d *PoolDesk) { s.poolDesk = d }
@@ -84,20 +84,45 @@ func (d *PoolDesk) ChainKey() string    { return d.c.Token.ChainKey }
 func (d *PoolDesk) TokenSymbol() string { return d.c.Token.Symbol }
 func (d *PoolDesk) now() time.Time      { return d.c.Now().UTC() }
 
+// cachedCandidates is the eligible set on cached balances, cached 5 s on top
+// of the 30 s balance cache (public paths only; never a money decision).
+// Callers must not mutate what it returns.
+func (d *PoolDesk) cachedCandidates(ctx context.Context, set PoolSettings) ([]poolCandidate, error) {
+	key := fmt.Sprintf("min%s", set.MinSliceUnits)
+	now := d.now()
+	return d.cached.Get(key, now, func() ([]poolCandidate, error) {
+		cs, err := d.candidates(ctx, d.c.DB, set, nil, nil, false)
+		d.cached.Put(key, now, cs, err)
+		return cs, err
+	})
+}
+
 // FreeTopN is Σ of the top pool_slice_cap LPs' free stock: what the pool can
 // promise right now (quote feasibility §9.3 step 4, the card's maximum).
-// Cached 5 s on top of the 30 s balance cache; never a money decision.
 func (d *PoolDesk) FreeTopN(ctx context.Context, set PoolSettings) (*big.Int, error) {
-	key := fmt.Sprintf("top%d", set.SliceCap)
-	now := d.now()
-	return d.totals.Get(key, now, func() (*big.Int, error) {
-		cs, err := d.candidates(ctx, d.c.DB, set, nil, nil, false)
-		if err == nil {
-			sum := sumTopN(cs, set.SliceCap)
-			d.totals.Put(key, now, sum, nil)
-			return sum, nil
-		}
-		d.totals.Put(key, now, nil, err)
+	cs, err := d.cachedCandidates(ctx, set)
+	if err != nil {
 		return nil, err
-	})
+	}
+	return sumTopN(cs, set.SliceCap), nil
+}
+
+// QuoteSliceUnits is the slice sizes an order of units would open as now:
+// allocatePool on the cached eligible set, the open's own allocator (§9.3).
+// A quote prices its per-slice costs on it; the open re-plans on fresh stock.
+// ErrPoolCannotFill when no allocation fits.
+func (d *PoolDesk) QuoteSliceUnits(ctx context.Context, units *big.Int, set PoolSettings) ([]*big.Int, error) {
+	cs, err := d.cachedCandidates(ctx, set)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := allocatePool(cs, units, set.SliceCap, set.MinSliceUnits)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*big.Int, len(plan))
+	for i := range plan {
+		out[i] = plan[i].Units
+	}
+	return out, nil
 }

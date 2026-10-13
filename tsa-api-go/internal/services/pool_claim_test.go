@@ -111,9 +111,9 @@ func TestPoolLate_CoveredClaimsLiveRecordsSurplus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok, err := lateClaim(t, r, intent, 99_000) // live net 71.695397 of the 72.419593 locked
+	ok, err := lateClaim(t, r, intent, 99_000) // live net 71.566176 of the 72.290372 locked (both costed on the two kept slices)
 	got := r.intent(t, intent.ID)
-	if !ok || err != nil || got.Status != models.ITStatusPaymentReceived || !got.Repriced || got.AssetAmount != "71695397" {
+	if !ok || err != nil || got.Status != models.ITStatusPaymentReceived || !got.Repriced || got.AssetAmount != "71566176" {
 		t.Fatalf("claim = %v %v, intent = %+v", ok, err, got)
 	}
 	var po models.PoolOrder
@@ -136,7 +136,7 @@ func TestPoolLate_UncoveredParks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ok, err := lateClaim(t, r, intent, 120_000) // live ≈ 86.9 > 72.42 locked
+	ok, err := lateClaim(t, r, intent, 120_000) // live ≈ 86.8 > 72.29 locked
 	got := r.intent(t, intent.ID)
 	if !ok || err != nil || got.Status != models.ITStatusBuyAwaitingRate || !strings.HasPrefix(got.FailureReason, models.ITFailurePoolSlicesShort) {
 		t.Fatalf("claim = %v %v, intent = %+v", ok, err, got)
@@ -158,7 +158,7 @@ func TestPoolHonoured_ClaimsWithoutTouchingSlices(t *testing.T) {
 	}
 	ok, err := r.it.claimAndPriceStableBuy(context.Background(), intent, "sess_ok", intent.AmountMinor, time.Now(), false, PayInCentral)
 	got := r.intent(t, intent.ID)
-	if !ok || err != nil || got.Status != models.ITStatusPaymentReceived || got.Repriced || got.AssetAmount != "72419593" {
+	if !ok || err != nil || got.Status != models.ITStatusPaymentReceived || got.Repriced || got.AssetAmount != "72290372" {
 		t.Fatalf("honoured = %v %v %+v", ok, err, got)
 	}
 }

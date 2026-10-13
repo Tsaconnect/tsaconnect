@@ -13,7 +13,8 @@ import (
 func specPoolSettings() PoolSettings {
 	return PoolSettings{SpreadBps: 50, TakeBps: 50, BandBps: 50, SliceCap: 3,
 		MinSliceUnits: big.NewInt(2_000_000), OrderMaxUnits: big.NewInt(2_000_000_000),
-		UserDailyMaxUnits: big.NewInt(2_000_000_000)}
+		UserDailyMaxUnits: big.NewInt(2_000_000_000),
+		GasPerSliceUnits:  big.NewInt(30_000), GasDeliveryUnits: big.NewInt(10_000)}
 }
 
 // S33 / decision 19: the seven C1 rows ensured once, with the spec's defaults.
@@ -32,6 +33,7 @@ func TestPoolSettings_EnsureRowsIdempotent_C1Rows(t *testing.T) {
 		models.FeaturePoolSpread: {50, 0}, models.FeaturePoolTake: {50, 0}, models.FeaturePoolBand: {50, 0},
 		models.FeaturePoolSliceCap: {3, 0}, models.FeaturePoolMinSlice: {0, 2},
 		models.FeaturePoolOrderMax: {0, 2000}, models.FeaturePoolUserDailyMax: {0, 2000},
+		models.FeaturePoolGasPerSlice: {0, 0.03}, models.FeaturePoolGasDelivery: {0, 0.01},
 	} {
 		var rows []models.FeeConfig
 		db.Where("feature = ?", feature).Find(&rows)
@@ -49,7 +51,8 @@ func TestCurrentPoolSettings_DefaultsMatchSpec(t *testing.T) {
 	Fees = nil // every row missing → defaults with an ALERT, never 0 or unbounded
 	s := CurrentPoolSettings()
 	if s.SpreadBps != 50 || s.TakeBps != 50 || s.BandBps != 50 || s.SliceCap != 3 || s.OrdersStopped ||
-		s.MinSliceUnits.String() != "2000000" || s.OrderMaxUnits.String() != "2000000000" || s.UserDailyMaxUnits.String() != "2000000000" {
+		s.MinSliceUnits.String() != "2000000" || s.OrderMaxUnits.String() != "2000000000" || s.UserDailyMaxUnits.String() != "2000000000" ||
+		s.GasPerSliceUnits.String() != "30000" || s.GasDeliveryUnits.String() != "10000" {
 		t.Fatalf("defaults = %+v", s)
 	}
 }
@@ -105,7 +108,20 @@ func TestPoolSettings_ValidationRanges_C1Rows(t *testing.T) {
 		{models.FeaturePoolSliceCap, 0, 0, "between 1 and 5"},
 		{models.FeaturePoolSliceCap, 6, 0, "between 1 and 5"},
 		{models.FeaturePoolMinSlice, 0, 2, ""},
-		{models.FeaturePoolMinSlice, 0, 0.5, "between 1 and 100"},
+		{models.FeaturePoolMinSlice, 0, 0.25, ""},
+		{models.FeaturePoolMinSlice, 0, 0.5, ""},
+		{models.FeaturePoolMinSlice, 0, 0.24, "between 0.25 and 100"},
+		{models.FeaturePoolMinSlice, 0, 101, "between 0.25 and 100"},
+		{models.FeaturePoolGasPerSlice, 0, 0, ""},
+		{models.FeaturePoolGasPerSlice, 0, 0.03, ""},
+		{models.FeaturePoolGasPerSlice, 0, 5.01, "between 0 and 5"},
+		{models.FeaturePoolGasPerSlice, 0, -0.01, "between 0 and 5"},
+		{models.FeaturePoolGasPerSlice, 3, 0, "flat USD"},
+		{models.FeaturePoolGasDelivery, 0, 5, ""},
+		{models.FeaturePoolGasDelivery, 0, 6, "between 0 and 5"},
+		{models.FeaturePoolGasPerSlice, 0, 0.0000001, "at most 6 decimal places"},
+		{models.FeaturePoolMinSlice, 0, 0.2500005, "at most 6 decimal places"},
+		{models.FeaturePoolGasPerSlice, 0, 0.000001, ""},
 		{models.FeaturePoolMinSlice, 10, 2, "flat USD"},
 		{models.FeaturePoolOrderMax, 0, 0, ""}, // the incident stop
 		{models.FeaturePoolOrderMax, 0, 2001, "at most 2000"},

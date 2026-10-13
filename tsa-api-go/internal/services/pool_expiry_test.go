@@ -227,7 +227,7 @@ func TestPoolSettings_OrderMaxZeroClosesQuotesKeepsSettlement(t *testing.T) {
 	r, intent, _, sender := abandoned(t)
 	stopped := specPoolSettings()
 	stopped.OrdersStopped, stopped.OrderMaxUnits = true, new(big.Int)
-	if _, err := r.it.QuotePoolBuy("USDT", "5000", "NGN", poolMid, stopped); err == nil {
+	if _, err := r.it.QuotePoolBuy(context.Background(), "USDT", "5000", "NGN", poolMid, stopped); err == nil {
 		t.Fatal("quote while stopped")
 	}
 	if tick, _ := canceller(r, sender, nil).RunOnce(context.Background()); tick.Pool != 1 {

@@ -50,6 +50,10 @@ const (
 	FeaturePoolMinSlice     = "pool_min_slice"      // flat USD: minimum slice and minimum order
 	FeaturePoolOrderMax     = "pool_order_max"      // flat USD: per order; 0 = the incident stop (S46)
 	FeaturePoolUserDailyMax = "pool_user_daily_max" // flat USD: rolling 24h per user
+	// Per-order costs the pool's buy price passes on as fee lines (owner,
+	// 2026-10-13: all actual costs + the take, like the Flutterwave route).
+	FeaturePoolGasPerSlice = "pool_gas_per_slice" // flat USD: treasury gas per slice (its open + adminRelease)
+	FeaturePoolGasDelivery = "pool_gas_delivery"  // flat USD: treasury gas for the delivery send
 )
 
 // IsPoolSetting reports whether feature is a TSA Liquidity setting row.

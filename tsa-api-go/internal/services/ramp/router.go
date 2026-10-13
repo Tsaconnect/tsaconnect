@@ -438,6 +438,17 @@ func quoteError(errs []error) error {
 		}
 		return ErrAboveMaximum
 	default:
+		// A provider that trades this pair said the amount is out of range
+		// while another failed: nothing quoted either way, and the amount is
+		// what she can act on, so that answer beats a generic outage
+		// (2026-10-13). Below wins over above, as when all are out of range.
+		for _, class := range []error{ErrBelowMinimum, ErrAboveMaximum} {
+			for _, e := range errs {
+				if errors.Is(e, class) {
+					return class
+				}
+			}
+		}
 		return ErrUnavailable
 	}
 }

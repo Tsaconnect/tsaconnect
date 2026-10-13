@@ -50,6 +50,7 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 	}
 	need := s.saleDepth()
 	released, gen := new(big.Int), 1
+	var releasedUnits []*big.Int // the proven releases: the slices her price is costed on
 	exclude := map[uuid.UUID]bool{}
 	for i := range slices {
 		sl := &slices[i]
@@ -75,6 +76,7 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 				return nil, fmt.Errorf("%w: slice %s is not a proven release yet — wait for it", ErrITBadState, sl.ID)
 			}
 			released.Add(released, d.toCanonical(sl.TokenAmount))
+			releasedUnits = append(releasedUnits, d.toCanonical(sl.TokenAmount))
 		case sl.Status == models.P2PTradeStatusCancelled, sl.Status == models.P2PTradeStatusResolved:
 		case sl.CancelReason == poolF22Returned:
 			// Handed back to its LP by an operator: never at the treasury.
@@ -93,7 +95,20 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 	if !ok || paid.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: unusable received amount %q", ErrITBadState, intent.ReceivedAmount)
 	}
-	p, err := s.poolQuoteAt(intent.Asset, intent.Currency, paid, mid, CurrentPoolSettings(), PayInCentral, false)
+	// Costed on the slices her LPs are paid for: those already at the
+	// treasury, plus the new generation — estimated here as one slice of
+	// what is owed, then fitted to the actual allocation under the lock.
+	p, err := s.poolQuoteAt(intent.Asset, intent.Currency, paid, mid, CurrentPoolSettings(), PayInCentral, false, releasedUnits)
+	if err != nil {
+		return nil, err
+	}
+	if est := new(big.Int).Sub(p.Quote.AssetUnits, released); est.Sign() > 0 {
+		if p, err = s.poolQuoteAt(intent.Asset, intent.Currency, paid, mid, CurrentPoolSettings(), PayInCentral, false,
+			append(append([]*big.Int(nil), releasedUnits...), est)); err != nil {
+			return nil, err
+		}
+	}
+	rec, err := s.ConversionFor(ctx, intent)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +130,7 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 		return nil, err
 	}
 	gen++
+	var fitted *PoolPrice
 	var written []models.P2PTrade
 	var closeAfter []models.P2PAd
 	err = withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
@@ -136,16 +152,32 @@ func (s *ITService) RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid
 		if err != nil {
 			return err
 		}
-		if err := tx.Create(d.snapshot(intentID, gen, p, plan)).Error; err != nil {
+		// A converted order's amount may shrink (still under its record) but
+		// never grow past it (N4).
+		fp, plan, more, err := fitPlanPrice(p, plan, planFit{fixed: releasedUnits, allowWorse: true, allowBetter: rec == nil,
+			replan: func(u *big.Int) ([]PoolSlicePlan, []models.P2PAd, error) {
+				return d.plan(ctx, tx, u, p.Settings, exclude)
+			}})
+		closeAfter = append(closeAfter, more...)
+		if err != nil {
 			return err
 		}
-		written, err = d.writeSlices(tx, intentID, gen, p, plan)
+		if err := tx.Create(d.snapshot(intentID, gen, fp, plan)).Error; err != nil {
+			return err
+		}
+		written, err = d.writeSlices(tx, intentID, gen, fp, plan)
+		if err == nil {
+			fitted = fp
+		}
 		return err
 	})
 	d.closeCancelledAds(ctx, closeAfter)
 	if err != nil {
 		return nil, err
 	}
+	p = fitted
+	owed = new(big.Int).Sub(p.Quote.AssetUnits, released)
+	meta["live"], meta["owed"] = p.Quote.AssetUnits.String(), owed.String()
 	octx, cancel := context.WithTimeout(ctx, redeliverOpenBudget)
 	defer cancel()
 	opens, _, feeBroken := d.openAndProve(octx, intent, p, written, exclude)

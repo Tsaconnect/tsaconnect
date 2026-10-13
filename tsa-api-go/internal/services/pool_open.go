@@ -191,7 +191,9 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 			}
 			return nil
 		},
-		insert: func(ctx context.Context, i *models.ITIntent) error { return d.insertOrder(ctx, i, p, also, &written) },
+		insert: func(ctx context.Context, i *models.ITIntent) error {
+			return d.insertOrderAt(ctx, i, p, also, &written, &p)
+		},
 	})
 	if err != nil {
 		return nil, nil, err
@@ -229,39 +231,165 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 }
 
 // insertOrder is §12.2 step 2 under pool:<chain>:<TOKEN>: allocate (cached →
-// fresh → once more), then the intent, its snapshot and one slice per
-// allocation, each debiting its stock ad with the guarded CAS — all or nothing.
+// fresh → once more), price the order on that allocation (fitPlanPrice), then
+// the intent, its snapshot and one slice per allocation, each debiting its
+// stock ad with the guarded CAS — all or nothing. A converted order (also
+// set) keeps its quoted amount: its conversion record was priced on it.
 func (d *PoolDesk) insertOrder(ctx context.Context, intent *models.ITIntent, p *PoolPrice,
 	also func(tx *gorm.DB, intent *models.ITIntent) error, out *[]models.P2PTrade) error {
+	return d.insertOrderAt(ctx, intent, p, also, out, nil)
+}
+
+// insertOrderAt is insertOrder that hands back, in priced, the price the order
+// was opened at (p itself is never changed: a caller may share it).
+func (d *PoolDesk) insertOrderAt(ctx context.Context, intent *models.ITIntent, p *PoolPrice,
+	also func(tx *gorm.DB, intent *models.ITIntent) error, out *[]models.P2PTrade, priced **PoolPrice) error {
 	var closeAfter []models.P2PAd
 	defer func() { d.closeCancelledAds(ctx, closeAfter) }() // F23, after the lock's transaction ends (review C2)
-	return withAdvisoryLock(ctx, d.c.DB, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
-		units, ok := new(big.Int).SetString(intent.AssetAmount, 10)
-		if !ok {
-			return fmt.Errorf("liquidity pool: unusable amount %q", intent.AssetAmount)
-		}
-		plan, cancelled, err := d.plan(ctx, tx, units, p.Settings, nil)
+	var opened *PoolPrice
+	err := withAdvisoryLock(ctx, d.c.DB, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
+		plan, cancelled, err := d.plan(ctx, tx, p.Quote.AssetUnits, p.Settings, nil)
 		closeAfter = cancelled
 		if err != nil {
 			return err
 		}
+		converted := also != nil
+		fp, plan, more, err := fitPlanPrice(p, plan, planFit{allowWorse: !converted, allowBetter: !converted,
+			replan: func(u *big.Int) ([]PoolSlicePlan, []models.P2PAd, error) { return d.plan(ctx, tx, u, p.Settings, nil) }})
+		closeAfter = append(closeAfter, more...)
+		if err != nil {
+			return err
+		}
+		setIntentQuote(intent, fp.Quote)
 		intent.Asset, intent.DestChain = strings.ToUpper(intent.Asset), strings.ToUpper(intent.DestChain)
 		if err := tx.Create(intent).Error; err != nil {
 			return err
 		}
-		if err := tx.Create(d.snapshot(intent.ID, 1, p, plan)).Error; err != nil {
+		if err := tx.Create(d.snapshot(intent.ID, 1, fp, plan)).Error; err != nil {
 			return err
 		}
-		slices, err := d.writeSlices(tx, intent.ID, 1, p, plan)
+		slices, err := d.writeSlices(tx, intent.ID, 1, fp, plan)
 		if err != nil {
 			return err
 		}
 		*out = slices
+		opened = fp
 		if also != nil {
 			return also(tx, intent)
 		}
 		return nil
 	})
+	if err == nil && opened != nil && priced != nil {
+		*priced = opened
+	}
+	return err
+}
+
+// setIntentQuote writes q's price columns onto an intent not yet saved (the
+// fields openStableBuy fills from a quote).
+func setIntentQuote(intent *models.ITIntent, q *StableBuyQuote) {
+	intent.AssetAmount = q.AssetUnits.String()
+	intent.LockedRate, intent.RateKobo, intent.RateMinor = q.RatePerUnitMinor.String(), q.RatePerUnitMinor.String(), q.RatePerUnitMinor.String()
+	if q.DisplayRateMinor != nil {
+		intent.DisplayRate = q.DisplayRateMinor.String()
+	}
+	intent.Fees = marshalFees(q.Fees)
+}
+
+// planFit is how fitPlanPrice may move an order's amount.
+type planFit struct {
+	fixed       []*big.Int // slices already at the treasury (a re-delivery's releases)
+	allowWorse  bool       // her amount may shrink (past p.Guard it is refused)
+	allowBetter bool       // her amount may grow
+	replan      func(units *big.Int) ([]PoolSlicePlan, []models.P2PAd, error)
+}
+
+// fitPlanPrice makes the ACTUAL allocation decide the price, so the slices
+// locked are exactly what she is delivered and every per-slice cost is one
+// the order really has. plan is the allocation for what p leaves her (less
+// any fixed slices); p1 is the price on fixed + plan.
+//   - p1 = p: the price stands.
+//   - p1 < p (more or dearer slices than p was costed on): worse for her.
+//     Refused when not allowed (a converted open's amount is pinned by its
+//     record: can't-fill, failover) or past her price guard (price-moved:
+//     she re-confirms). Else the largest planned slice gives up the
+//     difference and she gets p1 — its cost lines are the unshrunk plan's,
+//     never below the shrunk plan's (shrinking only lowers a payout tier).
+//   - p1 > p (fewer or cheaper slices): better. When allowed, a fresh plan
+//     for p1 is tried; when it costs no more than plan she gets p1 on it
+//     (lines from plan: ≥ its cost). Otherwise she gets p on plan (p's
+//     lines: ≥ plan's cost).
+func fitPlanPrice(p *PoolPrice, plan []PoolSlicePlan, f planFit) (*PoolPrice, []PoolSlicePlan, []models.P2PAd, error) {
+	fixedSum := sumUnits(f.fixed)
+	withFixed := func(pl []PoolSlicePlan) []*big.Int {
+		return append(append([]*big.Int(nil), f.fixed...), planUnits(pl)...)
+	}
+	n0 := p.Quote.AssetUnits
+	p1, err := p.repriceOn(withFixed(plan))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	switch c := p1.Quote.AssetUnits.Cmp(n0); {
+	case c == 0:
+		return p1, plan, nil, nil
+	case c < 0:
+		if !f.allowWorse {
+			return nil, nil, nil, fmt.Errorf("%w: its slices cost more than priced", ErrPoolCannotFill)
+		}
+		if err := CheckPriceGuard(models.ITProviderPool, "buy", FormatMinor(p1.Quote.RatePerUnitMinor.String()), p.Guard.Limit, p.Guard.Mode); err != nil {
+			return nil, nil, nil, err
+		}
+		shrunk, ok := shrinkPlan(plan, new(big.Int).Sub(n0, p1.Quote.AssetUnits), p.Settings.MinSliceUnits)
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("%w: its slices cannot give up their extra cost", ErrPoolCannotFill)
+		}
+		p1.SliceUnits = withFixed(shrunk)
+		return p1, shrunk, nil, nil
+	default:
+		kept := *p
+		kept.SliceUnits = withFixed(plan)
+		if !f.allowBetter || f.replan == nil {
+			return &kept, plan, nil, nil
+		}
+		plan2, cancelled, err := f.replan(new(big.Int).Sub(p1.Quote.AssetUnits, fixedSum))
+		if err != nil {
+			return &kept, plan, cancelled, nil
+		}
+		p2, err := p.repriceOn(withFixed(plan2))
+		if err != nil || p2.Quote.AssetUnits.Cmp(p1.Quote.AssetUnits) < 0 {
+			return &kept, plan, cancelled, nil
+		}
+		p1.SliceUnits = withFixed(plan2)
+		return p1, plan2, cancelled, nil
+	}
+}
+
+func planUnits(plan []PoolSlicePlan) []*big.Int {
+	out := make([]*big.Int, len(plan))
+	for i := range plan {
+		out[i] = plan[i].Units
+	}
+	return out
+}
+
+// shrinkPlan takes diff off the largest slice, never below minSlice.
+func shrinkPlan(plan []PoolSlicePlan, diff, minSlice *big.Int) ([]PoolSlicePlan, bool) {
+	if len(plan) == 0 {
+		return nil, false
+	}
+	at := 0
+	for i := range plan {
+		if plan[i].Units.Cmp(plan[at].Units) > 0 {
+			at = i
+		}
+	}
+	left := new(big.Int).Sub(plan[at].Units, diff)
+	if left.Cmp(minSlice) < 0 {
+		return nil, false
+	}
+	out := append([]PoolSlicePlan(nil), plan...)
+	out[at].Units = left
+	return out, true
 }
 
 func (d *PoolDesk) snapshot(intentID uuid.UUID, gen int, p *PoolPrice, plan []PoolSlicePlan) *models.PoolOrder {

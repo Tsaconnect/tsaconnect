@@ -28,6 +28,7 @@ type stubPoolIT struct {
 	openFn        func(ctx context.Context) (*models.ITIntent, error)
 	opened        int
 	convErr       error // OpenPoolConvertedBuy's refusal; nil keeps it out of the test
+	guard         services.PoolPriceGuard
 }
 
 func (s *stubPoolIT) PoolLegOpen(context.Context) bool       { return s.open }
@@ -37,14 +38,15 @@ func (s *stubPoolIT) PoolSettingsNow() services.PoolSettings { return s.settings
 func (s *stubPoolIT) PoolCanFill(context.Context, *big.Int, services.PoolSettings) bool {
 	return s.canFill
 }
-func (s *stubPoolIT) QuotePoolBuy(string, string, string, *big.Rat, services.PoolSettings) (*services.PoolPrice, error) {
+func (s *stubPoolIT) QuotePoolBuy(context.Context, string, string, string, *big.Rat, services.PoolSettings) (*services.PoolPrice, error) {
 	return s.quote, s.quoteErr
 }
 func (s *stubPoolIT) CheckPoolDailyCap(context.Context, uuid.UUID, *big.Int, services.PoolSettings) error {
 	return nil
 }
-func (s *stubPoolIT) OpenPoolBuy(ctx context.Context, _ uuid.UUID, _ *services.PoolPrice, _ string) (*models.ITIntent, *services.StableBuyInstructions, error) {
+func (s *stubPoolIT) OpenPoolBuy(ctx context.Context, _ uuid.UUID, p *services.PoolPrice, _ string) (*models.ITIntent, *services.StableBuyInstructions, error) {
 	s.opened++
+	s.guard = p.Guard
 	i, err := s.openFn(ctx)
 	return i, &services.StableBuyInstructions{AccountNumber: "1234567890"}, err
 }
@@ -114,7 +116,7 @@ func TestPoolProvider_LegClosedWhenStoppedClosedOrShort(t *testing.T) {
 		}
 	}
 	short := livePool(t)
-	short.canFill = false
+	short.quoteErr = services.ErrPoolCannotFill // the quote's allocation found no plan
 	if _, err := newPoolProvider(short, fixedMid{big.NewRat(1348, 1)}, time.Second).Quote(context.Background(), Request{Side: Buy, FiatCode: "NGN", FiatAmount: "100000"}); !errors.Is(err, ErrAboveMaximum) {
 		t.Fatalf("short stock = %v, want above-maximum without naming the stock", err)
 	}
@@ -185,12 +187,53 @@ func TestPoolProvider_ConvertedOpenLegGoneFailsOver(t *testing.T) {
 	for name, it := range map[string]*stubPoolIT{
 		"stopped":     func() *stubPoolIT { s := livePool(t); s.settings.OrdersStopped = true; return s }(),
 		"gates":       func() *stubPoolIT { s := livePool(t); s.open = false; return s }(),
-		"short stock": func() *stubPoolIT { s := livePool(t); s.canFill = false; return s }(),
+		"short stock": func() *stubPoolIT { s := livePool(t); s.quoteErr = services.ErrPoolCannotFill; return s }(),
 	} {
 		_, err := convertingPool(it).OpenConverted(context.Background(), convertedTreasuryReq("100000"),
 			OrderInput{UserID: uuid.New(), WalletAddress: "0xabc", LimitRate: "2000"})
 		if !errors.Is(err, ErrVenueUnavailable) {
 			t.Fatalf("%s: open = %v, want venue-unavailable", name, err)
 		}
+	}
+}
+
+// Owner 2026-10-13: the pool venue shows its costs as one "Fees" line (the
+// sum of its stored lines, never a provider's name).
+func TestPoolProvider_QuoteShowsOneFeesLine(t *testing.T) {
+	it := livePool(t)
+	it.quote.Quote.Fees = []services.StableBuyFee{
+		{Kind: services.FeeKindFunding, Label: "Funding fee (1.4%)", Provider: services.FeeProviderShown, Units: "1028270", NgnMinor: "139999"},
+		{Kind: services.FeeKindNetwork, Label: "Network fee", Provider: services.FeeProviderShown, Units: "40000", NgnMinor: "5446"},
+		{Kind: services.FeeKindPayout, Label: "Payout fee", Provider: services.FeeProviderShown, Units: "39479", NgnMinor: "5375"},
+	}
+	p := newPoolProvider(it, fixedMid{big.NewRat(1348, 1)}, time.Second)
+	q, err := p.Quote(context.Background(), Request{Side: Buy, FiatCode: "NGN", FiatAmount: "100000"})
+	if err != nil || len(q.Venues) != 1 {
+		t.Fatalf("quote = %v %v", q, err)
+	}
+	f := q.Venues[0].Fees
+	if len(f) != 1 || f[0].Label != "Fees" || f[0].Kind != services.FeeKindFees || f[0].Provider != services.FeeProviderShown ||
+		f[0].Token != "1.107749" || f[0].Ngn != "1508.21" {
+		// ₦: the summed units at the display rate, one floor (1.107749 × ₦1,361.51).
+		t.Fatalf("fees = %+v, want one Fees line 1.107749 / ₦1,508.21", f)
+	}
+}
+
+// Review money-1: the open carries her guard to the service, and the
+// service's price-moved refusal (its allocation priced past the guard)
+// reaches the router as price-moved — never an outcome-unknown stop.
+func TestPoolProvider_OpenPassesTheGuardAndPriceMoved(t *testing.T) {
+	it := livePool(t)
+	it.openFn = func(context.Context) (*models.ITIntent, error) {
+		return nil, &services.PriceMovedPastQuoteError{BoundRate: "1390.00"}
+	}
+	p := newPoolProvider(it, fixedMid{big.NewRat(1348, 1)}, time.Second)
+	_, err := p.Open(context.Background(), VenueKey{ChainKey: "bsc", Token: "USDT"}, Request{Side: Buy, FiatCode: "NGN", FiatAmount: "100000"},
+		OrderInput{UserID: uuid.New(), WalletAddress: "0xabc", LimitRate: "1390.00", Guard: services.PriceGuardEnforce})
+	if !errors.Is(err, services.ErrPriceMovedPastQuote) || errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("open = %v, want price moved", err)
+	}
+	if it.guard.Limit != "1390.00" || it.guard.Mode != services.PriceGuardEnforce {
+		t.Fatalf("guard = %+v, want her limit and mode", it.guard)
 	}
 }

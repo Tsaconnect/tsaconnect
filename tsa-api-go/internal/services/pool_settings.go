@@ -30,7 +30,8 @@ type poolSettingDefault struct {
 	minBps, maxBps   int
 }
 
-// poolSettingDefaults are the rows ensured at boot (Plan B's two, then C1's seven).
+// poolSettingDefaults are the rows ensured at boot (Plan B's two, C1's seven,
+// then the two per-order gas costs the buy price passes on).
 var poolSettingDefaults = []poolSettingDefault{
 	{feature: models.FeaturePoolLPMin, unit: poolUnitUSD, flatUSD: 5, minFlat: 1, maxFlat: 1000},
 	{feature: models.FeaturePoolLPMax, unit: poolUnitUSD, flatUSD: 5000, minFlat: 0, maxFlat: 100000},
@@ -38,10 +39,24 @@ var poolSettingDefaults = []poolSettingDefault{
 	{feature: models.FeaturePoolTake, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 300},
 	{feature: models.FeaturePoolBand, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 500},
 	{feature: models.FeaturePoolSliceCap, unit: poolUnitCount, bps: 3, minBps: 1, maxBps: 5},
-	{feature: models.FeaturePoolMinSlice, unit: poolUnitUSD, flatUSD: 2, minFlat: 1, maxFlat: 100},
+	{feature: models.FeaturePoolMinSlice, unit: poolUnitUSD, flatUSD: 2, minFlat: poolMinSliceFloorUSD, maxFlat: 100},
 	{feature: models.FeaturePoolOrderMax, unit: poolUnitUSD, flatUSD: 2000, minFlat: 0, maxFlat: 2000},
 	{feature: models.FeaturePoolUserDailyMax, unit: poolUnitUSD, flatUSD: 2000, minFlat: 1, maxFlat: 100000},
+	{feature: models.FeaturePoolGasPerSlice, unit: poolUnitUSD, flatUSD: 0.03, minFlat: 0, maxFlat: 5},
+	{feature: models.FeaturePoolGasDelivery, unit: poolUnitUSD, flatUSD: 0.01, minFlat: 0, maxFlat: 5},
 }
+
+// atMostSixDecimals: v × 10^6 is a whole number of canonical units.
+func atMostSixDecimals(v float64) bool {
+	scaled := v * 1e6
+	return math.Abs(scaled-math.Round(scaled)) < 1e-6
+}
+
+// poolMinSliceFloorUSD is the lowest pool_min_slice an admin may set (owner,
+// 2026-10-13: orders down to about ₦500). Every cost is a fee line, so a small
+// slice no longer loses money; an LP payout under the ₦100 transfer floor is
+// refused at quote time (poolQuoteAt).
+const poolMinSliceFloorUSD = 0.25
 
 func poolSettingDefaultFor(feature string) (poolSettingDefault, bool) {
 	for _, d := range poolSettingDefaults {
@@ -140,6 +155,9 @@ type PoolSettings struct {
 	// OrdersStopped: pool_order_max = 0, the incident stop (S46). Quotes and
 	// opens close; claims, expiry and (C2) settlement keep running.
 	OrdersStopped bool
+	// Per-order gas the buy price passes on as its "Network fee" line:
+	// slices × GasPerSliceUnits + GasDeliveryUnits. nil reads as zero.
+	GasPerSliceUnits, GasDeliveryUnits *big.Int
 }
 
 func usdToCanonical(usd float64) *big.Int {
@@ -166,6 +184,8 @@ func CurrentPoolSettings() PoolSettings {
 		OrderMaxUnits:     usdToCanonical(orderMax),
 		UserDailyMaxUnits: usdToCanonical(poolSettingFlat(models.FeaturePoolUserDailyMax)),
 		OrdersStopped:     orderMax <= 0,
+		GasPerSliceUnits:  usdToCanonical(poolSettingFlat(models.FeaturePoolGasPerSlice)),
+		GasDeliveryUnits:  usdToCanonical(poolSettingFlat(models.FeaturePoolGasDelivery)),
 	}
 }
 
@@ -222,6 +242,11 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 	if bps != 0 {
 		return fmt.Errorf("%s is a flat USD amount; bps must be 0", feature)
 	}
+	if !atMostSixDecimals(flatUSD) {
+		// Stored as a float but used in 6-dp units (flatUSDToUnits): a finer
+		// value would silently round to another amount.
+		return fmt.Errorf("%s takes at most 6 decimal places", feature)
+	}
 	switch feature {
 	case models.FeaturePoolLPMin:
 		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
@@ -239,7 +264,7 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 		}
 	case models.FeaturePoolMinSlice:
 		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
-			return fmt.Errorf("pool_min_slice must be between 1 and 100 USD")
+			return fmt.Errorf("pool_min_slice must be between %v and %v USD", d.minFlat, d.maxFlat)
 		}
 		if max := current(models.FeaturePoolOrderMax); max > 0 && flatUSD > max {
 			return fmt.Errorf("pool_min_slice cannot exceed the order maximum (%v USD)", max)
@@ -256,6 +281,10 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 		}
 		if daily := current(models.FeaturePoolUserDailyMax); flatUSD > daily {
 			return fmt.Errorf("pool_order_max cannot exceed the daily maximum (%v USD)", daily)
+		}
+	case models.FeaturePoolGasPerSlice, models.FeaturePoolGasDelivery:
+		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
+			return fmt.Errorf("%s must be between %v and %v USD", feature, d.minFlat, d.maxFlat)
 		}
 	case models.FeaturePoolUserDailyMax:
 		if flatUSD < d.minFlat || flatUSD > d.maxFlat {

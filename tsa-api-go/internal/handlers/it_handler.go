@@ -930,6 +930,7 @@ func (h *ITHandler) ListIntents(c *gin.Context) {
 	rows := make([]intentListRow, len(intents))
 	for i := range intents {
 		intents[i].FailureReason = services.UserFacingITFailure(intents[i].FailureReason)
+		services.ShowUserFees(&intents[i])
 		rows[i].ITIntent = intents[i]
 		if rec := conversions[intents[i].ID]; rec != nil {
 			rows[i].RequestedToken, rows[i].RequestedChain = rec.RequestedToken, rec.RequestedChain
@@ -1039,6 +1040,7 @@ func (h *ITHandler) checkPaymentsNow(ctx context.Context, intentID uuid.UUID) bo
 // while a buy is still waiting for money.
 func (h *ITHandler) intentData(ctx context.Context, user *models.User, intent *models.ITIntent) gin.H {
 	intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
+	services.ShowUserFees(intent)
 	data := gin.H{"intent": intent}
 	if services.IsBuyAwaitingTransfer(intent) {
 		// The order detail is where a user comes back to pay, so it carries the
@@ -1598,6 +1600,7 @@ func (h *ITHandler) cancelBuy(c *gin.Context, cancel func(ctx context.Context, u
 	data := gin.H{"cancelled": true}
 	if intent != nil {
 		intent.FailureReason = services.UserFacingITFailure(intent.FailureReason)
+		services.ShowUserFees(intent)
 		data["intent"] = intent
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Cancelled", data)

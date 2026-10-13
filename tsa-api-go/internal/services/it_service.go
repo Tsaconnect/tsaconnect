@@ -209,8 +209,12 @@ func NewITService(db *gorm.DB, swap *MCGPSwapService, fx FxProvider) *ITService 
 // SetCompanyPMID pins which PaymentMerchant IT buyers pay into (from IT_PM_ID).
 func (s *ITService) SetCompanyPMID(id string) { s.companyPMID = strings.TrimSpace(id) }
 
-// defaultMinSellNgnKobo is Flutterwave's ₦100 payout floor (TRANSFER_AMOUNT_LIMIT).
-const defaultMinSellNgnKobo = 10000 // ₦100
+// fwNGNTransferMinKobo is Flutterwave's ₦100 NGN transfer floor
+// (TRANSFER_AMOUNT_LIMIT): no payout below it is ever sent.
+const fwNGNTransferMinKobo = 10000 // ₦100
+
+// defaultMinSellNgnKobo is the sell payout floor: the transfer minimum.
+const defaultMinSellNgnKobo = fwNGNTransferMinKobo
 
 // SetMinSellNgnKobo overrides the minimum sell payout (kobo). A non-positive
 // value keeps the default.

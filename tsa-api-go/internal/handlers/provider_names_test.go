@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -248,7 +249,7 @@ func TestProviderNames_PoolResponses(t *testing.T) {
 	if err := it.SetRampBuyTerms(services.RampBuyTerms{FundingFeeBps: 140}); err != nil {
 		t.Fatal(err)
 	}
-	p, err := it.QuotePoolBuy("USDT", "100000", "NGN", big.NewRat(134800, 100), services.CurrentPoolSettings())
+	p, err := it.QuotePoolBuy(context.Background(), "USDT", "100000", "NGN", big.NewRat(134800, 100), services.CurrentPoolSettings())
 	if err != nil {
 		t.Fatal(err)
 	}

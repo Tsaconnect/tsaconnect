@@ -371,7 +371,7 @@ func ptrInt64(v int64) *int64 { return &v }
 func (r *forkRig) openOrder(t *testing.T, naira string) (*models.ITIntent, error) {
 	t.Helper()
 	user := seedRehearsalBuyer(t, r.db)
-	p, err := r.it.QuotePoolBuy("USDT", naira, "NGN", poolMid, CurrentPoolSettings())
+	p, err := r.it.QuotePoolBuy(context.Background(), "USDT", naira, "NGN", poolMid, CurrentPoolSettings())
 	if err != nil {
 		t.Fatalf("quote: %v", err)
 	}

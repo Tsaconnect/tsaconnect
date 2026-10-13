@@ -81,7 +81,7 @@ func (r *c2Rehearsal) openRehearsalOrder(t *testing.T, naira string) *models.ITI
 		r.capFree(t, context.Background(), lp, usdt18(6))
 	}
 	user := seedRehearsalBuyer(t, r.db)
-	p, err := r.it.QuotePoolBuy("USDT", naira, "NGN", poolMid, CurrentPoolSettings())
+	p, err := r.it.QuotePoolBuy(context.Background(), "USDT", naira, "NGN", poolMid, CurrentPoolSettings())
 	if err != nil {
 		t.Fatalf("quote: %v", err)
 	}

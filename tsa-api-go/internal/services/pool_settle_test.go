@@ -43,7 +43,7 @@ func TestPoolSettle_ClaimDeliveryCASIsTheOnlyWayIn(t *testing.T) {
 // never a direct SignAndBroadcast.
 func TestPoolSettle_ReleasesEverySliceThroughSend(t *testing.T) {
 	r := newPoolSettleRig(t, 60, 45)
-	intent := r.openPaid(t, "100000") // the §10.2 split: 60 + 12.419593
+	intent := r.openPaid(t, "100000") // the §10.2 split less costs: 60 + 12.290371
 	if err := r.advance(t, intent.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func usdt18Units(t *testing.T, canonical string) string {
 // delivering short, and the LP's F22 exit is offered whatever the order holds.
 func TestPoolSlice_DroppedThenSelfReleasedIsNotR(t *testing.T) {
 	r := newPoolSettleRig(t, 60, 45)
-	intent, _, err := r.open(t, "100000") // A 60 + B 12.419593
+	intent, _, err := r.open(t, "100000") // A 60 + B 12.290371
 	if err != nil {
 		t.Fatal(err)
 	}
