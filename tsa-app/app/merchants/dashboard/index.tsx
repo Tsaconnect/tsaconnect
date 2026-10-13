@@ -20,6 +20,7 @@ import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
 import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
 import { merchantDashboardCta } from '@/utils/pmCta';
 import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
+import { LpCtaCard } from '@/components/liquidity/LpCtaCard';
 import { TSA_PAY_APPLY } from '@/constants/routes';
 import {
   AccentCard,
@@ -51,6 +52,8 @@ export default function MerchantDashboard() {
     status: pmStatus,
     kind: pmKind,
     activationNeedsId,
+    lpStatus,
+    liquidityAvailable,
     loading: pmLoading,
     reload: reloadPmStatus,
   } = useIsPaymentMerchant();
@@ -312,6 +315,8 @@ export default function MerchantDashboard() {
               </AccentCard>
             </PressableScale>
           )}
+
+          <LpCtaCard isPm={isPm} kind={pmKind} lpStatus={lpStatus} liquidityAvailable={liquidityAvailable} loading={pmLoading} />
 
           {/* Stat tiles — three product KPIs followed by service KPIs. Each tile
               is a Card with a colored top rail keyed to its semantic meaning. */}

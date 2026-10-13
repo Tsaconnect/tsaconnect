@@ -64,14 +64,15 @@ import { createAndSignAd } from '../../services/adPublish';
 import { goBack } from '../../utils/back';
 import { runLpDeposit } from '../../services/lpDeposit';
 import { liquidityApi, type LiquidityMe } from '../../services/liquidityApi';
-import { formatLiquidityAmount, lpDepositPlan } from '../../utils/liquidityView';
+import { formatLiquidityAmount, lpDepositPlan, lpMaxAddable, lpWalletShortfall, type LpWalletView } from '../../utils/liquidityView';
+import TokenAvatar from '../../components/wallet/TokenAvatar';
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
-import { getChainByChainId, getNetworkDisplayName } from '../../constants/chains';
+import { getChainByChainId, getNetworkDisplayName, networkOfChainId } from '../../constants/chains';
 import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
@@ -181,6 +182,31 @@ const CreateAdScreen: React.FC = () => {
   useEffect(() => {
     if (isLp) loadLpMe();
   }, [isLp, loadLpMe]);
+
+  // The LP's own wallet on the pool chain (the token it deposits and the gas
+  // coin), re-read whenever the pool view reloads. Unknown never blocks.
+  const [lpWallet, setLpWallet] = useState<LpWalletView | null>(null);
+  useEffect(() => {
+    if (!lpMe?.chain || !lpMe.wallet || !lpMe.token) return;
+    const chain = getChainByChainId(lpMe.chain.id);
+    const nativeSymbol = chain?.nativeCurrency.symbol ?? 'BNB';
+    const sym = lpMe.token.symbol.toUpperCase();
+    let live = true;
+    (async () => {
+      try {
+        const res = await getWalletBalances(lpMe.chain!.id, lpMe.wallet!, networkOfChainId(lpMe.chain!.id));
+        if (!live) return;
+        const entries = res.success && res.data ? normalizeWalletBalances(res.data, chain?.key) : [];
+        const find = (symbol: string) => entries.find((e) => e.symbol.toUpperCase() === symbol.toUpperCase())?.balance ?? null;
+        setLpWallet({ token: find(sym), native: find(nativeSymbol), nativeSymbol });
+      } catch {
+        if (live) setLpWallet({ token: null, native: null, nativeSymbol });
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [lpMe]);
   const [adCurrencyCode, setAdCurrencyCode] = useState<string | null>(null);
   const currencyCode = (adCurrencyCode ?? marketCurrency.code).toUpperCase();
   const currencyConfig =
@@ -869,6 +895,7 @@ const CreateAdScreen: React.FC = () => {
           {isLp ? (
             <LpAddForm
               me={lpMe}
+              wallet={lpWallet}
               loadFailed={lpLoadFailed}
               onReload={loadLpMe}
               amount={amountInput}
@@ -1293,6 +1320,7 @@ const CreateAdScreen: React.FC = () => {
  */
 function LpAddForm({
   me,
+  wallet,
   loadFailed,
   onReload,
   amount,
@@ -1302,6 +1330,7 @@ function LpAddForm({
   onSubmit,
 }: {
   me: LiquidityMe | null;
+  wallet: LpWalletView | null;
   loadFailed: boolean;
   onReload: () => void;
   amount: string;
@@ -1330,15 +1359,33 @@ function LpAddForm({
   const nothingHeld = me.balanceReadable && isZero(me.available) && isZero(me.locked);
   // An empty amount re-signs the stock ad, which only makes sense when one is
   // needed and stock is already held — exactly when the plan accepts ''.
-  const renewOnly = amount.trim() === '' && lpDepositPlan(me, '').ok;
+  // Renew is offered once there has been stock (held, or a stock ad); a first-time
+  // LP with an empty amount just has nothing to submit yet.
+  const neverStocked = nothingHeld && !me.voucher;
+  const amountEmpty = amount.trim() === '';
+  const renewOnly = amountEmpty && !neverStocked && lpDepositPlan(me, '').ok;
+  const chainKey = me.chain ? getChainByChainId(me.chain.id)?.key : undefined;
+  const maxAddable = wallet ? lpMaxAddable(me, wallet) : null;
+  const shortfall = wallet ? lpWalletShortfall(me, wallet, amount) : null;
+  const walletLine = (v: string | null | undefined, unit: string) =>
+    wallet == null ? 'Loading…' : v == null ? '—' : `${formatLiquidityAmount(v)} ${unit}`;
   return (
     <View style={{ marginTop: spacing.lg }}>
+      {/* The pool takes one token per network; paying with another token is a later step. */}
+      <Card padding="md" style={{ marginBottom: spacing.md }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+          <TokenAvatar symbol={sym} chainKey={chainKey} size={40} />
+          <View style={{ flex: 1 }}>
+            <Text variant="bodyMed" weight="700">{sym}</Text>
+            <Text variant="caption" color="textSecondary">{me.chain?.name ?? 'Pool network'}</Text>
+          </View>
+        </View>
+        <SummaryRow label="In your wallet" value={walletLine(wallet?.token, sym)} />
+        <SummaryRow label="For network fees" value={walletLine(wallet?.native, wallet?.nativeSymbol ?? '')} />
+      </Card>
       <Card padding="md">
         <Text variant="bodyMed" weight="700">
-          Add {sym} to the pool
-        </Text>
-        <Text variant="caption" color="textSecondary">
-          {me.chain?.name ?? 'Pool network'} · {sym}
+          Your pool position
         </Text>
         {me.balanceReadable ? (
           <>
@@ -1372,13 +1419,22 @@ function LpAddForm({
           symbolPosition="suffix"
           value={amount}
           onChangeText={onChangeAmount}
+          onMax={maxAddable && maxAddable !== '0' ? () => onChangeAmount(maxAddable) : undefined}
         />
       </View>
+      {!!shortfall && (
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.sm }}>
+          <Icon name="info" size={14} color={colors.warning} />
+          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+            {shortfall}
+          </Text>
+        </View>
+      )}
       <Button
         title={renewOnly ? 'Renew' : 'Add liquidity'}
         leftIcon="check"
         onPress={onSubmit}
-        disabled={!me.poolOpen || submitting}
+        disabled={!me.poolOpen || submitting || !!shortfall || (amountEmpty && !renewOnly)}
         loading={submitting}
         style={{ marginTop: spacing.xl }}
       />

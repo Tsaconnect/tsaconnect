@@ -4,9 +4,17 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { cachesMerchantRole, initBusinessType, isPickerLocked, lpSettlementPayload, resolveMerchantGate } from '@/app/merchants/merchant-request';
+import { LP_HOW_IT_WORKS, cachesMerchantRole, initBusinessType, isPickerLocked, lpSettlementPayload, resolveMerchantGate } from '@/app/merchants/merchant-request';
 
 describe('liquidity_provider applications', () => {
+  // An LP adds crypto and is paid naira; the form says so before any field.
+  it('explains that an LP adds USDT and is paid naira, never sends naira', () => {
+    const text = LP_HOW_IT_WORKS.join(' ');
+    expect(text).toMatch(/add USDT/);
+    expect(text).toMatch(/never send us naira/);
+    expect(text).toMatch(/pay that naira into the bank account/);
+  });
+
   it('opens a locked LP form from ?type=liquidity_provider', () => {
     expect(initBusinessType('liquidity_provider')).toBe('liquidity_provider');
     expect(isPickerLocked('liquidity_provider')).toBe(true);

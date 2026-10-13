@@ -21,6 +21,7 @@ const mockTradesApi = {
 };
 jest.mock('../p2p', () => ({
   p2pChainKey: (id: number) => `chain-${id}`,
+  p2pNetwork: (id: number) => (id === 97 ? 'testnet' : 'mainnet'),
   unsignedTxToTxLike: (tx: any) => ({ __txLike: true, ...tx }),
   // A getter: the factory runs before the const above is initialised.
   get tradesApi() { return mockTradesApi; },
@@ -72,7 +73,8 @@ it('gas → prepare → sign as the wallet → broadcast on the trade chain → 
 
   expect(order).toEqual(['gas', 'prepare', 'mined', 'confirm']);
   expect(mockSign).toHaveBeenCalledWith({ __txLike: true, ...UTX }, W);
-  expect(mockBroadcast).toHaveBeenCalledWith('chain-146', '0xsigned');
+  // Broadcast on the trade chain's OWN network, not the wallet toggle's.
+  expect(mockBroadcast).toHaveBeenCalledWith('chain-146', '0xsigned', 'mainnet');
   expect(mockWaitMined).toHaveBeenCalledWith(146, '0xhash', expect.objectContaining({ timeoutMs: 25_000 }));
   expect(confirm).toHaveBeenCalledWith('0xhash', prepared);
   expect(r).toEqual({ status: 'confirmed', txHash: '0xhash', prepared, data: { id: 't1', status: 'paid' } });
@@ -401,4 +403,13 @@ describe('retryStashedConfirm (the trade screen\'s retry for a lost confirm)', (
     expect((await retryStashedConfirm({ ...base, mode: 'deposit' })).status).toBe('pending');
     expect(mockRemovePending).not.toHaveBeenCalled();
   });
+});
+
+// A testnet pool while the wallet toggle says mainnet: the approve/deposit
+// must go to a testnet node, or mainnet refuses it ("Could not send").
+it('broadcasts a testnet chain tx on the testnet network', async () => {
+  const prepare = jest.fn(async () => ({ success: true, data: { ...prepared, unsignedTx: { ...UTX, chainId: '97' } } }));
+  const confirm = jest.fn(async () => ({ success: true, data: {} }));
+  await runP2PTx({ chainId: 97, walletAddress: W, action: 'mark_paid', tradeId: 't1', prepare, confirm });
+  expect(mockBroadcast).toHaveBeenCalledWith('chain-97', '0xsigned', 'testnet');
 });

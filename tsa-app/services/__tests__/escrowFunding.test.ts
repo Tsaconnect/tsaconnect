@@ -36,6 +36,7 @@ jest.mock('../p2p', () => ({
   },
   // Deterministic, side-effect-free stand-ins for the two pure adapters.
   p2pChainKey: (chainId: number) => `chain-${chainId}`,
+  p2pNetwork: (chainId: number) => (chainId === 97 ? 'testnet' : 'mainnet'),
   unsignedTxToTxLike: (tx: any) => ({ __txLike: true, ...tx }),
 }));
 

@@ -547,6 +547,13 @@ export function getChainByChainId(chainId: number): (ChainConfig & { key: ChainK
   return undefined;
 }
 
+/** Which network a chain id belongs to, whatever the app's toggle says (P2P and the pool run on their own). */
+export function networkOfChainId(chainId: number): NetworkType | undefined {
+  if (Object.values(MAINNET_CHAINS).some((c) => c.chainId === chainId)) return 'mainnet';
+  if (Object.values(TESTNET_CHAINS).some((c) => c.chainId === chainId)) return 'testnet';
+  return undefined;
+}
+
 // User-facing network names for chooser chips/labels. Distinct from `shortName`
 // (which carries token-standard labels like BEP20) — here we want the plain
 // network a merchant recognises ("Sonic", "BNB").

@@ -16,6 +16,7 @@
 // tx that reverts and reads as "failed".
 import {
   p2pChainKey,
+  p2pNetwork,
   tradesApi,
   unsignedTxToTxLike,
   type ApiResponse,
@@ -97,7 +98,7 @@ export async function signAndBroadcast(
     stage.onStage?.(stage.signing ?? 'Signing…');
     const signed = await signTransaction(unsignedTxToTxLike(unsignedTx), walletAddress);
     stage.onStage?.(stage.broadcasting ?? 'Broadcasting…');
-    const sent = await broadcastTransaction(p2pChainKey(chainId), signed);
+    const sent = await broadcastTransaction(p2pChainKey(chainId), signed, p2pNetwork(chainId));
     return { hash: sent.hash, provider: sent.provider ?? undefined };
   } catch (err) {
     // `raw` keeps the original for decoders (rawErrorText); the message is copy.

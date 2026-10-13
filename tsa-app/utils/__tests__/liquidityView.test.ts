@@ -4,7 +4,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 /* eslint-disable import/first */
-import { formatLiquidityAmount, liquidityStage, lpDepositPlan } from '@/utils/liquidityView';
+import { formatLiquidityAmount, liquidityStage, lpDepositPlan, lpMaxAddable, lpWalletShortfall } from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
 
 const me = (over: Partial<LiquidityMe> = {}): LiquidityMe => ({
@@ -59,5 +59,23 @@ describe('lpDepositPlan', () => {
     expect(lpDepositPlan(me(), '10')).toMatchObject({ ok: true, needsStockAd: true });
     expect(lpDepositPlan(me({ voucher: { adId: 'a', status: 'paused', remaining: '1', renewDue: false } }), '10')).toMatchObject({ ok: true, needsStockAd: true });
     expect(lpDepositPlan(me({ status: 'paused', paused: true }), '10').ok).toBe(false);
+  });
+});
+
+describe('LP wallet view', () => {
+  const wallet = (token: string | null, native: string | null = '0.01') => ({ token, native, nativeSymbol: 'tBNB' });
+
+  it('Max is the wallet balance, capped by the headroom', () => {
+    expect(lpMaxAddable(me(), wallet('120.5'))).toBe('120.5');
+    expect(lpMaxAddable(me({ headroom: '100' }), wallet('120.5'))).toBe('100');
+    expect(lpMaxAddable(me(), wallet(null))).toBeNull();
+  });
+
+  it('flags more than the wallet holds, then missing gas, and never blocks on unknowns', () => {
+    expect(lpWalletShortfall(me(), wallet('10'), '20')).toMatch(/Your wallet has 10 USDT/);
+    expect(lpWalletShortfall(me(), wallet('100', '0'), '20')).toMatch(/a little tBNB/);
+    expect(lpWalletShortfall(me(), wallet('100'), '20')).toBeNull();
+    expect(lpWalletShortfall(me(), wallet(null, null), '20')).toBeNull();
+    expect(lpWalletShortfall(me(), wallet('10'), '')).toBeNull();
   });
 });

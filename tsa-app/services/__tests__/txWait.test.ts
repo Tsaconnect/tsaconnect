@@ -1,6 +1,6 @@
 const mockWait = jest.fn();
 jest.mock('../wallet', () => ({ getProvider: () => ({ waitForTransaction: (...a: any[]) => mockWait(...a) }) }));
-jest.mock('../p2p', () => ({ p2pChainKey: (id: number) => `chain-${id}` }));
+jest.mock('../p2p', () => ({ p2pChainKey: (id: number) => `chain-${id}`, p2pNetwork: (id: number) => (id === 97 ? 'testnet' : 'mainnet') }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
 import { TxRevertedError, waitMined } from '../txWait';

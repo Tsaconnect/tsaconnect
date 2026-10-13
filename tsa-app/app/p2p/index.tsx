@@ -22,7 +22,6 @@ import { marketLoadError, type MarketError } from '@/utils/p2pMarketError';
 import { getChainByChainId } from '../../constants/chains';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
-import { lpCta } from '@/utils/lpCta';
 import { liquidityApi, type PoolCard } from '@/services/liquidityApi';
 import { poolCardView } from '@/utils/poolCard';
 import { RAILS, railLabel } from '../../constants/rails';
@@ -78,7 +77,7 @@ const P2PMarketScreen: React.FC = () => {
   const { side: sideParam, pm: pmParam } = useLocalSearchParams<{ side?: string; pm?: string }>();
   const isPmView = pmParam === '1';
   const [adSide, setAdSide] = useState<'sell' | 'buy'>(sideParam === 'sell' ? 'buy' : 'sell');
-  const { isPm, kind, lpStatus, liquidityAvailable, loading: pmLoading } = useIsPaymentMerchant();
+  const { isPm, loading: pmLoading } = useIsPaymentMerchant();
   const { currency, setCurrency: setMarketCurrency } = useP2pCurrency();
   const [providerFilter, setProviderFilter] = useState<string | null>(null);
   // Minimum trade amount (fiat, in the selected currency). Shows ads whose
@@ -295,23 +294,6 @@ const P2PMarketScreen: React.FC = () => {
           </PressableScale>
         )}
 
-        {(() => {
-          const cta = lpCta({ isPm, kind, lpStatus, liquidityAvailable, loading: pmLoading });
-          return cta ? (
-            <PressableScale onPress={() => router.push(cta.route as never)} style={{ marginBottom: spacing.lg }}>
-              <AccentCard padding="md">
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                  <Icon name="wallet" size={24} color={colors.accent} />
-                  <View style={{ flex: 1 }}>
-                    <Text variant="bodyMed" weight="700">{cta.title}</Text>
-                    <Text variant="caption" color="textSecondary">{cta.subtitle}</Text>
-                  </View>
-                  <Icon name="chevronRight" size={20} color={colors.textMuted} />
-                </View>
-              </AccentCard>
-            </PressableScale>
-          ) : null;
-        })()}
 
         {(() => {
           const v = poolCardView(poolCard, adSide);
@@ -320,15 +302,19 @@ const P2PMarketScreen: React.FC = () => {
             <PressableScale
               disabled={v.disabled}
               onPress={() => v.route && router.push(v.route as never)}
-              style={{ marginBottom: spacing.lg, opacity: v.disabled ? 0.6 : 1 }}
+              style={{ marginBottom: spacing.lg }}
             >
-              <AccentCard padding="md">
+              {/* Disabled is drawn in muted colours, never with opacity: on Android an
+                  elevated card under opacity shows its inner layer as a white box. */}
+              <AccentCard padding="md" railColor={v.disabled ? colors.border : undefined}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                  <Icon name="verified" size={24} color={colors.accent} />
+                  <Icon name="verified" size={24} color={v.disabled ? colors.textMuted : colors.accent} />
                   <View style={{ flex: 1 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                      <Text variant="bodyMed" weight="700">{v.title}</Text>
-                      <Badge label={v.badge} size="sm" color={colors.accent} background={colors.accentMuted} />
+                      <Text variant="bodyMed" weight="700" color={v.disabled ? 'textSecondary' : undefined}>{v.title}</Text>
+                      {!v.disabled && (
+                        <Badge label={v.badge} size="sm" color={colors.accent} background={colors.accentMuted} />
+                      )}
                     </View>
                     {v.lines.map((line) => (
                       <Text key={line} variant="caption" color="textSecondary">{line}</Text>
