@@ -70,17 +70,21 @@ func TestLoad_SonicAlways_BSCDormantByDefault(t *testing.T) {
 
 // The BSC row is the liquidity pool (purpose pool). Its default network is
 // mainnet, and with an empty mainnet escrow it is dormant — prod after Plan A.
-func TestLoad_BSCDefaultsToMainnetAndStaysDormantWithAnEmptyRow(t *testing.T) {
+// The mainnet rollout (2026-10-13): the default BSC row is the live pool on
+// the deployed mainnet escrow and FeeManager, never the testnet one.
+func TestLoad_BSCDefaultsToTheMainnetPool(t *testing.T) {
 	t.Setenv("BSC_NETWORK", "")
 	cfg := Load()
-	if _, ok := cfg.P2PChains[56]; ok {
-		t.Fatal("BSC mainnet has no pool escrow yet: it must be dormant")
-	}
 	if _, ok := cfg.P2PChains[97]; ok {
 		t.Fatal("BSC must never fall back to testnet")
 	}
-	if _, ok := cfg.PoolChain(); ok {
-		t.Fatal("no pool chain in the default config")
+	pool, ok := cfg.PoolChain()
+	if !ok || pool.ChainID != 56 {
+		t.Fatalf("pool chain = %+v ok=%t, want BSC mainnet (56)", pool, ok)
+	}
+	if pool.EscrowAddress != "0xeBF3Fc37C57Eff8353bB4c30F51b6899F4ae22cD" ||
+		pool.Pool.FeeManager != "0x32CBeb22B468da660241c2Bbb635BdFE768A8f6c" {
+		t.Fatalf("pool = escrow %s feeManager %s, want the 2026-10-13 mainnet deploy", pool.EscrowAddress, pool.Pool.FeeManager)
 	}
 }
 

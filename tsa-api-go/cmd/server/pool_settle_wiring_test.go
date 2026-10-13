@@ -72,16 +72,25 @@ func TestAttachPoolSettle_WiresAdminAndTheSettleJob(t *testing.T) {
 	}
 }
 
-// Prod today: the shipped BSC mainnet preset row has no pool escrow, so a boot
-// with every settle part available (release key, LP forwarder, admin handler)
-// still opens no pool orders, registers no settle job and serves no pool
-// console routes.
-func TestBoot_ProdStaysDormantWhileTheBSCMainnetRowIsUnset(t *testing.T) {
+// A config with no pool row (any chain whose preset is emptied) stays dormant
+// even with every settle part available (release key, LP forwarder, admin
+// handler): no pool orders, no settle job, no pool console routes. The shipped
+// config carries the BSC mainnet pool since the 2026-10-13 rollout, so the
+// pool rows are dropped here to keep exercising the dormant path.
+func TestBoot_NoPoolRowStaysDormant(t *testing.T) {
 	t.Setenv("BSC_NETWORK", "")
 	_, _, _, trades, it := poolDeskWorld(t, 60*time.Minute) // a forwarder-wired ITService
 	cfg := config.Load()
+	if pool, ok := cfg.PoolChain(); !ok || pool.ChainID != 56 {
+		t.Fatalf("shipped pool chain = %+v ok=%t, want BSC mainnet (56)", pool, ok)
+	}
+	for id, cc := range cfg.P2PChains {
+		if cc.Purpose == config.P2PPurposePool {
+			delete(cfg.P2PChains, id)
+		}
+	}
 	if _, ok := cfg.PoolChain(); ok {
-		t.Fatal("the shipped config must carry no pool chain")
+		t.Fatal("pool rows not dropped")
 	}
 	reg := services.NewP2PEscrowRegistryFromMap(nil, "2")
 	w := wirePoolOrders(cfg, services.NewBlockchainService(cfg), reg, trades, services.NewPMService(config.DB), fakeSender{}, it, nil)
