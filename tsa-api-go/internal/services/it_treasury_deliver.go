@@ -83,6 +83,18 @@ type saleDesk struct {
 	onSettle   func(tx *gorm.DB, intent *models.ITIntent, leg *models.RampLeg) error // extra writes in the settle transaction; nil = none
 }
 
+// laneOn is the desk wallet's key lane on chain (nil without one): where a
+// sale's signings — and any speed-up of them — are recorded.
+func (sd *saleDesk) laneOn(chain string) *KeyLane {
+	if sd == nil || sd.wallet == nil || sd.wallet.Treasury() == nil {
+		return nil
+	}
+	if lane := sd.wallet.Treasury().Lane(chain); lane != nil && lane.SponsorLane != nil {
+		return lane.KeyLane
+	}
+	return nil
+}
+
 // companySale is the company wallet's desk; nil without a wallet.
 func (s *ITService) companySale() *saleDesk {
 	if !s.HasCompanyWallet() {
@@ -404,6 +416,9 @@ func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uui
 	if verifier == nil || probe == nil {
 		return fmt.Errorf("%s: no verifier or probe on %s", sd.label, leg.ChainKey)
 	}
+	// A sale the key lane sped up mines under the replacement's hash: verify
+	// (and record) whichever signing of the same call mined.
+	leg.TxHash = followMinedHash(ctx, sd.laneOn(leg.ChainKey), s.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash, receiptExists(probe))
 	gen := probe.EndpointGeneration() // the verdict and its depth come from one endpoint
 	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, sd.wallet.TokenAddress(leg.ChainKey, leg.Token),
 		sd.wallet.Address(), intent.DestAddress)
@@ -594,14 +609,17 @@ func (s *ITService) chainEvidenceFor(ctx context.Context, sd *saleDesk, db *gorm
 	}
 	gen := probe.EndpointGeneration()
 	if leg.TxHash != "" {
-		known, terr := txHashKnown(ctx, probe, leg.TxHash)
-		if terr != nil {
-			return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
-		}
-		if known {
-			ev.HashKnown = true
-			ev.Reason = "the node still knows " + leg.TxHash
-			return ev, nil
+		// Every signing of the same call (a speed-up replaces the hash).
+		for _, h := range sd.laneOn(leg.ChainKey).signingsOf(ctx, leg.TxHash) {
+			known, terr := txHashKnown(ctx, probe, h)
+			if terr != nil {
+				return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
+			}
+			if known {
+				ev.HashKnown = true
+				ev.Reason = "the node still knows " + h
+				return ev, nil
+			}
 		}
 	}
 	addr := common.HexToAddress(sd.wallet.Address())

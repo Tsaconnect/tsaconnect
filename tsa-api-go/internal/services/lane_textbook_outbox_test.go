@@ -355,3 +355,61 @@ func TestKeyLane_WatchSpeedUpRespectsTheReservation(t *testing.T) {
 		t.Fatal("once funded, the next tick must speed up the same call")
 	}
 }
+
+// A sale the key lane sped up once mines under the REPLACEMENT's hash: the
+// finalize verifies whichever signing of the same call mined, records that
+// hash on the leg and settles — never a stall on the original's missing
+// receipt.
+func TestFinalizeTreasuryBuy_SpedUpSaleVerifiesTheReplacement(t *testing.T) {
+	r := newDeliverRig(t)
+	ctx := context.Background()
+	node := newChainNode(8453)
+	node.mined = 7
+	raw := NewLocalKeyReleaseSigner(newEcdsaKey().k, node)
+	tl := r.s.companySale().wallet.Treasury().Lane("base")
+	tl.Signer = raw
+	clock := time.Now()
+	kl := soloLane(raw, nil)
+	kl.pricer, kl.nonces, kl.lookup = node, node, node
+	kl.now = func() time.Time { return clock }
+	tl.KeyLane = kl
+
+	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	original := r.legs(t)[0].TxHash
+	node.forget(common.HexToHash(original)) // evicted, and refused when re-sent
+	node.mu.Lock()
+	node.refuse = func(tx *types.Transaction, _ int) error {
+		if tx.Hash() == common.HexToHash(original) {
+			return errors.New("transaction underpriced")
+		}
+		return nil
+	}
+	node.mu.Unlock()
+	clock = clock.Add(keyLaneGapGrace + time.Second)
+	if err := kl.Watch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	at7 := node.atNonce(7)
+	replacement := at7[len(at7)-1].Hash()
+	if replacement == common.HexToHash(original) {
+		t.Fatal("setup: no speed-up")
+	}
+
+	r.probe.noReceipt = map[common.Hash]bool{common.HexToHash(original): true} // only the replacement mined
+	r.verifier.credited, r.verifier.err = big.NewInt(7_278_150), nil
+	if err := r.s.FinalizeTreasuryBuy(ctx, r.intent.ID); err != nil {
+		t.Fatalf("finalize of a sped-up sale: %v, want settled", err)
+	}
+	if !strings.EqualFold(r.verifier.hash, replacement.Hex()) {
+		t.Fatalf("verified %s, want the mined replacement %s", r.verifier.hash, replacement.Hex())
+	}
+	leg := r.legs(t)[0]
+	if !strings.EqualFold(leg.TxHash, replacement.Hex()) || leg.Status != models.RampLegStatusConfirmed {
+		t.Fatalf("leg tx=%s status=%s, want the replacement recorded and confirmed", leg.TxHash, leg.Status)
+	}
+	if got := reloadIntent(t, r.s, r.intent.ID); got.Status != models.ITStatusSettled || !strings.EqualFold(got.TxHash, replacement.Hex()) {
+		t.Fatalf("intent status=%s tx=%s, want settled on the replacement", got.Status, got.TxHash)
+	}
+}

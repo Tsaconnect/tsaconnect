@@ -510,7 +510,7 @@ func (s *ITService) SliceOpenGone(ctx context.Context, slice *models.P2PTrade) (
 	deep := head - poolProveDepth
 	landedDeep := false
 	if slice.OpenTxHash != "" {
-		r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(slice.OpenTxHash))
+		r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(d.openHash(ctx, slice)))
 		if err != nil && !errors.Is(err, ethereum.NotFound) {
 			return false, err
 		}

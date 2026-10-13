@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
@@ -1337,6 +1339,70 @@ func (l *KeyLane) FinalHash(ctx context.Context, hash string) string {
 		return hash
 	}
 	return h
+}
+
+// MinedSigning resolves hash — the signing a caller recorded — to the
+// signing of the SAME call that has a receipt: after a speed-up the
+// replacement mines, never the original. It returns hash unchanged when the
+// lane knows no other signing of the call or none has a receipt yet;
+// hasReceipt is a non-waiting read ((false, nil) for a missing receipt), and
+// its error is returned with hash.
+func (l *KeyLane) MinedSigning(ctx context.Context, hash string, hasReceipt func(ctx context.Context, h string) (bool, error)) (string, error) {
+	if l == nil || hash == "" {
+		return hash, nil
+	}
+	hashes := l.signingsOf(ctx, hash)
+	if len(hashes) <= 1 {
+		return hash, nil
+	}
+	for _, h := range hashes {
+		ok, err := hasReceipt(ctx, h)
+		if err != nil {
+			return hash, err
+		}
+		if ok {
+			if strings.EqualFold(h, hash) {
+				return hash, nil
+			}
+			return h, nil
+		}
+	}
+	return hash, nil
+}
+
+// receiptReader is a chain client's non-waiting receipt read.
+type receiptReader interface {
+	TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error)
+}
+
+// receiptExists is hasReceipt over a receiptReader: ethereum.NotFound is
+// (false, nil).
+func receiptExists(p receiptReader) func(ctx context.Context, h string) (bool, error) {
+	return func(ctx context.Context, h string) (bool, error) {
+		r, err := p.TransactionReceipt(ctx, common.HexToHash(h))
+		if errors.Is(err, ethereum.NotFound) {
+			return false, nil
+		}
+		return err == nil && r != nil, err
+	}
+}
+
+// followMinedHash moves a recorded hash column to the signing of the same
+// call that mined (MinedSigning), only while the row still holds old; it
+// returns the hash to verify with. A read failure keeps old (the next tick
+// looks again).
+func followMinedHash(ctx context.Context, lane *KeyLane, db *gorm.DB, model any, column string, id uuid.UUID, old string,
+	hasReceipt func(ctx context.Context, h string) (bool, error)) string {
+	mined, err := lane.MinedSigning(ctx, old, hasReceipt)
+	if err != nil || mined == old {
+		return old
+	}
+	res := db.WithContext(ctx).Model(model).Where("id = ? AND "+column+" = ?", id, old).Update(column, mined)
+	if res.Error != nil || res.RowsAffected != 1 {
+		return old // changed under us: the next tick re-reads it
+	}
+	log.Printf("[signer] key lane: %s %s followed to the mined speed-up %s (was %s)", column, id, mined, old)
+	return mined
 }
 
 // signingsOf is every signing (not refused) of hash's call — the original

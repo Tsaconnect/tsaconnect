@@ -984,6 +984,7 @@ func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *model
 		}
 		return nil
 	}
+	o.followLeg(ctx, leg)
 	st, err := o.status.Status(ctx, leg.TxHash)
 	if err != nil {
 		return fmt.Errorf("conversion: bridge status for order %s: %w", order.ID, err)
@@ -1382,6 +1383,7 @@ func (o *ConversionOrchestrator) observeDeliver(ctx context.Context, order *mode
 // settleTopUp confirms a top-up leg on the strength of the destination chain
 // and settles the order. Unverified means wait — never settle.
 func (o *ConversionOrchestrator) settleTopUp(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, leg *models.RampLeg) error {
+	o.followLeg(ctx, leg)
 	credited, err := o.verifyOnDestination(ctx, order, dst, leg.TxHash, "topup")
 	if err != nil || credited == nil {
 		return err // alerted inside; the leg stays pending for the next tick
@@ -1455,6 +1457,7 @@ func (o *ConversionOrchestrator) observeRefund(ctx context.Context, order *model
 	// treasury actually paid from) — unlike a bridge leg, there is no
 	// origin/destination split to resolve here; see RampLeg.AmountReceived's
 	// own doc comment for that distinction.
+	o.followLeg(ctx, leg)
 	credited, err := o.verifyTransferOnChain(ctx, order, leg.ChainKey, tokenAddr, leg.TxHash, "refund")
 	if err != nil || credited == nil {
 		return err // alerted inside; the leg stays pending, or the order was parked
@@ -2466,6 +2469,28 @@ func (o *ConversionOrchestrator) resolveAdminRefund(ctx context.Context, adminID
 		return confirmed, nil
 	}
 	return pending, nil
+}
+
+// followLegReceiptWait bounds each receipt read followLeg makes per signing.
+const followLegReceiptWait = 2 * time.Second
+
+// followLeg moves a leg's recorded hash to the signing of the same call that
+// mined, when its treasury lane sped it up: LiFi, the verifier and the books
+// then read the transaction that actually landed. Only when the lane knows
+// more than one signing of the call does it read anything.
+func (o *ConversionOrchestrator) followLeg(ctx context.Context, leg *models.RampLeg) {
+	if leg == nil || leg.TxHash == "" || o.treasury == nil || o.db == nil {
+		return
+	}
+	lane := o.treasury.Lane(leg.ChainKey)
+	if lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil || lane.Native == nil {
+		return
+	}
+	leg.TxHash = followMinedHash(ctx, lane.KeyLane, o.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash,
+		func(ctx context.Context, h string) (bool, error) {
+			r, err := lane.Native.WaitForReceiptContext(ctx, h, followLegReceiptWait)
+			return err == nil && r != nil, nil // no receipt yet (or unreadable): not this one
+		})
 }
 
 // legSend is the send context of a treasury leg: the leg is the operation

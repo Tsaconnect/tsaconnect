@@ -210,7 +210,10 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     process may still be sending) and the mined nonce, and starts above all of them.
   - Receipt waits (`waitFollowingReplacements`: IT operator receipts, gas-drip confirms, the
     treasury approve) poll EVERY signing of the call, so the original mining after a speed-up still
-    answers. Pool slice releases are proven from the escrow's `TradeReleased` log.
+    answers. Post-send verifiers keyed by a recorded hash follow it first (`KeyLane.MinedSigning` /
+    `followMinedHash`): sale-leg finalize and its dropped-tx evidence, conversion bridge/top-up/refund
+    legs and pool slice opens verify whichever signing of the same call mined and record that hash on
+    the row. Pool slice releases are proven from the escrow's `TradeReleased` log.
   - A hole at a nonce NO process allocated (a send from outside the server) holds the lane after
     15 s (`ALERT key_lane_nonce_gap_held_total`); transient read errors never hold. The 30 s
     `key-lane-watch` job marks allocations below the mined nonce `mined` (raw bytes dropped), clears

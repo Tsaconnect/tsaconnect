@@ -55,6 +55,8 @@ type fakeTxProbe struct {
 	// blockTime is the receipt block's time; zero reads as now, so a test
 	// that does not care about it sees a transfer mined just now.
 	blockTime time.Time
+	// noReceipt: hashes with no receipt (a signing the key lane replaced).
+	noReceipt map[common.Hash]bool
 	// gen is the RPC endpoint generation. switchOnScan / switchOnReceipt fail
 	// the client over to another endpoint during a filtered scan / a receipt
 	// read: the reads either side of it may come from different nodes.
@@ -80,7 +82,10 @@ func (p *fakeTxProbe) NonceAt(_ context.Context, _ common.Address, block *big.In
 	return p.latest, nil
 }
 func (p *fakeTxProbe) BlockNumber(context.Context) (uint64, error) { return p.head, nil }
-func (p *fakeTxProbe) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
+func (p *fakeTxProbe) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
+	if p.noReceipt[h] {
+		return nil, ethereum.NotFound
+	}
 	if p.switchOnReceipt {
 		p.gen++
 	}
