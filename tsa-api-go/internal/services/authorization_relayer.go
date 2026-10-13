@@ -207,12 +207,6 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 	}
 	releaseRow := func() { releaseSponsorshipRow(ctx, a.store, row.ID) }
 
-	// Floors are alert-only: refused only when the sponsor cannot pay this
-	// relay's own fee (its lane re-checks at the send).
-	if err := lane.canPay(ctx, authorizationGasUnits, nil); err != nil {
-		releaseRow()
-		return AuthorizationRelayResult{}, err
-	}
 	gas, err := lane.Guard.ReserveGas(authorizationGasUnits)
 	if err != nil {
 		releaseRow()

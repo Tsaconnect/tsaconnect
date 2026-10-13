@@ -100,7 +100,7 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 	// Each lane keeps back the transfers its paid, undelivered sales owe.
 	for chain, lane := range lanes {
 		if lane.KeyLane != nil && config.DB != nil {
-			lane.KeyLane.AddReservation("company_wallet_owed_"+chain, services.NewCompanyWalletCommitments(config.DB, chain).Reservation)
+			lane.KeyLane.AddReservation("company_wallet_owed_"+chain, services.NewCompanyWalletCommitments(config.DB, chain).Units)
 		}
 	}
 	// No value caps on the lane (review C2): the maximum is enforced where

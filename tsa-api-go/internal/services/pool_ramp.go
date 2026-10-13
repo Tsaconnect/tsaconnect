@@ -30,7 +30,8 @@ func (s *ITService) PoolLegOpen(ctx context.Context) bool {
 // on the same balance. A count that cannot be read fails closed. Read outside
 // the pool lock: two opens racing past it can both count the same balance
 // once; gasFeeBuffer (2x) covers that one extra order's worth. fresh: an open
-// counts now; a quote (PoolLegOpen) may reuse a count a few seconds old.
+// counts and reads the balance and gas price now; a quote (PoolLegOpen) may
+// reuse readings a few seconds old.
 func (s *ITService) poolReleaseGasOK(ctx context.Context, releases int, fresh bool) bool {
 	d := s.poolDesk
 	units := d.c.ReleaseCommitments.Units
@@ -42,7 +43,7 @@ func (s *ITService) poolReleaseGasOK(ctx context.Context, releases int, fresh bo
 		log.Printf("[liquidity] ALERT liquidity_pool_release_commitments_unreadable_total=1 err=%s", RedactAlertText(err.Error()))
 		return false
 	}
-	return d.c.Gates.ReleaseGasOK(ctx, int(owed/poolReleaseCallGas)+releases)
+	return d.c.Gates.ReleaseGasOK(ctx, int(owed/poolReleaseCallGas)+releases, fresh)
 }
 
 // PoolVenue is the pool's one direct venue: its chain key and token.

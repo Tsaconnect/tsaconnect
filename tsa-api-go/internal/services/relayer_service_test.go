@@ -171,7 +171,7 @@ func newRig(t *testing.T, mutate ...func(*RelayerLimits)) *rig {
 	r := &rig{signer: signer, chain: chain, metrics: metrics, clock: &now}
 
 	svc, err := NewRelayerService(
-		signer, chain, &fakeRelayBuilder{}, forwarderHex,
+		soloLane(signer, chainBalances{chain}), chain, &fakeRelayBuilder{}, forwarderHex,
 		[]AllowedCall{{Target: swapAddr, Selector: spendSel, AmountWordIndex: 1}},
 		limits, metrics,
 		func() time.Time { return *r.clock },
@@ -179,6 +179,7 @@ func newRig(t *testing.T, mutate ...func(*RelayerLimits)) *rig {
 	if err != nil {
 		t.Fatalf("NewRelayerService: %v", err)
 	}
+	svc.rolesOK.Store(true) // as ProbeRoles does once the key holds no swap role
 	r.svc = svc
 	return r
 }
@@ -676,7 +677,7 @@ func TestRelayer_ConcurrentRelaysOnTheKeyLaneGetDistinctNonces(t *testing.T) {
 	reg := NewSignerRegistry()
 	lane := reg.Lane("relayer", key, node)
 	r.svc.builder = laggingRelayBuilder{nonce: 9}
-	r.svc.UseKeyLane(lane)
+	r.svc.signer, r.svc.lane = lane.Signer(), lane
 	if reg.Lane("it_operator", key, node) != lane {
 		t.Fatal("relayer and operator on one key must share the lane")
 	}
@@ -712,5 +713,21 @@ func TestRelayer_DefiniteRefusalIsRecordedAsNotBroadcast(t *testing.T) {
 	last := r.metrics.attempts[len(r.metrics.attempts)-1]
 	if last.outcome != "rejected" || last.reason != "not_broadcast" {
 		t.Fatalf("metric = %+v, want rejected/not_broadcast", last)
+	}
+}
+
+// Review: the relayer's role check is re-probed — off while the key holds a
+// swap role or the read fails, on once it reads clean.
+func TestRelayer_ProbeRolesTurnsRelayingOnAndOff(t *testing.T) {
+	r := newRig(t)
+	r.svc.rolesOK.Store(false)
+	if r.svc.IsEnabled() {
+		t.Fatal("unprobed: must be off")
+	}
+	if err := r.svc.ProbeRoles(context.Background(), fakeRoles{owner: userAddr}); err != nil || !r.svc.IsEnabled() {
+		t.Fatalf("clean roles: err=%v enabled=%v", err, r.svc.IsEnabled())
+	}
+	if err := r.svc.ProbeRoles(context.Background(), fakeRoles{owner: userAddr, operator: true}); err == nil || r.svc.IsEnabled() {
+		t.Fatalf("operator: err=%v enabled=%v, want off", err, r.svc.IsEnabled())
 	}
 }

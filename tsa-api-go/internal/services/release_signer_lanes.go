@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
@@ -23,40 +22,32 @@ import (
 // consolidation 2026-10-13): the lock held from nonce read to broadcast, the
 // nonce floor that covers an RPC whose pending view lags our own sends, and the
 // one fee gate every send on the key passes. Every role signing with that key
-// on that chain (PM release, expiry cancel, IT operator, relayer, gas sponsor,
-// treasury) sends through the same KeyLane, so two roles on one key can never
-// read the same pending nonce or spend the same balance twice. Get one from a
+// on that chain (PM release, expiry cancel, IT operator, gas sponsor, treasury)
+// sends through the same KeyLane, so two roles on one key can never read the
+// same pending nonce or spend the same balance twice. Get one from a
 // SignerRegistry; the lint test forbids building one anywhere else.
 //
-// Extracted from the release signer's per-chain lane, SponsorLane.sendMu and
-// TreasuryLane's nonce floor, which were three copies of this.
+// Nonce rule (owner): a nonce this lane signed is never signed again with
+// different bytes. The floor only rises (it steps back only for the send that
+// just took a nonce and was definitely refused). When the chain's pending
+// nonce sits below the floor at a transaction this lane sent more than
+// keyLaneGapGrace ago and the node does not have it, the lane RE-BROADCASTS
+// the exact signed bytes it kept; if it has no bytes (a signer that cannot
+// hand them over) or cannot tell, it holds the lane and alerts rather than
+// guess. Records are dropped only once the chain's latest (mined) nonce has
+// passed them.
 type KeyLane struct {
 	mu      sync.Mutex
 	signer  ReleaseSigner
 	chainID int64 // what the lane's broadcaster reports; 0 = unchecked (a solo lane)
 
-	// nonceFloor is the next nonce this process may use on the lane (plan C1
-	// review I2). Back-to-back sends go out faster than a load-balanced RPC's
-	// pending view moves; without the floor the second would be built on the
-	// first one's nonce and replace or bounce it. It is NOT a counter: it moves
-	// only after a build succeeded (an EstimateGas revert never burns a nonce),
-	// steps back on a definite refusal, and is dropped back to the chain's own
-	// pending nonce when the transaction holding the gap never reached the node
-	// (gapLocked). Read and written only under mu.
-	nonceFloor uint64
-	// sent is every nonce this lane signed at or above the chain's pending
-	// view (highWater), with its hash and when it was prepared: the evidence the
-	// floor rests on, aged from each send rather than refreshed by later ones.
-	sent map[uint64]laneSent
-	// highWater is the highest pending nonce any build has read, seenAt when a
-	// build last read at least that. A view below it is a lagging RPC (the floor
-	// holds), until none has reached it for keyLaneNonceFloorTTL (a dropped
-	// mempool tx really did move the chain back).
-	highWater uint64
-	seenAt    time.Time
+	nonceFloor uint64               // the next nonce this lane may sign
+	sent       map[uint64]*laneSent // every nonce signed and not yet passed by the latest mined nonce
+	held       *laneHold            // a gap the lane cannot refill: every send refused until it clears
 
 	balances laneBalanceReader // nil: no fee gate (a solo test lane)
-	lookup   laneTxLookup      // nil: a gap is judged on age alone
+	lookup   laneTxLookup      // nil: a suspected gap is re-broadcast without asking
+	nonces   laneNonceReader   // nil: records are never pruned, holds never clear by themselves
 
 	reserveMu sync.Mutex
 	reserves  map[string]LaneReservation
@@ -64,52 +55,78 @@ type KeyLane struct {
 	now func() time.Time
 }
 
+// laneSent is one transaction this lane signed: its hash and, when the signer
+// can hand them over, the exact signed bytes (kept in memory for the process;
+// the onPrepared hook records only the nonce, so after a restart a gap at an
+// old nonce holds the lane instead of being refilled).
 type laneSent struct {
-	hash string
-	at   time.Time
+	hash          string
+	raw           []byte
+	at            time.Time
+	rebroadcastAt time.Time
+}
+
+type laneHold struct {
+	nonce uint64
+	since time.Time
 }
 
 // laneBalanceReader is the lane broadcaster's native balance read
-// (*blockchain.EVMClient).
+// (*blockchain.EVMClient), bounded by the caller's ctx.
 type laneBalanceReader interface {
-	GetBalance(address string) (*big.Int, error)
+	NativeBalance(ctx context.Context, address string) (*big.Int, error)
 }
 
-// laneTxLookup asks the node whether it holds a transaction, pending or mined
-// (*blockchain.EVMClient).
+// laneTxLookup asks the node whether it holds a transaction, pending or mined.
 type laneTxLookup interface {
 	TransactionKnown(ctx context.Context, txHash string) (bool, error)
 }
 
+// laneNonceReader is the chain's latest MINED nonce for an address.
+type laneNonceReader interface {
+	LatestNonce(ctx context.Context, address string) (uint64, error)
+}
+
+// rawSigner is a signer that can sign without broadcasting, so the lane keeps
+// the bytes for an identical re-broadcast (*LocalKeyReleaseSigner).
+type rawSigner interface {
+	signRaw(unsigned []byte) (raw []byte, hash string, err error)
+	broadcastRaw(raw []byte, hash string) (string, error)
+}
+
+// ErrKeyLaneHeld: the lane found a hole in its nonce sequence it cannot refill
+// (no stored bytes for the missing transaction) and refuses every send until
+// the chain's mined nonce passes it or an operator clears it (ClearHold).
+var ErrKeyLaneHeld = errors.New("the signing key's lane is held at a nonce gap it cannot refill")
+
 const (
 	// keyLaneGapGrace is how long a sent transaction may stay unseen in the
-	// chain's pending view before the lane asks the node whether it has it.
+	// chain's pending view before the lane checks it, and how often it may be
+	// re-broadcast.
 	keyLaneGapGrace = 15 * time.Second
-	// keyLaneNonceFloorTTL is the gap verdict without a node lookup, and how long
-	// a pending view may sit below the high-water mark before it is believed.
-	keyLaneNonceFloorTTL = 30 * time.Second
+	// keyLaneReadTimeout bounds the fee gate's balance and reservation reads.
+	keyLaneReadTimeout = 10 * time.Second
+	// keyLanePruneAt: past this many records the lane reads the mined nonce to
+	// drop the ones the chain has passed.
+	keyLanePruneAt = 256
 )
 
-// soloLane is a lane outside any registry, for a signer handed in directly (a
-// test, or a constructor that takes a bare ReleaseSigner). balances nil = no
-// fee gate. Boot never builds one: every boot signer comes from
-// SignerRegistry.Lane (lint: TestKeyLanes_OnlyFromTheRegistry).
+// soloLane is a lane outside any registry, for a signer handed in directly in
+// a test. balances nil = no fee gate. Only this file may build a lane (lint:
+// TestKeyLanes_OnlyFromTheRegistry); production code takes registry lanes.
 func soloLane(signer ReleaseSigner, balances laneBalanceReader) *KeyLane {
 	return &KeyLane{signer: signer, balances: balances}
 }
 
-// chainBalances adapts a BalanceAt reader (a sponsor or relay chain) to the
-// lane's balance read.
-type chainBalances struct {
-	c interface {
-		BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+// SetOperatorSigner wires a bare operator signer on a lane of its own. Tests
+// only: the lint forbids any production call (boot uses SetOperatorLane).
+// Defined here, with soloLane, so no other file builds a lane.
+func (s *MCGPSwapService) SetOperatorSigner(signer ReleaseSigner) {
+	s.operator, s.operatorLane = signer, nil
+	if signer != nil {
+		s.operatorLane = soloLane(signer, nil)
 	}
-}
-
-func (b chainBalances) GetBalance(address string) (*big.Int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return b.c.BalanceAt(ctx, common.HexToAddress(address), nil)
+	s.operatorVerified.Store(signer != nil) // a directly-wired signer is trusted (tests)
 }
 
 // Signer is the lane's signer: Address() for every role, and what Send signs with.
@@ -121,9 +138,9 @@ func (l *KeyLane) Address() string { return l.signer.Address() }
 // ChainID is the chain the lane sends on (0 for a solo lane).
 func (l *KeyLane) ChainID() int64 { return l.chainID }
 
-// LaneReservation is what a lane must keep back, in wei at the given gas
-// price, for transactions it already owes.
-type LaneReservation func(ctx context.Context, price *big.Int) (*big.Int, error)
+// LaneReservation is the gas (units) a lane must keep back for transactions it
+// already owes; the gate prices it at each send's own gas price.
+type LaneReservation func(ctx context.Context) (uint64, error)
 
 // AddReservation registers (or replaces, by name) what the key's balance must
 // keep back on this lane for transactions it already owes — the pool's live
@@ -142,23 +159,21 @@ func (l *KeyLane) AddReservation(name string, fn LaneReservation) {
 	l.reserveMu.Unlock()
 }
 
-// reserved sums the lane's reservations at price.
-func (l *KeyLane) reserved(ctx context.Context, price *big.Int) (*big.Int, error) {
+// reservedUnits sums the lane's reservations.
+func (l *KeyLane) reservedUnits(ctx context.Context) (uint64, error) {
 	l.reserveMu.Lock()
 	fns := make(map[string]LaneReservation, len(l.reserves))
 	for k, v := range l.reserves {
 		fns[k] = v
 	}
 	l.reserveMu.Unlock()
-	sum := new(big.Int)
+	var sum uint64
 	for name, fn := range fns {
-		r, err := fn(ctx, price)
+		u, err := fn(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
+			return 0, fmt.Errorf("%s: %w", name, err)
 		}
-		if r != nil {
-			sum.Add(sum, r)
-		}
+		sum += u
 	}
 	return sum, nil
 }
@@ -166,8 +181,9 @@ func (l *KeyLane) reserved(ctx context.Context, price *big.Int) (*big.Int, error
 type reservedSendKey struct{}
 
 // ReservedSend marks ctx as carrying one of the transactions a lane's
-// reservation is held for (a pool slice's release, cancel or resolve): its fee
-// is checked, the reservation is not, since it is what the reservation pays.
+// reservation is held for (a pool slice's release, cancel or resolve; an owed
+// delivery or refund): its fee is checked, the reservation is not, since it is
+// what the reservation pays. Only an owed call site marks it.
 func ReservedSend(ctx context.Context) context.Context {
 	return context.WithValue(ctx, reservedSendKey{}, true)
 }
@@ -195,10 +211,45 @@ func (l *KeyLane) SendRecorded(ctx context.Context, build func() ([]byte, error)
 	return l.sendWith(ctx, l.signer, build, onPrepared)
 }
 
+// feeInputs is what the fee gate read before taking the lock.
+type feeInputs struct {
+	balance       *big.Int
+	reservedUnits uint64
+}
+
+// readFeeInputs reads the balance and the reservation with the caller's ctx
+// (bounded), BEFORE the lane lock: a hung read holds up only its own send.
+// nil on a lane without a fee gate.
+func (l *KeyLane) readFeeInputs(ctx context.Context, address string) (*feeInputs, error) {
+	if l.balances == nil {
+		return nil, nil
+	}
+	rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
+	defer cancel()
+	in := &feeInputs{}
+	if !isReservedSend(ctx) {
+		u, err := l.reservedUnits(rctx)
+		if err != nil {
+			return nil, notBroadcast(fmt.Errorf("key lane: read the lane's reservation: %w", err))
+		}
+		in.reservedUnits = u
+	}
+	bal, err := l.balances.NativeBalance(rctx, address)
+	if err != nil {
+		return nil, notBroadcast(fmt.Errorf("key lane: read the balance: %w", err))
+	}
+	in.balance = bal
+	return in, nil
+}
+
 // sendWith is Send signing with signer. Only a SponsorLane built without a
 // registry lane passes a signer other than the lane's own (tests swap
 // SponsorLane.Signer); every registry lane signs with its own.
 func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func() ([]byte, error), onPrepared func(uint64) error) (string, bool, error) {
+	fee, err := l.readFeeInputs(ctx, signer.Address())
+	if err != nil {
+		return "", false, err
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	unsigned, err := build()
@@ -217,15 +268,25 @@ func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func
 			return "", false, notBroadcast(fmt.Errorf("key lane: a tx built for chain %s was sent on chain %d", u.ChainID, l.chainID))
 		}
 	}
+	if err := l.checkHoldLocked(ctx); err != nil {
+		return "", false, err
+	}
 	prepared := u.Nonce
-	l.pinNonceLocked(ctx, &u)
+	if prepared < l.nonceFloor {
+		l.checkGapLocked(ctx, prepared)
+		if err := l.checkHoldLocked(ctx); err != nil {
+			return "", false, err
+		}
+		u.Nonce = l.nonceFloor // never sign a nonce this lane already used
+	}
+	l.nonceFloor = u.Nonce + 1
 	if u.Nonce != prepared {
 		if unsigned, err = json.Marshal(u); err != nil {
 			l.stepBackLocked(u.Nonce)
 			return "", false, notBroadcast(fmt.Errorf("key lane: re-encode the pinned tx: %w", err))
 		}
 	}
-	if _, err := l.requireFee(ctx, signer.Address(), &u); err != nil {
+	if err := l.requireFee(ctx, signer.Address(), fee, &u); err != nil {
 		l.stepBackLocked(u.Nonce)
 		return "", false, err
 	}
@@ -235,68 +296,78 @@ func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func
 			return "", false, fmt.Errorf("key lane: record the nonce before broadcast: %w", err)
 		}
 	}
-	txHash, err := signer.SignAndBroadcast(ctx, unsigned)
+	return l.signAndSendLocked(ctx, signer, u.Nonce, unsigned)
+}
+
+// signAndSendLocked signs, records and broadcasts one transaction. A signer
+// that can sign without sending hands the lane its bytes first, so a later
+// gap is refilled with exactly these bytes.
+func (l *KeyLane) signAndSendLocked(ctx context.Context, signer ReleaseSigner, nonce uint64, unsigned []byte) (string, bool, error) {
+	if l.sent == nil {
+		l.sent = map[uint64]*laneSent{}
+	}
+	rec := &laneSent{at: l.clock()}
+	var txHash string
+	var err error
+	if rs, ok := signer.(rawSigner); ok {
+		raw, hash, serr := rs.signRaw(unsigned)
+		if serr != nil {
+			l.stepBackLocked(nonce)
+			return "", false, serr
+		}
+		rec.raw, rec.hash = raw, hash
+		l.sent[nonce] = rec
+		txHash, err = rs.broadcastRaw(raw, hash)
+	} else {
+		l.sent[nonce] = rec
+		txHash, err = signer.SignAndBroadcast(ctx, unsigned)
+		rec.hash = txHash
+		if err != nil {
+			rec.hash = uncertainTxHash(err)
+		}
+	}
 	if errors.Is(err, ErrTxNotBroadcast) {
-		l.stepBackLocked(u.Nonce)
+		l.stepBackLocked(nonce)
 		return "", false, err
 	}
-	hash := txHash
-	if err != nil {
-		hash = uncertainTxHash(err)
-	}
-	if rec, ok := l.sent[u.Nonce]; ok {
-		rec.hash = hash
-		l.sent[u.Nonce] = rec
-	}
+	l.pruneLocked()
 	return txHash, true, err
 }
 
-// requireFee is the lane's one balance gate (it reads no lane state guarded by
-// mu, so CanPay calls it without the lock) (floors only alert, owner
+// requireFee is the lane's one balance gate (floors only alert, owner
 // 2026-10-13): the key must hold this transaction's gas limit × gas price ×
-// gasFeeBuffer, plus its value, plus whatever the lane reserves for
-// transactions it already owes (unless this is one of them). Fails closed when
-// the transaction cannot be priced or the balance or reservation cannot be
-// read. A solo lane (no balance reader) is not gated.
-func (l *KeyLane) requireFee(ctx context.Context, address string, u *blockchain.UnsignedTx) (*big.Int, error) {
-	if l.balances == nil {
-		return nil, nil
+// gasFeeBuffer, plus its value, plus the lane's reservation priced at the same
+// gas price (unless this is an owed send). The balance and reservation were
+// read before the lock (in). Fails closed when the transaction cannot be
+// priced. A lane without a fee gate (in == nil) is not gated.
+func (l *KeyLane) requireFee(ctx context.Context, address string, in *feeInputs, u *blockchain.UnsignedTx) error {
+	if in == nil {
+		return nil
 	}
 	price, ok := new(big.Int).SetString(u.GasPrice, 10)
 	if !ok || price.Sign() <= 0 || u.GasLimit == 0 {
-		return nil, notBroadcast(fmt.Errorf("key lane: cannot price the prepared tx (gasPrice %q, gasLimit %d)", u.GasPrice, u.GasLimit))
+		return notBroadcast(fmt.Errorf("key lane: cannot price the prepared tx (gasPrice %q, gasLimit %d)", u.GasPrice, u.GasLimit))
 	}
 	value := new(big.Int)
 	if u.Value != "" {
 		if _, ok := value.SetString(u.Value, 10); !ok {
-			return nil, notBroadcast(fmt.Errorf("key lane: cannot read the prepared tx's value %q", u.Value))
+			return notBroadcast(fmt.Errorf("key lane: cannot read the prepared tx's value %q", u.Value))
 		}
 	}
 	need := feeNeed(u.GasLimit, price, value)
-	reserved := new(big.Int)
-	if !isReservedSend(ctx) {
-		r, err := l.reserved(ctx, price)
-		if err != nil {
-			return nil, notBroadcast(fmt.Errorf("key lane: read the lane's reservation: %w", err))
-		}
-		reserved = r
-	}
+	reserved := feeNeed(in.reservedUnits, price, nil)
 	need.Add(need, reserved)
-	bal, err := l.balances.GetBalance(address)
-	if err != nil {
-		return nil, notBroadcast(fmt.Errorf("key lane: read the balance: %w", err))
-	}
-	if bal.Cmp(need) < 0 {
+	if in.balance.Cmp(need) < 0 {
 		log.Printf("[signer] ALERT key_lane_cannot_pay_total=1 chain=%d address=%s balance=%s needed=%s reserved=%s",
-			l.chainID, address, bal, need, reserved)
-		return bal, notBroadcast(fmt.Errorf("%w: balance %s wei, this transaction needs %s (%s of it reserved)", ErrRelayerUnderfunded, bal, need, reserved))
+			l.chainID, address, in.balance, need, reserved)
+		return notBroadcast(fmt.Errorf("%w: balance %s wei, this transaction needs %s (%s of it reserved)", ErrRelayerUnderfunded, in.balance, need, reserved))
 	}
-	return bal, nil
+	return nil
 }
 
 // CanPay is the lane's fee gate asked before anything is built (a quote, a
 // pool open): units of gas at price plus value, plus the lane's reservation
-// unless ctx is a ReservedSend. A solo lane always can.
+// unless ctx is a ReservedSend. A solo lane without a balance reader always can.
 func (l *KeyLane) CanPay(ctx context.Context, units uint64, price, value *big.Int) error {
 	if l == nil || l.signer == nil {
 		return nil
@@ -306,7 +377,7 @@ func (l *KeyLane) CanPay(ctx context.Context, units uint64, price, value *big.In
 }
 
 // canPayAs is CanPay for address (a solo lane signing with its caller's
-// signer); it also returns the balance it read (nil on a solo lane without a
+// signer); it also returns the balance it read (nil on a lane without a
 // balance reader) so a caller can raise its floor ALERT without a second read.
 func (l *KeyLane) canPayAs(ctx context.Context, address string, units uint64, price, value *big.Int) (*big.Int, error) {
 	if l == nil || l.balances == nil {
@@ -318,70 +389,128 @@ func (l *KeyLane) canPayAs(ctx context.Context, address string, units uint64, pr
 	if value == nil {
 		value = new(big.Int)
 	}
-	return l.requireFee(ctx, address, &blockchain.UnsignedTx{GasLimit: units, GasPrice: price.String(), Value: value.String()})
+	in, err := l.readFeeInputs(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	return in.balance, l.requireFee(ctx, address, in, &blockchain.UnsignedTx{GasLimit: units, GasPrice: price.String(), Value: value.String()})
 }
 
-// pinNonceLocked raises a prepared tx's nonce to the lane's floor, unless the
-// floor rests on a transaction the node never got (gapLocked), and moves the
-// floor past it. Caller holds mu.
-func (l *KeyLane) pinNonceLocked(ctx context.Context, u *blockchain.UnsignedTx) {
+// checkGapLocked looks at the chain's pending nonce p, below the floor: a
+// lagging view, or a transaction of ours the node lost. Never reuses p.
+// Caller holds mu.
+func (l *KeyLane) checkGapLocked(ctx context.Context, p uint64) {
+	rec := l.sent[p]
+	if rec == nil && !l.sentWithin(p) {
+		return // we never sent p in this process: the view lags behind sends we did
+	}
 	now := l.clock()
-	if l.sent == nil {
-		l.sent = map[uint64]laneSent{}
+	if rec != nil && (now.Sub(rec.at) < keyLaneGapGrace || now.Sub(rec.rebroadcastAt) < keyLaneGapGrace) {
+		return
 	}
-	p := u.Nonce
-	if p >= l.highWater || now.Sub(l.seenAt) >= keyLaneNonceFloorTTL {
-		l.highWater, l.seenAt = p, now
-		for n := range l.sent {
-			if n < p {
-				delete(l.sent, n)
+	rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
+	defer cancel()
+	if l.nonces != nil {
+		if mined, err := l.nonces.LatestNonce(rctx, l.logAddress()); err == nil {
+			l.dropMinedLocked(mined)
+			if mined > p {
+				return // p is mined: the pending view lags
 			}
 		}
 	}
-	if p < l.nonceFloor {
-		if p == l.highWater && l.gapLocked(ctx, p, now) {
-			log.Printf("[signer] ALERT key_lane_nonce_gap_recovered_total=1 chain=%d address=%s nonce=%d floor=%d — the transaction at this nonce never reached the node; reusing it",
-				l.chainID, l.logAddress(), p, l.nonceFloor)
-			for n := range l.sent {
-				if n >= p {
-					delete(l.sent, n)
-				}
-			}
-			l.nonceFloor = p
-		} else {
-			u.Nonce = l.nonceFloor
+	if rec != nil && l.lookup != nil && rec.hash != "" {
+		known, err := l.lookup.TransactionKnown(rctx, rec.hash)
+		if err != nil {
+			log.Printf("[signer] ALERT key_lane_gap_unverified_total=1 chain=%d address=%s nonce=%d err=%s — not reused, re-checked on the next send",
+				l.chainID, l.logAddress(), p, RedactAlertText(err.Error()))
+			return
+		}
+		if known {
+			return
 		}
 	}
-	l.nonceFloor = u.Nonce + 1
-	l.sent[u.Nonce] = laneSent{at: now}
+	rs, ok := l.signer.(rawSigner)
+	if rec == nil || rec.raw == nil || !ok {
+		l.held = &laneHold{nonce: p, since: now}
+		log.Printf("[signer] ALERT key_lane_nonce_gap_held_total=1 chain=%d address=%s nonce=%d — the transaction at this nonce is gone and its bytes are not kept; every send on this key and chain is refused until the chain's mined nonce passes it or an operator clears the hold",
+			l.chainID, l.logAddress(), p)
+		return
+	}
+	rec.rebroadcastAt = now
+	_, err := rs.broadcastRaw(rec.raw, rec.hash)
+	log.Printf("[signer] ALERT key_lane_nonce_gap_rebroadcast_total=1 chain=%d address=%s nonce=%d tx=%s err=%v",
+		l.chainID, l.logAddress(), p, rec.hash, err)
 }
 
-// gapLocked reports whether the chain's pending nonce p is a hole: the
-// transaction this lane sent at p is older than keyLaneGapGrace and the node
-// says it does not have it (or, with no lookup, it is older than
-// keyLaneNonceFloorTTL). No record of p means nothing of ours holds it.
-func (l *KeyLane) gapLocked(ctx context.Context, p uint64, now time.Time) bool {
-	rec, ok := l.sent[p]
-	if !ok {
-		return true
+// sentWithin reports whether n lies inside the range of nonces this lane has
+// records for.
+func (l *KeyLane) sentWithin(n uint64) bool {
+	for k := range l.sent {
+		if k <= n {
+			return true
+		}
 	}
-	age := now.Sub(rec.at)
-	if age < keyLaneGapGrace {
-		return false
+	return false
+}
+
+// checkHoldLocked refuses while the lane is held, clearing the hold once the
+// chain's mined nonce has passed the gap. Caller holds mu.
+func (l *KeyLane) checkHoldLocked(ctx context.Context) error {
+	if l.held == nil {
+		return nil
 	}
-	if l.lookup != nil && rec.hash != "" {
-		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		known, err := l.lookup.TransactionKnown(lctx, rec.hash)
+	if l.nonces != nil {
+		rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
+		mined, err := l.nonces.LatestNonce(rctx, l.logAddress())
 		cancel()
-		if err == nil {
-			return !known
+		if err == nil && mined > l.held.nonce {
+			log.Printf("[signer] key lane hold cleared chain=%d address=%s nonce=%d (mined nonce %d)", l.chainID, l.logAddress(), l.held.nonce, mined)
+			l.dropMinedLocked(mined)
+			l.held = nil
+			return nil
 		}
 	}
-	return age >= keyLaneNonceFloorTTL
+	return notBroadcast(fmt.Errorf("%w (nonce %d, since %s)", ErrKeyLaneHeld, l.held.nonce, l.held.since.Format(time.RFC3339)))
 }
 
-// stepBackLocked hands back the one nonce a send provably never used, and only
-// while the floor still sits just past it (re-review N3). Caller holds mu.
+// ClearHold is the operator's exit from a held lane, after the gap was filled
+// by hand (or proven filled): the floor and records are left as they are.
+func (l *KeyLane) ClearHold() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held != nil {
+		log.Printf("[signer] AUDIT key_lane_hold_cleared_by_operator=1 chain=%d address=%s nonce=%d", l.chainID, l.logAddress(), l.held.nonce)
+		// The operator vouches the gap is filled: its record is no longer
+		// evidence of a hole (records above it are kept).
+		delete(l.sent, l.held.nonce)
+	}
+	l.held = nil
+}
+
+// dropMinedLocked forgets records the chain's mined nonce has passed.
+func (l *KeyLane) dropMinedLocked(mined uint64) {
+	for n := range l.sent {
+		if n < mined {
+			delete(l.sent, n)
+		}
+	}
+}
+
+// pruneLocked keeps the record map bounded, using the mined nonce only.
+func (l *KeyLane) pruneLocked() {
+	if len(l.sent) <= keyLanePruneAt || l.nonces == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), keyLaneReadTimeout)
+	defer cancel()
+	if mined, err := l.nonces.LatestNonce(ctx, l.logAddress()); err == nil {
+		l.dropMinedLocked(mined)
+	}
+}
+
+// stepBackLocked hands back the one nonce a send provably never used — the
+// send that just took it — and only while the floor still sits just past it
+// (re-review N3). Caller holds mu.
 func (l *KeyLane) stepBackLocked(n uint64) {
 	delete(l.sent, n)
 	if l.nonceFloor == n+1 {
@@ -457,6 +586,7 @@ func newBroadcasterLane(key *ecdsa.PrivateKey, bc ReleaseBroadcaster, chainID in
 	l := &KeyLane{signer: NewLocalKeyReleaseSigner(key, bc), chainID: chainID}
 	l.balances, _ = bc.(laneBalanceReader)
 	l.lookup, _ = bc.(laneTxLookup)
+	l.nonces, _ = bc.(laneNonceReader)
 	return l
 }
 

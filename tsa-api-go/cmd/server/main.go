@@ -376,6 +376,7 @@ func main() {
 	// legacy redeem. Dormant unless MCGP_SWAP_B_ADDRESS is set; the handler is
 	// nil in that case so its /api/mcgp routes are not registered.
 	var mcgpSwapHandler *handlers.MCGPSwapHandler
+	var relayerForProbe *services.RelayerService // re-probed for swap roles every minute
 	var itHandler *handlers.ITHandler
 	var itService *services.ITService // hoisted: the PM block wires automation onto it
 	mcgpSwapService := services.NewMCGPSwapService(sonicClient, cfg)
@@ -455,18 +456,18 @@ func main() {
 				if keyLane := blockchainService.Signers().Lane("relayer", key, sonicClient); keyLane == nil {
 					log.Printf("[config] gasless dormant: no Sonic chain id for the relayer's key lane")
 				} else if relayer := buildRelayer(cfg, keyLane, sonicClient); relayer != nil {
+					// Wired either way; it relays only while its key holds no swap
+					// role — checked now and every minute (relayer-role-probe), so a
+					// failed read takes only gasless down, never the API.
 					roleCtx, roleCancel := context.WithTimeout(context.Background(), 10*time.Second)
-					serr := relayer.AssertRoleSeparation(roleCtx, services.SwapRoleReader{Swap: mcgpSwapService})
-					roleCancel()
-					if serr != nil {
-						// A relayer that holds (or may hold) a swap role is never
-						// run — but it takes only gasless relaying down, not the API.
-						log.Printf("[config] ALERT relayer_role_check_failed=1 relayer=%s err=%s — gasless dormant; the app self-pays",
+					if serr := relayer.ProbeRoles(roleCtx, services.SwapRoleReader{Swap: mcgpSwapService}); serr != nil {
+						log.Printf("[config] ALERT relayer_role_check_failed=1 relayer=%s err=%s — gasless dormant until the role check passes (re-probed every 60 s)",
 							keyLane.Address(), services.RedactAlertText(serr.Error()))
-					} else {
-						mcgpSwapHandler = mcgpSwapHandler.WithRelayer(relayer, cfg.MCGPSwapBAddress)
-						log.Printf("[config] gasless relaying enabled; forwarder=%s relayer=%s", cfg.MCGPForwarderAddress, keyLane.Address())
 					}
+					roleCancel()
+					relayerForProbe = relayer
+					mcgpSwapHandler = mcgpSwapHandler.WithRelayer(relayer, cfg.MCGPSwapBAddress)
+					log.Printf("[config] gasless relaying wired; forwarder=%s relayer=%s live=%t", cfg.MCGPForwarderAddress, keyLane.Address(), relayer.IsEnabled())
 				}
 			}
 		} else {
@@ -547,6 +548,9 @@ func main() {
 	scheduler := jobs.NewScheduler()
 	if mcgpSwapService.OperatorConfigured() {
 		scheduler.Register(operatorRoleProbe{swap: mcgpSwapService}, jobs.AlertOnFailureStreak())
+	}
+	if relayerForProbe != nil {
+		scheduler.Register(relayerRoleProbe{relayer: relayerForProbe, roles: services.SwapRoleReader{Swap: mcgpSwapService}}, jobs.AlertOnFailureStreak())
 	}
 	// Cancelled at shutdown. Background work started outside the scheduler (an
 	// on-demand inbound check) derives from it so it stops with everything else.

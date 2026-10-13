@@ -738,6 +738,8 @@ func errIfOutOfGas(err error) error {
 // function, so reserving after it would let both ticks broadcast; reserving
 // before it means the loser never even asks for a route.
 func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane) error {
+	// An owed send: it spends the treasury lane reservation held for it (pre-check and send alike).
+	ctx = ReservedSend(ctx)
 	// order.TokenAmount is a plain human-readable decimal string (Paycrest's
 	// own order.Amount, exactly as CreateBuy writes it and the app renders
 	// it) — never base units. It must be read with the SOURCE token's own
@@ -1317,6 +1319,8 @@ func (o *ConversionOrchestrator) settleOrTopUp(ctx context.Context, order *model
 // No cap check: a top-up completes an order the treasury is already exposed to.
 // It creates no new exposure, and refusing it would leave the user short.
 func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *models.PaycrestOrderRecord, dst *conversionDestination, shortfall *big.Int) error {
+	// An owed send: it spends the treasury lane reservation held for it (pre-check and send alike).
+	ctx = ReservedSend(ctx)
 	// The treasury holds no float in an arbitrary token, so there is nothing
 	// to pay a gap in. settleOrTopUp already parks a short non-stable landing
 	// before it gets here; this is the same refusal stated where the money
@@ -1480,6 +1484,8 @@ func (o *ConversionOrchestrator) observeRefund(ctx context.Context, order *model
 //
 // No cap check: a refund returns money the treasury already holds.
 func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane, fault string) error {
+	// An owed send: it spends the treasury lane reservation held for it (pre-check and send alike).
+	ctx = ReservedSend(ctx)
 	// order.TokenAmount is a plain human-readable decimal string (see
 	// startBridge's own doc comment) — never base units.
 	srcDecimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress(order.Token))
@@ -2273,6 +2279,8 @@ func (o *ConversionOrchestrator) OwedToUser(ctx context.Context, order *models.P
 // supplies only adminID (for the audit log) and orderID — never an amount, a
 // token or an address.
 func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID, orderID uuid.UUID) (*models.RampLeg, error) {
+	// An owed send: it spends the treasury lane reservation held for it (pre-check and send alike).
+	ctx = ReservedSend(ctx)
 	if o == nil || o.db == nil {
 		return nil, ErrSponsorNotAvailable
 	}

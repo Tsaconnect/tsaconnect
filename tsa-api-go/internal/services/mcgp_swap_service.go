@@ -94,20 +94,6 @@ func NewMCGPSwapService(client *blockchain.EVMClient, cfg *config.Config) *MCGPS
 	return svc
 }
 
-// SetOperatorSigner wires the operator EOA signer used for the IT/NGN path
-// (creditPremium/debitPremium/settleDebit/reverseDebit). The backend signs and
-// broadcasts these directly (they are NOT app-signed). Must be an `operators[]`
-// member on-chain. nil ⇒ IT operator ops disabled.
-//
-// The signer gets a lane of its own; boot uses SetOperatorLane instead, so the
-// operator shares its key's lane with every other role on that key.
-func (s *MCGPSwapService) SetOperatorSigner(signer ReleaseSigner) {
-	s.operator, s.operatorLane = signer, nil
-	if signer != nil {
-		s.operatorLane = soloLane(signer, nil)
-	}
-	s.operatorVerified.Store(signer != nil) // a directly-wired signer is trusted (tests)
-}
 
 // SetOperatorLane wires the operator EOA through its key's shared KeyLane
 // (SignerRegistry). nil ⇒ IT operator ops disabled.

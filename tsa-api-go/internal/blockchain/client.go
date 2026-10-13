@@ -115,6 +115,26 @@ func (c *EVMClient) GetBalance(address string) (*big.Int, error) {
 	return balance, nil
 }
 
+// NativeBalance is GetBalance bounded by the caller's ctx (a key lane's fee
+// gate reads it before taking its lock).
+func (c *EVMClient) NativeBalance(ctx context.Context, address string) (*big.Int, error) {
+	balance, err := c.Client.BalanceAt(ctx, common.HexToAddress(address), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance for %s: %w", address, err)
+	}
+	return balance, nil
+}
+
+// LatestNonce is the address's nonce at the latest MINED block — never the
+// pending view a load-balanced RPC may lag on.
+func (c *EVMClient) LatestNonce(ctx context.Context, address string) (uint64, error) {
+	n, err := c.Client.NonceAt(ctx, common.HexToAddress(address), nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get mined nonce for %s: %w", address, err)
+	}
+	return n, nil
+}
+
 // GetNonce returns the next nonce for the given address.
 func (c *EVMClient) GetNonce(address string) (uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -22,6 +22,7 @@ type laneNode struct {
 	id     int64
 	err    error
 	nonces []uint64
+	raws   [][]byte // every signed payload handed to the node, in order
 }
 
 func (n *laneNode) ChainID() *big.Int { return big.NewInt(n.id) }
@@ -33,6 +34,7 @@ func (n *laneNode) SendRawTransaction(raw []byte) (string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.nonces = append(n.nonces, tx.Nonce())
+	n.raws = append(n.raws, append([]byte(nil), raw...))
 	if n.err != nil {
 		return "", fmt.Errorf("failed to send transaction: %w", n.err)
 	}
@@ -151,21 +153,6 @@ func TestKeyLane_UncertainBroadcastKeepsTheFloor(t *testing.T) {
 	}
 	if got := node.sent(); got[len(got)-1] != 4 {
 		t.Fatalf("nonces %v, want 4 after an uncertain 3", got)
-	}
-}
-
-func TestKeyLane_FloorExpiresAfterTTL(t *testing.T) {
-	key, _ := crypto.GenerateKey()
-	node := &laneNode{id: 56}
-	lane := NewSignerRegistry().Lane("r", key, node)
-	now := time.Unix(1_700_000_000, 0)
-	lane.now = func() time.Time { return now }
-	build := func() ([]byte, error) { return unsignedOn(56, 3) }
-	_, _, _ = lane.Send(context.Background(), build)
-	now = now.Add(keyLaneNonceFloorTTL + time.Second)
-	_, _, _ = lane.Send(context.Background(), build)
-	if got := node.sent(); len(got) != 2 || got[1] != 3 {
-		t.Fatalf("nonces %v, want the chain's 3 again once the floor expired", got)
 	}
 }
 

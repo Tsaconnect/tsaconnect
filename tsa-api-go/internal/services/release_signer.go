@@ -52,13 +52,24 @@ func (s *LocalKeyReleaseSigner) Address() string {
 }
 
 func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx []byte) (string, error) {
+	raw, hash, err := s.signRaw(unsignedTx)
+	if err != nil {
+		return "", err
+	}
+	return s.broadcastRaw(raw, hash)
+}
+
+// signRaw signs the JSON-encoded blockchain.UnsignedTx and returns the signed
+// RLP and its hash — what a KeyLane keeps so a dropped transaction can be
+// re-broadcast byte for byte (never re-signed at the same nonce).
+func (s *LocalKeyReleaseSigner) signRaw(unsignedTx []byte) ([]byte, string, error) {
 	var u blockchain.UnsignedTx
 	if err := json.Unmarshal(unsignedTx, &u); err != nil {
-		return "", notBroadcast(fmt.Errorf("decode unsigned tx: %w", err))
+		return nil, "", notBroadcast(fmt.Errorf("decode unsigned tx: %w", err))
 	}
 	gasPrice, ok := new(big.Int).SetString(u.GasPrice, 10)
 	if !ok {
-		return "", notBroadcast(fmt.Errorf("bad gasPrice %q", u.GasPrice))
+		return nil, "", notBroadcast(fmt.Errorf("bad gasPrice %q", u.GasPrice))
 	}
 	value, ok := new(big.Int).SetString(u.Value, 10)
 	if !ok {
@@ -70,7 +81,7 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 	}
 	data, err := hexutil.Decode("0x" + u.Data)
 	if err != nil {
-		return "", notBroadcast(fmt.Errorf("decode call data: %w", err))
+		return nil, "", notBroadcast(fmt.Errorf("decode call data: %w", err))
 	}
 	to := common.HexToAddress(u.To)
 	tx := types.NewTx(&types.LegacyTx{
@@ -83,20 +94,27 @@ func (s *LocalKeyReleaseSigner) SignAndBroadcast(ctx context.Context, unsignedTx
 	})
 	signed, err := types.SignTx(tx, types.NewEIP155Signer(chainID), s.key)
 	if err != nil {
-		return "", notBroadcast(fmt.Errorf("sign tx: %w", err))
+		return nil, "", notBroadcast(fmt.Errorf("sign tx: %w", err))
 	}
 	raw, err := rlp.EncodeToBytes(signed)
 	if err != nil {
-		return "", notBroadcast(fmt.Errorf("rlp encode: %w", err))
+		return nil, "", notBroadcast(fmt.Errorf("rlp encode: %w", err))
 	}
-	hash, err := s.bc.SendRawTransaction(raw)
+	return raw, signed.Hash().Hex(), nil
+}
+
+// broadcastRaw sends a signed transaction and classifies a failure: a
+// definite refusal is ErrTxNotBroadcast, anything else is uncertain and
+// carries the hash.
+func (s *LocalKeyReleaseSigner) broadcastRaw(raw []byte, hash string) (string, error) {
+	got, err := s.bc.SendRawTransaction(raw)
 	if err != nil && rejectedDefinitely(err) {
 		return "", notBroadcast(err)
 	}
 	if err != nil {
-		return "", broadcastUncertainError{err: err, txHash: signed.Hash().Hex()}
+		return "", broadcastUncertainError{err: err, txHash: hash}
 	}
-	return hash, nil
+	return got, nil
 }
 
 // rejectedDefinitely reports a node refusing a transaction before it could

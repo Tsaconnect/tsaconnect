@@ -197,6 +197,8 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 
 // sendSale starts the desk's delivery of one order, at most once per order.
 func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UUID) error {
+	// An owed send: it spends the treasury lane reservation held for it (pre-check and send alike).
+	ctx = ReservedSend(ctx)
 	intent, err := s.saleIntent(ctx, sd, intentID)
 	if err != nil {
 		return err

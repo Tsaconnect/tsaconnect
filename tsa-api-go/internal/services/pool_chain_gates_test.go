@@ -220,12 +220,12 @@ func TestPoolGates_ReleaseGasIsALiveFeeCheckNotTheFloor(t *testing.T) {
 	c.balance = big.NewInt(5e15) // below the 0.01 floor
 	g := NewPoolChainGates(healthyGates(c))
 	// 0.005 BNB at 1 gwei pays 4 releases (4 × 300k × 1 gwei × 2 = 0.0024).
-	if !g.ReleaseGasOK(context.Background(), 4) {
+	if !g.ReleaseGasOK(context.Background(), 4, false) {
 		t.Fatal("below the floor but able to pay its releases: the pool must stay open")
 	}
 	c.gasPrice = big.NewInt(5e9)           // 4 × 300k × 5 gwei × 2 = 0.012 > 0.005
 	g = NewPoolChainGates(healthyGates(c)) // a fresh reading (they are reused for a few seconds)
-	if g.ReleaseGasOK(context.Background(), 4) {
+	if g.ReleaseGasOK(context.Background(), 4, false) {
 		t.Fatal("a key that cannot pay this order's releases must refuse the open")
 	}
 	fl, err := g.FloatBalances(context.Background())
@@ -242,7 +242,7 @@ func TestPoolGates_MissingChainOrTokensFailsClosed(t *testing.T) {
 	if st := NewPoolChainGates(cfg).Check(context.Background()); len(st.Failures) != 1 {
 		t.Fatalf("no client must close at once, not run the chain gates: %v", st.Failures)
 	}
-	if g := NewPoolChainGates(cfg); g.ReleaseGasOK(context.Background(), 1) {
+	if g := NewPoolChainGates(cfg); g.ReleaseGasOK(context.Background(), 1, false) {
 		t.Fatal("no chain client: release gas must not read as OK")
 	}
 
@@ -276,7 +276,7 @@ func TestPoolGates_NilReceiverReadsClosed(t *testing.T) {
 		}
 		gate.Close("fee snapshot")
 		gate.ReprobeReceipts(ctx)
-		if gate.Enabled() || gate.ReleaseGasOK(ctx, 1) {
+		if gate.Enabled() || gate.ReleaseGasOK(ctx, 1, false) {
 			t.Fatalf("%s: release float must read as off", name)
 		}
 		if fl, err := gate.FloatBalances(ctx); err == nil || fl != nil {

@@ -150,24 +150,33 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
   OPERATOR = `PM_RELEASE_PRIVATE_KEY`: PM/pool releases and cancels, and the IT operator and gas
   sponsor whenever their own var is unset (`roleKey`, resolved where each signer is built — the operator secret is never copied into the role's config field; raw-key ALERTs name the var actually used, e.g. `key=PM_RELEASE_PRIVATE_KEY role=gas_sponsor`; boot lines `[signer] role=… signs
   with the operator` / `[signer] DEPRECATED role=…`). RELAYER = `RELAYER_PRIVATE_KEY`, its own key:
-  never falls back (unset = gasless dormant), and boot refuses it equal to any other key; a relayer
-  that is the swap's owner, operator or guardian (or whose role read fails) leaves gasless dormant
-  with `ALERT relayer_role_check_failed=1`, never stops the API. TREASURY = `RAMP_TREASURY_PRIVATE_KEY`.
+  never falls back (unset = gasless dormant), and boot refuses it equal to any other key; it relays
+  only while its key reads clean of swap owner/operator/guardian — at boot and on the 60 s
+  `relayer-role-probe` job (failure-streak alerted, `ALERT relayer_role_check_failed=1`); a failed
+  check takes only gasless down, never the API. TREASURY = `RAMP_TREASURY_PRIVATE_KEY`.
   `assertDistinctKey` is class-based: only operator roles may share a key; the company wallet must
   differ from all of them.
 - **KeyLane** (`services/release_signer_lanes.go`): every signing path takes its lane from the one
   `SignerRegistry` (`BlockchainService.Signers()`), keyed by (address, chain id); boot prints
-  `[signer] operator=… roles=… lanes=[…]`. A lane holds the nonce lock, a nonce floor (aged from
-  each send; when the chain's pending nonce sits at a transaction we sent more than 15 s ago and the
-  node does not have it, the lane reuses that nonce — `ALERT key_lane_nonce_gap_recovered_total`),
-  and the ONE fee gate: the prepared tx's gas limit × gas price × `gasFeeBuffer` (2) + value + the
-  lane's reservations, failing closed when unpriceable or unreadable (`ALERT key_lane_cannot_pay_total`,
-  `ErrRelayerUnderfunded`). Reservations (`AddReservation`, `services.LaneCommitments`, counted from
-  the DB and cached 5 s) keep back what in-flight work is owed: the pool release key keeps the live
-  slices' release/cancel/resolve calls; the pool treasury lane its pool orders' deliveries; each
-  conversion lane its converting orders' routes; each company-wallet lane its paid, undelivered sales.
-  The owed sends themselves run as `services.ReservedSend(ctx)`. Lanes are built only in that file
-  (lint `TestKeyLanes_OnlyFromTheRegistry`); `SignAndBroadcast` on any signer outside
+  `[signer] operator=… roles=… lanes=[…]`. A lane holds the nonce lock, a nonce floor that only
+  rises, and the signed bytes of every tx it sent until the chain's MINED nonce passes it. **A nonce
+  is never signed twice:** when the pending nonce sits below the floor at a tx we sent >15 s ago and
+  the node lacks it, the lane re-broadcasts the exact stored bytes (`ALERT
+  key_lane_nonce_gap_rebroadcast_total`); with no bytes (a restart) it HOLDS the lane — every send on
+  that key and chain refused, `ALERT key_lane_nonce_gap_held_total` — until the mined nonce passes the
+  gap or an operator calls `KeyLane.ClearHold` (no admin route yet); a lookup error never reuses
+  (`key_lane_gap_unverified_total`). The lane is also the ONE fee gate: the prepared tx's gas limit ×
+  gas price × `gasFeeBuffer` (2) + value + the lane's reservations, with balance and reservations read
+  on the caller's ctx BEFORE the lock, failing closed (`ALERT key_lane_cannot_pay_total`,
+  `ErrRelayerUnderfunded`). Reservations (`AddReservation`, `services.LaneCommitments`: DB-counted
+  gas units, cached 5 s, fresh on opens, a newer count never overwritten by an older read) keep back
+  what in-flight work is owed: the pool release key its live slices' release/cancel/resolve calls; the
+  pool treasury lane its pool orders' deliveries; each conversion lane its converting routes; each
+  company-wallet lane its paid, undelivered sales. Only owed call sites run as
+  `services.ReservedSend(ctx)` (slice release/cancel/resolve, `sendSale`, `startBridge`,
+  `deliverShortfall`, `refund`, `RefundFromTreasury`); any other treasury transfer respects the
+  reservation. Lanes are built only in `release_signer_lanes*.go` (lint `TestKeyLanes_OnlyFromTheRegistry`
+  over the whole AST; `SetOperatorSigner` is tests-only); `SignAndBroadcast` on any signer outside
   `release_signer*.go` fails `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
   `MCGPSwapService.signMu` is only the operator SEQUENCE lock (held across receipt waits).
 - **IT operator role is verified, not assumed.** The IT key is wired but dormant (`HasOperator` false,
@@ -179,8 +188,9 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
   `RELAYER_BALANCE_FLOOR_WEI`, the pool `releaseGasFloorWei` and `RAMP_TREASURY_NATIVE_FLOOR_WEI_*`
   only raise `*_underfunded_total` / float-monitor ALERTs; the lane fee gate decides. A pool open
   asks whether the release key can pay every slice call already owed plus this order's `SliceCap`
-  (`ITService.poolReleaseGasOK`, fresh count on an open; quotes reuse a 5 s count and a 5 s
-  balance/price reading, falling back to one up to 30 s old on a failed read).
+  (`ITService.poolReleaseGasOK`). Opens read the count, balance and gas price fresh (also
+  `Treasury.CanPayForGasFresh`); quotes reuse a 5 s count and a 5 s balance/price reading, falling
+  back to one up to 30 s old on a failed read.
 - **Rollout order matters.** As of 2026-09, production runs with `ENV` not exactly
   `"production"` — that is what currently keeps IT/bills/gasless/ramp-sponsorship alive with
   their raw keys. Flipping `ENV=production` alone would silently take all of them dormant.

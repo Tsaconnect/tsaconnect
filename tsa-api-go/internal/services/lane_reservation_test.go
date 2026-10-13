@@ -12,27 +12,49 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// gatedNode is a lane broadcaster with a balance and, optionally, a
-// transaction lookup — what *blockchain.EVMClient gives a registry lane.
+// gatedNode is a lane broadcaster with a balance — what *blockchain.EVMClient
+// gives a registry lane. hang, when set, makes the first balance read block
+// until its ctx ends.
 type gatedNode struct {
 	*laneNode
 	mu      sync.Mutex
 	balance *big.Int
-	known   map[string]bool // nil: no lookup
+	known   map[string]bool
+	lookErr error
+	hang    chan struct{}
 }
 
-func (n *gatedNode) GetBalance(string) (*big.Int, error) {
+func (n *gatedNode) NativeBalance(ctx context.Context, _ string) (*big.Int, error) {
+	n.mu.Lock()
+	hang := n.hang
+	n.hang = nil
+	n.mu.Unlock()
+	if hang != nil {
+		close(hang)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return new(big.Int).Set(n.balance), nil
 }
 
+// lookupNode adds eth_getTransactionByHash.
 type lookupNode struct{ *gatedNode }
 
 func (n lookupNode) TransactionKnown(_ context.Context, hash string) (bool, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.lookErr != nil {
+		return false, n.lookErr
+	}
 	return n.known[strings.ToLower(hash)], nil
+}
+
+func (n *gatedNode) markKnown(hash string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.known[strings.ToLower(hash)] = true
 }
 
 // pricedOn is a priced legacy tx (21k gas at 1 gwei, so its buffered fee is
@@ -45,63 +67,149 @@ func pricedOn(chain int64, nonce uint64, value int64) func() ([]byte, error) {
 	}
 }
 
-// Review item 1: an uncertain broadcast that never reached the node leaves a
-// hole at its nonce. Steady sends from another role keep the floor busy, but
-// the floor is aged from the hole's own send: once keyLaneGapGrace has passed
-// and the node says it does not have that transaction, the next send reuses
-// the nonce and the queue behind it can mine.
-func TestKeyLane_UncertainBroadcastThatNeverLandedIsRecoveredWithinTheGrace(t *testing.T) {
+func lookupLane(t *testing.T) (*KeyLane, *gatedNode, *time.Time) {
+	t.Helper()
 	key, _ := crypto.GenerateKey()
 	node := &gatedNode{laneNode: &laneNode{id: 146}, balance: big.NewInt(1e18), known: map[string]bool{}}
-	reg := NewSignerRegistry()
-	release := reg.Lane("pm_release", key, lookupNode{node})
-	sponsor := reg.Lane("gas_sponsor", key, lookupNode{node})
+	lane := NewSignerRegistry().Lane("pm_release", key, lookupNode{node})
 	clock := time.Unix(1_700_000_000, 0)
-	release.now = func() time.Time { return clock }
+	lane.now = func() time.Time { return clock }
+	return lane, node, &clock
+}
 
-	node.laneNode.err = errors.New("context deadline exceeded") // never reached the node
-	if _, attempted, _ := release.Send(context.Background(), pricedOn(146, 5, 0)); !attempted {
+// Re-review: tx 5 was dropped (never reached the node) while 6 and 7 queue
+// behind it. Once the grace has passed and the node says it lacks 5, the lane
+// RE-BROADCASTS 5's exact signed bytes — 6 and 7 are untouched, and no other
+// transaction is ever signed at 5.
+func TestKeyLane_DroppedTxIsRebroadcastIdenticallyNeverResigned(t *testing.T) {
+	lane, node, clock := lookupLane(t)
+	ctx := context.Background()
+	node.laneNode.err = errors.New("context deadline exceeded") // 5 never reached the node
+	if _, attempted, _ := lane.Send(ctx, pricedOn(146, 5, 0)); !attempted {
 		t.Fatal("a timeout is an uncertain broadcast")
 	}
+	raw5 := append([]byte(nil), node.raws[0]...)
 	node.laneNode.err = nil
-	recovered := false
-	for i := 1; i <= 12; i++ { // a send every 2 s from another role; the RPC still says 5
-		clock = clock.Add(2 * time.Second)
-		if _, _, err := sponsor.Send(context.Background(), pricedOn(146, 5, 0)); err != nil {
+	for i := 0; i < 2; i++ { // 6 and 7, the RPC still reporting 5
+		h, _, err := lane.Send(ctx, pricedOn(146, 5, 0))
+		if err != nil {
 			t.Fatal(err)
 		}
-		if got := node.sent(); got[len(got)-1] == 5 {
-			recovered = true
-			if elapsed := time.Duration(i) * 2 * time.Second; elapsed > keyLaneGapGrace+2*time.Second {
-				t.Fatalf("recovered after %v, want within the %v grace", elapsed, keyLaneGapGrace)
-			}
-			break
-		}
+		node.markKnown(h)
 	}
-	if !recovered {
-		t.Fatalf("nonces %v: the hole at 5 was never refilled", node.sent())
+	*clock = clock.Add(keyLaneGapGrace + time.Second)
+	if _, _, err := lane.Send(ctx, pricedOn(146, 5, 0)); err != nil {
+		t.Fatal(err)
+	}
+	got := node.sent()
+	// 5, 6, 7, then the re-broadcast of 5, then the new send at 8.
+	if len(got) != 5 || got[0] != 5 || got[1] != 6 || got[2] != 7 || got[3] != 5 || got[4] != 8 {
+		t.Fatalf("nonces %v, want 5 6 7 then 5 re-broadcast and the new send at 8", got)
+	}
+	if string(node.raws[3]) != string(raw5) {
+		t.Fatal("the re-broadcast must be the exact bytes first signed at 5")
 	}
 }
 
-// The node HAS the floor-defining transaction (it is only slow to count it):
-// the floor holds past the grace.
-func TestKeyLane_FloorHoldsWhileTheNodeKnowsTheTransaction(t *testing.T) {
-	key, _ := crypto.GenerateKey()
-	node := &gatedNode{laneNode: &laneNode{id: 146}, balance: big.NewInt(1e18), known: map[string]bool{}}
-	lane := NewSignerRegistry().Lane("r", key, lookupNode{node})
+// A signer that cannot hand over its bytes (here a fake; in production a
+// record lost to a restart): the lane holds and alerts, never reusing 5, and
+// an operator's ClearHold lets it go on at the floor.
+func TestKeyLane_MissingBytesHoldsTheLaneNoReuse(t *testing.T) {
+	var log []string
 	clock := time.Unix(1_700_000_000, 0)
+	lane := soloLane(&orderSigner{log: &log, addr: sponsorTestSigner}, nil)
 	lane.now = func() time.Time { return clock }
-	hash, _, err := lane.Send(context.Background(), pricedOn(146, 5, 0))
-	if err != nil {
+	ctx := context.Background()
+	build := func() ([]byte, error) { u, _ := unsignedOn(0, 5); return u, nil }
+	if _, _, err := lane.Send(ctx, build); err != nil {
 		t.Fatal(err)
 	}
-	node.known[strings.ToLower(hash)] = true
 	clock = clock.Add(keyLaneGapGrace + time.Second)
-	if _, _, err := lane.Send(context.Background(), pricedOn(146, 5, 0)); err != nil {
+	if _, attempted, err := lane.Send(ctx, build); !errors.Is(err, ErrKeyLaneHeld) || attempted {
+		t.Fatalf("attempted=%v err=%v, want the lane held", attempted, err)
+	}
+	if _, _, err := lane.Send(ctx, build); !errors.Is(err, ErrKeyLaneHeld) {
+		t.Fatalf("still held: err=%v", err)
+	}
+	if len(log) != 1 {
+		t.Fatalf("broadcasts = %d, want only the first", len(log))
+	}
+	lane.ClearHold()
+	var pinned uint64
+	if _, _, err := lane.SendRecorded(ctx, build, func(n uint64) error { pinned = n; return nil }); err != nil || pinned != 6 {
+		t.Fatalf("after the hold: nonce %d err=%v, want 6 (never 5 again)", pinned, err)
+	}
+}
+
+// A lagging, load-balanced RPC reporting an old pending nonce after the lane
+// sat idle: its transactions are known, so the floor is unchanged and every
+// record kept.
+func TestKeyLane_LaggingRPCAfterIdleLeavesFloorAndRecords(t *testing.T) {
+	lane, node, clock := lookupLane(t)
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		h, _, err := lane.Send(ctx, pricedOn(146, 5, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		node.markKnown(h)
+	}
+	*clock = clock.Add(time.Minute)
+	if _, _, err := lane.Send(ctx, pricedOn(146, 5, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if got := node.sent(); got[1] != 6 {
-		t.Fatalf("nonces %v, want 6: the node holds 5", got)
+	if got := node.sent(); len(got) != 3 || got[2] != 7 {
+		t.Fatalf("nonces %v, want 5 6 7", got)
+	}
+	if len(lane.sent) != 3 {
+		t.Fatalf("records %d, want all 3 kept (no mined nonce has passed them)", len(lane.sent))
+	}
+}
+
+// The node's lookup answers 429: the lane cannot tell, so it neither reuses
+// nor re-broadcasts — the next send takes the floor.
+func TestKeyLane_LookupErrorNeverReuses(t *testing.T) {
+	lane, node, clock := lookupLane(t)
+	ctx := context.Background()
+	node.laneNode.err = errors.New("context deadline exceeded")
+	_, _, _ = lane.Send(ctx, pricedOn(146, 5, 0))
+	node.laneNode.err = nil
+	node.lookErr = errors.New("429 Too Many Requests")
+	*clock = clock.Add(keyLaneGapGrace + time.Second)
+	if _, _, err := lane.Send(ctx, pricedOn(146, 5, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := node.sent(); len(got) != 2 || got[1] != 6 {
+		t.Fatalf("nonces %v, want 5 then 6: no reuse, no re-broadcast", got)
+	}
+}
+
+// Re-review item 6: the fee gate reads the balance before taking the lane's
+// lock, on the caller's ctx — a hung balance read holds up only its own send.
+func TestKeyLane_HungBalanceReadDoesNotBlockAnotherRole(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	reg := NewSignerRegistry()
+	hang := make(chan struct{})
+	node := &gatedNode{laneNode: &laneNode{id: 56}, balance: big.NewInt(1e18), hang: hang}
+	release := reg.Lane("pm_release", key, node)
+	sponsor := reg.Lane("gas_sponsor", key, node)
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _, err := release.Send(ctx, pricedOn(56, 0, 0))
+		done <- err
+	}()
+	<-hang // the release's balance read is now stuck
+	start := time.Now()
+	if _, _, err := sponsor.Send(context.Background(), pricedOn(56, 0, 0)); err != nil {
+		t.Fatalf("the other role's send: %v", err)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("the other role waited %v behind a hung balance read", time.Since(start))
+	}
+	if err := <-done; err == nil || !errors.Is(err, ErrTxNotBroadcast) {
+		t.Fatalf("the hung send: err=%v, want refused (not broadcast) when its ctx ends", err)
 	}
 }
 
@@ -115,8 +223,8 @@ func TestKeyLane_TopUpRefusedUnderThePoolReservationReleaseStillGoes(t *testing.
 	release := NewChainReleaseSigner(reg, key, map[int64]ReleaseBroadcaster{56: node})
 	kl := reg.Lane("gas_sponsor", key, node)
 	owedSlices := uint64(1)
-	kl.AddReservation("pool_releases", func(_ context.Context, price *big.Int) (*big.Int, error) {
-		return feeNeed(owedSlices*poolReleaseCallGas, price, nil), nil // 1 × 300k × 1 gwei × 2 = 6e14
+	kl.AddReservation("pool_releases", func(context.Context) (uint64, error) {
+		return owedSlices * poolReleaseCallGas, nil // priced at the send: 1 × 300k × 1 gwei × 2 = 6e14
 	})
 	// A 5e14 top-up: 5e14 + 4.2e13 fee alone fits 1e15; with the 6e14 kept back it does not.
 	if _, attempted, err := kl.Send(context.Background(), pricedOn(56, 0, 5e14)); !errors.Is(err, ErrRelayerUnderfunded) || attempted {
@@ -130,7 +238,7 @@ func TestKeyLane_TopUpRefusedUnderThePoolReservationReleaseStillGoes(t *testing.
 		t.Fatalf("a top-up above the reservation: %v", err)
 	}
 	// An unreadable reservation fails closed.
-	kl.AddReservation("pool_releases", func(context.Context, *big.Int) (*big.Int, error) { return nil, errors.New("db down") })
+	kl.AddReservation("pool_releases", func(context.Context) (uint64, error) { return 0, errors.New("db down") })
 	if _, attempted, err := kl.Send(context.Background(), pricedOn(56, 2, 1)); err == nil || attempted {
 		t.Fatalf("an unreadable reservation must refuse: attempted=%v err=%v", attempted, err)
 	}
@@ -174,11 +282,16 @@ func TestPoolOpen_TreasuryKeepsBackWhatEarlierOrdersAreOwed(t *testing.T) {
 	if _, _, err := r.open(t, "5000"); !errors.Is(err, ErrPoolClosed) || !strings.Contains(err.Error(), "treasury cannot pay") {
 		t.Fatalf("second open with the first's delivery owed = %v, want ErrPoolClosed (treasury cannot pay)", err)
 	}
-	// The owed delivery itself spends its reservation: a balance covering its
-	// own fee, but not fee + reservation, still sends it.
+	// The owed delivery itself (an owed call site marks ReservedSend) spends
+	// its reservation: a balance covering its own fee, but not fee +
+	// reservation, still sends it — and the same transfer from a call site
+	// that is NOT owed (a name-change refund) is refused by the reservation.
 	sc.balances[strings.ToLower(lane.Signer.Address())] = feeNeed(treasuryERC20Gas, price, nil)
 	lane.Signer = &fakeRelaySigner{addr: lane.Signer.Address(), txHash: "0xdelivered"} // the rig's chain only signs escrow calls
-	if _, _, err := tr.TransferToken(context.Background(), lane, "USDT", treasuryTestRecipient, big.NewInt(1)); err != nil {
+	if _, _, err := tr.TransferToken(context.Background(), lane, "USDT", treasuryTestRecipient, big.NewInt(1)); !errors.Is(err, ErrRelayerUnderfunded) {
+		t.Fatalf("a non-owed transfer under the reservation = %v, want refused", err)
+	}
+	if _, _, err := tr.TransferToken(ReservedSend(context.Background()), lane, "USDT", treasuryTestRecipient, big.NewInt(1)); err != nil {
 		t.Fatalf("the owed delivery must go: %v", err)
 	}
 }
@@ -188,23 +301,49 @@ func TestPoolOpen_TreasuryKeepsBackWhatEarlierOrdersAreOwed(t *testing.T) {
 func TestPoolGates_ReleaseGasReadingIsReusedAndStaleOnError(t *testing.T) {
 	c := healthyPoolChain()
 	g := NewPoolChainGates(healthyGates(c))
-	if !g.ReleaseGasOK(context.Background(), 1) {
+	if !g.ReleaseGasOK(context.Background(), 1, false) {
 		t.Fatal("setup")
 	}
 	c.balanceErr = errors.New("429 Too Many Requests")
-	if !g.ReleaseGasOK(context.Background(), 1) {
+	if !g.ReleaseGasOK(context.Background(), 1, false) {
 		t.Fatal("a fresh reading must be reused")
 	}
 	g.gasMu.Lock()
 	g.gasRead.at = g.gasRead.at.Add(-10 * time.Second) // past fresh, inside stale
 	g.gasMu.Unlock()
-	if !g.ReleaseGasOK(context.Background(), 1) {
+	if !g.ReleaseGasOK(context.Background(), 1, false) {
 		t.Fatal("a failed read must fall back to a recent reading")
 	}
 	g.gasMu.Lock()
 	g.gasRead.at = g.gasRead.at.Add(-time.Minute)
 	g.gasMu.Unlock()
-	if g.ReleaseGasOK(context.Background(), 1) {
+	if g.ReleaseGasOK(context.Background(), 1, false) {
 		t.Fatal("no recent reading and a failed read must close")
+	}
+}
+
+// Re-review item 1: a lane funded for exactly N owed deliveries sends all N
+// when each is an owed send (its call site marks ReservedSend for both the
+// pre-check and the send); the reservation would refuse the first otherwise.
+func TestTreasury_ExactlyFundedForNOwedDeliveriesSendsAllN(t *testing.T) {
+	tr, lane, _, signer := newTestTreasuryWithFakes(t)
+	const n = 3
+	lane.KeyLane.AddReservation("owed", func(context.Context) (uint64, error) { return n * treasuryERC20Gas, nil })
+	price := big.NewInt(1_000_000_000)
+	per := feeNeed(treasuryERC20Gas, price, nil)
+	bal := new(big.Int).Mul(per, big.NewInt(n))
+	for i := 0; i < n; i++ {
+		withTreasuryBalance(lane, bal)
+		if _, _, err := tr.TransferToken(ReservedSend(context.Background()), lane, "USDC", treasuryTestRecipient, big.NewInt(1)); err != nil {
+			t.Fatalf("owed delivery %d: %v", i+1, err)
+		}
+		bal.Sub(bal, per)
+	}
+	if signer.calls() != n {
+		t.Fatalf("broadcasts = %d, want %d", signer.calls(), n)
+	}
+	withTreasuryBalance(lane, new(big.Int).Mul(per, big.NewInt(n)))
+	if _, _, err := tr.TransferToken(context.Background(), lane, "USDC", treasuryTestRecipient, big.NewInt(1)); !errors.Is(err, ErrRelayerUnderfunded) {
+		t.Fatalf("a non-owed transfer must respect the reservation: %v", err)
 	}
 }

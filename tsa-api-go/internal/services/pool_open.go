@@ -177,7 +177,7 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 		log.Printf("[liquidity] ALERT liquidity_pool_treasury_commitments_unreadable_total=1 err=%s", RedactAlertText(err.Error()))
 		return nil, nil, fmt.Errorf("%w: the treasury's commitments cannot be read", ErrPoolClosed)
 	}
-	if !d.c.Treasury.CanPayForGas(ctx, d.ChainKey(), treasuryEscrowCallGas*uint64(p.Settings.SliceCap+1)) {
+	if !d.c.Treasury.CanPayForGasFresh(ctx, d.ChainKey(), treasuryEscrowCallGas*uint64(p.Settings.SliceCap+1)) {
 		return nil, nil, fmt.Errorf("%w: the treasury cannot pay to open slices", ErrPoolClosed)
 	}
 	if err := s.stableBuyPrechecks(ctx, userID, p.Quote, false); err != nil {

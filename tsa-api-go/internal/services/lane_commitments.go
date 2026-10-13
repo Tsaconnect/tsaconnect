@@ -3,67 +3,122 @@ package services
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
 
-// LaneCommitments is the gas a key lane already owes for work in flight,
-// counted from the database and cached briefly (single-flight) so a quote or
-// an open does not re-count on every call. Registered on the lane as a
-// reservation (KeyLane.AddReservation): every send but the owed ones
+// LaneCommitments is the gas (units) a key lane already owes for work in
+// flight, counted from the database and cached briefly so a quote does not
+// re-count on every call. Registered on the lane as a reservation
+// (KeyLane.AddReservation(name, c.Units)): every send but the owed ones
 // themselves (ReservedSend) must leave enough for it. A count that cannot be
 // read is an error, never zero — callers fail closed.
+//
+// One read runs at a time per generation, on its own context (never the first
+// caller's, which may be cancelled for the others); each caller waits for it
+// on its own ctx. UnitsFresh starts a new generation, and a read only stores
+// its result when no newer generation has stored one, so a slow older read can
+// never overwrite a fresher count.
 type LaneCommitments struct {
 	name  string
 	count func(ctx context.Context) (uint64, error) // gas units owed
-	cache *cachedReader[uint64]
 	now   func() time.Time
+
+	mu        sync.Mutex
+	units     uint64
+	at        time.Time
+	storedGen uint64 // generation of the stored count
+	gen       uint64 // latest generation started
+	flight    *commitmentsRead
 }
 
-// laneCommitmentsTTL bounds how stale a count may be: a few seconds of lag is
-// covered by gasFeeBuffer; a failed count is not cached.
+type commitmentsRead struct {
+	gen   uint64
+	done  chan struct{}
+	units uint64
+	err   error
+}
+
+// laneCommitmentsTTL bounds how stale a quote's count may be; a failed count
+// is never cached.
 const laneCommitmentsTTL = 5 * time.Second
 
+// laneCommitmentsReadTimeout bounds one count, whoever waits for it.
+const laneCommitmentsReadTimeout = 10 * time.Second
+
 func newLaneCommitments(name string, count func(ctx context.Context) (uint64, error)) *LaneCommitments {
-	return &LaneCommitments{name: name, count: count, cache: newCachedReader[uint64](laneCommitmentsTTL, 0), now: time.Now}
+	return &LaneCommitments{name: name, count: count, now: time.Now}
 }
 
-// UnitsFresh is Units counted now — for an open, which must not pass on a
-// count that predates the order before it.
-func (c *LaneCommitments) UnitsFresh(ctx context.Context) (uint64, error) {
-	if c == nil {
-		return 0, nil
-	}
-	c.cache.Forget(c.name)
-	return c.Units(ctx)
-}
-
-// Units is the gas owed, from a reading younger than laneCommitmentsTTL.
+// Units is the gas owed, from a count younger than laneCommitmentsTTL. It is
+// a LaneReservation.
 func (c *LaneCommitments) Units(ctx context.Context) (uint64, error) {
 	if c == nil {
 		return 0, nil
 	}
-	return c.cache.Get(c.name, c.now(), func() (uint64, error) {
-		n, err := c.count(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("%s: %w", c.name, err)
-		}
-		c.cache.Put(c.name, c.now(), n, nil)
-		return n, nil
-	})
+	c.mu.Lock()
+	if !c.at.IsZero() && c.now().Sub(c.at) < laneCommitmentsTTL {
+		u := c.units
+		c.mu.Unlock()
+		return u, nil
+	}
+	r := c.flight
+	if r == nil {
+		r = c.startLocked()
+	}
+	c.mu.Unlock()
+	return c.wait(ctx, r)
 }
 
-// Reservation is Units priced at price with gasFeeBuffer: a LaneReservation.
-func (c *LaneCommitments) Reservation(ctx context.Context, price *big.Int) (*big.Int, error) {
-	units, err := c.Units(ctx)
-	if err != nil {
-		return nil, err
+// UnitsFresh counts now — for an open, which must not pass on a count that
+// predates the order before it.
+func (c *LaneCommitments) UnitsFresh(ctx context.Context) (uint64, error) {
+	if c == nil {
+		return 0, nil
 	}
-	return feeNeed(units, price, nil), nil
+	c.mu.Lock()
+	r := c.startLocked()
+	c.mu.Unlock()
+	return c.wait(ctx, r)
+}
+
+// startLocked starts a read of a new generation. Caller holds mu.
+func (c *LaneCommitments) startLocked() *commitmentsRead {
+	c.gen++
+	r := &commitmentsRead{gen: c.gen, done: make(chan struct{})}
+	c.flight = r
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), laneCommitmentsReadTimeout)
+		defer cancel()
+		n, err := c.count(ctx)
+		c.mu.Lock()
+		if err == nil && r.gen > c.storedGen {
+			c.units, c.at, c.storedGen = n, c.now(), r.gen
+		}
+		if c.flight == r {
+			c.flight = nil
+		}
+		c.mu.Unlock()
+		if err != nil {
+			err = fmt.Errorf("%s: %w", c.name, err)
+		}
+		r.units, r.err = n, err
+		close(r.done)
+	}()
+	return r
+}
+
+func (c *LaneCommitments) wait(ctx context.Context, r *commitmentsRead) (uint64, error) {
+	select {
+	case <-r.done:
+		return r.units, r.err
+	case <-ctx.Done():
+		return 0, fmt.Errorf("%s: %w", c.name, ctx.Err())
+	}
 }
 
 // NewPoolReleaseCommitments counts the release-key calls the pool chain's live

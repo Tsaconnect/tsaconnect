@@ -76,7 +76,7 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	// (their route + approve), so a new open or send never spends it.
 	for chain, lane := range lanes {
 		if lane.KeyLane != nil && config.DB != nil {
-			lane.KeyLane.AddReservation("treasury_converting_"+chain, services.NewConversionTreasuryCommitments(config.DB, chain).Reservation)
+			lane.KeyLane.AddReservation("treasury_converting_"+chain, services.NewConversionTreasuryCommitments(config.DB, chain).Units)
 		}
 	}
 	treasury := services.NewTreasury(lanes, caps, nil)

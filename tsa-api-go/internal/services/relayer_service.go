@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -170,12 +171,18 @@ type RelayerService struct {
 
 	guard *SponsorGuard
 
+	// rolesOK: the key was last read holding no swap role (ProbeRoles).
+	rolesOK atomic.Bool
+
 	mu     sync.Mutex
 	domain EIP712Domain // cached after the first read from the forwarder
 }
 
+// NewRelayerService builds the relayer on its key's lane (a SignerRegistry
+// lane at boot). It relays nothing until ProbeRoles has found the key holds no
+// swap role.
 func NewRelayerService(
-	signer ReleaseSigner,
+	lane *KeyLane,
 	chain relayChain,
 	builder relayTxBuilder,
 	forwarder string,
@@ -194,9 +201,9 @@ func NewRelayerService(
 	if now == nil {
 		now = time.Now
 	}
-	var lane *KeyLane
-	if signer != nil {
-		lane = soloLane(signer, chainBalances{chain})
+	var signer ReleaseSigner
+	if lane != nil {
+		signer = lane.Signer()
 	}
 	return &RelayerService{
 		signer: signer, lane: lane, chain: chain, builder: builder,
@@ -206,16 +213,6 @@ func NewRelayerService(
 	}, nil
 }
 
-// UseKeyLane makes the relayer sign and send through its key's shared lane
-// (SignerRegistry), so it never races another role on the same key for a
-// nonce. Boot calls it right after NewRelayerService.
-func (r *RelayerService) UseKeyLane(lane *KeyLane) {
-	if lane == nil {
-		return
-	}
-	r.signer, r.lane = lane.Signer(), lane
-}
-
 // IsEnabled reports whether relaying is available. The app keys its self-pay
 // fallback off this, so it must be an explicit signal — never an error.
 //
@@ -223,10 +220,34 @@ func (r *RelayerService) UseKeyLane(lane *KeyLane) {
 // unsynchronised read of it is a data race the detector flags the moment two
 // requests overlap.
 func (r *RelayerService) IsEnabled() bool {
-	if r == nil || r.signer == nil || r.lane == nil || r.chain == nil || r.builder == nil || r.forwarder == "" {
+	if !r.configured() || !r.rolesOK.Load() {
 		return false
 	}
 	return !r.guard.Killed()
+}
+
+// configured: a key lane, a chain, a builder and a forwarder.
+func (r *RelayerService) configured() bool {
+	return r != nil && r.signer != nil && r.lane != nil && r.chain != nil && r.builder != nil && r.forwarder != ""
+}
+
+// ProbeRoles runs AssertRoleSeparation and records the answer: the relayer
+// relays only while its key provably holds no swap role. A failed read keeps
+// it off (or turns it off) and is returned, so the 60 s relayer-role-probe
+// job's failure-streak ALERT fires while it lasts.
+func (r *RelayerService) ProbeRoles(ctx context.Context, roles relayRoleReader) error {
+	if !r.configured() {
+		return nil
+	}
+	err := r.AssertRoleSeparation(ctx, roles)
+	was := r.rolesOK.Swap(err == nil)
+	switch {
+	case err == nil && !was:
+		log.Printf("[relayer] roles verified (no owner/operator/guardian) — gasless relaying live relayer=%s", r.signer.Address())
+	case err != nil && was:
+		log.Printf("[relayer] ALERT relayer_role_check_failed=1 relayer=%s err=%s — gasless dormant", r.signer.Address(), RedactAlertText(err.Error()))
+	}
+	return err
 }
 
 // SetKillSwitch forces every request to self-pay regardless of configuration.
@@ -243,7 +264,7 @@ func (r *RelayerService) SetKillSwitch(on bool) {
 // decision 2026-10-13: the relayer keeps its own key). Boot treats an error as
 // "relayer dormant", never as a reason to stop the whole API.
 func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRoleReader) error {
-	if !r.IsEnabled() || roles == nil {
+	if !r.configured() || roles == nil {
 		return nil
 	}
 	addr := strings.ToLower(r.signer.Address())

@@ -548,13 +548,9 @@ func (g *GasTopUp) sendTopUp(ctx context.Context, s topUpSend) (GasTopUpResult, 
 		}
 	}
 
-	// Floors are alert-only: the sponsor sends while it can pay this top-up
-	// (amount + its own fee) on top of its lane's reservation; below the floor
-	// it only raises the refill ALERT. The lane re-checks at the send.
-	if err := lane.canPay(ctx, topUpGasUnits, amount); err != nil {
-		release()
-		return GasTopUpResult{}, err
-	}
+	// Whether the sponsor can pay this top-up (amount + its own fee) on top of
+	// its lane's reservation is the key lane's fee gate, at the send; a refusal
+	// there is not-broadcast and frees the slot and the budget below.
 	gas, err := lane.Guard.ReserveGas(topUpGasUnits)
 	if err != nil {
 		release()

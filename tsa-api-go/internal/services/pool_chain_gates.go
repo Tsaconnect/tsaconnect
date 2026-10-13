@@ -59,7 +59,7 @@ type PoolGate interface {
 	Status() PoolGateStatus
 	Check(ctx context.Context) PoolGateStatus
 	Close(reason string)
-	ReleaseGasOK(ctx context.Context, releases int) bool
+	ReleaseGasOK(ctx context.Context, releases int, fresh bool) bool
 	ReprobeReceipts(ctx context.Context)
 	Enabled() bool
 	FloatBalances(ctx context.Context) ([]SponsorFloat, error)
@@ -318,8 +318,11 @@ const poolReleaseCallGas = treasuryEscrowCallGas
 // today's gas price (times gasFeeBuffer). The release floor is alert-only
 // (owner 2026-10-13): below it this logs the refill ALERT and the gas float
 // monitor keeps alerting, but the pool stays open while the key can pay.
-func (g *PoolChainGates) ReleaseGasOK(ctx context.Context, releases int) bool {
-	r, ok := g.releaseReading(ctx)
+//
+// fresh (an open) reads the balance and gas price now, never a cached or stale
+// reading; a quote may reuse one.
+func (g *PoolChainGates) ReleaseGasOK(ctx context.Context, releases int, fresh bool) bool {
+	r, ok := g.releaseReading(ctx, fresh)
 	if !ok {
 		return false
 	}
@@ -341,7 +344,7 @@ func (g *PoolChainGates) ReleaseGasOK(ctx context.Context, releases int) bool {
 
 // releaseReading is the release key's balance and gas price, reused for
 // releaseGasFresh and, when a read fails, for releaseGasStale.
-func (g *PoolChainGates) releaseReading(ctx context.Context) (releaseGasReading, bool) {
+func (g *PoolChainGates) releaseReading(ctx context.Context, fresh bool) (releaseGasReading, bool) {
 	if !g.Enabled() || g.c.Chain == nil {
 		return releaseGasReading{}, false
 	}
@@ -349,6 +352,9 @@ func (g *PoolChainGates) releaseReading(ctx context.Context) (releaseGasReading,
 	defer g.gasMu.Unlock()
 	now := time.Now()
 	last := g.gasRead
+	if fresh {
+		last = releaseGasReading{} // neither reused nor a fallback
+	}
 	if last.balance != nil && now.Sub(last.at) < releaseGasFresh {
 		return last, true
 	}

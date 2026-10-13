@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -85,30 +84,19 @@ type SponsorLane struct {
 	// floor and fee gate, shared with every other role signing with this key on this chain
 	// (PendingNonceAt hands two concurrent builds the same nonce; one then
 	// fails as "nonce too low" after we already told the user it was sent).
-	// Signer must be KeyLane.Signer(). Nil (a lane built in a test) means a
-	// private lane, created on first send.
+	// Signer must be KeyLane.Signer() (a test may swap Signer for a fake).
+	// Required: a SponsorLane without one refuses every send.
 	KeyLane *KeyLane
-
-	privateOnce sync.Once
-	private     *KeyLane
 }
 
-// nonceLane is the lane every send on this SponsorLane goes through.
-func (l *SponsorLane) nonceLane() *KeyLane {
-	if l.KeyLane != nil {
-		return l.KeyLane
-	}
-	l.privateOnce.Do(func() { l.private = soloLane(nil, sponsorLaneBalances{l}) })
-	return l.private
-}
+// errNoKeyLane: a SponsorLane built without its key's registry lane never
+// sends (boot always sets KeyLane; a lane outside the registry would hold a
+// private nonce lock).
+var errNoKeyLane = notBroadcast(errors.New("sponsor lane has no key lane from the signer registry"))
 
-// sponsorLaneBalances reads the lane's own Chain at call time (a test may swap
-// it after the lane's first send).
-type sponsorLaneBalances struct{ l *SponsorLane }
-
-func (b sponsorLaneBalances) GetBalance(address string) (*big.Int, error) {
-	return chainBalances{b.l.Chain}.GetBalance(address)
-}
+// nonceLane is the lane every send on this SponsorLane goes through (nil
+// without one; KeyLane's methods are nil-safe where a quote asks).
+func (l *SponsorLane) nonceLane() *KeyLane { return l.KeyLane }
 
 // send builds and broadcasts one tx on the key's lane (lock + nonce floor).
 // broadcastAttempted separates a build failure (nothing left this process,
@@ -118,13 +106,16 @@ func (b sponsorLaneBalances) GetBalance(address string) (*big.Int, error) {
 // marks ErrTxNotBroadcast (e.g. the node said the sender cannot pay): that tx
 // provably never left, so it is reported as not attempted.
 func (l *SponsorLane) send(ctx context.Context, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
-	return l.nonceLane().sendWith(ctx, l.Signer, build, nil)
+	return l.sendRecorded(ctx, build, nil)
 }
 
 // sendRecorded is send with the nonce handed to onPrepared before the
 // broadcast (KeyLane.SendRecorded).
 func (l *SponsorLane) sendRecorded(ctx context.Context, build func() ([]byte, error), onPrepared func(uint64) error) (string, bool, error) {
-	return l.nonceLane().sendWith(ctx, l.Signer, build, onPrepared)
+	if l.KeyLane == nil {
+		return "", false, errNoKeyLane
+	}
+	return l.KeyLane.sendWith(ctx, l.Signer, build, onPrepared)
 }
 
 func (l *SponsorLane) tokenAddress(symbol string) string {

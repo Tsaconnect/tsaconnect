@@ -447,6 +447,7 @@ func newSponsorRig(chainKey, token string) (*sponsorRig, uuid.UUID) {
 		Tokens:      map[string]string{"USDC": sponsorTestUSDC, "USDT": sponsorTestBscUSDT},
 		TopUpMaxWei: big.NewInt(1_000_000_000_000_000), // 0.001 native
 	}
+	withTestLane(r.lane)
 	return r, orderID
 }
 
@@ -466,4 +467,33 @@ func withBaseUSDCDomain(t *testing.T, r *sponsorRig) {
 		"54fd4d50": abiString(t, "2"),
 		"3644e515": common.FromHex("0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f"),
 	}
+}
+
+// chainBalances adapts a BalanceAt reader (a sponsor or relay chain) to a
+// test lane's balance read.
+type chainBalances struct {
+	c interface {
+		BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+	}
+}
+
+func (b chainBalances) NativeBalance(ctx context.Context, address string) (*big.Int, error) {
+	return b.c.BalanceAt(ctx, common.HexToAddress(address), nil)
+}
+
+// sponsorLaneBalances reads the lane's own Chain at call time (a test may swap
+// it after the lane is built).
+type sponsorLaneBalances struct{ l *SponsorLane }
+
+func (b sponsorLaneBalances) NativeBalance(ctx context.Context, address string) (*big.Int, error) {
+	return chainBalances{b.l.Chain}.NativeBalance(ctx, address)
+}
+
+// withTestLane gives a test-built SponsorLane the solo key lane boot would
+// take from the registry, gated on the lane's own chain balances.
+func withTestLane(l *SponsorLane) *SponsorLane {
+	if l != nil && l.KeyLane == nil {
+		l.KeyLane = soloLane(nil, sponsorLaneBalances{l})
+	}
+	return l
 }

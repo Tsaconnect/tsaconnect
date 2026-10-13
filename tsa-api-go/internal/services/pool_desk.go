@@ -84,9 +84,9 @@ func NewPoolDesk(c PoolDeskConfig) (*PoolDesk, error) {
 	if c.TreasuryCommitments == nil {
 		c.TreasuryCommitments = NewPoolTreasuryCommitments(c.DB)
 	}
-	c.Treasury.Lane(c.Token.ChainKey).nonceLane().AddReservation("pool_treasury_owed", c.TreasuryCommitments.Reservation)
+	c.Treasury.Lane(c.Token.ChainKey).nonceLane().AddReservation("pool_treasury_owed", c.TreasuryCommitments.Units)
 	if crs, ok := c.Sender.(*ChainReleaseSigner); ok {
-		crs.Lane(c.Token.ChainID).AddReservation("pool_releases", c.ReleaseCommitments.Reservation)
+		crs.Lane(c.Token.ChainID).AddReservation("pool_releases", c.ReleaseCommitments.Units)
 	}
 	return &PoolDesk{c: c, cached: newCachedReader[[]poolCandidate](poolTotalsTTL, poolBalanceFailTTL), proveWindow: poolProveWindow}, nil
 }

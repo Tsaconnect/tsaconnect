@@ -212,13 +212,12 @@ func buildRelayer(cfg *config.Config, lane *services.KeyLane, client *blockchain
 		// spend(to, amount, ref) — amount is calldata word 1.
 		{Target: cfg.MCGPSwapBAddress, Selector: services.SelectorOf("spend(address,uint256,bytes32)"), AmountWordIndex: 1},
 	}
-	relayer, err := services.NewRelayerService(lane.Signer(), services.EVMRelayChain{Client: client},
+	relayer, err := services.NewRelayerService(lane, services.EVMRelayChain{Client: client},
 		services.EVMRelayTxBuilder{Client: client}, cfg.MCGPForwarderAddress, allow, limits, nil, nil)
 	if err != nil {
 		log.Printf("[config] relayer init failed; gasless dormant: %v", err)
 		return nil
 	}
-	relayer.UseKeyLane(lane)
 	return relayer
 }
 
@@ -235,4 +234,20 @@ func (p operatorRoleProbe) Run(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return p.swap.ProbeOperatorRole(ctx)
+}
+
+// relayerRoleProbe re-reads the relayer key's swap roles every minute: gasless
+// relaying comes up once the key reads clean (no owner/operator/guardian) and
+// goes dormant if a role appears or the read fails (failure-streak ALERT).
+type relayerRoleProbe struct {
+	relayer *services.RelayerService
+	roles   services.SwapRoleReader
+}
+
+func (p relayerRoleProbe) Name() string            { return "relayer-role-probe" }
+func (p relayerRoleProbe) Interval() time.Duration { return time.Minute }
+func (p relayerRoleProbe) Run(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return p.relayer.ProbeRoles(ctx, p.roles)
 }

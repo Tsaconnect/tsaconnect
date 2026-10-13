@@ -100,7 +100,7 @@ func TestBuildPoolChain_NoClientIsClosedAndStillReChecked(t *testing.T) {
 	if st := g.Status(); g.Open() || st.Open || len(st.Failures) == 0 || !strings.Contains(st.Failures[0], "no chain client") {
 		t.Fatalf("status = %+v, want closed on no chain client", st)
 	}
-	if g.ReleaseGasOK(context.Background(), 1) {
+	if g.ReleaseGasOK(context.Background(), 1, false) {
 		t.Fatal("no client: release gas must not read as OK")
 	}
 	s := jobs.NewScheduler()

@@ -360,9 +360,24 @@ func (t *Treasury) routeExpired(route *LiFiRoute) bool {
 // treasuryGasCacheTTL; an unreadable balance or price reads as "cannot pay",
 // since offering the route anyway is the failure this exists to prevent.
 func (t *Treasury) CanPayForGas(ctx context.Context, chainKey string, units uint64) bool {
+	return t.canPayForGas(ctx, chainKey, units, false)
+}
+
+// CanPayForGasFresh is CanPayForGas on a fresh balance and gas price — for an
+// open, which must never pass on a cached reading.
+func (t *Treasury) CanPayForGasFresh(ctx context.Context, chainKey string, units uint64) bool {
+	return t.canPayForGas(ctx, chainKey, units, true)
+}
+
+func (t *Treasury) canPayForGas(ctx context.Context, chainKey string, units uint64, fresh bool) bool {
 	lane := t.Lane(chainKey)
 	if lane == nil || lane.SponsorLane == nil {
 		return false
+	}
+	if fresh {
+		t.gasMu.Lock()
+		delete(t.gasCache, lane.ChainKey)
+		t.gasMu.Unlock()
 	}
 	reading, ok := t.gasReadingFor(ctx, lane)
 	if !ok {
@@ -370,12 +385,12 @@ func (t *Treasury) CanPayForGas(ctx context.Context, chainKey string, units uint
 	}
 	// The same rule as the lane's fee gate: buffered, plus what the lane keeps
 	// back for deliveries already owed (fails closed when unreadable).
-	reserved, err := lane.nonceLane().reserved(ctx, reading.price)
+	reservedUnits, err := lane.nonceLane().reservedUnits(ctx)
 	if err != nil {
 		log.Printf("[ramp-conversion] ALERT ramp_treasury_commitments_unreadable_total=1 chain=%s err=%s", lane.ChainKey, RedactAlertText(err.Error()))
 		return false
 	}
-	need := feeNeed(units, reading.price, reserved)
+	need := feeNeed(units+reservedUnits, reading.price, nil)
 	return reading.balance.Cmp(need) >= 0
 }
 
@@ -437,9 +452,6 @@ const maxRouteGasLimit uint64 = 5_000_000
 // willing to cancel; ExecuteRoute abandons the wait for the lane's lock (not
 // a wait already broadcast) the moment ctx is done.
 func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token string, amount *big.Int, route *LiFiRoute) (string, bool, error) {
-	// A route delivers an order already owed: it spends the reservation held
-	// for it rather than being refused by it.
-	ctx = ReservedSend(ctx)
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}
@@ -600,9 +612,6 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 // attempted broadcast that errored returns the signed transaction's hash when
 // the signer knows it, so the caller can later ask the chain about it.
 func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared func(nonce uint64) error) (string, bool, error) {
-	// A transfer delivers (or refunds) an order already owed: it spends the
-	// reservation held for it rather than being refused by it.
-	ctx = ReservedSend(ctx)
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}

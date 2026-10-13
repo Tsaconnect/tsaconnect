@@ -253,7 +253,7 @@ func (g *fakePoolGate) Open() bool {
 func (g *fakePoolGate) Status() PoolGateStatus               { return PoolGateStatus{Open: g.Open()} }
 func (g *fakePoolGate) Check(context.Context) PoolGateStatus { return g.Status() }
 func (g *fakePoolGate) Close(reason string)                  { g.mu.Lock(); g.closed = reason; g.mu.Unlock() }
-func (g *fakePoolGate) ReleaseGasOK(_ context.Context, releases int) bool {
+func (g *fakePoolGate) ReleaseGasOK(_ context.Context, releases int, _ bool) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.asked = releases
