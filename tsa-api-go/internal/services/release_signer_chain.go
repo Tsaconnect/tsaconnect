@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -22,26 +21,22 @@ type ChainSender interface {
 	Send(ctx context.Context, chainID int64, build func() ([]byte, error)) (string, error)
 }
 
-type chainKeyLane struct {
-	mu      sync.Mutex
-	signer  *LocalKeyReleaseSigner
-	chainID int64 // what the lane's own client reports
-}
-
 // ChainReleaseSigner is the one release key with a broadcaster per P2P chain.
 // It never routes a transaction to a chain it was not built for.
 type ChainReleaseSigner struct {
 	address string
-	byChain map[int64]*chainKeyLane
+	byChain map[int64]*KeyLane
 }
 
-func NewChainReleaseSigner(key *ecdsa.PrivateKey, broadcasters map[int64]ReleaseBroadcaster) *ChainReleaseSigner {
-	c := &ChainReleaseSigner{address: crypto.PubkeyToAddress(key.PublicKey).Hex(), byChain: map[int64]*chainKeyLane{}}
+// NewChainReleaseSigner takes each chain's lane from reg, so the release key
+// shares one lock and nonce floor with every other role signing with the same
+// key on that chain. A nil reg gives the signer private lanes.
+func NewChainReleaseSigner(reg *SignerRegistry, key *ecdsa.PrivateKey, broadcasters map[int64]ReleaseBroadcaster) *ChainReleaseSigner {
+	c := &ChainReleaseSigner{address: crypto.PubkeyToAddress(key.PublicKey).Hex(), byChain: map[int64]*KeyLane{}}
 	for id, bc := range broadcasters {
-		if bc == nil || bc.ChainID() == nil {
-			continue
+		if lane := reg.Lane("pm_release", key, bc); lane != nil {
+			c.byChain[id] = lane
 		}
-		c.byChain[id] = &chainKeyLane{signer: NewLocalKeyReleaseSigner(key, bc), chainID: bc.ChainID().Int64()}
 	}
 	return c
 }
@@ -59,18 +54,18 @@ func (c *ChainReleaseSigner) Chains() []int64 {
 }
 
 // Send builds (prepare + nonce read), signs and broadcasts on chainID under
-// that chain's lock.
+// that chain's lane (lock + nonce floor).
 func (c *ChainReleaseSigner) Send(ctx context.Context, chainID int64, build func() ([]byte, error)) (string, error) {
 	lane := c.byChain[chainID]
 	if lane == nil {
 		return "", notBroadcast(fmt.Errorf("release signer: no broadcaster for chain %d", chainID))
 	}
-	hash, _, err := sendLocked(ctx, &lane.mu, lane.signer, func() ([]byte, error) {
+	hash, _, err := lane.Send(ctx, func() ([]byte, error) {
 		unsigned, err := build()
 		if err != nil {
 			return nil, notBroadcast(err)
 		}
-		if err := lane.ownTx(unsigned); err != nil {
+		if err := ownTx(lane, unsigned); err != nil {
 			return nil, notBroadcast(err)
 		}
 		return unsigned, nil
@@ -90,15 +85,16 @@ func (c *ChainReleaseSigner) SignAndBroadcast(ctx context.Context, unsigned []by
 		return "", notBroadcast(fmt.Errorf("release signer: the transaction names no chain"))
 	}
 	for _, lane := range c.byChain {
-		if lane.chainID == id {
-			hash, _, err := sendLocked(ctx, &lane.mu, lane.signer, func() ([]byte, error) { return unsigned, nil })
+		if lane.ChainID() == id {
+			hash, _, err := lane.Send(ctx, func() ([]byte, error) { return unsigned, nil })
 			return hash, err
 		}
 	}
 	return "", notBroadcast(fmt.Errorf("release signer: no broadcaster for chain %d", id))
 }
 
-func (l *chainKeyLane) ownTx(unsigned []byte) error {
+// ownTx refuses a tx that names no chain or another chain than the lane's.
+func ownTx(l *KeyLane, unsigned []byte) error {
 	var u blockchain.UnsignedTx
 	if err := json.Unmarshal(unsigned, &u); err != nil {
 		return fmt.Errorf("decode unsigned tx: %w", err)
@@ -106,8 +102,8 @@ func (l *chainKeyLane) ownTx(unsigned []byte) error {
 	if u.ChainID == "" {
 		return fmt.Errorf("release signer: the transaction names no chain") // as SignAndBroadcast refuses
 	}
-	if u.ChainID != strconv.FormatInt(l.chainID, 10) {
-		return fmt.Errorf("release signer: a tx built for chain %s was sent on chain %d", u.ChainID, l.chainID)
+	if u.ChainID != strconv.FormatInt(l.ChainID(), 10) {
+		return fmt.Errorf("release signer: a tx built for chain %s was sent on chain %d", u.ChainID, l.ChainID())
 	}
 	return nil
 }

@@ -36,7 +36,7 @@ type c2Rehearsal struct {
 func newC2Rehearsal(t *testing.T) *c2Rehearsal {
 	t.Helper()
 	r := &c2Rehearsal{c1Rehearsal: newC1Rehearsal(t)}
-	r.sender = NewChainReleaseSigner(mustKey(t, os.Getenv("LIQ_C1_RELEASE_PK")), map[int64]ReleaseBroadcaster{97: r.client})
+	r.sender = NewChainReleaseSigner(nil, mustKey(t, os.Getenv("LIQ_C1_RELEASE_PK")), map[int64]ReleaseBroadcaster{97: r.client})
 	verifier := NewLogTransferVerifier(r.client.Client)
 	sale := NewCompanyWallet(CompanyWalletConfig{Treasury: r.desk.c.Treasury,
 		Decimals:  map[string]map[string]int{"bsc": {"USDT": 18}},

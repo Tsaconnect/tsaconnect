@@ -82,7 +82,7 @@ func buildReleaseSigner(cfg *config.Config, bs *services.BlockchainService) serv
 		return nil
 	}
 	alertRawSignerKeyInProduction(cfg, "PM_RELEASE_PRIVATE_KEY")
-	crs := services.NewChainReleaseSigner(key, broadcasters)
+	crs := services.NewChainReleaseSigner(nil, key, broadcasters)
 	log.Printf("[pm] release signer ready (admin EOA %s) chains=%v — one lock per chain", crs.Address(), crs.Chains())
 	// Catch a signer/admin-EOA misconfig at boot rather than at the first
 	// release: adminRelease reverts on-chain when the key isn't a registered admin.
