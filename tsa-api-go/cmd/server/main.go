@@ -427,11 +427,17 @@ func main() {
 			// treatment. Gasless stays dormant; the app self-pays.
 			log.Printf("[config] gasless dormant: raw RELAYER_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
 		} else if cfg.MCGPForwarderAddress != "" && cfg.RelayerPrivateKey != "" && sonicClient != nil {
-			if key, kerr := crypto.HexToECDSA(cfg.RelayerPrivateKey); kerr != nil {
+			if key, kerr := crypto.HexToECDSA(strings.TrimPrefix(cfg.RelayerPrivateKey, "0x")); kerr != nil {
 				log.Printf("[config] relayer key invalid; gasless dormant: %v", kerr)
 			} else {
 				alertRawSignerKeyInProduction(cfg, "RELAYER_PRIVATE_KEY")
-				signer := services.NewLocalKeyReleaseSigner(key, sonicClient)
+				// The relayer's key lane is shared with every other role on the
+				// same key on Sonic (it used to send with no lock at all).
+				keyLane := blockchainService.Signers().Lane("relayer", key, sonicClient)
+				var signer services.ReleaseSigner = services.NewLocalKeyReleaseSigner(key, sonicClient)
+				if keyLane != nil {
+					signer = keyLane.Signer()
+				}
 				limits := services.RelayerLimits{
 					SponsorLimits: services.SponsorLimits{
 						PerUserPerWindow: cfg.RelayerPerUserPerHour,
@@ -452,11 +458,16 @@ func main() {
 					services.EVMRelayTxBuilder{Client: sonicClient},
 					cfg.MCGPForwarderAddress, allow, limits, nil, nil,
 				)
+				if rerr == nil {
+					relayer.UseKeyLane(keyLane)
+				}
 				if rerr != nil {
 					log.Printf("[config] relayer init failed; gasless dormant: %v", rerr)
 				} else if serr := relayer.AssertRoleSeparation(context.Background(), services.SwapRoleReader{Swap: mcgpSwapService}); serr != nil {
-					// Hard-fail rather than run: a relayer key that is also the
-					// operator turns a hot-key compromise into an operator one.
+					// Hard-fail rather than run: a relayer key that is the swap
+					// owner or a guardian turns a hot-key compromise into one that
+					// can upgrade or pause the swap. Operator is allowed (signer
+					// consolidation) and logged by AssertRoleSeparation.
 					log.Fatalf("[config] REFUSING TO START: %v", serr)
 				} else {
 					mcgpSwapHandler = mcgpSwapHandler.WithRelayer(relayer, cfg.MCGPSwapBAddress)

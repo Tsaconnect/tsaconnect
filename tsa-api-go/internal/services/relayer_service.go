@@ -46,7 +46,7 @@ var (
 	ErrRelayerUnderfunded    = errors.New("relayer balance is below its floor")
 	ErrSimulationReverted    = errors.New("transaction would revert")
 	ErrSimulationUnavailable = errors.New("could not simulate the transaction; try again")
-	ErrRoleSeparation        = errors.New("relayer key must not also be owner, operator, or guardian")
+	ErrRoleSeparation        = errors.New("relayer key must not also be owner or guardian")
 )
 
 // ForwardRequest mirrors ERC2771Forwarder.ForwardRequestData.
@@ -155,6 +155,10 @@ const forwarderExecuteABI = `[
 
 type RelayerService struct {
 	signer    ReleaseSigner
+	// lane is the relayer key's KeyLane on Sonic (lock + nonce floor),
+	// shared with every other role on the same key. Before it existed the
+	// relayer built and broadcast with no lock at all.
+	lane      *KeyLane
 	chain     relayChain
 	builder   relayTxBuilder
 	forwarder string
@@ -190,12 +194,26 @@ func NewRelayerService(
 	if now == nil {
 		now = time.Now
 	}
+	var lane *KeyLane
+	if signer != nil {
+		lane = NewKeyLane(signer, 0)
+	}
 	return &RelayerService{
-		signer: signer, chain: chain, builder: builder,
+		signer: signer, lane: lane, chain: chain, builder: builder,
 		forwarder: strings.ToLower(strings.TrimSpace(forwarder)),
 		allow:     allow, limits: limits, metrics: metrics, now: now, fwdABI: parsed,
 		guard: NewSponsorGuard("relayer", limits.SponsorLimits, now),
 	}, nil
+}
+
+// UseKeyLane makes the relayer sign and send through its key's shared lane
+// (SignerRegistry), so it never races another role on the same key for a
+// nonce. Boot calls it right after NewRelayerService.
+func (r *RelayerService) UseKeyLane(lane *KeyLane) {
+	if lane == nil {
+		return
+	}
+	r.signer, r.lane = lane.Signer(), lane
 }
 
 // IsEnabled reports whether relaying is available. The app keys its self-pay
@@ -205,7 +223,7 @@ func NewRelayerService(
 // unsynchronised read of it is a data race the detector flags the moment two
 // requests overlap.
 func (r *RelayerService) IsEnabled() bool {
-	if r == nil || r.signer == nil || r.chain == nil || r.builder == nil || r.forwarder == "" {
+	if r == nil || r.signer == nil || r.lane == nil || r.chain == nil || r.builder == nil || r.forwarder == "" {
 		return false
 	}
 	return !r.guard.Killed()
@@ -218,10 +236,15 @@ func (r *RelayerService) SetKillSwitch(on bool) {
 	r.guard.SetKillSwitch(on)
 }
 
-// AssertRoleSeparation fails startup if the relayer key also holds a privileged
-// role. A relayer key is hot — it broadcasts constantly from a server — so it is
-// far more exposed than the operator key. If they are the same EOA, a relayer
-// compromise becomes an operator compromise.
+// AssertRoleSeparation fails startup if the relayer key is the swap's owner or
+// a guardian: a relayer key is hot — it broadcasts constantly from a server — so
+// it must never hold a role that can upgrade, pause or re-key the contract.
+//
+// Being an operator is allowed since the signer consolidation (owner decision
+// 2026-10-13: relayer, IT operator, PM release and gas sponsor are one OPERATOR
+// key). That is a deliberate trade-off, not an oversight: a compromise of the
+// relayer is then a compromise of the operator (debit cap 5,000/tx and
+// 25,000/h, credit cap 10,000/tx). It is logged loudly at boot every time.
 func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRoleReader) error {
 	if !r.IsEnabled() || roles == nil {
 		return nil
@@ -235,19 +258,22 @@ func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRo
 	if strings.EqualFold(owner, addr) {
 		return fmt.Errorf("%w: relayer is the owner", ErrRoleSeparation)
 	}
-	isOp, err := roles.IsOperator(ctx, addr)
-	if err != nil {
-		return fmt.Errorf("relayer: read operator: %w", err)
-	}
-	if isOp {
-		return fmt.Errorf("%w: relayer is an operator", ErrRoleSeparation)
-	}
 	isGuard, err := roles.IsGuardian(ctx, addr)
 	if err != nil {
 		return fmt.Errorf("relayer: read guardian: %w", err)
 	}
 	if isGuard {
 		return fmt.Errorf("%w: relayer is a guardian", ErrRoleSeparation)
+	}
+	isOp, err := roles.IsOperator(ctx, addr)
+	if err != nil {
+		// Informational only now; an unreadable operator flag is not a reason
+		// to refuse to start.
+		log.Printf("[relayer] could not read operators(%s): %v", addr, err)
+		return nil
+	}
+	if isOp {
+		log.Printf("[relayer] WARNING relayer_is_operator=1 address=%s — the gasless relayer signs with the swap OPERATOR key (signer consolidation trade-off: a relayer compromise is an operator compromise, bounded by the swap's debit/credit caps)", addr)
 	}
 	return nil
 }
@@ -308,14 +334,22 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		return "", err
 	}
 
-	unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
-	if err != nil {
+	// Built and broadcast under the key's lane: the nonce read in the build
+	// and the broadcast never interleave with another send on the same key.
+	built := false
+	txHash, _, err := r.lane.Send(ctx, func() ([]byte, error) {
+		unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
+		if err != nil {
+			return nil, err
+		}
+		built = true
+		return unsigned, nil
+	})
+	if err != nil && !built {
 		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "build")
 		return "", fmt.Errorf("relayer: build tx: %w", err)
 	}
-
-	txHash, err := r.signer.SignAndBroadcast(ctx, unsigned)
 	if err != nil {
 		releaseOurFault()
 		r.metrics.RelayAttempt("error", "broadcast")

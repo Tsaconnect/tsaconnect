@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // ── doubles ──────────────────────────────────────────────────────────────
@@ -460,7 +461,9 @@ func TestRelayer_DoesNotBroadcastWhenSimulationErrorsTransiently(t *testing.T) {
 	}
 }
 
-func TestRelayer_AssertRoleSeparationRejectsOwnerOperatorGuardian(t *testing.T) {
+// Signer consolidation (owner 2026-10-13): the relayer may be the swap
+// operator (one OPERATOR key); owner and guardian stay refused.
+func TestRelayer_AssertRoleSeparationRejectsOwnerAndGuardianOnly(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name  string
@@ -468,7 +471,8 @@ func TestRelayer_AssertRoleSeparationRejectsOwnerOperatorGuardian(t *testing.T) 
 		want  bool
 	}{
 		{"relayer is owner", fakeRoles{owner: relayerAddr}, true},
-		{"relayer is operator", fakeRoles{owner: userAddr, operator: true}, true},
+		{"relayer is operator (allowed, warned)", fakeRoles{owner: userAddr, operator: true}, false},
+		{"relayer is operator and guardian", fakeRoles{owner: userAddr, operator: true, guardian: true}, true},
 		{"relayer is guardian", fakeRoles{owner: userAddr, guardian: true}, true},
 		{"cleanly separated", fakeRoles{owner: userAddr}, false},
 	}
@@ -624,5 +628,47 @@ func TestRelayer_BudgetReleasedWhenTheRequestNeverBroadcasts(t *testing.T) {
 	}
 	if got := r.svc.SpentToday(); got.Sign() != 0 {
 		t.Fatalf("budget leaked %s gas on a request that never broadcast", got)
+	}
+}
+
+// laggingRelayBuilder prepares every relay at the same pending nonce, as a
+// load-balanced RPC does while earlier relays are still unseen.
+type laggingRelayBuilder struct{ nonce uint64 }
+
+func (b laggingRelayBuilder) BuildUnsignedTx(_, _ string, _ []byte) ([]byte, error) {
+	return unsignedOn(146, b.nonce)
+}
+
+// The relayer used to build and broadcast with no lock: concurrent relays on a
+// lagging RPC signed one nonce twice. On its key lane they get 9, 10, 11 — and
+// a relay on the operator's key shares the operator's lane.
+func TestRelayer_ConcurrentRelaysOnTheKeyLaneGetDistinctNonces(t *testing.T) {
+	r := newRig(t)
+	key, _ := crypto.GenerateKey()
+	node := &laneNode{id: 146}
+	reg := NewSignerRegistry()
+	lane := reg.Lane("relayer", key, node)
+	r.svc.builder = laggingRelayBuilder{nonce: 9}
+	r.svc.UseKeyLane(lane)
+	if reg.Lane("it_operator", key, node) != lane {
+		t.Fatal("relayer and operator on one key must share the lane")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	seen := map[uint64]bool{}
+	for _, n := range node.sent() {
+		seen[n] = true
+	}
+	if len(seen) != 3 || !seen[9] || !seen[10] || !seen[11] {
+		t.Fatalf("nonces %v, want 9, 10, 11", node.sent())
 	}
 }
