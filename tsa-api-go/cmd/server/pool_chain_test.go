@@ -37,12 +37,15 @@ func TestRegisterPoolJobs_ProbeAndReleaseFloat(t *testing.T) {
 	}
 }
 
-// Review I8 / S8 / S39: the per-chain lock covers every use of the release key
-// only if no other signer (with its own lock) holds the same key. The
-// controller confirmed prod's PM release, IT operator and relayer keys differ.
-func TestBuildReleaseSigner_RefusesAKeySharedWithAnotherSigner(t *testing.T) {
-	for _, other := range []string{"IT_OPERATOR_PRIVATE_KEY", "RELAYER_PRIVATE_KEY", "RAMP_SPONSOR_PRIVATE_KEY",
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY", "RAMP_TREASURY_PRIVATE_KEY"} {
+// Signer consolidation (2026-10-13): the release key is the OPERATOR, which
+// the IT operator, relayer and gas sponsor may share (one KeyLane per key and
+// chain makes that nonce-safe). Sharing it with the TREASURY or the company
+// wallet still refuses to start.
+func TestBuildReleaseSigner_RefusesAKeySharedAcrossSignerClasses(t *testing.T) {
+	for other, refuse := range map[string]bool{
+		"IT_OPERATOR_PRIVATE_KEY": false, "RELAYER_PRIVATE_KEY": false, "RAMP_SPONSOR_PRIVATE_KEY": false,
+		"RAMP_TREASURY_WALLET_PRIVATE_KEY": true, "RAMP_TREASURY_PRIVATE_KEY": true,
+	} {
 		cfg := testConfig(t)
 		cfg.PMReleasePrivateKey = testKeyA
 		switch other {
@@ -57,8 +60,8 @@ func TestBuildReleaseSigner_RefusesAKeySharedWithAnotherSigner(t *testing.T) {
 		case "RAMP_TREASURY_PRIVATE_KEY":
 			cfg.RampTreasuryPrivateKey = testKeyA
 		}
-		if !refusesToStart(t, func() { buildReleaseSigner(cfg, nil) }) {
-			t.Fatalf("a release key shared with %s must refuse to start", other)
+		if got := refusesToStart(t, func() { buildReleaseSigner(cfg, nil) }); got != refuse {
+			t.Fatalf("release key shared with %s: refused=%v, want %v", other, got, refuse)
 		}
 	}
 }

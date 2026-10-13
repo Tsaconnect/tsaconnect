@@ -23,18 +23,24 @@ import (
 // variable and could each restore the other's swap mid-test.
 var fatalf = log.Fatalf
 
-// assertDistinctKey refuses to start when key's address matches any entry in
-// others (a name -> hex-private-key map). It is the ONE collision check every
-// privileged signer goes through — the relayer, the IT operator, the PM
-// release key, the ramp sponsor and the ramp treasury are all hot keys that
-// broadcast from this server, so sharing any two of them turns a single
-// compromise into a compromise of both. An unparsable entry in others is
+// assertDistinctKey refuses to start when key's address matches an entry in
+// others (a name -> hex-private-key map) of a DIFFERENT signer class
+// (signerKeyClass). Since the signer consolidation the operator roles — PM
+// release, IT operator, relayer, gas sponsor — may share one key: every role
+// on one key and chain sends through that key's one KeyLane, so sharing no
+// longer races a nonce. Across classes it stays fatal: an OPERATOR key equal to
+// the TREASURY key (which holds user funds in transit) or to the company
+// wallet would turn one compromise into both. An unparsable entry in others is
 // skipped rather than failing the boot on a malformed but irrelevant key —
 // that key's own builder is responsible for validating it.
 func assertDistinctKey(name string, key *ecdsa.PrivateKey, others map[string]string) error {
 	addr := crypto.PubkeyToAddress(key.PublicKey)
+	class, known := signerKeyClass[name]
 	for otherName, other := range others {
 		if other == "" {
+			continue
+		}
+		if oc, ok := signerKeyClass[otherName]; known && ok && oc == class {
 			continue
 		}
 		k, err := crypto.HexToECDSA(strings.TrimPrefix(other, "0x"))

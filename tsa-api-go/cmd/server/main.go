@@ -165,6 +165,10 @@ func main() {
 
 	// Load configuration
 	cfg := config.Load()
+	// Signer consolidation: IT operator, relayer and gas sponsor sign with the
+	// OPERATOR key (PM_RELEASE_PRIVATE_KEY) when their own var is unset. Runs
+	// before any signer is built.
+	resolveSignerRoles(cfg)
 
 	// Central inbound mode sends every payer to one company account, so an
 	// unset account number is not a dormant feature — it is a pay-into screen
@@ -392,25 +396,39 @@ func main() {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
 				alertRawSignerKeyInProduction(cfg, "IT_OPERATOR_PRIVATE_KEY")
-				// The operator's key lane is shared with every other role on
-				// the same key on Sonic; OperatorSequence keeps its own
-				// sequence lock on top (MCGPSwapService.signMu).
-				if lane := blockchainService.Signers().Lane("it_operator", key, sonicClient); lane != nil {
-					mcgpSwapService.SetOperatorLane(lane)
-				} else {
-					mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
+				itAddr := crypto.PubkeyToAddress(key.PublicKey).Hex()
+				roleCtx, roleCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				isOp, roleErr := services.SwapRoleReader{Swap: mcgpSwapService}.IsOperator(roleCtx, itAddr)
+				roleCancel()
+				if roleErr != nil {
+					log.Printf("[config] WARNING could not read operators(%s) on the swap: %v — IT stays on; a non-operator key reverts every debit", itAddr, roleErr)
 				}
-				itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
-				itService.SetCompanyPMID(cfg.ITPMID)
-				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
-				itService.SetCurrencyRegistry(currencyRegistry)
-				itService.SetInboundCentral(cfg.InboundCentralEnabled(), services.CentralAccount{
-					AccountNumber: cfg.InboundCentralAccountNumber,
-					BankName:      cfg.InboundCentralBankName,
-					AccountName:   cfg.InboundCentralAccountName,
-				})
-				itHandler = handlers.NewITHandler(config.DB, itService, currencyRegistry)
-				log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
+				if roleErr == nil && !isOp {
+					// The fallback to the OPERATOR key lands here until the PM
+					// has called addOperator(<operator>) (PM-1).
+					log.Printf("[config] ALERT signer_role_missing=1 role=it_operator address=%s swap=%s — not an operator on the swap; IT dormant until the PM adds it (addOperator) or IT_OPERATOR_PRIVATE_KEY is restored",
+						itAddr, cfg.MCGPSwapBAddress)
+				} else {
+					// The operator's key lane is shared with every other role on
+					// the same key on Sonic; OperatorSequence keeps its own
+					// sequence lock on top (MCGPSwapService.signMu).
+					if lane := blockchainService.Signers().Lane("it_operator", key, sonicClient); lane != nil {
+						mcgpSwapService.SetOperatorLane(lane)
+					} else {
+						mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
+					}
+					itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
+					itService.SetCompanyPMID(cfg.ITPMID)
+					itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
+					itService.SetCurrencyRegistry(currencyRegistry)
+					itService.SetInboundCentral(cfg.InboundCentralEnabled(), services.CentralAccount{
+						AccountNumber: cfg.InboundCentralAccountNumber,
+						BankName:      cfg.InboundCentralBankName,
+						AccountName:   cfg.InboundCentralAccountName,
+					})
+					itHandler = handlers.NewITHandler(config.DB, itService, currencyRegistry)
+					log.Printf("[config] IT (Instant Transfer) enabled; operator=%s", mcgpSwapService.OperatorAddress())
+				}
 			}
 		} else {
 			log.Printf("IT routes dormant: IT_OPERATOR_PRIVATE_KEY not set")
@@ -1379,6 +1397,15 @@ func main() {
 	// One release key, one lock per P2P chain (spec S8/S39); refuses a key
 	// shared with any other signer (review I8).
 	releaseSigner := buildReleaseSigner(cfg, blockchainService)
+	if releaseSigner != nil && p2pEscrowService != nil {
+		// Sonic PM auto-release (adminRelease/adminResolve) needs the release
+		// key to be an escrow admin; cancelByTimeout does not. The BSC pool
+		// checks its own escrow in its gates.
+		if ok, err := p2pEscrowService.IsAdmin(releaseSigner.Address()); err == nil && !ok {
+			log.Printf("[pm] WARNING signer_role_missing=1 role=pm_release address=%s — not an admin on the Sonic P2P escrow: PM auto-release reverts until the PM calls addAdmin(%s) (PM-2)",
+				releaseSigner.Address(), releaseSigner.Address())
+		}
+	}
 
 	var (
 		pmAuto *services.PMAutomationService
@@ -2009,6 +2036,9 @@ func main() {
 		ReadHeaderTimeout: 20 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+
+	// One line per hot address: its class, the roles on it and its chain ids.
+	logSignerSummary(cfg, blockchainService.Signers())
 
 	// Start scheduler (no-op if no workers registered yet — future steps add them).
 	scheduler.Start(workerCtx)
