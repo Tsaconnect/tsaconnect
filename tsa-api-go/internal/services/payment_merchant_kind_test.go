@@ -46,10 +46,12 @@ func TestPMService_ActiveLookupByKind(t *testing.T) {
 	if err != nil || got.ID != lp.ID {
 		t.Fatalf("lp lookup = %v %v", got, err)
 	}
-	// The kind-blind lookup is unchanged: it still sees the LP (the submit guard
-	// blocks an active row of either kind, spec §8.1).
-	if got, err := svc.GetActiveByUserID(ctx, lp.UserID); err != nil || got.ID != lp.ID {
-		t.Fatalf("kind-blind lookup = %v %v", got, err)
+	// Any status, by kind: the LP row is the LP's, and there is no merchant row.
+	if got, err := svc.GetByUserIDKind(ctx, lp.UserID, models.PaymentMerchantKindLP); err != nil || got.ID != lp.ID {
+		t.Fatalf("lp by kind = %v %v", got, err)
+	}
+	if _, err := svc.GetByUserIDKind(ctx, lp.UserID, models.PaymentMerchantKindMerchant); !errors.Is(err, ErrPMNotFound) {
+		t.Fatalf("merchant by kind on an LP = %v, want ErrPMNotFound", err)
 	}
 }
 

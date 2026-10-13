@@ -83,23 +83,6 @@ func (s *PMService) GetByAccountRef(ctx context.Context, ref string) (*models.Pa
 	return &pm, nil
 }
 
-// GetActiveByUserID looks up the ACTIVE PaymentMerchant whose UserID matches
-// the given user. Non-active rows (pending, paused) are not returned.
-// Returns ErrPMNotFound when no active PM row exists for the user.
-func (s *PMService) GetActiveByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
-	var pm models.PaymentMerchant
-	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND status = ?", userID, models.PaymentMerchantStatusActive).
-		First(&pm).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrPMNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &pm, nil
-}
-
 // wherePMKind narrows q to one kind. Anything but lp reads as merchant, the
 // column default — the one kind rule every per-role read shares.
 func wherePMKind(q *gorm.DB, kind string) *gorm.DB {
@@ -140,25 +123,6 @@ func (s *PMService) LPIDs(ctx context.Context) ([]uuid.UUID, error) {
 	err := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
 		Where("kind = ?", models.PaymentMerchantKindLP).Pluck("id", &ids).Error
 	return ids, err
-}
-
-// GetByUserID looks up the most recent PaymentMerchant for a user regardless of
-// status (pending/approved/active/paused/rejected). Used by the status read so
-// the app can distinguish "approved, needs activation" from "active".
-// Returns ErrPMNotFound when the user has no PM row.
-func (s *PMService) GetByUserID(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
-	var pm models.PaymentMerchant
-	err := s.db.WithContext(ctx).
-		Where("user_id = ?", userID).
-		Order("created_at DESC").
-		First(&pm).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrPMNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &pm, nil
 }
 
 // GetByID looks up a PM by its primary key UUID.

@@ -116,7 +116,7 @@ func pmAccountRef(userID uuid.UUID) string { return "pm-" + userID.String() }
 // the merchant triggers by supplying their BVN/NIN (Flutterwave live mode
 // requires an account-holder identity we deliberately do not store).
 //
-//  1. Upsert a payment_merchants row (keyed on user_id).
+//  1. Upsert the payment_merchants row of the request's kind (keyed on user_id + kind).
 //  2. Copy the (already validated at submit) settlement bank / maker wallet /
 //     caps and set status='approved', provisioning_status='pending'.
 //
