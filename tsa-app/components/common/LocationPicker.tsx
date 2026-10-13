@@ -48,6 +48,8 @@ interface SearchableDropdownProps {
   loading?: boolean;
   error?: string;
   apiError?: boolean;
+  /** No list for this choice (the lookup has none): type it instead, no retry. */
+  freeText?: boolean;
   onRetry?: () => void;
   onFallbackTextChange?: (text: string) => void;
 }
@@ -62,6 +64,7 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
   loading = false,
   error,
   apiError = false,
+  freeText = false,
   onRetry,
   onFallbackTextChange,
 }) => {
@@ -79,7 +82,7 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
 
   // If the remote API failed, degrade to a free-text input so the user can still
   // enter a value, plus a retry affordance.
-  if (apiError && !loading) {
+  if ((apiError || freeText) && !loading) {
     return (
       <View>
         <Input
@@ -89,7 +92,7 @@ const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
           onChangeText={onFallbackTextChange}
           error={error}
         />
-        {onRetry && (
+        {apiError && onRetry && (
           <PressableScale
             onPress={onRetry}
             style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs }}
@@ -150,6 +153,8 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   const [loadingCities, setLoadingCities] = useState(false);
   const [statesApiError, setStatesApiError] = useState(false);
   const [citiesApiError, setCitiesApiError] = useState(false);
+  const [statesEmpty, setStatesEmpty] = useState(false);
+  const [citiesEmpty, setCitiesEmpty] = useState(false);
 
   const initialCountry = useRef(value.country);
   const initialState = useRef(value.state);
@@ -164,8 +169,10 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
     try {
       const states = await fetchStates(country);
       setStatesList(states);
+      setStatesEmpty(states.length === 0);
     } catch {
       setStatesApiError(true);
+      setStatesEmpty(false);
       setStatesList([]);
     } finally {
       setLoadingStates(false);
@@ -182,8 +189,10 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
     try {
       const cities = await fetchCities(country, state);
       setCitiesList(cities);
+      setCitiesEmpty(cities.length === 0);
     } catch {
       setCitiesApiError(true);
+      setCitiesEmpty(false);
       setCitiesList([]);
     } finally {
       setLoadingCities(false);
@@ -205,6 +214,8 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
     setCitiesList([]);
     setStatesApiError(false);
     setCitiesApiError(false);
+    setStatesEmpty(false);
+    setCitiesEmpty(false);
     onChange({ country, state: '', city: '' });
     if (country) loadStates(country);
   };
@@ -212,6 +223,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
   const handleStateChange = (state: string) => {
     setCitiesList([]);
     setCitiesApiError(false);
+    setCitiesEmpty(false);
     onChange({ ...value, state, city: '' });
     if (value.country && state) loadCities(value.country, state);
   };
@@ -256,6 +268,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
             loading={loadingStates}
             error={errors.state}
             apiError={statesApiError}
+            freeText={statesEmpty}
             onRetry={() => loadStates(value.country)}
             onFallbackTextChange={(text) => onChange({ ...value, state: text, city: '' })}
           />
@@ -275,6 +288,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
             loading={loadingCities}
             error={errors.city}
             apiError={citiesApiError}
+            freeText={citiesEmpty}
             onRetry={() => loadCities(value.country, value.state)}
             onFallbackTextChange={(text) => onChange({ ...value, city: text })}
           />

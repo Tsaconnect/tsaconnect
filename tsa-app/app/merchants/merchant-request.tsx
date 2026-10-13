@@ -194,6 +194,13 @@ const ADD_ON_BUSINESS_TYPES = ['p2p_merchant', 'payment_acceptance', 'liquidity_
  * p2p_merchant) never hides a pending LP application. Undefined = the newest
  * request of any type, as before.
  */
+/** The LP form's opening explainer: an LP adds crypto and is paid naira, never the reverse. */
+export const LP_HOW_IT_WORKS = [
+  'You add USDT to the TSA Connect pool from your wallet. You never send us naira.',
+  'When a buyer pays naira for your USDT, we pay that naira into the bank account below.',
+  'You can see your stock and payouts in your liquidity dashboard.',
+];
+
 export function requestTypeFilter(formType: string): string | undefined {
   return ADD_ON_BUSINESS_TYPES.includes(formType) ? formType : undefined;
 }
@@ -268,7 +275,7 @@ function resolveRequestGate(args: {
 }
 
 export default function MerchantRequestScreen() {
-  const { colors, spacing } = useTheme();
+  const { colors, spacing, radius } = useTheme();
   const { currentUser } = useAuth();
   // Pad the scroll body by the keyboard height so fields below the focused one
   // can scroll clear of the keypad (Android runs pan mode — see the hook).
@@ -336,6 +343,7 @@ export default function MerchantRequestScreen() {
   const isPm = businessType === 'p2p_merchant';
   const isPay = businessType === 'payment_acceptance';
   const isLp = businessType === 'liquidity_provider';
+  const screenTitle = isLp ? 'Provide liquidity' : 'Merchant Application';
   const needsBanks = isPm || isLp;
 
   useEffect(() => {
@@ -575,7 +583,7 @@ export default function MerchantRequestScreen() {
   if (loading || ((isPay || isLp) && !kycChecked)) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-        <Stack.Screen options={{ title: 'Merchant Application' }} />
+        <Stack.Screen options={{ title: screenTitle }} />
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <Spinner size="large" label="Loading…" />
         </View>
@@ -597,6 +605,7 @@ export default function MerchantRequestScreen() {
   if (isLp && gate.screen === 'form' && !lpAvailable) {
     return (
       <StatusScreen
+        screenTitle={screenTitle}
         icon="clock"
         tone={colors.warning}
         toneBg={colors.warningBg}
@@ -612,6 +621,7 @@ export default function MerchantRequestScreen() {
   if (gate.screen === 'verify') {
     return (
       <StatusScreen
+        screenTitle={screenTitle}
         icon="shield"
         tone={colors.warning}
         toneBg={colors.warningBg}
@@ -627,6 +637,7 @@ export default function MerchantRequestScreen() {
   if (gate.screen === 'pending') {
     return (
       <StatusScreen
+        screenTitle={screenTitle}
         icon="clock"
         tone={colors.warning}
         toneBg={colors.warningBg}
@@ -642,6 +653,7 @@ export default function MerchantRequestScreen() {
   if (gate.screen === 'provisioning') {
     return (
       <StatusScreen
+        screenTitle={screenTitle}
         icon="clock"
         tone={colors.warning}
         toneBg={colors.warningBg}
@@ -657,6 +669,7 @@ export default function MerchantRequestScreen() {
   if (gate.screen === 'approved') {
     return (
       <StatusScreen
+        screenTitle={screenTitle}
         icon="checkCircle"
         tone={colors.success}
         toneBg={colors.successBg}
@@ -682,6 +695,7 @@ export default function MerchantRequestScreen() {
   if (gate.screen === 'rejected') {
     return (
       <StatusScreen
+        screenTitle={screenTitle}
         icon="closeCircle"
         tone={colors.danger}
         toneBg={colors.dangerBg}
@@ -715,7 +729,7 @@ export default function MerchantRequestScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <Stack.Screen options={{ title: 'Merchant Application' }} />
+      <Stack.Screen options={{ title: screenTitle }} />
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -726,9 +740,20 @@ export default function MerchantRequestScreen() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
         >
-          <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.xl }}>
-            Fill in your business details to apply
-          </Text>
+          {isLp ? (
+            <View
+              style={{ backgroundColor: colors.accentMuted, borderRadius: radius.md, padding: spacing.lg, marginBottom: spacing.xl, gap: spacing.sm }}
+            >
+              <Text variant="bodyMed" weight="700">How providing liquidity works</Text>
+              {LP_HOW_IT_WORKS.map((line, i) => (
+                <Text key={line} variant="bodySm" color="textSecondary">{`${i + 1}. ${line}`}</Text>
+              ))}
+            </View>
+          ) : (
+            <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.xl }}>
+              Fill in your business details to apply
+            </Text>
+          )}
 
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.sm }}>
             Business Type *
@@ -768,6 +793,7 @@ export default function MerchantRequestScreen() {
           />
           )}
 
+          {!isLp && (
           <Field
             ref={descriptionRef}
             label="Business Description"
@@ -780,6 +806,7 @@ export default function MerchantRequestScreen() {
             blurOnSubmit={true}
             onSubmitEditing={() => addressRef.current?.focus()}
           />
+          )}
 
           <Field
             ref={addressRef}
@@ -803,7 +830,7 @@ export default function MerchantRequestScreen() {
               }}
               fields={['country', 'state', 'city']}
               required={['country', 'state', 'city']}
-              labels={{ country: 'Country *', state: 'State *', city: 'City *' }}
+              labels={{ country: 'Country', state: 'State', city: 'City' }}
               showLabels
             />
           </View>
@@ -1145,11 +1172,12 @@ const StatusScreen: React.FC<{
   actionVariant: 'primary' | 'secondary' | 'success';
   onAction: () => void;
   children?: React.ReactNode;
-}> = ({ icon, tone, toneBg, title, body, actionTitle, actionVariant, onAction, children }) => {
+  screenTitle: string;
+}> = ({ screenTitle, icon, tone, toneBg, title, body, actionTitle, actionVariant, onAction, children }) => {
   const { colors, spacing, radius } = useTheme();
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
-      <Stack.Screen options={{ title: 'Merchant Application' }} />
+      <Stack.Screen options={{ title: screenTitle }} />
       <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: spacing.lg }}>
         <View
           style={{
