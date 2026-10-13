@@ -36,7 +36,7 @@ func TestLaneCommitments_OlderReadNeverOverwritesAFresherCount(t *testing.T) {
 	if u, err := c.UnitsFresh(context.Background()); err != nil || u != 9 {
 		t.Fatalf("fresh count = %d, %v; want 9", u, err)
 	}
-	close(release) // the old read now finishes with 5
+	close(release)                     // the old read now finishes with 5
 	time.Sleep(100 * time.Millisecond) // let the old read store (or not) its 5
 	if u, err := c.Units(context.Background()); err != nil || u != 9 {
 		t.Fatalf("cached count = %d, %v; want the fresher 9, never the older 5", u, err)

@@ -11,7 +11,7 @@ import (
 
 // RegisterSignerAdmin mounts the super-admin signer lane routes (signer
 // consolidation runbook): GET /api/admin/signer/lanes, POST .../fill-gap,
-// POST .../clear-hold.
+// POST .../retry, POST .../clear-hold.
 func RegisterSignerAdmin(router *gin.Engine, cfg *config.Config, h *handlers.SignerAdminHandler) {
 	if h == nil || h.Registry == nil {
 		return
@@ -20,5 +20,6 @@ func RegisterSignerAdmin(router *gin.Engine, cfg *config.Config, h *handlers.Sig
 	g.Use(middleware.RateLimiter(500, 15*time.Minute), middleware.AdminAuth(cfg), middleware.RequireSuperAdmin())
 	g.GET("", h.Lanes)
 	g.POST("/fill-gap", h.FillGap)
+	g.POST("/retry", h.Retry)
 	g.POST("/clear-hold", h.ClearHold)
 }

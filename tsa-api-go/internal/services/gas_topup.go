@@ -636,7 +636,8 @@ func (g *GasTopUp) gasNeeded(lane *SponsorLane, order *models.PaycrestOrderRecor
 // confirm waits for the top-up to land, so the app's own send that follows is
 // not priced against a balance that has not arrived yet.
 func (g *GasTopUp) confirm(ctx context.Context, lane *SponsorLane, txHash string) error {
-	receipt, err := lane.Native.WaitForReceiptContext(ctx, txHash, g.receiptTimeout)
+	// Followed to a speed-up of the same top-up, if the key lane re-signed it.
+	receipt, _, err := waitFollowingReplacements(ctx, lane.KeyLane, txHash, g.receiptTimeout, lane.Native.WaitForReceiptContext)
 	if err != nil {
 		// Keep the cause: an RPC that refuses every receipt read looks exactly
 		// like a slow chain from the outside.

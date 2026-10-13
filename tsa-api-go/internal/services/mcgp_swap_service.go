@@ -69,6 +69,9 @@ type MCGPSwapService struct {
 	// error must not leave the money paths open on a guess.
 	operatorVerified atomic.Bool
 
+	// receiptWait is one bounded receipt wait (client.WaitForReceipt; tests).
+	receiptWait func(txHash string, timeout time.Duration) (*types.Receipt, error)
+
 	// signMu is the operator SEQUENCE lock: it orders operator operations, and
 	// OperatorSequence holds it across receipt waits (up to 60 s). It is never
 	// the nonce lock — holding the shared KeyLane that long would stall PM
@@ -93,7 +96,6 @@ func NewMCGPSwapService(client *blockchain.EVMClient, cfg *config.Config) *MCGPS
 	}
 	return svc
 }
-
 
 // SetOperatorLane wires the operator EOA through its key's shared KeyLane
 // (SignerRegistry). nil ⇒ IT operator ops disabled.
@@ -921,18 +923,25 @@ func (s *MCGPSwapService) VerifyAmountEvent(eventName, txHash string, account co
 }
 
 func (s *MCGPSwapService) receipt(txHash string) (*types.Receipt, error) {
-	if s.client == nil {
+	if s.client == nil && s.receiptWait == nil {
 		return nil, fmt.Errorf("blockchain client not available")
 	}
 	// The app confirms right after broadcast, so the tx is usually not mined
 	// yet on the node we query. Wait (Sonic blocks are ~1s) rather than failing
-	// immediately on a single-shot lookup.
-	r, err := s.client.WaitForReceipt(txHash, 60*time.Second)
+	// immediately on a single-shot lookup — following an operator tx to its
+	// speed-up, if the key lane re-signed it, so the replacement's receipt
+	// answers for the original.
+	wait := s.receiptWait
+	if wait == nil {
+		wait = s.client.WaitForReceipt
+	}
+	r, final, err := waitFollowingReplacements(context.Background(), s.operatorLane, txHash, 60*time.Second,
+		func(_ context.Context, h string, d time.Duration) (*types.Receipt, error) { return wait(h, d) })
 	if err != nil {
 		return nil, fmt.Errorf("get receipt %s: %w", txHash, err)
 	}
 	if r.Status != types.ReceiptStatusSuccessful {
-		return nil, fmt.Errorf("tx %s reverted", txHash)
+		return nil, fmt.Errorf("tx %s reverted", final)
 	}
 	return r, nil
 }

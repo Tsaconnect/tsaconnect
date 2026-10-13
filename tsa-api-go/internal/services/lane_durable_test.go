@@ -15,68 +15,12 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/testutil"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
-
-// memLaneStore is a KeyLaneStore in memory, shared between "processes".
-type memLaneStore struct {
-	mu   sync.Mutex
-	rows []models.KeyLaneTx
-}
-
-func (m *memLaneStore) Record(_ context.Context, r *models.KeyLaneTx) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	r.CreatedAt = time.Now()
-	m.rows = append(m.rows, *r)
-	return nil
-}
-func (m *memLaneStore) Delete(_ context.Context, id uuid.UUID) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i, r := range m.rows {
-		if r.ID == id {
-			m.rows = append(m.rows[:i], m.rows[i+1:]...)
-			return nil
-		}
-	}
-	return nil
-}
-func (m *memLaneStore) SetStatus(_ context.Context, id uuid.UUID, status string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i := range m.rows {
-		if m.rows[i].ID == id {
-			m.rows[i].Status = status
-		}
-	}
-	return nil
-}
-func (m *memLaneStore) Pending(_ context.Context, chainID int64, address string) ([]models.KeyLaneTx, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []models.KeyLaneTx
-	for _, r := range m.rows {
-		if r.ChainID == chainID && strings.EqualFold(r.Address, address) && r.Status == models.KeyLaneTxPending {
-			out = append(out, r)
-		}
-	}
-	return out, nil
-}
-func (m *memLaneStore) MarkMined(_ context.Context, chainID int64, address string, mined uint64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for i := range m.rows {
-		if m.rows[i].ChainID == chainID && strings.EqualFold(m.rows[i].Address, address) && uint64(m.rows[i].Nonce) < mined {
-			m.rows[i].Status, m.rows[i].RawTx = models.KeyLaneTxMined, nil
-		}
-	}
-	return nil
-}
 
 // chainNode is a full lane broadcaster: it records every signed tx it is
 // handed, can refuse one (refuse), knows what it accepted (unless forgotten),
@@ -171,12 +115,48 @@ func durableLane(t *testing.T, store KeyLaneStore, key *ecdsaKey, node *chainNod
 	return lane
 }
 
+type ecdsaKey struct{ k *ecdsa.PrivateKey }
+
+func newEcdsaKey() *ecdsaKey { k, _ := crypto.GenerateKey(); return &ecdsaKey{k: k} }
+
+func jsonTx(u blockchain.UnsignedTx) ([]byte, error) { return json.Marshal(u) }
+
+// sqliteLaneStore is the durable GORM store on a private SQLite database
+// (the lane lock emulated by a process mutex), shared by every "process"
+// (registry) a test builds on it.
+func sqliteLaneStore(t *testing.T) *GormKeyLaneStore {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, _ := db.DB()
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	if err := db.AutoMigrate(&models.KeyLaneNonce{}, &models.KeyLaneTx{}); err != nil {
+		t.Fatal(err)
+	}
+	return &GormKeyLaneStore{DB: db}
+}
+
+// statefulNode adds a consistent (balance, mined nonce) read.
+type statefulNode struct {
+	*chainNode
+	stateMined uint64
+}
+
+func (n *statefulNode) NativeStateAt(context.Context, string) (*big.Int, uint64, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return new(big.Int).Set(n.balance), n.stateMined, nil
+}
+
 // Owner's rule across a restart: process 1 signs call A at nonce 5 and its
-// broadcast times out without reaching the node. Process 2 (same store) seeds
-// from key_lane_txs and, once the grace has passed, re-broadcasts A at 5 —
+// broadcast times out without reaching the node. Process 2 (same database)
+// finds the allocation and, once the grace has passed, re-broadcasts A at 5 —
 // the next call (B) goes to 6. No other call is ever signed at 5.
 func TestKeyLane_RestartResendsTheSameCallNeverADifferentOne(t *testing.T) {
-	store := &memLaneStore{}
+	store := sqliteLaneStore(t)
 	key := newEcdsaKey()
 	node := newChainNode(146)
 	node.mined = 5
@@ -209,11 +189,57 @@ func TestKeyLane_RestartResendsTheSameCallNeverADifferentOne(t *testing.T) {
 	}
 }
 
+// Review 1 (multi-process): two lanes on one key in two "processes" sharing
+// the database, building on an RPC whose pending view never moves, send
+// concurrently: every nonce is allocated once, and carries one call.
+func testTwoProcessesNeverShareANonce(t *testing.T, store KeyLaneStore) {
+	key := newEcdsaKey()
+	node := newChainNode(56)
+	clock := time.Now()
+	p1 := durableLane(t, store, key, node, &clock)
+	p2 := durableLane(t, store, key, node, &clock)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			lane := p1
+			if i%2 == 1 {
+				lane = p2
+			}
+			to := common.BigToAddress(big.NewInt(int64(1000 + i)))
+			if _, _, err := lane.Send(context.Background(), callTo(56, to, "ab", 0)); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	byNonce := map[uint64]common.Address{}
+	for _, tx := range node.txs {
+		if prev, ok := byNonce[tx.Nonce()]; ok && prev != *tx.To() {
+			t.Fatalf("nonce %d carried two calls (%s and %s)", tx.Nonce(), prev, tx.To())
+		}
+		byNonce[tx.Nonce()] = *tx.To()
+	}
+	if len(byNonce) != 8 {
+		t.Fatalf("%d distinct nonces for 8 sends, want 8", len(byNonce))
+	}
+}
+
+func TestKeyLane_TwoProcessesNeverShareANonce_SQLite(t *testing.T) {
+	testTwoProcessesNeverShareANonce(t, sqliteLaneStore(t))
+}
+
+func TestKeyLane_TwoProcessesNeverShareANonce_Postgres(t *testing.T) {
+	db := testutil.TempPostgres(t, "key_lane_", &models.KeyLaneNonce{}, &models.KeyLaneTx{})
+	testTwoProcessesNeverShareANonce(t, &GormKeyLaneStore{DB: db})
+}
+
 // An evicted, underpriced tx: its re-broadcast is refused as underpriced, so
 // the lane re-signs the SAME call at nonce 5 with a higher fee; once mined,
 // later sends carry on above it.
 func TestKeyLane_EvictedUnderpricedTxIsSpedUpWithTheSameCall(t *testing.T) {
-	store := &memLaneStore{}
+	store := sqliteLaneStore(t)
 	key := newEcdsaKey()
 	node := newChainNode(146)
 	node.mined = 5
@@ -245,6 +271,10 @@ func TestKeyLane_EvictedUnderpricedTxIsSpedUpWithTheSameCall(t *testing.T) {
 	if got := node.atNonce(6); len(got) != 1 || *got[0].To() != callB {
 		t.Fatal("call B must go to 6")
 	}
+	// Review 3: the original's hash now resolves to the accepted speed-up.
+	if final := lane.FinalHash(context.Background(), h5); final != last.Hash().Hex() {
+		t.Fatalf("FinalHash(%s) = %s, want the speed-up %s", h5, final, last.Hash().Hex())
+	}
 	node.mu.Lock()
 	node.mined = 7
 	node.mu.Unlock()
@@ -254,22 +284,128 @@ func TestKeyLane_EvictedUnderpricedTxIsSpedUpWithTheSameCall(t *testing.T) {
 	if _, _, err := lane.Send(context.Background(), callTo(146, callB, "cc", 7)); err != nil {
 		t.Fatal(err)
 	}
-	if got := node.atNonce(7); len(got) != 1 || len(lane.sent) != 1 {
-		t.Fatalf("after mining: nonce 7 sends=%d records=%d", len(got), len(lane.sent))
+	if got := node.atNonce(7); len(got) != 1 {
+		t.Fatalf("after mining: nonce 7 sends=%d", len(got))
 	}
-	for _, r := range store.rows {
-		if r.Nonce < 7 && (r.Status != models.KeyLaneTxMined || r.RawTx != nil) {
-			t.Fatalf("row %d status %s raw kept=%v, want mined with raw dropped", r.Nonce, r.Status, r.RawTx != nil)
+	var raws int64
+	store.DB.Model(&models.KeyLaneTx{}).Where("nonce < 7 AND raw_tx IS NOT NULL").Count(&raws)
+	if raws != 0 {
+		t.Fatalf("%d mined rows kept their raw bytes", raws)
+	}
+}
+
+// Review 2 (security): speed-ups are capped — at most keyLaneMaxBumps, each
+// based on the last ACCEPTED price, never above 3× today's price — and past
+// the cap the lane holds; the admin retry re-arms it.
+func TestKeyLane_SpeedUpsAreCappedAndBasedOnTheLastAcceptedPrice(t *testing.T) {
+	store := sqliteLaneStore(t)
+	key := newEcdsaKey()
+	node := newChainNode(146)
+	node.mined = 5
+	clock := time.Now()
+	lane := durableLane(t, store, key, node, &clock)
+	h5, _, err := lane.Send(context.Background(), callTo(146, callA, "aa", 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nothing at nonce 5 is ever accepted again: every signing is evicted, and
+	// the second speed-up is refused outright (never accepted).
+	node.refuse = func(tx *types.Transaction, attempt int) error {
+		if tx.Nonce() == 5 && tx.Hash() == common.HexToHash(h5) {
+			return errors.New("transaction underpriced")
+		}
+		if tx.Nonce() == 5 && tx.GasPrice().Cmp(big.NewInt(1_200_000_000)) > 0 && tx.GasPrice().Cmp(big.NewInt(1_300_000_000)) < 0 {
+			return errors.New("transaction underpriced") // the 2nd bump: rejected, never accepted
+		}
+		return nil
+	}
+	var prices []*big.Int
+	for i := 0; i < 5; i++ {
+		node.mu.Lock()
+		for h := range node.known {
+			delete(node.known, h)
+		}
+		node.mu.Unlock()
+		clock = clock.Add(keyLaneGapGrace + time.Second)
+		_, _, err := lane.Send(context.Background(), callTo(146, callB, "bb", 5))
+		if errors.Is(err, ErrKeyLaneHeld) {
+			break
+		}
+	}
+	for _, tx := range node.atNonce(5)[1:] {
+		if tx.Hash() != common.HexToHash(h5) {
+			prices = append(prices, tx.GasPrice())
+		}
+	}
+	if len(prices) != keyLaneMaxBumps {
+		t.Fatalf("speed-ups %v, want exactly %d before the hold", prices, keyLaneMaxBumps)
+	}
+	// Bump 2 was refused: recorded rejected, never the accepted base.
+	var rejected int64
+	store.DB.Model(&models.KeyLaneTx{}).Where("nonce = 5 AND status = ?", models.KeyLaneTxRejected).Count(&rejected)
+	var alloc models.KeyLaneNonce
+	store.DB.Where("nonce = 5").First(&alloc)
+	if rejected != 1 || alloc.AcceptedPrice != prices[2].String() {
+		t.Fatalf("rejected rows %d, accepted price %s; want only bump 2 rejected and bump 3 (%s) accepted", rejected, alloc.AcceptedPrice, prices[2])
+	}
+	if prices[2].Cmp(prices[1]) <= 0 {
+		t.Fatalf("bump 3 %s must step past the refused bump 2 %s", prices[2], prices[1])
+	}
+	for _, p := range prices {
+		if p.Cmp(big.NewInt(3_000_000_000)) > 0 {
+			t.Fatalf("a speed-up priced %s, above 3× today's 1 gwei", p)
+		}
+	}
+	if _, why, held := lane.Held(); !held || !strings.Contains(why, "speed-up limit") {
+		t.Fatalf("held=%v reason=%q, want held at the speed-up limit", held, why)
+	}
+	if err := lane.RetrySpeedUp(context.Background(), 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, held := lane.Held(); held {
+		t.Fatal("the admin retry clears the hold")
+	}
+}
+
+// The fee cap itself: a stuck call already priced near 3× today's price is
+// not bumped above it — the lane holds.
+func TestKeyLane_SpeedUpNeverExceedsTheFeeCap(t *testing.T) {
+	store := sqliteLaneStore(t)
+	key := newEcdsaKey()
+	node := newChainNode(146)
+	node.mined = 5
+	clock := time.Now()
+	lane := durableLane(t, store, key, node, &clock)
+	h5, _, err := lane.Send(context.Background(), func() ([]byte, error) {
+		return jsonTx(blockchain.UnsignedTx{Nonce: 5, GasPrice: "2900000000", GasLimit: 50_000, To: callA.Hex(), Value: "0", Data: "aa", ChainID: "146"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.forget(common.HexToHash(h5))
+	node.refuse = func(tx *types.Transaction, _ int) error {
+		if tx.Hash() == common.HexToHash(h5) {
+			return errors.New("transaction underpriced")
+		}
+		return nil
+	}
+	clock = clock.Add(keyLaneGapGrace + time.Second)
+	if _, _, err := lane.Send(context.Background(), callTo(146, callB, "bb", 5)); !errors.Is(err, ErrKeyLaneHeld) {
+		t.Fatalf("err = %v, want held at the fee cap", err)
+	}
+	for _, tx := range node.atNonce(5) {
+		if tx.GasPrice().Cmp(big.NewInt(3_000_000_000)) > 0 {
+			t.Fatalf("a signing at %s wei exceeded the cap", tx.GasPrice())
 		}
 	}
 }
 
-// A hole at a nonce this lane never signed (a send from outside the
-// process): after the grace the lane holds, Watch fails (the streak ALERT),
-// and a super-admin's FillGap — a 0-value self-transfer at that nonce —
-// releases it.
+// A hole at a nonce NO process allocated (a send from outside the server):
+// after the grace the lane holds, Watch fails (the streak ALERT), and a
+// super-admin's FillGap — a 0-value self-transfer — releases it. FillGap is
+// refused for any nonce in the record.
 func TestKeyLane_ForeignGapHoldsUntilAnAdminFillsIt(t *testing.T) {
-	store := &memLaneStore{}
+	store := sqliteLaneStore(t)
 	key := newEcdsaKey()
 	node := newChainNode(146)
 	node.mined = 5
@@ -281,9 +417,12 @@ func TestKeyLane_ForeignGapHoldsUntilAnAdminFillsIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// The foreign tx at 5 is dropped: pending now reads 5, nothing of ours there.
+	// The foreign tx at 5 is dropped: pending reads 5; no process allocated 5.
 	if _, _, err := lane.Send(ctx, callTo(146, callA, "aa", 5)); err != nil {
 		t.Fatalf("first sight of the hole must not hold yet: %v", err)
+	}
+	if got := node.atNonce(5); len(got) != 0 {
+		t.Fatal("a hole outside the record is never taken by our own call")
 	}
 	clock = clock.Add(keyLaneGapGrace + time.Second)
 	if _, _, err := lane.Send(ctx, callTo(146, callA, "aa", 5)); !errors.Is(err, ErrKeyLaneHeld) {
@@ -296,6 +435,9 @@ func TestKeyLane_ForeignGapHoldsUntilAnAdminFillsIt(t *testing.T) {
 	if _, _, err := lane.Send(ctx, func() ([]byte, error) { built = true; return nil, nil }); !errors.Is(err, ErrKeyLaneHeld) || built {
 		t.Fatalf("a held lane refuses before building: err=%v built=%v", err, built)
 	}
+	if _, err := lane.FillGap(ctx, 6); err == nil {
+		t.Fatal("a nonce in the record is never filled")
+	}
 	hash, err := lane.FillGap(ctx, 5)
 	if err != nil {
 		t.Fatal(err)
@@ -307,22 +449,47 @@ func TestKeyLane_ForeignGapHoldsUntilAnAdminFillsIt(t *testing.T) {
 	if _, _, held := lane.Held(); held {
 		t.Fatal("the fill clears the hold")
 	}
-	if _, err := lane.FillGap(ctx, 6); err == nil {
-		t.Fatal("a nonce carrying our own call is never filled")
+	// Review 5/6: a second process (same database) cannot fill it again.
+	other := durableLane(t, store, key, node, &clock)
+	if _, err := other.FillGap(ctx, 5); err == nil {
+		t.Fatal("a filled nonce is in the record: never filled twice")
 	}
-	found := false
-	for _, r := range store.rows {
-		found = found || (r.Nonce == 5 && r.Status == models.KeyLaneTxFilled)
+}
+
+// Review 9: a nonce we allocated that is now mined is never "foreign", even
+// while a lagging RPC still reports it as pending.
+func TestKeyLane_MinedAllocationIsNeverForeign(t *testing.T) {
+	store := sqliteLaneStore(t)
+	key := newEcdsaKey()
+	node := newChainNode(146)
+	clock := time.Now()
+	lane := durableLane(t, store, key, node, &clock)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, _, err := lane.Send(ctx, callTo(146, callA, "aa", 5)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !found {
-		t.Fatal("the fill is recorded before its broadcast")
+	node.mu.Lock()
+	node.mined = 6
+	node.mu.Unlock()
+	_ = lane.Watch(ctx) // 5 mined
+	clock = clock.Add(time.Minute)
+	for i := 0; i < 2; i++ { // the lagging view still says 5
+		if _, _, err := lane.Send(ctx, callTo(146, callA, "aa", 5)); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+		clock = clock.Add(keyLaneGapGrace + time.Second)
+	}
+	if _, _, held := lane.Held(); held {
+		t.Fatal("a mined allocation of ours is not a foreign hole")
 	}
 }
 
 // A 429 on the lookup (or the mined-nonce read) is transient: never a hold,
 // never a reuse.
 func TestKeyLane_TransientLookupErrorsNeverHold(t *testing.T) {
-	store := &memLaneStore{}
+	store := sqliteLaneStore(t)
 	key := newEcdsaKey()
 	node := newChainNode(146)
 	node.mined = 5
@@ -344,17 +511,17 @@ func TestKeyLane_TransientLookupErrorsNeverHold(t *testing.T) {
 	}
 }
 
-// Review: two concurrent top-ups each fit the balance on their own, but not
-// together: the second sees the first's unmined spend under the lane lock and
-// is refused, so the reservation is never dipped into.
+// Two concurrent top-ups each fit the balance on their own, but not together:
+// the second sees the first's unmined spend and is refused, so the
+// reservation is never dipped into.
 func TestKeyLane_ConcurrentTopUpsCannotDipIntoTheReservation(t *testing.T) {
 	key := newEcdsaKey()
 	node := newChainNode(56)
 	reg := NewSignerRegistry()
+	reg.SetStore(sqliteLaneStore(t))
 	lane := reg.Lane("gas_sponsor", key.k, node)
 	lane.AddReservation("pool_releases", func(context.Context) (uint64, error) { return 300_000, nil }) // 6e14 at 1 gwei
-	// One top-up: 1e15 value + 21k gas fee (4.2e13 buffered) + 6e14 reserved = 1.642e15.
-	node.balance = big.NewInt(2_000_000_000_000_000)
+	node.balance = big.NewInt(2_000_000_000_000_000)                                                    // one 1e15 top-up + fee + reserve fits
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	for i := 0; i < 2; i++ {
@@ -377,57 +544,115 @@ func TestKeyLane_ConcurrentTopUpsCannotDipIntoTheReservation(t *testing.T) {
 	if ok != 1 || refused != 1 {
 		t.Fatalf("errs = %v, want exactly one top-up through and one refused", errs)
 	}
+	// Review 8: the quote-time check counts the same unmined spend.
+	if err := lane.CanPay(context.Background(), 21_000, big.NewInt(1e9), big.NewInt(1_000_000_000_000_000)); !errors.Is(err, ErrRelayerUnderfunded) {
+		t.Fatalf("CanPay = %v, want refused like the send", err)
+	}
 }
 
-// The lane lock is ctx-aware: a caller whose ctx is done never acquires it.
-func TestKeyLane_LockIsContextAware(t *testing.T) {
-	lane := soloLane(&fakeReleaseSigner{addr: sponsorTestSigner, hash: "0x1"}, nil)
-	if err := lane.lock(context.Background()); err != nil {
+// Review 4: the balance and the mined nonce are read at one block; a
+// transaction already mined at that block is paid for in the balance (not
+// subtracted again), one not yet mined is.
+func TestKeyLane_FeeGateCountsOnlyUnpaidSpend(t *testing.T) {
+	key := newEcdsaKey()
+	cn := newChainNode(56)
+	node := &statefulNode{chainNode: cn}
+	reg := NewSignerRegistry()
+	reg.SetStore(sqliteLaneStore(t))
+	lane := reg.Lane("gas_sponsor", key.k, node)
+	ctx := context.Background()
+	cn.balance = big.NewInt(2_000_000_000_000_000)
+	if _, _, err := lane.Send(ctx, pricedOn(56, 0, 1_000_000_000_000_000)); err != nil {
 		t.Fatal(err)
 	}
-	defer lane.unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	built := false
-	if _, _, err := lane.Send(ctx, func() ([]byte, error) { built = true; u, _ := unsignedOn(0, 1); return u, nil }); err == nil || built {
-		t.Fatalf("err=%v built=%v, want refused without building", err, built)
+	// Not yet mined at the read: its 1e15 (+ fee) is still to be spent, so a
+	// 0.96e15 send (needing 1.002e15) does not fit 2e15 - 1.000021e15.
+	if _, _, err := lane.Send(ctx, pricedOn(56, 0, 960_000_000_000_000)); !errors.Is(err, ErrRelayerUnderfunded) {
+		t.Fatalf("undercount: err = %v, want the unmined top-up counted", err)
+	}
+	// Mined at the read (the balance already paid it): a 0.9e15 send (needing
+	// 0.942e15) fits 0.999979e15 — the mined top-up is not subtracted twice.
+	node.mu.Lock()
+	node.stateMined = 1
+	cn.balance = big.NewInt(999_979_000_000_000)
+	node.mu.Unlock()
+	if _, _, err := lane.Send(ctx, pricedOn(56, 0, 900_000_000_000_000)); err != nil {
+		t.Fatalf("double count: err = %v, want the mined top-up not subtracted again", err)
 	}
 }
 
-// The GORM store round trip on SQLite: rows written before broadcast, read
-// back as pending, and marked mined with their raw bytes dropped.
-func TestGormKeyLaneStore_RoundTrip(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+// Review 7: the caller's persisted nonce always has a lane row — the hook
+// runs after the allocation and the signing are recorded.
+func TestKeyLane_OnPreparedRunsAfterTheAllocationIsRecorded(t *testing.T) {
+	store := sqliteLaneStore(t)
+	key := newEcdsaKey()
+	node := newChainNode(56)
+	clock := time.Now()
+	lane := durableLane(t, store, key, node, &clock)
+	_, _, err := lane.SendRecorded(context.Background(), callTo(56, callA, "aa", 3), func(n uint64) error {
+		var alloc, txs int64
+		store.DB.Model(&models.KeyLaneNonce{}).Where("nonce = ?", n).Count(&alloc)
+		store.DB.Model(&models.KeyLaneTx{}).Where("nonce = ? AND raw_tx IS NOT NULL", n).Count(&txs)
+		if alloc != 1 || txs != 1 {
+			t.Errorf("at the hook: %d allocations, %d recorded signings for nonce %d; want 1 and 1", alloc, txs, n)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.KeyLaneTx{}); err != nil {
-		t.Fatal(err)
-	}
-	s := &GormKeyLaneStore{DB: db}
-	ctx := context.Background()
-	for n := int64(4); n <= 6; n++ {
-		if err := s.Record(ctx, &models.KeyLaneTx{ChainID: 56, Address: "0xABC", Nonce: n, Hash: "0xh" + big.NewInt(n).String(),
-			RawTx: []byte{1, 2}, Status: models.KeyLaneTxPending}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := s.MarkMined(ctx, 56, "0xabc", 6); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := s.Pending(ctx, 56, "0xAbC")
-	if err != nil || len(rows) != 1 || rows[0].Nonce != 6 || rows[0].RawTx == nil {
-		t.Fatalf("pending = %+v, %v; want only nonce 6 with its bytes", rows, err)
-	}
-	var mined models.KeyLaneTx
-	db.First(&mined, "nonce = ?", 4)
-	if mined.Status != models.KeyLaneTxMined || mined.RawTx != nil {
-		t.Fatalf("row 4 = %+v, want mined with raw dropped", mined)
+}
+
+// Review 10: a signer that cannot sign without broadcasting (a future KMS) is
+// refused on a durable store — nothing is broadcast unrecorded.
+func TestKeyLane_NonRawSignerIsRefusedOnADurableStore(t *testing.T) {
+	lane := soloLane(&fakeReleaseSigner{addr: sponsorTestSigner, hash: "0x1"}, nil)
+	lane.store = sqliteLaneStore(t)
+	built := false
+	if _, attempted, err := lane.Send(context.Background(), func() ([]byte, error) { built = true; return unsignedOn(0, 1) }); attempted || !errors.Is(err, ErrTxNotBroadcast) || built {
+		t.Fatalf("attempted=%v err=%v built=%v, want refused before anything", attempted, err, built)
 	}
 }
 
-type ecdsaKey struct{ k *ecdsa.PrivateKey }
-
-func newEcdsaKey() *ecdsaKey { k, _ := crypto.GenerateKey(); return &ecdsaKey{k: k} }
-
-func jsonTx(u blockchain.UnsignedTx) ([]byte, error) { return json.Marshal(u) }
+// Review 3: an IT operator debit the lane sped up reports the replacement's
+// receipt for the original hash.
+func TestOperatorReceipt_FollowsTheSpeedUp(t *testing.T) {
+	store := sqliteLaneStore(t)
+	key := newEcdsaKey()
+	node := newChainNode(146)
+	node.mined = 5
+	clock := time.Now()
+	lane := durableLane(t, store, key, node, &clock)
+	h5, _, err := lane.Send(context.Background(), callTo(146, callA, "aa", 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.forget(common.HexToHash(h5))
+	node.refuse = func(tx *types.Transaction, _ int) error {
+		if tx.Hash() == common.HexToHash(h5) {
+			return errors.New("transaction underpriced")
+		}
+		return nil
+	}
+	clock = clock.Add(keyLaneGapGrace + time.Second)
+	if _, _, err := lane.Send(context.Background(), callTo(146, callB, "bb", 5)); err != nil {
+		t.Fatal(err)
+	}
+	replacement := lane.FinalHash(context.Background(), h5)
+	if replacement == h5 {
+		t.Fatal("setup: no speed-up recorded")
+	}
+	svc := NewMCGPSwapService(nil, nil)
+	svc.SetOperatorLane(lane)
+	svc.receiptWait = func(h string, d time.Duration) (*types.Receipt, error) {
+		if strings.EqualFold(h, replacement) {
+			return &types.Receipt{Status: types.ReceiptStatusSuccessful, TxHash: common.HexToHash(h)}, nil
+		}
+		time.Sleep(d)
+		return nil, errors.New("not found")
+	}
+	r, err := svc.receipt(h5)
+	if err != nil || r.TxHash != common.HexToHash(replacement) {
+		t.Fatalf("receipt(%s) = %v, %v; want the replacement %s's receipt", h5, r, err, replacement)
+	}
+}

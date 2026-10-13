@@ -79,8 +79,10 @@ func AutoMigrate() error {
 		// services.NewCurrencyRegistry at boot, so operator-tuned payout floors
 		// survive a deploy.
 		&models.Currency{},
-		// Every transaction a hot key's send lane signed, written before its
-		// broadcast (signer consolidation): which call each used nonce carries.
+		// Hot keys' nonce allocations (one call per nonce, DB-authoritative
+		// across processes) and every signing of them, written before its
+		// broadcast (signer consolidation).
+		&models.KeyLaneNonce{},
 		&models.KeyLaneTx{},
 		// Per-currency PM fiat balances. Supersedes payment_merchants'
 		// available_ngn/reserved_ngn, which can only express one implicit NGN

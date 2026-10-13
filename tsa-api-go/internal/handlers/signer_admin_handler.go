@@ -55,6 +55,26 @@ func (h *SignerAdminHandler) FillGap(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "gap filled", gin.H{"txHash": hash})
 }
 
+// Retry is POST /api/admin/signer/lanes/retry {chainId, address, nonce}: a
+// nonce held at the speed-up limit gets a fresh count (the fee cap still
+// applies, at the next attempt's live price).
+func (h *SignerAdminHandler) Retry(c *gin.Context) {
+	req, lane, ok := h.lane(c)
+	if !ok {
+		return
+	}
+	if req.Nonce == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "nonce is required")
+		return
+	}
+	if err := lane.RetrySpeedUp(c.Request.Context(), *req.Nonce); err != nil {
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+		return
+	}
+	h.audit(c, "signer.lane_speed_up_retry", req, nil)
+	utils.SuccessResponse(c, http.StatusOK, "speed-up retry armed", nil)
+}
+
 // ClearHold is POST /api/admin/signer/lanes/clear-hold {chainId, address}.
 func (h *SignerAdminHandler) ClearHold(c *gin.Context) {
 	req, lane, ok := h.lane(c)

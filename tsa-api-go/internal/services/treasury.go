@@ -564,7 +564,7 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		if aerr != nil {
 			return "", approveAttempted, fmt.Errorf("treasury: approve: %w", aerr)
 		}
-		receipt, rerr := lane.Native.WaitForReceiptContext(ctx, approveHash, 60*time.Second)
+		receipt, _, rerr := waitFollowingReplacements(ctx, lane.KeyLane, approveHash, 60*time.Second, lane.Native.WaitForReceiptContext)
 		if rerr != nil {
 			return "", true, fmt.Errorf("treasury: approve unconfirmed: %w", rerr)
 		}

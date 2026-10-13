@@ -125,6 +125,27 @@ func (c *EVMClient) NativeBalance(ctx context.Context, address string) (*big.Int
 	return balance, nil
 }
 
+// NativeStateAt is the address's balance and mined nonce at ONE block (the
+// head), so a key lane's fee gate knows exactly which of its transactions the
+// balance has already paid for.
+func (c *EVMClient) NativeStateAt(ctx context.Context, address string) (*big.Int, uint64, error) {
+	head, err := c.Client.BlockNumber(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read the head block: %w", err)
+	}
+	at := new(big.Int).SetUint64(head)
+	addr := common.HexToAddress(address)
+	bal, err := c.Client.BalanceAt(ctx, addr, at)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get balance for %s at %d: %w", address, head, err)
+	}
+	n, err := c.Client.NonceAt(ctx, addr, at)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get nonce for %s at %d: %w", address, head, err)
+	}
+	return bal, n, nil
+}
+
 // LatestNonce is the address's nonce at the latest MINED block — never the
 // pending view a load-balanced RPC may lag on.
 func (c *EVMClient) LatestNonce(ctx context.Context, address string) (uint64, error) {
