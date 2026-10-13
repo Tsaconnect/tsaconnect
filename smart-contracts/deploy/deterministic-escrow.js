@@ -55,8 +55,17 @@ function envOptions(env = process.env) {
     feeBps: env.DET_FEE_BPS || undefined,
     checkOnly: env.CHECK_ONLY === "1",
     deployer: env.DET_DEPLOYER || undefined,
-    deployerKey: env.DET_DEPLOYER_PRIVATE_KEY || undefined,
+    deployerKey: takeDeployKey(env),
   };
+}
+
+// takeDeployKey reads the per-run deploy key and removes it from the
+// environment at once, so no child process, crash report or env dump made
+// later in the run can carry it.
+function takeDeployKey(env) {
+  const key = env.DET_DEPLOYER_PRIVATE_KEY || undefined;
+  delete env.DET_DEPLOYER_PRIVATE_KEY;
+  return key;
 }
 
 // networkClass keeps testnet rehearsals (often with a throwaway deploy key) from
@@ -69,7 +78,15 @@ function networkClass(hre) {
   throw new Error(`deterministic: cannot tell whether network '${name}' is a mainnet or a testnet — name it *Mainnet or *Testnet`);
 }
 
-const addrOfKey = (k) => new Wallet(k.startsWith("0x") ? k : "0x" + k).address;
+// addrOfKey never lets a key reach an error message: a malformed key is named
+// by where it came from, never by value.
+const addrOfKey = (k, source) => {
+  try {
+    return new Wallet(k.startsWith("0x") ? k : "0x" + k).address;
+  } catch {
+    throw new Error(`deterministic: ${source} is not a valid private key`);
+  }
+};
 
 // routineDeployerAddresses: every key this repo uses for routine deploys — the
 // active network's hardhat-config accounts and the DEPLOYER_PRIVATE_KEY in .env.
@@ -77,14 +94,14 @@ const addrOfKey = (k) => new Wallet(k.startsWith("0x") ? k : "0x" + k).address;
 function routineDeployerAddresses(hre, envFile = ENV_FILE) {
   const out = [];
   const accounts = hre.network.config && hre.network.config.accounts;
-  if (Array.isArray(accounts)) for (const a of accounts) out.push(addrOfKey(typeof a === "string" ? a : a.privateKey));
-  if (process.env.DEPLOYER_PRIVATE_KEY) out.push(addrOfKey(process.env.DEPLOYER_PRIVATE_KEY));
+  if (Array.isArray(accounts)) for (const a of accounts) out.push(addrOfKey(typeof a === "string" ? a : a.privateKey, `a hardhat-config account on ${hre.network.name}`));
+  if (process.env.DEPLOYER_PRIVATE_KEY) out.push(addrOfKey(process.env.DEPLOYER_PRIVATE_KEY, "DEPLOYER_PRIVATE_KEY"));
   if (fs.existsSync(envFile)) {
     const parsed = require("dotenv").parse(fs.readFileSync(envFile));
     if (parsed.DET_DEPLOYER_PRIVATE_KEY) {
       throw new Error("deterministic: DET_DEPLOYER_PRIVATE_KEY is stored in .env — remove it; the deploy key is typed in for one run only");
     }
-    if (parsed.DEPLOYER_PRIVATE_KEY) out.push(addrOfKey(parsed.DEPLOYER_PRIVATE_KEY));
+    if (parsed.DEPLOYER_PRIVATE_KEY) out.push(addrOfKey(parsed.DEPLOYER_PRIVATE_KEY, ".env DEPLOYER_PRIVATE_KEY"));
   }
   return out;
 }
@@ -356,7 +373,8 @@ async function verifyProxyCode(hre, p) {
 }
 
 if (require.main === module) {
-  deploy(require("hardhat"), envOptions()).catch((e) => { console.error(e); process.exit(1); });
+  // Message only: a full error object can carry nested request/transaction data.
+  deploy(require("hardhat"), envOptions()).catch((e) => { console.error(`deterministic: ${e && e.message ? e.message : e}`); process.exit(1); });
 }
 
 module.exports = {

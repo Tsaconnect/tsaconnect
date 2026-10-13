@@ -184,6 +184,24 @@ describe("deploy/deterministic-escrow", function () {
     expect(() => det.routineDeployerAddresses({ network: { config: {} } }, env)).to.throw(/stored in \.env/);
   });
 
+  it("takes the deploy key out of the environment as soon as it is read", () => {
+    const key = hardhatKey(4);
+    const env = { DET_DEPLOYER_PRIVATE_KEY: key };
+    expect(det.envOptions(env).deployerKey).to.equal(key);
+    expect(env).to.not.have.property("DET_DEPLOYER_PRIVATE_KEY");
+  });
+
+  it("names a malformed routine key by its source, never by its value", () => {
+    const bad = "0xnot-a-real-key-" + "ab".repeat(20);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "det-env-"));
+    const env = path.join(dir, ".env");
+    fs.writeFileSync(env, `DEPLOYER_PRIVATE_KEY=${bad}\n`);
+    let msg = "";
+    try { det.routineDeployerAddresses({ network: { name: "x", config: { accounts: [] } } }, env); } catch (e) { msg = e.message; }
+    expect(msg).to.match(/\.env DEPLOYER_PRIVATE_KEY is not a valid private key/);
+    expect(msg).to.not.include(bad.slice(2));
+  });
+
   it("refuses bad DET_FEE_BPS / DET_PAYMENT_WINDOW / DET_FEE_MANAGER / tokens before any send or manifest write", async () => {
     const C = await newChain(31352);
     const chain = await chainFor(C);
