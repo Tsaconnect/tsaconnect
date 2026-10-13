@@ -146,6 +146,15 @@ func (c *EVMClient) NativeStateAt(ctx context.Context, address string) (*big.Int
 	return bal, n, nil
 }
 
+// PendingNonce is the address's pending nonce, bounded by ctx.
+func (c *EVMClient) PendingNonce(ctx context.Context, address string) (uint64, error) {
+	n, err := c.Client.PendingNonceAt(ctx, common.HexToAddress(address))
+	if err != nil {
+		return 0, fmt.Errorf("failed to get pending nonce for %s: %w", address, err)
+	}
+	return n, nil
+}
+
 // LatestNonce is the address's nonce at the latest MINED block — never the
 // pending view a load-balanced RPC may lag on.
 func (c *EVMClient) LatestNonce(ctx context.Context, address string) (uint64, error) {

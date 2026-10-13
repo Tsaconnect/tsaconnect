@@ -122,7 +122,10 @@ func TestKeyLane_ConcurrentRolesOnALaggingRPCGetConsecutiveNonces(t *testing.T) 
 	}
 }
 
-func TestKeyLane_DefiniteRejectionHandsTheNonceBack(t *testing.T) {
+// Outbox rule C: a definitely refused signing never frees its nonce for
+// another call — the next call takes the next nonce (the refused one is
+// filled by the upkeep unless its own operation retries).
+func TestKeyLane_DefiniteRejectionNeverReusesTheNonce(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	node := &laneNode{id: 56, err: errors.New("transaction underpriced")}
 	lane := NewSignerRegistry().Lane("r", key, node)
@@ -134,8 +137,8 @@ func TestKeyLane_DefiniteRejectionHandsTheNonceBack(t *testing.T) {
 	if _, _, err := lane.Send(context.Background(), build); err != nil {
 		t.Fatal(err)
 	}
-	if got := node.sent(); got[len(got)-1] != 3 {
-		t.Fatalf("nonces %v, want 3 reused after the refusal", got)
+	if got := node.sent(); got[len(got)-1] != 4 {
+		t.Fatalf("nonces %v, want 4: the refused 3 is never given to another call", got)
 	}
 }
 
@@ -169,8 +172,8 @@ func TestKeyLane_RecordHookRunsBeforeBroadcastAndAFailureSendsNothing(t *testing
 	if _, _, err := lane.SendRecorded(context.Background(), build, func(n uint64) error { recorded = n; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if recorded != 3 || node.sent()[0] != 3 {
-		t.Fatalf("recorded %d sent %v, want the hook's nonce (3, handed back) to be the one signed", recorded, node.sent())
+	if recorded != 4 || node.sent()[0] != 4 {
+		t.Fatalf("recorded %d sent %v, want 4: the abandoned 3 is never given to another call", recorded, node.sent())
 	}
 }
 

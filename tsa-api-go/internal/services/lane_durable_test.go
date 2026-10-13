@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,33 @@ type chainNode struct {
 	lookErr  error
 	price    *big.Int
 	balance  *big.Int
+	// inLock, when set, reports whether a store lock is held right now: any
+	// node call while it is counts as network I/O inside the lock.
+	inLock     func() bool
+	ioInLock   atomic.Int32
+	pendingSeq []uint64 // PendingNonce answers, in order (last repeats)
+	pendingN   int
+}
+
+func (n *chainNode) io() {
+	if n.inLock != nil && n.inLock() {
+		n.ioInLock.Add(1)
+	}
+}
+
+func (n *chainNode) PendingNonce(context.Context, string) (uint64, error) {
+	n.io()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.pendingSeq) == 0 {
+		return n.mined, nil
+	}
+	i := n.pendingN
+	if i >= len(n.pendingSeq) {
+		i = len(n.pendingSeq) - 1
+	}
+	n.pendingN++
+	return n.pendingSeq[i], nil
 }
 
 func newChainNode(id int64) *chainNode {
@@ -45,6 +73,7 @@ func newChainNode(id int64) *chainNode {
 
 func (n *chainNode) ChainID() *big.Int { return big.NewInt(n.id) }
 func (n *chainNode) SendRawTransaction(raw []byte) (string, error) {
+	n.io()
 	tx := new(types.Transaction)
 	if err := rlp.DecodeBytes(raw, tx); err != nil {
 		return "", err
@@ -62,6 +91,7 @@ func (n *chainNode) SendRawTransaction(raw []byte) (string, error) {
 	return tx.Hash().Hex(), nil
 }
 func (n *chainNode) TransactionKnown(_ context.Context, h string) (bool, error) {
+	n.io()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.lookErr != nil {
@@ -70,12 +100,14 @@ func (n *chainNode) TransactionKnown(_ context.Context, h string) (bool, error) 
 	return n.known[common.HexToHash(h)], nil
 }
 func (n *chainNode) LatestNonce(context.Context, string) (uint64, error) {
+	n.io()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.mined, n.minedErr
 }
-func (n *chainNode) SuggestGasPrice() (*big.Int, error) { return n.price, nil }
+func (n *chainNode) SuggestGasPrice() (*big.Int, error) { n.io(); return n.price, nil }
 func (n *chainNode) NativeBalance(context.Context, string) (*big.Int, error) {
+	n.io()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return new(big.Int).Set(n.balance), nil
@@ -342,7 +374,7 @@ func TestKeyLane_SpeedUpsAreCappedAndBasedOnTheLastAcceptedPrice(t *testing.T) {
 	}
 	// Bump 2 was refused: recorded rejected, never the accepted base.
 	var rejected int64
-	store.DB.Model(&models.KeyLaneTx{}).Where("nonce = 5 AND status = ?", models.KeyLaneTxRejected).Count(&rejected)
+	store.DB.Model(&models.KeyLaneTx{}).Where("nonce = 5 AND status = ? AND hash <> ?", models.KeyLaneTxRefused, strings.ToLower(h5)).Count(&rejected)
 	var alloc models.KeyLaneNonce
 	store.DB.Where("nonce = 5").First(&alloc)
 	if rejected != 1 || alloc.AcceptedPrice != prices[2].String() {

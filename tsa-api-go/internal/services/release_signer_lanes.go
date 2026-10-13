@@ -17,27 +17,36 @@ import (
 
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 // KeyLane is the ONE send lane of one hot key on one chain (signer
 // consolidation 2026-10-13): the in-process lock, the one fee gate every send
-// on the key passes, and the bridge to the DB-authoritative nonce record
-// (KeyLaneStore). Every role signing with that key on that chain (PM release,
-// expiry cancel, IT operator, gas sponsor, treasury) sends through the same
-// KeyLane, and every process allocates its nonces from the same store under a
+// on the key passes, and the bridge to the DB-authoritative OUTBOX of its
+// nonces (KeyLaneStore). Every role signing with that key on that chain (PM
+// release, expiry cancel, IT operator, gas sponsor, treasury) sends through
+// the same KeyLane, and every process allocates from the same store under a
 // per-(chain, address) advisory lock. Get one from a SignerRegistry; the lint
 // test forbids building one anywhere else.
 //
-// Nonce rule (owner): a nonce only ever carries ONE call (to, data, value),
-// enforced by the allocation's unique (chain, address, nonce) and its call
-// fingerprint, across processes and restarts. A transaction of ours the node
-// does not have past keyLaneGapGrace is re-broadcast byte for byte once, then
-// re-signed with the SAME call at a higher fee (capped; at most
-// keyLaneMaxBumps). A hole at a nonce no process allocated (a send from
-// outside the server) holds the lane until the mined nonce passes it or a
-// super-admin fills or clears it. Transient read failures never hold.
+// Outbox (owner rule: a nonce only ever carries ONE call, across processes and
+// restarts):
+//   - A. Under the advisory lock, in one DB transaction, with no network I/O:
+//     choose the nonce, sign, write the allocation and its signing ('signed'),
+//     commit. Chain reads (pending, mined, balance, price) happen before.
+//   - B. After the commit, outside every lock: hand the nonce to the caller
+//     (onPrepared), broadcast, then record the outcome in a short transaction.
+//   - C. A nonce is never given to another call. A refused or lost signing is
+//     re-sent with the SAME call (its stored bytes, or a capped speed-up); a
+//     call its caller abandoned is replaced by a 0-value self-transfer
+//     ('filled'), never by another call.
+//   - D. Speed-ups are decided, signed and committed under the lock (bumps
+//     counted in the committed row), broadcast after the commit.
+//   - E. The caller's operation key (WithOperationRef) is the allocation's
+//     idempotency key: retrying the same operation gets the same allocation,
+//     never a new nonce.
 type KeyLane struct {
 	sem     chan struct{} // the in-process lane lock, acquired ctx-aware
 	signer  ReleaseSigner
@@ -47,10 +56,15 @@ type KeyLane struct {
 	gapMu   sync.Mutex
 	gapSeen map[uint64]time.Time // when a hole no process allocated was first seen
 
+	bootMu    sync.Mutex
+	bootFloor uint64 // the first-use floor (empty table): pending read twice, and mined
+	booted    bool
+
 	balances laneBalanceReader // nil: no fee gate (a solo test lane)
 	state    laneStateReader   // balance and mined nonce at one block (consistent)
 	lookup   laneTxLookup      // nil: an unseen tx is treated as unknown to the node
 	nonces   laneNonceReader   // nil: holds never clear by themselves
+	pending  lanePendingReader // nil: no first-use floor read
 	pricer   laneGasPricer     // nil: no speed-up (a stuck tx then holds the lane)
 	store    KeyLaneStore      // never nil: the database at boot, memory otherwise
 	roles    string
@@ -91,6 +105,11 @@ type laneNonceReader interface {
 	LatestNonce(ctx context.Context, address string) (uint64, error)
 }
 
+// lanePendingReader is the chain's pending nonce (the first-use floor).
+type lanePendingReader interface {
+	PendingNonce(ctx context.Context, address string) (uint64, error)
+}
+
 // laneGasPricer is today's gas price, for a speed-up.
 type laneGasPricer interface {
 	SuggestGasPrice() (*big.Int, error)
@@ -123,6 +142,10 @@ const (
 	// keyLaneLiveCapMultiple: a speed-up never prices above this × today's price.
 	keyLaneLiveCapMultiple = 3
 )
+
+// keyLaneBootReread is the gap before the first-use floor's second pending
+// read (a var so tests can shorten it).
+var keyLaneBootReread = time.Second
 
 // keyLaneFeeCeilingGwei is each chain's absolute ceiling on a speed-up's gas
 // price, in gwei (security review: a stuck tx must never be repriced into a
@@ -254,6 +277,25 @@ func isReservedSend(ctx context.Context) bool {
 	return v
 }
 
+type operationRefKey struct{}
+
+// WithOperationRef names the caller's operation (a trade's release, a sale
+// leg, an IT debit): the lane's idempotency key for it. Retrying the same
+// operation — same call, same ref — gets the existing allocation back, never a
+// new nonce, so a caller retry can never pay twice.
+func WithOperationRef(ctx context.Context, ref string) context.Context {
+	return context.WithValue(ctx, operationRefKey{}, ref)
+}
+
+func operationRef(ctx context.Context) string {
+	v, _ := ctx.Value(operationRefKey{}).(string)
+	return v
+}
+
+// ErrOperationFilled: the operation's call was abandoned and its nonce filled
+// with a self-transfer; the same operation is never sent again.
+var ErrOperationFilled = errors.New("this operation's signing was abandoned and its nonce filled; it will not be sent")
+
 // callFingerprint identifies a call: keccak256(to|data|value). A nonce's
 // allocation carries it; a speed-up re-signs only the same fingerprint.
 func callFingerprint(u blockchain.UnsignedTx) string {
@@ -356,12 +398,16 @@ func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func
 	}
 	rs, isRaw := signer.(rawSigner)
 	if !isRaw && l.store.Durable() {
-		// A signer that cannot hand over its bytes would broadcast a
-		// transaction the store never saw.
+		// The outbox commits the exact bytes before they leave; a signer that
+		// cannot hand them over (a future KMS without raw signing) is refused.
 		return "", false, notBroadcast(errors.New("key lane: this signer cannot sign without broadcasting; refusing to send unrecorded"))
 	}
 	address := signer.Address()
 	fee, err := l.readFeeInputs(ctx, address)
+	if err != nil {
+		return "", false, err
+	}
+	floor, err := l.firstUseFloor(ctx, address)
 	if err != nil {
 		return "", false, err
 	}
@@ -388,107 +434,361 @@ func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func
 			return "", false, notBroadcast(fmt.Errorf("key lane: a tx built for chain %s was sent on chain %d", u.ChainID, l.chainID))
 		}
 	}
-	fp := callFingerprint(u)
+	pending := u.Nonce
+	// Upkeep at the chain's pending nonce first (network outside any lock).
+	l.reviewGap(ctx, signer, pending, fee)
+	if err := l.heldErr(); err != nil {
+		return "", false, err
+	}
+	fp, op := callFingerprint(u), operationRef(ctx)
+	if pending < floor {
+		pending = floor
+	}
+	if fee != nil && fee.minedKnown && fee.mined > pending {
+		pending = fee.mined
+	}
 	var alloc *models.KeyLaneNonce
 	var row *models.KeyLaneTx
-	var raw []byte
+	reused := false
 	err = l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error {
-		l.reviewGapLocked(ctx, q, u.Nonce, fee)
-		if err := l.heldErr(); err != nil {
-			return err
-		}
-		a, err := q.Allocate(u.Nonce, fp, l.roles, l.clock())
+		alloc, row, reused = nil, nil, false
+		existing, err := q.ByOp(op)
 		if err != nil {
 			return err
 		}
-		alloc, u.Nonce = a, uint64(a.Nonce)
-		if fee != nil {
-			committed, err := q.Committed(fee.committedFrom())
-			if err != nil {
-				_ = q.Release(a.ID)
-				return err
+		if existing != nil {
+			if existing.Fingerprint != fp {
+				return notBroadcast(fmt.Errorf("key lane: operation %q already holds nonce %d for a different call", op, existing.Nonce))
 			}
-			if err := l.requireFee(address, fee, committed, &u); err != nil {
-				_ = q.Release(a.ID)
-				return err
+			switch existing.Status {
+			case models.KeyLaneNonceFilled:
+				return notBroadcast(ErrOperationFilled)
+			case models.KeyLaneNonceAbandoned:
+				// The same call again at its own nonce (a fresh signing).
+				u.Nonce = uint64(existing.Nonce)
+				if err := l.gateLocked(q, address, fee, &u); err != nil {
+					return err
+				}
+				// Never an identical transaction: price it above every
+				// earlier signing of this call.
+				prior, err := q.Signings(existing.ID)
+				if err != nil {
+					return err
+				}
+				if price, ok := new(big.Int).SetString(u.GasPrice, 10); ok {
+					for _, t := range prior {
+						if prev, ok := new(big.Int).SetString(t.GasPrice, 10); ok && prev.Cmp(price) >= 0 {
+							price.Add(prev, big.NewInt(1))
+						}
+					}
+					u.GasPrice = price.String()
+				}
+				alloc = existing
+				if isRaw {
+					if _, row, err = l.signLocked(q, rs, existing, u); err != nil {
+						return err
+					}
+				}
+				alloc.Status, alloc.Handed, alloc.ActedAt = models.KeyLaneNonceSigned, onPrepared == nil, l.clock()
+				return q.Save(alloc)
+			default:
+				alloc, reused = existing, true
+				return nil
 			}
 		}
-		if unsigned, err = json.Marshal(u); err != nil {
-			_ = q.Release(a.ID)
+		n := pending
+		if max, ok, err := q.MaxNonce(); err != nil {
+			return err
+		} else if ok && uint64(max)+1 > n {
+			n = uint64(max) + 1
+		}
+		u.Nonce = n
+		if err := l.gateLocked(q, address, fee, &u); err != nil {
 			return err
 		}
-		if !isRaw {
-			return nil // memory store only: recorded once the signer reports its hash
-		}
-		var hash string
-		if raw, hash, err = rs.signRaw(unsigned); err != nil {
-			_ = q.Release(a.ID)
+		a := &models.KeyLaneNonce{Nonce: int64(n), OpKey: op, Fingerprint: fp, Status: models.KeyLaneNonceSigned,
+			Role: l.roles, Handed: onPrepared == nil, BumpLimit: keyLaneMaxBumps, ActedAt: l.clock()}
+		if err := q.Create(a); err != nil {
 			return err
 		}
-		row = laneTxRow(a, u, hash, raw, l.clock())
-		return q.RecordTx(row)
+		alloc = a
+		if isRaw {
+			_, row, err = l.signLocked(q, rs, a, u)
+		}
+		return err
 	})
 	if err != nil {
 		if errors.Is(err, ErrTxNotBroadcast) {
 			return "", false, err
 		}
-		return "", false, notBroadcast(fmt.Errorf("key lane: allocate and record: %w", err))
+		return "", false, notBroadcast(fmt.Errorf("key lane: allocate and sign: %w", err))
+	}
+	if reused {
+		// The same operation again: never a new nonce. The lane's upkeep
+		// drives its signing; the caller gets its current hash.
+		return l.FinalHash(ctx, l.currentHash(ctx, alloc)), true, nil
 	}
 	if onPrepared != nil {
-		if err := onPrepared(u.Nonce); err != nil {
-			l.undo(ctx, address, alloc, row)
+		if err := onPrepared(uint64(alloc.Nonce)); err != nil {
+			l.abandon(ctx, address, alloc.ID)
 			return "", false, fmt.Errorf("key lane: record the nonce before broadcast: %w", err)
 		}
-	}
-	var txHash string
-	if isRaw {
-		txHash, err = rs.broadcastRaw(raw, row.Hash)
-	} else {
-		txHash, err = signer.SignAndBroadcast(ctx, unsigned)
-		h := txHash
-		if err != nil {
-			h = uncertainTxHash(err)
-		}
-		row = laneTxRow(alloc, u, h, nil, l.clock())
-		if rerr := l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error { return q.RecordTx(row) }); rerr != nil {
-			log.Printf("[signer] key lane: record a test signer's tx: %v", rerr)
+		if err := l.markHanded(ctx, address, alloc.ID); err != nil {
+			l.abandon(ctx, address, alloc.ID)
+			return "", false, notBroadcast(fmt.Errorf("key lane: mark the nonce handed: %w", err))
 		}
 	}
-	if errors.Is(err, ErrTxNotBroadcast) {
-		l.undo(ctx, address, alloc, row)
-		return "", false, err
+	if !isRaw {
+		return l.sendUnrecorded(ctx, signer, address, alloc, u)
 	}
-	if err == nil {
-		if aerr := l.store.WithLock(context.WithoutCancel(ctx), l.chainID, address, func(q KeyLaneTxn) error { return q.Accept(alloc, row) }); aerr != nil {
-			log.Printf("[signer] key lane: mark %s accepted: %v", row.Hash, aerr)
-		}
+	txHash, berr := rs.broadcastRaw(row.RawTx, row.Hash)
+	l.recordOutcome(ctx, address, alloc.ID, row.ID, berr)
+	if errors.Is(berr, ErrTxNotBroadcast) {
+		return "", false, berr
 	}
-	return txHash, true, err
+	return txHash, true, berr
+}
+
+// sendUnrecorded is the in-memory store's path for a signer that cannot sign
+// without broadcasting (test fakes; never on the database store): the
+// allocation is committed first as always, the signing recorded once the
+// signer reports its hash.
+func (l *KeyLane) sendUnrecorded(ctx context.Context, signer ReleaseSigner, address string, alloc *models.KeyLaneNonce, u blockchain.UnsignedTx) (string, bool, error) {
+	unsigned, err := json.Marshal(u)
+	if err != nil {
+		l.abandon(ctx, address, alloc.ID)
+		return "", false, notBroadcast(err)
+	}
+	txHash, berr := signer.SignAndBroadcast(ctx, unsigned)
+	h := txHash
+	if berr != nil {
+		h = uncertainTxHash(berr)
+	}
+	if h == "" {
+		h = "unrecorded-" + alloc.ID.String()
+	}
+	row := laneTxRow(alloc, u, h, nil, l.clock())
+	if err := l.store.WithLock(context.WithoutCancel(ctx), l.chainID, address, func(q KeyLaneTxn) error { return q.RecordTx(row) }); err != nil {
+		log.Printf("[signer] key lane: record a test signer's tx: %v", err)
+	}
+	l.recordOutcome(ctx, address, alloc.ID, row.ID, berr)
+	if errors.Is(berr, ErrTxNotBroadcast) {
+		return "", false, berr
+	}
+	return txHash, true, berr
+}
+
+// gateLocked is the fee gate inside the lock: the committed spend of the
+// lane's live allocations the balance read has not paid, then requireFee.
+func (l *KeyLane) gateLocked(q KeyLaneTxn, address string, fee *feeInputs, u *blockchain.UnsignedTx) error {
+	if fee == nil {
+		return nil
+	}
+	committed, err := q.Committed(fee.committedFrom())
+	if err != nil {
+		return err
+	}
+	return l.requireFee(address, fee, committed, u)
+}
+
+// signLocked signs u for allocation a and records the signing ('signed').
+// Local CPU and the database only.
+func (l *KeyLane) signLocked(q KeyLaneTxn, rs rawSigner, a *models.KeyLaneNonce, u blockchain.UnsignedTx) (*models.KeyLaneNonce, *models.KeyLaneTx, error) {
+	unsigned, err := json.Marshal(u)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, hash, err := rs.signRaw(unsigned)
+	if err != nil {
+		return nil, nil, err
+	}
+	row := laneTxRow(a, u, hash, raw, l.clock())
+	if err := q.RecordTx(row); err != nil {
+		return nil, nil, err
+	}
+	return a, row, nil
 }
 
 // laneTxRow is a signing's row.
 func laneTxRow(a *models.KeyLaneNonce, u blockchain.UnsignedTx, hash string, raw []byte, at time.Time) *models.KeyLaneTx {
 	return &models.KeyLaneTx{AllocationID: a.ID, Nonce: a.Nonce, Hash: hash, RawTx: raw, To: u.To, Data: u.Data,
-		Value: u.Value, GasLimit: int64(u.GasLimit), GasPrice: u.GasPrice, Status: models.KeyLaneTxPending, CreatedAt: at}
+		Value: u.Value, GasLimit: int64(u.GasLimit), GasPrice: u.GasPrice, Status: models.KeyLaneTxSigned, CreatedAt: at}
 }
 
-// undo frees a nonce whose transaction provably never left: its row is marked
-// rejected and its allocation released, so the nonce is free again.
-func (l *KeyLane) undo(ctx context.Context, address string, a *models.KeyLaneNonce, row *models.KeyLaneTx) {
-	if a == nil {
-		return
+// currentHash is the allocation's current signing's hash ("" if none).
+func (l *KeyLane) currentHash(ctx context.Context, a *models.KeyLaneNonce) string {
+	txs, err := l.store.Signings(ctx, a.ID)
+	if err != nil {
+		return ""
 	}
-	err := l.store.WithLock(context.WithoutCancel(ctx), l.chainID, address, func(q KeyLaneTxn) error {
-		if row != nil {
-			if err := q.SetTxStatus(row.ID, models.KeyLaneTxRejected); err != nil {
-				return err
+	if cur := currentSigning(a, txs); cur != nil {
+		return cur.Hash
+	}
+	return ""
+}
+
+// firstUseFloor is the lane's floor before its first allocation (an empty
+// table, e.g. the first deploy): the pending nonce read twice a moment apart
+// (a process on the old binary may still be sending) and the mined nonce.
+// Computed once; a failed read refuses the send (retried next time).
+func (l *KeyLane) firstUseFloor(ctx context.Context, address string) (uint64, error) {
+	l.bootMu.Lock()
+	defer l.bootMu.Unlock()
+	if l.booted {
+		return l.bootFloor, nil
+	}
+	if _, ok, err := l.store.MaxNonce(ctx, l.chainID, address); err != nil {
+		return 0, notBroadcast(fmt.Errorf("key lane: read the lane's allocations: %w", err))
+	} else if ok || l.pending == nil {
+		l.booted = true
+		return l.bootFloor, nil
+	}
+	var floor uint64
+	for i := 0; i < 2; i++ {
+		if i > 0 {
+			select {
+			case <-time.After(keyLaneBootReread):
+			case <-ctx.Done():
+				return 0, notBroadcast(ctx.Err())
 			}
 		}
-		return q.Release(a.ID)
+		rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
+		p, err := l.pending.PendingNonce(rctx, address)
+		cancel()
+		if err != nil {
+			return 0, notBroadcast(fmt.Errorf("key lane: first-use floor: %w", err))
+		}
+		if p > floor {
+			floor = p
+		}
+	}
+	if l.nonces != nil {
+		rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
+		if m, err := l.nonces.LatestNonce(rctx, address); err == nil && m > floor {
+			floor = m
+		}
+		cancel()
+	}
+	l.bootFloor, l.booted = floor, true
+	log.Printf("[signer] key lane first use chain=%d address=%s floor=%d (pending read twice, mined)", l.chainID, address, floor)
+	return floor, nil
+}
+
+// abandon marks a signed allocation its caller never took: it is never
+// broadcast, and the upkeep fills its nonce unless the same operation retries.
+func (l *KeyLane) abandon(ctx context.Context, address string, allocID uuid.UUID) {
+	err := l.store.WithLock(context.WithoutCancel(ctx), l.chainID, address, func(q KeyLaneTxn) error {
+		return l.updateAlloc(q, allocID, func(a *models.KeyLaneNonce) bool {
+			if a.Status != models.KeyLaneNonceSigned {
+				return false
+			}
+			a.Status = models.KeyLaneNonceAbandoned
+			return true
+		})
 	})
 	if err != nil {
-		log.Printf("[signer] ALERT key_lane_release_failed_total=1 chain=%d address=%s nonce=%d err=%v — the nonce stays allocated; a later send skips it and the watch will hold the lane at the gap",
-			l.chainID, address, a.Nonce, err)
+		log.Printf("[signer] ALERT key_lane_abandon_failed_total=1 chain=%d address=%s alloc=%s err=%v — the upkeep abandons it once its grace passes unhanded",
+			l.chainID, address, allocID, err)
+	}
+}
+
+func (l *KeyLane) markHanded(ctx context.Context, address string, allocID uuid.UUID) error {
+	return l.store.WithLock(context.WithoutCancel(ctx), l.chainID, address, func(q KeyLaneTxn) error {
+		return l.updateAlloc(q, allocID, func(a *models.KeyLaneNonce) bool { a.Handed = true; return true })
+	})
+}
+
+// updateAlloc reloads an allocation by id inside the lock and saves it when
+// change reports a change.
+func (l *KeyLane) updateAlloc(q KeyLaneTxn, allocID uuid.UUID, change func(a *models.KeyLaneNonce) bool) error {
+	a, err := l.allocByID(q, allocID)
+	if err != nil || a == nil {
+		return err
+	}
+	if !change(a) {
+		return nil
+	}
+	return q.Save(a)
+}
+
+// allocByID reloads an allocation by id inside the lock.
+func (l *KeyLane) allocByID(q KeyLaneTxn, allocID uuid.UUID) (*models.KeyLaneNonce, error) {
+	return q.ByID(allocID)
+}
+
+// recordOutcome records one broadcast's outcome (a short transaction after
+// it, never around it): accepted — the allocation's current signing, its
+// others replaced; refused — those bytes never left (an allocation with no
+// other live signing is abandoned, to be filled); otherwise uncertain.
+func (l *KeyLane) recordOutcome(ctx context.Context, address string, allocID, txID uuid.UUID, berr error) {
+	err := l.store.WithLock(context.WithoutCancel(ctx), l.chainID, address, func(q KeyLaneTxn) error {
+		a, err := l.allocByID(q, allocID)
+		if err != nil || a == nil {
+			return err
+		}
+		txs, err := q.Signings(a.ID)
+		if err != nil {
+			return err
+		}
+		var row *models.KeyLaneTx
+		for i := range txs {
+			if txs[i].ID == txID {
+				row = &txs[i]
+			}
+		}
+		if row == nil {
+			return nil
+		}
+		switch {
+		case berr == nil:
+			for _, t := range txs {
+				if t.ID != txID && containsString(liveTxStatuses, t.Status) {
+					if err := q.SetTxStatus(t.ID, models.KeyLaneTxReplaced); err != nil {
+						return err
+					}
+				}
+			}
+			if err := q.SetTxStatus(txID, models.KeyLaneTxAccepted); err != nil {
+				return err
+			}
+			a.AcceptedHash, a.AcceptedPrice, a.AcceptedBumps = row.Hash, row.GasPrice, a.Bumps
+			if a.Status == models.KeyLaneNonceSigned {
+				a.Status = models.KeyLaneNonceSent
+			}
+			return q.Save(a)
+		case errors.Is(berr, ErrTxNotBroadcast):
+			if row.Status != models.KeyLaneTxSigned {
+				// A re-broadcast of bytes that already left once: they may
+				// still mine, so the signing stays live.
+				return nil
+			}
+			if err := q.SetTxStatus(txID, models.KeyLaneTxRefused); err != nil {
+				return err
+			}
+			live := false
+			for _, t := range txs {
+				if t.ID != txID && containsString(liveTxStatuses, t.Status) {
+					live = true
+				}
+			}
+			if !live && a.Status == models.KeyLaneNonceSigned {
+				a.Status = models.KeyLaneNonceAbandoned // its call never left: filled unless retried
+				return q.Save(a)
+			}
+			return nil
+		default:
+			if err := q.SetTxStatus(txID, models.KeyLaneTxUncertain); err != nil {
+				return err
+			}
+			if a.Status == models.KeyLaneNonceSigned {
+				a.Status = models.KeyLaneNonceSent
+				return q.Save(a)
+			}
+			return nil
+		}
+	})
+	if err != nil {
+		log.Printf("[signer] key lane: record the outcome of %s: %v (the upkeep re-reads it)", txID, err)
 	}
 }
 
@@ -568,22 +868,24 @@ func (l *KeyLane) canPayAs(ctx context.Context, address string, units uint64, pr
 	return in.balance, l.requireFee(address, in, committed, &blockchain.UnsignedTx{GasLimit: units, GasPrice: price.String(), Value: value.String()})
 }
 
-// reviewGapLocked looks at the chain's pending nonce p before allocating: a
-// hole at a nonce of ours the node lost, a hole no process allocated, or
-// nothing (a lagging view, or no hole). Decided from the store's allocations,
-// never from a pending read alone. Never puts a different call at p.
-// Transient read failures do nothing (the next send or watch tick retries).
-// Caller holds the store's lane lock.
-func (l *KeyLane) reviewGapLocked(ctx context.Context, q KeyLaneTxn, p uint64, fee *feeInputs) {
+// reviewGap is the lane's upkeep at the chain's pending nonce p: an
+// allocation of ours whose signing the node lacks (re-broadcast its bytes,
+// then a capped same-call speed-up), a call its caller abandoned (fill), or a
+// hole no process allocated (hold). Every chain read happens here, outside any
+// lock; each mutation is a short locked transaction that re-checks the state
+// it decided on, signing there and broadcasting after its commit. Transient
+// read failures do nothing (the next send or watch tick retries).
+func (l *KeyLane) reviewGap(ctx context.Context, signer ReleaseSigner, p uint64, fee *feeInputs) {
 	now := l.clock()
 	rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
 	defer cancel()
-	a, err := q.AllocationAt(p)
+	address := signer.Address()
+	a, err := l.store.Get(rctx, l.chainID, address, p)
 	if err != nil {
 		return
 	}
 	if a == nil {
-		above, err := q.HasAllocationAbove(p)
+		above, err := l.store.HasUnminedAbove(rctx, l.chainID, address, p)
 		if err != nil || !above {
 			l.forgetGap(p)
 			return
@@ -592,7 +894,7 @@ func (l *KeyLane) reviewGapLocked(ctx context.Context, q KeyLaneTxn, p uint64, f
 		if l.nonces == nil {
 			return
 		}
-		mined, err := l.nonces.LatestNonce(rctx, l.Address())
+		mined, err := l.nonces.LatestNonce(rctx, address)
 		if err != nil || mined > p {
 			return // unknown, or p is mined: the pending view lags
 		}
@@ -601,51 +903,71 @@ func (l *KeyLane) reviewGapLocked(ctx context.Context, q KeyLaneTxn, p uint64, f
 		}
 		return
 	}
-	if a.Status != models.KeyLaneNonceAllocated {
-		return // mined (a lagging pending view) or released (the allocation below reuses it)
-	}
-	if now.Sub(a.ActedAt) < keyLaneGapGrace {
-		return
-	}
-	cur, err := q.CurrentTx(a)
-	if err != nil {
+	if a.Status == models.KeyLaneNonceMined || now.Sub(a.ActedAt) < keyLaneGapGrace {
 		return
 	}
 	if l.nonces != nil {
-		if mined, err := l.nonces.LatestNonce(rctx, l.Address()); err == nil && mined > p {
+		if mined, err := l.nonces.LatestNonce(rctx, address); err == nil && mined > p {
 			return
 		}
 	}
+	if a.Status == models.KeyLaneNonceSigned && !a.Handed {
+		l.abandon(ctx, address, a.ID) // its caller never took it: filled next
+		return
+	}
+	if a.Status == models.KeyLaneNonceAbandoned {
+		_, _ = l.fill(ctx, signer, a, false)
+		return
+	}
+	txs, err := l.store.Signings(rctx, a.ID)
+	if err != nil {
+		return
+	}
+	cur := currentSigning(a, txs)
 	if cur == nil {
-		l.holdLocked(p, "this nonce is allocated but no signing of it is recorded")
+		l.holdLocked(p, "this nonce is allocated but no live signing of it is recorded")
 		return
 	}
 	if l.lookup != nil {
-		known, err := l.lookup.TransactionKnown(rctx, cur.Hash)
-		if err != nil {
-			log.Printf("[signer] key lane: nonce %d tx %s unverified (%s); not re-sent, retried later", p, cur.Hash, RedactAlertText(err.Error()))
-			return
-		}
-		if known {
-			return
+		for _, t := range txs {
+			if t.Status == models.KeyLaneTxRefused {
+				continue
+			}
+			known, err := l.lookup.TransactionKnown(rctx, t.Hash)
+			if err != nil {
+				log.Printf("[signer] key lane: nonce %d tx %s unverified (%s); not re-sent, retried later", p, t.Hash, RedactAlertText(err.Error()))
+				return
+			}
+			if known {
+				return
+			}
 		}
 	}
-	rs, isRaw := l.signer.(rawSigner)
-	if cur.RawTx != nil && isRaw && a.Rebroadcasts == 0 {
-		_ = q.Touch(a, a.Bumps, a.Rebroadcasts+1, now)
-		_, err := rs.broadcastRaw(cur.RawTx, cur.Hash)
-		log.Printf("[signer] ALERT key_lane_nonce_gap_rebroadcast_total=1 chain=%d address=%s nonce=%d tx=%s err=%v",
-			l.chainID, l.Address(), p, cur.Hash, err)
-		if err == nil {
-			_ = q.Accept(a, cur)
+	rs, isRaw := signer.(rawSigner)
+	if isRaw && cur.RawTx != nil && a.Rebroadcasts == 0 {
+		claimed := false
+		_ = l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error {
+			return l.updateAlloc(q, a.ID, func(x *models.KeyLaneNonce) bool {
+				if x.Rebroadcasts != 0 || x.Status == models.KeyLaneNonceMined {
+					return false
+				}
+				x.Rebroadcasts, x.ActedAt, claimed = 1, l.clock(), true
+				return true
+			})
+		})
+		if !claimed {
 			return
 		}
-		if !errors.Is(err, ErrTxNotBroadcast) {
-			return // uncertain: look again after the grace
+		_, berr := rs.broadcastRaw(cur.RawTx, cur.Hash)
+		log.Printf("[signer] ALERT key_lane_nonce_gap_rebroadcast_total=1 chain=%d address=%s nonce=%d tx=%s err=%v",
+			l.chainID, address, p, cur.Hash, berr)
+		l.recordOutcome(ctx, address, a.ID, cur.ID, berr)
+		if !errors.Is(berr, ErrTxNotBroadcast) {
+			return // accepted, or uncertain: look again after the grace
 		}
 		// Definitely refused (underpriced, below the base fee): speed it up now.
 	}
-	l.speedUpLocked(ctx, q, a, cur, fee)
+	l.speedUp(ctx, signer, a, cur, fee)
 }
 
 func (l *KeyLane) noteGap(p uint64, now time.Time) time.Time {
@@ -665,98 +987,186 @@ func (l *KeyLane) forgetGap(p uint64) {
 	l.gapMu.Unlock()
 }
 
-// speedUpLocked re-signs the SAME call at its nonce at a higher fee: the
-// replacement bump over the last ACCEPTED price (or the original's), at least
-// today's price, never above min(keyLaneLiveCapMultiple × today's price, the
-// chain's ceiling), at most keyLaneMaxBumps times, and through the fee gate.
-// Past a cap, or without a raw signer or price, it holds the lane.
-func (l *KeyLane) speedUpLocked(ctx context.Context, q KeyLaneTxn, a *models.KeyLaneNonce, cur *models.KeyLaneTx, fee *feeInputs) {
+// speedUp re-signs the SAME call at its nonce at a higher fee — decided,
+// signed and committed under the lock (the bump counted in the committed row),
+// broadcast after the commit. Price: one +12.5% step per signing since the
+// last ACCEPTED one (a refused signing is never the base), above every
+// earlier signing of the call, at least today's price, never above
+// min(keyLaneLiveCapMultiple × today's price, the chain's ceiling), at most
+// BumpLimit bumps, through the fee gate. Past a cap, or without a raw signer
+// or price, the lane holds.
+func (l *KeyLane) speedUp(ctx context.Context, signer ReleaseSigner, a *models.KeyLaneNonce, cur *models.KeyLaneTx, fee *feeInputs) {
 	p := uint64(a.Nonce)
-	rs, isRaw := l.signer.(rawSigner)
+	rs, isRaw := signer.(rawSigner)
 	if !isRaw || l.pricer == nil {
 		l.holdLocked(p, "the transaction at this nonce is gone and cannot be re-signed here")
 		return
 	}
-	if a.Bumps >= keyLaneMaxBumps {
-		l.holdLocked(p, fmt.Sprintf("speed-up limit reached (%d bumps)", a.Bumps))
-		return
-	}
-	basePrice := a.AcceptedPrice
-	if basePrice == "" {
-		if first, err := q.FirstTx(a); err == nil && first != nil {
-			basePrice = first.GasPrice
-		}
-	}
-	base, ok := new(big.Int).SetString(basePrice, 10)
-	if !ok {
-		l.holdLocked(p, "the transaction at this nonce has no readable gas price")
-		return
-	}
-	live, err := l.pricer.SuggestGasPrice()
+	live, err := l.pricer.SuggestGasPrice() // network: before the lock
 	if err != nil || live == nil || live.Sign() <= 0 {
 		return // transient
 	}
-	// One replacement step per signing since the last accepted one: a
-	// signing the node refused is never the base, but re-sending its price
-	// would be refused again, so the step compounds from the accepted price.
-	bumped := new(big.Int).Set(base)
-	for i := 0; i <= a.Bumps-a.AcceptedBumps; i++ {
-		bumped.Mul(bumped, big.NewInt(keyLaneSpeedUpBumpPermille)).Div(bumped, big.NewInt(1000)).Add(bumped, big.NewInt(1))
+	address := signer.Address()
+	var row *models.KeyLaneTx
+	var holdReason string
+	err = l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error {
+		x, err := l.allocByID(q, a.ID)
+		if err != nil || x == nil {
+			return err
+		}
+		if x.Status == models.KeyLaneNonceMined || x.Bumps != a.Bumps {
+			return nil // decided elsewhere meanwhile
+		}
+		if x.Bumps >= x.BumpLimit {
+			holdReason = fmt.Sprintf("speed-up limit reached (%d bumps)", x.Bumps)
+			return nil
+		}
+		txs, err := q.Signings(x.ID)
+		if err != nil {
+			return err
+		}
+		price, why := speedUpPrice(x, txs, live, l.chainID)
+		if price == nil {
+			holdReason = why
+			return nil
+		}
+		base := currentSigning(x, txs)
+		if base == nil {
+			base = cur
+		}
+		call := blockchain.UnsignedTx{Nonce: p, GasPrice: price.String(), GasLimit: uint64(base.GasLimit), To: base.To,
+			Value: base.Value, Data: base.Data, ChainID: strconv.FormatInt(l.chainID, 10)}
+		if fee != nil {
+			committed, err := q.Committed(fee.committedFrom())
+			if err != nil {
+				return err
+			}
+			replacing := new(big.Int)
+			addSpend(replacing, base)
+			committed.Sub(committed, replacing)
+			owed := *fee
+			owed.reservedUnits = 0 // the speed-up IS owed work
+			if err := l.requireFee(address, &owed, committed, &call); err != nil {
+				return nil // alerted; retried later
+			}
+		}
+		if _, row, err = l.signLocked(q, rs, x, call); err != nil {
+			return err
+		}
+		x.Bumps, x.ActedAt = x.Bumps+1, l.clock()
+		return q.Save(x)
+	})
+	if holdReason != "" {
+		l.holdLocked(p, holdReason)
+		return
 	}
-	if live.Cmp(bumped) > 0 {
-		bumped = new(big.Int).Set(live)
+	if err != nil || row == nil {
+		return
+	}
+	_, berr := rs.broadcastRaw(row.RawTx, row.Hash)
+	l.recordOutcome(ctx, address, a.ID, row.ID, berr)
+	log.Printf("[signer] ALERT key_lane_speed_up_total=1 chain=%d address=%s nonce=%d old_tx=%s new_tx=%s gas_price=%s err=%v",
+		l.chainID, address, p, cur.Hash, row.Hash, row.GasPrice, berr)
+}
+
+// speedUpPrice is a speed-up's price for allocation a with signings txs, or
+// nil and why it may not bump: one +12.5% step per bump since the last
+// accepted signing, from the last ACCEPTED price (the first signing's when
+// none was accepted), raised to today's price, strictly above every earlier
+// signing (never an identical transaction), capped at
+// min(keyLaneLiveCapMultiple × live, the chain's ceiling).
+func speedUpPrice(a *models.KeyLaneNonce, txs []models.KeyLaneTx, live *big.Int, chainID int64) (*big.Int, string) {
+	basePrice := a.AcceptedPrice
+	if basePrice == "" && len(txs) > 0 {
+		basePrice = txs[0].GasPrice
+	}
+	base, ok := new(big.Int).SetString(basePrice, 10)
+	if !ok {
+		return nil, "the transaction at this nonce has no readable gas price"
+	}
+	price := new(big.Int).Set(base)
+	steps := a.Bumps - a.AcceptedBumps + 1
+	if steps < 1 {
+		steps = 1
+	}
+	for i := 0; i < steps; i++ {
+		price.Mul(price, big.NewInt(keyLaneSpeedUpBumpPermille)).Div(price, big.NewInt(1000)).Add(price, big.NewInt(1))
+	}
+	if live.Cmp(price) > 0 {
+		price.Set(live)
+	}
+	for _, t := range txs {
+		if prev, ok := new(big.Int).SetString(t.GasPrice, 10); ok && prev.Cmp(price) >= 0 {
+			price.Add(prev, big.NewInt(1))
+		}
 	}
 	ceiling := new(big.Int).Mul(live, big.NewInt(keyLaneLiveCapMultiple))
-	if abs := keyLaneFeeCeiling(l.chainID); abs.Cmp(ceiling) < 0 {
+	if abs := keyLaneFeeCeiling(chainID); abs.Cmp(ceiling) < 0 {
 		ceiling = abs
 	}
-	if bumped.Cmp(ceiling) > 0 {
-		l.holdLocked(p, fmt.Sprintf("speed-up fee cap reached: next price %s wei, cap %s", bumped, ceiling))
-		return
+	if price.Cmp(ceiling) > 0 {
+		return nil, fmt.Sprintf("speed-up fee cap reached: next price %s wei, cap %s", price, ceiling)
 	}
-	call := blockchain.UnsignedTx{Nonce: p, GasPrice: bumped.String(), GasLimit: uint64(cur.GasLimit), To: cur.To,
-		Value: cur.Value, Data: cur.Data, ChainID: strconv.FormatInt(l.chainID, 10)}
-	if callFingerprint(call) != a.Fingerprint {
-		l.holdLocked(p, "the recorded call does not match this nonce's allocation")
-		return
+	return price, ""
+}
+
+// fill replaces an abandoned call (or, for FillGap, a hole no process
+// allocated) with a 0-value self-transfer at its nonce, signed and committed
+// under the lock (status 'filled'), broadcast after. exact: a new allocation
+// at a hole (admin); else the abandoned allocation a is filled.
+func (l *KeyLane) fill(ctx context.Context, signer ReleaseSigner, a *models.KeyLaneNonce, exact bool) (string, error) {
+	rs, isRaw := signer.(rawSigner)
+	if !isRaw || l.pricer == nil {
+		return "", errors.New("key lane: this lane cannot sign a fill")
 	}
-	if fee != nil {
-		committed, err := q.Committed(fee.committedFrom())
+	price, err := l.pricer.SuggestGasPrice() // network: before the lock
+	if err != nil {
+		return "", fmt.Errorf("key lane: gas price: %w", err)
+	}
+	price = new(big.Int).Div(new(big.Int).Mul(price, big.NewInt(keyLaneSpeedUpBumpPermille)), big.NewInt(1000))
+	address := signer.Address()
+	call := blockchain.UnsignedTx{Nonce: uint64(a.Nonce), GasPrice: price.String(), GasLimit: 21_000, To: address, Value: "0",
+		ChainID: strconv.FormatInt(l.chainID, 10)}
+	var alloc *models.KeyLaneNonce
+	var row *models.KeyLaneTx
+	err = l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error {
+		x, err := q.Get(uint64(a.Nonce))
 		if err != nil {
-			return
+			return err
 		}
-		replacing := new(big.Int)
-		addSpend(replacing, cur)
-		committed.Sub(committed, replacing) // this signing replaces the current one
-		owed := *fee
-		owed.reservedUnits = 0 // the speed-up IS owed work
-		if err := l.requireFee(l.Address(), &owed, committed, &call); err != nil {
-			return // alerted; retried later
+		switch {
+		case exact && x != nil:
+			return fmt.Errorf("key lane: nonce %d is in the record (%s, role %q); only a hole no process allocated is filled", a.Nonce, x.Status, x.Role)
+		case exact:
+			x = &models.KeyLaneNonce{Nonce: a.Nonce, Fingerprint: callFingerprint(call), Status: models.KeyLaneNonceFilled,
+				Role: "gap_fill", Handed: true, BumpLimit: keyLaneMaxBumps, ActedAt: l.clock()}
+			if err := q.Create(x); err != nil {
+				return err
+			}
+		case x == nil || x.ID != a.ID || x.Status != models.KeyLaneNonceAbandoned:
+			return nil // decided elsewhere meanwhile
+		default:
+			x.Status, x.Handed, x.ActedAt = models.KeyLaneNonceFilled, true, l.clock()
+			x.AcceptedHash, x.AcceptedPrice, x.AcceptedBumps, x.Bumps, x.Rebroadcasts = "", "", 0, 0, 0
+			if err := q.Save(x); err != nil {
+				return err
+			}
 		}
+		alloc = x
+		_, row, err = l.signLocked(q, rs, x, call)
+		return err
+	})
+	if err != nil || row == nil {
+		return "", err
 	}
-	unsigned, err := json.Marshal(call)
-	if err != nil {
-		return
+	_, berr := rs.broadcastRaw(row.RawTx, row.Hash)
+	l.recordOutcome(ctx, address, alloc.ID, row.ID, berr)
+	log.Printf("[signer] ALERT key_lane_nonce_filled_total=1 chain=%d address=%s nonce=%d tx=%s err=%v — a 0-value self-transfer took this nonce",
+		l.chainID, address, a.Nonce, row.Hash, berr)
+	if errors.Is(berr, ErrTxNotBroadcast) {
+		return row.Hash, berr
 	}
-	raw, hash, err := rs.signRaw(unsigned)
-	if err != nil {
-		return
-	}
-	row := laneTxRow(a, call, hash, raw, l.clock())
-	if err := q.RecordTx(row); err != nil {
-		log.Printf("[signer] key lane: record the speed-up at nonce %d: %v", p, err)
-		return // never broadcast an unrecorded signing
-	}
-	_ = q.Touch(a, a.Bumps+1, a.Rebroadcasts, l.clock())
-	_, berr := rs.broadcastRaw(raw, hash)
-	switch {
-	case berr == nil:
-		_ = q.Accept(a, row)
-	case errors.Is(berr, ErrTxNotBroadcast):
-		_ = q.SetTxStatus(row.ID, models.KeyLaneTxRejected) // the next bump starts from the last accepted price
-	}
-	log.Printf("[signer] ALERT key_lane_speed_up_total=1 chain=%d address=%s nonce=%d old_tx=%s new_tx=%s gas_price=%s err=%v",
-		l.chainID, l.Address(), p, cur.Hash, hash, bumped, berr)
+	return row.Hash, nil
 }
 
 // holdLocked holds the lane at nonce p.
@@ -788,34 +1198,33 @@ func (l *KeyLane) ClearHold(ctx context.Context) error {
 		l.forgetGap(h.nonce)
 		// The admin vouched for it: a fresh grace before it is judged again.
 		_ = l.store.WithLock(ctx, l.chainID, l.Address(), func(q KeyLaneTxn) error {
-			a, err := q.AllocationAt(h.nonce)
+			a, err := q.Get(h.nonce)
 			if err != nil || a == nil {
 				return err
 			}
-			return q.Touch(a, a.Bumps, a.Rebroadcasts, l.clock())
+			a.ActedAt = l.clock()
+			return q.Save(a)
 		})
 	}
 	l.held.Store(nil)
 	return nil
 }
 
-// RetrySpeedUp is a super-admin's retry of a nonce held at the speed-up limit:
-// its bump count is reset (the price cap still applies, priced at the next
-// attempt's live price) and the hold cleared.
+// RetrySpeedUp is a super-admin's retry of a nonce held at the speed-up
+// limit: the limit is raised by keyLaneMaxBumps (the count is kept, so the
+// next speed-up steps past every earlier signing — never an identical
+// transaction) and the hold cleared. The fee cap still applies.
 func (l *KeyLane) RetrySpeedUp(ctx context.Context, nonce uint64) error {
-	if err := l.lock(ctx); err != nil {
-		return err
-	}
-	defer l.unlock()
 	err := l.store.WithLock(ctx, l.chainID, l.Address(), func(q KeyLaneTxn) error {
-		a, err := q.AllocationAt(nonce)
+		a, err := q.Get(nonce)
 		if err != nil {
 			return err
 		}
-		if a == nil || a.Status != models.KeyLaneNonceAllocated {
-			return fmt.Errorf("key lane: nonce %d has no unmined allocation", nonce)
+		if a == nil || a.Status == models.KeyLaneNonceMined || a.Status == models.KeyLaneNonceAbandoned {
+			return fmt.Errorf("key lane: nonce %d has no live allocation", nonce)
 		}
-		return q.Touch(a, 0, a.Rebroadcasts, time.Time{})
+		a.BumpLimit, a.ActedAt = a.Bumps+keyLaneMaxBumps, time.Time{}
+		return q.Save(a)
 	})
 	if err != nil {
 		return err
@@ -828,69 +1237,21 @@ func (l *KeyLane) RetrySpeedUp(ctx context.Context, nonce uint64) error {
 
 // FillGap is a super-admin's fix for a hole at a nonce NO process allocated
 // (checked in the store, under the lane lock): a 0-value self-transfer at
-// that nonce, allocated and recorded before its broadcast. Refused for any
-// allocated nonce, or one the chain has mined.
+// that nonce, allocated and committed before its broadcast. Refused for any
+// nonce in the record, or one the chain has mined.
 func (l *KeyLane) FillGap(ctx context.Context, nonce uint64) (string, error) {
-	if err := l.lock(ctx); err != nil {
-		return "", err
-	}
-	defer l.unlock()
-	rs, isRaw := l.signer.(rawSigner)
-	if !isRaw || l.pricer == nil {
-		return "", errors.New("key lane: this lane cannot sign a gap fill")
-	}
-	var hash string
-	err := l.store.WithLock(ctx, l.chainID, l.Address(), func(q KeyLaneTxn) error {
-		a, err := q.AllocationAt(nonce)
-		if err != nil {
-			return err
-		}
-		if a != nil {
-			return fmt.Errorf("key lane: nonce %d is in the record (%s, role %q); only a hole no process allocated is filled", nonce, a.Status, a.Role)
-		}
+	if l.nonces != nil {
 		rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
-		defer cancel()
-		if l.nonces != nil {
-			mined, err := l.nonces.LatestNonce(rctx, l.Address())
-			if err != nil {
-				return fmt.Errorf("key lane: read the mined nonce: %w", err)
-			}
-			if mined > nonce {
-				return fmt.Errorf("key lane: nonce %d is already mined", nonce)
-			}
-		}
-		price, err := l.pricer.SuggestGasPrice()
+		mined, err := l.nonces.LatestNonce(rctx, l.Address())
+		cancel()
 		if err != nil {
-			return fmt.Errorf("key lane: gas price: %w", err)
+			return "", fmt.Errorf("key lane: read the mined nonce: %w", err)
 		}
-		price = new(big.Int).Div(new(big.Int).Mul(price, big.NewInt(keyLaneSpeedUpBumpPermille)), big.NewInt(1000))
-		call := blockchain.UnsignedTx{Nonce: nonce, GasPrice: price.String(), GasLimit: 21_000, To: l.Address(), Value: "0",
-			ChainID: strconv.FormatInt(l.chainID, 10)}
-		alloc, err := q.AllocateExact(nonce, callFingerprint(call), "gap_fill", l.clock())
-		if err != nil {
-			return err
+		if mined > nonce {
+			return "", fmt.Errorf("key lane: nonce %d is already mined", nonce)
 		}
-		unsigned, _ := json.Marshal(call)
-		raw, h, err := rs.signRaw(unsigned)
-		if err != nil {
-			return err
-		}
-		row := laneTxRow(alloc, call, h, raw, l.clock())
-		if err := q.RecordTx(row); err != nil {
-			return err
-		}
-		if _, err := rs.broadcastRaw(raw, h); err != nil {
-			if errors.Is(err, ErrTxNotBroadcast) {
-				_ = q.SetTxStatus(row.ID, models.KeyLaneTxRejected)
-				_ = q.Release(alloc.ID)
-				return err
-			}
-		} else {
-			_ = q.Accept(alloc, row)
-		}
-		hash = h
-		return nil
-	})
+	}
+	hash, err := l.fill(ctx, l.signer, &models.KeyLaneNonce{Nonce: int64(nonce)}, true)
 	if err != nil {
 		return "", err
 	}
@@ -905,7 +1266,7 @@ func (l *KeyLane) FillGap(ctx context.Context, nonce uint64) (string, error) {
 // FinalHash follows a transaction this lane sent to the signing of its call
 // the node accepted last (a speed-up), or returns hash unchanged.
 func (l *KeyLane) FinalHash(ctx context.Context, hash string) string {
-	if l == nil || l.signer == nil {
+	if l == nil || l.signer == nil || hash == "" {
 		return hash
 	}
 	h, err := l.store.FinalHash(ctx, l.chainID, l.Address(), hash)
@@ -915,48 +1276,66 @@ func (l *KeyLane) FinalHash(ctx context.Context, hash string) string {
 	return h
 }
 
-// waitFollowingReplacements waits up to timeout for hash's receipt, each
-// round re-resolving hash to its call's accepted replacement (a speed-up), so
-// a caller waiting on the original sees the replacement's receipt. wait is
-// one bounded receipt wait. Returns the receipt and the hash it belongs to.
+// signingsOf is every live signing of hash's call (the original and any
+// speed-ups), or [hash].
+func (l *KeyLane) signingsOf(ctx context.Context, hash string) []string {
+	if l == nil || l.signer == nil {
+		return []string{hash}
+	}
+	hs, err := l.store.SigningsOf(ctx, l.chainID, l.Address(), hash)
+	if err != nil || len(hs) == 0 {
+		return []string{hash}
+	}
+	return hs
+}
+
+// waitFollowingReplacements waits up to timeout for the receipt of hash's
+// call: each round it polls EVERY signing of that call (the original may
+// still mine after a speed-up was sent), returning the first receipt found
+// and the hash it belongs to. wait is one bounded receipt wait.
 func waitFollowingReplacements(ctx context.Context, lane *KeyLane, hash string, timeout time.Duration,
 	wait func(ctx context.Context, hash string, d time.Duration) (*types.Receipt, error)) (*types.Receipt, string, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		h := hash
-		if lane != nil {
-			h = lane.FinalHash(ctx, hash)
+		hashes := lane.signingsOf(ctx, hash)
+		left := time.Until(deadline)
+		if left <= 0 {
+			return nil, hash, lastErr
 		}
-		round := time.Until(deadline)
-		if round > 5*time.Second {
-			round = 5 * time.Second
+		round := 5 * time.Second
+		if left < round {
+			round = left
 		}
-		if round <= 0 {
-			return nil, h, lastErr
+		per := round / time.Duration(len(hashes))
+		early := true
+		for _, h := range hashes {
+			started := time.Now()
+			r, err := wait(ctx, h, per)
+			if err == nil {
+				return r, h, nil
+			}
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, h, lastErr
+			}
+			if time.Since(started) >= per-50*time.Millisecond {
+				early = false
+			}
 		}
-		started := time.Now()
-		r, err := wait(ctx, h, round)
-		if err == nil {
-			return r, h, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, h, lastErr
-		}
-		// A wait that failed before its round was up is the wait's own answer
-		// (not a timeout); keep going only if the call has a newer signing.
-		if time.Since(started) < round-100*time.Millisecond && (lane == nil || lane.FinalHash(ctx, hash) == h) {
-			return nil, h, lastErr
+		// Every wait failed before its slice was up (the wait's own answer, not
+		// a timeout) and no new signing appeared: stop.
+		if early && len(lane.signingsOf(ctx, hash)) == len(hashes) {
+			return nil, hash, lastErr
 		}
 	}
 }
 
-// Watch is the lane's periodic upkeep, outside the send path: read the mined
-// nonce, mark the allocations it has passed mined (raw bytes dropped), and
-// clear a hold the chain has passed. It returns an error while the lane is
-// held or the mined nonce is unreadable, so the scheduler's failure-streak
-// ALERT fires while either lasts.
+// Watch is the lane's periodic upkeep: read the mined nonce, mark the
+// allocations it has passed mined (raw bytes dropped), clear a hold the chain
+// has passed, and review the allocation at the mined nonce (re-send, speed
+// up, fill) so an idle lane still moves. It returns an error while the lane
+// is held or the mined nonce is unreadable (failure-streak ALERT).
 func (l *KeyLane) Watch(ctx context.Context) error {
 	if l.nonces == nil {
 		return l.heldErr()
@@ -982,6 +1361,9 @@ func (l *KeyLane) Watch(ctx context.Context) error {
 	if h := l.held.Load(); h != nil && mined > h.nonce {
 		log.Printf("[signer] key lane hold cleared chain=%d address=%s nonce=%d (mined nonce %d)", l.chainID, l.Address(), h.nonce, mined)
 		l.held.Store(nil)
+	}
+	if l.held.Load() == nil {
+		l.reviewGap(ctx, l.signer, mined, nil)
 	}
 	return l.heldErr()
 }
@@ -1140,6 +1522,7 @@ func newBroadcasterLane(key *ecdsa.PrivateKey, bc ReleaseBroadcaster, chainID in
 	l := newKeyLane(NewLocalKeyReleaseSigner(key, bc), chainID, store)
 	l.balances, _ = bc.(laneBalanceReader)
 	l.state, _ = bc.(laneStateReader)
+	l.pending, _ = bc.(lanePendingReader)
 	l.lookup, _ = bc.(laneTxLookup)
 	l.nonces, _ = bc.(laneNonceReader)
 	l.pricer, _ = bc.(laneGasPricer)

@@ -196,7 +196,7 @@ func (s *P2PTradeService) reconcileSliceDisputed(ctx context.Context, trade *mod
 	// PrepareAdminResolve's bool is the contract's releaseToBuyer: the buyer
 	// of a slice is the conversion treasury.
 	// A slice's resolve is one of the pool's reserved release-key calls.
-	hash, err := s.poolSender.Send(ReservedSend(ctx), trade.ChainID, func() ([]byte, error) {
+	hash, err := s.poolSender.Send(ReservedSend(WithOperationRef(ctx, "p2p_resolve:"+trade.ID.String())), trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminResolve(HashID(trade.ID), paid, s.poolSender.Address())
 	})
 	if hash == "" {

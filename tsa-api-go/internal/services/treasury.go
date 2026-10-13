@@ -557,7 +557,11 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 		// Exact-amount approval, never MaxUint256: the spender is a
 		// third-party router that changes weekly. lane.send carries the
 		// nonce lock and the broadcastAttempted contract.
-		approveHash, attempted, aerr := lane.send(ctx, func() ([]byte, error) {
+		approveCtx := ctx
+		if ref := operationRef(ctx); ref != "" {
+			approveCtx = WithOperationRef(ctx, ref+":approve")
+		}
+		approveHash, attempted, aerr := lane.send(approveCtx, func() ([]byte, error) {
 			return lane.Native.PrepareERC20Approve(tokenAddr, lane.Signer.Address(), route.ApprovalAddress, amount)
 		})
 		approveAttempted = attempted // sticky from here on, see doc comment
@@ -582,7 +586,11 @@ func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token s
 	// never zero here (a missing or malformed limit became the ceiling
 	// above), so the builder never estimates an unbounded one. value is
 	// always zero: routeValueIsZero already refused anything else above.
-	txHash, attempted, err := lane.send(ctx, func() ([]byte, error) {
+	routeCtx := ctx
+	if ref := operationRef(ctx); ref != "" {
+		routeCtx = WithOperationRef(ctx, ref+":route")
+	}
+	txHash, attempted, err := lane.send(routeCtx, func() ([]byte, error) {
 		return lane.Builder.BuildUnsignedCall(lane.Signer.Address(), route.To, callData, big.NewInt(0), gasLimit)
 	})
 	attempted = attempted || approveAttempted // sticky, see doc comment

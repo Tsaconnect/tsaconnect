@@ -257,9 +257,9 @@ func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade
 		}
 	}
 	e.sentAt[tr.ID] = now
-	sendCtx := ctx
+	sendCtx := WithOperationRef(ctx, "p2p_cancel:"+tr.ID.String()) // a retry never gets a new nonce
 	if tr.IsPoolSlice() {
-		sendCtx = ReservedSend(ctx) // a slice's cancel is one of the pool's reserved release-key calls
+		sendCtx = ReservedSend(sendCtx) // a slice's cancel is one of the pool's reserved release-key calls
 	}
 	hash, err := e.c.Signer.Send(sendCtx, tr.ChainID, func() ([]byte, error) {
 		return escrow.PrepareCancelByTimeout(HashID(tr.ID), e.c.Signer.Address())

@@ -145,15 +145,15 @@ func TestCallEscrowRecorded_BackToBackSlicesGetDistinctNonces(t *testing.T) {
 	if len(got) != 3 || got[0] != 7 || got[1] != 8 || got[2] != 9 {
 		t.Fatalf("nonces = %v, want 7 8 9", got)
 	}
-	// A refusal that provably never broadcast hands exactly that nonce back
-	// (stepBackNonce, re-review N3) — the floor is not cleared.
+	// A refusal that provably never broadcast does NOT hand its nonce to
+	// another call (outbox rule C): the next call takes the next nonce.
 	lane.Signer = &orderSigner{log: &log, addr: sponsorTestSigner, err: ErrTxNotBroadcast}
 	if _, attempted, _ := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 10), record); attempted {
 		t.Fatal("ErrTxNotBroadcast must report not attempted")
 	}
 	lane.Signer = &orderSigner{log: &log, addr: sponsorTestSigner}
-	if _, _, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 10), record); err != nil || got[len(got)-1] != 10 {
-		t.Fatalf("after a non-broadcast the nonce is reused: %v %v", got, err)
+	if _, _, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 10), record); err != nil || got[len(got)-1] != 11 {
+		t.Fatalf("after a non-broadcast: %v %v, want 11 (10 is never reused by another call)", got, err)
 	}
 }
 
@@ -235,10 +235,10 @@ func TestTreasury_TransferAfterASliceNeverReusesItsNonce(t *testing.T) {
 	}
 }
 
-// M-1 (b): a send the node definitely refused (here: underpriced) is not
-// broadcast, so its nonce is handed back and the next send within the floor's
-// TTL reuses it — no gap for later sends to queue behind.
-func TestTreasury_DefiniteRejectionHandsTheNonceBack(t *testing.T) {
+// M-1 (b), outbox rule C: a send the node definitely refused (underpriced) is
+// not broadcast, and its nonce is never given to another call — the next
+// send takes the next nonce (the refused one is filled by the upkeep).
+func TestTreasury_DefiniteRejectionNeverReusesTheNonce(t *testing.T) {
 	tr, lane, bc := treasuryLaneOnNode(t)
 	ctx := context.Background()
 	bc.err = errors.New("transaction underpriced")
@@ -246,8 +246,8 @@ func TestTreasury_DefiniteRejectionHandsTheNonceBack(t *testing.T) {
 		t.Fatalf("underpriced: attempted=%v err=%v, want not broadcast", attempted, err)
 	}
 	bc.err = nil
-	if _, _, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil || bc.last(t) != 7 {
-		t.Fatalf("next send: nonce %d err=%v, want 7 again", bc.last(t), err)
+	if _, _, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil || bc.last(t) != 8 {
+		t.Fatalf("next send: nonce %d err=%v, want 8", bc.last(t), err)
 	}
 }
 

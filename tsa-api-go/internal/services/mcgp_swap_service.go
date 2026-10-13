@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"golang.org/x/sync/errgroup"
@@ -491,7 +492,10 @@ func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData 
 	if !s.operatorVerified.Load() {
 		return "", notBroadcast(ErrOperatorRoleMissing)
 	}
-	hash, _, err := s.operatorLane.Send(ctx, func() ([]byte, error) {
+	// The call itself (it carries the debit/credit ref) is the operation: a
+	// retry of the same op never gets a new nonce.
+	opCtx := WithOperationRef(ctx, "it_op:"+crypto.Keccak256Hash(callData).Hex())
+	hash, _, err := s.operatorLane.Send(opCtx, func() ([]byte, error) {
 		unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
 		if err != nil {
 			// Nonce, gas price and gas estimate are all reads: nothing was sent.

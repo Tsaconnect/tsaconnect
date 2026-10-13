@@ -339,7 +339,8 @@ func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UU
 	}
 	// 6. Send, writing the nonce on the leg before the broadcast (review C1).
 	// 7. Record the hash on a context that outlives ours.
-	hash, attempted, err := tr.TransferTokenRecorded(ctx, lane, token, intent.DestAddress, amount, func(nonce uint64) error {
+	// The leg is the operation: a retry of this same leg never gets a new nonce.
+	hash, attempted, err := tr.TransferTokenRecorded(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, token, intent.DestAddress, amount, func(nonce uint64) error {
 		res := s.db.WithContext(detached(ctx)).Model(&models.RampLeg{}).
 			Where("id = ? AND status = ?", leg.ID, models.RampLegStatusPending).Update("nonce", nonce)
 		if res.Error == nil && res.RowsAffected != 1 {

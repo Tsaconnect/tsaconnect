@@ -16,50 +16,59 @@ import (
 	"gorm.io/gorm"
 )
 
-// KeyLaneStore is the DB-authoritative record of a hot key's nonces
+// KeyLaneStore is the DB-authoritative outbox of a hot key's nonces
 // (key_lane_nonces) and every signing of them (key_lane_txs). Every decision
-// about a nonce — allocate, re-broadcast, speed up, fill — runs inside
-// WithLock, which serialises it per (chain, address) across every process.
+// about a nonce — allocate, re-sign, speed up, fill, record an outcome — runs
+// inside WithLock, which serialises it per (chain, address) across every
+// process. WithLock bodies touch only the database (and sign locally): never
+// the network.
 type KeyLaneStore interface {
 	// Durable: survives a restart and is shared by processes (the database).
 	Durable() bool
 	WithLock(ctx context.Context, chainID int64, address string, fn func(q KeyLaneTxn) error) error
-	// FinalHash follows a transaction to its allocation's accepted signing (a
-	// speed-up's hash), or returns hash unchanged when it knows none.
+
+	// Plain reads, outside any lock.
+	Get(ctx context.Context, chainID int64, address string, nonce uint64) (*models.KeyLaneNonce, error)
+	HasUnminedAbove(ctx context.Context, chainID int64, address string, nonce uint64) (bool, error)
+	MaxNonce(ctx context.Context, chainID int64, address string) (int64, bool, error)
+	Signings(ctx context.Context, allocID uuid.UUID) ([]models.KeyLaneTx, error)
+	// SigningsOf is every signing (not refused) of the allocation that hash
+	// belongs to, oldest first; [hash] when the store does not know it.
+	SigningsOf(ctx context.Context, chainID int64, address, hash string) ([]string, error)
+	// FinalHash is the accepted signing of hash's allocation, else hash.
 	FinalHash(ctx context.Context, chainID int64, address, hash string) (string, error)
-	// Committed is what this lane's allocations at or above fromNonce will
-	// still spend: value + gas limit × price of each one's current signing.
+	// Committed is what this lane's live allocations at or above fromNonce
+	// will still spend: value + gas limit × price of each one's current signing.
 	Committed(ctx context.Context, chainID int64, address string, fromNonce uint64) (*big.Int, error)
 	// MarkMined marks allocations below mined as mined and drops the raw bytes
 	// of their signings.
 	MarkMined(ctx context.Context, chainID int64, address string, mined uint64) error
 }
 
-// KeyLaneTxn is the store inside one lane's lock.
+// KeyLaneTxn is the store inside one lane's lock. Every method returns its
+// statement's error; a caller returns it from the WithLock body (never
+// ignores it), so a failed statement rolls the whole transaction back.
 type KeyLaneTxn interface {
-	AllocationAt(nonce uint64) (*models.KeyLaneNonce, error)
-	// HasAllocationAbove: any unmined allocation above nonce.
-	HasAllocationAbove(nonce uint64) (bool, error)
-	// Allocate reserves the smallest free nonce at or above from (and above
-	// every mined allocation) for the call fp. Free = released, or above every
-	// allocation ever made: a lower nonce with no allocation is a hole outside
-	// this server's record and is never taken (reviewGapLocked holds on it).
-	Allocate(from uint64, fp, role string, at time.Time) (*models.KeyLaneNonce, error)
-	// AllocateExact reserves exactly nonce (a released one, or one with no
-	// allocation), or fails.
-	AllocateExact(nonce uint64, fp, role string, at time.Time) (*models.KeyLaneNonce, error)
-	// Release marks an allocation released: its only signing never left.
-	Release(id uuid.UUID) error
+	Get(nonce uint64) (*models.KeyLaneNonce, error)
+	ByID(id uuid.UUID) (*models.KeyLaneNonce, error)
+	ByOp(opKey string) (*models.KeyLaneNonce, error)
+	MaxNonce() (int64, bool, error)
+	Committed(fromNonce uint64) (*big.Int, error)
+	Create(a *models.KeyLaneNonce) error
+	Save(a *models.KeyLaneNonce) error
 	RecordTx(row *models.KeyLaneTx) error
 	SetTxStatus(id uuid.UUID, status string) error
-	// CurrentTx is the allocation's accepted signing, else its latest pending one.
-	CurrentTx(alloc *models.KeyLaneNonce) (*models.KeyLaneTx, error)
-	// FirstTx is the allocation's first signing (its original price).
-	FirstTx(alloc *models.KeyLaneNonce) (*models.KeyLaneTx, error)
-	Accept(alloc *models.KeyLaneNonce, tx *models.KeyLaneTx) error
-	Touch(alloc *models.KeyLaneNonce, bumps, rebroadcasts int, at time.Time) error
-	Committed(fromNonce uint64) (*big.Int, error)
+	Signings(allocID uuid.UUID) ([]models.KeyLaneTx, error)
 }
+
+// liveAllocationStatuses hold a nonce whose transaction may still spend.
+var liveAllocationStatuses = []string{models.KeyLaneNonceSigned, models.KeyLaneNonceSent, models.KeyLaneNonceFilled}
+
+// unminedAllocationStatuses are every allocation the mined nonce has not passed.
+var unminedAllocationStatuses = []string{models.KeyLaneNonceSigned, models.KeyLaneNonceSent, models.KeyLaneNonceAbandoned, models.KeyLaneNonceFilled}
+
+// liveTxStatuses are signings that may be (or become) the mined one.
+var liveTxStatuses = []string{models.KeyLaneTxSigned, models.KeyLaneTxAccepted, models.KeyLaneTxUncertain}
 
 // laneLockKey is the advisory-lock key of one lane.
 func laneLockKey(chainID int64, address string) int64 {
@@ -75,6 +84,37 @@ var processLaneLocks sync.Map
 func processLaneLock(key int64) *sync.Mutex {
 	m, _ := processLaneLocks.LoadOrStore(key, &sync.Mutex{})
 	return m.(*sync.Mutex)
+}
+
+// currentSigning is an allocation's current signing among its signings
+// (oldest first): the accepted one, else the latest live one.
+func currentSigning(a *models.KeyLaneNonce, txs []models.KeyLaneTx) *models.KeyLaneTx {
+	if a.AcceptedHash != "" {
+		for i := range txs {
+			if txs[i].Hash == a.AcceptedHash {
+				return &txs[i]
+			}
+		}
+	}
+	for i := len(txs) - 1; i >= 0; i-- {
+		if containsString(liveTxStatuses, txs[i].Status) {
+			return &txs[i]
+		}
+	}
+	return nil
+}
+
+// addSpend adds a signing's value + gas limit × price to sum.
+func addSpend(sum *big.Int, tx *models.KeyLaneTx) {
+	if tx == nil {
+		return
+	}
+	if p, ok := new(big.Int).SetString(tx.GasPrice, 10); ok {
+		sum.Add(sum, new(big.Int).Mul(p, big.NewInt(tx.GasLimit)))
+	}
+	if v, ok := new(big.Int).SetString(tx.Value, 10); ok {
+		sum.Add(sum, v)
+	}
 }
 
 // GormKeyLaneStore is the KeyLaneStore on the API database. On Postgres the
@@ -100,45 +140,95 @@ func (s *GormKeyLaneStore) WithLock(ctx context.Context, chainID int64, address 
 	})
 }
 
-func (s *GormKeyLaneStore) FinalHash(ctx context.Context, chainID int64, address, hash string) (string, error) {
+func (s *GormKeyLaneStore) txn(ctx context.Context, chainID int64, address string) *gormLaneTxn {
+	return &gormLaneTxn{db: s.DB.WithContext(ctx), chainID: chainID, address: strings.ToLower(address)}
+}
+
+func (s *GormKeyLaneStore) Get(ctx context.Context, chainID int64, address string, nonce uint64) (*models.KeyLaneNonce, error) {
+	return s.txn(ctx, chainID, address).Get(nonce)
+}
+
+func (s *GormKeyLaneStore) HasUnminedAbove(ctx context.Context, chainID int64, address string, nonce uint64) (bool, error) {
+	var n int64
+	err := s.txn(ctx, chainID, address).lane().Model(&models.KeyLaneNonce{}).
+		Where("nonce > ? AND status IN ?", int64(nonce), unminedAllocationStatuses).Count(&n).Error
+	return n > 0, err
+}
+
+func (s *GormKeyLaneStore) MaxNonce(ctx context.Context, chainID int64, address string) (int64, bool, error) {
+	return s.txn(ctx, chainID, address).MaxNonce()
+}
+
+func (s *GormKeyLaneStore) Signings(ctx context.Context, allocID uuid.UUID) ([]models.KeyLaneTx, error) {
+	return (&gormLaneTxn{db: s.DB.WithContext(ctx)}).Signings(allocID)
+}
+
+func (s *GormKeyLaneStore) allocationOf(ctx context.Context, chainID int64, address, hash string) (*models.KeyLaneNonce, []models.KeyLaneTx, error) {
 	var row models.KeyLaneTx
-	err := s.DB.WithContext(ctx).Where("chain_id = ? AND address = ? AND lower(hash) = ?", chainID, strings.ToLower(address), strings.ToLower(hash)).
+	err := s.DB.WithContext(ctx).Where("hash = ? AND chain_id = ? AND address = ?", strings.ToLower(hash), chainID, strings.ToLower(address)).
 		First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return hash, nil
+		return nil, nil, nil
 	}
 	if err != nil {
+		return nil, nil, err
+	}
+	var a models.KeyLaneNonce
+	if err := s.DB.WithContext(ctx).Where("id = ?", row.AllocationID).First(&a).Error; err != nil {
+		return nil, nil, err
+	}
+	txs, err := s.Signings(ctx, a.ID)
+	return &a, txs, err
+}
+
+func (s *GormKeyLaneStore) SigningsOf(ctx context.Context, chainID int64, address, hash string) ([]string, error) {
+	a, txs, err := s.allocationOf(ctx, chainID, address, hash)
+	if err != nil || a == nil {
+		return []string{hash}, err
+	}
+	var out []string
+	for _, t := range txs {
+		if t.Status != models.KeyLaneTxRefused {
+			out = append(out, t.Hash)
+		}
+	}
+	return out, nil
+}
+
+func (s *GormKeyLaneStore) FinalHash(ctx context.Context, chainID int64, address, hash string) (string, error) {
+	a, txs, err := s.allocationOf(ctx, chainID, address, hash)
+	if err != nil || a == nil {
 		return hash, err
 	}
-	q := &gormLaneTxn{db: s.DB.WithContext(ctx), chainID: chainID, address: strings.ToLower(address)}
-	var alloc models.KeyLaneNonce
-	if err := q.db.Where("id = ?", row.AllocationID).First(&alloc).Error; err != nil {
-		return hash, nil
+	if cur := currentSigning(a, txs); cur != nil {
+		return cur.Hash, nil
 	}
-	cur, err := q.CurrentTx(&alloc)
-	if err != nil || cur == nil {
-		return hash, err
-	}
-	return cur.Hash, nil
+	return hash, nil
 }
 
 func (s *GormKeyLaneStore) Committed(ctx context.Context, chainID int64, address string, fromNonce uint64) (*big.Int, error) {
-	q := &gormLaneTxn{db: s.DB.WithContext(ctx), chainID: chainID, address: strings.ToLower(address)}
-	return q.Committed(fromNonce)
+	return s.txn(ctx, chainID, address).Committed(fromNonce)
 }
 
 func (s *GormKeyLaneStore) MarkMined(ctx context.Context, chainID int64, address string, mined uint64) error {
 	addr := strings.ToLower(address)
 	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.KeyLaneNonce{}).
-			Where("chain_id = ? AND address = ? AND nonce < ? AND status = ?", chainID, addr, int64(mined), models.KeyLaneNonceAllocated).
-			Update("status", models.KeyLaneNonceMined).Error; err != nil {
+			Where("chain_id = ? AND address = ? AND nonce < ? AND status IN ?", chainID, addr, int64(mined), unminedAllocationStatuses).
+			// A mined operation is final on chain: its key is freed, so a
+			// caller's later, deliberate retry (after reading the outcome) is
+			// a new operation.
+			Updates(map[string]any{"status": models.KeyLaneNonceMined, "op_key": ""}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.KeyLaneTx{}).
+			Where("chain_id = ? AND address = ? AND nonce < ? AND status IN ?", chainID, addr, int64(mined), liveTxStatuses).
+			Update("status", models.KeyLaneTxMined).Error; err != nil {
 			return err
 		}
 		return tx.Model(&models.KeyLaneTx{}).
 			Where("chain_id = ? AND address = ? AND nonce < ? AND raw_tx IS NOT NULL", chainID, addr, int64(mined)).
-			Updates(map[string]any{"raw_tx": nil, "status": gorm.Expr("CASE WHEN status IN (?, ?) THEN ? ELSE status END",
-				models.KeyLaneTxPending, models.KeyLaneTxAccepted, models.KeyLaneTxMined)}).Error
+			Update("raw_tx", nil).Error
 	})
 }
 
@@ -152,7 +242,7 @@ func (q *gormLaneTxn) lane() *gorm.DB {
 	return q.db.Where("chain_id = ? AND address = ?", q.chainID, q.address)
 }
 
-func (q *gormLaneTxn) AllocationAt(nonce uint64) (*models.KeyLaneNonce, error) {
+func (q *gormLaneTxn) Get(nonce uint64) (*models.KeyLaneNonce, error) {
 	var a models.KeyLaneNonce
 	err := q.lane().Where("nonce = ?", int64(nonce)).First(&a).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -161,80 +251,74 @@ func (q *gormLaneTxn) AllocationAt(nonce uint64) (*models.KeyLaneNonce, error) {
 	return &a, err
 }
 
-func (q *gormLaneTxn) HasAllocationAbove(nonce uint64) (bool, error) {
-	var n int64
-	err := q.lane().Model(&models.KeyLaneNonce{}).Where("nonce > ? AND status = ?", int64(nonce), models.KeyLaneNonceAllocated).Count(&n).Error
-	return n > 0, err
+func (q *gormLaneTxn) ByID(id uuid.UUID) (*models.KeyLaneNonce, error) {
+	var a models.KeyLaneNonce
+	err := q.db.Where("id = ?", id).First(&a).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &a, err
 }
 
-func (q *gormLaneTxn) Allocate(from uint64, fp, role string, at time.Time) (*models.KeyLaneNonce, error) {
-	var rows []models.KeyLaneNonce
-	if err := q.lane().Select("nonce", "status").Order("nonce").Find(&rows).Error; err != nil {
+func (q *gormLaneTxn) ByOp(opKey string) (*models.KeyLaneNonce, error) {
+	if opKey == "" {
+		return nil, nil
+	}
+	var a models.KeyLaneNonce
+	err := q.lane().Where("op_key = ?", opKey).First(&a).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &a, err
+}
+
+func (q *gormLaneTxn) MaxNonce() (int64, bool, error) {
+	var max *int64
+	if err := q.lane().Model(&models.KeyLaneNonce{}).Select("MAX(nonce)").Scan(&max).Error; err != nil {
+		return 0, false, err
+	}
+	if max == nil {
+		return 0, false, nil
+	}
+	return *max, true, nil
+}
+
+func (q *gormLaneTxn) Committed(fromNonce uint64) (*big.Int, error) {
+	var allocs []models.KeyLaneNonce
+	if err := q.lane().Where("nonce >= ? AND status IN ?", int64(fromNonce), liveAllocationStatuses).Find(&allocs).Error; err != nil {
 		return nil, err
 	}
-	return q.AllocateExact(nextFreeNonce(from, rows), fp, role, at)
-}
-
-func (q *gormLaneTxn) AllocateExact(nonce uint64, fp, role string, at time.Time) (*models.KeyLaneNonce, error) {
-	var existing models.KeyLaneNonce
-	err := q.lane().Where("nonce = ?", int64(nonce)).First(&existing).Error
-	switch {
-	case err == nil && existing.Status == models.KeyLaneNonceReleased:
-		existing.Fingerprint, existing.Status, existing.Role, existing.ActedAt = fp, models.KeyLaneNonceAllocated, role, at
-		existing.AcceptedHash, existing.AcceptedPrice, existing.Bumps, existing.Rebroadcasts, existing.AcceptedBumps = "", "", 0, 0, 0
-		if err := q.db.Save(&existing).Error; err != nil {
-			return nil, fmt.Errorf("allocate nonce %d: %w", nonce, err)
+	sum := new(big.Int)
+	for i := range allocs {
+		txs, err := q.Signings(allocs[i].ID)
+		if err != nil {
+			return nil, err
 		}
-		return &existing, nil
-	case err == nil:
-		return nil, fmt.Errorf("allocate nonce %d: already allocated", nonce)
-	case !errors.Is(err, gorm.ErrRecordNotFound):
-		return nil, err
+		addSpend(sum, currentSigning(&allocs[i], txs))
 	}
-	a := &models.KeyLaneNonce{ID: uuid.New(), ChainID: q.chainID, Address: q.address, Nonce: int64(nonce), Fingerprint: fp,
-		Status: models.KeyLaneNonceAllocated, Role: role, ActedAt: at}
+	return sum, nil
+}
+
+func (q *gormLaneTxn) Create(a *models.KeyLaneNonce) error {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.New()
+	}
+	a.ChainID, a.Address = q.chainID, q.address
 	if err := q.db.Create(a).Error; err != nil {
-		return nil, fmt.Errorf("allocate nonce %d: %w", nonce, err)
+		return fmt.Errorf("allocate nonce %d: %w", a.Nonce, err)
 	}
-	return a, nil
+	return nil
 }
 
-func (q *gormLaneTxn) Release(id uuid.UUID) error {
-	return q.db.Model(&models.KeyLaneNonce{}).Where("id = ?", id).Update("status", models.KeyLaneNonceReleased).Error
-}
-
-// nextFreeNonce is the smallest nonce at or above from, and above every mined
-// allocation, that is released or above every allocation (rows sorted by
-// nonce). A lower nonce with no row is a hole outside the record: skipped.
-func nextFreeNonce(from uint64, rows []models.KeyLaneNonce) uint64 {
-	n := from
-	var maxRow int64 = -1
-	status := map[uint64]string{}
-	for _, r := range rows {
-		if r.Status == models.KeyLaneNonceMined && uint64(r.Nonce)+1 > n {
-			n = uint64(r.Nonce) + 1
-		}
-		if r.Nonce > maxRow {
-			maxRow = r.Nonce
-		}
-		status[uint64(r.Nonce)] = r.Status
-	}
-	for ; ; n++ {
-		st, ok := status[n]
-		if ok && st == models.KeyLaneNonceReleased {
-			return n
-		}
-		if !ok && int64(n) > maxRow {
-			return n
-		}
-	}
+func (q *gormLaneTxn) Save(a *models.KeyLaneNonce) error {
+	return q.db.Save(a).Error
 }
 
 func (q *gormLaneTxn) RecordTx(row *models.KeyLaneTx) error {
 	if row.ID == uuid.Nil {
 		row.ID = uuid.New()
 	}
-	row.ChainID, row.Address = q.chainID, q.address
+	row.ChainID, row.Address, row.Hash = q.chainID, q.address, strings.ToLower(row.Hash)
 	return q.db.Create(row).Error
 }
 
@@ -242,81 +326,14 @@ func (q *gormLaneTxn) SetTxStatus(id uuid.UUID, status string) error {
 	return q.db.Model(&models.KeyLaneTx{}).Where("id = ?", id).Update("status", status).Error
 }
 
-func (q *gormLaneTxn) CurrentTx(alloc *models.KeyLaneNonce) (*models.KeyLaneTx, error) {
-	var row models.KeyLaneTx
-	var err error
-	if alloc.AcceptedHash != "" {
-		err = q.db.Where("allocation_id = ? AND hash = ?", alloc.ID, alloc.AcceptedHash).First(&row).Error
-	} else {
-		err = q.db.Where("allocation_id = ? AND status = ?", alloc.ID, models.KeyLaneTxPending).Order("created_at DESC").First(&row).Error
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	return &row, err
-}
-
-func (q *gormLaneTxn) FirstTx(alloc *models.KeyLaneNonce) (*models.KeyLaneTx, error) {
-	var row models.KeyLaneTx
-	err := q.db.Where("allocation_id = ?", alloc.ID).Order("created_at").First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
-	}
-	return &row, err
-}
-
-func (q *gormLaneTxn) Accept(alloc *models.KeyLaneNonce, tx *models.KeyLaneTx) error {
-	if err := q.db.Model(&models.KeyLaneTx{}).
-		Where("allocation_id = ? AND id <> ? AND status IN ?", alloc.ID, tx.ID, []string{models.KeyLaneTxPending, models.KeyLaneTxAccepted}).
-		Update("status", models.KeyLaneTxReplaced).Error; err != nil {
-		return err
-	}
-	if err := q.SetTxStatus(tx.ID, models.KeyLaneTxAccepted); err != nil {
-		return err
-	}
-	alloc.AcceptedHash, alloc.AcceptedPrice, alloc.AcceptedBumps = tx.Hash, tx.GasPrice, alloc.Bumps
-	return q.db.Model(&models.KeyLaneNonce{}).Where("id = ?", alloc.ID).
-		Updates(map[string]any{"accepted_hash": tx.Hash, "accepted_price": tx.GasPrice, "accepted_bumps": alloc.Bumps}).Error
-}
-
-func (q *gormLaneTxn) Touch(alloc *models.KeyLaneNonce, bumps, rebroadcasts int, at time.Time) error {
-	alloc.Bumps, alloc.Rebroadcasts, alloc.ActedAt = bumps, rebroadcasts, at
-	return q.db.Model(&models.KeyLaneNonce{}).Where("id = ?", alloc.ID).
-		Updates(map[string]any{"bumps": bumps, "rebroadcasts": rebroadcasts, "acted_at": at}).Error
-}
-
-func (q *gormLaneTxn) Committed(fromNonce uint64) (*big.Int, error) {
-	var allocs []models.KeyLaneNonce
-	if err := q.lane().Where("nonce >= ? AND status = ?", int64(fromNonce), models.KeyLaneNonceAllocated).Find(&allocs).Error; err != nil {
-		return nil, err
-	}
-	sum := new(big.Int)
-	for i := range allocs {
-		tx, err := q.CurrentTx(&allocs[i])
-		if err != nil {
-			return nil, err
-		}
-		addSpend(sum, tx)
-	}
-	return sum, nil
-}
-
-// addSpend adds a signing's value + gas limit × price to sum.
-func addSpend(sum *big.Int, tx *models.KeyLaneTx) {
-	if tx == nil {
-		return
-	}
-	if p, ok := new(big.Int).SetString(tx.GasPrice, 10); ok {
-		sum.Add(sum, new(big.Int).Mul(p, big.NewInt(tx.GasLimit)))
-	}
-	if v, ok := new(big.Int).SetString(tx.Value, 10); ok {
-		sum.Add(sum, v)
-	}
+func (q *gormLaneTxn) Signings(allocID uuid.UUID) ([]models.KeyLaneTx, error) {
+	var txs []models.KeyLaneTx
+	err := q.db.Where("allocation_id = ?", allocID).Order("created_at, id").Find(&txs).Error
+	return txs, err
 }
 
 // memKeyLaneStore is the KeyLaneStore in memory: a registry without the
-// database (tests, local tooling). Not durable — a lane on it never signs with
-// a signer that cannot hand over its bytes only when durable.
+// database (tests, local tooling). Not durable.
 type memKeyLaneStore struct {
 	mu     sync.Mutex
 	allocs []*models.KeyLaneNonce
@@ -330,23 +347,98 @@ func (m *memKeyLaneStore) Durable() bool { return false }
 func (m *memKeyLaneStore) WithLock(_ context.Context, chainID int64, address string, fn func(q KeyLaneTxn) error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return fn(&memLaneTxn{m: m, chainID: chainID, address: strings.ToLower(address)})
+	// A failed body must leave nothing behind: work on copies, commit on success.
+	work := &memKeyLaneStore{}
+	for _, a := range m.allocs {
+		c := *a
+		work.allocs = append(work.allocs, &c)
+	}
+	for _, t := range m.txs {
+		c := *t
+		work.txs = append(work.txs, &c)
+	}
+	if err := fn(&memLaneTxn{m: work, chainID: chainID, address: strings.ToLower(address)}); err != nil {
+		return err
+	}
+	m.allocs, m.txs = work.allocs, work.txs
+	return nil
+}
+
+func (m *memKeyLaneStore) read(chainID int64, address string) *memLaneTxn {
+	return &memLaneTxn{m: m, chainID: chainID, address: strings.ToLower(address)}
+}
+
+func (m *memKeyLaneStore) Get(_ context.Context, chainID int64, address string, nonce uint64) (*models.KeyLaneNonce, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.read(chainID, address).Get(nonce)
+}
+
+func (m *memKeyLaneStore) HasUnminedAbove(_ context.Context, chainID int64, address string, nonce uint64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	q := m.read(chainID, address)
+	for _, a := range m.allocs {
+		if q.mine(a) && uint64(a.Nonce) > nonce && containsString(unminedAllocationStatuses, a.Status) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *memKeyLaneStore) MaxNonce(_ context.Context, chainID int64, address string) (int64, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.read(chainID, address).MaxNonce()
+}
+
+func (m *memKeyLaneStore) Signings(_ context.Context, allocID uuid.UUID) ([]models.KeyLaneTx, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return (&memLaneTxn{m: m}).Signings(allocID)
+}
+
+func (m *memKeyLaneStore) allocationOf(chainID int64, address, hash string) (*models.KeyLaneNonce, []models.KeyLaneTx) {
+	q := m.read(chainID, address)
+	for _, t := range m.txs {
+		if strings.EqualFold(t.Hash, hash) && t.ChainID == chainID {
+			for _, a := range m.allocs {
+				if a.ID == t.AllocationID {
+					c := *a
+					txs, _ := q.Signings(a.ID)
+					return &c, txs
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
+func (m *memKeyLaneStore) SigningsOf(_ context.Context, chainID int64, address, hash string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, txs := m.allocationOf(chainID, address, hash)
+	if a == nil {
+		return []string{hash}, nil
+	}
+	var out []string
+	for _, t := range txs {
+		if t.Status != models.KeyLaneTxRefused {
+			out = append(out, t.Hash)
+		}
+	}
+	return out, nil
 }
 
 func (m *memKeyLaneStore) FinalHash(_ context.Context, chainID int64, address, hash string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	q := &memLaneTxn{m: m, chainID: chainID, address: strings.ToLower(address)}
-	for _, t := range m.txs {
-		if strings.EqualFold(t.Hash, hash) && t.ChainID == chainID {
-			for _, a := range m.allocs {
-				if a.ID == t.AllocationID {
-					if cur, _ := q.CurrentTx(a); cur != nil {
-						return cur.Hash, nil
-					}
-				}
-			}
-		}
+	a, txs := m.allocationOf(chainID, address, hash)
+	if a == nil {
+		return hash, nil
+	}
+	if cur := currentSigning(a, txs); cur != nil {
+		return cur.Hash, nil
 	}
 	return hash, nil
 }
@@ -354,22 +446,22 @@ func (m *memKeyLaneStore) FinalHash(_ context.Context, chainID int64, address, h
 func (m *memKeyLaneStore) Committed(_ context.Context, chainID int64, address string, fromNonce uint64) (*big.Int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return (&memLaneTxn{m: m, chainID: chainID, address: strings.ToLower(address)}).Committed(fromNonce)
+	return m.read(chainID, address).Committed(fromNonce)
 }
 
 func (m *memKeyLaneStore) MarkMined(_ context.Context, chainID int64, address string, mined uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	addr := strings.ToLower(address)
+	q := m.read(chainID, address)
 	for _, a := range m.allocs {
-		if a.ChainID == chainID && a.Address == addr && uint64(a.Nonce) < mined && a.Status == models.KeyLaneNonceAllocated {
-			a.Status = models.KeyLaneNonceMined
+		if q.mine(a) && uint64(a.Nonce) < mined && containsString(unminedAllocationStatuses, a.Status) {
+			a.Status, a.OpKey = models.KeyLaneNonceMined, ""
 		}
 	}
 	for _, t := range m.txs {
-		if t.ChainID == chainID && t.Address == addr && uint64(t.Nonce) < mined {
+		if t.ChainID == chainID && t.Address == q.address && uint64(t.Nonce) < mined {
 			t.RawTx = nil
-			if t.Status == models.KeyLaneTxPending || t.Status == models.KeyLaneTxAccepted {
+			if containsString(liveTxStatuses, t.Status) {
 				t.Status = models.KeyLaneTxMined
 			}
 		}
@@ -387,69 +479,104 @@ func (q *memLaneTxn) mine(a *models.KeyLaneNonce) bool {
 	return a.ChainID == q.chainID && a.Address == q.address
 }
 
-func (q *memLaneTxn) AllocationAt(nonce uint64) (*models.KeyLaneNonce, error) {
+func (q *memLaneTxn) Get(nonce uint64) (*models.KeyLaneNonce, error) {
 	for _, a := range q.m.allocs {
 		if q.mine(a) && uint64(a.Nonce) == nonce {
-			return a, nil
+			c := *a
+			return &c, nil
 		}
 	}
 	return nil, nil
 }
 
-func (q *memLaneTxn) HasAllocationAbove(nonce uint64) (bool, error) {
-	for _, a := range q.m.allocs {
-		if q.mine(a) && uint64(a.Nonce) > nonce && a.Status == models.KeyLaneNonceAllocated {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (q *memLaneTxn) Allocate(from uint64, fp, role string, at time.Time) (*models.KeyLaneNonce, error) {
-	var rows []models.KeyLaneNonce
-	for _, a := range q.m.allocs {
-		if q.mine(a) {
-			rows = append(rows, *a)
-		}
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Nonce < rows[j].Nonce })
-	return q.AllocateExact(nextFreeNonce(from, rows), fp, role, at)
-}
-
-func (q *memLaneTxn) AllocateExact(nonce uint64, fp, role string, at time.Time) (*models.KeyLaneNonce, error) {
-	if a, _ := q.AllocationAt(nonce); a != nil {
-		if a.Status != models.KeyLaneNonceReleased {
-			return nil, fmt.Errorf("allocate nonce %d: already allocated", nonce)
-		}
-		a.Fingerprint, a.Status, a.Role, a.ActedAt = fp, models.KeyLaneNonceAllocated, role, at
-		a.AcceptedHash, a.AcceptedPrice, a.Bumps, a.Rebroadcasts, a.AcceptedBumps = "", "", 0, 0, 0
-		return a, nil
-	}
-	a := &models.KeyLaneNonce{ID: uuid.New(), ChainID: q.chainID, Address: q.address, Nonce: int64(nonce), Fingerprint: fp,
-		Status: models.KeyLaneNonceAllocated, Role: role, ActedAt: at, CreatedAt: at}
-	q.m.allocs = append(q.m.allocs, a)
-	return a, nil
-}
-
-func (q *memLaneTxn) Release(id uuid.UUID) error {
+func (q *memLaneTxn) ByID(id uuid.UUID) (*models.KeyLaneNonce, error) {
 	for _, a := range q.m.allocs {
 		if a.ID == id {
-			a.Status = models.KeyLaneNonceReleased
+			c := *a
+			return &c, nil
 		}
 	}
+	return nil, nil
+}
+
+func (q *memLaneTxn) ByOp(opKey string) (*models.KeyLaneNonce, error) {
+	if opKey == "" {
+		return nil, nil
+	}
+	for _, a := range q.m.allocs {
+		if q.mine(a) && a.OpKey == opKey {
+			c := *a
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+func (q *memLaneTxn) MaxNonce() (int64, bool, error) {
+	var max int64 = -1
+	for _, a := range q.m.allocs {
+		if q.mine(a) && a.Nonce > max {
+			max = a.Nonce
+		}
+	}
+	return max, max >= 0, nil
+}
+
+func (q *memLaneTxn) Committed(fromNonce uint64) (*big.Int, error) {
+	sum := new(big.Int)
+	for _, a := range q.m.allocs {
+		if q.mine(a) && uint64(a.Nonce) >= fromNonce && containsString(liveAllocationStatuses, a.Status) {
+			txs, _ := q.Signings(a.ID)
+			addSpend(sum, currentSigning(a, txs))
+		}
+	}
+	return sum, nil
+}
+
+func (q *memLaneTxn) Create(a *models.KeyLaneNonce) error {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.New()
+	}
+	a.ChainID, a.Address = q.chainID, q.address
+	for _, x := range q.m.allocs {
+		if q.mine(x) && (x.Nonce == a.Nonce || (a.OpKey != "" && x.OpKey == a.OpKey)) {
+			return fmt.Errorf("allocate nonce %d: unique violation", a.Nonce)
+		}
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = time.Now()
+	}
+	c := *a
+	q.m.allocs = append(q.m.allocs, &c)
 	return nil
+}
+
+func (q *memLaneTxn) Save(a *models.KeyLaneNonce) error {
+	for i, x := range q.m.allocs {
+		if x.ID == a.ID {
+			c := *a
+			q.m.allocs[i] = &c
+			return nil
+		}
+	}
+	return fmt.Errorf("save allocation %s: not found", a.ID)
 }
 
 func (q *memLaneTxn) RecordTx(row *models.KeyLaneTx) error {
 	if row.ID == uuid.Nil {
 		row.ID = uuid.New()
 	}
-	row.ChainID, row.Address = q.chainID, q.address
+	row.ChainID, row.Address, row.Hash = q.chainID, q.address, strings.ToLower(row.Hash)
+	for _, t := range q.m.txs {
+		if t.ChainID == row.ChainID && t.Address == row.Address && t.Nonce == row.Nonce && t.Hash == row.Hash {
+			return fmt.Errorf("record signing %s: unique violation", row.Hash)
+		}
+	}
 	if row.CreatedAt.IsZero() {
 		row.CreatedAt = time.Now()
 	}
-	cp := *row
-	q.m.txs = append(q.m.txs, &cp)
+	c := *row
+	q.m.txs = append(q.m.txs, &c)
 	return nil
 }
 
@@ -462,74 +589,13 @@ func (q *memLaneTxn) SetTxStatus(id uuid.UUID, status string) error {
 	return nil
 }
 
-func (q *memLaneTxn) CurrentTx(alloc *models.KeyLaneNonce) (*models.KeyLaneTx, error) {
-	var latest *models.KeyLaneTx
+func (q *memLaneTxn) Signings(allocID uuid.UUID) ([]models.KeyLaneTx, error) {
+	var out []models.KeyLaneTx
 	for _, t := range q.m.txs {
-		if t.AllocationID != alloc.ID {
-			continue
-		}
-		if alloc.AcceptedHash != "" {
-			if t.Hash == alloc.AcceptedHash {
-				c := *t
-				return &c, nil
-			}
-			continue
-		}
-		if t.Status == models.KeyLaneTxPending {
-			latest = t
+		if t.AllocationID == allocID {
+			out = append(out, *t)
 		}
 	}
-	if latest == nil {
-		return nil, nil
-	}
-	c := *latest
-	return &c, nil
-}
-
-func (q *memLaneTxn) FirstTx(alloc *models.KeyLaneNonce) (*models.KeyLaneTx, error) {
-	for _, t := range q.m.txs {
-		if t.AllocationID == alloc.ID {
-			c := *t
-			return &c, nil
-		}
-	}
-	return nil, nil
-}
-
-func (q *memLaneTxn) Accept(alloc *models.KeyLaneNonce, tx *models.KeyLaneTx) error {
-	for _, t := range q.m.txs {
-		if t.AllocationID != alloc.ID {
-			continue
-		}
-		switch {
-		case t.ID == tx.ID:
-			t.Status = models.KeyLaneTxAccepted
-		case t.Status == models.KeyLaneTxPending || t.Status == models.KeyLaneTxAccepted:
-			t.Status = models.KeyLaneTxReplaced
-		}
-	}
-	alloc.AcceptedHash, alloc.AcceptedPrice, alloc.AcceptedBumps = tx.Hash, tx.GasPrice, alloc.Bumps
-	if a, _ := q.AllocationAt(uint64(alloc.Nonce)); a != nil {
-		a.AcceptedHash, a.AcceptedPrice, a.AcceptedBumps = tx.Hash, tx.GasPrice, alloc.Bumps
-	}
-	return nil
-}
-
-func (q *memLaneTxn) Touch(alloc *models.KeyLaneNonce, bumps, rebroadcasts int, at time.Time) error {
-	alloc.Bumps, alloc.Rebroadcasts, alloc.ActedAt = bumps, rebroadcasts, at
-	if a, _ := q.AllocationAt(uint64(alloc.Nonce)); a != nil {
-		a.Bumps, a.Rebroadcasts, a.ActedAt = bumps, rebroadcasts, at
-	}
-	return nil
-}
-
-func (q *memLaneTxn) Committed(fromNonce uint64) (*big.Int, error) {
-	sum := new(big.Int)
-	for _, a := range q.m.allocs {
-		if q.mine(a) && uint64(a.Nonce) >= fromNonce && a.Status == models.KeyLaneNonceAllocated {
-			tx, _ := q.CurrentTx(a)
-			addSpend(sum, tx)
-		}
-	}
-	return sum, nil
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
 }

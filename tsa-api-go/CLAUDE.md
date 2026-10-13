@@ -160,54 +160,62 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
   signing path takes its lane from the one `SignerRegistry` (`BlockchainService.Signers()`), keyed by
   (address, chain id); boot prints `[signer] operator=… roles=… lanes=[…]` and gives the registry the
   database store. The in-process lane lock is ctx-aware (a dead ctx never acquires it); a held lane
-  refuses before any read or build.
-  - **Nonces are DB-authoritative and carry one call each.** Every send allocates its nonce in
-    `key_lane_nonces` (unique `(chain_id, address, nonce)`, with the call's fingerprint
-    keccak(to|data|value)) inside a per-(chain, address) `pg_advisory_xact_lock` (a process mutex on
-    SQLite), re-reading the allocations each time — two processes (a rolling deploy) never share a
-    nonce. The nonce is the smallest free one ≥ the chain's pending view: free = released (its only
-    signing was definitely refused) or above every allocation; a lower nonce with no allocation is
-    never taken. Each signing is written to `key_lane_txs` (raw bytes kept until mined) in the same
-    transaction, BEFORE the caller's `onPrepared` hook and the broadcast. A signer that cannot hand
-    over its bytes is refused on the database store (nothing is broadcast unrecorded).
-  - When the chain's pending nonce sits at one of our allocations whose signing the node lacks
-    after 15 s, the lane re-broadcasts the stored bytes once (`ALERT key_lane_nonce_gap_rebroadcast_total`),
-    then re-signs the SAME call (`ALERT key_lane_speed_up_total`): one +12.5% step per signing since
-    the last ACCEPTED one (a refused replacement is recorded `rejected`, never the base), at least
-    today's price, never above min(3 × today's price, the chain's `keyLaneFeeCeilingGwei`), at most 3
-    bumps, and through the fee gate. Past a cap the lane holds. `waitFollowingReplacements` /
-    `KeyLane.FinalHash` follow an original hash to the accepted speed-up: IT operator receipts
-    (`MCGPSwapService.receipt`), gas-drip confirms and the treasury's approve wait use it; pool slice
-    releases are proven from the escrow's `TradeReleased` log, which a replacement does not change.
+  refuses before any read or build. **A nonce only ever carries one call**, across processes and
+  restarts — the lane is an OUTBOX:
+  - **A.** Chain reads (pending, mined + balance at one block, gas price) happen first. Then, under a
+    per-(chain, address) `pg_advisory_xact_lock` (a process mutex on SQLite) in ONE transaction with no
+    network I/O: choose the nonce (max(pending, mined, every allocation + 1); never a hole), run the fee
+    gate, sign, write the allocation (`key_lane_nonces`: unique `(chain_id, address, nonce)`, the call's
+    fingerprint keccak(to|data|value), the caller's operation key) and its signing (`key_lane_txs`,
+    raw bytes, status `signed`), commit. Every statement's error rolls the transaction back.
+  - **B.** After the commit, outside every lock: the caller's `onPrepared` hook gets the committed
+    nonce (then the allocation is marked handed), the bytes are broadcast, and a short transaction
+    records the outcome (`accepted` / `uncertain` / `refused`).
+  - **C.** A nonce is never released to another call. A definitely refused signing leaves its
+    allocation `abandoned`; the same operation retried re-signs the SAME call there (priced above
+    every earlier signing), and otherwise the upkeep fills it with a 0-value self-transfer (`filled`;
+    the operation then fails with `ErrOperationFilled`). A signed allocation whose caller never took
+    it (hook failed, process died) is abandoned, never broadcast.
+  - **D.** A signing the node lacks 15 s on is re-broadcast byte for byte once, then sped up with the
+    SAME call — decided, signed and committed under the lock (the bump counted in the committed row),
+    broadcast after: one +12.5% step per bump since the last ACCEPTED signing, above every earlier
+    signing, at least today's price, never above min(3 × today's price, `keyLaneFeeCeilingGwei`), at
+    most `BumpLimit` (3) bumps, through the fee gate. Past a cap the lane holds.
+  - **E.** `services.WithOperationRef(ctx, ref)` is the allocation's idempotency key: the same
+    operation retried (release `p2p_release:<trade>`, cancel, resolve, IT op `it_op:<call hash>`,
+    treasury legs `ramp_leg:<leg>` with `:approve`/`:route`) gets its existing allocation and current
+    hash, never a new nonce. A mined allocation frees its key.
+  - First use of a lane on an empty table reads the pending nonce twice a second apart (an old
+    process may still be sending) and the mined nonce, and starts above all of them.
+  - Receipt waits (`waitFollowingReplacements`: IT operator receipts, gas-drip confirms, the
+    treasury approve) poll EVERY signing of the call, so the original mining after a speed-up still
+    answers. Pool slice releases are proven from the escrow's `TradeReleased` log.
   - A hole at a nonce NO process allocated (a send from outside the server) holds the lane after
-    15 s (`ALERT key_lane_nonce_gap_held_total`); a mined or released allocation of ours is never a
-    hole. Transient lookup or mined-nonce read errors never hold or reuse. The 30 s `key-lane-watch`
-    job marks allocations the mined nonce has passed `mined` (raw bytes dropped), clears holds the
-    chain has passed, and fails (failure-streak ALERT) while a lane is held.
-  - **The fee gate** reads the balance and the mined nonce at ONE block (`NativeStateAt`) on the
-    caller's ctx before any lock, then, under the store lock, subtracts the spend of this lane's
-    allocations the balance has not paid (nonce ≥ that mined nonce: value + gas limit × price), and
-    requires this tx's gas limit × gas price × `gasFeeBuffer` (2) + value + the lane's reservations;
-    fails closed (`ALERT key_lane_cannot_pay_total`, `ErrRelayerUnderfunded`). `CanPay` (quotes,
-    opens) makes the same computation.
+    15 s (`ALERT key_lane_nonce_gap_held_total`); transient read errors never hold. The 30 s
+    `key-lane-watch` job marks allocations below the mined nonce `mined` (raw bytes dropped), clears
+    holds the chain passed, reviews the allocation at the mined nonce (so an idle lane still moves),
+    and fails (failure-streak ALERT) while a lane is held.
+  - **The fee gate:** the balance and mined nonce read at ONE block (`NativeStateAt`), less the spend
+    of this lane's live allocations the balance has not paid (nonce ≥ that mined nonce: value + gas
+    limit × price of each current signing), must cover this tx's gas limit × gas price ×
+    `gasFeeBuffer` (2) + value + the lane's reservations; fails closed (`ALERT
+    key_lane_cannot_pay_total`, `ErrRelayerUnderfunded`). `CanPay` (quotes, opens) is the same.
   - Reservations (`AddReservation`, `services.LaneCommitments`: DB-counted gas units, cached 5 s,
-    fresh on opens, a newer count never overwritten by an older read) keep back what in-flight work
-    is owed: the pool release key its live slices' release/cancel/resolve calls; the pool treasury
-    lane its pool orders' deliveries; each conversion lane its converting routes; each company-wallet
-    lane its paid, undelivered sales. Only owed call sites run as `services.ReservedSend(ctx)` (slice
-    release/cancel/resolve, `sendSale`, `startBridge`, `deliverShortfall`, `refund`,
-    `RefundFromTreasury`); any other treasury transfer respects the reservation.
-  - Lanes are built only in `release_signer_lanes*.go` (lint `TestKeyLanes_OnlyFromTheRegistry` over
-    the whole AST; `SetOperatorSigner` is tests-only); `SignAndBroadcast` on any signer outside
-    `release_signer*.go` fails `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
+    fresh on opens) keep back what in-flight work is owed (pool slice release/cancel/resolve on the
+    release key; pool deliveries, converting routes, company-wallet sales on treasury lanes). Only
+    owed call sites run as `services.ReservedSend(ctx)` (slice release/cancel/resolve, `sendSale`,
+    `startBridge`, `deliverShortfall`, `refund`, `RefundFromTreasury`).
+  - A signer that cannot sign without broadcasting is refused on the database store. Lanes are built
+    only in `release_signer_lanes*.go` (lint `TestKeyLanes_OnlyFromTheRegistry`; `SetOperatorSigner`
+    is tests-only); `SignAndBroadcast` on any signer outside `release_signer*.go` fails
+    `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
   - **Runbook — never send from the OPERATOR (or any hot key) by hand.** A manual tx takes a nonce no
     process allocated and holds that lane. Super admin: `GET /api/admin/signer/lanes`;
     `POST /api/admin/signer/lanes/fill-gap {chainId, address, nonce}` (a 0-value self-transfer at a
-    hole NO process allocated, itself allocated and recorded; refused for any nonce in the record or
-    already mined); `POST .../retry {chainId, address, nonce}` (a nonce held at the speed-up limit gets
-    a fresh count; the fee cap still applies); `POST .../clear-hold {chainId, address}` (after checking
-    the chain by hand). Each writes a `p2p_audit_logs` row (`signer.lane_gap_filled`,
-    `signer.lane_speed_up_retry`, `signer.lane_hold_cleared`); no key material is ever read or logged.
+    hole NO process allocated; refused for any nonce in the record or already mined);
+    `POST .../retry {chainId, address, nonce}` (raises a held nonce's bump limit by 3; the fee cap still
+    applies); `POST .../clear-hold {chainId, address}` (after checking the chain by hand). Each writes a
+    `p2p_audit_logs` row; no key material is ever read or logged.
   `MCGPSwapService.signMu` is only the operator SEQUENCE lock (held across receipt waits).
 - **IT operator role is verified, not assumed.** The IT key is wired but dormant (`HasOperator` false,
   every operator op refused) until `operators(<key>)` reads true on the swap — at boot or on the 60 s

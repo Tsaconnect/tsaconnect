@@ -950,7 +950,7 @@ func (o *ConversionOrchestrator) startBridge(ctx context.Context, order *models.
 		return o.failLeg(detached(ctx), leg.ID, err.Error())
 	}
 
-	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(ctx, lane, order.Token, bridge, route)
+	txHash, broadcastAttempted, err := o.treasury.ExecuteRoute(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, order.Token, bridge, route)
 	if err != nil {
 		if broadcastAttempted {
 			// Might have landed: keep the leg pending so no second route runs.
@@ -1349,7 +1349,7 @@ func (o *ConversionOrchestrator) deliverShortfall(ctx context.Context, order *mo
 	if existing != nil {
 		return nil
 	}
-	txHash, attempted, err := o.treasury.TransferToken(ctx, dst.lane, dst.symbol, order.WalletAddress, shortfall)
+	txHash, attempted, err := o.treasury.TransferToken(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), dst.lane, dst.symbol, order.WalletAddress, shortfall)
 	if err != nil {
 		if attempted {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_broadcast_uncertain_total=1 order=%s leg=%s err=%v", order.ID, leg.ID, err)
@@ -1547,7 +1547,7 @@ func (o *ConversionOrchestrator) refund(ctx context.Context, order *models.Paycr
 	if existing != nil {
 		return nil
 	}
-	txHash, attempted, err := o.treasury.TransferToken(ctx, lane, order.Token, order.WalletAddress, amount)
+	txHash, attempted, err := o.treasury.TransferToken(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, order.Token, order.WalletAddress, amount)
 	if err != nil {
 		if attempted {
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_broadcast_uncertain_total=1 order=%s leg=%s err=%v", order.ID, leg.ID, err)
@@ -2417,7 +2417,7 @@ func (o *ConversionOrchestrator) RefundFromTreasury(ctx context.Context, adminID
 		return o.resolveAdminRefund(ctx, adminID, &order, reserved)
 	}
 
-	txHash, attempted, err := o.treasury.TransferToken(ctx, lane, token, order.WalletAddress, amount)
+	txHash, attempted, err := o.treasury.TransferToken(WithOperationRef(ctx, "ramp_leg:"+newLeg.ID.String()), lane, token, order.WalletAddress, amount)
 	if err != nil {
 		if attempted {
 			// Something may have landed: the leg MUST stay pending — never
