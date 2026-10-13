@@ -14,7 +14,7 @@
 //   POOL_RELEASE_ADMIN=0x… POOL_SYSTEM_WALLET=0x… [POOL_OWNER_ADDRESS=0x… POOL_OWNER_CONFIRM=0x…] \
 //     npx hardhat run deploy/pool.js --network bscTestnet
 const { getAddress } = require("ethers");
-const { resolveChain } = require("./lib");
+const { resolveChain, assertOwnerConfirm, handOverOwnership } = require("./lib");
 const feemanager = require("./feemanager");
 const p2pEscrow = require("./p2p-escrow");
 
@@ -70,12 +70,10 @@ async function deploy(hre, { chain } = {}) {
   if (pool.requireOwner) {
     // Review m1: on a requireOwner network the hot deployer key never owns the
     // pool, and the irreversible owner address is confirmed by typing it twice.
-    if (getAddress(pool.owner) === getAddress(deployerAddr)) {
-      throw new Error("pool: POOL_OWNER_ADDRESS is the deployer — a hot key must never own the pool on this network");
-    }
-    if (!pool.ownerConfirm || getAddress(pool.ownerConfirm) !== getAddress(pool.owner)) {
-      throw new Error("pool: set POOL_OWNER_CONFIRM to the same address as POOL_OWNER_ADDRESS (one-step Ownable is irreversible)");
-    }
+    assertOwnerConfirm({
+      label: "pool", owner: pool.owner, confirm: pool.ownerConfirm, deployerAddr,
+      ownerVar: "POOL_OWNER_ADDRESS", confirmVar: "POOL_OWNER_CONFIRM",
+    });
   }
   const finalOwner = pool.owner || deployerAddr;
   const fwd = chain ? { chain } : {};
@@ -104,21 +102,9 @@ async function deploy(hre, { chain } = {}) {
   }
   if (getAddress(finalOwner) !== getAddress(deployerAddr)) {
     console.log(`pool: transferring BOTH contracts to ${finalOwner} (one-step Ownable — this address is final)`);
-    try {
-      await (await fm.transferOwnership(finalOwner)).wait();
-      await (await esc.transferOwnership(finalOwner)).wait();
-    } finally {
-      // Review m1: read both back, so a failed second transfer is never silent.
-      const fo = await fm.owner(), eo = await esc.owner();
-      console.log(`pool: owner() read back — FeeManager=${fo} escrow=${eo}`);
-      if (getAddress(fo) !== getAddress(eo)) {
-        console.error("pool: SPLIT OWNERSHIP — finish the transfer from the current owner before anything else");
-      }
-    }
   }
-  if (getAddress(await fm.owner()) !== getAddress(finalOwner) || getAddress(await esc.owner()) !== getAddress(finalOwner)) {
-    throw new Error(`pool: owner() is not ${finalOwner} on both contracts`);
-  }
+  // Review m1: both owners are read back, so a failed second transfer is never silent.
+  await handOverOwnership("pool", [fm, esc], finalOwner);
   console.log(`pool: ready FeeManager=${fmOut.proxy} escrow=${escOut.proxy} owner=${finalOwner} window=${pool.paymentWindowSec}s`);
   return { feeManager: fmOut.proxy, escrow: escOut.proxy, owner: finalOwner };
 }

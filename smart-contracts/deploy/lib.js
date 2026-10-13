@@ -82,7 +82,46 @@ async function transferOwnershipIfNeeded(contract, deployerAddr, finalOwner) {
   return true;
 }
 
+// assertOwnerConfirm is the pre-deploy guard for an irreversible one-step
+// Ownable handover (review m1): the hot deployer key must never be the final
+// owner, and the owner address must be typed twice. Throws before anything is
+// sent, so a refused run deploys nothing.
+function assertOwnerConfirm({ label, owner, confirm, deployerAddr, ownerVar, confirmVar }) {
+  if (getAddress(owner) === getAddress(deployerAddr)) {
+    throw new Error(`${label}: ${ownerVar} is the deployer — a hot key must never own this contract on this network`);
+  }
+  if (!confirm || getAddress(confirm) !== getAddress(owner)) {
+    throw new Error(`${label}: set ${confirmVar} to the same address as ${ownerVar} (one-step Ownable is irreversible)`);
+  }
+}
+
+// handOverOwnership moves every contract from the deployer to finalOwner as the
+// LAST step of a run, after the caller has asserted the wiring. It reads every
+// owner() back (even when a transfer throws) so a split handover is never
+// silent, and throws unless all of them end at finalOwner. No-op transfers for
+// contracts already owned by finalOwner.
+async function handOverOwnership(label, contracts, finalOwner) {
+  const want = getAddress(finalOwner);
+  try {
+    for (const c of contracts) {
+      if (getAddress(await c.owner()) !== want) await (await c.transferOwnership(want)).wait();
+    }
+  } finally {
+    const owners = [];
+    for (const c of contracts) owners.push(getAddress(await c.owner()));
+    console.log(`${label}: owner() read back — ${owners.join(", ")}`);
+    if (new Set(owners).size > 1) {
+      console.error(`${label}: SPLIT OWNERSHIP — finish the transfer from the current owner before anything else`);
+    }
+  }
+  for (const c of contracts) {
+    if (getAddress(await c.owner()) !== want) throw new Error(`${label}: owner() is not ${want} on every contract`);
+  }
+}
+
 module.exports = {
+  assertOwnerConfirm,
+  handOverOwnership,
   resolveChain,
   validateAddresses,
   requireAddr,
