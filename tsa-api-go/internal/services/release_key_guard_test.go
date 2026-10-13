@@ -3,6 +3,7 @@ package services
 import (
 	"go/ast"
 	"go/parser"
+	"go/token"
 	"go/types"
 	"path/filepath"
 	"strings"
@@ -103,5 +104,102 @@ func fine(n notASigner) { _, _ = n.SignAndBroadcast(context.Background(), nil) }
 	})
 	if hits != 3 {
 		t.Fatalf("hits = %d, want the three signer calls and not the plain method", hits)
+	}
+}
+
+// soloLaneCallers are the only functions allowed to build a lane outside the
+// registry: constructors that take a bare signer (tests), never reached by
+// boot — the cmd/server half of this lint forbids boot from calling them.
+var soloLaneCallers = map[string]bool{
+	"SetOperatorSigner": true, // MCGPSwapService: tests' directly-wired operator
+	"NewRelayerService": true, // replaced at boot by UseKeyLane(registry lane)
+	"nonceLane":         true, // SponsorLane with no registry lane (tests)
+}
+
+// Review item 8: a KeyLane is built only in release_signer_lanes.go (the
+// registry), or by soloLane from the bare-signer constructors above; boot
+// (cmd/server) never wires an operator or relayer from a bare signer.
+func TestKeyLanes_OnlyFromTheRegistry(t *testing.T) {
+	fset, _, pkgs := lintChecker(t)
+	var findings []string
+	for _, p := range pkgs {
+		if p.DepOnly {
+			continue
+		}
+		boot := strings.HasSuffix(p.ImportPath, "/cmd/server")
+		for _, name := range p.GoFiles {
+			if strings.HasPrefix(name, "release_signer_lanes") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, filepath.Join(p.Dir, name), nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings = append(findings, keyLaneFindings(fset, f, boot)...)
+		}
+	}
+	if len(findings) > 0 {
+		t.Fatalf("a key lane built outside the registry:\n%s", strings.Join(findings, "\n"))
+	}
+}
+
+// keyLaneFindings is the lint over one file.
+func keyLaneFindings(fset *token.FileSet, f *ast.File, boot bool) []string {
+	var out []string
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CompositeLit:
+				if lintTypeName(x.Type) == "KeyLane" {
+					out = append(out, fset.Position(x.Pos()).String()+": KeyLane literal")
+				}
+			case *ast.CallExpr:
+				name := lintTypeName(x.Fun)
+				switch {
+				case (name == "soloLane" || name == "NewKeyLane") && !soloLaneCallers[fn.Name.Name]:
+					out = append(out, fset.Position(x.Pos()).String()+": "+name+" in "+fn.Name.Name)
+				case boot && (name == "SetOperatorSigner" || name == "NewLocalKeyReleaseSigner"):
+					out = append(out, fset.Position(x.Pos()).String()+": boot wires a bare signer ("+name+"); use Signers().Lane")
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+func lintTypeName(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.SelectorExpr:
+		return x.Sel.Name
+	case *ast.StarExpr:
+		return lintTypeName(x.X)
+	}
+	return ""
+}
+
+// The lane lint is not vacuous.
+func TestKeyLaneLint_FlagsPrivateLanes(t *testing.T) {
+	fset := token.NewFileSet()
+	src := `package x
+func a() { _ = &KeyLane{}; _ = soloLane(nil, nil) }
+func SetOperatorSigner() { _ = soloLane(nil, nil) }
+func boot() { s.SetOperatorSigner(services.NewLocalKeyReleaseSigner(k, c)) }
+`
+	f, err := parser.ParseFile(fset, "x.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := keyLaneFindings(fset, f, false); len(got) != 2 {
+		t.Fatalf("library findings = %v, want the literal and the soloLane in a()", got)
+	}
+	if got := keyLaneFindings(fset, f, true); len(got) != 4 {
+		t.Fatalf("boot findings = %v, want those plus SetOperatorSigner and NewLocalKeyReleaseSigner", got)
 	}
 }
