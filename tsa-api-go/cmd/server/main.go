@@ -392,7 +392,14 @@ func main() {
 				log.Printf("[config] IT operator key invalid; IT dormant: %v", kerr)
 			} else {
 				alertRawSignerKeyInProduction(cfg, "IT_OPERATOR_PRIVATE_KEY")
-				mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
+				// The operator's key lane is shared with every other role on
+				// the same key on Sonic; OperatorSequence keeps its own
+				// sequence lock on top (MCGPSwapService.signMu).
+				if lane := blockchainService.Signers().Lane("it_operator", key, sonicClient); lane != nil {
+					mcgpSwapService.SetOperatorLane(lane)
+				} else {
+					mcgpSwapService.SetOperatorSigner(services.NewLocalKeyReleaseSigner(key, sonicClient))
+				}
 				itService = services.NewITService(config.DB, mcgpSwapService, services.NewP2PFxProvider(p2pService))
 				itService.SetCompanyPMID(cfg.ITPMID)
 				itService.SetMinSellNgnKobo(cfg.ITMinSellNgnKobo)
