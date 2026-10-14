@@ -14,6 +14,8 @@
 const { getAddress } = require("ethers");
 const { resolveChain, assertOwnerConfirm, handOverOwnership, writeLedger } = require("./lib");
 
+const MIN_MAINNET_TIMELOCK_SEC = 72 * 3600;
+
 async function assertPool(pool, want) {
   const fail = (m) => { throw new Error(`liquidity-pool: assertion failed — ${m}`); };
   const same = (a, b) => getAddress(a) === getAddress(b);
@@ -22,7 +24,7 @@ async function assertPool(pool, want) {
   if (!(await pool.operators(want.operator))) fail(`operator ${want.operator} not set`);
   if (!same(await pool.guardian(), want.guardian)) fail("guardian");
   if (!(await pool.recipient(want.recipient))) fail(`recipient ${want.recipient} not approved`);
-  for (const k of ["minDeposit", "maxPerLp", "totalCap", "maxFillPerTx", "fillWindow", "fillWindowCap"]) {
+  for (const k of ["minDeposit", "maxPerLp", "totalCap", "maxFillPerTx", "fillWindow", "fillWindowCap", "maxSpreadBps"]) {
     if ((await pool[k]()) !== BigInt(want[k])) fail(`${k} is not ${want[k]}`);
   }
   if ((await pool.totalPrincipal()) !== 0n || (await pool.collateral()) !== 0n) fail("fresh pool is not empty");
@@ -35,6 +37,11 @@ async function deploy(hre, { chain } = {}) {
   if (!lp) throw new Error(`liquidity-pool: network ${hre.network.name} has no liquidityPool block in deploy/chains.js`);
   for (const k of ["collateralProvider", "operator", "guardian", "recipient", "timelockAdmin"]) {
     if (!lp[k]) throw new Error(`liquidity-pool: ${k} is required`);
+  }
+  // The timelock is what lets LPs exit before an upgrade lands: never shorter
+  // than 72 h on a mainnet (review 2026-10-14).
+  if (/mainnet/i.test(hre.network.name) && lp.timelockDelaySec < MIN_MAINNET_TIMELOCK_SEC) {
+    throw new Error(`liquidity-pool: timelock delay ${lp.timelockDelaySec}s is under the 72h mainnet minimum`);
   }
   const tokenAddr = cfg.tokens[lp.token];
   if (!tokenAddr) throw new Error(`liquidity-pool: token ${lp.token} has no address on this network`);
@@ -61,6 +68,7 @@ async function deploy(hre, { chain } = {}) {
     maxFillPerTx: units(lp.maxFillPerTx),
     fillWindow: lp.fillWindowSec,
     fillWindowCap: units(lp.fillWindowCap),
+    maxSpreadBps: lp.maxSpreadBps,
   };
 
   const Pool = await ethers.getContractFactory("TsaLiquidityPool");

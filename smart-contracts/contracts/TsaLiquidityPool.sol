@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -19,15 +20,19 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  * @dev Invariant (spec §2.2):
  *        token.balanceOf(this) == totalPrincipal + unclaimed + collateral − outstanding
  *        outstanding <= collateral
- *      hence the pool always holds every LP's principal and earnings. Integer
- *      division in the accumulator rounds against LPs, so "==" is really ">=" by
- *      at most a few wei of dust per fill — never in the LPs' disfavour.
+ *      hence the pool always holds every LP's principal and earnings. The
+ *      accumulator rounds every LP's credit DOWN (reward debt is set rounded
+ *      up), so "==" is really ">=" by a few wei of dust: LPs are never credited
+ *      more than the spread that was paid in.
  *
  *   - withdraw / claim are never paused and never gated by the depositor
  *     allow-list. That is the custody promise; do not add a guard to them.
  *   - Operators can only send tokens to owner-approved recipients (the
- *     treasury), capped per tx and per rolling window, and only within free
- *     collateral. It cannot reach principal or earnings.
+ *     treasury), capped per tx and per fixed window (amount + spread both
+ *     count), with the spread at most maxSpreadBps of the amount, and only
+ *     within free collateral. They cannot reach principal or earnings. A
+ *     leaked operator key that also allow-lists itself as a depositor earns
+ *     at most its pro-rata share of those capped spreads.
  *   - Privileged roles use raw msg.sender, never the ERC-2771 forwarder
  *     (same rule as McgpEntitlementSwapV2).
  *   - UUPS; the owner is meant to be a TimelockController (spec O1), so LPs can
@@ -81,8 +86,15 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
 
     mapping(bytes32 => bool) public usedFillRef;
     mapping(bytes32 => bool) public usedSettleRef;
+    /// @notice A fill's spread may be at most this share of its amount (bps).
+    uint256 public maxSpreadBps;
+    /// @notice Refill refs are the provider's own: an operator cannot burn one.
+    mapping(bytes32 => bool) public usedRefillRef;
 
-    uint256[30] private __gap;
+    uint256[28] private __gap;
+
+    /// @notice The ceiling setFillCaps may raise maxSpreadBps to: 10%.
+    uint256 public constant SPREAD_BPS_CEILING = 1_000;
 
     event Deposited(address indexed lp, uint256 amount);
     event Withdrawn(address indexed lp, uint256 amount);
@@ -97,7 +109,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     event RolesUpdated(address collateralProvider, address guardian);
     event OperatorSet(address indexed account, bool allowed);
     event LimitsUpdated(uint256 minDeposit, uint256 maxPerLp, uint256 totalCap);
-    event FillCapsUpdated(uint256 maxFillPerTx, uint256 fillWindow, uint256 fillWindowCap);
+    event FillCapsUpdated(uint256 maxFillPerTx, uint256 fillWindow, uint256 fillWindowCap, uint256 maxSpreadBps);
     event TrustedForwarderUpdated(address oldForwarder, address newForwarder);
 
     modifier onlyOperator() {
@@ -128,6 +140,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         uint256 maxFillPerTx;
         uint256 fillWindow;
         uint256 fillWindowCap;
+        uint256 maxSpreadBps;
     }
 
     function initialize(InitParams calldata p) public initializer {
@@ -140,7 +153,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _setOperator(p.operator, true);
         _setRecipient(p.recipient, true);
         _setLimits(p.minDeposit, p.maxPerLp, p.totalCap);
-        _setFillCaps(p.maxFillPerTx, p.fillWindow, p.fillWindowCap);
+        _setFillCaps(p.maxFillPerTx, p.fillWindow, p.fillWindowCap, p.maxSpreadBps);
     }
 
     // ───────────────────────────── LPs ─────────────────────────────
@@ -154,7 +167,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _harvest(lp);
         principal[lp] += amount;
         totalPrincipal += amount;
-        rewardDebt[lp] = _accrued(principal[lp]);
+        rewardDebt[lp] = _debt(principal[lp]);
         _pullExact(lp, amount);
         emit Deposited(lp, amount);
     }
@@ -166,7 +179,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _harvest(lp);
         principal[lp] -= amount;
         totalPrincipal -= amount;
-        rewardDebt[lp] = _accrued(principal[lp]);
+        rewardDebt[lp] = _debt(principal[lp]);
         token.safeTransfer(lp, amount);
         emit Withdrawn(lp, amount);
     }
@@ -188,7 +201,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     }
 
     function claimable(address lp) public view returns (uint256) {
-        return pending[lp] + _accrued(principal[lp]) - rewardDebt[lp];
+        return pending[lp] + _unharvested(lp);
     }
 
     // ─────────────────────────── Operator ───────────────────────────
@@ -204,16 +217,17 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     {
         require(recipient[to], "Not an approved recipient");
         require(ref != bytes32(0) && !usedFillRef[ref], "Bad or used ref");
-        require(amount > 0 && amount <= maxFillPerTx, "Bad fill amount");
+        require(amount > 0 && amount + spread <= maxFillPerTx, "Bad fill amount");
+        require(spread * 10_000 <= amount * maxSpreadBps, "Spread over maximum");
         require(outstanding + amount + spread <= collateral, "Not covered by collateral");
         _rollFillWindow();
-        require(filledInWindow + amount <= fillWindowCap, "Over fill window cap");
+        require(filledInWindow + amount + spread <= fillWindowCap, "Over fill window cap");
         if (spread > 0) {
             require(totalPrincipal > 0, "No LPs to credit");
             accEarningsPerShare += (spread * ACC_PRECISION) / totalPrincipal;
         }
         usedFillRef[ref] = true;
-        filledInWindow += amount;
+        filledInWindow += amount + spread;
         outstanding += amount + spread;
         token.safeTransfer(to, amount);
         emit Filled(ref, to, amount, spread);
@@ -247,7 +261,8 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     }
 
     function refill(uint256 amount, bytes32 ref) external onlyCollateralProvider nonReentrant {
-        _useSettleRef(ref);
+        require(ref != bytes32(0) && !usedRefillRef[ref], "Bad or used ref");
+        usedRefillRef[ref] = true;
         require(amount > 0 && amount <= outstanding, "Bad amount");
         outstanding -= amount;
         _pullExact(msg.sender, amount);
@@ -308,8 +323,8 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _setLimits(_minDeposit, _maxPerLp, _totalCap);
     }
 
-    function setFillCaps(uint256 perTx, uint256 window, uint256 windowCap) external onlyOwner {
-        _setFillCaps(perTx, window, windowCap);
+    function setFillCaps(uint256 perTx, uint256 window, uint256 windowCap, uint256 spreadBps) external onlyOwner {
+        _setFillCaps(perTx, window, windowCap, spreadBps);
     }
 
     function setTrustedForwarder(address fwd) external onlyOwner {
@@ -327,9 +342,21 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         return (shares * accEarningsPerShare) / ACC_PRECISION;
     }
 
+    /// @dev Reward debt rounds UP and accrual DOWN, so no LP is ever credited
+    ///      more than its exact share; the shortfall is dust left in the pool.
+    function _debt(uint256 shares) internal view returns (uint256) {
+        return Math.mulDiv(shares, accEarningsPerShare, ACC_PRECISION, Math.Rounding.Ceil);
+    }
+
+    function _unharvested(address lp) internal view returns (uint256) {
+        uint256 accrued = _accrued(principal[lp]);
+        uint256 debt = rewardDebt[lp];
+        return accrued > debt ? accrued - debt : 0;
+    }
+
     function _harvest(address lp) internal {
-        pending[lp] += _accrued(principal[lp]) - rewardDebt[lp];
-        rewardDebt[lp] = _accrued(principal[lp]);
+        pending[lp] += _unharvested(lp);
+        rewardDebt[lp] = _debt(principal[lp]);
     }
 
     function _claim(address lp, address to) internal returns (uint256 amount) {
@@ -353,6 +380,8 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         usedSettleRef[ref] = true;
     }
 
+    /// @dev A fixed window (it restarts at the first fill after it ends), not a
+    ///      sliding one: up to 2 × fillWindowCap can leave across a boundary.
     function _rollFillWindow() internal {
         if (block.timestamp >= fillWindowStart + fillWindow) {
             fillWindowStart = block.timestamp;
@@ -390,15 +419,17 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     }
 
     /// @dev Mandatory non-zero caps (the V2 lesson: zero must never mean unlimited).
-    function _setFillCaps(uint256 perTx, uint256 window, uint256 windowCap) internal {
-        require(perTx > 0 && window > 0 && windowCap > 0, "fill caps must be > 0");
+    function _setFillCaps(uint256 perTx, uint256 window, uint256 windowCap, uint256 spreadBps) internal {
+        require(perTx > 0 && window > 0 && windowCap > 0 && spreadBps > 0, "fill caps must be > 0");
         require(perTx <= windowCap, "perTx over window cap");
+        require(spreadBps <= SPREAD_BPS_CEILING, "spread cap over ceiling");
         maxFillPerTx = perTx;
         fillWindow = window;
         fillWindowCap = windowCap;
+        maxSpreadBps = spreadBps;
         fillWindowStart = block.timestamp;
         filledInWindow = 0;
-        emit FillCapsUpdated(perTx, window, windowCap);
+        emit FillCapsUpdated(perTx, window, windowCap, spreadBps);
     }
 
     function _authorizeUpgrade(address) internal override onlyOwner {}

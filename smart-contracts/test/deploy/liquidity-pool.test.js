@@ -19,7 +19,7 @@ async function fixture(over = {}) {
       timelockAdminConfirm: admin.address,
       timelockDelaySec: 72 * 3600,
       minDeposit: 5, maxPerLp: 5000, totalCap: 50000,
-      maxFillPerTx: 2000, fillWindowSec: 86400, fillWindowCap: 20000,
+      maxFillPerTx: 2000, fillWindowSec: 86400, fillWindowCap: 20000, maxSpreadBps: 300,
       ...over,
     },
   };

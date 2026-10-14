@@ -47,6 +47,10 @@ function liquidityPool() {
     maxFillPerTx: 2000,
     fillWindowSec: 24 * 3600,
     fillWindowCap: 20000,
+    // A fill's spread may be at most this share of its amount: the console's
+    // pool_spread ceiling (300 bps). Bounds what a leaked operator key can
+    // credit to LPs (review 2026-10-14).
+    maxSpreadBps: 300,
   };
 }
 

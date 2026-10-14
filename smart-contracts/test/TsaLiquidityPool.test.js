@@ -30,6 +30,7 @@ async function deployPool(overrides = {}) {
     maxFillPerTx: u(1000),
     fillWindow: 24 * HOUR,
     fillWindowCap: u(10000),
+    maxSpreadBps: 1000,
     ...overrides.params,
   };
   const Pool = await ethers.getContractFactory("TsaLiquidityPool");
@@ -86,7 +87,7 @@ describe("TsaLiquidityPool", function () {
       await pool.connect(operator).fill(treasury.address, u(10), u(1), refOf("a"));
       await pool.connect(lps[1]).deposit(u(10));
       expect(await pool.claimable(lps[1].address)).to.equal(0);
-      await pool.connect(operator).fill(treasury.address, u(10), u(2), refOf("b"));
+      await pool.connect(operator).fill(treasury.address, u(20), u(2), refOf("b"));
       expect(await pool.claimable(lps[0].address)).to.equal(u(2));
       expect(await pool.claimable(lps[1].address)).to.equal(u(1));
     });
@@ -119,9 +120,9 @@ describe("TsaLiquidityPool", function () {
       await pool.connect(provider).postCollateral(u(100));
       await pool.connect(operator).fill(treasury.address, u(90), u(1), refOf("a"));
       await expect(
-        pool.connect(operator).fill(treasury.address, u(9), u(1), refOf("b")),
+        pool.connect(operator).fill(treasury.address, u("9.5"), u("0.5"), refOf("b")),
       ).to.be.revertedWith("Not covered by collateral");
-      await pool.connect(operator).fill(treasury.address, u(8), u(1), refOf("c")); // exactly 100
+      await pool.connect(operator).fill(treasury.address, u("8.5"), u("0.5"), refOf("c")); // exactly 100
       expect(await pool.freeCapacity()).to.equal(0);
     });
 
@@ -168,7 +169,7 @@ describe("TsaLiquidityPool", function () {
       expect(await pool.outstanding()).to.equal(0);
       expect(await pool.collateral()).to.equal(u(80));
       await expect(pool.connect(provider).refill(1, refOf("r2"))).to.be.revertedWith("Bad amount");
-      await expect(pool.connect(provider).refill(0, refOf("s1"))).to.be.revertedWith("Bad or used ref");
+      await expect(pool.connect(provider).refill(1, refOf("r1"))).to.be.revertedWith("Bad or used ref");
 
       const before = await token.balanceOf(provider.address);
       await pool.connect(provider).withdrawCollateral(u(80));
@@ -210,6 +211,34 @@ describe("TsaLiquidityPool", function () {
     });
   });
 
+  // Review 2026-10-14 (LOW): reward debt set rounded down let an LP keep a
+  // wei of fraction per deposit/withdraw, so the books could exceed the
+  // balance and the last claim reverted.
+  describe("rounding", function () {
+    it("never credits LPs more than the spread paid in; the last LP still exits", async function () {
+      const c = await deployPool({ params: {
+        minDeposit: 1n, maxPerLp: 100n, totalCap: 1000n, maxFillPerTx: 200n, fillWindowCap: 2000n, maxSpreadBps: 1000,
+      } });
+      const { pool, token, provider, operator, treasury, lps } = c;
+      const [A, B] = lps;
+      for (const l of [A, B]) await pool.connect(operator).setDepositor(l.address, true);
+      await pool.connect(provider).postCollateral(1000n);
+      let n = 0;
+      const fill = (s) => pool.connect(operator).fill(treasury.address, 100n, s, refOf(`f${n++}`));
+      await pool.connect(B).deposit(5n); await fill(4n); await pool.connect(A).deposit(2n); await fill(2n); await fill(1n);
+      await pool.connect(A).deposit(3n); await pool.connect(B).deposit(2n); await pool.connect(A).deposit(2n); await fill(3n);
+      await pool.connect(A).withdraw(1n); await fill(2n);
+      const credited = 4n + 2n + 1n + 3n + 2n;
+      expect((await pool.claimable(A.address)) + (await pool.claimable(B.address))).to.be.lte(credited);
+      expect(await slack(pool, token, [A, B])).to.be.gte(0n);
+      await pool.connect(provider).withdrawCollateral(await pool.freeCapacity());
+      await pool.connect(A).withdraw(await pool.principal(A.address));
+      await pool.connect(B).withdraw(await pool.principal(B.address));
+      await pool.connect(A).claim();
+      await pool.connect(B).claim();
+    });
+  });
+
   describe("operator bounds", function () {
     beforeEach(async function () {
       await ctx.pool.connect(ctx.lps[0]).deposit(u(1000));
@@ -232,6 +261,25 @@ describe("TsaLiquidityPool", function () {
       await pool.connect(operator).fill(treasury.address, u(1000), 0, refOf("next-day"));
     });
 
+    // Review 2026-10-14 (HIGH): a leaked operator key that allow-lists itself
+    // could credit all free collateral to LPs as "spread" in one 1-wei fill.
+    it("caps the spread by the amount, and counts it against the per-tx and window caps", async function () {
+      const { pool, operator, treasury } = ctx;
+      await expect(pool.connect(operator).fill(treasury.address, 1n, u(500), refOf("drain")))
+        .to.be.revertedWith("Spread over maximum");
+      await expect(pool.connect(operator).fill(treasury.address, u(100), u("10.000000000000000001"), refOf("a")))
+        .to.be.revertedWith("Spread over maximum");
+      await pool.connect(operator).fill(treasury.address, u(100), u(10), refOf("a")); // exactly 10%
+      await expect(pool.connect(operator).fill(treasury.address, u(1000), u(1), refOf("b")))
+        .to.be.revertedWith("Bad fill amount"); // 1000 + 1 over the 1000 per-tx cap
+      for (let i = 0; i < 9; i++) await pool.connect(operator).fill(treasury.address, u(900), u(90), refOf(`w${i}`));
+      // 110 + 9 × 990 = 9020 of the 10000 window. Another 990 is over it,
+      // though on amounts alone (100 + 10 × 900 = 9100) it would pass.
+      await expect(pool.connect(operator).fill(treasury.address, u(900), u(90), refOf("w9")))
+        .to.be.revertedWith("Over fill window cap");
+      expect(await pool.filledInWindow()).to.equal(u(9020));
+    });
+
     it("refuses a spread when there are no LPs to credit", async function () {
       const { pool, operator, treasury, lps } = ctx;
       await pool.connect(lps[0]).withdraw(u(1000));
@@ -250,6 +298,16 @@ describe("TsaLiquidityPool", function () {
       await expect(pool.connect(stranger).pause()).to.be.revertedWith("Not owner or guardian");
       await expect(pool.connect(provider).setRecipient(stranger.address, true)).to.be.reverted;
       await expect(pool.connect(provider).upgradeToAndCall(stranger.address, "0x")).to.be.reverted;
+    });
+
+    it("keeps refill refs apart from settle refs, so an operator cannot burn the provider's", async function () {
+      const { pool, provider, operator, treasury, lps } = ctx;
+      await pool.connect(lps[0]).deposit(u(100));
+      await pool.connect(provider).postCollateral(u(100));
+      await pool.connect(operator).fill(treasury.address, u(50), u(1), refOf("a"));
+      await pool.connect(operator).settleFromCollateral(u(1), refOf("planned"));
+      await pool.connect(provider).refill(u(10), refOf("planned"));
+      expect(await pool.outstanding()).to.equal(u(40));
     });
 
     it("the collateral provider adds operators without the timelock; the guardian removes one at once", async function () {
@@ -291,8 +349,10 @@ describe("TsaLiquidityPool", function () {
 
     it("rejects zero caps and out-of-order limits", async function () {
       const { pool } = ctx;
-      await expect(pool.setFillCaps(0, HOUR, u(1))).to.be.revertedWith("fill caps must be > 0");
-      await expect(pool.setFillCaps(u(2), HOUR, u(1))).to.be.revertedWith("perTx over window cap");
+      await expect(pool.setFillCaps(0, HOUR, u(1), 300)).to.be.revertedWith("fill caps must be > 0");
+      await expect(pool.setFillCaps(u(1), HOUR, u(1), 0)).to.be.revertedWith("fill caps must be > 0");
+      await expect(pool.setFillCaps(u(2), HOUR, u(1), 300)).to.be.revertedWith("perTx over window cap");
+      await expect(pool.setFillCaps(u(1), HOUR, u(1), 1001)).to.be.revertedWith("spread cap over ceiling");
       await expect(pool.setLimits(u(10), u(5), u(100))).to.be.revertedWith("limits out of order");
     });
 
