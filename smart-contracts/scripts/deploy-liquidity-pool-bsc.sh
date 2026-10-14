@@ -23,7 +23,10 @@ fi
 
 read -rsp "Deployer private key (hidden): " PK; echo
 case "$PK" in 0x*) ;; *) PK="0x$PK" ;; esac
-ADDR=$(cast wallet address --private-key "$PK") || { echo "not a valid private key"; exit 1; }
+# The key goes to child processes only through the environment, never argv
+# (argv is visible to every local process via ps).
+ADDR=$(PK="$PK" node -e 'try { console.log(new (require("ethers").Wallet)(process.env.PK).address) } catch { process.exit(1) }') \
+  || { echo "not a valid private key"; exit 1; }
 BAL=$(cast balance "$ADDR" --rpc-url "$RPC" --ether)
 GAS=$(cast from-wei "$(cast gas-price --rpc-url "$RPC")" gwei)
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
