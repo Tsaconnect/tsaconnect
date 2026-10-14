@@ -574,3 +574,20 @@ func TestAssembleAndBroadcastWithMemo(t *testing.T) {
 		t.Fatalf("broadcast tx lost the memo: script=%s value=%d", memoScript, tx.TxOut[1].Value)
 	}
 }
+
+// Tron's aggregator transaction and its token approval have no meaning here.
+// Ignoring either would build a different transaction than the app asked for,
+// so each is refused as caller-fixable.
+func TestPrepareRejectsTronOnlyFields(t *testing.T) {
+	c := newTestClient("http://unused", "mainnet")
+	for name, req := range map[string]chains.TransferRequest{
+		"tronRawHex": {From: "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", To: "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", Amount: "1000", Symbol: "BTC", TronRawHex: "0a020f37"},
+		"approve":    {From: "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", To: "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu", Amount: "1000", Symbol: "BTC", Approve: true},
+	} {
+		_, err := c.PrepareTransfer(context.Background(), req)
+		var invalid *chains.InvalidRequestError
+		if !errors.As(err, &invalid) {
+			t.Fatalf("%s: want chains.InvalidRequestError, got %T (%v)", name, err, err)
+		}
+	}
+}

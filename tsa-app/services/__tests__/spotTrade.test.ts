@@ -4,14 +4,13 @@
 /**
  * Where a Spot listing's Buy/Sell button lands.
  *
- * The routing rule is the only thing standing between a cross-chain listing
- * and the same-chain desk, which cannot resolve two chains and would fail at
- * quote time — after the user has committed to a trade. So each route is
- * pinned by the destination it produces, not by the branch it takes.
+ * A cross-chain listing has to reach the desk WITH its quote chain: without it
+ * the desk reads the pair as same-chain, which a BTC pair can never be, and
+ * fails at quote time — after the user has committed to a trade. So each route
+ * is pinned by the destination it produces, not by the branch it takes.
  */
 jest.mock('expo-router', () => ({ __esModule: true, router: { push: jest.fn() } }));
-// Reached transitively: the Bitcoin check sits in utils/spotChains, beside the
-// LiFi chain table, which pulls in the wallet API.
+// Reached transitively through the Spot API types' module graph.
 jest.mock('@react-native-async-storage/async-storage', () => ({
   __esModule: true,
   default: { getItem: jest.fn(), setItem: jest.fn(), removeItem: jest.fn() },
@@ -38,19 +37,12 @@ const listing = (over: Partial<SpotListing>): SpotListing => ({
 beforeEach(() => push.mockClear());
 
 describe('openSpotTrade', () => {
-  it('sends an allswap listing to the All Swap tab with both legs and both chains', () => {
+  it('sends a cross-chain listing to the Spot desk with both chains, not to All Swap', () => {
     openSpotTrade(listing({ quoteChain: 'bsc' }), 'buy');
 
     expect(push).toHaveBeenCalledWith({
-      pathname: '/easyswap',
-      params: {
-        tab: 'allswap',
-        // Buying BTC is paying USDT, so the BSC leg is the one being spent.
-        fromSymbol: 'USDT',
-        fromChain: 'bsc',
-        toSymbol: 'BTC',
-        toChain: 'btc',
-      },
+      pathname: '/wallet/spot-trade',
+      params: { side: 'buy', base: 'BTC', quote: 'USDT', chain: 'btc', quoteChain: 'bsc' },
     });
   });
 
@@ -58,48 +50,29 @@ describe('openSpotTrade', () => {
     openSpotTrade(listing({ quoteChain: 'bsc' }), 'buy');
 
     const { params } = push.mock.calls[0][0];
-    expect(params).not.toHaveProperty('fundedLeg');
+    expect(params).not.toHaveProperty('quoteAuto');
   });
 
-  it('follows the balance when the API flags the listing as auto', () => {
+  it('follows the balance when the API flags the listing as auto, keeping its chain as the fallback', () => {
     // The API names a default chain for apps that predate auto; the flag is
     // what marks it as only a fallback.
     openSpotTrade(listing({ quoteChain: 'bsc', quoteChainAuto: true }), 'sell');
 
     expect(push).toHaveBeenCalledWith(expect.objectContaining({
-      params: expect.objectContaining({ fromChain: 'btc', toChain: 'bsc', fundedLeg: 'to' }),
+      params: expect.objectContaining({ side: 'sell', chain: 'btc', quoteChain: 'bsc', quoteAuto: '1' }),
     }));
   });
 
-  it('leaves the quote chain to All Swap when the listing is on auto', () => {
+  it('reads an empty quote chain as auto', () => {
     openSpotTrade(listing({ quoteChain: '' }), 'buy');
 
-    // Bitcoin carries no USDT, so there is no base-chain fallback to offer.
     expect(push).toHaveBeenCalledWith(expect.objectContaining({
-      params: expect.objectContaining({ fromSymbol: 'USDT', fromChain: '', toChain: 'btc', fundedLeg: 'from' }),
+      params: expect.objectContaining({ quoteChain: '', quoteAuto: '1' }),
     }));
   });
 
-  it('flips which leg is paid when the side is sell', () => {
-    openSpotTrade(listing({ quoteChain: 'bsc' }), 'sell');
-
-    expect(push).toHaveBeenCalledWith(expect.objectContaining({
-      params: expect.objectContaining({
-        fromSymbol: 'BTC', fromChain: 'btc', toSymbol: 'USDT', toChain: 'bsc',
-      }),
-    }));
-  });
-
-  it('reads a missing quoteChain as the base leg’s chain', () => {
-    openSpotTrade(listing({ chain: 'bsc', baseSymbol: 'CAKE', quoteChain: undefined }), 'buy');
-
-    expect(push).toHaveBeenCalledWith(expect.objectContaining({
-      params: expect.objectContaining({ fromChain: 'bsc', toChain: 'bsc' }),
-    }));
-  });
-
-  it('leaves a lifi listing on the same-chain desk', () => {
-    openSpotTrade(listing({ route: 'lifi', baseSymbol: 'CAKE', chain: 'bsc' }), 'sell');
+  it('leaves a lifi listing on the same-chain desk with no quote chain', () => {
+    openSpotTrade(listing({ route: 'lifi', baseSymbol: 'CAKE', chain: 'bsc', quoteChain: 'eth' }), 'sell');
 
     expect(push).toHaveBeenCalledWith({
       pathname: '/wallet/spot-trade',

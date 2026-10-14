@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/chains"
+	"github.com/ojimcy/tsa-api-go/internal/chains/tron"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -315,5 +316,59 @@ func TestShouldAccrueSubmitFee(t *testing.T) {
 		if got := shouldAccrueSubmitFee(tc.req); got != tc.want {
 			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A Tron approval the wallet already holds has nothing to sign. Prepare must
+// still answer 200 with `prepared.payloads: []` — the app reads the empty list
+// as "already approved" and goes straight to the swap without calling submit.
+func TestPrepareNonEVMTx_TronApproveAlreadyApprovedReturnsEmptyPayloads(t *testing.T) {
+	const (
+		owner   = "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf"
+		spender = "TU3ymitEKCWQFtASkEeHaPb8NfZcJtCHLt"
+		usdt    = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/accounts/" + owner:
+			w.Write([]byte(`{"data":[{"balance":50000000,"trc20":[]}]}`))
+		case "/wallet/triggerconstantcontract":
+			w.Write([]byte(`{"result":{"result":true},"constant_result":["ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]}`))
+		default:
+			t.Errorf("unexpected TronGrid call %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	reg := chains.NewRegistry()
+	reg.Register("mainnet", "tron", tron.NewClient(config.NonEVMChainConfig{ChainKey: "tron", Family: "tron", Routers: []string{spender}}, tron.NewTronGrid(srv.URL, "")))
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body, _ := json.Marshal(map[string]any{
+		"from": owner, "to": spender, "amount": "50000000", "symbol": "USDT",
+		"tokenAddr": usdt, "approve": true,
+	})
+	c.Request, _ = http.NewRequest("POST", "/?chain=tron&network=mainnet", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	(&Handlers{ChainRegistry: reg}).PrepareNonEVMTx(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Prepared struct {
+				Family   string             `json:"family"`
+				Payloads *[]json.RawMessage `json:"payloads"`
+			} `json:"prepared"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Data.Prepared.Family != "tron" || resp.Data.Prepared.Payloads == nil || len(*resp.Data.Prepared.Payloads) != 0 {
+		t.Fatalf("want family tron and payloads [], got %s", w.Body.String())
 	}
 }

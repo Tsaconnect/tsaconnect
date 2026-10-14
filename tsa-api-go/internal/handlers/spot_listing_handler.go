@@ -205,7 +205,7 @@ func (h *Handlers) CreateSpotListing(c *gin.Context) {
 	if in.QuoteChain != nil {
 		quoteChainIn = strings.ToLower(strings.TrimSpace(*in.QuoteChain))
 	}
-	quoteChain, err := models.NormalizeSpotLegs(chain, route, quote, quoteChainIn)
+	quoteChain, err := models.NormalizeSpotLegs(chain, route, base, quote, quoteChainIn)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
@@ -302,7 +302,11 @@ func (h *Handlers) UpdateSpotListing(c *gin.Context) {
 	if s, ok := updates["quote_symbol"].(string); ok {
 		quoteSymbol = s
 	}
-	quoteChain, err = models.NormalizeSpotLegs(chain, route, quoteSymbol, quoteChain)
+	baseSymbol := listing.BaseSymbol
+	if s, ok := updates["base_symbol"].(string); ok {
+		baseSymbol = s
+	}
+	quoteChain, err = models.NormalizeSpotLegs(chain, route, baseSymbol, quoteSymbol, quoteChain)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return

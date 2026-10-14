@@ -16,7 +16,8 @@ func newTestClient(url string) *Client {
 	cfg := config.NonEVMChainConfig{
 		ChainKey: "tron", Family: "tron", RPCURL: url,
 		NativeSymbol: "TRX", NativeDecimals: 6,
-		Tokens: map[string]string{"USDT": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"},
+		Tokens:  map[string]string{"USDT": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"},
+		Routers: []string{fixtureDiamond},
 	}
 	return NewClient(cfg, NewTronGrid(url, ""))
 }
@@ -47,7 +48,7 @@ func TestEstimateFeeBlocksWhenNoTRX(t *testing.T) {
 // sets NeedsActivation=true and adds activationCostSun (1_100_000) to the estimate,
 // resulting in nativeFeeEstSun+activationCostSun = 1_400_000 sun for a native send.
 func TestEstimateFeeAddsActivationForInactiveRecipient(t *testing.T) {
-	const recipientAddr = "TRecipientbase58xxxxxxxxxxxxxxxxxx"
+	const recipientAddr = otherAddress
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, recipientAddr) {
 			// Recipient has no on-chain account → Active=false.
@@ -62,7 +63,7 @@ func TestEstimateFeeAddsActivationForInactiveRecipient(t *testing.T) {
 	c := newTestClient(srv.URL)
 	// Native send (TokenAddr="") so fee = nativeFeeEstSun + activationCostSun = 1_400_000.
 	req := chains.TransferRequest{
-		From: "TSenderaddressbase58xxxxxxxxxxxxxxx", To: recipientAddr,
+		From: fixtureOwner, To: recipientAddr,
 		Amount: "1000000", Symbol: "TRX", TokenAddr: "",
 	}
 	q, err := c.EstimateFee(context.Background(), req)
@@ -90,7 +91,7 @@ func TestValidateAddressRejectsBadPrefix(t *testing.T) {
 
 func chainsTransfer(symbol, tokenAddr string) chains.TransferRequest {
 	return chains.TransferRequest{
-		From: "TSenderaddressbase58xxxxxxxxxxxxxxx", To: "TRecipientbase58xxxxxxxxxxxxxxxxxx",
+		From: fixtureOwner, To: otherAddress,
 		Amount: "1000000", Symbol: symbol, TokenAddr: tokenAddr,
 	}
 }

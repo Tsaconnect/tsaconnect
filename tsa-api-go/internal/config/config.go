@@ -182,6 +182,23 @@ type NonEVMChainConfig struct {
 	NativeSymbol   string
 	NativeDecimals int
 	Tokens         map[string]string // symbol → on-chain token contract/mint
+	// Routers is the allowlist of aggregator contracts a swap route may call or
+	// have approved (Tron: LiFi's diamond). Same reasoning as
+	// RampTreasuryRouters: a quote names its own target and spender, so without
+	// a list we would sign whatever a compromised or misdirected answer named.
+	// Empty means no aggregator route is signed on this chain — fail closed.
+	Routers []string
+}
+
+// parseAddressList splits a comma-separated address list, dropping blanks.
+func parseAddressList(raw string) []string {
+	var out []string
+	for _, addr := range strings.Split(raw, ",") {
+		if addr = strings.TrimSpace(addr); addr != "" {
+			out = append(out, addr)
+		}
+	}
+	return out
 }
 
 // FeeQuoteConfig tunes the deposit/withdrawal fee-quote engine (PM fee spec,
@@ -1112,14 +1129,7 @@ func Load() *Config {
 	cfg.RampTreasuryRouters = map[string][]string{}
 	for _, chain := range routerChains {
 		up := strings.ToUpper(chain)
-		raw := strings.TrimSpace(getEnv("RAMP_TREASURY_ROUTERS_"+up, rampTreasuryRouterDefaults[chain]))
-		var routers []string
-		for _, addr := range strings.Split(raw, ",") {
-			if addr = strings.TrimSpace(addr); addr != "" {
-				routers = append(routers, addr)
-			}
-		}
-		cfg.RampTreasuryRouters[chain] = routers
+		cfg.RampTreasuryRouters[chain] = parseAddressList(getEnv("RAMP_TREASURY_ROUTERS_"+up, rampTreasuryRouterDefaults[chain]))
 	}
 	cfg.RampConversionRetryWindow = time.Duration(getEnvInt64("RAMP_CONVERSION_RETRY_MINUTES", 30)) * time.Minute
 	cfg.RampConversionMinUSD = getEnvFloat64("RAMP_CONVERSION_MIN_USD", 1)
@@ -1555,6 +1565,10 @@ func Load() *Config {
 func buildNonEVMChains() map[string]NonEVMChainConfig {
 	out := map[string]NonEVMChainConfig{}
 	apiKey := os.Getenv("TRON_API_KEY") // one TronGrid key works across networks
+	// LiFi's Tron diamond (verified 2026-10-14). LiFi has no Tron testnet, so
+	// testnet has no default and signs no route. Override with
+	// TRON_<NETWORK>_ROUTERS (comma-separated) when LiFi migrates it.
+	tronRouterDefaults := map[string]string{"mainnet": "TU3ymitEKCWQFtASkEeHaPb8NfZcJtCHLt"}
 
 	addTron := func(network, rpc, usdt string) {
 		if rpc == "" {
@@ -1573,6 +1587,7 @@ func buildNonEVMChains() map[string]NonEVMChainConfig {
 			NativeSymbol:   "TRX",
 			NativeDecimals: 6,
 			Tokens:         tokens,
+			Routers:        parseAddressList(getEnv("TRON_"+strings.ToUpper(network)+"_ROUTERS", tronRouterDefaults[network])),
 		}
 	}
 

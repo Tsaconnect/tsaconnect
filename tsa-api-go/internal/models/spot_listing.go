@@ -63,14 +63,26 @@ func ValidSpotCategory(cat string) bool {
 // legal only on the allswap route, which names the quote leg's chain separately
 // (see NormalizeSpotLegs).
 //
-// Still absent: "tron", because LiFi routes no Tron liquidity at all, so neither
-// leg of a Tron pair can be quoted on any route.
+// "tron" joined once LiFi started routing Tron (chain 728126428, SunSwap among
+// others; verified 2026-10-14). Its legs are pinned — see SpotPinnedLegs.
 var SpotChains = map[string]bool{
 	"sonic": true, "bsc": true, "ethereum": true, "polygon": true,
 	"arbitrum": true, "base": true, "optimism": true, "avalanche": true,
 	"linea": true, "robinhood": true,
-	"solana": true, "sui": true, "btc": true,
+	"solana": true, "sui": true, "btc": true, "tron": true,
 }
+
+// SpotPinnedLeg is the only symbol each leg may carry on a chain whose tokens
+// the app pins by address rather than resolving by symbol.
+type SpotPinnedLeg struct{ Base, Quote string }
+
+// SpotPinnedLegs lists those chains. On Tron the app pins exactly TRX (native)
+// and USDT (TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t), so a base leg there is TRX
+// and a quote leg there is USDT. There is no usable USDC: Circle discontinued
+// it on Tron, and the only "USDC" LiFi lists there is an unverified 18-decimal
+// token — a USDC-quoted Tron listing would price against the real coin and
+// trade the impostor.
+var SpotPinnedLegs = map[string]SpotPinnedLeg{"tron": {Base: "TRX", Quote: "USDT"}}
 
 // SpotSingleTokenChains maps each chain that holds exactly one tradeable token
 // to that token's symbol, so no pair can be resolved with both legs on them.
@@ -111,7 +123,36 @@ func ValidSpotChain(chain string) bool {
 // time is the difference between an admin seeing an error and a user seeing one.
 //
 // quoteSymbol must already be trimmed and uppercased.
-func NormalizeSpotLegs(chain, route, quoteSymbol, quoteChain string) (string, error) {
+//
+// baseSymbol and quoteSymbol must already be trimmed and uppercased.
+func NormalizeSpotLegs(chain, route, baseSymbol, quoteSymbol, quoteChain string) (string, error) {
+	normalized, err := normalizeSpotLegs(chain, route, quoteSymbol, quoteChain)
+	if err != nil {
+		return "", err
+	}
+	if _, pinned := SpotPinnedLegs[chain]; pinned && route == SpotRouteMCGP {
+		return "", fmt.Errorf("The MCGP desk does not trade on %q. Use route %q or %q", chain, SpotRouteLiFi, SpotRouteAllSwap)
+	}
+	if pin, ok := SpotPinnedLegs[chain]; ok && baseSymbol != pin.Base {
+		return "", fmt.Errorf("Tron pairs must have %s as the base: %s is not a token the app trades on %q", pin.Base, baseSymbol, chain)
+	}
+	// The chain the quote leg actually resolves on: the base chain when the
+	// route keeps both legs there, else the stored quote chain, else what an
+	// auto listing is served as (DefaultSpotQuoteChain).
+	quoteLegChain := chain
+	if route == SpotRouteAllSwap {
+		quoteLegChain = normalized
+		if quoteLegChain == "" {
+			quoteLegChain = DefaultSpotQuoteChain(chain, quoteSymbol)
+		}
+	}
+	if pin, ok := SpotPinnedLegs[quoteLegChain]; ok && quoteSymbol != pin.Quote {
+		return "", fmt.Errorf("Tron pairs must quote in %s: there is no usable %s on %q", pin.Quote, quoteSymbol, quoteLegChain)
+	}
+	return normalized, nil
+}
+
+func normalizeSpotLegs(chain, route, quoteSymbol, quoteChain string) (string, error) {
 	if route != SpotRouteAllSwap {
 		// quoteChain is dropped rather than refused. It describes a second leg
 		// that only allswap has, so keeping it would leave the row claiming a
