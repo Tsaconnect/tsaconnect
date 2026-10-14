@@ -62,6 +62,10 @@ func (v *fakeVault) State(context.Context) (*VaultState, error) {
 		TotalPrincipal: new(big.Int).Set(v.principal), Paused: v.paused}, nil
 }
 
+func (v *fakeVault) Roles(context.Context) (*VaultRoles, error) {
+	return &VaultRoles{CollateralProvider: "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96", Guardian: "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96"}, nil
+}
+
 func (v *fakeVault) FillUsed(_ context.Context, ref [32]byte) (bool, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -211,6 +215,9 @@ type vaultRig struct {
 func newVaultRig(t *testing.T, collateralWhole, principalWhole int64) *vaultRig {
 	t.Helper()
 	base := newVaultBase(t)
+	if err := base.db.AutoMigrate(&models.LiquidityLedgerEntry{}); err != nil {
+		t.Fatalf("ledger table: %v", err)
+	}
 	sale, treasury, saleVerifier := newPoolSaleWallet(t, usdt18(1_000))
 	vault := newFakeVault(usdt18(collateralWhole), usdt18(principalWhole))
 	chain := &fakeTxProbe{head: 100}
@@ -592,6 +599,35 @@ func TestVaultAdmin_SummaryShowsReserve(t *testing.T) {
 	free := new(big.Int).Sub(usdt18(100), reserved)
 	if sum.Reserved != BaseUnitsToDecimal(reserved, 18) || sum.Free != BaseUnitsToDecimal(free, 18) || sum.Collateral != "100" {
 		t.Fatalf("summary = %+v", sum)
+	}
+}
+
+// The console names who signs: the vault's roles, and the operator set
+// replayed from the ledger (latest OperatorSet per account wins).
+func TestVaultAdmin_SummaryNamesRolesAndOperators(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	server := r.sender.Address()
+	other := "0x00000000000000000000000000000000000000b2"
+	yes, no := true, false
+	for i, e := range []struct {
+		account string
+		allowed *bool
+	}{{other, &yes}, {server, &yes}, {other, &no}} {
+		if err := r.db.Create(&models.LiquidityLedgerEntry{ID: uuid.New(), ChainID: poolTestChain, Vault: testVaultAddr.Hex(),
+			TxHash: fmt.Sprintf("0x%064d", i), LogIndex: uint(i), Block: uint64(i + 1), Kind: VaultEventOperatorSet,
+			Account: e.account, Allowed: e.allowed, BlockTime: time.Now()}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum, err := r.it.VaultPoolSummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Operators) != 1 || !SameEVMAddress(sum.Operators[0], server) || !sum.ServerOperatorActive {
+		t.Fatalf("operators = %v active=%v, want only the server operator", sum.Operators, sum.ServerOperatorActive)
+	}
+	if sum.CollateralProvider == "" || sum.Guardian == "" || sum.Decimals != 18 || sum.TokenAddress == "" {
+		t.Fatalf("roles/token missing: %+v", sum)
 	}
 }
 

@@ -214,10 +214,10 @@ func (x *VaultIndexer) Totals(ctx context.Context, block uint64) (*LedgerTotals,
 
 // VaultReconcileReport is one reconcile's findings (empty Drift = clean).
 type VaultReconcileReport struct {
-	Block        uint64
-	Drift        []string
-	UnknownFills []string // fill refs that match no order of ours
-	Utilisation  float64  // outstanding / collateral
+	Block        uint64   `json:"block"`
+	Drift        []string `json:"drift"`
+	UnknownFills []string `json:"unknownFills"` // fill refs that match no order of ours
+	Utilisation  float64  `json:"utilisation"`  // outstanding / collateral
 }
 
 // poolVaultHighUseBps: outstanding above this share of collateral alerts —

@@ -180,6 +180,32 @@ func (v *LiquidityVault) Wiring(ctx context.Context, operator, treasury string) 
 	return w, nil
 }
 
+// VaultRoles are the wallets the console signs with.
+type VaultRoles struct {
+	CollateralProvider string
+	Guardian           string
+}
+
+func (v *LiquidityVault) Roles(ctx context.Context) (*VaultRoles, error) {
+	if v == nil {
+		return nil, ErrVaultUnavailable
+	}
+	ctx, cancel := context.WithTimeout(ctx, v.timeout)
+	defer cancel()
+	r := &VaultRoles{}
+	for _, f := range []struct {
+		method string
+		into   *string
+	}{{"collateralProvider", &r.CollateralProvider}, {"guardian", &r.Guardian}} {
+		out, err := v.callAt(ctx, nil, f.method)
+		if err != nil {
+			return nil, err
+		}
+		*f.into = out[0].(common.Address).Hex()
+	}
+	return r, nil
+}
+
 // FillUsed reports whether ref has already been filled on-chain.
 func (v *LiquidityVault) FillUsed(ctx context.Context, ref [32]byte) (bool, error) {
 	if v == nil {

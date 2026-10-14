@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // The collateral provider's console (spec 2026-10-14 §7): the pool's books,
@@ -29,20 +30,29 @@ func (s *ITService) SetVaultLedger(x *VaultIndexer) { s.vaultLedger = x }
 // VaultPoolSummary is GET /api/admin/liquidity/pool. Token amounts are
 // decimal strings in whole tokens.
 type VaultPoolSummary struct {
-	Vault          string                `json:"vault"`
-	ChainID        int64                 `json:"chainId"`
-	Token          string                `json:"token"`
-	Paused         bool                  `json:"paused"`
-	Collateral     string                `json:"collateral"`
-	Outstanding    string                `json:"outstanding"`
-	Reserved       string                `json:"reserved"` // open orders not yet filled: never withdraw it
-	Free           string                `json:"free"`     // collateral − outstanding − reserved
-	WithdrawableUp string                `json:"withdrawableUpTo"`
-	TotalPrincipal string                `json:"totalPrincipal"`
-	Utilisation    string                `json:"utilisationPercent"`
-	ActiveLPs      int64                 `json:"activeLps"`
-	Spread30d      string                `json:"spread30d"`
-	Ledger         *VaultReconcileReport `json:"ledger,omitempty"`
+	Vault        string `json:"vault"`
+	ChainID      int64  `json:"chainId"`
+	Token        string `json:"token"`
+	TokenAddress string `json:"tokenAddress"`
+	Decimals     int    `json:"decimals"`
+	// The wallets that sign in the console. Operators are the ledger's
+	// OperatorSet history (the contract keeps a mapping, not a list).
+	CollateralProvider   string                `json:"collateralProvider,omitempty"`
+	Guardian             string                `json:"guardian,omitempty"`
+	Operators            []string              `json:"operators"`
+	ServerOperator       string                `json:"serverOperator"`
+	ServerOperatorActive bool                  `json:"serverOperatorActive"`
+	Paused               bool                  `json:"paused"`
+	Collateral           string                `json:"collateral"`
+	Outstanding          string                `json:"outstanding"`
+	Reserved             string                `json:"reserved"` // open orders not yet filled: never withdraw it
+	Free                 string                `json:"free"`     // collateral − outstanding − reserved
+	WithdrawableUp       string                `json:"withdrawableUpTo"`
+	TotalPrincipal       string                `json:"totalPrincipal"`
+	Utilisation          string                `json:"utilisationPercent"`
+	ActiveLPs            int64                 `json:"activeLps"`
+	Spread30d            string                `json:"spread30d"`
+	Ledger               *VaultReconcileReport `json:"ledger,omitempty"`
 }
 
 func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, error) {
@@ -64,6 +74,7 @@ func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, er
 	}
 	dec := d.c.Token.Decimals
 	out := &VaultPoolSummary{Vault: d.c.Vault.Address(), ChainID: d.c.Token.ChainID, Token: d.c.Token.Symbol, Paused: st.Paused,
+		TokenAddress: d.c.Token.Address, Decimals: dec, Operators: []string{}, ServerOperator: d.c.Sender.Address(),
 		Collateral: BaseUnitsToDecimal(st.Collateral, dec), Outstanding: BaseUnitsToDecimal(st.Outstanding, dec),
 		Reserved: BaseUnitsToDecimal(reserved, dec), Free: BaseUnitsToDecimal(free, dec),
 		// The contract lets the PM take collateral − outstanding; what open
@@ -73,6 +84,19 @@ func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, er
 	if err := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
 		Where("kind = ? AND status = ? AND pool_chain_id = ?", models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, d.c.Token.ChainID).
 		Count(&out.ActiveLPs).Error; err != nil {
+		return nil, err
+	}
+	if roles, err := d.c.Vault.Roles(ctx); err == nil {
+		out.CollateralProvider, out.Guardian = roles.CollateralProvider, roles.Guardian
+	} else {
+		log.Printf("[liquidity] vault roles unreadable: %s", RedactAlertText(err.Error()))
+	}
+	if ops, err := vaultOperators(ctx, s.db, d.c.Token.ChainID, d.c.Vault.Address()); err == nil {
+		out.Operators = ops
+		for _, op := range ops {
+			out.ServerOperatorActive = out.ServerOperatorActive || SameEVMAddress(op, out.ServerOperator)
+		}
+	} else {
 		return nil, err
 	}
 	if x := s.vaultLedger; x != nil {
@@ -87,6 +111,32 @@ func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, er
 				sum.Add(sum, bigFromDecimal(r.Spread))
 			}
 			out.Spread30d = BaseUnitsToDecimal(sum, dec)
+		}
+	}
+	return out, nil
+}
+
+// vaultOperators replays the ledger's OperatorSet events: the accounts whose
+// latest event allowed them, in the order they were first added.
+func vaultOperators(ctx context.Context, db *gorm.DB, chainID int64, vault string) ([]string, error) {
+	var rows []models.LiquidityLedgerEntry
+	if err := db.WithContext(ctx).Where("chain_id = ? AND LOWER(vault) = LOWER(?) AND kind = ?", chainID, vault, VaultEventOperatorSet).
+		Order("block, log_index").Select("account", "allowed").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{}
+	var order []string
+	for _, r := range rows {
+		key := strings.ToLower(r.Account)
+		if _, seen := allowed[key]; !seen {
+			order = append(order, r.Account)
+		}
+		allowed[key] = r.Allowed != nil && *r.Allowed
+	}
+	out := []string{}
+	for _, a := range order {
+		if allowed[strings.ToLower(a)] {
+			out = append(out, a)
 		}
 	}
 	return out, nil
