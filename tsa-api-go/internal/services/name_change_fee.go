@@ -173,7 +173,7 @@ func (r *TreasuryFeeRail) GiveUpCancelled(ctx context.Context, chain, op, txHash
 	if err != nil || !c {
 		return false, err
 	}
-	return r.treasury.giveUp(ctx, chain, op, txHash), nil
+	return r.treasury.giveUp(ctx, chain, op, txHash, RetirePermanent), nil // the retry is attempt n+1: a new key
 }
 
 func (r *TreasuryFeeRail) Refund(ctx context.Context, chain, token, to string, amount *big.Int, usd float64) (string, bool, error) {

@@ -430,8 +430,8 @@ func (s *ITService) SliceHashReverted(ctx context.Context, slice *models.P2PTrad
 			// Given up only through RetireOp (the release or resolve
 			// operation holds nothing live or executed).
 			addr := d.c.Sender.Address()
-			return lane.GiveUp(ctx, addr, "p2p_release:"+slice.ID.String(), slice.ReleaseTxHash) &&
-				lane.GiveUp(ctx, addr, "p2p_resolve:"+slice.ID.String(), ""), nil
+			return lane.GiveUp(ctx, addr, "p2p_release:"+slice.ID.String(), slice.ReleaseTxHash, RetireSequenced) &&
+				lane.GiveUp(ctx, addr, "p2p_resolve:"+slice.ID.String(), "", RetireSequenced), nil
 		}
 	}
 	gen := d.c.Probe.EndpointGeneration()

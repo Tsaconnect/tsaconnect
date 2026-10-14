@@ -2107,8 +2107,18 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 		// Step back only when the lane proves the release holds nothing live
 		// or executed (RetireOp); a committed release stays releasing for the
 		// reconciler.
-		if !trade.IsPoolSlice() && laneOfSender(signer, trade.ChainID).GiveUp(ctx, signer.Address(), "p2p_release:"+trade.ID.String(), minedHash) {
-			rollback()
+		// A release that mined and REVERTED moved nothing: it counts as not
+		// executed for the give-up (its operation key is freed; the retry
+		// reuses it, so the tombstone is sequenced).
+		if !trade.IsPoolSlice() {
+			lane := laneOfSender(signer, trade.ChainID)
+			hash := minedHash
+			if lane.CallReverted(ctx, minedHash) {
+				hash = ""
+			}
+			if lane.GiveUp(ctx, signer.Address(), "p2p_release:"+trade.ID.String(), hash, RetireSequenced) {
+				rollback()
+			}
 		}
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}

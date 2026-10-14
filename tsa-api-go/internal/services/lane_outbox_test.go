@@ -214,8 +214,11 @@ func TestKeyLane_SameOperationNeverGetsASecondNonce(t *testing.T) {
 	if allocs != 1 || len(node.txs) != 1 {
 		t.Fatalf("allocations=%d broadcasts=%d, want 1 and 1", allocs, len(node.txs))
 	}
-	if _, _, err := lane.Send(op, callTo(56, callB, "bb", 0)); err == nil {
-		t.Fatal("the same operation with a different call must be refused")
+	// A different call under the committed operation (a caller bug) is
+	// answered with the committed one — in flight, never "not sent", never a
+	// second nonce (review 5).
+	if h3, attempted, err := lane.Send(op, callTo(56, callB, "bb", 0)); h3 != h1 || !attempted || err != nil || len(node.txs) != 1 {
+		t.Fatalf("mismatched call = %q %v %v (broadcasts %d), want the committed %s", h3, attempted, err, len(node.txs), h1)
 	}
 }
 

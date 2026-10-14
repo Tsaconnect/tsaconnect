@@ -90,7 +90,7 @@ type KeyLaneTxn interface {
 	// nil; otherwise it returns that allocation. RetiredSeq is the key's
 	// tombstone sequence (0: never retired). Both under the lane lock, so a
 	// retire and an allocation for the same key can never both win.
-	RetireOp(opKey, hash string, permanent bool) (*models.KeyLaneNonce, error)
+	RetireOp(opKey, hash string, mode RetireMode) (*models.KeyLaneNonce, error)
 	RetiredSeq(opKey string) (seq int64, permanent bool, err error)
 	// AllocationOfHash is the allocation a signing hash belongs to.
 	AllocationOfHash(hash string) (*models.KeyLaneNonce, error)
@@ -100,11 +100,25 @@ type KeyLaneTxn interface {
 	Withdraw(allocID uuid.UUID) error
 	// Hold is the lane's shared hold; SetHold writes it (nil nonce clears).
 	Hold() (*models.KeyLaneState, error)
-	SetHold(nonce *uint64, reason string, at time.Time) error
+	// SetHold writes the hold (nil nonce clears; admin marks a super-admin's
+	// clear, which every process adopts as "vouched for").
+	SetHold(nonce *uint64, reason string, at time.Time, admin bool) error
 	// DB is the transaction itself, for a caller's pre-broadcast write in the
 	// same commit (nil on the in-memory store).
 	DB() *gorm.DB
 }
+
+// RetireMode is how a give-up marks its operation key: a probe only proves
+// nothing holds it (a transient refusal: nothing to tombstone); sequenced
+// refuses attempts begun before it (the retry reuses the key); permanent
+// refuses every later attempt (the retry is a NEW key).
+type RetireMode int
+
+const (
+	RetireProbe RetireMode = iota
+	RetireSequenced
+	RetirePermanent
+)
 
 // liveAllocationStatuses are every allocation the mined nonce has not passed:
 // each one's transaction may still spend.
@@ -457,7 +471,7 @@ func (q *gormLaneTxn) MarkMined(mined uint64) error {
 
 func (q *gormLaneTxn) DB() *gorm.DB { return q.db }
 
-func (q *gormLaneTxn) RetireOp(opKey, hash string, permanent bool) (*models.KeyLaneNonce, error) {
+func (q *gormLaneTxn) RetireOp(opKey, hash string, mode RetireMode) (*models.KeyLaneNonce, error) {
 	if a, err := q.ByOp(opKey); err != nil || a != nil {
 		return a, err
 	}
@@ -467,9 +481,10 @@ func (q *gormLaneTxn) RetireOp(opKey, hash string, permanent bool) (*models.KeyL
 			return a, err // live, or executed (mined): never given up
 		}
 	}
-	if opKey == "" {
+	if opKey == "" || mode == RetireProbe {
 		return nil, nil
 	}
+	permanent := mode == RetirePermanent
 	now := time.Now()
 	set := map[string]any{"seq": gorm.Expr("key_lane_retired_ops.seq + 1"), "updated_at": now}
 	if permanent {
@@ -493,7 +508,8 @@ func (q *gormLaneTxn) RetiredSeq(opKey string) (int64, bool, error) {
 	if err := q.lane().Where("op_key = ?", opKey).Limit(1).Find(&rows).Error; err != nil || len(rows) == 0 {
 		return 0, false, err
 	}
-	return rows[0].Seq, rows[0].Permanent, nil
+	// A row with seq 0 predates sequencing: a legacy tombstone, permanent.
+	return rows[0].Seq, rows[0].Permanent || rows[0].Seq == 0, nil
 }
 
 func (q *gormLaneTxn) AllocationOfHash(hash string) (*models.KeyLaneNonce, error) {
@@ -510,9 +526,9 @@ func (q *gormLaneTxn) Hold() (*models.KeyLaneState, error) {
 	return &rows[0], nil
 }
 
-func (q *gormLaneTxn) SetHold(nonce *uint64, reason string, at time.Time) error {
+func (q *gormLaneTxn) SetHold(nonce *uint64, reason string, at time.Time, admin bool) error {
 	st := map[string]any{"held_nonce": nil, "held_reason": "", "held_since": nil, "updated_at": time.Now()}
-	if nonce == nil {
+	if nonce == nil && admin {
 		st["clear_version"] = gorm.Expr("clear_version + 1")
 	}
 	if nonce != nil {
@@ -827,7 +843,7 @@ func (q *memLaneTxn) MarkMined(mined uint64) error {
 
 func (q *memLaneTxn) DB() *gorm.DB { return nil }
 
-func (q *memLaneTxn) RetireOp(opKey, hash string, permanent bool) (*models.KeyLaneNonce, error) {
+func (q *memLaneTxn) RetireOp(opKey, hash string, mode RetireMode) (*models.KeyLaneNonce, error) {
 	if a, _ := q.ByOp(opKey); a != nil {
 		return a, nil
 	}
@@ -836,9 +852,10 @@ func (q *memLaneTxn) RetireOp(opKey, hash string, permanent bool) (*models.KeyLa
 			return a, nil
 		}
 	}
-	if opKey == "" {
+	if opKey == "" || mode == RetireProbe {
 		return nil, nil
 	}
+	permanent := mode == RetirePermanent
 	if q.m.retired == nil {
 		q.m.retired = map[string]int64{}
 	}
@@ -892,14 +909,14 @@ func (q *memLaneTxn) Hold() (*models.KeyLaneState, error) {
 	return &st, nil
 }
 
-func (q *memLaneTxn) SetHold(nonce *uint64, reason string, at time.Time) error {
+func (q *memLaneTxn) SetHold(nonce *uint64, reason string, at time.Time, admin bool) error {
 	if q.m.states == nil {
 		q.m.states = map[string]models.KeyLaneState{}
 	}
 	st := q.m.states[q.stateKey()]
 	st.ChainID, st.Address, st.Version = q.chainID, q.address, st.Version+1
 	st.HeldNonce, st.HeldReason, st.HeldSince = nil, "", nil
-	if nonce == nil {
+	if nonce == nil && admin {
 		st.ClearVersion++
 	}
 	if nonce != nil {

@@ -410,7 +410,7 @@ func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uui
 	// attempt (a new operation, a new nonce) — paid exactly once.
 	var cancelled bool
 	leg.TxHash, cancelled = sd.wallet.Treasury().followCall(ctx, leg.ChainKey, probe, s.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash)
-	if cancelled && sd.wallet.Treasury().giveUp(ctx, leg.ChainKey, "ramp_leg:"+leg.ID.String(), leg.TxHash) {
+	if cancelled && sd.wallet.Treasury().giveUp(ctx, leg.ChainKey, "ramp_leg:"+leg.ID.String(), leg.TxHash, RetirePermanent) {
 		log.Printf("%s ALERT ramp_treasury_send_cancelled intent=%s leg=%s tx=%s — the key lane cancelled it; a new attempt follows", sd.tag, intent.ID, leg.ID, leg.TxHash)
 		if err := s.treasuryLegs(s.db).FailExpected(ctx, leg.ID, leg.TxHash, "cancelled: "+ErrCallCancelled.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
 			return err

@@ -67,7 +67,7 @@ func testLateAttemptRefusedAfterGiveUp(t *testing.T, store KeyLaneStore) {
 		})
 	}()
 	<-building
-	if held, err := other.RetireOp(context.Background(), other.Address(), "ramp_leg:L4", "", false); err != nil || held != nil {
+	if held, err := other.RetireOp(context.Background(), other.Address(), "ramp_leg:L4", "", RetireSequenced); err != nil || held != nil {
 		t.Fatalf("give-up: %v %v", held, err)
 	}
 	close(release)

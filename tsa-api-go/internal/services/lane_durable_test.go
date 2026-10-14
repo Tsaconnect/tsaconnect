@@ -48,6 +48,7 @@ type chainNode struct {
 	// receipts: mined transactions and their block; head the latest block.
 	receipts map[common.Hash]uint64
 	head     uint64
+	reverted map[common.Hash]bool // mined receipts whose status is failed
 }
 
 func (n *chainNode) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
@@ -58,7 +59,11 @@ func (n *chainNode) TransactionReceipt(_ context.Context, h common.Hash) (*types
 	if !ok {
 		return nil, ethereum.NotFound
 	}
-	return &types.Receipt{Status: types.ReceiptStatusSuccessful, BlockNumber: new(big.Int).SetUint64(b), TxHash: h}, nil
+	status := types.ReceiptStatusSuccessful
+	if n.reverted[h] {
+		status = types.ReceiptStatusFailed
+	}
+	return &types.Receipt{Status: status, BlockNumber: new(big.Int).SetUint64(b), TxHash: h}, nil
 }
 
 func (n *chainNode) BlockNumber(context.Context) (uint64, error) {

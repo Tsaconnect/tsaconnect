@@ -185,11 +185,18 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     **The give-up rule:** a caller may abandon an operation (fail or free its record, clear a claim,
     roll back, retry on a new operation) only after `KeyLane.RetireOp(op, hash)` — under the lane
     lock — proved it holds nothing live or executed (by its key and by the allocation of its
-    recorded hash; one resolved cancelled does not count) and bumped its tombstone
-    (`key_lane_retired_ops.seq`: an attempt of the op begun earlier is refused at its commit with
-    `ErrOperationRetired`; `permanent` refuses every later one). The lane applies it itself: every
-    not-attempted answer for an operation (a hold, a fee/floor read, a build error, the fee gate, a
-    hook refusal) passes through it, and an allocation found there is answered in flight instead.
+    recorded hash; a resolved-cancelled one does not count, nor a mined one that REVERTED) and
+    marked its tombstone (`key_lane_retired_ops`): **permanent** when the retry is a NEW key (legs and
+    routes, `gas_topup:<row>`, `auth_relay:<row>`, `p2p_drip`, `name_change_refund:<id>:<n>`, IT ops),
+    **sequenced** when the retry reuses the key (intent/destination top-ups, slice release/resolve,
+    AutoRelease) — an attempt begun before it is refused at its commit (`ErrOperationRetired`). A
+    tombstone row with seq 0 predates sequencing and reads as permanent. The lane PROBES (no
+    tombstone) on every not-attempted answer for an operation — a hold, a fee/floor read, a build
+    error, the fee gate, a hook refusal, and the treasury's own pre-lane refusals (kill switch,
+    checks, gas gate, allowance read): an allocation found there is answered in flight (a different
+    call under the key is logged and answered with the committed one). Every pre-broadcast hook
+    updates exactly one row under its expected-state guard, else the allocation rolls back.
+    A gasless relay in flight with no hash yet answers 202 `ErrRelayInProgress` naming its operation.
     Every operation therefore carries a key: legs `ramp_leg:<leg>`, opens `pool_open:<slice>`,
     releases/resolves/cancels `p2p_release|p2p_resolve|p2p_cancel:<trade>`, IT ops
     `it_op:<call hash>`, top-ups `gas_topup:<row>` / `gas_topup_intent|gas_topup_dest:<intent>` /
@@ -240,8 +247,9 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     re-arms the lane by itself. A hold is shared state (`key_lane_states`): every process refuses in
     its allocation transaction (after the operation-key lookup: a committed operation is answered
     even on a held lane) and adopts it on its watch; a hold whose persist failed is re-persisted,
-    never dropped; an admin clear on any process clears it for all and (`clear_version`) resets every
-    process's gap timers. Retry, raise-price-cap and clear-hold refuse a cancelled nonce (409, no
+    never dropped; an ADMIN clear on any process clears it for all and (`clear_version`, bumped only
+    by admin clears — not by the watch clearing a passed hold or a cancel's unhold) resets every
+    process's gap timers and drops unpersisted local holds. Retry, raise-price-cap and clear-hold refuse a cancelled nonce (409, no
     audit row); raise-price-cap stays the exit for a cancel held at the fee cap.
   - **E.** `services.WithOperationRef(ctx, ref)` is the allocation's idempotency key: the same
     operation retried (release `p2p_release:<trade>`, cancel, resolve, IT op `it_op:<call hash>`,

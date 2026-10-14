@@ -2517,7 +2517,7 @@ func (o *ConversionOrchestrator) resumeBridgeAfterApprove(ctx context.Context, o
 	// stays in flight on it) or its operation key is tombstoned so no slow or
 	// concurrent attempt of it can ever be sent — only then is the leg freed,
 	// and only while it still records no route hash.
-	held, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), "ramp_leg:"+leg.ID.String()+":route", "", true)
+	held, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), "ramp_leg:"+leg.ID.String()+":route", "", RetirePermanent)
 	if err != nil {
 		return err
 	}
@@ -2549,7 +2549,9 @@ func (o *ConversionOrchestrator) followLeg(ctx context.Context, leg *models.Ramp
 	// Give up only through RetireOp: nothing of this leg's operations may be
 	// live (a late attempt) or executed.
 	op := "ramp_leg:" + leg.ID.String()
-	if !o.treasury.giveUp(ctx, leg.ChainKey, op, leg.TxHash) || !o.treasury.giveUp(ctx, leg.ChainKey, op+":route", "") {
+	// The retry is a NEW leg (a new key): the old leg's operations are
+	// retired for good.
+	if !o.treasury.giveUp(ctx, leg.ChainKey, op, leg.TxHash, RetirePermanent) || !o.treasury.giveUp(ctx, leg.ChainKey, op+":route", "", RetirePermanent) {
 		return false // in flight after all: keep observing
 	}
 	log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_cancelled_total=1 leg=%s kind=%s tx=%s — the key lane cancelled it", leg.ID, leg.Kind, leg.TxHash)

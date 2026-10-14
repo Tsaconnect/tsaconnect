@@ -569,6 +569,8 @@ func clientSafeRelayMessage(err error) string {
 		return err.Error() // the revert reason is public on-chain and actionable
 	case errors.Is(err, services.ErrSimulationUnavailable):
 		return "Could not check the transaction right now. Please try again."
+	case errors.Is(err, services.ErrRelayInProgress):
+		return "Your transaction is being sent. Try again in a moment to see its hash — it will not be sent twice."
 	case errors.Is(err, services.ErrRelayerUnderfunded), errors.Is(err, services.ErrDailyCapExceeded):
 		return "Gas sponsorship is temporarily unavailable. Please try again later."
 	case errors.Is(err, services.ErrRateLimited),
@@ -594,6 +596,8 @@ func relayStatusCode(err error) int {
 	switch {
 	case errors.Is(err, services.ErrRelayerDisabled):
 		return http.StatusServiceUnavailable
+	case errors.Is(err, services.ErrRelayInProgress):
+		return http.StatusAccepted // in flight: retrying the same request is safe
 	case errors.Is(err, services.ErrSimulationUnavailable),
 		errors.Is(err, services.ErrRelayerUnderfunded),
 		errors.Is(err, services.ErrDailyCapExceeded):

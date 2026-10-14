@@ -94,12 +94,12 @@ func (s *GormRampLegStore) Reserve(ctx context.Context, leg *models.RampLeg) (*m
 // signed.
 func (s *GormRampLegStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, tool string) error {
 	res := LaneDB(ctx, s.DB).Model(&models.RampLeg{}).
-		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
+		Where("id = ? AND status = ? AND (tx_hash = '' OR tx_hash IS NULL)", id, models.RampLegStatusPending).
 		Updates(map[string]any{"tx_hash": txHash, "lifi_tool": tool})
 	if res.Error != nil {
 		return res.Error
 	}
-	if res.RowsAffected == 0 {
+	if res.RowsAffected != 1 {
 		return ErrLegNotPending
 	}
 	return nil
@@ -110,12 +110,12 @@ func (s *GormRampLegStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, 
 // pending is ErrLegNotPending and the approve is not signed.
 func (s *GormRampLegStore) SetApproveHash(ctx context.Context, id uuid.UUID, txHash string) error {
 	res := LaneDB(ctx, s.DB).Model(&models.RampLeg{}).
-		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
+		Where("id = ? AND status = ? AND (approve_tx_hash = '' OR approve_tx_hash IS NULL)", id, models.RampLegStatusPending).
 		Update("approve_tx_hash", txHash)
 	if res.Error != nil {
 		return res.Error
 	}
-	if res.RowsAffected == 0 {
+	if res.RowsAffected != 1 {
 		return ErrLegNotPending
 	}
 	return nil

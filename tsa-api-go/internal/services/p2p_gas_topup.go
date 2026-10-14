@@ -254,7 +254,7 @@ func (p *P2PGasSponsor) refuseUnusedDrip(ctx context.Context, lane *SponsorLane,
 	if !ok {
 		return nil
 	}
-	if lane.callCancelled(ctx, last.txHash) && lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), last.op, last.txHash) {
+	if lane.callCancelled(ctx, last.txHash) && lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), last.op, last.txHash, RetirePermanent) {
 		// The last drip was cancelled at its nonce: it never arrived, so it
 		// is not an unused drip — a new one may go.
 		p.mu.Lock()

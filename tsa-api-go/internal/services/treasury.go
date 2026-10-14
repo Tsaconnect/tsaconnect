@@ -454,6 +454,14 @@ const maxRouteGasLimit uint64 = 5_000_000
 // willing to cancel; ExecuteRoute abandons the wait for the lane's lock (not
 // a wait already broadcast) the moment ctx is done.
 func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token string, amount *big.Int, route *LiFiRoute) (string, bool, error) {
+	h, attempted, err := t.executeRoute(ctx, lane, token, amount, route)
+	if err != nil && !attempted {
+		return t.refuseOp(ctx, lane, err, ":approve", ":route")
+	}
+	return h, attempted, err
+}
+
+func (t *Treasury) executeRoute(ctx context.Context, lane *TreasuryLane, token string, amount *big.Int, route *LiFiRoute) (string, bool, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}
@@ -621,6 +629,35 @@ func approveHook(ctx context.Context) LaneHook {
 	return h
 }
 
+// refuseOp answers a refusal the treasury took BEFORE (or around) the key
+// lane — the kill switch, recipient/token/route checks, the gas gate, an
+// allowance read — the way the lane does: if the caller's operation (or one
+// of its sub-operations) already holds an allocation it is in flight, never
+// "not sent"; a probe that cannot run is an unknown outcome. Nothing is
+// tombstoned: a refusal commits nothing.
+func (t *Treasury) refuseOp(ctx context.Context, lane *TreasuryLane, cause error, subOps ...string) (string, bool, error) {
+	op := operationRef(ctx)
+	if op == "" || lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil || lane.Signer == nil {
+		return "", false, cause
+	}
+	for _, k := range append([]string{op}, func() []string {
+		out := make([]string, len(subOps))
+		for i, sfx := range subOps {
+			out[i] = op + sfx
+		}
+		return out
+	}()...) {
+		a, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), k, "", RetireProbe)
+		if err != nil {
+			return "", true, outcomeUnknown("", fmt.Errorf("%v; refusal unproven: %w", cause, err))
+		}
+		if a != nil {
+			return lane.KeyLane.inFlight(ctx, a)
+		}
+	}
+	return "", false, cause
+}
+
 // keyLane is the treasury's key lane on chainKey (nil without one).
 func (t *Treasury) keyLane(chainKey string) *KeyLane {
 	if t == nil {
@@ -635,12 +672,12 @@ func (t *Treasury) keyLane(chainKey string) *KeyLane {
 // giveUp is RetireOp for a call this treasury's lane on chainKey sent: true
 // only when the operation (and hash's allocation) holds nothing live or
 // executed — the caller may then fail or retry it.
-func (t *Treasury) giveUp(ctx context.Context, chainKey, op, hash string) bool {
+func (t *Treasury) giveUp(ctx context.Context, chainKey, op, hash string, mode RetireMode) bool {
 	lane := t.Lane(chainKey)
 	if lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil {
 		return true
 	}
-	return lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), op, hash)
+	return lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), op, hash, mode)
 }
 
 // followCall is the one post-send step every verifier keyed by a recorded
@@ -684,6 +721,14 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 // attempted broadcast that errored returns the signed transaction's hash when
 // the signer knows it, so the caller can later ask the chain about it.
 func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared LaneHook) (string, bool, error) {
+	h, attempted, err := t.transferTokenRecorded(ctx, lane, token, to, amount, onPrepared)
+	if err != nil && !attempted {
+		return t.refuseOp(ctx, lane, err)
+	}
+	return h, attempted, err
+}
+
+func (t *Treasury) transferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared LaneHook) (string, bool, error) {
 	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
 		return "", false, ErrSponsorNotAvailable
 	}
@@ -780,6 +825,14 @@ func (t *Treasury) StartEscrowBurst(ctx context.Context, lane *TreasuryLane, esc
 // then the prepared tx's guards, the key lane's nonce floor, the hook (in the
 // allocation's transaction) and the broadcast under its send lock. Same contract as CallEscrowRecorded.
 func (b *EscrowBurst) Call(ctx context.Context, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
+	h, attempted, err := b.call(ctx, build, onPrepared)
+	if err != nil && !attempted {
+		return (*Treasury)(nil).refuseOp(ctx, b.lane, err)
+	}
+	return h, attempted, err
+}
+
+func (b *EscrowBurst) call(ctx context.Context, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
 	lane, escrow := b.lane, b.escrow
 	if lane.Guard.Killed() {
 		return "", false, ErrTreasuryKilled

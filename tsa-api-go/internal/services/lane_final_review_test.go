@@ -581,7 +581,7 @@ func testRetiredRouteNeverRacesTheRetry(t *testing.T, store *GormKeyLaneStore, r
 	}
 	// The resume step, as resumeBridgeAfterApprove takes it.
 	free := func(leg *models.RampLeg) bool {
-		held, err := lane.RetireOp(ctx, lane.Address(), "ramp_leg:"+leg.ID.String()+":route", "", true)
+		held, err := lane.RetireOp(ctx, lane.Address(), "ramp_leg:"+leg.ID.String()+":route", "", RetirePermanent)
 		if err != nil {
 			t.Error(err)
 			return false

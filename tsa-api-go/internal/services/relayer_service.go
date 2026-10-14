@@ -298,6 +298,11 @@ func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRo
 // `authenticatedWallet` is the wallet the API session belongs to. Binding it to
 // req.From is the single most important check here: without it the endpoint is a
 // free "relay anything anyone signed" oracle.
+// ErrRelayInProgress: the relay is (or may be) in flight but its hash is not
+// known yet; the error names the operation. Retry the same request: it gets
+// the same relay, never a second one.
+var ErrRelayInProgress = errors.New("relayer: relay in progress")
+
 func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, req ForwardRequest) (string, error) {
 	if !r.IsEnabled() {
 		r.metrics.RelayAttempt("rejected", "disabled")
@@ -372,9 +377,13 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 	case attempted:
 		// Committed (in flight: ErrPendingBroadcast) or not provably unsent
 		// (ErrSendOutcomeUnknown): the relay may land, so its budget and the
-		// user's slot stay spent and the client gets the hash to follow.
+		// user's slot stay spent and the client gets the hash to follow —
+		// or, with no hash known, an in-progress answer naming the operation.
 		r.metrics.RelayAttempt("ok", "in_flight")
-		log.Printf("[relayer] relay %s in flight: %s", txHash, RedactAlertText(err.Error()))
+		log.Printf("[relayer] relay %q (%s) in flight: %s", txHash, op, RedactAlertText(err.Error()))
+		if txHash == "" {
+			return "", fmt.Errorf("%w: %s", ErrRelayInProgress, op)
+		}
 		return txHash, nil
 	case errors.Is(err, ErrRelayerUnderfunded):
 		// The key lane's fee gate: this relay's own fee (plus the lane's

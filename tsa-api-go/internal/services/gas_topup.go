@@ -116,7 +116,7 @@ func (g *GasTopUp) TopUp(ctx context.Context, user *models.User, orderID uuid.UU
 			}
 			return GasTopUpResult{}, ErrSponsorshipInProgress
 		}
-		if lane.callCancelled(ctx, existing.TxHash) && lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup:"+existing.ID.String(), existing.TxHash) {
+		if lane.callCancelled(ctx, existing.TxHash) && lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup:"+existing.ID.String(), existing.TxHash, RetirePermanent) {
 			// The earlier top-up was cancelled at its nonce: it never
 			// arrived. Its row goes; this request sends a new one.
 			if forgot, err := g.store.ForgetCancelled(ctx, existing.ID, existing.TxHash); err != nil || !forgot {
@@ -221,12 +221,14 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 		return GasTopUpResult{}, ErrSponsorNotAvailable
 	}
 	if h := intent.TopUpTxHash; h != "" && lane.callCancelled(ctx, h) &&
-		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_intent:"+intent.ID.String(), h) {
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_intent:"+intent.ID.String(), h, RetireSequenced) {
 		// Her earlier top-up was cancelled at its nonce (it never arrived):
 		// the once-per-sale claim is given back — only while the intent still
 		// records that cancelled top-up.
-		if _, err := store.ClearCancelledTopUp(ctx, intent.ID, h); err != nil {
+		if cleared, err := store.ClearCancelledTopUp(ctx, intent.ID, h); err != nil {
 			return GasTopUpResult{}, err
+		} else if !cleared {
+			return GasTopUpResult{}, ErrSponsorshipInProgress // the intent moved on meanwhile
 		}
 		intent.TopUpTxHash = ""
 	}
@@ -356,12 +358,14 @@ func (g *GasTopUp) TopUpDestForIntent(ctx context.Context, user *models.User, in
 		return GasTopUpResult{}, ErrDestGasUnavailable
 	}
 	if h := intent.DestTopUpTxHash; h != "" && lane.callCancelled(ctx, h) &&
-		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_dest:"+intent.ID.String(), h) {
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_dest:"+intent.ID.String(), h, RetireSequenced) {
 		// The earlier destination top-up was cancelled (it never arrived):
 		// the once-per-checkout claim is given back — only while the intent
 		// still records that cancelled top-up.
-		if _, err := store.ClearCancelledDestTopUp(ctx, intent.ID, h); err != nil {
+		if cleared, err := store.ClearCancelledDestTopUp(ctx, intent.ID, h); err != nil {
 			return GasTopUpResult{}, err
+		} else if !cleared {
+			return GasTopUpResult{}, ErrSponsorshipInProgress // the intent moved on meanwhile
 		}
 		intent.DestTopUpTxHash = ""
 	}

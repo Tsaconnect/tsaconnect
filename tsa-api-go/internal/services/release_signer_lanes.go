@@ -472,22 +472,20 @@ func (l *KeyLane) heldErr() error {
 func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func() ([]byte, error)) (string, bool, error) {
 	hash, attempted, err := l.sendCore(ctx, signer, build)
 	op := operationRef(ctx)
-	if attempted || op == "" || errors.Is(err, errOperationMismatch) {
+	if attempted || op == "" {
 		return hash, attempted, err
 	}
 	return l.giveUpRefused(ctx, signer.Address(), op, err)
 }
-
-// errOperationMismatch: the operation key already holds another call (a
-// caller bug) — refused without retiring the key.
-var errOperationMismatch = errors.New("key lane: this operation already holds a different call")
 
 // giveUpRefused retires op after a refusal that committed nothing: the
 // refusal stands only if op holds no allocation; otherwise that allocation is
 // the honest answer (in flight), and a retire that cannot run is an unknown
 // outcome — never "not sent".
 func (l *KeyLane) giveUpRefused(ctx context.Context, address, op string, cause error) (string, bool, error) {
-	a, err := l.RetireOp(ctx, address, op, "", false)
+	// A probe, not a tombstone: a refusal commits nothing, and the caller's
+	// own retry of this operation must not be refused (review 5).
+	a, err := l.RetireOp(ctx, address, op, "", RetireProbe)
 	switch {
 	case err != nil:
 		return "", true, outcomeUnknown("", fmt.Errorf("%v; give-up unproven: %w", cause, err))
@@ -600,7 +598,9 @@ func (l *KeyLane) sendCore(ctx context.Context, signer ReleaseSigner, build func
 		}
 		if existing != nil {
 			if existing.Fingerprint != fp {
-				return notBroadcast(fmt.Errorf("%w: operation %q holds nonce %d", errOperationMismatch, op, existing.Nonce))
+				// A caller bug, but the operation IS in flight under its first
+				// call: answer that, never "not sent".
+				log.Printf("[signer] ALERT key_lane_operation_mismatch_total=1 chain=%d op=%q nonce=%d — a different call under a committed operation; answered with the committed one", l.chainID, op, existing.Nonce)
 			}
 			reused = existing // the same operation again: never a new nonce
 			return nil
@@ -730,17 +730,17 @@ func emulatePreBroadcast(ctx context.Context, nonce uint64, hash string) error {
 	return nil
 }
 
-// retried answers an operation that already holds an allocation: a
-// different call under the same operation key is refused (built under the
-// lane lock to compare); otherwise — or when the build cannot run — the
-// allocation's honest status. Never a new nonce.
+// retried answers an operation that already holds an allocation: its honest
+// status, always — never a new nonce, never "not sent". A different call
+// under the same key (a caller bug) is logged, and answered with the
+// committed one (it is what is in flight).
 func (l *KeyLane) retried(ctx context.Context, a *models.KeyLaneNonce, build func() ([]byte, error)) (string, bool, error) {
 	if err := l.lock(ctx); err == nil {
 		unsigned, berr := build()
 		l.unlock()
 		var u blockchain.UnsignedTx
 		if berr == nil && json.Unmarshal(unsigned, &u) == nil && callFingerprint(u) != a.Fingerprint {
-			return "", false, notBroadcast(fmt.Errorf("%w: operation %q holds nonce %d", errOperationMismatch, a.OpKey, a.Nonce))
+			log.Printf("[signer] ALERT key_lane_operation_mismatch_total=1 chain=%d op=%q nonce=%d — a different call under a committed operation; answered with the committed one", l.chainID, a.OpKey, a.Nonce)
 		}
 	}
 	return l.inFlight(ctx, a)
@@ -1617,7 +1617,7 @@ func (l *KeyLane) RequestCancel(ctx context.Context, nonce uint64) error {
 		if err := q.Save(a); err != nil {
 			return err
 		}
-		return unholdLocked(q, &nonce)
+		return unholdLocked(q, &nonce, false)
 	})
 	if err != nil {
 		return err
@@ -1644,7 +1644,7 @@ var ErrOperationRetired = errors.New("key lane: this operation was retired and i
 // permanent: no attempt of op may ever commit again (its retry is a new
 // operation); otherwise only attempts begun before this give-up are refused,
 // and a retry of the same operation begun after it proceeds.
-func (l *KeyLane) RetireOp(ctx context.Context, address, op, hash string, permanent bool) (*models.KeyLaneNonce, error) {
+func (l *KeyLane) RetireOp(ctx context.Context, address, op, hash string, mode RetireMode) (*models.KeyLaneNonce, error) {
 	if l == nil || (op == "" && hash == "") {
 		return nil, nil
 	}
@@ -1653,7 +1653,7 @@ func (l *KeyLane) RetireOp(ctx context.Context, address, op, hash string, perman
 	var found *models.KeyLaneNonce
 	err := l.store.WithLock(rctx, l.chainID, address, func(q KeyLaneTxn) error {
 		var err error
-		found, err = q.RetireOp(op, hash, permanent)
+		found, err = q.RetireOp(op, hash, mode)
 		return err
 	})
 	return found, err
@@ -1662,11 +1662,11 @@ func (l *KeyLane) RetireOp(ctx context.Context, address, op, hash string, perman
 // GiveUp is RetireOp for a caller: true only when it may abandon the
 // operation (nothing live or executed holds it); any doubt is false (in
 // flight). A nil lane (no key lane wired) cannot have committed it.
-func (l *KeyLane) GiveUp(ctx context.Context, address, op, hash string) bool {
+func (l *KeyLane) GiveUp(ctx context.Context, address, op, hash string, mode RetireMode) bool {
 	if l == nil {
 		return true
 	}
-	a, err := l.RetireOp(ctx, address, op, hash, false)
+	a, err := l.RetireOp(ctx, address, op, hash, mode)
 	return err == nil && a == nil
 }
 
@@ -1778,6 +1778,32 @@ func (l *KeyLane) receiptBlock(ctx context.Context, hash string) (uint64, bool, 
 	return r.BlockNumber.Uint64(), true, nil
 }
 
+// CallData is the call data (hex) of the signing hash on this lane ("" when
+// unknown): what names an operation keyed by its call.
+func (l *KeyLane) CallData(ctx context.Context, hash string) (string, error) {
+	if l == nil || l.signer == nil || hash == "" {
+		return "", nil
+	}
+	_, txs, err := l.store.AllocationOf(ctx, l.chainID, l.Address(), hash)
+	for _, t := range txs {
+		if strings.EqualFold(t.Hash, hash) {
+			return t.Data, err
+		}
+	}
+	return "", err
+}
+
+// CallReverted reports whether hash's call mined and REVERTED (non-waiting
+// receipt read): an executed allocation that moved nothing — a caller may
+// give it up as not done.
+func (l *KeyLane) CallReverted(ctx context.Context, hash string) bool {
+	if l == nil || l.receipts == nil || hash == "" {
+		return false
+	}
+	r, err := l.receipts.TransactionReceipt(ctx, common.HexToHash(hash))
+	return err == nil && r != nil && r.Status == types.ReceiptStatusFailed
+}
+
 // CallCancelled reports whether hash's call is final as cancelled
 // (CallOutcome): the caller may then fail its operation and pay anew.
 func (l *KeyLane) CallCancelled(ctx context.Context, hash string) (bool, error) {
@@ -1805,7 +1831,7 @@ func (l *KeyLane) persistHold(address string, h *laneHold) error {
 	ctx, cancel := context.WithTimeout(context.Background(), keyLaneReadTimeout)
 	defer cancel()
 	n := h.nonce
-	err := l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error { return q.SetHold(&n, h.reason, h.since) })
+	err := l.store.WithLock(ctx, l.chainID, address, func(q KeyLaneTxn) error { return q.SetHold(&n, h.reason, h.since, false) })
 	if err != nil {
 		log.Printf("[signer] key lane: persist the hold at %d: %v (held in this process; re-persisted on watch)", n, err)
 	}
@@ -1814,7 +1840,7 @@ func (l *KeyLane) persistHold(address string, h *laneHold) error {
 
 // unholdLocked clears the shared hold inside a lane transaction — any hold,
 // or only one at nonce when nonce is given.
-func unholdLocked(q KeyLaneTxn, nonce *uint64) error {
+func unholdLocked(q KeyLaneTxn, nonce *uint64, admin bool) error {
 	st, err := q.Hold()
 	if err != nil || st == nil || st.HeldNonce == nil {
 		return err
@@ -1822,7 +1848,7 @@ func unholdLocked(q KeyLaneTxn, nonce *uint64) error {
 	if nonce != nil && uint64(*st.HeldNonce) != *nonce {
 		return nil
 	}
-	return q.SetHold(nil, "", time.Time{})
+	return q.SetHold(nil, "", time.Time{}, admin)
 }
 
 // adoptHold makes this process's view of the hold the shared one; a clear
@@ -1902,7 +1928,7 @@ func (l *KeyLane) ClearHold(ctx context.Context) error {
 				return fmt.Errorf("%w (nonce %d): its cancel drives it — raise its price cap instead", ErrNonceCancelling, *heldAt)
 			}
 		}
-		if err := unholdLocked(q, nil); err != nil {
+		if err := unholdLocked(q, nil, true); err != nil {
 			return err
 		}
 		if a == nil || a.Status != models.KeyLaneNonceSigned && a.Status != models.KeyLaneNonceSent {
@@ -1939,7 +1965,7 @@ func (l *KeyLane) RetrySpeedUp(ctx context.Context, nonce uint64) error {
 		if err := q.Save(a); err != nil {
 			return err
 		}
-		return unholdLocked(q, &nonce)
+		return unholdLocked(q, &nonce, false)
 	})
 	if err != nil {
 		return err
@@ -1998,7 +2024,7 @@ func (l *KeyLane) RaisePriceCap(ctx context.Context, nonce uint64, capWei *big.I
 		if err := q.Save(a); err != nil {
 			return err
 		}
-		return unholdLocked(q, &nonce)
+		return unholdLocked(q, &nonce, false)
 	})
 	if err != nil {
 		return "", err
@@ -2041,7 +2067,7 @@ func (l *KeyLane) FillGap(ctx context.Context, nonce uint64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := l.store.WithLock(ctx, l.chainID, l.Address(), func(q KeyLaneTxn) error { return unholdLocked(q, &nonce) }); err != nil {
+	if err := l.store.WithLock(ctx, l.chainID, l.Address(), func(q KeyLaneTxn) error { return unholdLocked(q, &nonce, false) }); err != nil {
 		log.Printf("[signer] key lane: clear the shared hold at %d: %v", nonce, err)
 	}
 	if h := l.held.Load(); h != nil && h.nonce == nonce {
@@ -2180,7 +2206,7 @@ func (l *KeyLane) Watch(ctx context.Context) error {
 		if st, err := q.Hold(); err != nil || st == nil || st.HeldNonce == nil || uint64(*st.HeldNonce) >= mined {
 			return err
 		}
-		return q.SetHold(nil, "", time.Time{})
+		return q.SetHold(nil, "", time.Time{}, false) // a routine clear: the chain passed it
 	}); err != nil {
 		log.Printf("[signer] key lane: mark allocations below %d mined: %v", mined, err)
 	}

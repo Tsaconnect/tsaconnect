@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,9 +45,17 @@ func (s *GormSponsorshipStore) Reserve(ctx context.Context, row *models.GasSpons
 // SetTxHash writes the sent tx on the row; inside a key lane hook (ctx from
 // the lane) it is part of the lane's allocation transaction.
 func (s *GormSponsorshipStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
-	return LaneDB(ctx, s.DB).Model(&models.GasSponsorship{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"tx_hash": txHash, "amount_wei": amountWei}).Error
+	// Exactly one row, still unsent: the hook's guard (else nothing signs).
+	res := LaneDB(ctx, s.DB).Model(&models.GasSponsorship{}).
+		Where("id = ? AND (tx_hash = '' OR tx_hash IS NULL)", id).
+		Updates(map[string]any{"tx_hash": txHash, "amount_wei": amountWei})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("sponsorship %s already records a transaction", id)
+	}
+	return nil
 }
 
 func (s *GormSponsorshipStore) ForgetCancelled(ctx context.Context, id uuid.UUID, txHash string) (bool, error) {

@@ -200,7 +200,7 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: reserve: %w", err)
 	}
 	if existing != nil && existing.TxHash != "" && lane.callCancelled(ctx, existing.TxHash) &&
-		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "auth_relay:"+existing.ID.String(), existing.TxHash) {
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "auth_relay:"+existing.ID.String(), existing.TxHash, RetirePermanent) {
 		// The earlier relay was cancelled at its nonce (it never executed;
 		// authorizationState above still reads unused): its row goes and the
 		// authorization is relayed again.

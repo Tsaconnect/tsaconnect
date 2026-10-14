@@ -514,8 +514,18 @@ func (s *MCGPSwapService) OperatorCallCancelled(ctx context.Context, txHash stri
 	if err != nil || !c {
 		return false, err
 	}
-	// Given up only through RetireOp: nothing live or executed holds it.
-	if s.operator == nil || !s.operatorLane.GiveUp(ctx, s.operator.Address(), "", txHash) {
+	// Given up only through RetireOp, by its operation key (it_op:<call
+	// hash>, as operatorBroadcastLocked named it) and hash — permanently: the
+	// retry is a new intent with a new debit ref, hence a new call.
+	if s.operator == nil {
+		return false, nil
+	}
+	data, err := s.operatorLane.CallData(ctx, txHash)
+	if err != nil || data == "" {
+		return false, err
+	}
+	op := "it_op:" + crypto.Keccak256Hash(common.FromHex(data)).Hex()
+	if !s.operatorLane.GiveUp(ctx, s.operator.Address(), op, txHash, RetirePermanent) {
 		return false, nil
 	}
 	return true, nil
