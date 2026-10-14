@@ -1,6 +1,7 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import { withMode } from '@/components/shell/mode';
 import { Developers } from './Developers';
+import { Liquidity } from './Liquidity';
 import { Overview } from './Overview';
 import { PaymentLinks } from './PaymentLinks';
 import { PaymentDrawer } from './PaymentDrawer';
@@ -35,6 +36,7 @@ export function BusinessRoutes() {
         {/* The poster is a page of its own (no app frame), laid out to print. */}
         <Route path="links/open/:id/poster" element={<OpenLinkPoster />} />
         <Route path="payouts" element={<Payouts />} />
+        <Route path="liquidity" element={<Liquidity />} />
         <Route path="reconciliation" element={<Reconciliation />} />
         <Route path="developers" element={<Developers />} />
         <Route path="*" element={<Navigate to="overview" replace />} />
