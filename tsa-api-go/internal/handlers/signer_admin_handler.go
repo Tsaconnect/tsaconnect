@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"math/big"
 	"net/http"
 	"strings"
@@ -137,7 +138,11 @@ func (h *SignerAdminHandler) ClearHold(c *gin.Context) {
 		return
 	}
 	if err := lane.ClearHold(c.Request.Context()); err != nil {
-		utils.ErrorResponse(c, http.StatusServiceUnavailable, err.Error())
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, services.ErrNonceCancelling) {
+			status = http.StatusConflict
+		}
+		utils.ErrorResponse(c, status, err.Error())
 		return
 	}
 	h.audit(c, "signer.lane_hold_cleared", req, map[string]any{"heldNonce": nonce, "heldReason": reason})

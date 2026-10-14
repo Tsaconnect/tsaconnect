@@ -363,6 +363,7 @@ func TestAutoRelease_VerifiesTheSpedUpRelease(t *testing.T) {
 	if strings.EqualFold(h2, h1) {
 		t.Fatal("setup: no speed-up")
 	}
+	node.mine(common.HexToHash(h2), 50, 60) // the replacement mined (non-waiting receipt read)
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 	esc.releasedEvent = &P2PTradeReleasedEvent{TradeID: HashID(trade.ID),
 		Buyer:         common.HexToAddress("0x000000000000000000000000000000000000beef"),
@@ -527,7 +528,7 @@ func TestSendSale_ReorgThatLandsTheOriginalOverAShallowCancelSettles(t *testing.
 	if c, _ := kl.CallCancelled(ctx, h1); c {
 		t.Fatal("the original mined: never cancelled")
 	}
-	a, _ := kl.store.Allocation(ctx, kl.chainID, raw.Address(), h1)
+	a, _, _ := kl.store.AllocationOf(ctx, kl.chainID, raw.Address(), h1)
 	if a == nil || a.Status != models.KeyLaneNonceMined {
 		t.Fatalf("allocation = %+v, want mined as the original call", a)
 	}

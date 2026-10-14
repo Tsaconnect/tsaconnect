@@ -258,3 +258,22 @@ type keyLaneWatch struct{ reg *services.SignerRegistry }
 func (w keyLaneWatch) Name() string                  { return "key-lane-watch" }
 func (w keyLaneWatch) Interval() time.Duration       { return 30 * time.Second }
 func (w keyLaneWatch) Run(ctx context.Context) error { return w.reg.Watch(ctx) }
+
+// laneFinalityDepth is the deepest confirmation depth any payer is configured
+// to wait for (RAMP_TREASURY_CONFIRMATIONS, the name-change minimums): a key
+// lane treats a cancel as final only at max(this, its own floor).
+func laneFinalityDepth(cfg *config.Config) uint64 {
+	d := cfg.RampTreasuryConfirmations
+	if cfg.NameChangeMinConfirmations > d {
+		d = cfg.NameChangeMinConfirmations
+	}
+	for _, n := range cfg.NameChangeMinConfirmationsByChain {
+		if n > d {
+			d = n
+		}
+	}
+	if d < 0 {
+		d = 0
+	}
+	return uint64(d)
+}

@@ -285,8 +285,22 @@ func (s *ITService) reconcileInflightSell(ctx context.Context, in *models.ITInte
 		}
 		return false
 	case DebitStateNone:
-		if in.UpdatedAt.After(now.Add(-itDebitAbandonAfter)) {
+		cancelled := false
+		if oc, ok := s.chain().(interface {
+			OperatorCallCancelled(ctx context.Context, txHash string) (bool, error)
+		}); ok && in.TxHash != "" {
+			c, err := oc.OperatorCallCancelled(ctx, in.TxHash)
+			cancelled = err == nil && c
+		}
+		if !cancelled && in.UpdatedAt.After(now.Add(-itDebitAbandonAfter)) {
 			return false // a broadcast may still mine
+		}
+		if cancelled {
+			res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+				Where("id = ? AND status IN ?", in.ID, inflight).
+				Updates(map[string]any{"status": models.ITStatusFailed,
+					"failure_reason": truncateReason("debit cancelled by the operator key lane: it never executed (was: " + in.FailureReason + ")")})
+			return res.Error == nil && res.RowsAffected == 1
 		}
 		res := s.db.WithContext(ctx).Model(&models.ITIntent{}).
 			Where("id = ? AND status IN ?", in.ID, inflight).

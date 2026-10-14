@@ -82,6 +82,16 @@ func (f *fakeSponsorStore) SetTxHash(_ context.Context, id uuid.UUID, txHash, am
 	return nil
 }
 
+func (f *fakeSponsorStore) ForgetCancelled(_ context.Context, id uuid.UUID, txHash string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r, ok := f.rows[id]; ok && r.TxHash == txHash && txHash != "" {
+		delete(f.rows, id)
+		return true, nil
+	}
+	return false, nil
+}
+
 func (f *fakeSponsorStore) Release(_ context.Context, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

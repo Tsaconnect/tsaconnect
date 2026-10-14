@@ -131,6 +131,7 @@ type P2PGasSponsor struct {
 type p2pDrip struct {
 	at          time.Time
 	postBalance *big.Int
+	txHash      string
 }
 
 // NewP2PGasSponsor is nil when sponsor has no lane or there is no need
@@ -223,10 +224,10 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 		release: func() { p.perUser.ReleaseUser(slot) },
 		// In-memory only (no DB row), so never inside the lane's transaction:
 		// noted once the drip is committed (sent or in flight).
-		sent: func() {
+		sent: func(txHash string) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			p.lastDrip[user.ID] = p2pDrip{at: p.now(), postBalance: new(big.Int).Set(need)}
+			p.lastDrip[user.ID] = p2pDrip{at: p.now(), postBalance: new(big.Int).Set(need), txHash: txHash}
 		},
 	})
 	switch {
@@ -249,6 +250,14 @@ func (p *P2PGasSponsor) refuseUnusedDrip(ctx context.Context, lane *SponsorLane,
 	}
 	p.mu.Unlock()
 	if !ok {
+		return nil
+	}
+	if lane.callCancelled(ctx, last.txHash) {
+		// The last drip was cancelled at its nonce: it never arrived, so it
+		// is not an unused drip — a new one may go.
+		p.mu.Lock()
+		delete(p.lastDrip, userID)
+		p.mu.Unlock()
 		return nil
 	}
 	have, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(wallet), nil)

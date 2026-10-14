@@ -187,8 +187,10 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     every other leg is failed only on its own send's not-attempted answer.
     IT operator ops write their row before the call and resolve by the contract ref, so they need
     none. In-memory bookkeeping (the P2P drip memory) runs after the commit, never in a hook.
-    An error from the allocation transaction that is not the body's own refusal is re-checked in the
-    store: a commit that happened answers `ErrPendingBroadcast`, never "not sent".
+    An error from the allocation transaction that is not the body's own refusal (fresh or reused
+    allocation) is re-checked under the RE-TAKEN lane lock by operation key: committed answers in
+    flight, provably absent answers not sent, and a re-check that fails (or an unreadable operation
+    key) answers `ErrSendOutcomeUnknown` — attempted, never "not sent".
   - **B.** After the commit, outside every lock: the bytes are broadcast and a short transaction
     records the outcome (`accepted` / `uncertain` / `refused`). Once committed the call is IN FLIGHT:
     a broadcast the node refused or that timed out returns its hash with `ErrPendingBroadcast`
@@ -196,14 +198,22 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     "not sent". `attempted = false` means nothing was committed.
   - **C.** A committed signing IS its nonce's transaction until the chain mines that nonce (statuses
     `signed` → `sent` → `mined`). Refused or lost, the upkeep re-broadcasts the same bytes or speeds up
-    the SAME call until it mines. A call that can NEVER be sent — refused for the RPC's tx-fee cap,
-    intrinsic gas too low, over the block gas limit (`permanentlyUnsendable`) — or that a super-admin
+    the SAME call until it mines. A call that can NEVER be sent — refused as call-intrinsic (intrinsic
+    gas too low, over the block gas limit), or for the RPC's tx-fee cap at its lowest-priced signing
+    with none accepted (`unsendableKind`) — or that a super-admin
     cancels (`POST .../cancel`) is replaced at its nonce by a 0-value self-transfer priced above every
-    earlier signing (same caps); once the cancel's receipt is `keyLaneCancelDepth` (5) blocks deep
-    against the latest block the allocation is `cancelled`, its operation key freed, and verifiers
+    earlier signing (same caps). A fee-cap refusal of a SPEED-UP while a cheaper signing is accepted
+    only stops the bumping (hold), never cancels. Once the cancel's receipt is max(`keyLaneCancelDepth`
+    (5), the deepest configured confirmations — `SetFinalityDepth` at boot) blocks deep against the
+    latest block the allocation is `cancelled`, its operation key freed, and verifiers
     report `ErrCallCancelled` (shallower it stays in flight, re-read every tick: a reorg that puts the
-    original in resolves it as mined and the caller sees success): the sale/conversion leg fails cleanly and the
-    next tick sends a new attempt (new operation, new nonce). The cancel is never followed as the
+    original in resolves it as mined and the caller sees success). Every caller reads ONE verdict,
+    `KeyLane.CallOutcome` (one store read; a recorded `cancelled` is re-proven on chain each time — a
+    chain that disagrees is in flight): sale legs and the sale gate, conversion legs, gas top-ups
+    (order row forgotten / intent claim given back / P2P drip memory dropped), authorization relays
+    (relayed again), the name-change refund (back to `refund_failed`), IT sells (failed at once), slice
+    releases/resolves (`SliceHashReverted`) and AutoRelease — each then retries on a new operation
+    and nonce. The cancel is never followed as the
     call's receipt. Only a hole NO process allocated — strictly below the highest allocated nonce —
     is ever filled, and only by a super-admin (`fill-gap`).
   - **D.** A signing the node lacks 15 s on is re-broadcast byte for byte once, then sped up with the
@@ -215,8 +225,11 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     recorded as `reserved`), gated as its send was, never against its own reservation. Past a cap the
     lane holds; a speed-up the balance cannot pay never holds — every tick retries it, so a top-up
     re-arms the lane by itself. A hold is shared state (`key_lane_states`): every process refuses in
-    its allocation transaction and adopts it on its watch; an admin clear on any process clears it
-    for all.
+    its allocation transaction (after the operation-key lookup: a committed operation is answered
+    even on a held lane) and adopts it on its watch; a hold whose persist failed is re-persisted,
+    never dropped; an admin clear on any process clears it for all and (`clear_version`) resets every
+    process's gap timers. Retry, raise-price-cap and clear-hold refuse a cancelled nonce (409, no
+    audit row); raise-price-cap stays the exit for a cancel held at the fee cap.
   - **E.** `services.WithOperationRef(ctx, ref)` is the allocation's idempotency key: the same
     operation retried (release `p2p_release:<trade>`, cancel, resolve, IT op `it_op:<call hash>`,
     treasury legs `ramp_leg:<leg>` with `:approve`/`:route`) gets its existing allocation and its

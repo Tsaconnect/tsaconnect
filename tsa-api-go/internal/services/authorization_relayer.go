@@ -199,6 +199,18 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 	if err != nil {
 		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: reserve: %w", err)
 	}
+	if existing != nil && existing.TxHash != "" && lane.callCancelled(ctx, existing.TxHash) {
+		// The earlier relay was cancelled at its nonce (it never executed;
+		// authorizationState above still reads unused): its row goes and the
+		// authorization is relayed again.
+		if forgot, ferr := a.store.ForgetCancelled(ctx, existing.ID, existing.TxHash); ferr != nil || !forgot {
+			return AuthorizationRelayResult{}, ErrSponsorshipInProgress
+		}
+		log.Printf("[ramp-sponsor] relay %s for order=%s was cancelled by the key lane; relaying again", existing.TxHash, orderID)
+		if existing, err = a.store.Reserve(ctx, row); err != nil {
+			return AuthorizationRelayResult{}, fmt.Errorf("sponsor: reserve: %w", err)
+		}
+	}
 	if existing != nil {
 		if existing.TxHash != "" {
 			return AuthorizationRelayResult{TxHash: existing.TxHash}, nil

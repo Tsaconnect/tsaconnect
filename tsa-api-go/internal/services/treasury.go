@@ -645,17 +645,16 @@ func (t *Treasury) followCall(ctx context.Context, chainKey string, receipts rec
 	if kl == nil || old == "" {
 		return old, false
 	}
-	if c, err := kl.CallCancelled(ctx, old); err == nil && c {
-		return old, true
-	}
+	var hasReceipt func(ctx context.Context, h string) (bool, error)
 	if receipts == nil {
-		r, ok := t.Lane(chainKey).Native.(receiptReader)
-		if !ok {
-			return old, false
-		}
-		receipts = r
+		receipts, _ = t.Lane(chainKey).Native.(receiptReader)
 	}
-	return followMinedHash(ctx, kl, db, model, column, id, old, receiptExists(receipts)), false
+	if receipts != nil {
+		hasReceipt = receiptExists(receipts)
+	}
+	// One store read: the cancel verdict (re-proven on chain) and the mined
+	// signing of the same call.
+	return followMinedHash(ctx, kl, db, model, column, id, old, hasReceipt)
 }
 
 // TransferToken moves a token out of the treasury — a shortfall top-up or a

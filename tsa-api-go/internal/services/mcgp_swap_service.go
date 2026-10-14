@@ -506,6 +506,13 @@ func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData 
 	return hash, err
 }
 
+// OperatorCallCancelled is the operator lane's verdict that an operator
+// transaction never executed (cancelled at its nonce, proven at the finality
+// depth): the op it carried can be decided as not done.
+func (s *MCGPSwapService) OperatorCallCancelled(ctx context.Context, txHash string) (bool, error) {
+	return s.operatorLane.CallCancelled(ctx, txHash)
+}
+
 // OperatorOps are the operator transactions a sequence may send.
 type OperatorOps interface {
 	OperatorDebitSpendable(ctx context.Context, user string, amount, maxFromBought *big.Int, debitRef [32]byte) (string, error)
@@ -942,6 +949,9 @@ func (s *MCGPSwapService) receipt(txHash string) (*types.Receipt, error) {
 	r, final, err := waitFollowingReplacements(context.Background(), s.operatorLane, txHash, 60*time.Second,
 		func(_ context.Context, h string, d time.Duration) (*types.Receipt, error) { return wait(h, d) })
 	if err != nil {
+		if c, cerr := s.operatorLane.CallCancelled(context.Background(), txHash); cerr == nil && c {
+			return nil, fmt.Errorf("get receipt %s: %w", txHash, ErrCallCancelled)
+		}
 		return nil, fmt.Errorf("get receipt %s: %w", txHash, err)
 	}
 	if r.Status != types.ReceiptStatusSuccessful {

@@ -107,7 +107,10 @@ type KeyLaneState struct {
 	HeldReason string     `gorm:"size:256" json:"heldReason,omitempty"`
 	HeldSince  *time.Time `json:"heldSince,omitempty"`
 	Version    int64      `gorm:"not null;default:0" json:"version"`
-	UpdatedAt  time.Time  `json:"updatedAt"`
+	// ClearVersion counts clears of the hold: a process that sees it move
+	// forgets the gaps it was timing (an admin vouched for the chain).
+	ClearVersion int64     `gorm:"not null;default:0" json:"clearVersion"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 func (KeyLaneState) TableName() string { return "key_lane_states" }

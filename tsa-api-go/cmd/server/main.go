@@ -342,6 +342,9 @@ func main() {
 	if config.DB != nil {
 		blockchainService.Signers().SetStore(&services.GormKeyLaneStore{DB: config.DB})
 	}
+	// A key lane's cancel is final only at the deepest confirmation depth any
+	// payer configures (and never under 5).
+	blockchainService.Signers().SetFinalityDepth(laneFinalityDepth(cfg))
 
 	// Initialize escrow service (sonic chain client). All Sonic-side services
 	// (escrow, product-escrow, service-contact, OTC, P2P) follow SONIC_NETWORK:

@@ -419,6 +419,11 @@ func (s *ITService) SliceHashReverted(ctx context.Context, slice *models.P2PTrad
 		strings.HasPrefix(slice.ReleaseTxHash, sliceResolveClaimPrefix) {
 		return false, nil
 	}
+	// A release (or resolve) the release key's lane CANCELLED at its nonce
+	// never executed: as final a "moved nothing" as a deep revert.
+	if c, err := laneOfSender(d.c.Sender, slice.ChainID).CallCancelled(ctx, slice.ReleaseTxHash); err != nil || c {
+		return c, err
+	}
 	gen := d.c.Probe.EndpointGeneration()
 	need := s.saleDepth()
 	return receiptDeep(ctx, d.c.Probe, slice.ReleaseTxHash, types.ReceiptStatusFailed, need, gen)

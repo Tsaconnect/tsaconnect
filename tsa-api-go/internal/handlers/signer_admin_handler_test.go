@@ -182,3 +182,39 @@ func TestSignerAdmin_CancelAudits(t *testing.T) {
 		t.Fatalf("audit = %q", action)
 	}
 }
+
+// A speed-up retry (or a hold clear) on a nonce being cancelled is a 409
+// with no audit row: nothing was done.
+func TestSignerAdmin_RetryRefusesACancellingNonceWithoutAudit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`CREATE TABLE p2p_audit_logs (id text primary key, actor_id text, trade_id text, ad_id text, action text, metadata text, created_at datetime)`)
+	key, _ := crypto.GenerateKey()
+	reg := services.NewSignerRegistry()
+	lane := reg.Lane("pm_release", key, &adminNode{})
+	if _, _, err := lane.Send(context.Background(), func() ([]byte, error) {
+		return json.Marshal(blockchain.UnsignedTx{Nonce: 5, GasPrice: "1000000000", GasLimit: 21000,
+			To: "0x00000000000000000000000000000000000000aa", Value: "0", ChainID: "56"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lane.RequestCancel(context.Background(), 5); err != nil {
+		t.Fatal(err)
+	}
+	h := &SignerAdminHandler{DB: db, Registry: reg}
+	raw, _ := json.Marshal(map[string]any{"chainId": 56, "address": lane.Address(), "nonce": 5})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/admin/signer/lanes/retry", bytes.NewReader(raw))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user", &models.User{ID: uuid.New()})
+	h.Retry(c)
+	var n int64
+	db.Raw(`SELECT COUNT(*) FROM p2p_audit_logs`).Row().Scan(&n)
+	if w.Code != http.StatusConflict || n != 0 || !strings.Contains(w.Body.String(), "cancel") {
+		t.Fatalf("retry on a cancelling nonce = %d %s (audit rows %d), want 409 and none", w.Code, w.Body.String(), n)
+	}
+}

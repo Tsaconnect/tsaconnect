@@ -92,6 +92,18 @@ type SponsorLane struct {
 // errNoKeyLane: a SponsorLane built without its key's registry lane never
 // sends (boot always sets KeyLane; a lane outside the registry would hold a
 // private nonce lock).
+// callCancelled is the key lane's verdict (CallOutcome, re-proven on chain
+// at the finality depth) that the transaction hash this sponsor lane sent
+// never executed — its claim on a sponsorship may be given back. A read
+// error is "not cancelled" (in flight).
+func (l *SponsorLane) callCancelled(ctx context.Context, hash string) bool {
+	if l == nil || l.KeyLane == nil || hash == "" {
+		return false
+	}
+	c, err := l.KeyLane.CallCancelled(ctx, hash)
+	return err == nil && c
+}
+
 var errNoKeyLane = notBroadcast(errors.New("sponsor lane has no key lane from the signer registry"))
 
 // nonceLane is the lane every send on this SponsorLane goes through (nil

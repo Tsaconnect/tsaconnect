@@ -2128,19 +2128,19 @@ func laneOfSender(signer ChainSender, chainID int64) *KeyLane {
 // key lane's speed-ups: hash first, then every other signing of the SAME
 // call (one mined in its place); it returns the hash that proved it.
 func (s *P2PTradeService) verifyReleaseFollowing(ctx context.Context, escrow P2PEscrowAdapter, signer ChainSender, trade *models.P2PTrade, hash string) (*P2PTradeReleasedEvent, string, error) {
+	// One non-waiting read picks the signing of the call that mined (or the
+	// lane's proven cancel); the receipt is then verified once, on it.
+	if lane := laneOfSender(signer, trade.ChainID); lane != nil && lane.receipts != nil {
+		mined, cancelled, err := lane.CallOutcome(ctx, hash, receiptExists(lane.receipts))
+		if cancelled {
+			return nil, hash, ErrCallCancelled
+		}
+		if err == nil {
+			hash = mined
+		}
+	}
 	ev, err := escrow.VerifyTradeReleased(hash, HashID(trade.ID))
-	if err == nil {
-		return ev, hash, nil
-	}
-	for _, h := range laneOfSender(signer, trade.ChainID).signingsOf(ctx, hash) {
-		if strings.EqualFold(h, hash) {
-			continue
-		}
-		if ev2, err2 := escrow.VerifyTradeReleased(h, HashID(trade.ID)); err2 == nil {
-			return ev2, h, nil
-		}
-	}
-	return nil, hash, err
+	return ev, hash, err
 }
 
 // PrepareCancel prepares an unsigned `cancelByTimeout` tx for a trade whose
