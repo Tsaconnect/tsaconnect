@@ -52,3 +52,24 @@ export function canClaimGasFree(me: LiquidityMe): boolean {
   const d = me.token.decimals;
   return units(me.claimable, d) >= units(me.minClaim, d);
 }
+
+/** The API refuses Activate while the old LP wallet still holds a position. */
+export const LIQUIDITY_OLD_WALLET_HAS_FUNDS = 'liquidity_old_wallet_has_funds';
+
+/**
+ * Activating a new wallet while the old one still holds principal or earnings
+ * would strand them: the screen only signs as the current LP wallet.
+ */
+export function oldWalletHasFunds(me: LiquidityMe): boolean {
+  return me.walletChanged && (!isZeroAmount(me.principal) || !isZeroAmount(me.claimable));
+}
+
+export function oldWalletFundsMessage(wallet?: string): string {
+  return `Withdraw and claim from ${wallet || 'your old wallet'} first (switch to it on this device), then activate your new wallet.`;
+}
+
+/** Server refusals carry a "liquidity: " package prefix that is not for users. */
+export function liquidityMessage(message: string | undefined, fallback: string): string {
+  const m = (message ?? '').replace(/^liquidity:\s*/i, '').trim();
+  return m ? m.charAt(0).toUpperCase() + m.slice(1) : fallback;
+}

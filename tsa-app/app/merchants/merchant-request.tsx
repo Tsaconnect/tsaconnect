@@ -40,6 +40,7 @@ import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { COMPANY } from '@/constants/legal';
 import { KYC_ROUTE, kycRefusalFor, promptKycRefusal } from '@/utils/kycRefusal';
+import { LP_DASHBOARD_ROUTE } from '@/utils/lpCta';
 import LocationPicker from '@/components/common/LocationPicker';
 import { Button, Chip, Icon, PickerSheet, PressableScale, SelectRow, Spinner, Text } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
@@ -167,7 +168,9 @@ export type MerchantGate =
   | { screen: 'pending'; pm: boolean }
   | { screen: 'approved'; pm: boolean; payFlow: boolean }
   | { screen: 'provisioning' }
-  | { screen: 'rejected' };
+  | { screen: 'rejected' }
+  /** A request of the retired liquidity_provider kind: LPs now activate on /liquidity. */
+  | { screen: 'liquidity' };
 
 // Business types the backend has NO "already a merchant" role guard for —
 // each may be applied for on top of whatever else the user already has
@@ -228,6 +231,10 @@ function resolveRequestGate(args: {
   const formIsAddOn = ADD_ON_BUSINESS_TYPES.includes(formType);
   const blockExisting = !formIsAddOn || existingType === formType;
   if (!blockExisting) return { screen: 'form' };
+
+  if (existingType === 'liquidity_provider' && (existingRequest.status === 'pending' || existingRequest.status === 'approved')) {
+    return { screen: 'liquidity' };
+  }
 
   switch (existingRequest.status) {
     case 'pending':
@@ -571,6 +578,22 @@ export default function MerchantRequestScreen() {
         actionTitle="Verify identity"
         actionVariant="primary"
         onAction={() => router.push(KYC_ROUTE as never)}
+      />
+    );
+  }
+
+  if (gate.screen === 'liquidity') {
+    return (
+      <StatusScreen
+        screenTitle={screenTitle}
+        icon="wallet"
+        tone={colors.accent}
+        toneBg={colors.accentMuted}
+        title="Liquidity providers now activate themselves in the app"
+        body="You no longer need an application to provide liquidity. Open TSA Liquidity to activate and add liquidity."
+        actionTitle="Open TSA Liquidity"
+        actionVariant="primary"
+        onAction={() => router.push(LP_DASHBOARD_ROUTE as never)}
       />
     );
   }
@@ -1083,7 +1106,7 @@ export const SetUpOnWebCard: React.FC = () => {
 // keeps the status registration + actions identical, only the chrome is themed.
 // children render between the body and the action.
 const StatusScreen: React.FC<{
-  icon: 'clock' | 'checkCircle' | 'closeCircle' | 'shield';
+  icon: 'clock' | 'checkCircle' | 'closeCircle' | 'shield' | 'wallet';
   tone: string;
   toneBg: string;
   title: string;

@@ -336,6 +336,14 @@ describe('isPickerLocked — locked single-chip mode vs selectable chip row', ()
 // dashboard reads the real status from /p2p/pm/me — the two must agree).
 
 describe('resolveMerchantGate', () => {
+  it('sends a retired liquidity_provider request to self-serve liquidity, pending or approved', () => {
+    for (const status of ['pending', 'approved']) {
+      const existingRequest = { status, businessType: 'liquidity_provider' };
+      expect(resolveMerchantGate({ existingRequest, formType: 'general_products', pmActive: false }))
+        .toEqual({ screen: 'liquidity' });
+    }
+  });
+
   it('shows the form when there is no existing request', () => {
     expect(resolveMerchantGate({ existingRequest: null, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'form' });
@@ -523,10 +531,10 @@ describe('cachesMerchantRole', () => {
 });
 
 describe('resolveMerchantGate — a legacy liquidity_provider request', () => {
-  it('is no longer an add-on: it gates the general form like any other type', () => {
+  it('is no longer an add-on: it gates the general form, pointing at self-serve liquidity', () => {
     const existingRequest = { status: 'pending', businessType: 'liquidity_provider' };
     expect(resolveMerchantGate({ existingRequest, formType: 'general_products', pmActive: false }))
-      .toEqual({ screen: 'pending', pm: false });
+      .toEqual({ screen: 'liquidity' });
     expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: false }))
       .toEqual({ screen: 'form' });
   });

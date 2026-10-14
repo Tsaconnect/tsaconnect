@@ -65,3 +65,10 @@ export function canClaim(me: LiquidityMe): boolean {
   if (!me.token || me.walletChanged) return false;
   return units(me.claimable, me.token.decimals) >= units(me.minClaim, me.token.decimals);
 }
+
+const isZero = (v?: string) => !v || /^0*(\.0*)?$/.test(v);
+
+/** The old LP wallet still holds a position: activating a new one first would strand it. */
+export function oldWalletHasFunds(me: LiquidityMe): boolean {
+  return me.walletChanged && (!isZero(me.principal) || !isZero(me.claimable));
+}

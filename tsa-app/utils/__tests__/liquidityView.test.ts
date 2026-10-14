@@ -4,7 +4,9 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 /* eslint-disable import/first */
-import { canClaimGasFree, formatLiquidityAmount, isZeroAmount, liquidityAmountError } from '@/utils/liquidityView';
+import {
+  canClaimGasFree, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage, oldWalletHasFunds,
+} from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
 
 const me = (over: Partial<LiquidityMe> = {}): LiquidityMe => ({
@@ -59,5 +61,31 @@ describe('canClaimGasFree', () => {
     expect(canClaimGasFree(me())).toBe(false);
     expect(canClaimGasFree(me({ claimable: '0.5' }))).toBe(true);
     expect(canClaimGasFree(me({ claimable: '3', walletChanged: true }))).toBe(false);
+  });
+});
+
+describe('oldWalletHasFunds', () => {
+  it('is false while the account is still on its LP wallet', () => {
+    expect(oldWalletHasFunds(me())).toBe(false);
+  });
+  it('is true when the old wallet still holds principal or earnings', () => {
+    expect(oldWalletHasFunds(me({ walletChanged: true }))).toBe(true);
+    expect(oldWalletHasFunds(me({ walletChanged: true, principal: '0' }))).toBe(true);
+  });
+  it('is false once the old wallet is empty', () => {
+    expect(oldWalletHasFunds(me({ walletChanged: true, principal: '0', claimable: '0.0' }))).toBe(false);
+  });
+});
+
+describe('liquidityMessage', () => {
+  it('strips the package prefix from a server message', () => {
+    expect(liquidityMessage('liquidity: the pool is closed', 'x')).toBe('The pool is closed');
+  });
+  it('falls back when there is no message', () => {
+    expect(liquidityMessage(undefined, 'Try again.')).toBe('Try again.');
+    expect(liquidityMessage('liquidity: ', 'Try again.')).toBe('Try again.');
+  });
+  it('leaves an ordinary message alone', () => {
+    expect(liquidityMessage('Your liquidity is paused', 'x')).toBe('Your liquidity is paused');
   });
 });

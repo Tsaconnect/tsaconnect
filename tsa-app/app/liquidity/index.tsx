@@ -30,11 +30,16 @@ import {
 import { runLiquidityTx, type LiquidityTxKind, type LiquidityTxResult } from '@/services/liquidityTx';
 import { getSignableWallet } from '@/services/wallet';
 import { getChainByChainId } from '@/constants/chains';
+import { promptKycRefusal } from '@/utils/kycRefusal';
 import {
   canClaimGasFree,
   formatLiquidityAmount,
   isZeroAmount,
+  LIQUIDITY_OLD_WALLET_HAS_FUNDS,
   liquidityAmountError,
+  liquidityMessage,
+  oldWalletFundsMessage,
+  oldWalletHasFunds,
   type LiquidityAction,
 } from '@/utils/liquidityView';
 
@@ -59,12 +64,20 @@ export default function LiquidityScreen() {
   const [sheet, setSheet] = useState<LiquidityAction | null>(null);
   const [amount, setAmount] = useState('');
   const [claimedOut, setClaimedOut] = useState(false); // offer the bank cash-out after a claim
+  // The claimable amount when a gas-free claim was sent: Claim stays off until
+  // a refresh shows it changed, so the operator's tx is never asked for twice.
+  const [claimSentAt, setClaimSentAt] = useState<string | null>(null);
   const activityReq = useRef(0);
+  // Set synchronously, so a double tap cannot start a second action before
+  // the first one's busy state has rendered.
+  const running = useRef(false);
 
   const load = useCallback(async () => {
     const res = await liquidityApi.me();
     if (res.success && res.data) {
+      const claimable = res.data.claimable ?? '';
       setMe(res.data);
+      setClaimSentAt((sent) => (sent != null && sent !== claimable ? null : sent));
       setLoadFailed(false);
     } else {
       setLoadFailed(true);
@@ -111,19 +124,40 @@ export default function LiquidityScreen() {
   const gasSymbol = (me.chain && getChainByChainId(me.chain.id)?.nativeCurrency.symbol) || 'gas';
   const isLp = me.status === 'active' || me.status === 'paused';
   const acting = busy != null;
+  const oldWalletFunded = oldWalletHasFunds(me);
+  const claimLocked = claimSentAt != null && claimSentAt === (me.claimable ?? '');
+
+  const begin = (label: string): boolean => {
+    if (running.current) return false;
+    running.current = true;
+    setBusy(label);
+    return true;
+  };
+  const end = () => {
+    running.current = false;
+    setBusy(null);
+  };
 
   const activate = async () => {
-    setBusy('Activating…');
+    if (oldWalletFunded) {
+      Alert.alert('Old wallet still holds liquidity', oldWalletFundsMessage(me.wallet));
+      return;
+    }
+    if (!begin('Activating…')) return;
     try {
       const res = await liquidityApi.activate();
       if (res.success && res.data) {
         setMe(res.data);
         toast.success('Liquidity activated');
+      } else if (promptKycRefusal(res.code, res.message)) {
+        // The KYC prompt has been shown.
+      } else if (res.code === LIQUIDITY_OLD_WALLET_HAS_FUNDS) {
+        Alert.alert('Old wallet still holds liquidity', oldWalletFundsMessage(me.wallet));
       } else {
-        Alert.alert("Couldn't activate", res.message || 'Try again in a moment.');
+        Alert.alert("Couldn't activate", liquidityMessage(res.message, 'Try again in a moment.'));
       }
     } finally {
-      setBusy(null);
+      end();
     }
   };
 
@@ -149,13 +183,17 @@ export default function LiquidityScreen() {
         if (kind === 'claim') setClaimedOut(true);
         return true;
       case 'pending':
-        Alert.alert('Still confirming', 'Your transaction was sent and is still confirming. Pull down to refresh in a minute — do not send it again.');
+        if (r.step === 'approve') {
+          Alert.alert('Approval confirming', 'Approval is confirming. Tap Add again in a minute to finish adding liquidity.');
+        } else {
+          Alert.alert('Still confirming', 'Your transaction was sent and is still confirming. Pull down to refresh in a minute — do not send it again.');
+        }
         return true;
       case 'reverted':
         Alert.alert('Not completed', 'The network rejected the transaction. Nothing changed; you can try again.');
         return false;
       case 'refused':
-        Alert.alert("Couldn't continue", r.message);
+        Alert.alert("Couldn't continue", liquidityMessage(r.message, 'Try again in a moment.'));
         return false;
       default:
         return false;
@@ -163,10 +201,10 @@ export default function LiquidityScreen() {
   };
 
   const runTx = async (kind: LiquidityTxKind, value?: string) => {
-    const wallet = await lpWallet();
-    if (!wallet) return false;
-    setBusy('Preparing…');
+    if (!begin('Preparing…')) return false;
     try {
+      const wallet = await lpWallet();
+      if (!wallet) return false;
       const r = await runLiquidityTx({
         me, kind, amount: value, wallet,
         onStage: setBusy,
@@ -179,7 +217,7 @@ export default function LiquidityScreen() {
       Alert.alert('Not sent', err instanceof Error ? err.message : 'Try again.');
       return false;
     } finally {
-      setBusy(null);
+      end();
     }
   };
 
@@ -197,26 +235,33 @@ export default function LiquidityScreen() {
   };
 
   const claim = async () => {
-    if (canClaimGasFree(me)) {
-      setBusy('Claiming…');
-      try {
-        const res = await liquidityApi.claimFor();
-        if (res.success) {
-          toast.success('Earnings on the way to your wallet');
-          setClaimedOut(true);
-          await Promise.all([load(), loadActivity()]);
-          return;
-        }
-        // Rate-limited or refused: fall back to a claim the LP signs.
-        if (res.status !== 429) {
-          Alert.alert("Couldn't claim", res.message || 'Try again in a moment.');
-          return;
-        }
-      } finally {
-        setBusy(null);
-      }
+    if (!canClaimGasFree(me)) {
+      await runTx('claim');
+      return;
     }
-    await runTx('claim');
+    if (!begin('Claiming…')) return;
+    let rateLimited = false;
+    try {
+      const res = await liquidityApi.claimFor();
+      if (res.success) {
+        setClaimSentAt(me.claimable ?? '');
+        toast.success('Earnings on the way to your wallet');
+        setClaimedOut(true);
+        await Promise.all([load(), loadActivity()]);
+        return;
+      }
+      if (res.status === 429) rateLimited = true;
+      else Alert.alert("Couldn't claim", liquidityMessage(res.message, 'Try again in a moment.'));
+    } finally {
+      end();
+    }
+    // A signed claim costs the LP gas, so it is never sent without asking.
+    if (rateLimited) {
+      Alert.alert('Claim with gas?', `The gas-free claim was used in the last 8 hours. Claim now with a little ${gasSymbol} for gas?`, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Continue', onPress: () => { void runTx('claim'); } },
+      ]);
+    }
   };
 
   const sheetError = sheet && amount ? liquidityAmountError(me, sheet, amount) : null;
@@ -267,10 +312,12 @@ export default function LiquidityScreen() {
             {me.walletChanged && (
               <Card padding="md" style={{ gap: spacing.sm }}>
                 <Text variant="bodySm">
-                  Your account now uses a different wallet. Withdraw and claim still go to {me.wallet}. To add liquidity
-                  from your new wallet, activate it.
+                  Your account now uses a different wallet. Withdraw and claim still go to {me.wallet}.{' '}
+                  {oldWalletFunded ? oldWalletFundsMessage(me.wallet) : 'To add liquidity from your new wallet, activate it.'}
                 </Text>
-                <Button title="Activate new wallet" variant="secondary" loading={acting} disabled={acting} onPress={activate} />
+                {!oldWalletFunded && (
+                  <Button title="Activate new wallet" variant="secondary" loading={acting} disabled={acting} onPress={activate} />
+                )}
               </Card>
             )}
 
@@ -303,8 +350,13 @@ export default function LiquidityScreen() {
             {!me.allowed && !me.paused && !me.walletChanged && (
               <Text variant="caption" color="textMuted">Setting up your wallet in the pool — this takes a couple of minutes.</Text>
             )}
-            <Button title={`Claim earnings (min ${me.minClaim} ${sym})`} variant="secondary"
-              disabled={acting || isZeroAmount(me.claimable)} loading={busy === 'Claiming…'} onPress={claim} />
+            <Button title="Claim earnings" variant="secondary"
+              disabled={acting || claimLocked || isZeroAmount(me.claimable)} loading={busy === 'Claiming…'} onPress={claim} />
+            <Text variant="caption" color="textMuted">
+              {claimLocked
+                ? 'Your claim is on its way. Pull down to refresh in a minute.'
+                : `Gas-free from ${me.minClaim} ${sym}; smaller claims need a little ${gasSymbol}.`}
+            </Text>
             {claimedOut && (
               <Button title="Cash out to your bank" variant="ghost" onPress={() => router.push(CASH_OUT_ROUTE as never)} />
             )}

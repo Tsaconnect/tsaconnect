@@ -1,7 +1,9 @@
 // services/liquidityTx.ts — the LP's own vault txs (spec 2026-10-14 §5):
 // gas check → API prepare → sign as the LP wallet → broadcast → wait mined.
 // A deposit whose allowance is short comes back as step "approve": the
-// approval is sent and mined, then the deposit is prepared again.
+// approval is sent and mined, then the deposit is prepared again. An API node
+// that has not yet seen the mined approval still answers "approve": that is
+// re-asked after a short wait, never signed twice.
 //
 // Once a tx is broadcast the LP is never told it "failed" unless the chain
 // says so: a slow receipt may still land, and the screen re-reads the vault.
@@ -15,8 +17,9 @@ export type LiquidityTxKind = 'deposit' | 'withdraw' | 'claim';
 
 export type LiquidityTxResult =
   | { status: 'done'; txHash: string }
-  /** Broadcast, but no receipt yet: it may still go through. Do not resend. */
-  | { status: 'pending'; txHash: string }
+  /** Broadcast, but no receipt yet: it may still go through. Do not resend.
+   *  `step` says which tx: an approve still needs the deposit after it. */
+  | { status: 'pending'; txHash: string; step: LiquidityTxPlan['step'] }
   /** Mined with status 0: nothing changed; safe to try again. */
   | { status: 'reverted'; txHash: string }
   | { status: 'refused'; message: string; code?: string }
@@ -25,6 +28,11 @@ export type LiquidityTxResult =
   | { status: 'busy' };
 
 const MINE_WAIT_MS = 60_000;
+/** API node lag after a mined approval: re-prepare this many times, this far apart. */
+const APPROVE_LAG_RETRIES = 3;
+const APPROVE_LAG_DELAY_MS = 2_000;
+export const APPROVAL_CONFIRMING_MESSAGE = 'Your approval is confirming on the network. Try again in a moment.';
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const inFlight = new Set<string>();
 
 const STAGE: Record<LiquidityTxPlan['step'], string> = {
@@ -48,7 +56,10 @@ export async function runLiquidityTx(p: {
   wallet: string;
   onStage?: (label: string) => void;
   onGasAlert?: (title: string, message: string) => void;
+  /** Injectable for tests. */
+  sleep?: (ms: number) => Promise<void>;
 }): Promise<LiquidityTxResult> {
+  const sleep = p.sleep ?? defaultSleep;
   const chainId = p.me.chain?.id;
   if (!chainId) return { status: 'refused', message: 'The pool network is not available right now.' };
   const key = `${p.kind}:${p.wallet.toLowerCase()}`;
@@ -63,7 +74,17 @@ export async function runLiquidityTx(p: {
     // An approve, then the deposit: never more than two rounds.
     for (let round = 0; round < 2; round++) {
       p.onStage?.('Preparing…');
-      const res = await prepare(p.kind, p.amount ?? '');
+      let res = await prepare(p.kind, p.amount ?? '');
+      // Round 1 follows a mined approve: "approve" again only means the API's
+      // node has not caught up yet. Wait for it; never sign a second approve.
+      for (let retry = 0; round > 0 && retry < APPROVE_LAG_RETRIES && res.data?.step === 'approve'; retry++) {
+        p.onStage?.('Waiting for the approval to confirm…');
+        await sleep(APPROVE_LAG_DELAY_MS);
+        res = await prepare(p.kind, p.amount ?? '');
+      }
+      if (round > 0 && res.success && res.data?.step === 'approve') {
+        return { status: 'refused', message: APPROVAL_CONFIRMING_MESSAGE };
+      }
       if (!res.success || !res.data) {
         return { status: 'refused', message: res.message || 'Could not prepare the transaction.', code: res.code };
       }
@@ -79,12 +100,12 @@ export async function runLiquidityTx(p: {
           await waitMined(chainId, sent.hash, { timeoutMs: MINE_WAIT_MS, provider: sent.provider, label: STAGE[plan.step] });
         } catch (err) {
           if (err instanceof TxRevertedError) return { status: 'reverted', txHash: sent.hash };
-          return { status: 'pending', txHash: sent.hash };
+          return { status: 'pending', txHash: sent.hash, step: plan.step };
         }
       }
       if (plan.step !== 'approve') return { status: 'done', txHash: last };
     }
-    return { status: 'refused', message: 'The approval did not take effect. Try again.' };
+    return { status: 'refused', message: APPROVAL_CONFIRMING_MESSAGE };
   } finally {
     inFlight.delete(key);
   }

@@ -1,7 +1,7 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { fail, merchant, mountAt, ok, stubFetch } from '@/test/harness';
-import { canClaim, tokenAmount, type LiquidityMe } from './liquidityApi';
+import { canClaim, oldWalletHasFunds, tokenAmount, type LiquidityMe } from './liquidityApi';
 
 const WALLET = '0x52908400098527886E0F7030069857D2E4169EE7';
 const base: LiquidityMe = {
@@ -47,7 +47,17 @@ describe('liquidity earnings', () => {
     });
     mountAt('/business/live/liquidity');
     expect(await screen.findByRole('button', { name: 'Claim 0.2 USDT' })).toBeDisabled();
-    expect(screen.getByText('Claims start from 0.5 USDT.')).toBeInTheDocument();
+    expect(screen.getByText('Claims start from 0.5 USDT here; smaller amounts can be claimed from the app.')).toBeInTheDocument();
+  });
+
+  it('tells an LP on a new wallet to empty the old one before activating', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/liquidity/me': ok({ ...lp, walletChanged: true }),
+      '/api/liquidity/me/activity': activity,
+    });
+    mountAt('/business/live/liquidity');
+    expect(await screen.findByText(/Withdraw and claim from 0x5290.* first \(switch to it in the TSA Connect app\)/)).toBeInTheDocument();
   });
 
   it('sends a non-LP to the app to start', async () => {
@@ -74,5 +84,10 @@ describe('liquidity helpers', () => {
     expect(canClaim({ ...lp, claimable: '0.5' })).toBe(true);
     expect(canClaim({ ...lp, claimable: '0.499999999999999999' })).toBe(false);
     expect(canClaim({ ...lp, walletChanged: true })).toBe(false);
+  });
+  it('sees a position left on the old wallet', () => {
+    expect(oldWalletHasFunds(lp)).toBe(false);
+    expect(oldWalletHasFunds({ ...lp, walletChanged: true })).toBe(true);
+    expect(oldWalletHasFunds({ ...lp, walletChanged: true, principal: '0', claimable: '0' })).toBe(false);
   });
 });

@@ -50,6 +50,7 @@ jest.mock('@/services/p2p', () => ({
 }));
 
 import React from 'react';
+import { Alert } from 'react-native';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { router } from 'expo-router';
 import { liquidityApi, type LiquidityMe } from '@/services/liquidityApi';
@@ -92,8 +93,12 @@ async function mount(me: LiquidityMe): Promise<ReactTestRenderer> {
   return r;
 }
 
+let alertSpy: jest.SpyInstance;
+const lastAlert = () => alertSpy.mock.calls[alertSpy.mock.calls.length - 1];
+
 beforeEach(() => {
   jest.clearAllMocks();
+  alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
   api.activity.mockResolvedValue({ success: true, data: { items: [] } });
   (getSignableWallet as jest.Mock).mockResolvedValue(WALLET);
 });
@@ -112,13 +117,13 @@ it('keeps withdraw and claim open while paused; only Add closes', async () => {
   const r = await mount({ ...lp, status: 'paused', paused: true });
   expect(button(r, 'Add').props.disabled).toBe(true);
   expect(button(r, 'Withdraw').props.disabled).toBe(false);
-  expect(button(r, 'Claim earnings (min 0.5 USDT)').props.disabled).toBe(false);
+  expect(button(r, 'Claim earnings').props.disabled).toBe(false);
 });
 
 it('claims gas-free above the minimum, then offers the bank cash-out', async () => {
   const r = await mount(lp);
   api.claimFor.mockResolvedValue({ success: true, data: { txHash: '0xc' } });
-  await act(async () => { button(r, 'Claim earnings (min 0.5 USDT)').props.onPress(); });
+  await act(async () => { button(r, 'Claim earnings').props.onPress(); });
   await flush();
   expect(api.claimFor).toHaveBeenCalledTimes(1);
   expect(runLiquidityTx).not.toHaveBeenCalled();
@@ -129,25 +134,108 @@ it('claims gas-free above the minimum, then offers the bank cash-out', async () 
 it('signs the claim itself below the gas-free minimum', async () => {
   const r = await mount({ ...lp, claimable: '0.2' });
   (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'done', txHash: '0xc' });
-  await act(async () => { button(r, 'Claim earnings (min 0.5 USDT)').props.onPress(); });
+  await act(async () => { button(r, 'Claim earnings').props.onPress(); });
   await flush();
   expect(api.claimFor).not.toHaveBeenCalled();
   expect(runLiquidityTx).toHaveBeenCalledWith(expect.objectContaining({ kind: 'claim', wallet: WALLET }));
 });
 
-it('falls back to a signed claim when the gas-free one is rate-limited', async () => {
+it('asks before a signed claim when the gas-free one is rate-limited', async () => {
   const r = await mount(lp);
   api.claimFor.mockResolvedValue({ success: false, status: 429, message: 'later' });
   (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'done', txHash: '0xc' });
-  await act(async () => { button(r, 'Claim earnings (min 0.5 USDT)').props.onPress(); });
+  await act(async () => { button(r, 'Claim earnings').props.onPress(); });
+  await flush();
+  expect(runLiquidityTx).not.toHaveBeenCalled();
+  const [, message, buttons] = lastAlert();
+  expect(message).toBe('The gas-free claim was used in the last 8 hours. Claim now with a little BNB for gas?');
+  expect(buttons.map((b: { text: string }) => b.text)).toEqual(['Cancel', 'Continue']);
+  await act(async () => { buttons[1].onPress(); });
   await flush();
   expect(runLiquidityTx).toHaveBeenCalledWith(expect.objectContaining({ kind: 'claim' }));
+});
+
+it('keeps Claim off after a gas-free claim until a refresh shows the claimable changed', async () => {
+  const r = await mount(lp);
+  api.claimFor.mockResolvedValue({ success: true, data: { txHash: '0xc' } });
+  await act(async () => { button(r, 'Claim earnings').props.onPress(); });
+  await flush();
+  expect(button(r, 'Claim earnings').props.disabled).toBe(true);
+  api.me.mockResolvedValue({ success: true, data: { ...lp, claimable: '0.01' } });
+  const scroll = r.root.findAll((n) => typeof n.props.refreshControl === 'object' && n.props.refreshControl)[0];
+  await act(async () => { await scroll.props.refreshControl.props.onRefresh(); });
+  await flush();
+  expect(button(r, 'Claim earnings').props.disabled).toBe(false);
+});
+
+it('explains that the gas-free minimum is the only minimum', async () => {
+  const r = await mount(lp);
+  expect(textOf(r)).toContain('Gas-free from 0.5 USDT; smaller claims need a little BNB.');
+});
+
+it('does not offer Activate for a new wallet while the old one still holds a position', async () => {
+  const r = await mount({ ...lp, walletChanged: true });
+  expect(button(r, 'Activate new wallet')).toBeUndefined();
+  expect(textOf(r)).toContain(`Withdraw and claim from ${WALLET} first (switch to it on this device), then activate your new wallet.`);
+});
+
+it('offers Activate for a new wallet once the old one is empty', async () => {
+  const r = await mount({ ...lp, walletChanged: true, principal: '0', claimable: '0' });
+  expect(button(r, 'Activate new wallet')).toBeDefined();
+});
+
+it('explains an old-wallet refusal from the API', async () => {
+  const r = await mount({ ...lp, walletChanged: true, principal: '0', claimable: '0' });
+  api.activate.mockResolvedValue({ success: false, code: 'liquidity_old_wallet_has_funds', message: 'liquidity: old wallet has funds' });
+  await act(async () => { button(r, 'Activate new wallet').props.onPress(); });
+  await flush();
+  expect(lastAlert()[1]).toBe(`Withdraw and claim from ${WALLET} first (switch to it on this device), then activate your new wallet.`);
+});
+
+it('sends an unverified user to KYC when Activate is refused for it', async () => {
+  const r = await mount(base);
+  api.activate.mockResolvedValue({ success: false, code: 'kyc_verification_required', message: 'liquidity: verify first' });
+  await act(async () => { button(r, 'Activate').props.onPress(); });
+  await flush();
+  expect(lastAlert()[0]).toBe('Verify your identity');
+});
+
+it('strips the package prefix from an activate refusal', async () => {
+  const r = await mount(base);
+  api.activate.mockResolvedValue({ success: false, message: 'liquidity: the pool is closed' });
+  await act(async () => { button(r, 'Activate').props.onPress(); });
+  await flush();
+  expect(lastAlert()).toEqual(["Couldn't activate", 'The pool is closed']);
+});
+
+it('tells the LP to tap Add again when the approval is still confirming', async () => {
+  const r = await mount(lp);
+  (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'pending', txHash: '0xa', step: 'approve' });
+  await act(async () => { button(r, 'Add').props.onPress(); });
+  await act(async () => { r.root.findAll((n) => typeof n.props.onChangeText === 'function')[0].props.onChangeText('10'); });
+  const sheet = r.root.findAll((n) => n.props.footer != null)[0];
+  await act(async () => { sheet.props.footer.props.onPress(); });
+  await flush();
+  expect(lastAlert()[1]).toBe('Approval is confirming. Tap Add again in a minute to finish adding liquidity.');
+});
+
+it('starts one transaction for a double tap', async () => {
+  const r = await mount({ ...lp, claimable: '0.2' });
+  let release!: (w: string) => void;
+  (getSignableWallet as jest.Mock).mockReturnValue(new Promise((res) => { release = res; }));
+  (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'done', txHash: '0xc' });
+  const onPress = button(r, 'Claim earnings').props.onPress;
+  await act(async () => { onPress(); onPress(); });
+  expect(button(r, 'Claim earnings').props.disabled).toBe(true);
+  await act(async () => { release(WALLET); });
+  await flush();
+  expect(runLiquidityTx).toHaveBeenCalledTimes(1);
 });
 
 it('signs nothing from a device that does not hold the LP wallet', async () => {
   const r = await mount({ ...lp, claimable: '0.2' });
   (getSignableWallet as jest.Mock).mockResolvedValue('0x00000000000000000000000000000000000000e2');
-  await act(async () => { button(r, 'Claim earnings (min 0.5 USDT)').props.onPress(); });
+  await act(async () => { button(r, 'Claim earnings').props.onPress(); });
   await flush();
   expect(runLiquidityTx).not.toHaveBeenCalled();
 });

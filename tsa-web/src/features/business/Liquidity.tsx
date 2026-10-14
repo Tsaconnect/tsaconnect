@@ -12,7 +12,7 @@ import { toast } from '@/components/ui/toaster';
 import { BusinessPage } from './BusinessPage';
 import { useIdempotencyKey } from './useIdempotencyKey';
 import {
-  canClaim, claimLiquidity, getLiquidity, LIQUIDITY_ACTIVITY_KEY, LIQUIDITY_KEY, listLiquidityActivity, tokenAmount,
+  canClaim, claimLiquidity, oldWalletHasFunds, getLiquidity, LIQUIDITY_ACTIVITY_KEY, LIQUIDITY_KEY, listLiquidityActivity, tokenAmount,
   type LiquidityActivity, type LiquidityMe,
 } from './liquidityApi';
 
@@ -106,7 +106,10 @@ function Position({ me }: { me: LiquidityMe }) {
       )}
       {me.walletChanged && (
         <Note tone="warning" icon={<TriangleAlert />}>
-          Your account now uses a different wallet. Earnings are paid to {me.wallet}; claim from the app with that wallet, or activate your new one there.
+          Your account now uses a different wallet. Earnings are paid to {me.wallet}.{' '}
+          {oldWalletHasFunds(me)
+            ? <>Withdraw and claim from {me.wallet} first (switch to it in the TSA Connect app), then activate your new wallet there.</>
+            : <>Activate your new wallet in the TSA Connect app to add liquidity from it.</>}
         </Note>
       )}
       <AccentCard>
@@ -132,7 +135,7 @@ function Position({ me }: { me: LiquidityMe }) {
           )}
         </CardBody>
         {!claimable && !me.walletChanged && (
-          <CardBody className="pt-0 text-caption text-text-secondary">Claims start from {me.minClaim} {sym}.</CardBody>
+          <CardBody className="pt-0 text-caption text-text-secondary">Claims start from {me.minClaim} {sym} here; smaller amounts can be claimed from the app.</CardBody>
         )}
       </AccentCard>
     </>

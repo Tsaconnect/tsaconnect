@@ -49,17 +49,42 @@ it('approves, waits for it to mine, then prepares and sends the deposit', async 
   expect(mockWait).toHaveBeenCalledTimes(2);
 });
 
-it('never loops on approvals', async () => {
+const sleep = jest.fn(async () => {});
+
+it('never signs a second approve while the API node lags: waits, then asks the LP to try again', async () => {
   mockPrepareDeposit.mockResolvedValue(plan('approve'));
-  const r = await runLiquidityTx({ me, kind: 'deposit', amount: '10', wallet: '0xabc' });
-  expect(r.status).toBe('refused');
-  expect(mockPrepareDeposit).toHaveBeenCalledTimes(2);
+  const r = await runLiquidityTx({ me, kind: 'deposit', amount: '10', wallet: '0xabc', sleep });
+  expect(r).toEqual({ status: 'refused', message: 'Your approval is confirming on the network. Try again in a moment.' });
+  expect(mockSign.mock.calls.map((c) => c[1].data)).toEqual(['approve']);
+  expect(mockPrepareDeposit).toHaveBeenCalledTimes(5); // the first, the one after the approve, 3 retries
+  expect(sleep).toHaveBeenCalledTimes(3);
+  expect(sleep).toHaveBeenCalledWith(2000);
+});
+
+it('re-prepares after a lagging node catches up, then sends the deposit', async () => {
+  mockPrepareDeposit
+    .mockResolvedValueOnce(plan('approve'))
+    .mockResolvedValueOnce(plan('approve'))
+    .mockResolvedValueOnce(plan('deposit'));
+  const r = await runLiquidityTx({ me, kind: 'deposit', amount: '10', wallet: '0xabc', sleep });
+  expect(r).toEqual({ status: 'done', txHash: '0xdeposit' });
+  expect(mockSign.mock.calls.map((c) => c[1].data)).toEqual(['approve', 'deposit']);
+  expect(sleep).toHaveBeenCalledTimes(1);
 });
 
 it('reports a slow receipt as pending, never failed', async () => {
   mockPrepareWithdraw.mockResolvedValue(plan('withdraw'));
   mockWait.mockRejectedValue(new Error('timed out'));
-  expect(await runLiquidityTx({ me, kind: 'withdraw', amount: '1', wallet: '0xabc' })).toEqual({ status: 'pending', txHash: '0xwithdraw' });
+  expect(await runLiquidityTx({ me, kind: 'withdraw', amount: '1', wallet: '0xabc' }))
+    .toEqual({ status: 'pending', txHash: '0xwithdraw', step: 'withdraw' });
+});
+
+it('says which tx is pending when the approval is slow to mine', async () => {
+  mockPrepareDeposit.mockResolvedValue(plan('approve'));
+  mockWait.mockRejectedValue(new Error('timed out'));
+  expect(await runLiquidityTx({ me, kind: 'deposit', amount: '10', wallet: '0xabc' }))
+    .toEqual({ status: 'pending', txHash: '0xapprove', step: 'approve' });
+  expect(mockPrepareDeposit).toHaveBeenCalledTimes(1);
 });
 
 it('reports a mined revert so the LP can retry', async () => {
