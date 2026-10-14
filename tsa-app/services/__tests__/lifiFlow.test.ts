@@ -25,6 +25,7 @@ jest.mock('../lifi', () => ({
   isSolanaLiFiChain: (id: number) => id === 1151111081099710,
   isBtcLiFiChain: (id: number) => id === 20000000000001,
   isSuiLiFiChain: (id: number) => id === 9270000000000000,
+  isTronLiFiChain: (id: number) => id === 728126428,
 }));
 
 const mockExecuteLiFiSolanaSwap = jest.fn();
@@ -43,6 +44,12 @@ jest.mock('../chains/btcLifi', () => ({
 const mockExecuteLiFiSuiSwap = jest.fn();
 jest.mock('../chains/suiLifi', () => ({
   executeLiFiSuiSwap: (...a: any[]) => mockExecuteLiFiSuiSwap(...a),
+}));
+
+// Mocked for the same import-time AsyncStorage reason as the Sui executor.
+const mockExecuteLiFiTronSwap = jest.fn();
+jest.mock('../chains/tronLifi', () => ({
+  executeLiFiTronSwap: (...a: any[]) => mockExecuteLiFiTronSwap(...a),
 }));
 
 jest.mock('../submitErrors', () => ({
@@ -258,6 +265,34 @@ describe('executeLiFiSwap — Sui source routes', () => {
     const hash = await executeLiFiSwap(params({ fromChainId: 56 }));
     expect(hash).toBe('0xswaphash');
     expect(mockExecuteLiFiSuiSwap).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeLiFiSwap — Tron source routes', () => {
+  const TRON_CHAIN_ID = 728126428;
+  const USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+
+  it('delegates to the Tron executor even though the route carries a chainId the EVM path would try', async () => {
+    mockExecuteLiFiTronSwap.mockResolvedValue('trontxid');
+    // A Tron route DOES name a chainId, unlike Solana's or Sui's — without the
+    // branch it reaches the EVM path and dies there as "Unsupported chain".
+    const q = quote({ transactionRequest: { chainId: TRON_CHAIN_ID, to: 'TU3y', value: '0x0', data: '0x0a02', gasLimit: '0x1' } });
+
+    const hash = await executeLiFiSwap(params({
+      quote: q, fromSymbol: 'USDT', fromDecimals: 6, fromAmount: '50',
+      fromTokenAddress: USDT, fromChainId: TRON_CHAIN_ID,
+    }));
+
+    expect(hash).toBe('trontxid');
+    expect(mockExecuteLiFiTronSwap).toHaveBeenCalledWith(expect.objectContaining({
+      quote: q,
+      fromAmountRaw: '50000000',
+      fromSymbol: 'USDT',
+      fromTokenAddr: USDT,
+      walletAddress: WALLET,
+    }));
+    expect(mockFetchPendingNonce).not.toHaveBeenCalled();
+    expect(mockSubmitTransaction).not.toHaveBeenCalled();
   });
 });
 

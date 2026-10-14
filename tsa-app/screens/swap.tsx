@@ -18,14 +18,18 @@
 // form directly. A paused direction dims Review and explains itself in the
 // same sheet the list uses.
 //
+// The form is the shared pair form (components/spot/PairTradeForm), the same
+// one the Spot Trade desk shows: the pair's balances, one amount box in the
+// token being paid, the live estimate. The side is fixed by the row the user
+// tapped — PM asked for this over the old swap layout, whose token pickers and
+// flip arrow let a "Buy" tap turn into a sell.
+//
 // SELL is capped at what this wallet bought on the OTC desk (owner rule
 // 2026-09-28 — wallet MCGP is otherwise not usable in the app). The form shows
 // and limits to that figure (/api/otc/position), never the wallet balance, and
 // refuses when it cannot be read; the API enforces the same cap on prepare.
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  View, TextInput, ScrollView, KeyboardAvoidingView, Platform, FlatList,
-} from 'react-native';
+import { View, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -44,9 +48,10 @@ import { useTheme } from '@/theme';
 import { NoLocalWalletScreen } from '@/components/wallet/NoLocalWallet';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
 import {
-  Text, Button, Card, Icon, PressableScale, Sheet, Spinner,
+  Text, Button, Card, Icon, PressableScale, Spinner,
   ScreenHeader,
 } from '@/components/ui';
+import { PairTradeForm } from '@/components/spot/PairTradeForm';
 import { mapSubmitError, SWAP_COPY } from '@/services/submitErrors';
 import { OtcClosedSheet } from '@/components/otc/OtcClosedSheet';
 
@@ -63,14 +68,6 @@ const TOKENS: Record<string, TokenInfo> = {
   USDC: { symbol: 'USDC', name: 'USD Coin', decimals: 6, color: '#2775CA' },
   USDT: { symbol: 'USDT', name: 'Tether', decimals: 6, color: '#26A17B' },
 };
-
-// Available swap pairs: [fromToken, toToken]
-// Add new pairs here as contracts support them
-const SWAP_PAIRS: Array<{ from: string; to: string; label: string }> = [
-  { from: 'USDC', to: 'MCGP', label: 'Buy MCGP with USDC' },
-  { from: 'MCGP', to: 'USDC', label: 'Sell MCGP for USDC' },
-  // Future: { from: 'USDT', to: 'MCGP', label: 'Buy MCGP with USDT' },
-];
 
 type Screen = 'form' | 'confirm' | 'signing' | 'success' | 'failure';
 
@@ -105,76 +102,6 @@ function estimateGasFee(
   } catch { return null; }
 }
 
-// ── Token Selector Button ──
-const TokenSelector = ({ token, onPress, disabled }: { token: TokenInfo; onPress: () => void; disabled?: boolean }) => {
-  const { colors, spacing, radius } = useTheme();
-  return (
-    <PressableScale
-      onPress={onPress}
-      disabled={disabled}
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: spacing.xs,
-        backgroundColor: colors.surfaceAlt,
-        paddingHorizontal: spacing.md,
-        paddingVertical: spacing.sm,
-        borderRadius: radius.xl,
-      }}
-    >
-      <TokenAvatar symbol={token.symbol} iconColor={token.color} size={32} />
-      <Text variant="bodyMed" weight="700">{token.symbol}</Text>
-      {!disabled && <Icon name="chevronDown" size={16} color={colors.textMuted} />}
-    </PressableScale>
-  );
-};
-
-// ── Token Picker Sheet ──
-const TokenPicker = ({
-  visible, tokens, selected, onSelect, onClose,
-}: {
-  visible: boolean;
-  tokens: TokenInfo[];
-  selected: string;
-  onSelect: (symbol: string) => void;
-  onClose: () => void;
-}) => {
-  const { colors, spacing, radius } = useTheme();
-  return (
-    <Sheet visible={visible} onClose={onClose} title="Select Token">
-      <FlatList
-        data={tokens}
-        keyExtractor={t => t.symbol}
-        style={{ flexShrink: 1 }}
-        contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.md }}
-        renderItem={({ item }) => {
-          const isSelected = item.symbol === selected;
-          return (
-            <PressableScale
-              onPress={() => { onSelect(item.symbol); onClose(); }}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                paddingVertical: spacing.md,
-                paddingHorizontal: spacing.sm,
-                borderRadius: radius.md,
-                backgroundColor: isSelected ? colors.accentMuted : 'transparent',
-              }}
-            >
-              <TokenAvatar symbol={item.symbol} iconColor={item.color} size={36} />
-              <View style={{ flex: 1, marginLeft: spacing.md }}>
-                <Text variant="bodyMed" weight="700">{item.symbol}</Text>
-                <Text variant="caption" color="textMuted">{item.name}</Text>
-              </View>
-              {isSelected && <Icon name="checkCircle" size={22} color={colors.accent} />}
-            </PressableScale>
-          );
-        }}
-      />
-    </Sheet>
-  );
-};
-
 export interface SwapScreenProps {
   /** Which way the user chose to trade in the listing. Buying MCGP pays USDC. */
   initialSide?: 'buy' | 'sell';
@@ -182,14 +109,14 @@ export interface SwapScreenProps {
 
 // ── Main Screen ──
 const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
-  const { colors, spacing, radius, fonts } = useTheme();
+  const { colors, spacing, radius } = useTheme();
 
   // null until loaded — treated as everything-enabled (fail OPEN).
   const [otcSettings, setOtcSettings] = useState<OtcSettings | null>(null);
   // `direction` is derived from which side is being paid, so the side the user
   // picked is expressed by seeding the pair rather than by a separate flag.
-  const [fromSymbol, setFromSymbol] = useState(initialSide === 'sell' ? 'MCGP' : 'USDC');
-  const [toSymbol, setToSymbol] = useState(initialSide === 'sell' ? 'USDC' : 'MCGP');
+  const fromSymbol = initialSide === 'sell' ? 'MCGP' : 'USDC';
+  const toSymbol = initialSide === 'sell' ? 'USDC' : 'MCGP';
   const [amount, setAmount] = useState('');
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [loadingBal, setLoadingBal] = useState(true);
@@ -208,7 +135,6 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   const [error, setError] = useState('');
   const [txHash, setTxHash] = useState('');
   const [status, setStatus] = useState('');
-  const [pickerFor, setPickerFor] = useState<'from' | 'to' | null>(null);
   // Set when a paused direction's Review is pressed — drives the closed notice.
   const [closedSide, setClosedSide] = useState<'buy' | 'sell' | null>(null);
   // Prepared swap (fetched on Review so the confirm screen can show real gas).
@@ -329,30 +255,6 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   const outputDisplay = rawOutput && rawOutput !== '0' ? rawOutput : null;
   const rawRate = quote ? fromWei(quote.rate, TOKENS.USDC.decimals, 6) : null;
   const rateDisplay = rawRate && rawRate !== '0' ? rawRate : null;
-
-  const swapTokens = () => {
-    const newFrom = toSymbol;
-    const newTo = fromSymbol;
-    setFromSymbol(newFrom);
-    setToSymbol(newTo);
-    setAmount(''); setQuote(null); setPriceErr(''); setError('');
-  };
-
-  const selectFrom = (sym: string) => {
-    if (sym === toSymbol) setToSymbol(fromSymbol); // swap if same
-    setFromSymbol(sym);
-    setAmount(''); setQuote(null); setError('');
-  };
-
-  const selectTo = (sym: string) => {
-    if (sym === fromSymbol) setFromSymbol(toSymbol);
-    setToSymbol(sym);
-    setAmount(''); setQuote(null); setError('');
-  };
-
-  // Available tokens for picker (based on existing pairs)
-  const fromTokenOptions = [...new Set(SWAP_PAIRS.map(p => p.from))].map(s => TOKENS[s]);
-  const toTokenOptions = [...new Set(SWAP_PAIRS.map(p => p.to))].map(s => TOKENS[s]);
 
   const validate = (): string | null => {
     if (direction === 'sell') {
@@ -654,239 +556,87 @@ const SwapScreen: React.FC<SwapScreenProps> = ({ initialSide = 'buy' }) => {
   if (signerReady && !signer) return <NoLocalWalletScreen action="swap" />;
 
   // ── Form ──
+  const fmtBal = (sym: string) => {
+    const n = Number(bal(sym));
+    return loadingBal && !balances.length ? null : n.toLocaleString('en-US', { maximumFractionDigits: sym === 'MCGP' ? 2 : 6 });
+  };
+  // Sell side: the OTC-sellable figure replaces the wallet's MCGP everywhere
+  // the form reads one (the line, Max, the limit check).
+  const mcgpShown = direction === 'sell'
+    ? (position ? otcSellableDisplay(sellableWei) : null)
+    : fmtBal('MCGP');
+  const onMax = direction === 'sell'
+    ? () => { if (sellable) { setAmount(otcSellableDecimal(sellableWei)); setError(''); } }
+    : () => { setAmount(bal(fromSymbol)); setError(''); };
+
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <ScrollView
-          contentContainerStyle={{ flexGrow: 1, padding: spacing.xl, paddingBottom: spacing['4xl'] }}
+          contentContainerStyle={{ flexGrow: 1, padding: spacing.lg, paddingBottom: spacing['4xl'] }}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Title and asset class live on the native header and the listing row
-              respectively; the live rate is the only chrome this form owns. */}
           <Stack.Screen options={{ title: direction === 'buy' ? 'Buy MCGP' : 'Sell MCGP' }} />
-          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'flex-start', marginBottom: spacing['2xl'] }}>
-            {rateDisplay ? (
+          <PairTradeForm
+            balanceLabel={direction === 'sell' ? OTC_SELLABLE_LABEL : 'Balance'}
+            balances={direction === 'buy'
+              ? [{ symbol: 'USDC', amount: fmtBal('USDC') }, { symbol: 'MCGP', amount: mcgpShown }]
+              : [{ symbol: 'MCGP', amount: mcgpShown }]}
+            onMax={onMax}
+            amountLabel={direction === 'buy' ? 'Amount to spend' : 'Amount to sell'}
+            amount={amount}
+            onChangeAmount={t => { setAmount(t); setError(''); }}
+            symbol={fromSymbol}
+            error={error}
+            estimate={outputDisplay ? `You receive ≈ ${outputDisplay} ${toSymbol}` : null}
+            estimateLoading={priceLoading}
+            hint={rateDisplay ? `1 MCGP = ${rateDisplay} USDC · 0.5% slippage` : undefined}
+            reviewTitle={preparing ? 'Calculating fees…' : 'Review'}
+            onReview={onReviewPress}
+            reviewLoading={preparing}
+            reviewDisabled={!directionPaused && (!amount || priceLoading || preparing || !!priceErr || sellUnavailable)}
+            // While the active direction is admin-paused the button is dimmed
+            // but stays pressable so the tap can explain the reason.
+            reviewStyle={directionPaused ? { opacity: 0.4 } : undefined}
+          >
+            {/* Sell side with nothing sellable (or unknown): say why up front
+                rather than letting the user type into a form that cannot go
+                through. */}
+            {direction === 'sell' && (sellable === false || positionFailed) ? (
               <View
                 style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: spacing.xs,
-                  backgroundColor: colors.accentMuted,
-                  paddingHorizontal: spacing.md,
-                  paddingVertical: spacing.xs,
-                  borderRadius: radius.pill,
+                  flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs,
+                  backgroundColor: colors.surfaceAlt, borderRadius: radius.sm, padding: spacing.md,
                 }}
               >
-                <Icon name="trendingUp" size={14} color={colors.accent} />
-                <Text variant="caption" weight="600" color="accent">1 MCGP = ${rateDisplay}</Text>
+                <Icon name="info" size={16} color={colors.textMuted} />
+                <View style={{ flex: 1, gap: spacing.xs }}>
+                  <Text variant="caption" color="textSecondary">
+                    {positionFailed ? OTC_POSITION_UNAVAILABLE : OTC_NOTHING_TO_SELL}
+                  </Text>
+                  {positionFailed ? (
+                    <PressableScale onPress={loadPosition}>
+                      <Text variant="caption" weight="600" color="accent">Try again</Text>
+                    </PressableScale>
+                  ) : null}
+                </View>
               </View>
             ) : null}
-          </View>
-
-          {/* From card */}
-          <Card padding="lg">
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
-              <Text variant="overline" color="textMuted">YOU PAY</Text>
-              {direction === 'sell' ? (
-                <PressableScale
-                  onPress={() => { if (sellable) { setAmount(otcSellableDecimal(sellableWei)); setError(''); } }}
-                  disabled={!sellable}
-                >
-                  <Text variant="caption" weight="500" color="accent">
-                    {OTC_SELLABLE_LABEL}: {position ? otcSellableDisplay(sellableWei) : positionFailed ? '—' : '…'}
-                  </Text>
-                </PressableScale>
-              ) : (
-                <PressableScale onPress={() => setAmount(bal(fromSymbol))}>
-                  <Text variant="caption" weight="500" color="accent">Balance: {bal(fromSymbol)}</Text>
-                </PressableScale>
-              )}
-            </View>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-              <TokenSelector
-                token={fromToken}
-                onPress={() => setPickerFor('from')}
-                disabled={fromTokenOptions.length <= 1}
-              />
-              <TextInput
+            {priceErr ? (
+              <View
                 style={{
-                  flex: 1,
-                  fontSize: 28,
-                  fontFamily: fonts['700'],
-                  color: colors.textPrimary,
-                  textAlign: 'right',
-                  padding: 0,
+                  flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+                  backgroundColor: colors.dangerBg, borderWidth: 1, borderColor: colors.danger,
+                  borderRadius: radius.sm, padding: spacing.md,
                 }}
-                placeholder="0.00"
-                placeholderTextColor={colors.textMuted}
-                value={amount}
-                onChangeText={t => { setAmount(t); setError(''); }}
-                keyboardType="decimal-pad"
-              />
-            </View>
-          </Card>
-
-          {/* Swap arrow */}
-          <View style={{ alignItems: 'center', zIndex: 10, marginVertical: -12 }}>
-            <PressableScale
-              onPress={swapTokens}
-              style={{
-                width: 40,
-                height: 40,
-                borderRadius: radius.pill,
-                backgroundColor: colors.accent,
-                justifyContent: 'center',
-                alignItems: 'center',
-              }}
-            >
-              <Icon name="swapVertical" size={22} color={colors.onAccent} />
-            </PressableScale>
-          </View>
-
-          {/* To card */}
-          <Card padding="lg" style={{ marginTop: -8 }}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
-              <Text variant="overline" color="textMuted">YOU RECEIVE</Text>
-              <Text variant="caption" weight="500" color="accent">Balance: {bal(toSymbol)}</Text>
-            </View>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-              <TokenSelector
-                token={toToken}
-                onPress={() => setPickerFor('to')}
-                disabled={toTokenOptions.length <= 1}
-              />
-              {priceLoading ? (
-                <View style={{ flex: 1, alignItems: 'flex-end' }}>
-                  <Spinner size="small" />
-                </View>
-              ) : (
-                <Text
-                  variant="display"
-                  weight="700"
-                  numeric
-                  align="right"
-                  style={{ flex: 1, fontSize: 28, lineHeight: 34 }}
-                >
-                  {outputDisplay || '—'}
-                </Text>
-              )}
-            </View>
-          </Card>
-
-          {/* Sell side with nothing sellable (or unknown): say why up front
-              rather than letting the user type into a form that cannot go
-              through. */}
-          {direction === 'sell' && (sellable === false || positionFailed) ? (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'flex-start',
-                gap: spacing.xs,
-                backgroundColor: colors.surfaceAlt,
-                borderRadius: radius.sm,
-                padding: spacing.md,
-                marginTop: spacing.md,
-              }}
-            >
-              <Icon name="info" size={16} color={colors.textMuted} />
-              <View style={{ flex: 1, gap: spacing.xs }}>
-                <Text variant="caption" color="textSecondary">
-                  {positionFailed ? OTC_POSITION_UNAVAILABLE : OTC_NOTHING_TO_SELL}
-                </Text>
-                {positionFailed ? (
-                  <PressableScale onPress={loadPosition}>
-                    <Text variant="caption" weight="600" color="accent">Try again</Text>
-                  </PressableScale>
-                ) : null}
+              >
+                <Icon name="warning" size={16} color={colors.danger} />
+                <Text variant="caption" color="danger" style={{ flex: 1 }}>{priceErr}</Text>
               </View>
-            </View>
-          ) : null}
-
-          {/* Info bar */}
-          {priceErr ? (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.xs,
-                backgroundColor: colors.dangerBg,
-                borderWidth: 1,
-                borderColor: colors.danger,
-                borderRadius: radius.sm,
-                padding: spacing.md,
-                marginTop: spacing.md,
-              }}
-            >
-              <Icon name="warning" size={16} color={colors.danger} />
-              <Text variant="caption" color="danger" style={{ flex: 1 }}>{priceErr}</Text>
-            </View>
-          ) : rateDisplay ? (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.xs,
-                backgroundColor: colors.accentMuted,
-                borderWidth: 1,
-                borderColor: colors.accent,
-                borderRadius: radius.sm,
-                padding: spacing.md,
-                marginTop: spacing.md,
-              }}
-            >
-              <Icon name="info" size={16} color={colors.accent} />
-              <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                1 MCGP = {rateDisplay} USDC  ·  0.5% slippage
-              </Text>
-            </View>
-          ) : null}
-
-          {error ? (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: spacing.xs,
-                backgroundColor: colors.dangerBg,
-                borderWidth: 1,
-                borderColor: colors.danger,
-                borderRadius: radius.sm,
-                padding: spacing.md,
-                marginTop: spacing.md,
-              }}
-            >
-              <Icon name="dispute" size={16} color={colors.danger} />
-              <Text variant="caption" color="danger" style={{ flex: 1 }}>{error}</Text>
-            </View>
-          ) : null}
-
-          {/* Action — while the active direction is admin-paused the button is
-              dimmed but stays pressable so the tap can explain the reason. */}
-          <Button
-            title={preparing ? 'Calculating fees…' : 'Review Swap'}
-            onPress={onReviewPress}
-            loading={preparing}
-            disabled={!directionPaused && (!amount || priceLoading || preparing || !!priceErr || sellUnavailable)}
-            style={{ marginTop: spacing.xl, ...(directionPaused ? { opacity: 0.4 } : null) }}
-          />
+            ) : null}
+          </PairTradeForm>
         </ScrollView>
-
-        {/* Token picker sheets */}
-        <TokenPicker
-          visible={pickerFor === 'from'}
-          tokens={fromTokenOptions}
-          selected={fromSymbol}
-          onSelect={selectFrom}
-          onClose={() => setPickerFor(null)}
-        />
-        <TokenPicker
-          visible={pickerFor === 'to'}
-          tokens={toTokenOptions}
-          selected={toSymbol}
-          onSelect={selectTo}
-          onClose={() => setPickerFor(null)}
-        />
         <OtcClosedSheet side={closedSide} onClose={() => setClosedSide(null)} />
       </KeyboardAvoidingView>
     </SafeAreaView>

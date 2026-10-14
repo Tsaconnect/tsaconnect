@@ -252,6 +252,12 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	if req.TxBytesB64 != "" {
 		return chains.PreparedTx{}, chains.Invalid("a Sui transaction cannot be signed on solana")
 	}
+	if req.TronRawHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("a Tron transaction cannot be signed on solana")
+	}
+	if req.Approve {
+		return chains.PreparedTx{}, chains.Invalid("solana has no token approvals to build")
+	}
 	if err := ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err
 	}

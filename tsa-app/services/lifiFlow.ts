@@ -15,11 +15,12 @@ import { getChainByChainId, getChainsForNetwork, type ChainKey, type NetworkType
 import { fetchPendingNonce, signLiFiTransaction, withRpcFallback } from '@/services/wallet';
 import { submitTransaction, type SwapFeeFeature } from '@/services/walletApi';
 import {
-  buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, isSuiLiFiChain, type LiFiQuote,
+  buildERC20ApproveCalldata, isBtcLiFiChain, isSolanaLiFiChain, isSuiLiFiChain, isTronLiFiChain, type LiFiQuote,
 } from '@/services/lifi';
 import { executeLiFiSolanaSwap } from '@/services/chains/solanaLifi';
 import { executeLiFiBtcSwap } from '@/services/chains/btcLifi';
 import { executeLiFiSuiSwap } from '@/services/chains/suiLifi';
+import { executeLiFiTronSwap } from '@/services/chains/tronLifi';
 import { mapSubmitError, SWAP_COPY } from '@/services/submitErrors';
 
 /**
@@ -125,6 +126,18 @@ export async function executeLiFiSwap({
     return executeLiFiBtcSwap({
       txRequest: quote.transactionRequest,
       fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
+      walletAddress,
+      fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
+      onStage,
+    });
+  }
+
+  if (fromChainId !== undefined && isTronLiFiChain(fromChainId)) {
+    return executeLiFiTronSwap({
+      quote,
+      fromAmountRaw: ethers.parseUnits(fromAmount, fromDecimals).toString(),
+      fromSymbol,
+      fromTokenAddr: fromTokenAddress,
       walletAddress,
       fee: { feature: feeFeature, amountHuman: fromAmount, chainId: fromChainId },
       onStage,

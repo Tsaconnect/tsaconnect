@@ -3,6 +3,7 @@ package tron
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -104,22 +105,34 @@ func (t *TronGrid) CreateTransfer(ctx context.Context, from, to string, amountSu
 	return &rt, nil
 }
 
-func (t *TronGrid) TriggerTransfer(ctx context.Context, from, tokenAddr, to string, amount *big.Int, feeLimit int64) (*RawTx, error) {
-	// ABI-encode transfer(address,uint256): 32-byte padded recipient (hex, no 41 prefix) + 32-byte amount.
-	toHex, err := Base58ToHex(to)
+// abiAddressWord ABI-encodes a base58 Tron address as one 32-byte word: the
+// 20-byte EVM-style body (the 21-byte form minus its 0x41 prefix), left-padded.
+func abiAddressWord(addr string) (string, error) {
+	h, err := Base58ToHex(addr)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	param := fmt.Sprintf("%064s%064s", toHex[2:], toHexNoPrefix(amount))
-	body := map[string]any{
+	return fmt.Sprintf("%064s", h[2:]), nil
+}
+
+// contractCallBody is the request shared by triggersmartcontract (build a call)
+// and triggerconstantcontract (run one read-only).
+func contractCallBody(from, contract, selector, param string) map[string]any {
+	return map[string]any{
 		"owner_address":     from,
-		"contract_address":  tokenAddr,
-		"function_selector": "transfer(address,uint256)",
+		"contract_address":  contract,
+		"function_selector": selector,
 		"parameter":         param,
-		"fee_limit":         feeLimit,
-		"call_value":        0,
 		"visible":           true,
 	}
+}
+
+// triggerSmartContract builds an unsigned call of selector(param) on contract,
+// sent by from with no TRX attached.
+func (t *TronGrid) triggerSmartContract(ctx context.Context, from, contract, selector, param string, feeLimit int64) (*RawTx, error) {
+	body := contractCallBody(from, contract, selector, param)
+	body["fee_limit"] = feeLimit
+	body["call_value"] = 0
 	var wrap struct {
 		Transaction RawTx `json:"transaction"`
 		Result      struct {
@@ -134,6 +147,57 @@ func (t *TronGrid) TriggerTransfer(ctx context.Context, from, tokenAddr, to stri
 		return nil, fmt.Errorf("triggersmartcontract failed: %s", wrap.Result.Message)
 	}
 	return &wrap.Transaction, nil
+}
+
+// TriggerTransfer builds a TRC-20 transfer(to, amount).
+func (t *TronGrid) TriggerTransfer(ctx context.Context, from, tokenAddr, to string, amount *big.Int, feeLimit int64) (*RawTx, error) {
+	toWord, err := abiAddressWord(to)
+	if err != nil {
+		return nil, err
+	}
+	param := toWord + fmt.Sprintf("%064s", toHexNoPrefix(amount))
+	return t.triggerSmartContract(ctx, from, tokenAddr, "transfer(address,uint256)", param, feeLimit)
+}
+
+// TriggerApprove builds a TRC-20 approve(spender, amount).
+func (t *TronGrid) TriggerApprove(ctx context.Context, from, tokenAddr, spender string, amount *big.Int, feeLimit int64) (*RawTx, error) {
+	spenderWord, err := abiAddressWord(spender)
+	if err != nil {
+		return nil, err
+	}
+	param := spenderWord + fmt.Sprintf("%064s", toHexNoPrefix(amount))
+	return t.triggerSmartContract(ctx, from, tokenAddr, "approve(address,uint256)", param, feeLimit)
+}
+
+// Allowance reads a TRC-20 allowance(owner, spender) with a constant call.
+func (t *TronGrid) Allowance(ctx context.Context, tokenAddr, owner, spender string) (*big.Int, error) {
+	ownerWord, err := abiAddressWord(owner)
+	if err != nil {
+		return nil, err
+	}
+	spenderWord, err := abiAddressWord(spender)
+	if err != nil {
+		return nil, err
+	}
+	body := contractCallBody(owner, tokenAddr, "allowance(address,address)", ownerWord+spenderWord)
+	var res struct {
+		ConstantResult []string `json:"constant_result"`
+		Result         struct {
+			Result  bool   `json:"result"`
+			Message string `json:"message"`
+		} `json:"result"`
+	}
+	if err := t.do(ctx, http.MethodPost, "/wallet/triggerconstantcontract", body, &res); err != nil {
+		return nil, err
+	}
+	if !res.Result.Result || len(res.ConstantResult) == 0 {
+		return nil, fmt.Errorf("allowance read failed: %s", res.Result.Message)
+	}
+	v, ok := new(big.Int).SetString(res.ConstantResult[0], 16)
+	if !ok {
+		return nil, fmt.Errorf("allowance read returned %q", res.ConstantResult[0])
+	}
+	return v, nil
 }
 
 func (t *TronGrid) Broadcast(ctx context.Context, raw *RawTx, sigHex string) (string, error) {
@@ -156,6 +220,33 @@ func (t *TronGrid) Broadcast(ctx context.Context, raw *RawTx, sigHex string) (st
 		return "", fmt.Errorf("broadcast rejected: %s", res.Message)
 	}
 	return raw.TxID, nil
+}
+
+// BroadcastHex sends a signed protocol.Transaction serialized as hex. Used for
+// aggregator-built transactions, where the protobuf bytes are what was
+// validated and signed and no raw_data JSON of ours exists to re-encode.
+func (t *TronGrid) BroadcastHex(ctx context.Context, txHex string) error {
+	var res struct {
+		Result  bool   `json:"result"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := t.do(ctx, http.MethodPost, "/wallet/broadcasthex", map[string]any{"transaction": txHex}, &res); err != nil {
+		return err
+	}
+	if !res.Result {
+		return fmt.Errorf("broadcast rejected: %s %s", res.Code, decodeNodeMessage(res.Message))
+	}
+	return nil
+}
+
+// decodeNodeMessage returns a node error message as text: java-tron hex-encodes
+// it on the broadcast endpoints.
+func decodeNodeMessage(m string) string {
+	if b, err := hex.DecodeString(m); err == nil && len(b) > 0 {
+		return string(b)
+	}
+	return m
 }
 
 // HistoryItem is one normalized transfer from the TronGrid history endpoints.

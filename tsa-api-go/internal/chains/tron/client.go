@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/chains"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -19,14 +20,24 @@ const (
 	trc20FeeLimitSun  = 100_000_000 // 100 TRX cap for TRC-20 transfer
 	activationCostSun = 1_100_000   // ~1.1 TRX to activate a new account
 	nativeFeeEstSun   = 300_000     // ~0.3 TRX bandwidth headroom
+	// trc20FeeEstSun is what a contract call typically burns; the fee limit is
+	// only a cap, and the preflight asks for this, not for the cap.
+	trc20FeeEstSun = trc20FeeLimitSun / 10
 )
+
+// maxUint256 is the allowance an Approve request grants: one approval per
+// token and spender, not one per swap.
+var maxUint256 = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 
 type Client struct {
 	cfg config.NonEVMChainConfig
 	tg  *TronGrid
+	now func() time.Time // aggregator expiry checks; replaced in tests
 }
 
-func NewClient(cfg config.NonEVMChainConfig, tg *TronGrid) *Client { return &Client{cfg: cfg, tg: tg} }
+func NewClient(cfg config.NonEVMChainConfig, tg *TronGrid) *Client {
+	return &Client{cfg: cfg, tg: tg, now: time.Now}
+}
 
 func (c *Client) Family() string { return "tron" }
 
@@ -59,13 +70,29 @@ func (c *Client) EstimateFee(ctx context.Context, req chains.TransferRequest) (c
 	if err != nil {
 		return chains.FeeQuote{}, err
 	}
+	// A route's transaction and an approval are contract calls, priced like a
+	// TRC-20 transfer. Their target is a contract, so there is no recipient to
+	// activate. The balance is held to the typical burn, not to the route's
+	// fee_limit: that is a ceiling the call rarely reaches, and a wallet with
+	// staked energy may burn no TRX at all — demanding the full ceiling would
+	// refuse swaps that go through.
+	if req.TronRawHex != "" || req.Approve {
+		quote := chains.FeeQuote{
+			GasSymbol: "TRX", EstFeeRaw: strconv.FormatInt(trc20FeeEstSun, 10), GasDecimals: 6,
+			HasEnoughGas: sender.BalanceSun >= trc20FeeEstSun,
+		}
+		if !quote.HasEnoughGas {
+			quote.Note = "You need TRX in this wallet to pay the Tron network fee."
+		}
+		return quote, nil
+	}
 	recipient, err := c.tg.GetAccount(ctx, req.To)
 	if err != nil {
 		return chains.FeeQuote{}, err
 	}
 	estFee := int64(nativeFeeEstSun)
 	if req.TokenAddr != "" {
-		estFee = trc20FeeLimitSun / 10 // typical energy burn is well under the cap
+		estFee = trc20FeeEstSun
 	}
 	needsActivation := !recipient.Active
 	if needsActivation {
@@ -94,6 +121,17 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	}
 	if req.TxBytesB64 != "" {
 		return chains.PreparedTx{}, chains.Invalid("a Sui transaction cannot be signed on tron")
+	}
+	if req.TronRawHex != "" && req.Approve {
+		return chains.PreparedTx{}, chains.Invalid("an approval and a route transaction are separate requests")
+	}
+	// An aggregator-built transaction is signed as given, once it has been
+	// decoded and held to what the user approved (see prepareFromRawHex).
+	if req.TronRawHex != "" {
+		return c.prepareFromRawHex(req)
+	}
+	if req.Approve {
+		return c.prepareApprove(ctx, req)
 	}
 	if err := c.ValidateAddress(req.To); err != nil {
 		return chains.PreparedTx{}, err
@@ -133,7 +171,49 @@ func (c *Client) AssembleAndBroadcast(ctx context.Context, prepared chains.Prepa
 	if err := json.Unmarshal([]byte(prepared.Raw), &raw); err != nil {
 		return "", err
 	}
+	if isAggregatorRaw(&raw) {
+		return c.broadcastAggregatorRaw(ctx, &raw, sigs[0].SigHex)
+	}
 	return c.tg.Broadcast(ctx, &raw, sigs[0].SigHex)
+}
+
+// prepareApprove builds approve(To, MaxUint256) on TokenAddr, unless the
+// current allowance already covers Amount — then it returns no payloads, which
+// the app reads as "already approved" and never submits.
+func (c *Client) prepareApprove(ctx context.Context, req chains.TransferRequest) (chains.PreparedTx, error) {
+	if !IsValidBase58(req.From) {
+		return chains.PreparedTx{}, chains.Invalid("invalid from address")
+	}
+	if !IsValidBase58(req.To) {
+		return chains.PreparedTx{}, chains.Invalid("invalid spender address")
+	}
+	if !IsValidBase58(req.TokenAddr) {
+		return chains.PreparedTx{}, chains.Invalid("an approval needs a valid token address")
+	}
+	if req.To == req.TokenAddr {
+		return chains.PreparedTx{}, chains.Invalid("a token cannot be its own spender")
+	}
+	needed, ok := new(big.Int).SetString(strings.TrimSpace(req.Amount), 10)
+	if !ok || needed.Sign() <= 0 {
+		return chains.PreparedTx{}, chains.Invalid("bad amount")
+	}
+	current, err := c.tg.Allowance(ctx, req.TokenAddr, req.From, req.To)
+	if err != nil {
+		return chains.PreparedTx{}, err
+	}
+	if current.Cmp(needed) >= 0 {
+		return chains.PreparedTx{Family: "tron", Payloads: []chains.SigningPayload{}}, nil
+	}
+	raw, err := c.tg.TriggerApprove(ctx, req.From, req.TokenAddr, req.To, maxUint256, trc20FeeLimitSun)
+	if err != nil {
+		return chains.PreparedTx{}, err
+	}
+	rawJSON, _ := json.Marshal(raw)
+	return chains.PreparedTx{
+		Family:   "tron",
+		Raw:      string(rawJSON),
+		Payloads: []chains.SigningPayload{{Index: 0, HashHex: raw.TxID, Curve: chains.CurveSecp256k1}},
+	}, nil
 }
 
 func (c *Client) GetTxStatus(ctx context.Context, txHash string) (chains.TxStatus, error) {

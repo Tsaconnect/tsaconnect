@@ -301,6 +301,12 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	if req.PSBTHex != "" {
 		return chains.PreparedTx{}, chains.Invalid("a PSBT is a Bitcoin transaction; it cannot be signed on sui")
 	}
+	if req.TronRawHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("a Tron transaction cannot be signed on sui")
+	}
+	if req.Approve {
+		return chains.PreparedTx{}, chains.Invalid("sui has no token approvals to build")
+	}
 	// An aggregator-built transaction is signed as given, once the network has
 	// confirmed what it would move (see prepareFromTxBytes). There is no `To`
 	// to validate on that path: the route decides its own recipients.

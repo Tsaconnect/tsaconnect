@@ -10,10 +10,13 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 import {
-  resolveSpotChain, isBitcoinSpotChain, unsupportedChainMessage, singleParam, matchSpotBalance,
-  type SpotBalanceRow,
+  resolveSpotChain, resolveSpotLegChain, resolveLiFiChainId, isBitcoinSpotChain, unsupportedChainMessage,
+  singleParam, matchSpotBalance, spotLegLookup, isPinnedLegToken, type SpotBalanceRow, type SpotChain,
 } from '../spotChains';
-import { SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS } from '@/services/lifi';
+import {
+  SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS, TRON_LIFI_CHAIN_ID, TRON_NATIVE_ADDRESS,
+  BTC_LIFI_CHAIN_ID,
+} from '@/services/lifi';
 import { CHAINS } from '@/constants/chains';
 
 describe('resolveSpotChain', () => {
@@ -43,8 +46,8 @@ describe('resolveSpotChain', () => {
     expect(isBitcoinSpotChain('solana')).toBe(false);
   });
 
-  it('refuses Tron, which LiFi does not route at all', () => {
-    expect(resolveSpotChain('tron')).toBeNull();
+  it('resolves Tron, which LiFi has routed since 2026-10', () => {
+    expect(resolveSpotChain('tron')).toMatchObject({ lifiChainId: TRON_LIFI_CHAIN_ID, family: 'tron', nonEvmKey: 'tron' });
   });
 
   it('refuses unknown, empty and nullish chains rather than guessing', () => {
@@ -119,11 +122,52 @@ describe('singleParam', () => {
   });
 });
 
+describe('resolveSpotLegChain', () => {
+  it('accepts Bitcoin as one leg, which resolveSpotChain refuses as a whole pair', () => {
+    expect(resolveSpotChain('btc')).toBeNull();
+    expect(resolveSpotLegChain('btc')).toMatchObject({ lifiChainId: BTC_LIFI_CHAIN_ID, family: 'btc' });
+    expect(resolveLiFiChainId('btc')).toBe(BTC_LIFI_CHAIN_ID);
+  });
+
+  it('agrees with resolveSpotChain on every chain that can hold a pair', () => {
+    for (const key of ['sonic', 'bsc', 'solana', 'sui', 'tron']) {
+      expect(resolveSpotLegChain(key)).toEqual(resolveSpotChain(key));
+    }
+    expect(resolveSpotLegChain('aptos')).toBeNull();
+  });
+});
+
+describe('Tron token pinning', () => {
+  const tron = resolveSpotChain('tron') as SpotChain;
+  const bsc = resolveSpotChain('bsc') as SpotChain;
+  const REAL_USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+
+  it('looks a Tron leg up by its pinned address, never by symbol', () => {
+    expect(spotLegLookup(tron, 'usdt')).toBe(REAL_USDT);
+    expect(spotLegLookup(tron, 'TRX')).toBe(TRON_NATIVE_ADDRESS);
+  });
+
+  // LiFi's only "USDC" on Tron is an unverified 18-decimal token.
+  it('refuses a Tron symbol it has no pin for', () => {
+    expect(spotLegLookup(tron, 'USDC')).toBeNull();
+  });
+
+  it('rejects an impostor USDT LiFi might hand back', () => {
+    expect(isPinnedLegToken(tron, 'USDT', REAL_USDT)).toBe(true);
+    expect(isPinnedLegToken(tron, 'USDT', 'TXenxWkADkZPE2gVvMydhjNfJVg7rp92Pz')).toBe(false);
+    expect(isPinnedLegToken(tron, 'USDT', undefined)).toBe(false);
+  });
+
+  it('leaves families without pins to the symbol lookup', () => {
+    expect(spotLegLookup(bsc, 'USDT')).toBe('USDT');
+    expect(isPinnedLegToken(bsc, 'USDT', '0xanything')).toBe(true);
+  });
+});
+
 describe('unsupportedChainMessage', () => {
-  it('tells the Bitcoin case apart, since it is a routing limit not a wallet gap', () => {
-    expect(unsupportedChainMessage('btc')).toContain('All Swap');
-    expect(unsupportedChainMessage('tron')).not.toContain('All Swap');
-    expect(unsupportedChainMessage('')).not.toContain('All Swap');
+  it('tells the Bitcoin case apart, since it is a property of the chain not a wallet gap', () => {
+    expect(unsupportedChainMessage('btc')).toContain('another network');
+    expect(unsupportedChainMessage('')).not.toContain('another network');
   });
 });
 
@@ -133,6 +177,34 @@ describe('matchSpotBalance', () => {
 
   const REAL_SUI_USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC';
   const IMPOSTOR_SUI_USDC = '0xbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbad0::usdc::USDC';
+
+  describe('tron', () => {
+    const REAL_USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
+    const rows = [
+      row({ symbol: 'TRX', balance: '12', contractAddress: '' }),
+      row({ symbol: 'USDT', balance: '40', contractAddress: REAL_USDT }),
+      row({ symbol: 'USDT', balance: '9999', contractAddress: 'TXenxWkADkZPE2gVvMydhjNfJVg7rp92Pz' }),
+    ];
+
+    it('matches a TRC-20 leg by its exact contract', () => {
+      expect(matchSpotBalance('tron', rows, { symbol: 'USDT', address: REAL_USDT })).toBe('40');
+    });
+
+    it('matches native TRX to the row with no contract', () => {
+      expect(matchSpotBalance('tron', rows, { symbol: 'TRX', address: TRON_NATIVE_ADDRESS })).toBe('12');
+    });
+
+    it('does not match base58 case-insensitively', () => {
+      expect(matchSpotBalance('tron', rows, { symbol: 'USDT', address: REAL_USDT.toLowerCase() })).toBe('0');
+    });
+  });
+
+  describe('btc', () => {
+    it('reads the one BTC row', () => {
+      expect(matchSpotBalance('btc', [row({ symbol: 'BTC', balance: '0.5' })], { symbol: 'BTC', address: 'bitcoin' }))
+        .toBe('0.5');
+    });
+  });
 
   describe('sui', () => {
     it('matches the leg by coin type, not by the symbol printed on it', () => {

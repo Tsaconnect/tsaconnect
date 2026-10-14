@@ -5,23 +5,27 @@
 // with both legs' balances and an amount box, instead of dropping the user
 // onto the generic All Swap pickers. Under the hood it is the SAME swap
 // implementation All Swap uses: getLiFiQuote + services/lifiFlow.executeLiFiSwap
-// (approve → wait mined → swap). Same-chain only — the pair's chain comes from
-// the Spot listing.
+// (approve → wait mined → swap).
 //
-// Works on every chain LiFi routes a same-chain pair on, EVM or not. The desk
-// therefore holds a LiFi chain id rather than one of our EVM ChainKeys, and
-// branches on VM family exactly where the VM differs: which derived address
-// signs, how a balance is read, and whether gas is a thing at all. Bitcoin is
-// excluded upstream in resolveSpotChain — see the note there.
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+// A pair's two legs each carry their own chain. Usually that is one chain (the
+// listing's `chain`); a cross-chain listing also names `quoteChain` — every BTC
+// pair does, since Bitcoin carries one asset — and an auto listing
+// (`quoteAuto`) puts the quote leg wherever the user already holds it.
+//
+// Works on every chain LiFi routes, EVM or not. Each leg therefore holds a LiFi
+// chain id rather than one of our EVM ChainKeys, and the desk branches on VM
+// family exactly where the VM differs: which derived address signs, how a
+// balance is read, and whether gas is a thing at all.
+import React, { useCallback, useEffect, useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { ethers } from 'ethers';
 import { useTheme } from '@/theme';
 import {
-  AmountInput, Button, Card, Divider, PressableScale, Spinner, SummaryCard, SummaryRow, Text, Icon,
+  Button, Card, Divider, Spinner, SummaryCard, SummaryRow, Text, Icon,
 } from '@/components/ui';
+import { PairTradeForm } from '@/components/spot/PairTradeForm';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { CHAINS } from '@/constants/chains';
 import { getActiveWallet, ensureGas, readErc20BalanceOf, getProvider } from '@/services/wallet';
@@ -33,8 +37,12 @@ import { executeLiFiSwap } from '@/services/lifiFlow';
 import type { WalletBalanceWithChain } from '@/services/walletApi';
 import { getSolanaAddress, getSolanaBalances } from '@/services/chains/solanaWallet';
 import { getSuiAddress, getSuiBalances } from '@/services/chains/suiWallet';
+import { getTronAddress, getTronBalances } from '@/services/chains/tronWallet';
+import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
+import { fundedQuoteChain } from '@/services/quoteChain';
 import {
-  resolveSpotChain, matchSpotBalance, unsupportedChainMessage, singleParam, unhandledFamily,
+  resolveSpotChain, resolveSpotLegChain, isSameSpotChain, matchSpotBalance, unsupportedChainMessage,
+  singleParam, unhandledFamily, spotLegLookup, isPinnedLegToken,
   type SpotChain, type NonEvmSpotChainFamily,
 } from '@/utils/spotChains';
 
@@ -62,6 +70,8 @@ const NON_EVM_BALANCE_READERS: Record<
 > = {
   solana: getSolanaBalances,
   sui: getSuiBalances,
+  tron: getTronBalances,
+  btc: getBtcBalances,
 };
 
 const NON_EVM_ADDRESS_DERIVERS: Record<
@@ -69,14 +79,22 @@ const NON_EVM_ADDRESS_DERIVERS: Record<
 > = {
   solana: getSolanaAddress,
   sui: getSuiAddress,
+  tron: getTronAddress,
+  btc: getBtcAddress,
 };
 
+/** One side of the pair: where it lives, and the address that holds it there. */
+interface PairLeg {
+  chain: SpotChain;
+  address: string;
+}
+
 /**
- * Live balances for the pair's two legs, in human units, or null where the read
+ * Live balances for tokens on ONE chain, in human units, or null where the read
  * failed. EVM reads each token from the chain, so the legs are independent and
- * one failing leaves the other. Solana and Sui have no per-token call to make:
- * both legs match against ONE fetch of the wallet's rows, so that fetch happens
- * once per setup rather than once per leg.
+ * one failing leaves the other. The non-EVM families have no per-token call to
+ * make: every token matches against ONE fetch of the wallet's rows, so that
+ * fetch happens once per chain rather than once per leg.
  */
 async function readSpotBalances(
   chain: SpotChain, address: string, tokens: LiFiToken[],
@@ -94,7 +112,9 @@ async function readSpotBalances(
         }
       }));
     case 'solana':
-    case 'sui': {
+    case 'sui':
+    case 'tron':
+    case 'btc': {
       try {
         const rows = await NON_EVM_BALANCE_READERS[chain.family](address);
         return tokens.map((t) => matchSpotBalance(chain.family, rows, t));
@@ -120,14 +140,17 @@ export default function SpotTrade() {
   const baseSymbol = singleParam(params.base).toUpperCase();
   const quoteSymbol = singleParam(params.quote).toUpperCase();
   const chainParam = singleParam(params.chain);
-  // Memoised: a fresh object each render would churn every callback below.
-  const spotChain = useMemo(() => resolveSpotChain(chainParam), [chainParam]);
+  const quoteChainParam = singleParam(params.quoteChain);
+  const quoteAuto = singleParam(params.quoteAuto) === '1';
 
   // Buying the base means paying the quote token; selling is the reverse.
   const fromSymbol = side === 'buy' ? quoteSymbol : baseSymbol;
   const toSymbol = side === 'buy' ? baseSymbol : quoteSymbol;
 
-  const [wallet, setWallet] = useState('');
+  // The EVM wallet id: the key every derived address and signer is looked up by.
+  const [walletId, setWalletId] = useState('');
+  const [fromLeg, setFromLeg] = useState<PairLeg | null>(null);
+  const [toLeg, setToLeg] = useState<PairLeg | null>(null);
   const [fromToken, setFromToken] = useState<LiFiToken | null>(null);
   const [toToken, setToToken] = useState<LiFiToken | null>(null);
   const [fromBalance, setFromBalance] = useState<number | null>(null);
@@ -146,50 +169,93 @@ export default function SpotTrade() {
   const [stage, setStage] = useState('');
   const [txHash, setTxHash] = useState('');
 
-  // Resolve the pair's symbols against the chain's LiFi token list, then read
-  // both legs' live balances the way this chain's VM allows.
+  const crossChain = !!fromLeg && !!toLeg && !isSameSpotChain(fromLeg.chain, toLeg.chain);
+
+  // Place both legs, resolve each symbol on its own chain, then read the live
+  // balances the way each chain's VM allows.
   const setup = useCallback(async () => {
     setSetupLoading(true);
     setSetupError('');
     try {
-      if (!spotChain) throw new Error(unsupportedChainMessage(chainParam));
+      const baseChain = resolveSpotLegChain(chainParam);
+      if (!baseChain) throw new Error(unsupportedChainMessage(chainParam));
+
+      // Same-chain unless the listing names a quote chain or asks for auto.
+      // Auto follows the user's largest balance of the quote asset, falling
+      // back to the chain the listing named, else to the base chain when that
+      // can hold the quote leg too.
+      let quoteKey = chainParam;
+      if (quoteAuto) {
+        quoteKey = await fundedQuoteChain(
+          quoteSymbol, quoteChainParam || (resolveSpotChain(chainParam) ? chainParam : undefined),
+        );
+      } else if (quoteChainParam) {
+        quoteKey = quoteChainParam;
+      }
+      const quoteChain = resolveSpotLegChain(quoteKey);
+      if (!quoteChain) throw new Error(unsupportedChainMessage(quoteKey));
+      // Both legs on a single-asset chain is the one pair that cannot exist.
+      if (isSameSpotChain(baseChain, quoteChain) && !resolveSpotChain(chainParam)) {
+        throw new Error(unsupportedChainMessage(chainParam));
+      }
+
       const evmAddr = await getActiveWallet();
       if (!evmAddr) throw new Error('No wallet found. Set up your wallet first.');
+      setWalletId(evmAddr);
       // Every VM family derives its own key from the one mnemonic, so the
-      // address that signs this route is not always the EVM one.
-      const addr = spotChain.family === 'evm'
-        ? evmAddr
-        : await NON_EVM_ADDRESS_DERIVERS[spotChain.family](evmAddr);
-      if (!addr) {
-        throw new Error(`Your wallet has no ${spotChain.name} address yet. Re-import it with your recovery phrase to trade on ${spotChain.name}.`);
-      }
-      setWallet(addr);
+      // address on each leg is not always the EVM one.
+      const addressOn = async (chain: SpotChain) => {
+        const addr = chain.family === 'evm' ? evmAddr : await NON_EVM_ADDRESS_DERIVERS[chain.family](evmAddr);
+        if (!addr) {
+          throw new Error(`Your wallet has no ${chain.name} address yet. Re-import it with your recovery phrase to trade on ${chain.name}.`);
+        }
+        return addr;
+      };
+      const [baseAddr, quoteAddr] = await Promise.all([addressOn(baseChain), addressOn(quoteChain)]);
+      const base = { chain: baseChain, address: baseAddr };
+      const quoteLeg = { chain: quoteChain, address: quoteAddr };
+      const from = side === 'buy' ? quoteLeg : base;
+      const to = side === 'buy' ? base : quoteLeg;
+      setFromLeg(from);
+      setToLeg(to);
 
       // Resolve each leg with LiFi's single-token lookup (accepts a symbol,
       // tiny payload) — the full per-chain list is multi-MB and flaky on
-      // mobile connections. Fall back to the list only if the lookup misses.
-      const resolve = async (sym: string): Promise<LiFiToken | null> => {
+      // mobile connections. Fall back to the list only if the lookup misses,
+      // and never on a chain that pins its tokens (see spotLegLookup).
+      const resolve = async (chain: SpotChain, sym: string): Promise<LiFiToken | null> => {
+        const lookup = spotLegLookup(chain, sym);
+        if (!lookup) return null;
+        let token: LiFiToken | null = null;
         try {
-          const t = await getLiFiToken(spotChain.lifiChainId, sym);
-          if (t) return t;
+          token = await getLiFiToken(chain.lifiChainId, lookup);
         } catch {
           /* fall through to the list */
         }
-        try {
-          const tokens = await getLiFiTokens(spotChain.lifiChainId);
-          return tokens.find((t) => t.symbol?.toUpperCase() === sym) ?? null;
-        } catch {
-          return null;
+        if (!token && lookup === sym) {
+          try {
+            const tokens = await getLiFiTokens(chain.lifiChainId);
+            token = tokens.find((t) => t.symbol?.toUpperCase() === sym) ?? null;
+          } catch {
+            return null;
+          }
         }
+        return token && isPinnedLegToken(chain, sym, token.address) ? token : null;
       };
-      const [from, to] = await Promise.all([resolve(fromSymbol), resolve(toSymbol)]);
-      if (!from || !to) {
-        throw new Error(`Couldn’t load ${!from ? fromSymbol : toSymbol} on ${spotChain.name}. Check your connection and try again.`);
+      const [fromTok, toTok] = await Promise.all([resolve(from.chain, fromSymbol), resolve(to.chain, toSymbol)]);
+      if (!fromTok || !toTok) {
+        const [sym, chain] = !fromTok ? [fromSymbol, from.chain] : [toSymbol, to.chain];
+        throw new Error(`Couldn’t load ${sym} on ${chain.name}. Check your connection and try again.`);
       }
-      setFromToken(from);
-      setToToken(to);
+      setFromToken(fromTok);
+      setToToken(toTok);
 
-      const [fb, tb] = await readSpotBalances(spotChain, addr, [from, to]);
+      const [fb, tb] = isSameSpotChain(from.chain, to.chain)
+        ? await readSpotBalances(from.chain, from.address, [fromTok, toTok])
+        : (await Promise.all([
+          readSpotBalances(from.chain, from.address, [fromTok]),
+          readSpotBalances(to.chain, to.address, [toTok]),
+        ])).flat();
       setFromBalance(fb == null ? null : Number(fb));
       setFromBalanceStr(fb ?? '0');
       setToBalance(tb == null ? null : Number(tb));
@@ -198,28 +264,30 @@ export default function SpotTrade() {
     } finally {
       setSetupLoading(false);
     }
-  }, [spotChain, chainParam, fromSymbol, toSymbol]);
+  }, [chainParam, quoteChainParam, quoteAuto, side, quoteSymbol, fromSymbol, toSymbol]);
 
   useEffect(() => {
     setup();
   }, [setup]);
 
   const fetchQuote = useCallback(async () => {
-    if (!fromToken || !toToken || !spotChain || !wallet) throw new Error('Pair not ready yet');
+    if (!fromToken || !toToken || !fromLeg || !toLeg) throw new Error('Pair not ready yet');
     const amountWei = ethers.parseUnits(amount, fromToken.decimals).toString();
     const q = await getLiFiQuote({
-      fromChain: spotChain.lifiChainId,
-      toChain: spotChain.lifiChainId,
+      fromChain: fromLeg.chain.lifiChainId,
+      toChain: toLeg.chain.lifiChainId,
       fromToken: fromToken.address,
       toToken: toToken.address,
       fromAmount: amountWei,
-      fromAddress: wallet,
+      fromAddress: fromLeg.address,
+      // Required whenever the legs sit on different VMs; harmless otherwise.
+      toAddress: toLeg.address,
       slippage: SLIPPAGE,
     });
     setQuote(q);
     setQuotedAt(Date.now());
     return q;
-  }, [fromToken, toToken, spotChain, wallet, amount]);
+  }, [fromToken, toToken, fromLeg, toLeg, amount]);
 
   const handleReview = async () => {
     setError('');
@@ -233,13 +301,14 @@ export default function SpotTrade() {
     }
     try {
       setLoading(true);
-      // Gas is an EVM concern here: Solana fees come out of the SOL balance and
-      // Sui's out of the SUI one, both of which ensureGas knows nothing about.
-      if (spotChain?.family === 'evm' && wallet) {
-        const evmKey = spotChain.evmKey;
+      // Gas is an EVM concern here: every other family pays its fee out of
+      // its own native balance, which ensureGas knows nothing about (Tron's
+      // shortfall is refused by the backend's preflight with its own note).
+      if (fromLeg?.chain.family === 'evm') {
+        const { evmKey, name } = fromLeg.chain;
         let gasMsg = '';
-        const ok = await ensureGas(evmKey, wallet, (title, message) => { gasMsg = `${title}: ${message}`; });
-        if (!ok) throw new Error(gasMsg || `You need ${CHAINS[evmKey].nativeCurrency.symbol} on ${spotChain.name} to pay the network fee.`);
+        const ok = await ensureGas(evmKey, fromLeg.address, (title, message) => { gasMsg = `${title}: ${message}`; });
+        if (!ok) throw new Error(gasMsg || `You need ${CHAINS[evmKey].nativeCurrency.symbol} on ${name} to pay the network fee.`);
       }
       await fetchQuote();
       setScreen('confirm');
@@ -255,7 +324,7 @@ export default function SpotTrade() {
     setScreen('sending');
     setError('');
     try {
-      if (!fromToken || !wallet) throw new Error('Pair not ready yet');
+      if (!fromToken || !fromLeg || !walletId) throw new Error('Pair not ready yet');
       // Refresh a stale quote with the same amount — the user only confirmed
       // an "≈" estimate and slippage still bounds the execution.
       let q = quote;
@@ -263,21 +332,21 @@ export default function SpotTrade() {
         setStage('Refreshing price…');
         q = await fetchQuote();
       }
-      if (!toToken || !spotChain) throw new Error('Pair not ready yet');
+      if (!toToken || !toLeg) throw new Error('Pair not ready yet');
       // Built BEFORE the trade runs: nothing about reporting the fee may throw
       // once the trade is on-chain, or a completed trade shows as failed.
       // Books against `spot`, not `allswap` — same rate, separate P&L line.
       const feeReport = {
-        fromChainId: spotChain.lifiChainId,
-        toChainId: spotChain.lifiChainId,
+        fromChainId: fromLeg.chain.lifiChainId,
+        toChainId: toLeg.chain.lifiChainId,
         fromToken: fromToken.address,
         toToken: toToken.address,
         fromAmount: ethers.parseUnits(amount, fromToken.decimals).toString(),
         toAmount: q.toAmount,
         fromSymbol: fromToken.symbol,
         fromDecimals: fromToken.decimals,
-        fromAddress: wallet,
-        toAddress: wallet,
+        fromAddress: fromLeg.address,
+        toAddress: toLeg.address,
         feature: 'spot' as const,
       };
 
@@ -287,12 +356,14 @@ export default function SpotTrade() {
         fromDecimals: fromToken.decimals,
         // Both are what let the executor route a non-EVM source swap: a Solana
         // or Sui quote's transactionRequest carries no chainId to branch on,
-        // and the Sui path needs the coin type to tell the swapped coin apart
-        // from the SUI paying for gas.
+        // and the Sui and Tron paths need the token address to tell the
+        // swapped token apart from the coin paying for gas.
         fromTokenAddress: fromToken.address,
-        fromChainId: spotChain.lifiChainId,
+        fromChainId: fromLeg.chain.lifiChainId,
         fromAmount: amount,
-        walletAddress: wallet,
+        // The EVM wallet id, on every family: each executor derives its own
+        // signer from it. A derived Solana/Sui address here finds no mnemonic.
+        walletAddress: walletId,
         feeFeature: 'spot',
         onStage: setStage,
       });
@@ -368,7 +439,8 @@ export default function SpotTrade() {
         </Text>
         {ok ? (
           <Text variant="body" style={{ marginTop: spacing.sm, color: colors.textSecondary, textAlign: 'center' }}>
-            {side === 'buy' ? `Your ${baseSymbol} will arrive once the swap confirms.` : `Your ${quoteSymbol} will arrive once the swap confirms.`}
+            {`Your ${toSymbol} will arrive once the swap confirms.`}
+            {crossChain ? ' Swaps between networks can take a few minutes — longer for Bitcoin.' : ''}
             {txHash ? `\nTx: ${txHash.slice(0, 10)}…${txHash.slice(-8)}` : ''}
           </Text>
         ) : (
@@ -397,12 +469,19 @@ export default function SpotTrade() {
               <SummaryRow label="You pay" value={`${amount} ${fromSymbol}`} />
               <Divider spacing="xs" />
               <SummaryRow label="You receive" value={receiveEstimate ? `≈ ${receiveEstimate} ${toSymbol}` : '—'} />
-              <SummaryRow label="Network" value={spotChain?.name ?? ''} />
+              {crossChain ? (
+                <>
+                  <SummaryRow label="Pay on" value={fromLeg?.chain.name ?? ''} />
+                  <SummaryRow label="Receive on" value={toLeg?.chain.name ?? ''} />
+                </>
+              ) : (
+                <SummaryRow label="Network" value={fromLeg?.chain.name ?? ''} />
+              )}
             </SummaryCard>
             <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
               The receive amount is an estimate — the trade executes at the live market rate
               (max slippage {Number(SLIPPAGE) * 100}%).
-              {spotChain?.family === 'evm'
+              {fromLeg?.chain.family === 'evm' || fromLeg?.chain.family === 'tron'
                 ? ` If ${fromSymbol} isn’t yet approved, you’ll sign an approval first.`
                 : ''}
             </Text>
@@ -422,32 +501,28 @@ export default function SpotTrade() {
   }
 
   // form
+  const network = (leg: PairLeg | null) => (crossChain ? leg?.chain.name : undefined);
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       {header}
-      <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text variant="bodySm" color="textSecondary">
-            Balance: {fromBalance == null ? '—' : fmt(fromBalance)} {fromSymbol} · {toBalance == null ? '—' : fmt(toBalance)} {toSymbol}
-          </Text>
-          <PressableScale onPress={() => fromBalanceStr !== '0' && setAmount(fromBalanceStr)} accessibilityLabel="Use max">
-            <Text variant="bodySm" weight="700" color="accent">Max</Text>
-          </PressableScale>
-        </View>
-        <AmountInput
-          label={side === 'buy' ? 'Amount to spend' : 'Amount to sell'}
-          value={amount}
-          onChangeText={setAmount}
+      <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
+        <PairTradeForm
+          balances={[
+            { symbol: fromSymbol, amount: fromBalance == null ? null : fmt(fromBalance), network: network(fromLeg) },
+            { symbol: toSymbol, amount: toBalance == null ? null : fmt(toBalance), network: network(toLeg) },
+          ]}
+          onMax={() => fromBalanceStr !== '0' && setAmount(fromBalanceStr)}
+          amountLabel={side === 'buy' ? 'Amount to spend' : 'Amount to sell'}
+          amount={amount}
+          onChangeAmount={setAmount}
           symbol={fromSymbol}
-          symbolPosition="suffix"
-          error={error || undefined}
-        />
-        <Text variant="bodySm" color="textMuted">
-          {side === 'buy'
+          error={error}
+          hint={side === 'buy'
             ? `Spend ${fromSymbol} to buy ${baseSymbol} at the live market rate.`
             : `Sell ${baseSymbol} for ${quoteSymbol} at the live market rate.`}
-        </Text>
-        <Button title="Review" onPress={handleReview} loading={loading} />
+          onReview={handleReview}
+          reviewLoading={loading}
+        />
       </ScrollView>
     </SafeAreaView>
   );

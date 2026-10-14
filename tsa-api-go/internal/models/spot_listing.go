@@ -63,14 +63,21 @@ func ValidSpotCategory(cat string) bool {
 // legal only on the allswap route, which names the quote leg's chain separately
 // (see NormalizeSpotLegs).
 //
-// Still absent: "tron", because LiFi routes no Tron liquidity at all, so neither
-// leg of a Tron pair can be quoted on any route.
+// "tron" joined once LiFi started routing Tron (chain 728126428, SunSwap among
+// others; verified 2026-10-14). Its quote leg is USDT only — see
+// SpotUSDTOnlyQuoteChains.
 var SpotChains = map[string]bool{
 	"sonic": true, "bsc": true, "ethereum": true, "polygon": true,
 	"arbitrum": true, "base": true, "optimism": true, "avalanche": true,
 	"linea": true, "robinhood": true,
-	"solana": true, "sui": true, "btc": true,
+	"solana": true, "sui": true, "btc": true, "tron": true,
 }
+
+// SpotUSDTOnlyQuoteChains are chains with no usable USDC, so a quote leg on them
+// must be USDT. Circle discontinued USDC on Tron, and the only "USDC" LiFi
+// lists there is an unverified 18-decimal token — a USDC-quoted Tron listing
+// would price against the real coin and trade the impostor.
+var SpotUSDTOnlyQuoteChains = map[string]bool{"tron": true}
 
 // SpotSingleTokenChains maps each chain that holds exactly one tradeable token
 // to that token's symbol, so no pair can be resolved with both legs on them.
@@ -112,6 +119,27 @@ func ValidSpotChain(chain string) bool {
 //
 // quoteSymbol must already be trimmed and uppercased.
 func NormalizeSpotLegs(chain, route, quoteSymbol, quoteChain string) (string, error) {
+	normalized, err := normalizeSpotLegs(chain, route, quoteSymbol, quoteChain)
+	if err != nil {
+		return "", err
+	}
+	// The chain the quote leg actually resolves on: the base chain when the
+	// route keeps both legs there, else the stored quote chain, else what an
+	// auto listing is served as (DefaultSpotQuoteChain).
+	quoteLegChain := chain
+	if route == SpotRouteAllSwap {
+		quoteLegChain = normalized
+		if quoteLegChain == "" {
+			quoteLegChain = DefaultSpotQuoteChain(chain, quoteSymbol)
+		}
+	}
+	if SpotUSDTOnlyQuoteChains[quoteLegChain] && quoteSymbol != "USDT" {
+		return "", fmt.Errorf("Tron pairs must quote in USDT: there is no usable %s on %q", quoteSymbol, quoteLegChain)
+	}
+	return normalized, nil
+}
+
+func normalizeSpotLegs(chain, route, quoteSymbol, quoteChain string) (string, error) {
 	if route != SpotRouteAllSwap {
 		// quoteChain is dropped rather than refused. It describes a second leg
 		// that only allswap has, so keeping it would leave the row claiming a
