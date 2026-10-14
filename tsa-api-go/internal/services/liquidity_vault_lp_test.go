@@ -460,6 +460,21 @@ func TestVaultLP_SyncTrustsTheLedgerWhenItAgrees(t *testing.T) {
 	}
 }
 
+// Review 2026-10-14: a revoke never trusts the ledger. An index that last
+// saw "revoked" while the chain still allows the wallet (a stalled indexer,
+// or an allow sent outside the server) must not leave it able to deposit.
+func TestVaultLP_SyncRevokeIgnoresAStaleLedger(t *testing.T) {
+	r := newLPRig(t)
+	ctx := context.Background()
+	user, wallet := r.activeLP(t)
+	r.indexDepositorSet(t, wallet, false, 10) // stale: says revoked
+	r.vault.allowed[strings.ToLower(wallet)] = true
+	r.db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user).Update("status", models.PaymentMerchantStatusPaused)
+	if n, err := r.svc.SyncDepositors(ctx); err != nil || n != 1 || r.vault.allowed[strings.ToLower(wallet)] {
+		t.Fatalf("revoke over a stale ledger = %d %v allowed=%v, want the wallet revoked", n, err, r.vault.allowed[strings.ToLower(wallet)])
+	}
+}
+
 // revertingLPVault refuses withdraw and claim at estimate the way the
 // contract does, or fails the RPC.
 type revertingLPVault struct {

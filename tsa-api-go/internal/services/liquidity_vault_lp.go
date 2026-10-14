@@ -846,7 +846,11 @@ func (s *VaultLPService) SyncDepositors(ctx context.Context) (int, error) {
 		log.Printf("[liquidity] depositor sync lp=%s: %s", lp.ID, RedactAlertText(err.Error()))
 	}
 	apply := func(lp *models.PaymentMerchant, wallet string, want bool) {
-		if got, ok := indexed[strings.ToLower(wallet)]; ok && got == want {
+		// The ledger may only save an RPC for an ALLOW that it agrees with:
+		// a stale or stalled index then costs at most a refused deposit.
+		// A revoke always reads the vault, so a wallet the chain still
+		// allows is never left able to deposit (fail closed).
+		if got, ok := indexed[strings.ToLower(wallet)]; ok && want && got {
 			return
 		}
 		sent, err := s.sendDepositor(ctx, lp.ID, wallet, want)
