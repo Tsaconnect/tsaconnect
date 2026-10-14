@@ -26,7 +26,7 @@ func (routesPoolAdmin) ResendPoolBuy(context.Context, uuid.UUID, uuid.UUID, stri
 func (routesPoolAdmin) VaultPoolSummary(context.Context) (*services.VaultPoolSummary, error) {
 	return &services.VaultPoolSummary{}, nil
 }
-func (routesPoolAdmin) SettlePoolFromCollateral(context.Context, uuid.UUID, string, string) (string, error) {
+func (routesPoolAdmin) SettlePoolFromCollateral(context.Context, uuid.UUID, uuid.UUID, string, string) (string, error) {
 	return "0x1", nil
 }
 func (routesPoolAdmin) RetryPoolFill(context.Context, uuid.UUID, uuid.UUID, string) (*models.ITIntent, error) {
@@ -90,7 +90,7 @@ func TestLiquidityAdminRoutes_ActionsNeedSuperAdmin(t *testing.T) {
 			}
 		}
 		for _, p := range actions {
-			if w := payRoutesDo(r, "POST", p, tok, map[string]string{"note": "n", "amount": "1"}); w.Code != tc.actions {
+			if w := payRoutesDo(r, "POST", p, tok, map[string]string{"note": "n", "amount": "1", "operationId": uuid.NewString()}); w.Code != tc.actions {
 				t.Fatalf("%s POST %s: %d %s", tc.role, p, w.Code, w.Body.String())
 			}
 		}

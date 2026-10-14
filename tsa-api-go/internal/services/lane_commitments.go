@@ -122,17 +122,19 @@ func (c *LaneCommitments) wait(ctx context.Context, r *commitmentsRead) (uint64,
 }
 
 // NewPoolFillCommitments counts the fills the release key still owes
-// shared-pool orders: one per order that may still fill and has none recorded.
+// shared-pool orders: one per order that may still fill and has none recorded
+// (an unpaid order only while it can still be claimed: poolReservingIntents).
 func NewPoolFillCommitments(db *gorm.DB) *LaneCommitments {
-	return newLaneCommitments("pool_fills", func(ctx context.Context) (uint64, error) {
+	c := newLaneCommitments("pool_fills", nil)
+	c.count = func(ctx context.Context) (uint64, error) {
 		var n int64
-		err := db.WithContext(ctx).Model(&models.PoolOrder{}).
-			Joins("JOIN it_intents ON it_intents.id = pool_orders.intent_id").
-			Where("it_intents.provider IN ? AND it_intents.status IN ?", poolProviders(), poolVaultReservedStatuses).
+		err := poolReservingIntents(db.WithContext(ctx).Model(&models.PoolOrder{}).
+			Joins("JOIN it_intents ON it_intents.id = pool_orders.intent_id"), c.now()).
 			Where("pool_orders.fill_units IS NOT NULL AND pool_orders.fill_tx_hash = ''").
 			Count(&n).Error
 		return uint64(n) * vaultFillGas, err
-	})
+	}
+	return c
 }
 
 // treasuryRouteReserveGas is one converted order's owed route on a treasury
@@ -141,18 +143,23 @@ const treasuryRouteReserveGas = maxRouteGasLimit + treasuryERC20Gas
 
 // NewPoolTreasuryCommitments counts what the pool chain's treasury lane owes
 // pool orders already in flight: one delivery transfer per pool order opened
-// or paid but not delivered. (A converted delivery's route is counted by the
-// conversion lane's own NewConversionTreasuryCommitments.)
+// or paid but not delivered — an unpaid one only while it can still be
+// claimed (stableBuyClaimWindow). (A converted delivery's route is counted by
+// the conversion lane's own NewConversionTreasuryCommitments.)
 func NewPoolTreasuryCommitments(db *gorm.DB) *LaneCommitments {
-	return newLaneCommitments("pool_treasury_owed", func(ctx context.Context) (uint64, error) {
+	c := newLaneCommitments("pool_treasury_owed", nil)
+	c.count = func(ctx context.Context) (uint64, error) {
 		var n int64
 		err := db.WithContext(ctx).Model(&models.ITIntent{}).
 			Where("provider IN ?", poolProviders()).
-			Where("direction = ? AND status IN ?", models.ITDirectionBuy,
-				[]string{models.ITStatusPendingPayment, models.ITStatusPaymentReceived, models.ITStatusDelivering}).
+			Where("direction = ?", models.ITDirectionBuy).
+			Where("(status IN ? OR (status = ? AND created_at > ?))",
+				[]string{models.ITStatusPaymentReceived, models.ITStatusDelivering}, models.ITStatusPendingPayment,
+				c.now().Add(-stableBuyClaimWindow)).
 			Count(&n).Error
 		return uint64(n) * treasuryERC20Gas, err
-	})
+	}
+	return c
 }
 
 // NewConversionTreasuryCommitments counts one route (+ approve) per converted

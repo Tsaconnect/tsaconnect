@@ -3163,7 +3163,10 @@ func (s *P2PTradeService) ListNonTerminalTrades(ctx context.Context, limit int) 
 		limit = 200
 	}
 	var out []models.P2PTrade
-	if err := s.db.WithContext(ctx).
+	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+		// Leftover slices are never reconciled; unscoped, 200 of them would
+		// fill every page and starve ordinary trades.
+		Scopes(notPoolSlice).
 		Where("status NOT IN ?", []string{
 			models.P2PTradeStatusReleased,
 			models.P2PTradeStatusCancelled,

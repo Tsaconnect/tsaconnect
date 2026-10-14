@@ -320,6 +320,13 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Merchant request submitted successfully", req)
 }
 
+// isBusinessTypeFilter: a type a read may filter on — every type a request
+// can be submitted as, plus the retired liquidity_provider, whose old rows
+// still exist and must stay readable. Submitting one stays refused.
+func isBusinessTypeFilter(t string) bool {
+	return slices.Contains(models.ValidBusinessTypes, t) || t == models.BusinessTypeLiquidityProvider
+}
+
 // GetMyMerchantRequest handles GET /api/merchant-requests/my-request[?type=<businessType>].
 // Returns the caller's most recent request (of that type, when given), or 200
 // with nil data if none exists. An unknown type is 400.
@@ -332,7 +339,7 @@ func (h *MerchantRequestHandler) GetMyMerchantRequest(c *gin.Context) {
 
 	q := h.DB.Where("user_id = ?", user.ID)
 	if t := c.Query("type"); t != "" {
-		if !slices.Contains(models.ValidBusinessTypes, t) {
+		if !isBusinessTypeFilter(t) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid business type")
 			return
 		}
@@ -389,7 +396,7 @@ func (h *MerchantRequestHandler) ListMerchantRequests(c *gin.Context) {
 		query = query.Where("status = ?", status)
 	}
 	if bt := c.Query("businessType"); bt != "" {
-		if !slices.Contains(models.ValidBusinessTypes, bt) {
+		if !isBusinessTypeFilter(bt) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid business type filter")
 			return
 		}

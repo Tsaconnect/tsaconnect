@@ -1292,7 +1292,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			vp.Use(adminAuth, middleware.RequireP2PAdmin())
 			{
 				vp.GET("", ith.AdminVaultPool)
-				vp.POST("/settle-from-collateral", middleware.RequireSuperAdmin(), ith.AdminSettlePoolFromCollateral)
+				// operationId in the body makes the settle itself idempotent;
+				// the Idempotency-Key replay answers a retried request as before.
+				vp.POST("/settle-from-collateral", middleware.RequireSuperAdmin(), middleware.Idempotency(config.DB), ith.AdminSettlePoolFromCollateral)
 			}
 		}
 		// Any settlement forward, merchant or LP (re-review I-D).

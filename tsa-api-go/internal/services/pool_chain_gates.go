@@ -238,6 +238,40 @@ func (g *PoolChainGates) vaultGates(ctx context.Context, fail func(gate, reason 
 	if v, ok := read("paused"); ok && v.(bool) {
 		fail("vault", "the vault is paused")
 	}
+	maxFill, okF := read("maxFillPerTx")
+	maxSpread, okS := read("maxSpreadBps")
+	if okF && okS {
+		g.alertFillCaps(CurrentPoolSettings(), maxFill.(*big.Int), maxSpread.(*big.Int))
+	}
+}
+
+// alertFillCaps: the pool's settings must fit the vault's own fill limits, or
+// opens of the largest orders are refused (checkFillCaps) and a re-priced
+// claim may park. Alert-only: the gates stay open; the PM lowers
+// pool_order_max / pool_spread or the owner raises the caps (timelocked).
+func (g *PoolChainGates) alertFillCaps(set PoolSettings, maxFill, maxSpreadBps *big.Int) {
+	if set.SpreadBps > 0 && big.NewInt(set.SpreadBps).Cmp(maxSpreadBps) > 0 {
+		log.Printf("[liquidity] ALERT liquidity_pool_spread_over_vault_max chain=%s pool_spread_bps=%d max_spread_bps=%s — every fill would revert: lower pool_spread",
+			g.c.ChainKey, set.SpreadBps, maxSpreadBps)
+	}
+	if set.OrderMaxUnits == nil || set.OrderMaxUnits.Sign() <= 0 {
+		return
+	}
+	for _, sym := range slices.Sorted(maps.Keys(g.c.Tokens)) {
+		dec, ok := g.c.Decimals[strings.ToUpper(sym)]
+		if !ok {
+			continue
+		}
+		fill, err := CanonicalToChainUnits(set.OrderMaxUnits, dec)
+		if err != nil {
+			continue
+		}
+		largest := new(big.Int).Add(fill, vaultSpreadUnits(fill, set.SpreadBps))
+		if largest.Cmp(maxFill) > 0 {
+			log.Printf("[liquidity] ALERT liquidity_pool_order_max_over_vault_cap chain=%s token=%s largest_fill=%s max_fill_per_tx=%s — the largest orders are refused at open: lower pool_order_max",
+				g.c.ChainKey, sym, largest, maxFill)
+		}
+	}
 }
 
 // record stores one Check's outcome and alerts each failure.

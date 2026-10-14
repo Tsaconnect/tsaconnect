@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum"
@@ -119,9 +120,11 @@ func TestVaultIndexer_ReconcileCleanAndUnknownFill(t *testing.T) {
 		ledgerLog(t, 190, 0, "Refilled", []common.Hash{common.Hash(ourRef)}, big.NewInt(50)),
 		ledgerLog(t, 200, 0, "SettledFromCollateral", []common.Hash{common.Hash(strayRef)}, big.NewInt(10)),
 	)
-	fill := "100"
+	fill, spread := "100", "1"
 	x.c.DB.Create(&models.PoolOrder{IntentID: ours, Generation: 1, ChainID: 97, Token: "USDT", TokenDecimals: 18,
-		MidMinor: "0", LPRateMinor: "0", DisplayRateMinor: "0", OpenedUnits: "0", SurplusUnits: "0", FillUnits: &fill})
+		MidMinor: "0", LPRateMinor: "0", DisplayRateMinor: "0", OpenedUnits: "0", SurplusUnits: "0", FillUnits: &fill,
+		SpreadUnits: &spread, FillSpreadUnits: &spread, FillTxHash: "0xfill"})
+	x.SetTreasury(ledgerTreasury)
 	if _, err := x.IndexOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +139,57 @@ func TestVaultIndexer_ReconcileCleanAndUnknownFill(t *testing.T) {
 	}
 	if len(rep.UnknownFills) != 1 || rep.UnknownFills[0] != "0x"+common.Bytes2Hex(strayRef[:]) {
 		t.Fatalf("unknown fills = %v, want only the stray ref", rep.UnknownFills)
+	}
+	if len(rep.MismatchedFills) != 0 {
+		t.Fatalf("mismatched fills = %v, want none", rep.MismatchedFills)
+	}
+}
+
+// M5: a fill under one of our refs must be that order's fill: its amount, its
+// spread, to the treasury, from an order that sent one. Anything else is the
+// operator key spending outside the order path.
+func TestVaultIndexer_ReconcileReportsMismatchedFills(t *testing.T) {
+	tr, stranger := lpTopic(ledgerTreasury), lpTopic(ledgerLP)
+	ids := map[string]uuid.UUID{"amount": uuid.New(), "spread": uuid.New(), "to": uuid.New(), "unsent": uuid.New(), "good": uuid.New()}
+	ref := func(k string) common.Hash { return common.Hash(HashID(ids[k])) }
+	x, _, books := newIndexerRig(t,
+		ledgerLog(t, 160, 0, "CollateralPosted", nil, big.NewInt(1000)),
+		ledgerLog(t, 170, 0, "Filled", []common.Hash{ref("amount"), tr}, big.NewInt(99), big.NewInt(1)),
+		ledgerLog(t, 171, 0, "Filled", []common.Hash{ref("spread"), tr}, big.NewInt(100), big.NewInt(7)),
+		ledgerLog(t, 172, 0, "Filled", []common.Hash{ref("to"), stranger}, big.NewInt(100), big.NewInt(1)),
+		ledgerLog(t, 173, 0, "Filled", []common.Hash{ref("unsent"), tr}, big.NewInt(100), big.NewInt(1)),
+		ledgerLog(t, 174, 0, "Filled", []common.Hash{ref("good"), tr}, big.NewInt(100), big.NewInt(0)),
+	)
+	for k, id := range ids {
+		fill, spread, sent := "100", "1", "0"
+		o := models.PoolOrder{IntentID: id, Generation: 1, ChainID: 97, Token: "USDT", TokenDecimals: 18,
+			MidMinor: "0", LPRateMinor: "0", DisplayRateMinor: "0", OpenedUnits: "0", SurplusUnits: "0",
+			FillUnits: &fill, SpreadUnits: &spread, FillSpreadUnits: &sent, FillTxHash: "0x" + k}
+		if k == "unsent" {
+			o.FillTxHash, o.FillSpreadUnits = "", nil
+		}
+		x.c.DB.Create(&o)
+	}
+	x.SetTreasury(ledgerTreasury)
+	if _, err := x.IndexOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	books.state = VaultState{Outstanding: big.NewInt(509), Collateral: big.NewInt(1000), TotalPrincipal: new(big.Int)}
+	rep, err := x.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Drift) != 0 || len(rep.UnknownFills) != 0 {
+		t.Fatalf("drift=%v unknown=%v, want none", rep.Drift, rep.UnknownFills)
+	}
+	got := strings.Join(rep.MismatchedFills, "\n")
+	for _, k := range []string{"amount", "spread", "to", "unsent"} {
+		if !strings.Contains(got, ids[k].String()) {
+			t.Fatalf("mismatched = %v, want the %s fill reported", rep.MismatchedFills, k)
+		}
+	}
+	if strings.Contains(got, ids["good"].String()) || len(rep.MismatchedFills) != 4 {
+		t.Fatalf("mismatched = %v, want exactly the four bad fills", rep.MismatchedFills)
 	}
 }
 

@@ -15,6 +15,7 @@ type fakePoolAdmin struct {
 	err  error
 	last string
 	note string
+	op   uuid.UUID
 }
 
 func (f *fakePoolAdmin) PoolOrderDetail(context.Context, uuid.UUID) (*services.PoolOrderDetail, error) {
@@ -28,8 +29,8 @@ func (f *fakePoolAdmin) VaultPoolSummary(context.Context) (*services.VaultPoolSu
 	f.last = "summary"
 	return &services.VaultPoolSummary{Collateral: "100"}, f.err
 }
-func (f *fakePoolAdmin) SettlePoolFromCollateral(_ context.Context, _ uuid.UUID, amount, note string) (string, error) {
-	f.last, f.note = "settle:"+amount, note
+func (f *fakePoolAdmin) SettlePoolFromCollateral(_ context.Context, _, op uuid.UUID, amount, note string) (string, error) {
+	f.last, f.note, f.op = "settle:"+amount, note, op
 	return "0xsettle", f.err
 }
 func (f *fakePoolAdmin) RetryPoolFill(_ context.Context, _, _ uuid.UUID, n string) (*models.ITIntent, error) {
@@ -72,14 +73,20 @@ func TestLiquidityAdmin_PoolSummaryAndSettle(t *testing.T) {
 	if w := walletDo(r, http.MethodGet, "/pool", nil); w.Code != http.StatusOK || f.last != "summary" {
 		t.Fatalf("summary = %d %s", w.Code, f.last)
 	}
-	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"note": "n"}); w.Code != http.StatusBadRequest {
+	op := uuid.NewString()
+	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": op, "note": "n"}); w.Code != http.StatusBadRequest {
 		t.Fatalf("settle without an amount = %d, want 400", w.Code)
 	}
-	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"amount": "5", "note": "kept the naira"}); w.Code != http.StatusOK || f.last != "settle:5" {
-		t.Fatalf("settle = %d %s", w.Code, f.last)
+	for _, bad := range []string{"", "not-a-uuid", uuid.Nil.String()} {
+		if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": bad, "amount": "5", "note": "n"}); w.Code != http.StatusBadRequest || f.last == "settle:5" {
+			t.Fatalf("settle with operationId %q = %d (called %q), want 400 before the service", bad, w.Code, f.last)
+		}
+	}
+	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": op, "amount": "5", "note": "kept the naira"}); w.Code != http.StatusOK || f.last != "settle:5" || f.op.String() != op {
+		t.Fatalf("settle = %d %s op=%s", w.Code, f.last, f.op)
 	}
 	f.err = services.ErrLPAmount
-	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"amount": "0", "note": "n"}); w.Code != http.StatusBadRequest {
+	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": op, "amount": "0", "note": "n"}); w.Code != http.StatusBadRequest {
 		t.Fatalf("a bad amount = %d, want 400", w.Code)
 	}
 }

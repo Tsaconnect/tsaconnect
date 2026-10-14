@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 
@@ -30,6 +32,8 @@ type fakePoolChain struct {
 	balance    *big.Int
 	balanceErr error
 	gasPrice   *big.Int // nil = 1 gwei
+	maxFill    *big.Int // nil = 10,000 USDT (18 dp)
+	maxSpread  *big.Int // nil = 1,000 bps
 }
 
 func (f *fakePoolChain) SuggestGasPrice(context.Context) (*big.Int, error) {
@@ -55,6 +59,16 @@ func (f *fakePoolChain) CallContract(_ context.Context, call ethereum.CallMsg, _
 		return m["recipient"].Outputs.Pack(f.recipients[arg("recipient")])
 	case bytes.Equal(sel, m["paused"].ID):
 		return m["paused"].Outputs.Pack(f.paused)
+	case bytes.Equal(sel, m["maxFillPerTx"].ID):
+		if f.maxFill == nil {
+			return m["maxFillPerTx"].Outputs.Pack(usdt18(10_000))
+		}
+		return m["maxFillPerTx"].Outputs.Pack(f.maxFill)
+	case bytes.Equal(sel, m["maxSpreadBps"].ID):
+		if f.maxSpread == nil {
+			return m["maxSpreadBps"].Outputs.Pack(big.NewInt(1_000))
+		}
+		return m["maxSpreadBps"].Outputs.Pack(f.maxSpread)
 	}
 	return nil, errors.New("fakePoolChain: unexpected call")
 }
@@ -266,4 +280,28 @@ func TestPoolGates_TreasuryLaneGate(t *testing.T) {
 	cfg = healthyGates(healthyPoolChain())
 	cfg.TreasuryLane.SponsorLane.Tokens = map[string]string{}
 	assertClosedBy(t, cfg, "treasury_lane")
+}
+
+// L6: settings the vault's own fill limits would refuse are alerted at gate
+// time (alert-only: the gates stay open).
+func TestPoolGates_AlertsSettingsOverTheVaultsFillCaps(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	g := NewPoolChainGates(healthyGates(healthyPoolChain()))
+	set := specPoolSettings() // order max 2,000 USDT, spread 50 bps
+	g.alertFillCaps(set, usdt18(10_000), big.NewInt(1_000))
+	if strings.Contains(buf.String(), "ALERT") {
+		t.Fatalf("alerted within the caps: %s", buf.String())
+	}
+	g.alertFillCaps(set, usdt18(2_000), big.NewInt(40))
+	out := buf.String()
+	if !strings.Contains(out, "liquidity_pool_order_max_over_vault_cap") || !strings.Contains(out, "liquidity_pool_spread_over_vault_max") {
+		t.Fatalf("log = %s, want both cap alerts", out)
+	}
+	chain := healthyPoolChain()
+	chain.maxFill = big.NewInt(1)
+	if st := NewPoolChainGates(healthyGates(chain)).Check(context.Background()); !st.Open {
+		t.Fatalf("status = %+v, the cap alert must not close the pool", st)
+	}
 }

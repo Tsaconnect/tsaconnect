@@ -16,7 +16,7 @@ import (
 // (spec 2026-10-14 §7); *services.ITService satisfies it.
 type VaultPoolAdmin interface {
 	VaultPoolSummary(ctx context.Context) (*services.VaultPoolSummary, error)
-	SettlePoolFromCollateral(ctx context.Context, adminID uuid.UUID, amount, note string) (string, error)
+	SettlePoolFromCollateral(ctx context.Context, adminID, operationID uuid.UUID, amount, note string) (string, error)
 	RetryPoolFill(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
 }
 
@@ -45,11 +45,14 @@ func (h *ITHandler) AdminVaultPool(c *gin.Context) {
 }
 
 type settleFromCollateralBody struct {
-	Amount string `json:"amount"`
-	Note   string `json:"note"`
+	OperationID string `json:"operationId"`
+	Amount      string `json:"amount"`
+	Note        string `json:"note"`
 }
 
-// POST /api/admin/liquidity/pool/settle-from-collateral {amount, note}
+// POST /api/admin/liquidity/pool/settle-from-collateral {operationId, amount, note}
+// operationId is the console's UUID for this one settle: a retry with the same
+// id is answered with the first send's hash, never a second settle.
 func (h *ITHandler) AdminSettlePoolFromCollateral(c *gin.Context) {
 	var body settleFromCollateralBody
 	_ = c.ShouldBindJSON(&body)
@@ -58,11 +61,16 @@ func (h *ITHandler) AdminSettlePoolFromCollateral(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
+	opID, err := uuid.Parse(strings.TrimSpace(body.OperationID))
+	if err != nil || opID == uuid.Nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "operationId (a UUID) is required")
+		return
+	}
 	if strings.TrimSpace(body.Amount) == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
 		return
 	}
-	hash, err := h.vaultAdmin.SettlePoolFromCollateral(c.Request.Context(), user.ID, body.Amount, body.Note)
+	hash, err := h.vaultAdmin.SettlePoolFromCollateral(c.Request.Context(), user.ID, opID, body.Amount, body.Note)
 	if err != nil {
 		poolAdminError(c, err)
 		return

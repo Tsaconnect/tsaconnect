@@ -47,10 +47,22 @@ type VaultIndexerConfig struct {
 	Finality    uint64 // blocks behind head indexed (never a reorg to undo)
 	// MaxChunks bounds one tick's catch-up; the next tick resumes.
 	MaxChunks int
+	// Treasury is the conversion treasury, the only address our fills pay.
+	// Empty (no order desk) skips the destination check; SetVaultLedger fills
+	// it from the desk.
+	Treasury string
 }
 
 type VaultIndexer struct {
 	c VaultIndexerConfig
+}
+
+// SetTreasury names the address every one of our fills must pay. Boot-time
+// only (before the indexer job runs).
+func (x *VaultIndexer) SetTreasury(addr string) {
+	if x != nil {
+		x.c.Treasury = addr
+	}
 }
 
 func NewVaultIndexer(c VaultIndexerConfig) (*VaultIndexer, error) {
@@ -178,13 +190,20 @@ func (x *VaultIndexer) rowsFor(ctx context.Context, logs []types.Log) ([]models.
 type LedgerTotals struct {
 	Principal, Collateral, Outstanding *big.Int
 	Fills                              map[string]bool // fill refs seen
+	FillRows                           []LedgerFill    // every Filled event, in ledger order
+}
+
+// LedgerFill is one Filled event as the ledger holds it.
+type LedgerFill struct {
+	Ref, To, TxHash string
+	Amount, Spread  *big.Int
 }
 
 // Totals sums the ledger up to and including block.
 func (x *VaultIndexer) Totals(ctx context.Context, block uint64) (*LedgerTotals, error) {
 	var rows []models.LiquidityLedgerEntry
 	if err := x.c.DB.WithContext(ctx).Where("chain_id = ? AND vault = ? AND block <= ?", x.c.ChainID, x.vault(), block).
-		Select("kind", "amount", "spread", "ref").Find(&rows).Error; err != nil {
+		Order("block, log_index").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	t := &LedgerTotals{Principal: new(big.Int), Collateral: new(big.Int), Outstanding: new(big.Int), Fills: map[string]bool{}}
@@ -202,6 +221,7 @@ func (x *VaultIndexer) Totals(ctx context.Context, block uint64) (*LedgerTotals,
 		case VaultEventFilled:
 			t.Outstanding.Add(t.Outstanding, amt).Add(t.Outstanding, spread)
 			t.Fills[strings.ToLower(r.Ref)] = true
+			t.FillRows = append(t.FillRows, LedgerFill{Ref: strings.ToLower(r.Ref), To: r.To, TxHash: r.TxHash, Amount: amt, Spread: spread})
 		case VaultEventRefilled:
 			t.Outstanding.Sub(t.Outstanding, amt)
 		case VaultEventSettled:
@@ -217,7 +237,10 @@ type VaultReconcileReport struct {
 	Block        uint64   `json:"block"`
 	Drift        []string `json:"drift"`
 	UnknownFills []string `json:"unknownFills"` // fill refs that match no order of ours
-	Utilisation  float64  `json:"utilisation"`  // outstanding / collateral
+	// MismatchedFills: a fill under one of our refs whose amount, spread or
+	// destination is not that order's, or whose order never sent a fill.
+	MismatchedFills []string `json:"mismatchedFills"`
+	Utilisation     float64  `json:"utilisation"` // outstanding / collateral
 }
 
 // poolVaultHighUseBps: outstanding above this share of collateral alerts —
@@ -261,15 +284,22 @@ func (x *VaultIndexer) Reconcile(ctx context.Context) (*VaultReconcileReport, er
 				st.Outstanding, st.Collateral, rep.Utilisation*100)
 		}
 	}
-	// Every fill must be one of our orders: an unknown ref is the operator key
-	// spending collateral outside the order path.
-	ours, err := x.ourFillRefs(ctx)
+	// Every fill must be one of our orders, exactly as that order sent it: an
+	// unknown ref, or a fill of ours with another amount, spread or
+	// destination, is the operator key spending collateral outside the order
+	// path. Only final blocks are in the ledger, so a reorg never reports.
+	ours, err := x.ourFills(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for ref := range tot.Fills {
-		if !ours[ref] {
-			rep.UnknownFills = append(rep.UnknownFills, ref)
+	for _, f := range tot.FillRows {
+		o, ok := ours[f.Ref]
+		if !ok {
+			rep.UnknownFills = append(rep.UnknownFills, f.Ref)
+			continue
+		}
+		if why := x.fillMismatch(f, o); why != "" {
+			rep.MismatchedFills = append(rep.MismatchedFills, f.Ref+" "+why)
 		}
 	}
 	for _, d := range rep.Drift {
@@ -278,19 +308,39 @@ func (x *VaultIndexer) Reconcile(ctx context.Context) (*VaultReconcileReport, er
 	for _, ref := range rep.UnknownFills {
 		alertf("liquidity_vault_unknown_fill:"+ref, "[liquidity] ALERT liquidity_vault_unknown_fill ref=%s block<=%d — a fill matching no pool order: check the operator key", ref, block)
 	}
+	for _, m := range rep.MismatchedFills {
+		alertf("liquidity_vault_fill_mismatch:"+m, "[liquidity] ALERT liquidity_vault_fill_mismatch %s block<=%d — a fill under our ref that is not the order's: check the operator key", m, block)
+	}
 	return rep, nil
 }
 
-// ourFillRefs are the fill refs of every vault order we ever recorded.
-func (x *VaultIndexer) ourFillRefs(ctx context.Context) (map[string]bool, error) {
-	var ids []uuid.UUID
-	if err := x.c.DB.WithContext(ctx).Model(&models.PoolOrder{}).Where("fill_units IS NOT NULL").
-		Distinct("intent_id").Pluck("intent_id", &ids).Error; err != nil {
+// fillMismatch is why on-chain fill f is not order o's fill ("" when it is):
+// the order must have sent a fill (hash recorded or proven), for its fill
+// units, its spread (as sent, or the snapshot's), to the treasury.
+func (x *VaultIndexer) fillMismatch(f LedgerFill, o models.PoolOrder) string {
+	switch {
+	case o.FillTxHash == "" && o.FilledAt == nil:
+		return "order=" + o.IntentID.String() + " has no fill recorded"
+	case f.Amount == nil || f.Amount.Cmp(bigFromDecimal(o.FillUnits)) != 0:
+		return fmt.Sprintf("order=%s amount=%v want=%s", o.IntentID, f.Amount, bigFromDecimal(o.FillUnits))
+	case f.Spread == nil || (f.Spread.Cmp(bigFromDecimal(o.FillSpreadUnits)) != 0 && f.Spread.Cmp(bigFromDecimal(o.SpreadUnits)) != 0):
+		return fmt.Sprintf("order=%s spread=%v", o.IntentID, f.Spread)
+	case x.c.Treasury != "" && !SameEVMAddress(f.To, x.c.Treasury):
+		return fmt.Sprintf("order=%s to=%s", o.IntentID, f.To)
+	}
+	return ""
+}
+
+// ourFills are every vault order we ever recorded, by fill ref.
+func (x *VaultIndexer) ourFills(ctx context.Context) (map[string]models.PoolOrder, error) {
+	var rows []models.PoolOrder
+	if err := x.c.DB.WithContext(ctx).Model(&models.PoolOrder{}).Where("fill_units IS NOT NULL AND generation = 1").
+		Select("intent_id", "fill_units", "spread_units", "fill_spread_units", "fill_tx_hash", "filled_at").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	out := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		out[strings.ToLower(HashIDHex(id))] = true
+	out := make(map[string]models.PoolOrder, len(rows))
+	for _, r := range rows {
+		out[strings.ToLower(HashIDHex(r.IntentID))] = r
 	}
 	return out, nil
 }

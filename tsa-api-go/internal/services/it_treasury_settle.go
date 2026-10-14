@@ -136,6 +136,87 @@ func (s *ITService) DeliverParkedTreasuryBuy(ctx context.Context, adminID, inten
 	})
 }
 
+// SliceLeftovers counts what the retired slice pool (spec 2026-10-08) can
+// have left behind; nothing in this build settles any of it. Boot refuses
+// while any count is non-zero (cmd/server/slice_leftovers.go).
+type SliceLeftovers struct {
+	Slices, Intents, Forwards int64
+}
+
+// Any reports whether a leftover exists.
+func (l SliceLeftovers) Any() bool { return l.Slices > 0 || l.Intents > 0 || l.Forwards > 0 }
+
+// sliceEraOpenIntentStatuses are the pool order states in which a slice-era
+// order still holds or owes money (slices locked, naira in, delivery owed).
+var sliceEraOpenIntentStatuses = []string{
+	models.ITStatusOpening, models.ITStatusPendingPayment, models.ITStatusPaymentReceived,
+	models.ITStatusAwaitingFunds, models.ITStatusDelivering, models.ITStatusBuyAwaitingRate,
+}
+
+// CountSliceLeftovers counts (a) non-terminal slices, (b) live pool orders
+// the slice path opened — a vault order always has pool_orders.fill_units
+// written at open, a slice-era one never does — and (c) LP naira forwards
+// ("pool:" automatic, "pool-f22:" operator) not yet landed.
+func CountSliceLeftovers(ctx context.Context, db *gorm.DB) (SliceLeftovers, error) {
+	var l SliceLeftovers
+	db = db.WithContext(ctx)
+	if err := db.Model(&models.P2PTrade{}).
+		Where("it_intent_id IS NOT NULL AND status NOT IN ?",
+			[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusCancelled, models.P2PTradeStatusResolved}).
+		Count(&l.Slices).Error; err != nil {
+		return l, err
+	}
+	if err := db.Model(&models.ITIntent{}).
+		Where("provider IN ?", poolProviders()).
+		Where("status IN ?", sliceEraOpenIntentStatuses).
+		Where("NOT EXISTS (SELECT 1 FROM pool_orders po WHERE po.intent_id = it_intents.id AND po.fill_units IS NOT NULL)").
+		Count(&l.Intents).Error; err != nil {
+		return l, err
+	}
+	if err := db.Model(&models.P2PSettlementForward{}).
+		Where("(provider_ref LIKE 'pool:%' OR provider_ref LIKE 'pool-f22:%') AND status IN ?",
+			[]string{models.P2PForwardPending, models.P2PForwardSubmitted}).
+		Count(&l.Forwards).Error; err != nil {
+		return l, err
+	}
+	return l, nil
+}
+
+// poolRefundableWithoutDesk: a TSA pool buy may be refunded in naira with no
+// pool desk only while it is paid and undelivered, no vault fill is recorded
+// for it, and every slice the retired slice pool opened for it is cancelled
+// (a slice in any other state may have released LP crypto to the treasury,
+// or still can — that order is settled by hand, never refunded here).
+func poolRefundableWithoutDesk(tx *gorm.DB, intent *models.ITIntent) error {
+	if intent.Status != models.ITStatusPaymentReceived && intent.Status != models.ITStatusBuyAwaitingRate {
+		return fmt.Errorf("%w: a TSA pool buy is refundable only while paid and undelivered (status %s)", ErrITBadState, intent.Status)
+	}
+	var filled int64
+	if err := tx.Model(&models.PoolOrder{}).
+		Where("intent_id = ? AND (fill_tx_hash <> '' OR filled_at IS NOT NULL)", intent.ID).
+		Count(&filled).Error; err != nil {
+		return err
+	}
+	if filled > 0 {
+		return fmt.Errorf("%w: this order's vault fill is recorded — it must be delivered, never refunded", ErrITBadState)
+	}
+	var slices []models.P2PTrade
+	if err := tx.Select("id", "status").Where("it_intent_id = ?", intent.ID).Find(&slices).Error; err != nil {
+		return err
+	}
+	var live []string
+	for _, sl := range slices {
+		if sl.Status != models.P2PTradeStatusCancelled {
+			live = append(live, sl.ID.String()+"="+sl.Status)
+		}
+	}
+	if len(live) > 0 {
+		return fmt.Errorf("%w: a TSA pool buy with a slice not cancelled (%s) is never refunded without the pool desk — settle its slices by hand first",
+			ErrITBadState, strings.Join(live, ", "))
+	}
+	return nil
+}
+
 // MarkStableBuyRefunded records that an operator returned a buy's naira (spec
 // §5.2), for either provider: terminal `refunded`, with an audit row, in one
 // transaction (Decision D56). It closes a parked buy, and — review C2 — a
@@ -167,13 +248,23 @@ func (s *ITService) MarkStableBuyRefunded(ctx context.Context, adminID, intentID
 		if termsErr != nil && !errors.Is(termsErr, ErrUnknownITProvider) {
 			return termsErr
 		}
-		if terms.pool {
-			// Plan C1 P3: the pool's refund is S37's (refundPoolBuy: no slice at
-			// the treasury, inside the pool lock); this generic path never runs
-			// it — reached only when the pool desk is not wired.
-			return fmt.Errorf("%w: a TSA pool buy is refunded only through its own path", ErrITBadState)
-		}
 		provider = models.ITIntentProvider(&intent) // the audit row names the raw value
+		if terms.pool {
+			// With a pool desk the refund is refundPoolBuy's, under the pool
+			// lock. Without one (vault unconfigured, or a slice-era order left
+			// over) nothing can fill or deliver it any more, so the operator's
+			// naira refund is its only exit — allowed only while provably no
+			// crypto moved for it.
+			if s.poolDesk != nil {
+				return fmt.Errorf("%w: a TSA pool buy is refunded only through its own path", ErrITBadState)
+			}
+			if err := poolRefundableWithoutDesk(tx, &intent); err != nil {
+				return err
+			}
+			return s.writePoolRefund(ctx, tx, &intent, adminID, models.ITAuditStableBuyRefunded, note, "an operator", map[string]any{
+				"receivedAmount": intent.ReceivedAmount, "provider": provider, "fromStatus": intent.Status,
+				"parkedReason": intent.FailureReason, "poolDesk": false})
+		}
 		refundable := []string{models.ITStatusBuyAwaitingRate}
 		if terms.companyWallet {
 			// Review N1 / C2: never refund while any sale can still pay her —

@@ -33,10 +33,20 @@ const (
 	poolFillStallAfter = 10 * time.Minute
 )
 
-// poolVaultReservedStatuses are the order states that may still lead to a
-// fill: each reserves its fill + spread until the fill is proven.
-var poolVaultReservedStatuses = []string{models.ITStatusPendingPayment, models.ITStatusPaymentReceived,
-	models.ITStatusDelivering, models.ITStatusBuyAwaitingRate}
+// poolVaultPaidStatuses are the paid order states that may still lead to a
+// fill: each reserves its fill + spread until the fill is proven, whatever
+// its age.
+var poolVaultPaidStatuses = []string{models.ITStatusPaymentReceived, models.ITStatusDelivering, models.ITStatusBuyAwaitingRate}
+
+// poolReservingIntents scopes q (joined to, or on, it_intents) to the pool
+// orders that hold a reservation at now: every paid one, and an unpaid one
+// only while it can still be claimed (stableBuyClaimWindow, the same bound
+// the inbound claim uses) — an abandoned order never starves the pool.
+func poolReservingIntents(q *gorm.DB, now time.Time) *gorm.DB {
+	return q.Where("it_intents.provider IN ?", poolProviders()).
+		Where("(it_intents.status IN ? OR (it_intents.status = ? AND it_intents.created_at > ?))",
+			poolVaultPaidStatuses, models.ITStatusPendingPayment, now.Add(-stableBuyClaimWindow))
+}
 
 // vaultFillRef is the order's fill ref on-chain: HashID of the intent, so a
 // replayed fill for the same order is refused by the contract itself.
@@ -55,12 +65,20 @@ func vaultSpreadUnits(fill *big.Int, spreadBps int64) *big.Int {
 // whose fill is not yet proven: what the vault's free collateral must keep
 // back for them. Summed in Go: chain units overflow SQLite's numerics.
 func (d *PoolDesk) vaultReserved(ctx context.Context, db *gorm.DB) (*big.Int, error) {
+	return d.vaultReservedExcept(ctx, db, uuid.Nil)
+}
+
+// vaultReservedExcept is vaultReserved without one order's own reservation
+// (a claim or retry deciding that order).
+func (d *PoolDesk) vaultReservedExcept(ctx context.Context, db *gorm.DB, except uuid.UUID) (*big.Int, error) {
 	var rows []models.PoolOrder
-	err := db.WithContext(ctx).Model(&models.PoolOrder{}).
-		Joins("JOIN it_intents ON it_intents.id = pool_orders.intent_id").
-		Where("it_intents.provider IN ? AND it_intents.status IN ?", poolProviders(), poolVaultReservedStatuses).
-		Where("pool_orders.filled_at IS NULL AND pool_orders.fill_units IS NOT NULL").
-		Select("pool_orders.intent_id, pool_orders.generation, pool_orders.fill_units, pool_orders.spread_units").
+	q := poolReservingIntents(db.WithContext(ctx).Model(&models.PoolOrder{}).
+		Joins("JOIN it_intents ON it_intents.id = pool_orders.intent_id"), d.c.Now()).
+		Where("pool_orders.filled_at IS NULL AND pool_orders.fill_units IS NOT NULL")
+	if except != uuid.Nil {
+		q = q.Where("pool_orders.intent_id <> ?", except)
+	}
+	err := q.Select("pool_orders.intent_id, pool_orders.generation, pool_orders.fill_units, pool_orders.spread_units").
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
@@ -206,6 +224,9 @@ func (d *PoolDesk) insertVaultOrder(ctx context.Context, intent *models.ITIntent
 		if free.Cmp(need) < 0 {
 			return fmt.Errorf("%w: the pool's free collateral is below this order", ErrPoolCannotFill)
 		}
+		if err := d.checkFillCaps(ctx, tx, fill, spread); err != nil {
+			return err
+		}
 		intent.Asset, intent.DestChain = strings.ToUpper(intent.Asset), strings.ToUpper(intent.DestChain)
 		if err := tx.Create(intent).Error; err != nil {
 			return err
@@ -224,6 +245,43 @@ func (d *PoolDesk) insertVaultOrder(ctx context.Context, intent *models.ITIntent
 		}
 		return nil
 	})
+}
+
+// checkFillCaps refuses an order the contract's own fill limits would refuse
+// at its fill (TsaLiquidityPool.fill): amount + spread over maxFillPerTx, a
+// spread over maxSpreadBps, or — while the contract's fixed window is still
+// open — the window's fills, every reserved unproven order and this one over
+// fillWindowCap. Read fresh under the pool lock (the window moves with every
+// fill); an unreadable cap refuses.
+func (d *PoolDesk) checkFillCaps(ctx context.Context, tx *gorm.DB, fill, spread *big.Int) error {
+	rctx, cancel := context.WithTimeout(ctx, poolFreshReadTimeout)
+	caps, err := d.c.Vault.FillCaps(rctx)
+	cancel()
+	if err != nil || caps == nil || caps.MaxFillPerTx == nil || caps.MaxSpreadBps == nil || caps.FillWindowCap == nil || caps.FilledInWindow == nil {
+		if err != nil {
+			log.Printf("[liquidity] vault fill caps unreadable at open: %s", RedactAlertText(err.Error()))
+		}
+		return fmt.Errorf("%w: the pool's fill limits cannot be read", ErrPoolCannotFill)
+	}
+	need := new(big.Int).Add(fill, spread)
+	if need.Cmp(caps.MaxFillPerTx) > 0 {
+		return fmt.Errorf("%w: this order is above the pool's per-fill limit", ErrPoolCannotFill)
+	}
+	if new(big.Int).Mul(spread, big.NewInt(10_000)).Cmp(new(big.Int).Mul(fill, caps.MaxSpreadBps)) > 0 {
+		log.Printf("[liquidity] ALERT liquidity_pool_spread_over_contract_max spread=%s fill=%s max_spread_bps=%s — lower pool_spread", spread, fill, caps.MaxSpreadBps)
+		return fmt.Errorf("%w: the pool's spread is above the vault's maximum", ErrPoolCannotFill)
+	}
+	if caps.WindowCurrent(d.c.Now()) {
+		reserved, err := d.vaultReserved(ctx, tx)
+		if err != nil {
+			return err
+		}
+		used := new(big.Int).Add(caps.FilledInWindow, reserved)
+		if used.Add(used, need).Cmp(caps.FillWindowCap) > 0 {
+			return fmt.Errorf("%w: the pool's fill limit for this period is reached", ErrPoolCannotFill)
+		}
+	}
+	return nil
 }
 
 // ─── Settle ─────────────────────────────────────────────────────────────────
@@ -316,11 +374,22 @@ func (s *ITService) sendVaultFill(ctx context.Context, d *PoolDesk, intent *mode
 		log.Printf("[liquidity] ALERT liquidity_pool_fill_ref_used_unrecorded intent=%s — the vault already filled this ref; not sent", intent.ID)
 		return fmt.Errorf("%w: the vault already filled intent %s", ErrITBadState, intent.ID)
 	}
+	fill := bigFromDecimal(o.FillUnits)
+	// The fill is what the sale desk then delivers (the intent's amount): never
+	// send one that disagrees with it — the treasury would over- or
+	// under-deliver. A retry re-reserves the order from the intent.
+	owed, err := vaultOwedUnits(ctx, s.db, d, intent.ID)
+	if err != nil {
+		return err
+	}
+	if owed == nil || owed.Cmp(fill) != 0 {
+		log.Printf("[liquidity] ALERT liquidity_pool_fill_amount_mismatch intent=%s fill=%s owed=%v — not sent", intent.ID, fill, owed)
+		return s.parkVaultFill(ctx, d, intent.ID, "", fmt.Sprintf("the fill (%s) does not match the amount owed (%v): retry re-reserves it from the order", fill, owed))
+	}
 	st, err := d.c.Vault.State(ctx)
 	if err != nil {
 		return err
 	}
-	fill := bigFromDecimal(o.FillUnits)
 	spread := bigFromDecimal(o.SpreadUnits)
 	if st.TotalPrincipal.Sign() == 0 {
 		spread = new(big.Int) // no LP to credit: the spread stays with the company (booked as take)
@@ -352,6 +421,7 @@ func (s *ITService) sendVaultFill(ctx context.Context, d *PoolDesk, intent *mode
 		}
 		if time.Since(intent.UpdatedAt) > poolFillStallAfter {
 			log.Printf("[liquidity] ALERT liquidity_pool_fill_stalled intent=%s err=%s", intent.ID, RedactAlertText(err.Error()))
+			return fmt.Errorf("%w: intent %s: %v", ErrPoolReleaseStalled, intent.ID, err)
 		}
 		return err
 	default:
@@ -360,6 +430,24 @@ func (s *ITService) sendVaultFill(ctx context.Context, d *PoolDesk, intent *mode
 		log.Printf("[liquidity] fill intent=%s in flight: %s", intent.ID, RedactAlertText(err.Error()))
 		return nil
 	}
+}
+
+// vaultOwedUnits is the intent's amount owed (asset_amount, read now) in
+// chain units; nil when it is not a usable amount (a read error is an error).
+func vaultOwedUnits(ctx context.Context, db *gorm.DB, d *PoolDesk, intentID uuid.UUID) (*big.Int, error) {
+	var i models.ITIntent
+	if err := db.WithContext(ctx).Select("id", "asset_amount").First(&i, "id = ?", intentID).Error; err != nil {
+		return nil, err
+	}
+	units, ok := new(big.Int).SetString(strings.TrimSpace(i.AssetAmount), 10)
+	if !ok || units.Sign() <= 0 {
+		return nil, nil
+	}
+	chain, err := CanonicalToChainUnits(units, d.c.Token.Decimals)
+	if err != nil {
+		return nil, nil
+	}
+	return chain, nil
 }
 
 // revertReasonOf is the contract's own revert reason when the build refused
@@ -393,6 +481,7 @@ func (s *ITService) proveVaultFill(ctx context.Context, d *PoolDesk, intent *mod
 	if err != nil || r == nil || r.BlockNumber == nil {
 		if time.Since(intent.UpdatedAt) > poolFillStallAfter {
 			log.Printf("[liquidity] ALERT liquidity_pool_fill_stalled intent=%s tx=%s — no receipt", intent.ID, hash)
+			return false, fmt.Errorf("%w: intent %s fill %s has no receipt", ErrPoolReleaseStalled, intent.ID, hash)
 		}
 		return false, nil
 	}
@@ -404,9 +493,15 @@ func (s *ITService) proveVaultFill(ctx context.Context, d *PoolDesk, intent *mod
 		return false, nil // not deep enough yet
 	}
 	if r.Status != 1 {
-		// Reverted at depth: final. Free the operation and park the order.
-		if lane != nil && !lane.GiveUp(ctx, d.c.Sender.Address(), vaultFillOp(intent.ID), o.FillTxHash, RetireSequenced) {
-			return false, nil
+		// Reverted. A mined call is never "given up" (RetireOp keeps an
+		// executed allocation, and the watch frees its key once the nonce is
+		// mined), so the lane's own verdict is what parks it: reverted at
+		// settle depth, final. The retry then takes a new allocation.
+		if lane != nil {
+			reverted, err := lane.CallReverted(ctx, hash)
+			if err != nil || !reverted {
+				return false, err // not yet final as reverted: the next tick re-reads
+			}
 		}
 		return false, s.parkVaultFill(ctx, d, intent.ID, o.FillTxHash, "the fill "+hash+" reverted")
 	}
@@ -471,7 +566,11 @@ func (s *ITService) parkVaultFill(ctx context.Context, d *PoolDesk, intentID uui
 }
 
 // RetryPoolFill is the operator's exit from a pool_fill_refused park once the
-// cause is fixed (collateral posted, vault unpaused): back to delivering.
+// cause is fixed (collateral posted, vault unpaused): back to delivering. The
+// order is re-reserved from the intent as a claim would: a claim park whose
+// amount was priced live is priced again on what she paid (the intent kept
+// its open-time quote), every other park re-derives its fill from the
+// intent's amount; the vault must cover it, or the order stays parked.
 func (s *ITService) RetryPoolFill(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error) {
 	if note = strings.TrimSpace(note); note == "" {
 		return nil, ErrITOperatorNoteRequired
@@ -480,7 +579,28 @@ func (s *ITService) RetryPoolFill(ctx context.Context, adminID, intentID uuid.UU
 	if d == nil {
 		return nil, ErrPoolSettleUnwired
 	}
-	err := withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
+	current, err := s.getIntent(ctx, intentID)
+	if err != nil {
+		return nil, err
+	}
+	reprice := strings.HasSuffix(current.FailureReason, poolFillRepriceMark)
+	var (
+		mid *big.Rat
+		ch  PayInChannel
+	)
+	if reprice {
+		if s.treasuryRates == nil {
+			return nil, fmt.Errorf("%w: the pool is not wired", ErrStableQuoteUnavailable)
+		}
+		if mid, err = s.treasuryRates.BuyRate(ctx, current.Currency); err != nil {
+			return nil, err
+		}
+		if ch, err = s.paidThrough(ctx, current); err != nil {
+			return nil, err
+		}
+	}
+	var repriced *PoolPrice
+	err = withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
 		var intent models.ITIntent
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&intent, "id = ?", intentID).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -492,15 +612,59 @@ func (s *ITService) RetryPoolFill(ctx context.Context, adminID, intentID uuid.UU
 			!strings.HasPrefix(intent.FailureReason, models.ITFailurePoolFillRefused) {
 			return fmt.Errorf("%w: only a %s park can retry its fill", ErrITBadState, models.ITFailurePoolFillRefused)
 		}
-		res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intentID, models.ITStatusBuyAwaitingRate).
-			Updates(map[string]any{"status": models.ITStatusDelivering, "failure_reason": ""})
+		if strings.HasSuffix(intent.FailureReason, poolFillRepriceMark) != reprice {
+			return fmt.Errorf("%w: the order moved", ErrITBadState)
+		}
+		if err := vaultRefundable(tx, intentID); err != nil {
+			return err // a recorded fill is proven or cleared, never re-reserved
+		}
+		o, err := d.vaultOrder(ctx, tx, intentID)
+		if err != nil {
+			return err
+		}
+		owed, ok := new(big.Int).SetString(strings.TrimSpace(intent.AssetAmount), 10)
+		spreadBps := int64(o.PoolSpreadBps)
+		if reprice {
+			paid, okP := new(big.Int).SetString(strings.TrimSpace(intent.ReceivedAmount), 10)
+			if !okP || paid.Sign() <= 0 {
+				return fmt.Errorf("%w: no received amount to price", ErrITBadState)
+			}
+			if repriced, err = s.poolQuoteAt(intent.Asset, intent.Currency, paid, mid, CurrentPoolSettings(), ch, false); err != nil {
+				return err
+			}
+			owed, ok, spreadBps = repriced.Quote.AssetUnits, true, repriced.Settings.SpreadBps
+		}
+		if !ok || owed.Sign() <= 0 {
+			return fmt.Errorf("%w: intent %s has no amount owed", ErrITBadState, intentID)
+		}
+		fill, spread, covered, err := d.vaultCovers(ctx, tx, intentID, owed, spreadBps)
+		if err != nil {
+			return err
+		}
+		if !covered {
+			return fmt.Errorf("%w: the pool's free collateral does not cover %s — post collateral first", ErrPoolCannotFill, FormatStableUnits(owed.String()))
+		}
+		if err := d.writeVaultSnapshot(tx, intentID, fill, spread, spreadBps); err != nil {
+			return err
+		}
+		cols := map[string]any{"status": models.ITStatusDelivering, "failure_reason": ""}
+		if repriced != nil {
+			setQuoteColumns(cols, repriced.Quote.AssetUnits, repriced.Quote.RatePerUnitMinor, repriced.Quote.DisplayRateMinor, repriced.Quote.Fees)
+			cols["repriced"] = true
+		}
+		res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", intentID, models.ITStatusBuyAwaitingRate).Updates(cols)
 		if res.Error != nil || res.RowsAffected != 1 {
 			return fmt.Errorf("%w: the order moved", ErrITBadState)
 		}
-		return auditIntent(tx, intentID, adminID, models.ITAuditPoolFillRetried, note, map[string]any{"parkedReason": intent.FailureReason})
+		return auditIntent(tx, intentID, adminID, models.ITAuditPoolFillRetried, note, map[string]any{
+			"parkedReason": intent.FailureReason, "fillUnits": fill.String(), "spreadUnits": spread.String(), "repriced": repriced != nil})
 	})
 	if err != nil {
 		return nil, err
+	}
+	d.vaultCache.Forget("free")
+	if repriced != nil {
+		s.notifyRateUpdated(current, repriced.Quote.AssetUnits)
 	}
 	return s.getIntent(ctx, intentID)
 }
@@ -550,10 +714,11 @@ func (s *ITService) vaultOrderActions(ctx context.Context, intent *models.ITInte
 // honoured quote's, or a live re-price for money that arrived late — must fit
 // the vault's free collateral with this order's own reservation counted
 // back in. Covered: claim, and the snapshot's fill and spread become what she
-// is owed. Not: park pool_fill_refused, the snapshot already holding the owed
-// fill so that a retry (after collateral is posted) fills the right amount. A
-// transient error (no mid, vault unreadable) writes nothing: the central
-// poller retries.
+// is owed. Not: park pool_fill_refused with the snapshot untouched — a park
+// keeps the intent's open-time quote (parkClaim), and the snapshot must never
+// disagree with it; a re-priced park is marked so that RetryPoolFill prices it
+// again. A transient error (no mid, vault unreadable) writes nothing: the
+// central poller retries.
 func (s *ITService) claimVault(ctx context.Context, candidate *models.ITIntent, claim map[string]any, amountMinor string,
 	ch PayInChannel, arrival *routedArrival, write func(*gorm.DB) *gorm.DB) (*gorm.DB, string, error) {
 	d := s.poolDesk
@@ -599,42 +764,29 @@ func (s *ITService) claimVault(ctx context.Context, candidate *models.ITIntent, 
 		if err != nil {
 			return err
 		}
-		fill, err := CanonicalToChainUnits(owed, d.c.Token.Decimals)
-		if err != nil {
-			return err
-		}
 		// The LPs are credited the spread she paid: the snapshot's when honoured,
 		// the live settings' when re-priced (which then become the snapshot's).
 		spreadBps := int64(o.PoolSpreadBps)
 		if p != nil {
 			spreadBps = p.Settings.SpreadBps
 		}
-		spread := vaultSpreadUnits(fill, spreadBps)
-		rctx, cancel := context.WithTimeout(ctx, poolFreshReadTimeout)
-		st, err := d.c.Vault.State(rctx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("liquidity pool: the vault is unreadable at claim: %w", err)
-		}
-		reserved, err := d.vaultReserved(ctx, tx)
+		fill, spread, covered, err := d.vaultCovers(ctx, tx, locked.ID, owed, spreadBps)
 		if err != nil {
 			return err
 		}
-		// Every other order's reserve comes off; her own is what this decides
-		// (never clamp before adding it back: that would hide a shortfall).
-		reserved.Sub(reserved, bigFromDecimal(o.FillUnits)).Sub(reserved, bigFromDecimal(o.SpreadUnits))
-		free := new(big.Int).Sub(st.FreeCapacity(), reserved)
-		fs, ss := fill.String(), spread.String()
-		if err := tx.Model(&models.PoolOrder{}).Where("intent_id = ? AND generation = 1 AND fill_tx_hash = ''", locked.ID).
-			Updates(map[string]any{"fill_units": fs, "spread_units": ss, "pool_spread_bps": spreadBps}).Error; err != nil {
-			return err
-		}
-		if st.Paused || free.Cmp(new(big.Int).Add(fill, spread)) < 0 {
-			parkClaim(claim, models.ITFailurePoolFillRefused+": the pool's free collateral does not cover the amount owed")
+		if !covered {
+			reason := models.ITFailurePoolFillRefused + ": the pool's free collateral does not cover the amount owed"
+			if p != nil {
+				reason += poolFillRepriceMark
+			}
+			parkClaim(claim, reason)
 			parked = models.ITFailurePoolFillRefused
 			log.Printf("[liquidity] ALERT liquidity_pool_fill_refused intent=%s owed=%s honoured=%v — at claim", locked.ID, owed, arrival.honoured)
 			res = write(tx)
 			return res.Error
+		}
+		if err := d.writeVaultSnapshot(tx, locked.ID, fill, spread, spreadBps); err != nil {
+			return err
 		}
 		if arrival.honoured {
 			arrival.writeTo(claim)
@@ -650,4 +802,43 @@ func (s *ITService) claimVault(ctx context.Context, candidate *models.ITIntent, 
 		d.vaultCache.Forget("free")
 	}
 	return res, parked, err
+}
+
+// poolFillRepriceMark ends a claim park whose amount owed was priced live:
+// parkClaim kept the intent's open-time quote, so a retry prices it again.
+const poolFillRepriceMark = " (priced live at claim: a retry re-prices)"
+
+// vaultCovers is the fill and spread (chain units) of owed canonical units at
+// spreadBps, and whether the vault's free collateral covers them with every
+// OTHER order's reservation kept back (her own is what this decides). Under
+// the pool lock.
+func (d *PoolDesk) vaultCovers(ctx context.Context, tx *gorm.DB, intentID uuid.UUID, owed *big.Int, spreadBps int64) (fill, spread *big.Int, covered bool, err error) {
+	if fill, err = CanonicalToChainUnits(owed, d.c.Token.Decimals); err != nil {
+		return nil, nil, false, err
+	}
+	spread = vaultSpreadUnits(fill, spreadBps)
+	rctx, cancel := context.WithTimeout(ctx, poolFreshReadTimeout)
+	st, err := d.c.Vault.State(rctx)
+	cancel()
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("liquidity pool: the vault is unreadable: %w", err)
+	}
+	reserved, err := d.vaultReservedExcept(ctx, tx, intentID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	free := new(big.Int).Sub(st.FreeCapacity(), reserved)
+	return fill, spread, !st.Paused && free.Cmp(new(big.Int).Add(fill, spread)) >= 0, nil
+}
+
+// writeVaultSnapshot sets the order's fill, spread and spread bps, only while
+// no fill is recorded.
+func (d *PoolDesk) writeVaultSnapshot(tx *gorm.DB, intentID uuid.UUID, fill, spread *big.Int, spreadBps int64) error {
+	res := tx.Model(&models.PoolOrder{}).
+		Where("intent_id = ? AND generation = 1 AND fill_tx_hash = '' AND filled_at IS NULL", intentID).
+		Updates(map[string]any{"fill_units": fill.String(), "spread_units": spread.String(), "pool_spread_bps": spreadBps})
+	if res.Error == nil && res.RowsAffected != 1 {
+		return fmt.Errorf("%w: pool order %s already has a fill recorded", ErrITBadState, intentID)
+	}
+	return res.Error
 }

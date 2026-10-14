@@ -25,7 +25,12 @@ import (
 const poolAuditSettleFromCollateral = "liquidity.settle_from_collateral"
 
 // SetVaultLedger gives the console the ledger's reconcile view.
-func (s *ITService) SetVaultLedger(x *VaultIndexer) { s.vaultLedger = x }
+func (s *ITService) SetVaultLedger(x *VaultIndexer) {
+	if x != nil && s.poolDesk != nil && s.poolDesk.c.Treasury != nil {
+		x.SetTreasury(s.poolDesk.c.Treasury.Address()) // our fills pay only the treasury
+	}
+	s.vaultLedger = x
+}
 
 // VaultPoolSummary is GET /api/admin/liquidity/pool. Token amounts are
 // decimal strings in whole tokens.
@@ -145,9 +150,18 @@ func vaultOperators(ctx context.Context, db *gorm.DB, chainID int64, vault strin
 // SettlePoolFromCollateral closes amount of outstanding against collateral:
 // the company keeps the fiat it already holds instead of buying USDT back.
 // Super admin; the operator sends it; the contract bounds it by outstanding.
-func (s *ITService) SettlePoolFromCollateral(ctx context.Context, adminID uuid.UUID, amount, note string) (string, error) {
+//
+// Idempotent per operationID (the console's UUID for one settle): the ref is
+// HashID(operationID) — the contract refuses a used settle ref — and the
+// lane's operation key pool_settle:<operationID>, so a retry is answered with
+// the first send's hash (from its allocation, or from the ledger once mined)
+// and never sends a second settle.
+func (s *ITService) SettlePoolFromCollateral(ctx context.Context, adminID, operationID uuid.UUID, amount, note string) (string, error) {
 	if note = strings.TrimSpace(note); note == "" {
 		return "", ErrITOperatorNoteRequired
+	}
+	if operationID == uuid.Nil {
+		return "", ErrPoolSettleOperationID
 	}
 	d := s.poolDesk
 	if d == nil {
@@ -157,20 +171,53 @@ func (s *ITService) SettlePoolFromCollateral(ctx context.Context, adminID uuid.U
 	if err != nil || n.Sign() <= 0 {
 		return "", fmt.Errorf("%w: amount %q", ErrLPAmount, amount)
 	}
-	id := uuid.New()
-	ref := HashID(id)
-	hash, err := d.c.Sender.Send(WithOperationRef(ctx, "pool_settle:"+id.String()), d.c.Token.ChainID, func() ([]byte, error) {
+	op, ref := poolSettleOp(operationID), HashID(operationID)
+	if hash, err := s.settledBefore(ctx, d, op, operationID); err != nil || hash != "" {
+		return hash, err
+	}
+	hash, err := d.c.Sender.Send(WithOperationRef(ctx, op), d.c.Token.ChainID, func() ([]byte, error) {
 		return d.c.Vault.PrepareSettleFromCollateral(d.c.Sender.Address(), n, ref)
 	})
 	if err != nil && !errors.Is(err, ErrPendingBroadcast) {
 		return "", err
 	}
-	meta, _ := json.Marshal(map[string]any{"amount": n.String(), "ref": HashIDHex(id), "tx": hash, "note": note})
+	meta, _ := json.Marshal(map[string]any{"amount": n.String(), "ref": HashIDHex(operationID), "operationId": operationID.String(),
+		"tx": hash, "note": note})
 	if aerr := s.db.WithContext(context.WithoutCancel(ctx)).Create(&models.P2PAuditLog{ID: uuid.New(), ActorID: &adminID,
 		Action: poolAuditSettleFromCollateral, Metadata: datatypes.JSON(meta)}).Error; aerr != nil {
 		log.Printf("[liquidity] ALERT liquidity_settle_audit_unwritten tx=%s err=%s", hash, RedactAlertText(aerr.Error()))
 	}
 	d.vaultCache.Forget("free")
-	log.Printf("[liquidity] METRIC liquidity_settle_from_collateral amount=%s tx=%s admin=%s", n, hash, adminID)
+	log.Printf("[liquidity] METRIC liquidity_settle_from_collateral amount=%s tx=%s admin=%s op=%s", n, hash, adminID, operationID)
 	return hash, nil
+}
+
+// ErrPoolSettleOperationID: a settle names its operation, so a retry is never
+// a second settle.
+var ErrPoolSettleOperationID = errors.New("liquidity pool: settle needs an operationId (UUID)")
+
+func poolSettleOp(operationID uuid.UUID) string { return "pool_settle:" + operationID.String() }
+
+// settledBefore is the hash of a settle already sent for this operation: its
+// live allocation on the operator's lane, or — once mined (the lane frees a
+// mined operation's key) — its SettledFromCollateral row in the ledger.
+func (s *ITService) settledBefore(ctx context.Context, d *PoolDesk, op string, operationID uuid.UUID) (string, error) {
+	if lane := laneOfSender(d.c.Sender, d.c.Token.ChainID); lane != nil {
+		hash, found, err := lane.OperationStatus(ctx, d.c.Sender.Address(), op)
+		if err != nil {
+			return "", err
+		}
+		if found && hash != "" {
+			return hash, nil
+		}
+	}
+	var rows []models.LiquidityLedgerEntry
+	if err := s.db.WithContext(ctx).Where("chain_id = ? AND kind = ? AND LOWER(ref) = ?", d.c.Token.ChainID, VaultEventSettled,
+		strings.ToLower(HashIDHex(operationID))).Limit(1).Find(&rows).Error; err != nil {
+		return "", err
+	}
+	if len(rows) == 1 {
+		return rows[0].TxHash, nil
+	}
+	return "", nil
 }

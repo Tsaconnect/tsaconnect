@@ -112,6 +112,56 @@ func (v *LiquidityVault) stateAt(ctx context.Context, block uint64) (*VaultState
 	return st, nil
 }
 
+// VaultFillCaps are the contract's own limits on a fill (TsaLiquidityPool
+// fill(): amount + spread ≤ MaxFillPerTx, spread × 10000 ≤ amount ×
+// MaxSpreadBps, and amount + spread counted in a fixed window of FillWindow
+// seconds from FillWindowStart, at most FillWindowCap), read at one block.
+type VaultFillCaps struct {
+	MaxFillPerTx    *big.Int
+	MaxSpreadBps    *big.Int
+	FillWindow      *big.Int // seconds
+	FillWindowStart *big.Int // unix seconds
+	FilledInWindow  *big.Int
+	FillWindowCap   *big.Int
+}
+
+// WindowCurrent: the window FilledInWindow counts is still open at now (the
+// contract rolls it on the first fill at or after start + window).
+func (c *VaultFillCaps) WindowCurrent(now time.Time) bool {
+	if c == nil || c.FillWindowStart == nil || c.FillWindow == nil {
+		return false
+	}
+	end := new(big.Int).Add(c.FillWindowStart, c.FillWindow)
+	return end.Cmp(big.NewInt(now.Unix())) > 0
+}
+
+// FillCaps reads the fill limits at the head block.
+func (v *LiquidityVault) FillCaps(ctx context.Context) (*VaultFillCaps, error) {
+	if v == nil {
+		return nil, ErrVaultUnavailable
+	}
+	ctx, cancel := context.WithTimeout(ctx, v.timeout)
+	defer cancel()
+	head, err := v.client.Client.BlockNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("liquidity vault: read head: %w", err)
+	}
+	at := new(big.Int).SetUint64(head)
+	c := &VaultFillCaps{}
+	for _, r := range []struct {
+		method string
+		into   **big.Int
+	}{{"maxFillPerTx", &c.MaxFillPerTx}, {"maxSpreadBps", &c.MaxSpreadBps}, {"fillWindow", &c.FillWindow},
+		{"fillWindowStart", &c.FillWindowStart}, {"filledInWindow", &c.FilledInWindow}, {"fillWindowCap", &c.FillWindowCap}} {
+		out, err := v.callAt(ctx, at, r.method)
+		if err != nil {
+			return nil, err
+		}
+		*r.into = out[0].(*big.Int)
+	}
+	return c, nil
+}
+
 // VaultPosition is one LP's on-chain position.
 type VaultPosition struct {
 	Principal *big.Int

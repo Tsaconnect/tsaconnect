@@ -24,6 +24,9 @@ type fakeLPVault struct {
 	claimable map[string]*big.Int
 	allowed   map[string]bool
 	state     VaultState
+	// stateCalls counts State reads; positionErr fails every Position read.
+	stateCalls  int
+	positionErr error
 }
 
 func newFakeLPVault() *fakeLPVault {
@@ -35,12 +38,16 @@ func (v *fakeLPVault) Address() string { return testVaultAddr.Hex() }
 func (v *fakeLPVault) State(context.Context) (*VaultState, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.stateCalls++
 	st := v.state
 	return &st, nil
 }
 func (v *fakeLPVault) Position(_ context.Context, lp string) (*VaultPosition, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.positionErr != nil {
+		return nil, v.positionErr
+	}
 	k := strings.ToLower(lp)
 	p, c := v.principal[k], v.claimable[k]
 	if p == nil {
@@ -129,6 +136,11 @@ func newLPRig(t *testing.T) *lpRig {
 	createPaymentMerchantsTable(t, db)
 	if err := db.AutoMigrate(&models.LiquidityLedgerEntry{}, &models.JobRunMarker{}, &models.PayMerchant{}); err != nil {
 		t.Fatal(err)
+	}
+	for _, col := range []string{"vault_activated_at DATETIME", "previous_operator_wallets TEXT"} {
+		if err := db.Exec("ALTER TABLE payment_merchants ADD COLUMN " + col).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	prev := Fees
 	t.Cleanup(func() { Fees = prev })
@@ -345,6 +357,7 @@ func TestVaultLP_MeShowsPositionShareAndEarned(t *testing.T) {
 	k := strings.ToLower(wallet)
 	r.vault.principal[k], r.vault.claimable[k] = usdt18(10), usdt18(1)
 	r.vault.state = VaultState{Collateral: usdt18(200), Outstanding: usdt18(50), TotalPrincipal: usdt18(40)}
+	r.now = r.now.Add(lpPoolViewTTL) // past the pool view cache
 	me, err := r.svc.Me(context.Background(), user)
 	if err != nil {
 		t.Fatal(err)
