@@ -126,25 +126,16 @@ describe('ActivatePmScreen', () => {
     expect(Alert.alert).not.toHaveBeenCalledWith('Activation failed', expect.anything());
   });
 
-  // One user may hold both roles (owner, 2026-10-13): the role param, not the
-  // top-level kind, says which row this screen activates.
-  it('activates the LP role of a merchant who is also an LP', async () => {
+  it('ignores a stale ?role=lp and activates the Payment Merchant', async () => {
     mockParams.role = 'lp';
-    mockStatus.kind = 'merchant';
     mockStatus.activationNeedsId = true;
     await render();
     const [title] = tree.root.findAll((n) => n.props.accessibilityLabel === 'title');
-    expect(title.props.children).toBe('Activate liquidity provider');
-    expect(idInputs()).toHaveLength(0);
-    const [button] = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Activate');
-    await act(async () => {
-      await button.props.onPress();
-    });
-    expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, 'lp');
+    expect(title.props.children).toBe('Activate Payment Merchant');
+    expect(idInputs().length).toBeGreaterThan(0);
   });
 
   it('sends no kind when no role is named', async () => {
-    mockStatus.kind = 'merchant';
     mockStatus.activationNeedsId = false;
     await render();
     const [button] = tree.root.findAll((n) => n.props.accessibilityLabel === 'button:Activate');
@@ -154,9 +145,8 @@ describe('ActivatePmScreen', () => {
     expect(activatePmAccount).toHaveBeenCalledWith(undefined, undefined, undefined);
   });
 
-  it('activates the merchant role when named, even for an LP-only top level', async () => {
+  it('activates the merchant role when named', async () => {
     mockParams.role = 'merchant';
-    mockStatus.kind = 'lp';
     mockStatus.activationNeedsId = false;
     await render();
     const [title] = tree.root.findAll((n) => n.props.accessibilityLabel === 'title');

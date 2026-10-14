@@ -1,6 +1,6 @@
-// The TSA Liquidity entry card (spec §17): apply, or open your liquidity once
-// you are an LP. Shared by the P2P screen and the merchant dashboard; lpCta
-// decides whether it shows and where it goes.
+// The TSA Liquidity entry card: opens the liquidity screen, which offers
+// Activate to anyone not yet an LP. Shared by the profile and the merchant
+// dashboard; lpCta decides whether it shows.
 import React from 'react';
 import { View } from 'react-native';
 import { router } from 'expo-router';

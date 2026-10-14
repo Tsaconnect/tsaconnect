@@ -23,7 +23,6 @@ jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn
 import {
   createAdStatusError,
   fundingPreflight,
-  lpStatusError,
   publishActionForFunding,
   publishFailureMessage,
 } from '../createAdFunding';
@@ -181,23 +180,7 @@ describe('publishFailureMessage — what "Could not publish ad" says', () => {
 
 // statusError output is thrown as a P2PCopyError and shown as-is, so it must be
 // app copy or p2pErrorMessage's mapping — never the server text passed through.
-describe('createAdStatusError / lpStatusError — never the raw server message', () => {
-  const STOCK_AD = 'p2p: you already have a live stock ad; it can be renewed when it is due';
-
-  it('LP 409 stock-ad sentinel: fixed pool-ad copy, not the server sentence', () => {
-    const res = { status: 409, message: STOCK_AD };
-    expect(lpStatusError(409, STOCK_AD, res)).toBe('You already have a live pool ad. You can renew it when it is due.');
-  });
-
-  it('LP 409 with an unreadable body: the pool-ad fallback', () => {
-    expect(lpStatusError(409, '<html>409</html>')).toBe('You already have a live pool ad.');
-  });
-
-  it('LP 409 otherwise: the shared P2P mapping', () => {
-    const res = { status: 409, message: 'p2p: ad is not active' };
-    expect(lpStatusError(409, res.message, res)).toBe('This ad is no longer available.');
-  });
-
+describe('createAdStatusError — never the raw server message', () => {
   it('signature mismatch: actionable copy without the server message', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const raw = 'signature recovered to 0x1111111111111111111111111111111111111111, expected 0x2222222222222222222222222222222222222222';
@@ -215,6 +198,5 @@ describe('createAdStatusError / lpStatusError — never the raw server message',
   ])('%s %s: exactly the shared mapping', (status, message) => {
     const res = { status, message };
     expect(createAdStatusError(status, message, res)).toBe(p2pErrorMessage(res, 'Server rejected the request'));
-    expect(lpStatusError(status, message, res)).toBe(p2pErrorMessage(res, 'Server rejected the request'));
   });
 });

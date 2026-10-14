@@ -18,9 +18,8 @@
 // identity verification instead, refused with a KYC code the shared prompt
 // handles.
 //
-// One user may hold both roles (owner, 2026-10-13). The `role` param (lp |
-// merchant) names the row to activate and is sent as ?kind=; without it the
-// screen follows the top-level kind and the API picks the row, as before.
+// `?role=merchant` names the merchant row to activate and is sent as ?kind=;
+// without it the API picks the row.
 
 import React, { useMemo, useState } from 'react';
 import { View, TextInput, ScrollView, Alert, KeyboardAvoidingView, Platform } from 'react-native';
@@ -45,36 +44,24 @@ export function isValidPmIdNumber(v: string): boolean {
 }
 
 type ActivationResult = Awaited<ReturnType<typeof activatePmAccount>>;
-type ActivationKind = 'merchant' | 'lp';
 
 type Outcome =
   | { kind: 'success'; title: string; message: string; route: string }
   | { kind: 'kyc' }
   | { kind: 'error'; title: string; message: string };
 
-const LP_ERRORS: Record<string, string> = {
-  settlement_name_mismatch:
-    "The name on your settlement account doesn't match your verified name. Apply again with a bank account in your own name.",
-  settlement_account_unresolved: "We couldn't check your bank account right now. Try again in a few minutes.",
-  liquidity_unavailable: "Providing liquidity isn't available right now. Try again later.",
-};
-
 /** Pure: what the screen does with an activation response (spec §8.2, S34). */
-export function activationOutcome(res: { success: boolean; code?: string; message?: string }, kind?: string): Outcome {
-  const lp = kind === 'lp';
+export function activationOutcome(res: { success: boolean; code?: string; message?: string }): Outcome {
   if (res.success) {
-    return lp
-      ? { kind: 'success', title: 'Liquidity activated', message: 'Add USDT from your liquidity dashboard to join the pool.', route: '/liquidity' }
-      : { kind: 'success', title: 'Payment Merchant activated', message: 'Your account is now live. You can start offering instant P2P buy & sell.', route: '/merchants/dashboard' };
+    return { kind: 'success', title: 'Payment Merchant activated', message: 'Your account is now live. You can start offering instant P2P buy & sell.', route: '/merchants/dashboard' };
   }
   if (res.code === 'kyc_verification_required' || res.code === 'kyc_legal_name_missing') return { kind: 'kyc' };
-  if (lp && res.code && LP_ERRORS[res.code]) return { kind: 'error', title: 'Activation failed', message: LP_ERRORS[res.code] };
   return { kind: 'error', title: 'Activation failed', message: res.message || 'Please try again.' };
 }
 
 /** Shared outcome handling for both activation forms. */
-function reportActivation(res: ActivationResult, kind?: string) {
-  const o = activationOutcome(res, kind);
+function reportActivation(res: ActivationResult) {
+  const o = activationOutcome(res);
   if (o.kind === 'kyc') {
     promptKycRefusal(res.code, res.message);
     return;
@@ -88,16 +75,15 @@ function reportActivation(res: ActivationResult, kind?: string) {
 
 export default function ActivatePmScreen() {
   const { colors } = useTheme();
-  const { activationNeedsId, kind, loading } = useIsPaymentMerchant();
+  const { activationNeedsId, loading } = useIsPaymentMerchant();
   const { role } = useLocalSearchParams<{ role?: string }>();
-  const isLp = role === 'lp' || (role !== 'merchant' && kind === 'lp');
-  const activationKind: ActivationKind | undefined = role === 'lp' || role === 'merchant' ? role : undefined;
+  const activationKind = role === 'merchant' ? role : undefined;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
-      <Stack.Screen options={{ title: isLp ? 'Activate liquidity provider' : 'Activate Payment Merchant' }} />
-      {loading ? <Spinner /> : isLp || !activationNeedsId ? (
-        <CentralActivation kind={isLp ? 'lp' : 'merchant'} activationKind={activationKind} />
+      <Stack.Screen options={{ title: 'Activate Payment Merchant' }} />
+      {loading ? <Spinner /> : !activationNeedsId ? (
+        <CentralActivation activationKind={activationKind} />
       ) : (
         <IdActivationForm activationKind={activationKind} />
       )}
@@ -106,7 +92,7 @@ export default function ActivatePmScreen() {
 }
 
 /** Central inbound: nothing to mint, so activation is a single confirm. */
-function CentralActivation({ kind, activationKind }: { kind: ActivationKind; activationKind?: ActivationKind }) {
+function CentralActivation({ activationKind }: { activationKind?: 'merchant' }) {
   const { spacing } = useTheme();
   const [submitting, setSubmitting] = useState(false);
 
@@ -114,15 +100,14 @@ function CentralActivation({ kind, activationKind }: { kind: ActivationKind; act
     setSubmitting(true);
     const res = await activatePmAccount(undefined, undefined, activationKind);
     setSubmitting(false);
-    reportActivation(res, kind);
+    reportActivation(res);
   };
 
   return (
     <ScrollView contentContainerStyle={{ padding: spacing.lg }}>
       <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.lg }}>
-        {kind === 'lp'
-          ? "Your application was approved. We'll check that your bank account is in your verified name, then you can add USDT."
-          : "Your application was approved. Buyers pay into TSA Connect's account, and we send your naira to your settlement bank account as each trade settles."}
+        Your application was approved. Buyers pay into TSA Connect&apos;s account, and we send your naira to your
+        settlement bank account as each trade settles.
       </Text>
       <Button
         title="Activate"
@@ -136,7 +121,7 @@ function CentralActivation({ kind, activationKind }: { kind: ActivationKind; act
 }
 
 /** Virtual-account mode: the BVN/NIN mints the account buyers pay into. */
-function IdActivationForm({ activationKind }: { activationKind?: ActivationKind }) {
+function IdActivationForm({ activationKind }: { activationKind?: 'merchant' }) {
   const { colors, spacing, radius, fonts, type } = useTheme();
   const [idType, setIdType] = useState<PmIdType>('BVN');
   const [idNumber, setIdNumber] = useState('');
@@ -153,7 +138,7 @@ function IdActivationForm({ activationKind }: { activationKind?: ActivationKind 
     setSubmitting(true);
     const res = await activatePmAccount(idType, idNumber, activationKind);
     setSubmitting(false);
-    reportActivation(res, 'merchant');
+    reportActivation(res);
   };
 
   return (

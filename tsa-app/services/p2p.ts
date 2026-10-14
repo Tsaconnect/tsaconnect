@@ -951,7 +951,7 @@ export type PmIdType = 'BVN' | 'NIN';
  * Returns the raw ApiResponse so the caller can surface the server message on
  * validation (400) / not-approved (409) / not-found (404) errors.
  */
-export function activatePmAccount(idType?: PmIdType, idNumber?: string, kind?: 'merchant' | 'lp') {
+export function activatePmAccount(idType?: PmIdType, idNumber?: string, kind?: 'merchant') {
   const body = idType && idNumber ? { idType, idNumber: idNumber.trim() } : {};
   return request<{ status: string }>('POST', '/p2p/pm/activate', body, kind ? { query: { kind } } : undefined);
 }
