@@ -334,8 +334,10 @@ func TestAuthorizationRelayer_RecordsHashWhenRequestContextCancelled(t *testing.
 	store := &ctxCheckingStore{fakeSponsorStore: r.store}
 	svc := NewAuthorizationRelayer(r.orders, store, r.lanes(), func() time.Time { return sponsorTestNow })
 
+	// The request dies right as the broadcast returns (a dead ctx never even
+	// acquires the key lane, so it cannot be dead before the send).
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // dead before Relay even starts
+	r.lane.Signer = cancellingSigner{fakeRelaySigner: r.signer, cancel: cancel}
 
 	got, err := svc.Relay(ctx, r.userID, sponsorTestUser, orderID, validAuth())
 	if err != nil {
@@ -351,3 +353,14 @@ func TestAuthorizationRelayer_RecordsHashWhenRequestContextCancelled(t *testing.
 }
 
 func stringsEqualFold(a, b string) bool { return common.HexToAddress(a) == common.HexToAddress(b) }
+
+// cancellingSigner cancels the request's ctx as its broadcast returns.
+type cancellingSigner struct {
+	*fakeRelaySigner
+	cancel context.CancelFunc
+}
+
+func (c cancellingSigner) SignAndBroadcast(ctx context.Context, tx []byte) (string, error) {
+	defer c.cancel()
+	return c.fakeRelaySigner.SignAndBroadcast(ctx, tx)
+}

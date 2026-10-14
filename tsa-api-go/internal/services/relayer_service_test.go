@@ -2,16 +2,20 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
 // ── doubles ──────────────────────────────────────────────────────────────
@@ -77,7 +81,7 @@ func (f *fakeRelayBuilder) BuildUnsignedTx(_, _ string, _ []byte) ([]byte, error
 	if f.err != nil {
 		return nil, f.err
 	}
-	return []byte(`{"unsigned":true}`), nil
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: "1000000000", GasLimit: 300_000, To: forwarderHex, Value: "0"})
 }
 
 type attempt struct{ outcome, reason string }
@@ -138,6 +142,7 @@ const (
 var spendSel = SelectorOf("spend(address,uint256,bytes32)")
 
 type rig struct {
+	seq     atomic.Int32 // each req() is a distinct request (one request = one relay operation)
 	svc     *RelayerService
 	signer  *fakeRelaySigner
 	chain   *fakeRelayChain
@@ -168,7 +173,7 @@ func newRig(t *testing.T, mutate ...func(*RelayerLimits)) *rig {
 	r := &rig{signer: signer, chain: chain, metrics: metrics, clock: &now}
 
 	svc, err := NewRelayerService(
-		signer, chain, &fakeRelayBuilder{}, forwarderHex,
+		soloLane(signer, chainBalances{chain}), chain, &fakeRelayBuilder{}, forwarderHex,
 		[]AllowedCall{{Target: swapAddr, Selector: spendSel, AmountWordIndex: 1}},
 		limits, metrics,
 		func() time.Time { return *r.clock },
@@ -176,6 +181,7 @@ func newRig(t *testing.T, mutate ...func(*RelayerLimits)) *rig {
 	if err != nil {
 		t.Fatalf("NewRelayerService: %v", err)
 	}
+	svc.rolesOK.Store(true) // as ProbeRoles does once the key holds no swap role
 	r.svc = svc
 	return r
 }
@@ -198,7 +204,7 @@ func (r *rig) req(mutate ...func(*ForwardRequest)) ForwardRequest {
 		Gas:       200_000,
 		Deadline:  uint64(r.clock.Add(2 * time.Minute).Unix()),
 		Data:      spendCalldata(5_000),
-		Signature: []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x01, 0x02, 0x03, byte(r.seq.Add(1))},
 	}
 	for _, m := range mutate {
 		m(&req)
@@ -395,14 +401,40 @@ func TestRelayer_RateLimitWindowRolls(t *testing.T) {
 	}
 }
 
-func TestRelayer_RefusesWhenBalanceBelowFloor(t *testing.T) {
+// pricedRelayBuilder prepares a relay costing 300k gas at 1 gwei: its own fee,
+// with gasFeeBuffer, is 6e14 wei.
+type pricedRelayBuilder struct{}
+
+func (pricedRelayBuilder) BuildUnsignedTx(_, _ string, _ []byte) ([]byte, error) {
+	return json.Marshal(blockchain.UnsignedTx{Nonce: 1, GasPrice: "1000000000", GasLimit: 300_000,
+		To: forwarderHex, Value: "0", ChainID: "146"})
+}
+
+// Floors are alert-only (owner 2026-10-13): a relayer below its floor that can
+// still pay this relay's own fee relays (and alerts).
+func TestRelayer_BelowFloorButAbleToPayStillRelays(t *testing.T) {
 	r := newRig(t)
-	r.chain.balance = big.NewInt(1e16) // floor is 1e17
+	r.svc.builder = pricedRelayBuilder{}
+	r.chain.balance = big.NewInt(1e16) // floor is 1e17; the relay needs 6e14
+	if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); err != nil {
+		t.Fatalf("below the floor but able to pay: %v", err)
+	}
+	if r.signer.calls() != 1 {
+		t.Fatalf("broadcasts = %d, want 1", r.signer.calls())
+	}
+}
+
+// A relayer that cannot pay this relay's own fee refuses with the existing
+// error class and broadcasts nothing.
+func TestRelayer_RefusesWhenItCannotPayTheRelaysFee(t *testing.T) {
+	r := newRig(t)
+	r.svc.builder = pricedRelayBuilder{}
+	r.chain.balance = big.NewInt(1e14) // the relay needs 6e14
 	_, err := r.svc.Relay(context.Background(), userAddr, r.req())
 	if !errors.Is(err, ErrRelayerUnderfunded) {
 		t.Fatalf("expected ErrRelayerUnderfunded, got %v", err)
 	}
-	if r.signer.broadcastCalls != 0 {
+	if r.signer.calls() != 0 {
 		t.Fatal("must not broadcast transactions that will fail for gas")
 	}
 }
@@ -460,6 +492,8 @@ func TestRelayer_DoesNotBroadcastWhenSimulationErrorsTransiently(t *testing.T) {
 	}
 }
 
+// Owner decision 2026-10-13: the relayer keeps its own key — owner, operator
+// and guardian are all refused (boot then leaves the relayer dormant).
 func TestRelayer_AssertRoleSeparationRejectsOwnerOperatorGuardian(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
@@ -624,5 +658,81 @@ func TestRelayer_BudgetReleasedWhenTheRequestNeverBroadcasts(t *testing.T) {
 	}
 	if got := r.svc.SpentToday(); got.Sign() != 0 {
 		t.Fatalf("budget leaked %s gas on a request that never broadcast", got)
+	}
+}
+
+// laggingRelayBuilder prepares every relay at the same pending nonce, as a
+// load-balanced RPC does while earlier relays are still unseen.
+type laggingRelayBuilder struct{ nonce uint64 }
+
+func (b laggingRelayBuilder) BuildUnsignedTx(_, _ string, _ []byte) ([]byte, error) {
+	return unsignedOn(146, b.nonce)
+}
+
+// The relayer used to build and broadcast with no lock: concurrent relays on a
+// lagging RPC signed one nonce twice. On its key lane they get 9, 10, 11 — and
+// a relay on the operator's key shares the operator's lane.
+func TestRelayer_ConcurrentRelaysOnTheKeyLaneGetDistinctNonces(t *testing.T) {
+	r := newRig(t)
+	key, _ := crypto.GenerateKey()
+	node := &laneNode{id: 146}
+	reg := NewSignerRegistry()
+	lane := reg.Lane("relayer", key, node)
+	r.svc.builder = laggingRelayBuilder{nonce: 9}
+	r.svc.signer, r.svc.lane = lane.Signer(), lane
+	if reg.Lane("it_operator", key, node) != lane {
+		t.Fatal("relayer and operator on one key must share the lane")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Three different requests (one request is one operation: a
+			// retry of the same one reuses its allocation).
+			req := r.req(func(f *ForwardRequest) { f.Data = spendCalldata(int64(5_000 + i)) })
+			if _, err := r.svc.Relay(context.Background(), userAddr, req); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	seen := map[uint64]bool{}
+	for _, n := range node.sent() {
+		seen[n] = true
+	}
+	if len(seen) != 3 || !seen[9] || !seen[10] || !seen[11] {
+		t.Fatalf("nonces %v, want 9, 10, 11", node.sent())
+	}
+}
+
+// Review item 7: a relay the node definitely refused (nothing broadcast) is
+// recorded as not broadcast, not as a broadcast error.
+func TestRelayer_DefiniteRefusalIsRecordedAsNotBroadcast(t *testing.T) {
+	r := newRig(t)
+	r.signer.err = notBroadcast(errors.New("transaction underpriced"))
+	_, err := r.svc.Relay(context.Background(), userAddr, r.req())
+	if !errors.Is(err, ErrTxNotBroadcast) {
+		t.Fatalf("err = %v, want not broadcast", err)
+	}
+	last := r.metrics.attempts[len(r.metrics.attempts)-1]
+	if last.outcome != "rejected" || last.reason != "not_broadcast" {
+		t.Fatalf("metric = %+v, want rejected/not_broadcast", last)
+	}
+}
+
+// Review: the relayer's role check is re-probed — off while the key holds a
+// swap role or the read fails, on once it reads clean.
+func TestRelayer_ProbeRolesTurnsRelayingOnAndOff(t *testing.T) {
+	r := newRig(t)
+	r.svc.rolesOK.Store(false)
+	if r.svc.IsEnabled() {
+		t.Fatal("unprobed: must be off")
+	}
+	if err := r.svc.ProbeRoles(context.Background(), fakeRoles{owner: userAddr}); err != nil || !r.svc.IsEnabled() {
+		t.Fatalf("clean roles: err=%v enabled=%v", err, r.svc.IsEnabled())
+	}
+	if err := r.svc.ProbeRoles(context.Background(), fakeRoles{owner: userAddr, operator: true}); err == nil || r.svc.IsEnabled() {
+		t.Fatalf("operator: err=%v enabled=%v, want off", err, r.svc.IsEnabled())
 	}
 }

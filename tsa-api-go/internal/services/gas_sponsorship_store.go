@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +15,9 @@ type sponsorshipStore interface {
 	Reserve(ctx context.Context, row *models.GasSponsorship) (*models.GasSponsorship, error)
 	SetTxHash(ctx context.Context, id uuid.UUID, txHash, amountWei string) error
 	Release(ctx context.Context, id uuid.UUID) error
+	// ForgetCancelled drops a row whose sent transaction the key lane proved
+	// cancelled (it never executed), only while it still records that hash.
+	ForgetCancelled(ctx context.Context, id uuid.UUID, txHash string) (bool, error)
 	CountUnusedTopUpsSince(ctx context.Context, userID uuid.UUID, since time.Time) (int64, error)
 }
 
@@ -38,10 +42,25 @@ func (s *GormSponsorshipStore) Reserve(ctx context.Context, row *models.GasSpons
 	return &existing, nil
 }
 
+// SetTxHash writes the sent tx on the row; inside a key lane hook (ctx from
+// the lane) it is part of the lane's allocation transaction.
 func (s *GormSponsorshipStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
-	return s.DB.WithContext(ctx).Model(&models.GasSponsorship{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"tx_hash": txHash, "amount_wei": amountWei}).Error
+	// Exactly one row, still unsent: the hook's guard (else nothing signs).
+	res := LaneDB(ctx, s.DB).Model(&models.GasSponsorship{}).
+		Where("id = ? AND (tx_hash = '' OR tx_hash IS NULL)", id).
+		Updates(map[string]any{"tx_hash": txHash, "amount_wei": amountWei})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("sponsorship %s already records a transaction", id)
+	}
+	return nil
+}
+
+func (s *GormSponsorshipStore) ForgetCancelled(ctx context.Context, id uuid.UUID, txHash string) (bool, error) {
+	res := s.DB.WithContext(ctx).Where("id = ? AND tx_hash = ? AND tx_hash <> ''", id, txHash).Delete(&models.GasSponsorship{})
+	return res.RowsAffected == 1, res.Error
 }
 
 func (s *GormSponsorshipStore) Release(ctx context.Context, id uuid.UUID) error {

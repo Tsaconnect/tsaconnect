@@ -38,13 +38,7 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 	}
 	// The one protection that holds in prod today: ENV=development there makes
 	// rawSignerKeyAllowed allow every raw key (spec §7 caveat).
-	if err := assertDistinctKey("RAMP_TREASURY_WALLET_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":       cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":   cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":    cfg.PMReleasePrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY":  cfg.RampSponsorPrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY": cfg.RampTreasuryPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_TREASURY_WALLET_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_TREASURY_WALLET_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}
@@ -61,7 +55,7 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 		return nil
 	}
 	lanes, _ := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
-		chains: cfg.RampTreasuryWalletChains, guardPrefix: "ramp_company_wallet_",
+		chains: cfg.RampTreasuryWalletChains, guardPrefix: "ramp_company_wallet_", role: "company_wallet",
 		logTag: "[ramp-company-wallet]", metric: "ramp_company_wallet", needRouters: false,
 	})
 	decimals := map[string]map[string]int{}
@@ -102,6 +96,12 @@ func buildCompanyWallet(cfg *config.Config, chains *services.BlockchainService) 
 	if len(lanes) == 0 {
 		log.Printf("[ramp-company-wallet] dormant: no usable chain in RAMP_TREASURY_WALLET_CHAINS=%v", cfg.RampTreasuryWalletChains)
 		return nil
+	}
+	// Each lane keeps back the transfers its paid, undelivered sales owe.
+	for chain, lane := range lanes {
+		if lane.KeyLane != nil && config.DB != nil {
+			lane.KeyLane.AddReservation("company_wallet_owed_"+chain, services.NewCompanyWalletCommitments(config.DB, chain).Units)
+		}
 	}
 	// No value caps on the lane (review C2): the maximum is enforced where
 	// orders are priced, and free stock is the real per-token limit (§4.1).

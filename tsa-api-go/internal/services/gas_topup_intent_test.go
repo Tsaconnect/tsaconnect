@@ -43,6 +43,16 @@ func (f *fakeIntentTopUps) RecordTopUp(_ context.Context, id uuid.UUID, txHash, 
 	return nil
 }
 
+func (f *fakeIntentTopUps) ClearCancelledTopUp(_ context.Context, id uuid.UUID, txHash string) (bool, error) {
+	if f.recorded[id][0] != txHash {
+		return false, nil
+	}
+	delete(f.recorded, id)
+	delete(f.claimed, id)
+	f.cleared++
+	return true, nil
+}
+
 func (f *fakeIntentTopUps) CountToppedUpSince(_ context.Context, _ uuid.UUID, since time.Time) (int64, error) {
 	f.toppedSince = since
 	return f.toppedToday, nil
@@ -503,10 +513,10 @@ func TestSellIntentTopUpStore(t *testing.T) {
 	}
 	hash3, hash4 := testSwapHash2[:len(testSwapHash2)-1]+"3", testSwapHash2[:len(testSwapHash2)-1]+"4"
 	mkt := models.SellIntentPurposeMarketplace
-	seed(models.SellIntentFailed, nil, &earlier, earlier)                // unused: gas taken, nothing ever sent
-	seed(models.SellIntentFailed, &hash, &earlier, earlier)              // a sale that swapped, then failed: an honest attempt, not unused
-	seed(models.SellIntentFailed, nil, nil, earlier)                     // never topped up
-	seed(models.SellIntentFailed, nil, &earlier, now.Add(-30*time.Hour)) // too long ago
+	seed(models.SellIntentFailed, nil, &earlier, earlier)                     // unused: gas taken, nothing ever sent
+	seed(models.SellIntentFailed, &hash, &earlier, earlier)                   // a sale that swapped, then failed: an honest attempt, not unused
+	seed(models.SellIntentFailed, nil, nil, earlier)                          // never topped up
+	seed(models.SellIntentFailed, nil, &earlier, now.Add(-30*time.Hour))      // too long ago
 	seedAs(mkt, nil, models.SellIntentFailed, &hash3, &earlier, earlier)      // a funding hash LiFi never saw: unused
 	seedAs(mkt, &earlier, models.SellIntentFailed, &hash4, &earlier, earlier) // a funding swap LiFi saw, then refunded: not unused
 	if n, err := r.svc.CountUnusedSince(ctx, r.user.ID, now.Add(-24*time.Hour)); err != nil || n != 2 {

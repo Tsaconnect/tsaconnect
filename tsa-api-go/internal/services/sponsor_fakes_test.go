@@ -3,9 +3,9 @@ package services
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math/big"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -79,6 +80,16 @@ func (f *fakeSponsorStore) SetTxHash(_ context.Context, id uuid.UUID, txHash, am
 		r.TxHash, r.AmountWei = txHash, amountWei
 	}
 	return nil
+}
+
+func (f *fakeSponsorStore) ForgetCancelled(_ context.Context, id uuid.UUID, txHash string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r, ok := f.rows[id]; ok && r.TxHash == txHash && txHash != "" {
+		delete(f.rows, id)
+		return true, nil
+	}
+	return false, nil
 }
 
 func (f *fakeSponsorStore) Release(_ context.Context, id uuid.UUID) error {
@@ -207,7 +218,15 @@ func (f *fakeSponsorBuilder) BuildUnsignedCall(_, to string, callData []byte, va
 	if f.err != nil {
 		return nil, f.err
 	}
-	return []byte(`{"unsigned":true}`), nil
+	limit := gasLimit
+	if limit == 0 {
+		limit = 100_000
+	}
+	v := "0"
+	if value != nil {
+		v = value.String()
+	}
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: "1000000000", GasLimit: limit, To: to, Value: v})
 }
 
 // lastCall is the mutex-guarded accessor for what BuildUnsignedCall was last
@@ -279,7 +298,7 @@ func (f *fakeSponsorNative) PrepareNativeTransfer(_, to string, amountWei *big.I
 	if f.prepareErr != nil {
 		return nil, f.prepareErr
 	}
-	return []byte(`{"native":true}`), nil
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: f.gasPrice.String(), GasLimit: 21_000, To: to, Value: amountWei.String()})
 }
 
 func (f *fakeSponsorNative) EstimateGas(ethereum.CallMsg) (uint64, error) {
@@ -364,7 +383,7 @@ func (f *fakeSponsorNative) PrepareERC20Approve(tokenAddress, owner, spender str
 	if f.approveErr != nil {
 		return nil, f.approveErr
 	}
-	return []byte(`{"approve":true}`), nil
+	return json.Marshal(blockchain.UnsignedTx{GasPrice: f.gasPrice.String(), GasLimit: 60_000, To: tokenAddress, Value: "0"})
 }
 
 // approveCall is the mutex-guarded accessor for the last PrepareERC20Approve
@@ -383,7 +402,7 @@ func (f *fakeSponsorNative) PrepareERC20Transfer(tokenAddress, from, to string, 
 	if f.transferErr != nil {
 		return nil, f.transferErr
 	}
-	return []byte(`{"transfer":true,"nonce":` + strconv.FormatUint(f.transferNonce, 10) + `}`), nil
+	return json.Marshal(blockchain.UnsignedTx{Nonce: f.transferNonce, GasPrice: f.gasPrice.String(), GasLimit: 60_000, To: tokenAddress, Value: "0"})
 }
 
 // transferCall is the mutex-guarded accessor for the last
@@ -438,6 +457,7 @@ func newSponsorRig(chainKey, token string) (*sponsorRig, uuid.UUID) {
 		Tokens:      map[string]string{"USDC": sponsorTestUSDC, "USDT": sponsorTestBscUSDT},
 		TopUpMaxWei: big.NewInt(1_000_000_000_000_000), // 0.001 native
 	}
+	withTestLane(r.lane)
 	return r, orderID
 }
 
@@ -457,4 +477,33 @@ func withBaseUSDCDomain(t *testing.T, r *sponsorRig) {
 		"54fd4d50": abiString(t, "2"),
 		"3644e515": common.FromHex("0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f"),
 	}
+}
+
+// chainBalances adapts a BalanceAt reader (a sponsor or relay chain) to a
+// test lane's balance read.
+type chainBalances struct {
+	c interface {
+		BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+	}
+}
+
+func (b chainBalances) NativeBalance(ctx context.Context, address string) (*big.Int, error) {
+	return b.c.BalanceAt(ctx, common.HexToAddress(address), nil)
+}
+
+// sponsorLaneBalances reads the lane's own Chain at call time (a test may swap
+// it after the lane is built).
+type sponsorLaneBalances struct{ l *SponsorLane }
+
+func (b sponsorLaneBalances) NativeBalance(ctx context.Context, address string) (*big.Int, error) {
+	return chainBalances{b.l.Chain}.NativeBalance(ctx, address)
+}
+
+// withTestLane gives a test-built SponsorLane the solo key lane boot would
+// take from the registry, gated on the lane's own chain balances.
+func withTestLane(l *SponsorLane) *SponsorLane {
+	if l != nil && l.KeyLane == nil {
+		l.KeyLane = soloLane(nil, sponsorLaneBalances{l})
+	}
+	return l
 }

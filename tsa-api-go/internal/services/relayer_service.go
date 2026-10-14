@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -43,7 +44,7 @@ var (
 	ErrBelowMinSponsored     = errors.New("amount is below the minimum we sponsor gas for")
 	ErrRateLimited           = errors.New("too many sponsored transactions; try again shortly")
 	ErrDailyCapExceeded      = errors.New("daily gas-sponsorship budget exhausted")
-	ErrRelayerUnderfunded    = errors.New("relayer balance is below its floor")
+	ErrRelayerUnderfunded    = errors.New("the sending wallet cannot pay for this transaction's gas")
 	ErrSimulationReverted    = errors.New("transaction would revert")
 	ErrSimulationUnavailable = errors.New("could not simulate the transaction; try again")
 	ErrRoleSeparation        = errors.New("relayer key must not also be owner, operator, or guardian")
@@ -154,7 +155,11 @@ const forwarderExecuteABI = `[
 ]`
 
 type RelayerService struct {
-	signer    ReleaseSigner
+	signer ReleaseSigner
+	// lane is the relayer key's KeyLane on Sonic (lock + nonce floor),
+	// shared with every other role on the same key. Before it existed the
+	// relayer built and broadcast with no lock at all.
+	lane      *KeyLane
 	chain     relayChain
 	builder   relayTxBuilder
 	forwarder string
@@ -166,12 +171,18 @@ type RelayerService struct {
 
 	guard *SponsorGuard
 
+	// rolesOK: the key was last read holding no swap role (ProbeRoles).
+	rolesOK atomic.Bool
+
 	mu     sync.Mutex
 	domain EIP712Domain // cached after the first read from the forwarder
 }
 
+// NewRelayerService builds the relayer on its key's lane (a SignerRegistry
+// lane at boot). It relays nothing until ProbeRoles has found the key holds no
+// swap role.
 func NewRelayerService(
-	signer ReleaseSigner,
+	lane *KeyLane,
 	chain relayChain,
 	builder relayTxBuilder,
 	forwarder string,
@@ -190,8 +201,12 @@ func NewRelayerService(
 	if now == nil {
 		now = time.Now
 	}
+	var signer ReleaseSigner
+	if lane != nil {
+		signer = lane.Signer()
+	}
 	return &RelayerService{
-		signer: signer, chain: chain, builder: builder,
+		signer: signer, lane: lane, chain: chain, builder: builder,
 		forwarder: strings.ToLower(strings.TrimSpace(forwarder)),
 		allow:     allow, limits: limits, metrics: metrics, now: now, fwdABI: parsed,
 		guard: NewSponsorGuard("relayer", limits.SponsorLimits, now),
@@ -205,10 +220,34 @@ func NewRelayerService(
 // unsynchronised read of it is a data race the detector flags the moment two
 // requests overlap.
 func (r *RelayerService) IsEnabled() bool {
-	if r == nil || r.signer == nil || r.chain == nil || r.builder == nil || r.forwarder == "" {
+	if !r.configured() || !r.rolesOK.Load() {
 		return false
 	}
 	return !r.guard.Killed()
+}
+
+// configured: a key lane, a chain, a builder and a forwarder.
+func (r *RelayerService) configured() bool {
+	return r != nil && r.signer != nil && r.lane != nil && r.chain != nil && r.builder != nil && r.forwarder != ""
+}
+
+// ProbeRoles runs AssertRoleSeparation and records the answer: the relayer
+// relays only while its key provably holds no swap role. A failed read keeps
+// it off (or turns it off) and is returned, so the 60 s relayer-role-probe
+// job's failure-streak ALERT fires while it lasts.
+func (r *RelayerService) ProbeRoles(ctx context.Context, roles relayRoleReader) error {
+	if !r.configured() {
+		return nil
+	}
+	err := r.AssertRoleSeparation(ctx, roles)
+	was := r.rolesOK.Swap(err == nil)
+	switch {
+	case err == nil && !was:
+		log.Printf("[relayer] roles verified (no owner/operator/guardian) — gasless relaying live relayer=%s", r.signer.Address())
+	case err != nil && was:
+		log.Printf("[relayer] ALERT relayer_role_check_failed=1 relayer=%s err=%s — gasless dormant", r.signer.Address(), RedactAlertText(err.Error()))
+	}
+	return err
 }
 
 // SetKillSwitch forces every request to self-pay regardless of configuration.
@@ -218,12 +257,14 @@ func (r *RelayerService) SetKillSwitch(on bool) {
 	r.guard.SetKillSwitch(on)
 }
 
-// AssertRoleSeparation fails startup if the relayer key also holds a privileged
-// role. A relayer key is hot — it broadcasts constantly from a server — so it is
-// far more exposed than the operator key. If they are the same EOA, a relayer
-// compromise becomes an operator compromise.
+// AssertRoleSeparation reports an error when the relayer key holds a
+// privileged role on the swap — owner, operator or guardian. A relayer key is
+// hot (it broadcasts constantly from a server), so a compromise of it must not
+// be a compromise of the operator, whose debits move users' MCGP (owner
+// decision 2026-10-13: the relayer keeps its own key). Boot treats an error as
+// "relayer dormant", never as a reason to stop the whole API.
 func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRoleReader) error {
-	if !r.IsEnabled() || roles == nil {
+	if !r.configured() || roles == nil {
 		return nil
 	}
 	addr := strings.ToLower(r.signer.Address())
@@ -257,6 +298,11 @@ func (r *RelayerService) AssertRoleSeparation(ctx context.Context, roles relayRo
 // `authenticatedWallet` is the wallet the API session belongs to. Binding it to
 // req.From is the single most important check here: without it the endpoint is a
 // free "relay anything anyone signed" oracle.
+// ErrRelayInProgress: the relay is (or may be) in flight but its hash is not
+// known yet; the error names the operation. Retry the same request: it gets
+// the same relay, never a second one.
+var ErrRelayInProgress = errors.New("relayer: relay in progress")
+
 func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, req ForwardRequest) (string, error) {
 	if !r.IsEnabled() {
 		r.metrics.RelayAttempt("rejected", "disabled")
@@ -270,6 +316,19 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 	if err != nil {
 		r.metrics.RelayAttempt("rejected", "encode")
 		return "", err
+	}
+	op := "relay:" + crypto.Keccak256Hash(execData).Hex()
+	// A retry of a request already committed is answered from its allocation
+	// FIRST — before the rate limit, the budget or the simulation (which would
+	// now revert: the forwarder nonce is spent) — and holds nothing to release.
+	if h, found, err := r.lane.OperationStatus(ctx, r.signer.Address(), op); err != nil {
+		return "", fmt.Errorf("%w: %s", ErrRelayInProgress, op)
+	} else if found {
+		if h == "" {
+			return "", fmt.Errorf("%w: %s", ErrRelayInProgress, op)
+		}
+		r.metrics.RelayAttempt("ok", "retry")
+		return h, nil
 	}
 
 	if err := r.checkBalance(ctx); err != nil {
@@ -308,18 +367,52 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		return "", err
 	}
 
-	unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
-	if err != nil {
+	// Built and broadcast under the key's lane: the nonce read in the build
+	// and the broadcast never interleave with another send on the same key.
+	// The request itself is the operation (its digest: the signed forward
+	// request, nonce included), so a client retry of the same request gets
+	// the same allocation, never a second relay.
+	built := false
+	txHash, attempted, err := r.lane.Send(WithOperationRef(ctx, op), func() ([]byte, error) {
+		unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
+		if err != nil {
+			return nil, err
+		}
+		built = true
+		return unsigned, nil
+	})
+	if txHash == "" {
+		txHash = uncertainTxHash(err)
+	}
+	switch {
+	case err == nil:
+	case attempted:
+		// Committed (in flight: ErrPendingBroadcast) or not provably unsent
+		// (ErrSendOutcomeUnknown): the relay may land, so its budget and the
+		// user's slot stay spent and the client gets the hash to follow —
+		// or, with no hash known, an in-progress answer naming the operation.
+		r.metrics.RelayAttempt("ok", "in_flight")
+		log.Printf("[relayer] relay %q (%s) in flight: %s", txHash, op, RedactAlertText(err.Error()))
+		if txHash == "" {
+			return "", fmt.Errorf("%w: %s", ErrRelayInProgress, op)
+		}
+		return txHash, nil
+	case errors.Is(err, ErrRelayerUnderfunded):
+		// The key lane's fee gate: this relay's own fee (plus the lane's
+		// reservation) is more than the relayer holds.
+		releaseOurFault()
+		r.metrics.RelayAttempt("rejected", "underfunded")
+		return "", err
+	case !built:
 		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "build")
 		return "", fmt.Errorf("relayer: build tx: %w", err)
-	}
-
-	txHash, err := r.signer.SignAndBroadcast(ctx, unsigned)
-	if err != nil {
+	default:
+		// Not attempted: the lane proved (RetireOp) nothing of this request
+		// was committed.
 		releaseOurFault()
-		r.metrics.RelayAttempt("error", "broadcast")
-		return "", fmt.Errorf("relayer: broadcast: %w", err)
+		r.metrics.RelayAttempt("rejected", "not_broadcast")
+		return "", fmt.Errorf("relayer: not broadcast: %w", err)
 	}
 
 	r.metrics.RelayGasUnits(new(big.Int).SetUint64(req.Gas))
@@ -413,16 +506,16 @@ func (r *RelayerService) checkMinSponsored(a AllowedCall, data []byte) error {
 	return nil
 }
 
+// checkBalance reads the relayer's native balance and raises the refill ALERT
+// below its floor. The floor never refuses (owner 2026-10-13): the key lane's
+// fee gate decides whether this relay's own transaction can be paid.
 func (r *RelayerService) checkBalance(ctx context.Context) error {
 	bal, err := r.chain.BalanceAt(ctx, common.HexToAddress(r.signer.Address()), nil)
 	if err != nil {
 		r.metrics.RelayAttempt("error", "balance")
 		return fmt.Errorf("relayer: read balance: %w", err)
 	}
-	if err := r.guard.CheckFloor(bal); err != nil {
-		r.metrics.RelayAttempt("rejected", "underfunded")
-		return err
-	}
+	r.guard.AlertFloor(bal)
 	return nil
 }
 

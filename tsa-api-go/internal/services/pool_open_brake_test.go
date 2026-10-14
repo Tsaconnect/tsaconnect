@@ -132,9 +132,10 @@ func TestPoolOpen_BurstReadsOnceThenSends(t *testing.T) {
 	if got := strings.Join(events, ","); got != "prepare,prepare,broadcast,broadcast" {
 		t.Fatalf("events = %s, want both slices prepared before the first send", got)
 	}
-	// One read for the guard's cached gas reading, one for the burst.
-	if cc.balances != 2 {
-		t.Fatalf("treasury balance read %d times for a two-slice burst, want 2", cc.balances)
+	// One read for the guard's cached gas reading, one for the burst, and one
+	// per send: the key lane's fee gate reads the balance under its lock.
+	if cc.balances != 4 {
+		t.Fatalf("treasury balance read %d times for a two-slice burst, want 4", cc.balances)
 	}
 	slices := r.slicesOf(t, intent.ID)
 	if len(slices) != 2 || slices[0].OpenNonce == nil || slices[1].OpenNonce == nil || *slices[0].OpenNonce == *slices[1].OpenNonce {

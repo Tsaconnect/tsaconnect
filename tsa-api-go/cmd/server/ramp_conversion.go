@@ -55,7 +55,7 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	}
 
 	lanes, missing := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
-		chains: cfg.RampTreasuryChains, guardPrefix: "ramp_treasury_",
+		chains: cfg.RampTreasuryChains, guardPrefix: "ramp_treasury_", role: "treasury",
 		logTag: "[ramp-conversion]", metric: "ramp_treasury", needRouters: true,
 	})
 	if len(missing) > 0 {
@@ -72,6 +72,13 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		return nil, nil
 	}
 
+	// Each lane keeps back what converted buys already in flight from it owe
+	// (their route + approve), so a new open or send never spends it.
+	for chain, lane := range lanes {
+		if lane.KeyLane != nil && config.DB != nil {
+			lane.KeyLane.AddReservation("treasury_converting_"+chain, services.NewConversionTreasuryCommitments(config.DB, chain).Units)
+		}
+	}
 	treasury := services.NewTreasury(lanes, caps, nil)
 	// An empty address means the configured lanes disagree about their
 	// signer (NewTreasury already logged the mismatch ALERT) — a hard
@@ -155,13 +162,7 @@ func rampTreasuryKey(cfg *config.Config, logTag string) (*ecdsa.PrivateKey, bool
 		log.Printf("%s dormant: invalid RAMP_TREASURY_PRIVATE_KEY: %v", logTag, err)
 		return nil, false
 	}
-	if err := assertDistinctKey("RAMP_TREASURY_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_TREASURY_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_TREASURY_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil, false
 	}
@@ -173,6 +174,7 @@ type treasuryLaneSpec struct {
 	chains      []string
 	network     string // "" = mainnet
 	guardPrefix string // the lane guard's namespace, so two treasuries never share a kill switch
+	role        string // the signer role named in the registry's boot summary
 	logTag      string
 	metric      string
 	// needRouters: only a treasury that executes LiFi routes needs a router
@@ -198,7 +200,7 @@ func buildTreasuryLanes(cfg *config.Config, chains *services.BlockchainService, 
 			missing = append(missing, chain)
 			continue
 		}
-		lane := buildSponsorLaneOn(chains, network, chain, key, spec.guardPrefix+chain, services.SponsorLimits{
+		lane := buildSponsorLaneOn(chains, network, chain, spec.role, key, spec.guardPrefix+chain, services.SponsorLimits{
 			BalanceFloor: floor,
 		}, nil)
 		if lane == nil {

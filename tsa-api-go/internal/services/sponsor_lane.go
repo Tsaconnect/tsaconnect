@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -80,42 +79,59 @@ type SponsorLane struct {
 	Tokens      map[string]string // SYMBOL -> contract address, from BlockchainService.TokenAddress
 	TopUpMaxWei *big.Int          // refuse a single top-up above this
 
-	// sendMu serialises nonce read -> broadcast. PendingNonceAt hands two
-	// concurrent builds the same nonce; one then fails as "nonce too low"
-	// after we already told the user it was sent. Same fix as
-	// MCGPSwapService.signMu.
-	sendMu sync.Mutex
+	// KeyLane is the key's one send lane on this chain, from the boot
+	// SignerRegistry: the lock from nonce read to broadcast and the nonce
+	// floor and fee gate, shared with every other role signing with this key on this chain
+	// (PendingNonceAt hands two concurrent builds the same nonce; one then
+	// fails as "nonce too low" after we already told the user it was sent).
+	// Signer must be KeyLane.Signer() (a test may swap Signer for a fake).
+	// Required: a SponsorLane without one refuses every send.
+	KeyLane *KeyLane
 }
 
-// send builds and broadcasts one tx. broadcastAttempted separates a build
-// failure (nothing left this process, safe to free the order's slot) from a
-// broadcast failure, which is not proof of rejection: an RPC timeout can hide
-// a tx the node accepted, so callers must keep the slot on that path. The one
-// exception is a refusal the signer marks ErrTxNotBroadcast (the node said
-// the sender cannot pay): that tx provably never left, so it is reported as
-// not attempted.
+// errNoKeyLane: a SponsorLane built without its key's registry lane never
+// sends (boot always sets KeyLane; a lane outside the registry would hold a
+// private nonce lock).
+var errNoKeyLane = notBroadcast(errors.New("sponsor lane has no key lane from the signer registry"))
+
+// callCancelled is the key lane's verdict (CallOutcome, re-proven on chain
+// at the finality depth) that the transaction hash this sponsor lane sent
+// never executed — its claim on a sponsorship may be given back. A read
+// error is "not cancelled" (in flight).
+func (l *SponsorLane) callCancelled(ctx context.Context, hash string) bool {
+	if l == nil || l.KeyLane == nil || hash == "" {
+		return false
+	}
+	c, err := l.KeyLane.CallCancelled(ctx, hash)
+	return err == nil && c
+}
+
+// nonceLane is the lane every send on this SponsorLane goes through (nil
+// without one; KeyLane's methods are nil-safe where a quote asks).
+func (l *SponsorLane) nonceLane() *KeyLane { return l.KeyLane }
+
+// send builds and broadcasts one tx on the key's lane (lock + nonce floor).
+// broadcastAttempted separates a build failure (nothing left this process,
+// safe to free the order's slot) from a broadcast failure, which is not proof
+// of rejection: an RPC timeout can hide a tx the node accepted, so callers
+// must keep the slot on that path. The one exception is a refusal the signer
+// marks ErrTxNotBroadcast (e.g. the node said the sender cannot pay): that tx
+// provably never left, so it is reported as not attempted.
 func (l *SponsorLane) send(ctx context.Context, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
-	return sendLocked(ctx, &l.sendMu, l.Signer, build)
+	return l.sendRecorded(ctx, build, nil)
 }
 
-// sendLocked builds and broadcasts one tx while holding mu from build (its
-// nonce read) to broadcast. Shared by every key that must never hand two
-// concurrent builds the same nonce: a sponsor lane, and each chain of the
-// release signer (spec S8). broadcastAttempted separates a build failure
-// (nothing left this process) from a broadcast failure, which is not proof of
-// rejection; a refusal the signer marks ErrTxNotBroadcast is "not attempted".
-func sendLocked(ctx context.Context, mu *sync.Mutex, signer ReleaseSigner, build func() ([]byte, error)) (txHash string, broadcastAttempted bool, err error) {
-	mu.Lock()
-	defer mu.Unlock()
-	unsigned, err := build()
-	if err != nil {
-		return "", false, err
+// sendRecorded is send with hook as the pre-broadcast write, inside the key
+// lane's allocation transaction (KeyLane.SendRecorded). A nil hook keeps one
+// the caller attached to ctx.
+func (l *SponsorLane) sendRecorded(ctx context.Context, build func() ([]byte, error), hook LaneHook) (string, bool, error) {
+	if l.KeyLane == nil {
+		return "", false, errNoKeyLane
 	}
-	txHash, err = signer.SignAndBroadcast(ctx, unsigned)
-	if errors.Is(err, ErrTxNotBroadcast) {
-		return "", false, err
+	if hook != nil {
+		ctx = WithPreBroadcast(ctx, hook)
 	}
-	return txHash, true, err
+	return l.KeyLane.sendWith(ctx, l.Signer, build)
 }
 
 func (l *SponsorLane) tokenAddress(symbol string) string {
@@ -143,21 +159,6 @@ func releaseSponsorshipRow(ctx context.Context, store sponsorshipStore, id uuid.
 	defer cancel()
 	if err := store.Release(releaseCtx, id); err != nil {
 		log.Printf("[ramp-sponsor] ALERT ramp_sponsor_release_failed_total=1 id=%s err=%v", id, err)
-	}
-}
-
-// recordSponsorshipTx writes the broadcast tx hash on a context that survives
-// the caller's own cancellation/deadline, for the same reason
-// releaseSponsorshipRow does: the broadcast already happened by the time this
-// runs, so a request ctx that dies between broadcast and this write must not
-// leave the row stuck with an empty tx hash — that stalls the once-per-order
-// slot as ErrSponsorshipInProgress forever and drops the top-up out of the
-// daily-cap count.
-func recordSponsorshipTx(ctx context.Context, store sponsorshipStore, id uuid.UUID, txHash, amountWei string) {
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if err := store.SetTxHash(recordCtx, id, txHash, amountWei); err != nil {
-		log.Printf("[ramp-sponsor] ALERT ramp_sponsor_record_failed_total=1 id=%s tx=%s err=%v", id, txHash, err)
 	}
 }
 

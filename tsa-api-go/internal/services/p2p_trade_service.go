@@ -2003,6 +2003,9 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	// flip to releasing won (on a slice with no recorded hash) may broadcast.
 	// A slice already releasing, or carrying a hash, has a release in flight
 	// that only the reconciler decides — never a second Send.
+	if trade.ReleaseRevertedAt != nil {
+		return nil, fmt.Errorf("%w: trade=%s its release reverted on chain; an operator decides", ErrInvalidTransition, trade.ID)
+	}
 	if trade.IsPoolSlice() && (trade.Status == models.P2PTradeStatusReleasing || trade.ReleaseTxHash != "") {
 		return nil, fmt.Errorf("%w: slice=%s status=%s tx=%q", ErrSliceReleaseInFlight, trade.ID, trade.Status, trade.ReleaseTxHash)
 	}
@@ -2058,32 +2061,117 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	}
 	// Spec S8/S39: the nonce read in PrepareAdminRelease and the broadcast run
 	// under this chain's release-key lock, shared with every other release-key job.
-	txHash, err := signer.Send(ctx, trade.ChainID, func() ([]byte, error) {
+	// The trade's release is the operation: a retry never gets a new nonce.
+	sendCtx := WithOperationRef(ctx, "p2p_release:"+trade.ID.String())
+	if trade.IsPoolSlice() {
+		// A slice's release is what the release lane's pool reservation is
+		// held for: it spends it rather than being refused by it.
+		sendCtx = ReservedSend(sendCtx)
+		// Plan C2 P2: the slice's release hash commits in the key lane's
+		// allocation transaction, with the signed release, or nothing does.
+		sendCtx = WithPreBroadcast(sendCtx, func(hctx context.Context, _ uint64, hash string) error {
+			res := LaneDB(hctx, s.db).Model(&models.P2PTrade{}).
+				Where("id = ? AND status = ? AND release_tx_hash IN ('', 'reconciled')", trade.ID, models.P2PTradeStatusReleasing).
+				Update("release_tx_hash", hash)
+			if res.Error == nil && res.RowsAffected != 1 {
+				return fmt.Errorf("%w: slice=%s no longer releasing without a hash", ErrSliceReleaseInFlight, trade.ID)
+			}
+			return res.Error
+		})
+	}
+	txHash, err := signer.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
 	})
-	if trade.IsPoolSlice() {
-		recorded := txHash
-		if recorded == "" {
-			recorded = uncertainTxHash(err) // re-review I-C: an uncertain broadcast carries its hash in the error
-		}
-		s.recordSliceReleaseHash(ctx, trade.ID, recorded) // plan C2 P2: before anything can fail
+	if txHash == "" {
+		txHash = uncertainTxHash(err)
+	}
+	if trade.IsPoolSlice() && txHash != "" {
+		// The retried path: an allocation this release already holds answers
+		// with its hash without running the hook again, so a slice reset meanwhile
+		// (cleared to paid, hash emptied) gets it here — same conditional write.
+		s.db.WithContext(detached(ctx)).Model(&models.P2PTrade{}).
+			Where("id = ? AND status = ? AND release_tx_hash IN ('', 'reconciled')", trade.ID, models.P2PTradeStatusReleasing).
+			Update("release_tx_hash", txHash)
 	}
 	if err != nil {
-		// Review C-1: a slice whose release may have been broadcast stays
-		// `releasing` (at the treasury) until its hash is proven reverted.
-		if !trade.IsPoolSlice() || errors.Is(err, ErrTxNotBroadcast) {
+		// A slice whose release may have been broadcast stays `releasing` (at
+		// the treasury) until its hash is proven reverted (review C-1). A
+		// release the key lane COMMITTED (ErrPendingBroadcast: it keeps
+		// sending it) is in flight: never rolled back either.
+		if errors.Is(err, ErrTxNotBroadcast) || (!trade.IsPoolSlice() && !errors.Is(err, ErrPendingBroadcast) && !errors.Is(err, ErrSendOutcomeUnknown)) {
 			rollback()
 		}
 		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
 	}
-	ev, err := escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
+	// Verified on whichever signing of the call mined (a speed-up during the
+	// wait is the release, not a failure).
+	ev, minedHash, err := s.verifyReleaseFollowing(ctx, escrow, signer, &trade, txHash)
 	if err != nil {
+		// Step back only when the lane proves the release holds nothing live
+		// or executed (RetireOp); a committed release stays releasing for the
+		// reconciler.
+		// A release that mined and REVERTED (at settle depth) is never rolled
+		// back to paid — the recovery sweep would release it again in a loop,
+		// burning release-key gas. It stays releasing, flagged for an
+		// operator. Otherwise step back only when the lane proves the release
+		// holds nothing live or executed.
 		if !trade.IsPoolSlice() {
-			rollback()
+			lane := laneOfSender(signer, trade.ChainID)
+			if reverted, rerr := lane.CallReverted(ctx, minedHash); rerr == nil && reverted {
+				s.markReleaseReverted(ctx, &trade, minedHash)
+			} else if rerr == nil && lane.GiveUp(ctx, signer.Address(), "p2p_release:"+trade.ID.String(), minedHash, RetireSequenced) {
+				rollback()
+			}
 		}
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
-	return s.confirmReleaseCore(ctx, &trade, txHash, nil, ev)
+	return s.confirmReleaseCore(ctx, &trade, minedHash, nil, ev)
+}
+
+// markReleaseReverted parks a trade whose system release mined and reverted:
+// it stays releasing with the reverted hash and release_reverted_at set, so
+// neither the reconciler's stale-release rollback nor AutoRelease touches it
+// again; an operator is alerted (deduped hourly per trade).
+func (s *P2PTradeService) markReleaseReverted(ctx context.Context, trade *models.P2PTrade, hash string) {
+	now := s.clock.Now()
+	res := s.db.WithContext(detached(ctx)).Model(&models.P2PTrade{}).
+		Where("id = ? AND status = ? AND release_reverted_at IS NULL", trade.ID, models.P2PTradeStatusReleasing).
+		Updates(map[string]any{"release_reverted_at": now, "release_tx_hash": hash, "updated_at": now})
+	if res.Error == nil && res.RowsAffected == 1 {
+		s.audit(ctx, models.P2PAuditReconcilerDrift, nil, &trade.AdID, &trade.ID, map[string]any{
+			"reason": "system release reverted on chain; parked for an operator", "tx": hash})
+	}
+	if reconcileAlerts.allow("p2p_release_reverted:"+trade.ID.String(), reconcileAlertEvery) {
+		log.Printf("[p2p] ALERT p2p_release_reverted_total=1 trade=%s tx=%s — the system release reverted on chain; the trade stays releasing and is not retried: an operator must decide", trade.ID, hash)
+	}
+}
+
+// laneOfSender is the release key's lane on chainID, when the sender
+// exposes it (ChainReleaseSigner); nil otherwise.
+func laneOfSender(signer ChainSender, chainID int64) *KeyLane {
+	if ls, ok := signer.(interface{ Lane(int64) *KeyLane }); ok {
+		return ls.Lane(chainID)
+	}
+	return nil
+}
+
+// verifyReleaseFollowing proves a release on its receipt, following the
+// key lane's speed-ups: hash first, then every other signing of the SAME
+// call (one mined in its place); it returns the hash that proved it.
+func (s *P2PTradeService) verifyReleaseFollowing(ctx context.Context, escrow P2PEscrowAdapter, signer ChainSender, trade *models.P2PTrade, hash string) (*P2PTradeReleasedEvent, string, error) {
+	// One non-waiting read picks the signing of the call that mined (or the
+	// lane's proven cancel); the receipt is then verified once, on it.
+	if lane := laneOfSender(signer, trade.ChainID); lane != nil && lane.receipts != nil {
+		mined, cancelled, err := lane.CallOutcome(ctx, hash, receiptExists(lane.receipts))
+		if cancelled {
+			return nil, hash, ErrCallCancelled
+		}
+		if err == nil {
+			hash = mined
+		}
+	}
+	ev, err := escrow.VerifyTradeReleased(hash, HashID(trade.ID))
+	return ev, hash, err
 }
 
 // PrepareCancel prepares an unsigned `cancelByTimeout` tx for a trade whose
@@ -2751,10 +2839,10 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 		// to `paid` so the seller can retry. We assume the prepared-but-
 		// never-broadcast window is bounded by the user's session; older
 		// than that and we give up waiting.
-		if trade.Status == models.P2PTradeStatusReleasing &&
+		if trade.Status == models.P2PTradeStatusReleasing && trade.ReleaseRevertedAt == nil &&
 			s.clock.Now().Sub(trade.UpdatedAt) > releasingStaleAfter {
 			res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-				Where("id = ? AND status = ?", trade.ID, models.P2PTradeStatusReleasing).
+				Where("id = ? AND status = ? AND release_reverted_at IS NULL", trade.ID, models.P2PTradeStatusReleasing).
 				Updates(map[string]any{
 					"status":     models.P2PTradeStatusPaid,
 					"updated_at": s.clock.Now(),

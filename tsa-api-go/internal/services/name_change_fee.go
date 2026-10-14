@@ -165,6 +165,17 @@ func (r *TreasuryFeeRail) VerifyPayment(ctx context.Context, chain, txHash, toke
 	return r.Verify(ctx, chain, txHash, tokenAddress, from, to)
 }
 
+// GiveUpCancelled is true only when the treasury lane proved the refund it
+// sent as txHash cancelled (never executed) AND the refund's operation was
+// given up through RetireOp — the caller may then send it again.
+func (r *TreasuryFeeRail) GiveUpCancelled(ctx context.Context, chain, op, txHash string) (bool, error) {
+	c, err := r.treasury.keyLane(chain).CallCancelled(ctx, txHash)
+	if err != nil || !c {
+		return false, err
+	}
+	return r.treasury.giveUp(ctx, chain, op, txHash, RetirePermanent), nil // the retry is attempt n+1: a new key
+}
+
 func (r *TreasuryFeeRail) Refund(ctx context.Context, chain, token, to string, amount *big.Int, usd float64) (string, bool, error) {
 	lane := r.treasury.Lane(chain)
 	if lane == nil {

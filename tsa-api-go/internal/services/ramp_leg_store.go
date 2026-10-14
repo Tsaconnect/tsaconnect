@@ -25,9 +25,12 @@ var ErrLegNotPending = errors.New("ramp leg is no longer pending")
 type rampLegStore interface {
 	Reserve(ctx context.Context, leg *models.RampLeg) (*models.RampLeg, error)
 	SetTxHash(ctx context.Context, id uuid.UUID, txHash, tool string) error
+	SetApproveHash(ctx context.Context, id uuid.UUID, txHash string) error
 	SetAmount(ctx context.Context, id uuid.UUID, amount string) error
 	Confirm(ctx context.Context, id uuid.UUID, amountReceived string, at time.Time) error
 	Fail(ctx context.Context, id uuid.UUID, reason string) error
+	FailUnsent(ctx context.Context, id uuid.UUID, reason string) error
+	FailExpected(ctx context.Context, id uuid.UUID, txHash, reason string) error
 	ForOrder(ctx context.Context, orderID uuid.UUID) ([]models.RampLeg, error)
 	NextAttempt(ctx context.Context, orderID uuid.UUID, kind string) (int, error)
 }
@@ -84,10 +87,38 @@ func (s *GormRampLegStore) Reserve(ctx context.Context, leg *models.RampLeg) (*m
 	return &existing, nil
 }
 
+// SetTxHash records a pending leg's transaction. A caller runs it as its
+// key lane pre-broadcast hook (ctx from the lane: LaneDB is the lane's
+// allocation transaction), so the leg and the signed call commit together; a
+// leg no longer pending (a refund won it) is ErrLegNotPending and nothing is
+// signed.
 func (s *GormRampLegStore) SetTxHash(ctx context.Context, id uuid.UUID, txHash, tool string) error {
-	return s.DB.WithContext(ctx).Model(&models.RampLeg{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"tx_hash": txHash, "lifi_tool": tool}).Error
+	res := LaneDB(ctx, s.DB).Model(&models.RampLeg{}).
+		Where("id = ? AND status = ? AND (tx_hash = '' OR tx_hash IS NULL)", id, models.RampLegStatusPending).
+		Updates(map[string]any{"tx_hash": txHash, "lifi_tool": tool})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return ErrLegNotPending
+	}
+	return nil
+}
+
+// SetApproveHash records a pending bridge leg's approve, in the key lane's
+// allocation transaction (the approve's pre-broadcast hook): a leg no longer
+// pending is ErrLegNotPending and the approve is not signed.
+func (s *GormRampLegStore) SetApproveHash(ctx context.Context, id uuid.UUID, txHash string) error {
+	res := LaneDB(ctx, s.DB).Model(&models.RampLeg{}).
+		Where("id = ? AND status = ? AND (approve_tx_hash = '' OR approve_tx_hash IS NULL)", id, models.RampLegStatusPending).
+		Update("approve_tx_hash", txHash)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return ErrLegNotPending
+	}
+	return nil
 }
 
 // SetAmount rewrites a reserved leg's amount before it is broadcast (the
@@ -128,6 +159,42 @@ func (s *GormRampLegStore) Fail(ctx context.Context, id uuid.UUID, reason string
 	res := s.DB.WithContext(ctx).Model(&models.RampLeg{}).
 		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
 		Updates(map[string]any{"status": models.RampLegStatusFailed, "error": reason})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrLegNotPending
+	}
+	return nil
+}
+
+// FailExpected fails a pending leg only while it still records txHash (""
+// for none): a leg whose recorded transaction moved on (a speed-up hash
+// written, a send committed) is never failed by a caller that read it stale.
+func (s *GormRampLegStore) FailExpected(ctx context.Context, id uuid.UUID, txHash, reason string) error {
+	q := s.DB.WithContext(ctx).Model(&models.RampLeg{}).Where("id = ? AND status = ?", id, models.RampLegStatusPending)
+	if txHash == "" {
+		q = q.Where("(tx_hash = '' OR tx_hash IS NULL)")
+	} else {
+		q = q.Where("tx_hash = ?", txHash)
+	}
+	res := q.Updates(map[string]any{"status": models.RampLegStatusFailed, "error": truncateRunes(reason, 512)})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrLegNotPending
+	}
+	return nil
+}
+
+// FailUnsent is Fail for a leg that recorded no transaction hash: a leg
+// whose send committed (its hook wrote the hash) is never freed by it
+// (ErrLegNotPending).
+func (s *GormRampLegStore) FailUnsent(ctx context.Context, id uuid.UUID, reason string) error {
+	res := s.DB.WithContext(ctx).Model(&models.RampLeg{}).
+		Where("id = ? AND status = ? AND (tx_hash = '' OR tx_hash IS NULL)", id, models.RampLegStatusPending).
+		Updates(map[string]any{"status": models.RampLegStatusFailed, "error": truncateRunes(reason, 512)})
 	if res.Error != nil {
 		return res.Error
 	}

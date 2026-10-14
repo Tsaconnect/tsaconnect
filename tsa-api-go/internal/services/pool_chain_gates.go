@@ -20,6 +20,7 @@ type PoolChainReader interface {
 	CallContract(ctx context.Context, call ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 	CodeAt(ctx context.Context, account common.Address, blockNumber *big.Int) ([]byte, error)
 	BalanceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (*big.Int, error)
+	SuggestGasPrice(ctx context.Context) (*big.Int, error)
 }
 
 // PoolChainGatesConfig is everything the TSA Liquidity boot gates read
@@ -58,7 +59,7 @@ type PoolGate interface {
 	Status() PoolGateStatus
 	Check(ctx context.Context) PoolGateStatus
 	Close(reason string)
-	ReleaseGasOK(ctx context.Context) bool
+	ReleaseGasOK(ctx context.Context, releases int, fresh bool) bool
 	ReprobeReceipts(ctx context.Context)
 	Enabled() bool
 	FloatBalances(ctx context.Context) ([]SponsorFloat, error)
@@ -75,7 +76,27 @@ type PoolChainGates struct {
 	c  PoolChainGatesConfig
 	mu sync.Mutex
 	st PoolGateStatus
+
+	gasMu   sync.Mutex
+	gasRead releaseGasReading
 }
+
+// releaseGasReading is the release key's balance and the gas price, as last
+// read for ReleaseGasOK.
+type releaseGasReading struct {
+	balance, price *big.Int
+	at             time.Time
+}
+
+const (
+	// releaseGasFresh: a quote or open within this of the last reading reuses
+	// it rather than spending two RPCs (single-flight: gasMu is held across
+	// the read).
+	releaseGasFresh = 5 * time.Second
+	// releaseGasStale: a failed read (a 429) falls back to a reading this
+	// young rather than closing the leg.
+	releaseGasStale = 30 * time.Second
+)
 
 func NewPoolChainGates(c PoolChainGatesConfig) *PoolChainGates { return &PoolChainGates{c: c} }
 
@@ -286,9 +307,69 @@ func (g *PoolChainGates) FloatBalances(ctx context.Context) ([]SponsorFloat, err
 	return []SponsorFloat{{Chain: g.c.ChainKey, Address: g.c.ReleaseAdmin, BalanceWei: bal, FloorWei: g.c.ReleaseGasFloorWei}}, nil
 }
 
+// poolReleaseCallGas budgets one adminRelease of a slice from the release key:
+// the same allowance the treasury makes for one escrow call.
+const poolReleaseCallGas = treasuryEscrowCallGas
+
 // ReleaseGasOK: paid orders must always be able to release, so a pool open is
-// refused below the floor (Plan C1 calls this).
-func (g *PoolChainGates) ReleaseGasOK(ctx context.Context) bool {
+// refused unless the release key can pay for `releases` release-key calls — the
+// caller passes every slice still owed one on this chain plus the new order's
+// (ITService.poolReleaseGasOK) — at
+// today's gas price (times gasFeeBuffer). The release floor is alert-only
+// (owner 2026-10-13): below it this logs the refill ALERT and the gas float
+// monitor keeps alerting, but the pool stays open while the key can pay.
+//
+// fresh (an open) reads the balance and gas price now, never a cached or stale
+// reading; a quote may reuse one.
+func (g *PoolChainGates) ReleaseGasOK(ctx context.Context, releases int, fresh bool) bool {
+	r, ok := g.releaseReading(ctx, fresh)
+	if !ok {
+		return false
+	}
+	if g.c.ReleaseGasFloorWei != nil && r.balance.Cmp(g.c.ReleaseGasFloorWei) < 0 {
+		log.Printf("[liquidity] ALERT liquidity_pool_release_below_floor_total=1 chain=%s address=%s balance_wei=%s floor_wei=%s — refill; opens continue while the key can pay its releases",
+			g.c.ChainKey, g.c.ReleaseAdmin, r.balance, g.c.ReleaseGasFloorWei)
+	}
+	if releases < 1 {
+		releases = 1
+	}
+	need := feeNeed(poolReleaseCallGas*uint64(releases), r.price, nil)
+	if r.balance.Cmp(need) < 0 {
+		log.Printf("[liquidity] ALERT liquidity_pool_release_gas_short_total=1 chain=%s address=%s balance_wei=%s needed_wei=%s releases=%d",
+			g.c.ChainKey, g.c.ReleaseAdmin, r.balance, need, releases)
+		return false
+	}
+	return true
+}
+
+// releaseReading is the release key's balance and gas price, reused for
+// releaseGasFresh and, when a read fails, for releaseGasStale.
+func (g *PoolChainGates) releaseReading(ctx context.Context, fresh bool) (releaseGasReading, bool) {
+	if !g.Enabled() || g.c.Chain == nil {
+		return releaseGasReading{}, false
+	}
+	g.gasMu.Lock()
+	defer g.gasMu.Unlock()
+	now := time.Now()
+	last := g.gasRead
+	if fresh {
+		last = releaseGasReading{} // neither reused nor a fallback
+	}
+	if last.balance != nil && now.Sub(last.at) < releaseGasFresh {
+		return last, true
+	}
 	fl, err := g.FloatBalances(ctx)
-	return err == nil && len(fl) == 1 && fl[0].BalanceWei != nil && fl[0].BalanceWei.Cmp(fl[0].FloorWei) >= 0
+	var price *big.Int
+	if err == nil {
+		price, err = g.c.Chain.SuggestGasPrice(ctx)
+	}
+	if err != nil || len(fl) != 1 || fl[0].BalanceWei == nil || price == nil {
+		if last.balance != nil && now.Sub(last.at) < releaseGasStale {
+			return last, true
+		}
+		log.Printf("[liquidity] release gas reading on %s unavailable: %s", g.c.ChainKey, RedactAlertText(fmt.Sprint(err)))
+		return releaseGasReading{}, false
+	}
+	g.gasRead = releaseGasReading{balance: fl[0].BalanceWei, price: price, at: now}
+	return g.gasRead, true
 }

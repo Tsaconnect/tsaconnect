@@ -50,7 +50,7 @@ func unsignedOn(chain int64, nonce uint64) ([]byte, error) {
 func TestChainReleaseSigner_SendSerialisesPrepareAndBroadcast(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	bsc := &nonceChain{id: 56}
-	s := NewChainReleaseSigner(key, map[int64]ReleaseBroadcaster{56: bsc})
+	s := NewChainReleaseSigner(nil, key, map[int64]ReleaseBroadcaster{56: bsc})
 	build := func() ([]byte, error) {
 		n := bsc.pending()                // the nonce read every Prepare* does
 		time.Sleep(20 * time.Millisecond) // a gas estimate between read and broadcast
@@ -75,7 +75,7 @@ func TestChainReleaseSigner_SendSerialisesPrepareAndBroadcast(t *testing.T) {
 func TestChainReleaseSigner_ChainsDoNotBlockEachOther(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	sonic, bsc := &nonceChain{id: 146}, &nonceChain{id: 56}
-	s := NewChainReleaseSigner(key, map[int64]ReleaseBroadcaster{146: sonic, 56: bsc})
+	s := NewChainReleaseSigner(nil, key, map[int64]ReleaseBroadcaster{146: sonic, 56: bsc})
 	started := make(chan struct{})
 	go s.Send(context.Background(), 146, func() ([]byte, error) {
 		close(started)
@@ -95,7 +95,7 @@ func TestChainReleaseSigner_ChainsDoNotBlockEachOther(t *testing.T) {
 func TestChainReleaseSigner_RoutesByChainID(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	sonic, bsc := &nonceChain{id: 146}, &nonceChain{id: 56}
-	s := NewChainReleaseSigner(key, map[int64]ReleaseBroadcaster{146: sonic, 56: bsc})
+	s := NewChainReleaseSigner(nil, key, map[int64]ReleaseBroadcaster{146: sonic, 56: bsc})
 	u, _ := unsignedOn(56, 0)
 	if _, err := s.SignAndBroadcast(context.Background(), u); err != nil {
 		t.Fatalf("sign: %v", err)
@@ -111,7 +111,7 @@ func TestChainReleaseSigner_RoutesByChainID(t *testing.T) {
 func TestChainReleaseSigner_UnknownChainNotBroadcast(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	sonic := &nonceChain{id: 146}
-	s := NewChainReleaseSigner(key, map[int64]ReleaseBroadcaster{146: sonic})
+	s := NewChainReleaseSigner(nil, key, map[int64]ReleaseBroadcaster{146: sonic})
 	built := false
 	_, err := s.Send(context.Background(), 56, func() ([]byte, error) { built = true; return unsignedOn(56, 0) })
 	if !errors.Is(err, ErrTxNotBroadcast) || built {
@@ -126,7 +126,7 @@ func TestChainReleaseSigner_UnknownChainNotBroadcast(t *testing.T) {
 func TestChainReleaseSigner_RefusesATxBuiltForAnotherChain(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	sonic := &nonceChain{id: 146}
-	s := NewChainReleaseSigner(key, map[int64]ReleaseBroadcaster{146: sonic})
+	s := NewChainReleaseSigner(nil, key, map[int64]ReleaseBroadcaster{146: sonic})
 	_, err := s.Send(context.Background(), 146, func() ([]byte, error) { return unsignedOn(56, 0) })
 	if !errors.Is(err, ErrTxNotBroadcast) || len(sonic.sent) != 0 {
 		t.Fatalf("err = %v sent = %v", err, sonic.sent)
@@ -137,7 +137,7 @@ func TestChainReleaseSigner_RefusesATxBuiltForAnotherChain(t *testing.T) {
 func TestChainReleaseSigner_SendRefusesATxNamingNoChain(t *testing.T) {
 	key, _ := crypto.GenerateKey()
 	sonic := &nonceChain{id: 146}
-	s := NewChainReleaseSigner(key, map[int64]ReleaseBroadcaster{146: sonic})
+	s := NewChainReleaseSigner(nil, key, map[int64]ReleaseBroadcaster{146: sonic})
 	_, err := s.Send(context.Background(), 146, func() ([]byte, error) {
 		return json.Marshal(blockchain.UnsignedTx{GasPrice: "1", GasLimit: 21000, To: "0x000000000000000000000000000000000000dEaD", Value: "0"})
 	})
@@ -146,11 +146,15 @@ func TestChainReleaseSigner_SendRefusesATxNamingNoChain(t *testing.T) {
 	}
 }
 
-// chainCountingSender proves AutoRelease builds inside Send, on the trade's chain.
+// chainCountingSender proves AutoRelease builds inside Send, on the trade's
+// chain. Like the key lane, it runs the caller's pre-broadcast hook first: a
+// send the hook declines (nothing committed) is not counted and never reaches
+// onSent (the fake chain applying what was sent).
 type chainCountingSender struct {
 	fakeReleaseSigner
 	sendChains []int64
 	direct     int
+	onSent     func(unsigned []byte)
 }
 
 func (c *chainCountingSender) SignAndBroadcast(ctx context.Context, u []byte) (string, error) {
@@ -158,8 +162,30 @@ func (c *chainCountingSender) SignAndBroadcast(ctx context.Context, u []byte) (s
 	return c.fakeReleaseSigner.SignAndBroadcast(ctx, u)
 }
 func (c *chainCountingSender) Send(ctx context.Context, chainID int64, build func() ([]byte, error)) (string, error) {
+	declined := false
+	if hook := preBroadcastHook(ctx); hook != nil {
+		ctx = WithPreBroadcast(ctx, func(hctx context.Context, n uint64, h string) error {
+			if err := hook(hctx, n, h); err != nil {
+				declined = true
+				return err
+			}
+			return nil
+		})
+	}
+	var unsigned []byte
+	hash, err := c.fakeReleaseSigner.Send(ctx, chainID, func() ([]byte, error) {
+		u, err := build()
+		unsigned = u
+		return u, err
+	})
+	if declined {
+		return hash, err
+	}
 	c.sendChains = append(c.sendChains, chainID)
-	return c.fakeReleaseSigner.Send(ctx, chainID, build)
+	if c.onSent != nil && unsigned != nil && !errors.Is(err, ErrTxNotBroadcast) {
+		c.onSent(unsigned)
+	}
+	return hash, err
 }
 
 func TestAutoRelease_BuildsUnderTheSignersChainLock(t *testing.T) {

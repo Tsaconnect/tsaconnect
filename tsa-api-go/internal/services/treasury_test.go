@@ -203,7 +203,8 @@ func routeCostWei(route *LiFiRoute, withApprove bool) *big.Int {
 	if withApprove {
 		units += treasuryERC20Gas
 	}
-	return new(big.Int).Mul(new(big.Int).SetUint64(units), big.NewInt(1_000_000_000))
+	// × gasFeeBuffer: the key lane's one fee gate (and requireGas, which asks it).
+	return new(big.Int).Mul(new(big.Int).SetUint64(units), big.NewInt(1_000_000_000*gasFeeBuffer))
 }
 
 // The floor is a warning, not a stop: a lane below it that can still pay
@@ -578,7 +579,7 @@ func TestTreasury_TransferTokenRefusedWhenKilled(t *testing.T) {
 
 func TestTreasury_TransferTokenRunsBelowTheFloorWhenItCanPayForTheTx(t *testing.T) {
 	tr, lane, _, _ := newTestTreasuryWithFakes(t)
-	withTreasuryBalance(lane, new(big.Int).Mul(big.NewInt(treasuryERC20Gas), big.NewInt(1_000_000_000)))
+	withTreasuryBalance(lane, new(big.Int).Mul(big.NewInt(treasuryERC20Gas), big.NewInt(1_000_000_000*gasFeeBuffer)))
 	if _, _, err := tr.TransferToken(context.Background(), lane, "USDC", treasuryTestRecipient, big.NewInt(1)); err != nil {
 		t.Fatalf("a lane that can pay for the transfer was refused: %v", err)
 	}
@@ -883,7 +884,7 @@ func TestTreasury_CanPayForGas(t *testing.T) {
 	tr, lane, _, _ := newTestTreasuryWithFakes(t)
 	clock := sponsorTestNow
 	tr.now = func() time.Time { return clock }
-	withTreasuryBalance(lane, big.NewInt(1_000_000_000*1_000_000)) // 1M gas at the rig's 1 gwei
+	withTreasuryBalance(lane, big.NewInt(1_000_000_000*1_000_000*gasFeeBuffer)) // 1M gas at the rig's 1 gwei, buffered
 
 	if !tr.CanPayForGas(context.Background(), "base", 1_000_000) {
 		t.Fatal("a lane holding exactly the cost can pay")
@@ -909,18 +910,19 @@ func TestTreasury_CanPayForGas(t *testing.T) {
 // broadcast; a nonce that cannot be recorded is never broadcast.
 func TestTreasury_TransferTokenRecordedHandsOverTheNonceFirst(t *testing.T) {
 	tr, lane, native, signer := newTestTreasuryWithFakes(t)
+	lane.Signer = rawRelaySigner{signer}
 	native.transferNonce = 42
 	ctx := context.Background()
 	var got uint64
 	callsAtHook := -1
-	_, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(n uint64) error {
+	_, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(_ context.Context, n uint64, _ string) error {
 		got, callsAtHook = n, signer.calls()
 		return nil
 	})
 	if err != nil || !attempted || got != 42 || callsAtHook != 0 || signer.calls() != 1 {
 		t.Fatalf("err=%v attempted=%v nonce=%d broadcasts-at-hook=%d broadcasts=%d", err, attempted, got, callsAtHook, signer.calls())
 	}
-	_, attempted, err = tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(uint64) error {
+	_, attempted, err = tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), func(context.Context, uint64, string) error {
 		return errors.New("db down")
 	})
 	if err == nil || attempted || signer.calls() != 1 {

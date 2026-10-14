@@ -365,7 +365,7 @@ func TestPoolOrdersRehearsal_Cancel_BSCTestnet(t *testing.T) {
 	if err != nil {
 		t.Fatal("bad release key")
 	}
-	release := NewChainReleaseSigner(relKey, map[int64]ReleaseBroadcaster{97: r.client})
+	release := NewChainReleaseSigner(nil, relKey, map[int64]ReleaseBroadcaster{97: r.client})
 	ec := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.trades, Signer: release, Pool: r.it, Fresh: fixedFresh{at: time.Now()}})
 
 	deadline := time.Now().Add(5 * time.Minute)

@@ -15,7 +15,7 @@ type SponsorLimits struct {
 	PerUserPerWindow int
 	Window           time.Duration
 	DailyGasBudget   *big.Int // GAS UNITS per UTC day
-	BalanceFloor     *big.Int // wei; refuse to sponsor below this native balance
+	BalanceFloor     *big.Int // wei; the refill ALERT threshold — never a gate (AlertFloor)
 }
 
 // SponsorReservation records what a request consumed so it can be handed back
@@ -64,15 +64,6 @@ func (g *SponsorGuard) Killed() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.killed
-}
-
-// CheckFloor refuses rather than broadcast transactions that will fail for gas.
-func (g *SponsorGuard) CheckFloor(balance *big.Int) error {
-	if g.limits.BalanceFloor != nil && balance != nil && balance.Cmp(g.limits.BalanceFloor) < 0 {
-		log.Printf("[%s] ALERT %s_underfunded_total=1 balance=%s floor=%s", g.name, g.name, balance, g.limits.BalanceFloor)
-		return ErrRelayerUnderfunded
-	}
-	return nil
 }
 
 // ReserveUser prunes the window and claims a slot in one critical section.

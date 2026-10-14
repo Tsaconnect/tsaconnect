@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 
@@ -12,14 +13,37 @@ import (
 	"gorm.io/gorm"
 )
 
-// PoolLegOpen: the pool can take a naira buy now — wired, gates open, release
-// gas above its floor, central account active, not stopped (§11.1 RampLegs).
+// PoolLegOpen: the pool can take a naira buy now — wired, gates open, the
+// release key able to pay an order's releases, central account active, not
+// stopped (§11.1 RampLegs).
 func (s *ITService) PoolLegOpen(ctx context.Context) bool {
 	if !s.HasPool() || s.payInChannelNow() != PayInCentral || CurrentPoolSettings().OrdersStopped {
 		return false
 	}
+	return s.poolDesk.c.Gates.Open() && s.poolReleaseGasOK(ctx, CurrentPoolSettings().SliceCap, false)
+}
+
+// poolReleaseGasOK asks the gates whether the release key can pay for every
+// release-key call already owed on the pool chain (each live slice of every
+// open order, ReleaseCommitments, cached a few seconds) plus this order's
+// `releases` — not this order alone, which would let N open orders each pass
+// on the same balance. A count that cannot be read fails closed. Read outside
+// the pool lock: two opens racing past it can both count the same balance
+// once; gasFeeBuffer (2x) covers that one extra order's worth. fresh: an open
+// counts and reads the balance and gas price now; a quote (PoolLegOpen) may
+// reuse readings a few seconds old.
+func (s *ITService) poolReleaseGasOK(ctx context.Context, releases int, fresh bool) bool {
 	d := s.poolDesk
-	return d.c.Gates.Open() && d.c.Gates.ReleaseGasOK(ctx)
+	units := d.c.ReleaseCommitments.Units
+	if fresh {
+		units = d.c.ReleaseCommitments.UnitsFresh
+	}
+	owed, err := units(ctx)
+	if err != nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_release_commitments_unreadable_total=1 err=%s", RedactAlertText(err.Error()))
+		return false
+	}
+	return d.c.Gates.ReleaseGasOK(ctx, int(owed/poolReleaseCallGas)+releases, fresh)
 }
 
 // PoolVenue is the pool's one direct venue: its chain key and token.

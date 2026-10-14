@@ -243,8 +243,10 @@ func TestPoolOpen_DuplicateTradeIdNeverLocksTwice(t *testing.T) {
 	units, _ := new(big.Int).SetString(sl.TokenAmount, 10)
 	o := &sliceOpen{slice: sl, ad: ad, units: units}
 	r.desk.broadcast(context.Background(), []*sliceOpen{o})
-	if r.chain.broadcasts != before || o.sent {
-		t.Fatalf("re-broadcast of slice %s: broadcasts %d → %d", sl.ID, before, r.chain.broadcasts)
+	// The slice's open operation already holds its allocation: the answer is
+	// that open, in flight (its own hash) — never a second broadcast.
+	if r.chain.broadcasts != before || (o.sent && !strings.EqualFold(o.hash, sl.OpenTxHash)) {
+		t.Fatalf("re-broadcast of slice %s: broadcasts %d → %d (sent=%v hash=%s want %s)", sl.ID, before, r.chain.broadcasts, o.sent, o.hash, sl.OpenTxHash)
 	}
 }
 
@@ -340,5 +342,34 @@ func TestPoolOpen_WorseAllocationPastTheGuardIsPriceMoved(t *testing.T) {
 	r.db.Model(&models.P2PTrade{}).Count(&slices)
 	if intents != 0 || slices != 0 || r.chain.broadcasts != 0 {
 		t.Fatalf("intents=%d slices=%d broadcasts=%d, want nothing written or sent", intents, slices, r.chain.broadcasts)
+	}
+}
+
+// Security review of the alert-only floors: the release-gas gate counts every
+// release-key call already owed on the pool chain (each live slice of every
+// open order), not only this order's. Two orders that each fit the balance
+// alone but not together: the second open is refused.
+func TestPoolOpen_ReleaseGasCountsEveryOutstandingSlice(t *testing.T) {
+	r := newPoolOpenRig(t)
+	r.addLP(t, 50)
+	r.addLP(t, 50)
+	cap := CurrentPoolSettings().SliceCap
+	r.gates.maxReleases = cap // the key pays exactly one order's releases
+	first, _, err := r.open(t, "5000")
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if r.gates.asked != cap {
+		t.Fatalf("first open asked for %d releases, want %d (nothing outstanding)", r.gates.asked, cap)
+	}
+	live := len(r.slicesOf(t, first.ID))
+	if live == 0 {
+		t.Fatal("setup: the first order opened no slices")
+	}
+	if _, _, err := r.open(t, "5000"); !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("second open with the first's %d slices still owed = %v, want ErrPoolClosed", live, err)
+	}
+	if r.gates.asked != live+cap {
+		t.Fatalf("second open asked for %d releases, want %d outstanding + %d", r.gates.asked, live, cap)
 	}
 }

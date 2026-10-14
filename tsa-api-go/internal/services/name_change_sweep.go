@@ -340,7 +340,21 @@ func (s *NameChangeService) sweepAlerts(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, ch := range stuck {
+	for i := range stuck {
+		ch := stuck[i]
+		if ch.FeeStatus == models.NameChangeFeeRefundUncertain && ch.FeeTxHash != "" {
+			if rc, ok := s.rail.(interface {
+				GiveUpCancelled(ctx context.Context, chain, op, txHash string) (bool, error)
+			}); ok {
+				if c, err := rc.GiveUpCancelled(ctx, ch.PayChain, nameChangeRefundOp(&ch), ch.FeeTxHash); err == nil && c {
+					// The refund never executed (cancelled at its nonce): it
+					// goes back to refund_failed and the sweep sends it again
+					// as a new operation.
+					s.refundNotSent(ctx, &ch, []string{models.NameChangeFeeRefundUncertain}, ErrCallCancelled)
+					continue
+				}
+			}
+		}
 		alertf("name-change-refund-stuck:"+ch.ID.String(),
 			"[name-change] ALERT name_change_refund_unresolved_total=1 change=%s fee_status=%s chain=%s tx=%s — check the chain: if the refund was mined, record it as sent (POST /api/admin/name-changes/:id/refund-outcome); if it never left, support resolves it by hand",
 			ch.ID, ch.FeeStatus, ch.PayChain, ch.FeeTxHash)

@@ -41,10 +41,12 @@ type mockEscrow struct {
 	verifyCancelledErr error
 	verifyOpenedErr    error
 	verifyReleasedErr  error
-	verifyTradeCanErr  error
-	verifyDisputedErr  error
-	onVerifyDisputed   func() // runs inside VerifyTradeDisputed (simulates a concurrent writer)
-	raiseDisputeErr    error  // PrepareRaiseDispute build failure
+	// verifyReleasedFor, when set, decides VerifyTradeReleased per hash.
+	verifyReleasedFor func(txHash string) error
+	verifyTradeCanErr error
+	verifyDisputedErr error
+	onVerifyDisputed  func() // runs inside VerifyTradeDisputed (simulates a concurrent writer)
+	raiseDisputeErr   error  // PrepareRaiseDispute build failure
 	// onPrepareRaiseDispute runs inside PrepareRaiseDispute: between the
 	// service's dispute-row read and its write (simulates a concurrent retry).
 	onPrepareRaiseDispute func()
@@ -254,6 +256,11 @@ func (m *mockEscrow) VerifyTradeOpenedWithDeposit(txHash string, tradeId [32]byt
 	return &P2PTradeOpenedWithDepositEvent{TradeID: tradeId, Amount: big.NewInt(100)}, nil
 }
 func (m *mockEscrow) VerifyTradeReleased(txHash string, tradeId [32]byte) (*P2PTradeReleasedEvent, error) {
+	if m.verifyReleasedFor != nil {
+		if err := m.verifyReleasedFor(txHash); err != nil {
+			return nil, err
+		}
+	}
 	if m.verifyReleasedErr != nil {
 		return nil, m.verifyReleasedErr
 	}
@@ -410,7 +417,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 			fiat_currency TEXT, rate TEXT,
 			payment_method_id TEXT, payment_ref TEXT, nomba_inbound_event_id TEXT, nomba_payout_id TEXT, payout_account_number TEXT, payout_bank TEXT, payout_account_name TEXT,
 			on_chain_trade_id TEXT UNIQUE,
-			open_tx_hash TEXT, release_tx_hash TEXT,
+			open_tx_hash TEXT, release_tx_hash TEXT, release_reverted_at DATETIME,
 			status TEXT DEFAULT 'pending_payment',
 			proof_image_url TEXT, cancel_reason TEXT,
 			ngn_reservation_released INTEGER NOT NULL DEFAULT 0,

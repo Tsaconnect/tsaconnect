@@ -33,6 +33,7 @@ func openOne(t *testing.T) (*poolOpenRig, *models.ITIntent, models.P2PTrade, *mo
 		t.Fatal(err)
 	}
 	sender := releaseSender()
+	sender.onSent = r.chain.sent
 	r.trades.SetPoolSlices(r.it, sender)
 	return r, intent, r.slicesOf(t, intent.ID)[0], lp, sender
 }

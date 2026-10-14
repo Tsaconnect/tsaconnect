@@ -35,6 +35,12 @@ type PoolDeskConfig struct {
 	Sale     *CompanyWallet               // the conversion treasury's pool-chain lane as a sale wallet (S20)
 	LogChunk uint64                       // PoolChainConfig.LogChunkBlocks (the F22 scan)
 	Now      func() time.Time
+	// What the release key and the treasury lane on the pool chain already owe
+	// in-flight orders (nil = counted from DB). NewPoolDesk registers both as
+	// their lanes' reservations, so no other send on either key (a gas top-up,
+	// a direct P2P release, an IT op, a slice open) spends them.
+	ReleaseCommitments  *LaneCommitments
+	TreasuryCommitments *LaneCommitments
 }
 
 // PoolDesk is the TSA Liquidity pool's order desk: free stock, allocation,
@@ -71,6 +77,16 @@ func NewPoolDesk(c PoolDeskConfig) (*PoolDesk, error) {
 	}
 	if c.Now == nil {
 		c.Now = time.Now
+	}
+	if c.ReleaseCommitments == nil {
+		c.ReleaseCommitments = NewPoolReleaseCommitments(c.DB, c.Token.ChainID)
+	}
+	if c.TreasuryCommitments == nil {
+		c.TreasuryCommitments = NewPoolTreasuryCommitments(c.DB)
+	}
+	c.Treasury.Lane(c.Token.ChainKey).nonceLane().AddReservation("pool_treasury_owed", c.TreasuryCommitments.Units)
+	if crs, ok := c.Sender.(*ChainReleaseSigner); ok {
+		crs.Lane(c.Token.ChainID).AddReservation("pool_releases", c.ReleaseCommitments.Units)
 	}
 	return &PoolDesk{c: c, cached: newCachedReader[[]poolCandidate](poolTotalsTTL, poolBalanceFailTTL), proveWindow: poolProveWindow}, nil
 }

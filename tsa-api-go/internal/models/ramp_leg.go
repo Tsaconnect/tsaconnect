@@ -84,6 +84,10 @@ type RampLeg struct {
 	AmountReceived string `gorm:"size:64" json:"amountReceived,omitempty"`
 
 	TxHash string `gorm:"size:128;index" json:"txHash,omitempty"`
+	// ApproveTxHash is a bridge leg's approve (the route's allowance),
+	// committed with the approve's signing: an approve in flight keeps the
+	// leg visibly in flight even before its route is sent.
+	ApproveTxHash string `gorm:"size:128;column:approve_tx_hash" json:"approveTxHash,omitempty"`
 	// Nonce is the sale's transaction nonce, written before it is broadcast
 	// (review C1): with the hash lost, it is what tells "dropped" from "mined
 	// under a hash we never learned". FromBlock is the head when the sale was

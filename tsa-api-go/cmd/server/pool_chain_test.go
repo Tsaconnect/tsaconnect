@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
@@ -36,12 +37,15 @@ func TestRegisterPoolJobs_ProbeAndReleaseFloat(t *testing.T) {
 	}
 }
 
-// Review I8 / S8 / S39: the per-chain lock covers every use of the release key
-// only if no other signer (with its own lock) holds the same key. The
-// controller confirmed prod's PM release, IT operator and relayer keys differ.
-func TestBuildReleaseSigner_RefusesAKeySharedWithAnotherSigner(t *testing.T) {
-	for _, other := range []string{"IT_OPERATOR_PRIVATE_KEY", "RELAYER_PRIVATE_KEY", "RAMP_SPONSOR_PRIVATE_KEY",
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY", "RAMP_TREASURY_PRIVATE_KEY"} {
+// Signer consolidation (2026-10-13): the release key is the OPERATOR, which
+// the IT operator and gas sponsor may share (one KeyLane per key and chain
+// makes that nonce-safe). Sharing it with the relayer (its own key, owner
+// decision), the TREASURY or the company wallet refuses to start.
+func TestBuildReleaseSigner_RefusesAKeySharedAcrossSignerClasses(t *testing.T) {
+	for other, refuse := range map[string]bool{
+		"IT_OPERATOR_PRIVATE_KEY": false, "RELAYER_PRIVATE_KEY": true, "RAMP_SPONSOR_PRIVATE_KEY": false,
+		"RAMP_TREASURY_WALLET_PRIVATE_KEY": true, "RAMP_TREASURY_PRIVATE_KEY": true,
+	} {
 		cfg := testConfig(t)
 		cfg.PMReleasePrivateKey = testKeyA
 		switch other {
@@ -56,8 +60,8 @@ func TestBuildReleaseSigner_RefusesAKeySharedWithAnotherSigner(t *testing.T) {
 		case "RAMP_TREASURY_PRIVATE_KEY":
 			cfg.RampTreasuryPrivateKey = testKeyA
 		}
-		if !refusesToStart(t, func() { buildReleaseSigner(cfg, nil) }) {
-			t.Fatalf("a release key shared with %s must refuse to start", other)
+		if got := refusesToStart(t, func() { buildReleaseSigner(cfg, nil) }); got != refuse {
+			t.Fatalf("release key shared with %s: refused=%v, want %v", other, got, refuse)
 		}
 	}
 }
@@ -96,7 +100,7 @@ func TestBuildPoolChain_NoClientIsClosedAndStillReChecked(t *testing.T) {
 	if st := g.Status(); g.Open() || st.Open || len(st.Failures) == 0 || !strings.Contains(st.Failures[0], "no chain client") {
 		t.Fatalf("status = %+v, want closed on no chain client", st)
 	}
-	if g.ReleaseGasOK(context.Background()) {
+	if g.ReleaseGasOK(context.Background(), 1, false) {
 		t.Fatal("no client: release gas must not read as OK")
 	}
 	s := jobs.NewScheduler()
@@ -142,5 +146,21 @@ func TestCompanyPMUser_RefusesAnLPRow(t *testing.T) {
 	t.Cleanup(func() { config.DB = prev })
 	if user, err := companyPMUser(&config.Config{ITPMID: lp.ID.String()}); err == nil {
 		t.Fatalf("slice buyer = %s, want IT_PM_ID naming an LP row refused", user)
+	}
+}
+
+// The release key's lane on the pool chain is the registry's: a sponsor lane
+// on the same key and chain shares its lock and nonce floor.
+func TestBuildReleaseSigner_TakesItsLanesFromTheRegistry(t *testing.T) {
+	cfg := poolTestConfig(t, "mainnet")
+	cfg.PMReleasePrivateKey = testKeyA
+	bs := services.NewBlockchainService(cfg)
+	crs, ok := buildReleaseSigner(cfg, bs).(*services.ChainReleaseSigner)
+	if !ok || crs.Lane(56) == nil {
+		t.Fatalf("release signer = %#v, want a lane on chain 56", crs)
+	}
+	key, _ := crypto.HexToECDSA(testKeyA)
+	if l := buildSponsorLaneOn(bs, "mainnet", "bsc", "gas_sponsor", key, "ramp_sponsor_bsc", services.SponsorLimits{}, nil); l.KeyLane != crs.Lane(56) {
+		t.Fatal("the release key and a sponsor lane on the same key and chain must share one KeyLane")
 	}
 }

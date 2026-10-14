@@ -32,6 +32,7 @@ func abandoned(t *testing.T) (*poolOpenRig, *models.ITIntent, models.P2PTrade, *
 		t.Fatal(err)
 	}
 	sender := releaseSender()
+	sender.onSent = r.chain.sent
 	r.trades.SetPoolSlices(r.it, sender)
 	sl := r.slicesOf(t, intent.ID)[0]
 	agePoolSlice(t, r, sl, 61*time.Minute)

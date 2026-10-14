@@ -195,7 +195,18 @@ func (s *P2PTradeService) reconcileSliceDisputed(ctx context.Context, trade *mod
 	}
 	// PrepareAdminResolve's bool is the contract's releaseToBuyer: the buyer
 	// of a slice is the conversion treasury.
-	hash, err := s.poolSender.Send(ctx, trade.ChainID, func() ([]byte, error) {
+	// A slice's resolve is one of the pool's reserved release-key calls.
+	// The real hash replaces our own claim in the key lane's allocation
+	// transaction, with the signed resolve, or nothing commits.
+	sendCtx := WithPreBroadcast(ReservedSend(WithOperationRef(ctx, "p2p_resolve:"+trade.ID.String())),
+		func(hctx context.Context, _ uint64, hash string) error {
+			res := LaneDB(hctx, s.db).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", hash)
+			if res.Error == nil && res.RowsAffected != 1 {
+				return fmt.Errorf("slice %s: the resolve claim moved", trade.ID)
+			}
+			return res.Error
+		})
+	hash, err := s.poolSender.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminResolve(HashID(trade.ID), paid, s.poolSender.Address())
 	})
 	if hash == "" {
@@ -204,9 +215,9 @@ func (s *P2PTradeService) reconcileSliceDisputed(ctx context.Context, trade *mod
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 	switch {
-	case hash != "": // the real hash replaces our own claim, never anything else
+	case hash != "": // a retried resolve (its allocation already committed) replaces a fresh claim
 		s.db.WithContext(wctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", hash)
-	case errors.Is(err, ErrTxNotBroadcast): // provably unsent: release the claim
+	case errors.Is(err, ErrTxNotBroadcast): // nothing committed: release the claim
 		s.db.WithContext(wctx).Model(&models.P2PTrade{}).Where("id = ? AND release_tx_hash = ?", trade.ID, claim).Update("release_tx_hash", "")
 	}
 	if err != nil {
@@ -408,6 +419,21 @@ func (s *ITService) SliceHashReverted(ctx context.Context, slice *models.P2PTrad
 		strings.HasPrefix(slice.ReleaseTxHash, sliceResolveClaimPrefix) {
 		return false, nil
 	}
+	// A release (or resolve) the release key's lane CANCELLED at its nonce
+	// never executed: as final a "moved nothing" as a deep revert.
+	if lane := laneOfSender(d.c.Sender, slice.ChainID); lane != nil {
+		c, err := lane.CallCancelled(ctx, slice.ReleaseTxHash)
+		if err != nil {
+			return false, err
+		}
+		if c {
+			// Given up only through RetireOp (the release or resolve
+			// operation holds nothing live or executed).
+			addr := d.c.Sender.Address()
+			return lane.GiveUp(ctx, addr, "p2p_release:"+slice.ID.String(), slice.ReleaseTxHash, RetireSequenced) &&
+				lane.GiveUp(ctx, addr, "p2p_resolve:"+slice.ID.String(), "", RetireSequenced), nil
+		}
+	}
 	gen := d.c.Probe.EndpointGeneration()
 	need := s.saleDepth()
 	return receiptDeep(ctx, d.c.Probe, slice.ReleaseTxHash, types.ReceiptStatusFailed, need, gen)
@@ -499,7 +525,7 @@ func (s *ITService) SliceOpenGone(ctx context.Context, slice *models.P2PTrade) (
 	deep := head - poolProveDepth
 	landedDeep := false
 	if slice.OpenTxHash != "" {
-		r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(slice.OpenTxHash))
+		r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(d.openHash(ctx, slice)))
 		if err != nil && !errors.Is(err, ethereum.NotFound) {
 			return false, err
 		}

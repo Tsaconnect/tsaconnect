@@ -23,18 +23,25 @@ import (
 // variable and could each restore the other's swap mid-test.
 var fatalf = log.Fatalf
 
-// assertDistinctKey refuses to start when key's address matches any entry in
-// others (a name -> hex-private-key map). It is the ONE collision check every
-// privileged signer goes through — the relayer, the IT operator, the PM
-// release key, the ramp sponsor and the ramp treasury are all hot keys that
-// broadcast from this server, so sharing any two of them turns a single
-// compromise into a compromise of both. An unparsable entry in others is
+// assertDistinctKey refuses to start when key's address matches an entry in
+// others (a name -> hex-private-key map) of a DIFFERENT signer class
+// (signerKeyClass). Since the signer consolidation the operator roles — PM
+// release, IT operator, gas sponsor — may share one key: every role on one key
+// and chain sends through that key's one KeyLane, so sharing no longer races a
+// nonce. Across classes it stays fatal: the relayer on the OPERATOR key would
+// let a hot relayer compromise debit users' MCGP, and an OPERATOR or relayer
+// key equal to the TREASURY key (user funds in transit) or the company wallet
+// would turn one compromise into both. An unparsable entry in others is
 // skipped rather than failing the boot on a malformed but irrelevant key —
 // that key's own builder is responsible for validating it.
 func assertDistinctKey(name string, key *ecdsa.PrivateKey, others map[string]string) error {
 	addr := crypto.PubkeyToAddress(key.PublicKey)
+	class, known := signerKeyClass[name]
 	for otherName, other := range others {
 		if other == "" {
+			continue
+		}
+		if oc, ok := signerKeyClass[otherName]; known && ok && oc == class {
 			continue
 		}
 		k, err := crypto.HexToECDSA(strings.TrimPrefix(other, "0x"))
@@ -68,20 +75,26 @@ func rampLaneTokensOn(chains *services.BlockchainService, network, chain string)
 
 // buildSponsorLane is buildSponsorLaneOn on mainnet, where every sponsor lane
 // and the conversion treasury's lanes live.
-func buildSponsorLane(chains *services.BlockchainService, chain string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
-	return buildSponsorLaneOn(chains, "mainnet", chain, key, guardName, limits, topUpMaxWei)
+func buildSponsorLane(chains *services.BlockchainService, chain, role string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
+	return buildSponsorLaneOn(chains, "mainnet", chain, role, key, guardName, limits, topUpMaxWei)
 }
 
 // buildSponsorLaneOn builds one SponsorLane for chain on network — the shape
 // both the gas sponsor and the ramp treasury need (chain client,
 // EVMRelayChain, EVMRelayTxBuilder, NewLocalKeyReleaseSigner,
 // NewSponsorGuard). Returns nil when chain has no configured RPC client on
-// that network. guardName namespaces the guard's own kill switch/daily
+// that network. Its send lane comes from the process's SignerRegistry
+// (chains.Signers()), so role shares one nonce lock and floor with every other
+// role on the same key and chain. guardName namespaces the guard's own kill switch/daily
 // counter (e.g. "ramp_sponsor_base" vs "ramp_treasury_base") so the two lane
 // types never share one.
-func buildSponsorLaneOn(chains *services.BlockchainService, network, chain string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
+func buildSponsorLaneOn(chains *services.BlockchainService, network, chain, role string, key *ecdsa.PrivateKey, guardName string, limits services.SponsorLimits, topUpMaxWei *big.Int) *services.SponsorLane {
 	client := chains.ClientForNetwork(network, chain)
 	if client == nil {
+		return nil
+	}
+	keyLane := chains.Signers().Lane(role, key, client)
+	if keyLane == nil {
 		return nil
 	}
 	// Ramp lanes do not rate-limit per user, so no PerUserPerWindow and
@@ -93,7 +106,8 @@ func buildSponsorLaneOn(chains *services.BlockchainService, network, chain strin
 		Chain:       services.EVMRelayChain{Client: client},
 		Builder:     services.EVMRelayTxBuilder{Client: client},
 		Native:      client,
-		Signer:      services.NewLocalKeyReleaseSigner(key, client),
+		Signer:      keyLane.Signer(),
+		KeyLane:     keyLane,
 		Guard:       services.NewSponsorGuard(guardName, limits, nil),
 		Tokens:      rampLaneTokensOn(chains, network, chain),
 		TopUpMaxWei: topUpMaxWei,
@@ -118,32 +132,27 @@ func newIntentSponsorship(orders *services.PaycrestOrderService, lanes map[strin
 // or nil with a line saying why. There is exactly one: P2P top-ups use it
 // whenever it exists and the marketplace funding while MARKETPLACE_SONIC_GAS
 // is on (marketplaceSonicGas). A second lane on the same key would hold its
-// own send lock and could hand two txs the same nonce. It is a separate
+// own guard; the nonce lock is the key's KeyLane either way. It is a separate
 // sponsorship holding ONLY the Sonic lane, so it can never give a sale or a
 // TSA Pay intent from Sonic a source-chain top-up. Floor and ceiling are
 // SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI (the old MARKETPLACE_SONIC_GAS_*
 // names still read); guard and metrics are named sonic_gas.
 func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainService) *services.RampSponsorship {
-	if cfg.RampSponsorPrivateKey == "" || chains == nil {
-		log.Printf("[sonic-gas] dormant: RAMP_SPONSOR_PRIVATE_KEY not set — a P2P user or buyer with no S is told to add some")
+	keyHex, keyVar := roleKey(cfg, roleGasSponsor)
+	if keyHex == "" || chains == nil {
+		log.Printf("[sonic-gas] dormant: neither RAMP_SPONSOR_PRIVATE_KEY nor PM_RELEASE_PRIVATE_KEY set — a P2P user or buyer with no S is told to add some")
 		return nil
 	}
 	if !rawSignerKeyAllowed(cfg) {
-		log.Printf("[sonic-gas] dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
+		log.Printf("[sonic-gas] dormant: raw %s refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)", keyVar)
 		return nil
 	}
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampSponsorPrivateKey, "0x"))
+	key, err := crypto.HexToECDSA(keyHex)
 	if err != nil {
-		log.Printf("[sonic-gas] dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
+		log.Printf("[sonic-gas] dormant: invalid %s: %v", keyVar, err)
 		return nil
 	}
-	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_SPONSOR_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}
@@ -154,14 +163,14 @@ func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainSer
 		log.Printf("[sonic-gas] ALERT sonic_gas_skipped_total=1 reason=invalid SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI / RAMP_SPONSOR_DAILY_GAS_BUDGET")
 		return nil
 	}
-	lane := buildSponsorLane(chains, "sonic", key, "sonic_gas", services.SponsorLimits{
+	lane := buildSponsorLane(chains, "sonic", "gas_sponsor", key, "sonic_gas", services.SponsorLimits{
 		DailyGasBudget: budget, BalanceFloor: floor,
 	}, topUpMax)
 	if lane == nil {
 		log.Printf("[sonic-gas] dormant: no sonic mainnet client")
 		return nil
 	}
-	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
+	alertRawRoleKeyInProduction(cfg, roleGasSponsor, keyVar)
 	sponsor := newIntentSponsorship(nil, map[string]*services.SponsorLane{"sonic": lane}, cfg.RampSponsorTopUpUnusedDailyCap)
 	sponsor.SetChainRegistry(chains)
 	log.Printf("[sonic-gas] lane enabled sponsor=%s floor=%s max=%s", lane.Signer.Address(), floor, topUpMax)
@@ -222,28 +231,23 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 		log.Printf("[ramp-sponsor] dormant: RAMP_GAS_SPONSORSHIP is off")
 		return nil
 	}
-	if cfg.RampSponsorPrivateKey == "" || chains == nil {
-		log.Printf("[ramp-sponsor] dormant: RAMP_SPONSOR_PRIVATE_KEY not set")
+	keyHex, keyVar := roleKey(cfg, roleGasSponsor)
+	if keyHex == "" || chains == nil {
+		log.Printf("[ramp-sponsor] dormant: neither RAMP_SPONSOR_PRIVATE_KEY nor PM_RELEASE_PRIVATE_KEY set")
 		return nil
 	}
 	if !rawSignerKeyAllowed(cfg) {
-		log.Printf("[ramp-sponsor] dormant: raw RAMP_SPONSOR_PRIVATE_KEY refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)")
+		log.Printf("[ramp-sponsor] dormant: raw %s refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)", keyVar)
 		return nil
 	}
-	key, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.RampSponsorPrivateKey, "0x"))
+	key, err := crypto.HexToECDSA(keyHex)
 	if err != nil {
-		log.Printf("[ramp-sponsor] dormant: invalid RAMP_SPONSOR_PRIVATE_KEY: %v", err)
+		log.Printf("[ramp-sponsor] dormant: invalid %s: %v", keyVar, err)
 		return nil
 	}
-	alertRawSignerKeyInProduction(cfg, "RAMP_SPONSOR_PRIVATE_KEY")
+	alertRawRoleKeyInProduction(cfg, roleGasSponsor, keyVar)
 	sponsorAddr := crypto.PubkeyToAddress(key.PublicKey)
-	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, map[string]string{
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"PM_RELEASE_PRIVATE_KEY":           cfg.PMReleasePrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_SPONSOR_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}
@@ -255,7 +259,7 @@ func buildRampSponsorship(cfg *config.Config, chains *services.BlockchainService
 			log.Printf("[ramp-sponsor] ALERT ramp_sponsor_lane_skipped_total=1 chain=%s reason=%s", chain, skipReason)
 			continue
 		}
-		lane := buildSponsorLane(chains, chain, key, "ramp_sponsor_"+chain, services.SponsorLimits{
+		lane := buildSponsorLane(chains, chain, "gas_sponsor", key, "ramp_sponsor_"+chain, services.SponsorLimits{
 			DailyGasBudget: dailyBudget,
 			BalanceFloor:   floor,
 		}, topUpMax)

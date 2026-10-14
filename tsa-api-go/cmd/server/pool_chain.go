@@ -41,8 +41,10 @@ func companyPMCheck(cfg *config.Config) func(context.Context) error {
 	}
 }
 
-// buildReleaseSigner is the PM release key with one broadcaster and one lock
-// per P2P chain (spec S8), or nil with a log line saying why. A key shared with
+// buildReleaseSigner is the PM release key with one broadcaster and one lane
+// (lock + nonce floor) per P2P chain (spec S8), taken from the process's
+// SignerRegistry so any other role on the same key and chain shares it, or nil
+// with a log line saying why. A key shared with
 // any other signer is fatal (review I8): that signer has its own lock, so the
 // per-chain mutex would no longer cover every use of the key (S39).
 func buildReleaseSigner(cfg *config.Config, bs *services.BlockchainService) services.ChainSender {
@@ -66,13 +68,7 @@ func buildReleaseSigner(cfg *config.Config, bs *services.BlockchainService) serv
 		log.Printf("[pm] invalid PM_RELEASE_PRIVATE_KEY; PM release disabled: %v", err)
 		return nil
 	}
-	if err := assertDistinctKey("PM_RELEASE_PRIVATE_KEY", key, map[string]string{
-		"IT_OPERATOR_PRIVATE_KEY":          cfg.ITOperatorPrivateKey,
-		"RELAYER_PRIVATE_KEY":              cfg.RelayerPrivateKey,
-		"RAMP_SPONSOR_PRIVATE_KEY":         cfg.RampSponsorPrivateKey,
-		"RAMP_TREASURY_WALLET_PRIVATE_KEY": cfg.RampTreasuryWalletPrivateKey,
-		"RAMP_TREASURY_PRIVATE_KEY":        cfg.RampTreasuryPrivateKey,
-	}); err != nil {
+	if err := assertDistinctKey("PM_RELEASE_PRIVATE_KEY", key, signerKeysExcept(cfg, "PM_RELEASE_PRIVATE_KEY")); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 		return nil
 	}
@@ -82,8 +78,8 @@ func buildReleaseSigner(cfg *config.Config, bs *services.BlockchainService) serv
 		return nil
 	}
 	alertRawSignerKeyInProduction(cfg, "PM_RELEASE_PRIVATE_KEY")
-	crs := services.NewChainReleaseSigner(key, broadcasters)
-	log.Printf("[pm] release signer ready (admin EOA %s) chains=%v — one lock per chain", crs.Address(), crs.Chains())
+	crs := services.NewChainReleaseSigner(bs.Signers(), key, broadcasters)
+	log.Printf("[pm] release signer ready (admin EOA %s) chains=%v — one shared key lane per chain", crs.Address(), crs.Chains())
 	// Catch a signer/admin-EOA misconfig at boot rather than at the first
 	// release: adminRelease reverts on-chain when the key isn't a registered admin.
 	if cfg.PMAdminEOAAddress != "" && !strings.EqualFold(crs.Address(), cfg.PMAdminEOAAddress) {

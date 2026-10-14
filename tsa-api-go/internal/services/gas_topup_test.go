@@ -244,8 +244,10 @@ func TestGasTopUp_RecordsHashWhenRequestContextCancelled(t *testing.T) {
 	store := &ctxCheckingStore{fakeSponsorStore: r.store}
 	svc := NewGasTopUp(r.orders, store, r.lanes(), 3, time.Second, func() time.Time { return sponsorTestNow })
 
+	// The request dies as the broadcast returns (a dead ctx never even
+	// acquires the key lane, so it cannot be dead before the send).
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // dead before TopUp even starts
+	r.lane.Signer = cancellingSigner{fakeRelaySigner: r.signer, cancel: cancel}
 
 	got, err := svc.TopUp(ctx, topUpUser(r), orderID)
 	// The receipt wait follows the request ctx, so a dead request stops waiting

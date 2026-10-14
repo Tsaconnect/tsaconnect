@@ -112,6 +112,10 @@ func (a *alertThrottle) due(id uuid.UUID, now time.Time) bool {
 	return true
 }
 
+// errExpiryNotDecided: the decision (in the lane hook) declined the cancel;
+// nothing was committed.
+var errExpiryNotDecided = errors.New("expiry cancel not decided")
+
 // errExpiryTradeAbsent: the escrow reports no such trade.
 var errExpiryTradeAbsent = errors.New("p2p-expiry: trade not on the escrow")
 
@@ -219,10 +223,12 @@ func (e *ExpiryCanceller) windowFor(chainID int64) time.Duration {
 // lock (S8, S24) once the trade is Pending past its window; the chain
 // reconciler moves the row once it mines (idempotent; a second cancel reverts
 // NotPending).
-// decide (nil for a zombie, whose row is already cancelled) runs last, just
-// before the send: it takes the row lock the payment paths take and records
-// the decision, so a payment and the cancel can never both win.
-func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade, now time.Time, decide func() (bool, error)) (bool, error) {
+// decide (nil for a zombie, whose row is already cancelled) runs inside the
+// key lane's allocation transaction (the pre-broadcast hook): it takes the row
+// lock the payment paths take and records the decision in the same commit as
+// the signed cancel, so a payment and the cancel can never both win, and a
+// decision never outlives a cancel that was not committed.
+func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade, now time.Time, decide func(ctx context.Context) (bool, error)) (bool, error) {
 	if at, ok := e.sentAt[tr.ID]; ok && now.Sub(at) < expiryResendAfter {
 		return false, nil // review M10: the last cancel may still mine (checked before any read)
 	}
@@ -242,24 +248,41 @@ func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade
 	if time.Unix(onchain.CreatedAt.Int64(), 0).Add(e.windowFor(tr.ChainID)).After(now) {
 		return false, nil
 	}
-	if decide != nil {
-		ok, err := decide()
-		if err != nil {
-			return false, fmt.Errorf("decide %s: %s", tr.ID, RedactAlertText(err.Error()))
-		}
-		if !ok {
-			return false, nil
-		}
-	}
 	for id, at := range e.sentAt { // bounded: entries older than the back-off are useless
 		if now.Sub(at) >= expiryResendAfter {
 			delete(e.sentAt, id)
 		}
 	}
 	e.sentAt[tr.ID] = now
-	hash, err := e.c.Signer.Send(ctx, tr.ChainID, func() ([]byte, error) {
+	sendCtx := WithOperationRef(ctx, "p2p_cancel:"+tr.ID.String()) // a retry never gets a new nonce
+	if tr.IsPoolSlice() {
+		sendCtx = ReservedSend(sendCtx) // a slice's cancel is one of the pool's reserved release-key calls
+	}
+	var decideErr error
+	if decide != nil {
+		sendCtx = WithPreBroadcast(sendCtx, func(hctx context.Context, _ uint64, _ string) error {
+			ok, err := decide(hctx)
+			switch {
+			case err != nil:
+				decideErr = err
+				return err
+			case !ok:
+				return errExpiryNotDecided
+			}
+			return nil
+		})
+	}
+	hash, err := e.c.Signer.Send(sendCtx, tr.ChainID, func() ([]byte, error) {
 		return escrow.PrepareCancelByTimeout(HashID(tr.ID), e.c.Signer.Address())
 	})
+	switch {
+	case errors.Is(err, errExpiryNotDecided):
+		delete(e.sentAt, tr.ID)
+		return false, nil
+	case decideErr != nil && errors.Is(err, ErrTxNotBroadcast):
+		delete(e.sentAt, tr.ID)
+		return false, fmt.Errorf("decide %s: %s", tr.ID, RedactAlertText(decideErr.Error()))
+	}
 	if err != nil {
 		if errors.Is(err, ErrTxNotBroadcast) {
 			delete(e.sentAt, tr.ID) // nothing was sent: no back-off
@@ -286,9 +309,9 @@ func (e *ExpiryCanceller) poolScope(ctx context.Context, now, zombieSince time.T
 		if budget[tr.ChainID] >= e.c.PerChain {
 			continue
 		}
-		var decide func() (bool, error)
+		var decide func(context.Context) (bool, error)
 		if tr.Status == models.P2PTradeStatusPendingPayment {
-			decide = func() (bool, error) { return e.c.Pool.decideSliceCancel(ctx, tr, now) }
+			decide = func(dctx context.Context) (bool, error) { return e.c.Pool.decideSliceCancel(dctx, tr, now) }
 		}
 		sent, cerr := e.cancelOnChain(ctx, tr, now, decide)
 		switch {
@@ -339,21 +362,24 @@ func (e *ExpiryCanceller) legacyScope(ctx context.Context, now time.Time, budget
 		if _, absent := e.legacyAbsent[tr.ID]; absent {
 			continue
 		}
-		sent, cerr := e.cancelOnChain(ctx, tr, now, func() (bool, error) {
-			cancel, leg, err := e.c.Trades.decideLegacyCancelLeg(ctx, tr, now)
-			if leg == "proof" {
-				e.c.Trades.alertExpiredWithProof(ctx, tr)
-				return cancel, err
-			}
-			if leg != "" && e.moneyMovedAlerts.due(tr.ID, now) {
-				metric := "p2p_expiry_money_moved"
-				if leg == "payout" {
-					metric = "p2p_expiry_payout_in_flight"
-				}
-				log.Printf("[p2p-expiry] ALERT %s trade=%s leg=%s: expired but naira has moved; not cancelled (repeats hourly)", metric, tr.ID, leg)
-			}
+		// The decision runs in the key lane's transaction; its alerts (email,
+		// audit rows) only after it, never inside the lane's lock.
+		var leg string
+		sent, cerr := e.cancelOnChain(ctx, tr, now, func(dctx context.Context) (bool, error) {
+			cancel, moved, err := e.c.Trades.decideLegacyCancelLeg(dctx, tr, now)
+			leg = moved
 			return cancel, err
 		})
+		switch {
+		case leg == "proof":
+			e.c.Trades.alertExpiredWithProof(ctx, tr)
+		case leg != "" && e.moneyMovedAlerts.due(tr.ID, now):
+			metric := "p2p_expiry_money_moved"
+			if leg == "payout" {
+				metric = "p2p_expiry_payout_in_flight"
+			}
+			log.Printf("[p2p-expiry] ALERT %s trade=%s leg=%s: expired but naira has moved; not cancelled (repeats hourly)", metric, tr.ID, leg)
+		}
 		switch {
 		case errors.Is(cerr, errExpiryTradeAbsent):
 			e.legacyAbsent[tr.ID] = tr.ExpiredNotifiedAt.Add(expiryLegacyLookback)
@@ -362,9 +388,6 @@ func (e *ExpiryCanceller) legacyScope(ctx context.Context, now time.Time, budget
 			failed++
 			budget[tr.ChainID]++
 			log.Printf("[p2p-expiry] %s", cerr)
-			if errors.Is(cerr, ErrTxNotBroadcast) {
-				e.c.Trades.undoLegacyDecision(ctx, tr.ID, now) // review M-7
-			}
 		case sent:
 			legacy++
 			budget[tr.ChainID]++
@@ -400,7 +423,10 @@ func (s *ITService) decideSliceCancel(ctx context.Context, slice *models.P2PTrad
 		return false, nil
 	}
 	cancel := false
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	// LaneDB: inside the key lane's allocation transaction when the
+	// canceller's hook calls it (a savepoint), so the decision commits with
+	// the signed cancel.
+	err := LaneDB(ctx, s.db).Transaction(func(tx *gorm.DB) error {
 		var intent models.ITIntent
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&intent, "id = ?", *slice.ITIntentID).Error; err != nil {
 			return err
@@ -431,7 +457,7 @@ func (s *ITService) decideSliceCancel(ctx context.Context, slice *models.P2PTrad
 // none did), for the canceller's alert.
 func (s *P2PTradeService) decideLegacyCancelLeg(ctx context.Context, tr *models.P2PTrade, now time.Time) (bool, string, error) {
 	cancel, moved := false, ""
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := LaneDB(ctx, s.db).Transaction(func(tx *gorm.DB) error { // see decideSliceCancel
 		var cur models.P2PTrade
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&cur, "id = ?", tr.ID).Error; err != nil {
 			return err
@@ -506,19 +532,6 @@ func (s *P2PTradeService) alertHeldCreditOnCancel(ctx context.Context, tr *model
 	for _, c := range credits {
 		log.Printf("[p2p-expiry] ALERT p2p_expiry_cancelled_with_held_credit trade=%s credit=%s status=%s hold=%s — the trade was cancelled with a credit of its amount waiting; refund the credit, never assign it to this trade",
 			tr.ID, c.ID, c.Status, c.HoldReasonCode)
-	}
-}
-
-// undoLegacyDecision is review M-7: the cancel this tick decided provably
-// never broadcast, so its decision comes off and the trade's payment paths
-// open again until a later tick cancels it. Guarded to this tick's decision
-// (a decision whose cancel may have broadcast keeps its older dropped_at).
-func (s *P2PTradeService) undoLegacyDecision(ctx context.Context, id uuid.UUID, decidedAt time.Time) {
-	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-		Where("id = ? AND status = ? AND dropped_at >= ? AND it_intent_id IS NULL", id, models.P2PTradeStatusPendingPayment, decidedAt.Add(-time.Second)).
-		Update("dropped_at", nil).Error; err != nil {
-		log.Printf("[p2p-expiry] ALERT p2p_expiry_undo_failed trade=%s: %s — decided but not cancelled; payments refused until a later cancel lands",
-			id, RedactAlertText(err.Error()))
 	}
 }
 

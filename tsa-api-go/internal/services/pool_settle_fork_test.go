@@ -240,7 +240,7 @@ func newForkRig(t *testing.T) *forkRig {
 		t.Fatal("treasury address mismatch")
 	}
 	// Task 14's settle wiring (newC2Rehearsal), on chain 56.
-	r.sender = NewChainReleaseSigner(mustKey(t, forkKey(t, "release")), map[int64]ReleaseBroadcaster{forkChainID: client})
+	r.sender = NewChainReleaseSigner(nil, mustKey(t, forkKey(t, "release")), map[int64]ReleaseBroadcaster{forkChainID: client})
 	verifier := NewLogTransferVerifier(client.Client)
 	sale := NewCompanyWallet(CompanyWalletConfig{Treasury: tr,
 		Decimals:  map[string]map[string]int{"bsc": {"USDT": 18}},

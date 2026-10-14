@@ -133,7 +133,7 @@ func (d *PoolDesk) findSliceTx(ctx context.Context, sl *models.P2PTrade, topic c
 	if sl.OpenTxHash == "" {
 		return "", nil
 	}
-	r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(sl.OpenTxHash))
+	r, err := d.c.Probe.TransactionReceipt(ctx, common.HexToHash(d.openHash(ctx, sl)))
 	if err != nil || r == nil || r.BlockNumber == nil {
 		return "", err
 	}
@@ -155,4 +155,15 @@ func (d *PoolDesk) findSliceTx(ctx context.Context, sl *models.P2PTrade, topic c
 		return nil
 	})
 	return found, err
+}
+
+// openHash is the slice's open transaction through the treasury's followCall
+// (the shared step): the signing of the same call that mined, recorded on the
+// slice.
+func (d *PoolDesk) openHash(ctx context.Context, sl *models.P2PTrade) string {
+	if sl.OpenTxHash == "" || sl.OpenTxHash == openTxReconciled || d.c.Treasury == nil {
+		return sl.OpenTxHash
+	}
+	sl.OpenTxHash, _ = d.c.Treasury.followCall(ctx, d.ChainKey(), d.c.Probe, d.c.DB, &models.P2PTrade{}, "open_tx_hash", sl.ID, sl.OpenTxHash)
+	return sl.OpenTxHash
 }

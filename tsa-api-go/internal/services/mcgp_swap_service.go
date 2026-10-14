@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"golang.org/x/sync/errgroup"
@@ -43,28 +46,38 @@ type MCGPSwapService struct {
 	cfg      *config.Config
 	operator ReleaseSigner // signs+broadcasts the IT operator ops; nil = IT dormant
 
-	// signMu serialises build+sign+broadcast for the operator EOA.
+	// operatorLane is the operator key's KeyLane on this chain: the lock held
+	// from the nonce read in buildUnsignedTx to the broadcast, and the nonce
+	// floor, shared with every other role signing with the same key on Sonic
+	// (PM release, gas sponsor, relayer). PendingNonceAt reflects only what the
+	// node has already seen, so two concurrent callers would otherwise read the
+	// same nonce and the node silently drops one — after which the caller burns
+	// a 60s WaitForReceipt on a transaction that will never exist. The
+	// scheduler's bill-reconciler settles and reverses on this key while the
+	// HTTP request path debits on it.
 	//
-	// buildUnsignedTx reads the nonce with PendingNonceAt, which reflects only
-	// what the node has already seen. Two concurrent callers receive the same
-	// value while the first transaction is still un-mined, sign different
-	// payloads with it, and the node silently drops one — after which the caller
-	// burns a 60s WaitForReceipt on a transaction that will never exist. The
-	// scheduler's bill-reconciler settles and reverses on this key while the HTTP
-	// request path debits on it, so this races in production today.
-	//
-	// NOTE: this lock covers this service's signer only. The PM release key has
-	// the same unguarded race via P2PTradeService.AutoRelease, on a different
-	// EOA, and is NOT fixed here.
-	//
-	// Holding the lock across the read is what fixes it: the nonce is read only
-	// after the previous broadcast has returned.
-	//
-	// Deliberately NOT an in-process nonce counter. A counter advances even when
-	// buildUnsignedTx fails at EstimateGas — a duplicate debitRef ("Debit exists")
-	// and an over-draw both revert there, routinely — and one burned nonce leaves
-	// every later transaction queued at the node forever, each reporting a tx hash
-	// that never mines. PendingNonceAt self-heals from a gap; a counter does not.
+	// The floor is not the in-process counter this comment once warned about:
+	// it moves only after a build succeeded, so an EstimateGas revert (a
+	// duplicate debitRef, an over-draw — routine here) never burns a nonce; it
+	// steps back on a definite rejection; and it expires after 30 s, so a gap
+	// self-heals from PendingNonceAt as before.
+	operatorLane *KeyLane
+
+	// operatorVerified is whether operators(<operator>) is true on the swap, as
+	// last read (ProbeOperatorRole). Until it is, IT, bills and MCGP checkout
+	// read as dormant (HasOperator) and every operator op is refused before it
+	// is built: a non-operator key reverts every debit, and a boot-time read
+	// error must not leave the money paths open on a guess.
+	operatorVerified atomic.Bool
+
+	// receiptWait is one bounded receipt wait (client.WaitForReceipt; tests).
+	receiptWait func(txHash string, timeout time.Duration) (*types.Receipt, error)
+
+	// signMu is the operator SEQUENCE lock: it orders operator operations, and
+	// OperatorSequence holds it across receipt waits (up to 60 s). It is never
+	// the nonce lock — holding the shared KeyLane that long would stall PM
+	// releases, pool releases and gas top-ups on the same key. Lock order is
+	// always signMu → operatorLane, never the other way.
 	signMu sync.Mutex
 }
 
@@ -85,14 +98,59 @@ func NewMCGPSwapService(client *blockchain.EVMClient, cfg *config.Config) *MCGPS
 	return svc
 }
 
-// SetOperatorSigner wires the operator EOA signer used for the IT/NGN path
-// (creditPremium/debitPremium/settleDebit/reverseDebit). The backend signs and
-// broadcasts these directly (they are NOT app-signed). Must be an `operators[]`
-// member on-chain. nil ⇒ IT operator ops disabled.
-func (s *MCGPSwapService) SetOperatorSigner(signer ReleaseSigner) { s.operator = signer }
+// SetOperatorLane wires the operator EOA through its key's shared KeyLane
+// (SignerRegistry). nil ⇒ IT operator ops disabled.
+//
+// The operator starts unverified: ProbeOperatorRole turns it on once
+// operators(<address>) reads true.
+func (s *MCGPSwapService) SetOperatorLane(lane *KeyLane) {
+	s.operator, s.operatorLane = nil, lane
+	if lane != nil {
+		s.operator = lane.Signer()
+	}
+	s.operatorVerified.Store(false)
+}
+
+// ErrOperatorRoleMissing: the operator key is wired but not (yet) verified as
+// an operator on the swap.
+var ErrOperatorRoleMissing = errors.New("the IT operator key is not a verified operator on the swap")
+
+// ProbeOperatorRole reads operators(<operator>) on the swap and records the
+// answer. A read error leaves the last answer standing (a boot read error
+// leaves it unverified, i.e. dormant) and is returned; so is a "no", so a
+// failure-streak alert fires while the role is missing.
+func (s *MCGPSwapService) ProbeOperatorRole(ctx context.Context) error {
+	if s == nil || s.operator == nil {
+		return nil
+	}
+	addr := s.operator.Address()
+	ok, err := s.callBool(ctx, "operators", common.HexToAddress(addr))
+	if err != nil {
+		return fmt.Errorf("read operators(%s): %w", addr, err)
+	}
+	was := s.operatorVerified.Swap(ok)
+	if ok && !was {
+		log.Printf("[config] IT operator %s verified on the swap — IT, bills and MCGP checkout live", addr)
+	}
+	if !ok {
+		if was {
+			log.Printf("[config] ALERT signer_role_missing=1 role=it_operator address=%s — operators() turned false; IT dormant", addr)
+		}
+		return fmt.Errorf("%w: operators(%s) is false — the PM must call addOperator", ErrOperatorRoleMissing, addr)
+	}
+	return nil
+}
+
+// OperatorConfigured reports whether an operator key is wired at all (boot
+// wiring of IT, bills and checkout), verified or not.
+func (s *MCGPSwapService) OperatorConfigured() bool { return s != nil && s.operator != nil }
 
 // HasOperator reports whether the IT operator signer is configured.
-func (s *MCGPSwapService) HasOperator() bool { return s != nil && s.operator != nil }
+//
+// It is false until the key is verified on the swap (ProbeOperatorRole).
+func (s *MCGPSwapService) HasOperator() bool {
+	return s != nil && s.operator != nil && s.operatorVerified.Load()
+}
 
 // OperatorAddress returns the IT operator EOA address (empty if unset).
 func (s *MCGPSwapService) OperatorAddress() string {
@@ -418,8 +476,8 @@ func (s *MCGPSwapService) operatorBroadcast(ctx context.Context, callData []byte
 		return "", notBroadcast(fmt.Errorf("IT operator signer not configured"))
 	}
 
-	// The nonce read inside buildUnsignedTx and the broadcast must not interleave
-	// with another caller's — see signMu.
+	// Operator operations are ordered by signMu; the nonce read and broadcast
+	// are covered by the key's lane — see operatorLane.
 	s.signMu.Lock()
 	defer s.signMu.Unlock()
 	return s.operatorBroadcastLocked(ctx, callData)
@@ -431,12 +489,60 @@ func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData 
 	if s.operator == nil {
 		return "", notBroadcast(fmt.Errorf("IT operator signer not configured"))
 	}
-	unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
-	if err != nil {
-		// Nonce, gas price and gas estimate are all reads: nothing was sent.
-		return "", notBroadcast(err)
+	if !s.operatorVerified.Load() {
+		return "", notBroadcast(ErrOperatorRoleMissing)
 	}
-	return s.operator.SignAndBroadcast(ctx, unsigned)
+	// The call itself (it carries the debit/credit ref) is the operation: a
+	// retry of the same op never gets a new nonce.
+	op := "it_op:" + crypto.Keccak256Hash(callData).Hex()
+	hash, attempted, err := s.operatorLane.Send(WithOperationRef(ctx, op), func() ([]byte, error) {
+		unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
+		if err != nil {
+			// Nonce, gas price and gas estimate are all reads: nothing was sent.
+			return nil, notBroadcast(err)
+		}
+		return unsigned, nil
+	})
+	if err != nil && !attempted {
+		// IT ops have no guarded pre-broadcast hook, and their callers fail
+		// the row on "not sent": tombstone the op (sequenced) so an attempt
+		// begun earlier can never commit after that answer — or, if one
+		// already did, answer in flight.
+		a, rerr := s.operatorLane.RetireOp(ctx, s.operator.Address(), op, "", RetireSequenced)
+		switch {
+		case rerr != nil:
+			return "", outcomeUnknown("", fmt.Errorf("%v; give-up unproven: %w", err, rerr))
+		case a != nil:
+			h, _, ierr := s.operatorLane.inFlight(ctx, a)
+			return h, ierr
+		}
+	}
+	return hash, err
+}
+
+// OperatorCallCancelled is the operator lane's verdict that an operator
+// transaction never executed (cancelled at its nonce, proven at the finality
+// depth): the op it carried can be decided as not done.
+func (s *MCGPSwapService) OperatorCallCancelled(ctx context.Context, txHash string) (bool, error) {
+	c, err := s.operatorLane.CallCancelled(ctx, txHash)
+	if err != nil || !c {
+		return false, err
+	}
+	// Given up only through RetireOp, by its operation key (it_op:<call
+	// hash>, as operatorBroadcastLocked named it) and hash — permanently: the
+	// retry is a new intent with a new debit ref, hence a new call.
+	if s.operator == nil {
+		return false, nil
+	}
+	data, err := s.operatorLane.CallData(ctx, txHash)
+	if err != nil || data == "" {
+		return false, err
+	}
+	op := "it_op:" + crypto.Keccak256Hash(common.FromHex(data)).Hex()
+	if !s.operatorLane.GiveUp(ctx, s.operator.Address(), op, txHash, RetirePermanent) {
+		return false, nil
+	}
+	return true, nil
 }
 
 // OperatorOps are the operator transactions a sequence may send.
@@ -447,7 +553,7 @@ type OperatorOps interface {
 	OperatorCreditPremium(ctx context.Context, user string, amount *big.Int, ref [32]byte) (string, error)
 }
 
-// OperatorSequence runs fn holding the operator signing lock, so the
+// OperatorSequence runs fn holding the operator sequence lock (signMu), so the
 // transactions fn sends (and the receipts it waits for) are not interleaved
 // with any other operator transaction — an IT credit cannot land between a
 // settle and the credit that depends on the MCGP it freed. Only operator-key
@@ -860,18 +966,28 @@ func (s *MCGPSwapService) VerifyAmountEvent(eventName, txHash string, account co
 }
 
 func (s *MCGPSwapService) receipt(txHash string) (*types.Receipt, error) {
-	if s.client == nil {
+	if s.client == nil && s.receiptWait == nil {
 		return nil, fmt.Errorf("blockchain client not available")
 	}
 	// The app confirms right after broadcast, so the tx is usually not mined
 	// yet on the node we query. Wait (Sonic blocks are ~1s) rather than failing
-	// immediately on a single-shot lookup.
-	r, err := s.client.WaitForReceipt(txHash, 60*time.Second)
+	// immediately on a single-shot lookup — following an operator tx to its
+	// speed-up, if the key lane re-signed it, so the replacement's receipt
+	// answers for the original.
+	wait := s.receiptWait
+	if wait == nil {
+		wait = s.client.WaitForReceipt
+	}
+	r, final, err := waitFollowingReplacements(context.Background(), s.operatorLane, txHash, 60*time.Second,
+		func(_ context.Context, h string, d time.Duration) (*types.Receipt, error) { return wait(h, d) })
 	if err != nil {
+		if c, cerr := s.operatorLane.CallCancelled(context.Background(), txHash); cerr == nil && c {
+			return nil, fmt.Errorf("get receipt %s: %w", txHash, ErrCallCancelled)
+		}
 		return nil, fmt.Errorf("get receipt %s: %w", txHash, err)
 	}
 	if r.Status != types.ReceiptStatusSuccessful {
-		return nil, fmt.Errorf("tx %s reverted", txHash)
+		return nil, fmt.Errorf("tx %s reverted", final)
 	}
 	return r, nil
 }

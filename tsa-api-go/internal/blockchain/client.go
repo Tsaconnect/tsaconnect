@@ -115,6 +115,56 @@ func (c *EVMClient) GetBalance(address string) (*big.Int, error) {
 	return balance, nil
 }
 
+// NativeBalance is GetBalance bounded by the caller's ctx (a key lane's fee
+// gate reads it before taking its lock).
+func (c *EVMClient) NativeBalance(ctx context.Context, address string) (*big.Int, error) {
+	balance, err := c.Client.BalanceAt(ctx, common.HexToAddress(address), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get balance for %s: %w", address, err)
+	}
+	return balance, nil
+}
+
+// NativeStateAt is the address's balance and mined nonce at ONE block (the
+// head), so a key lane's fee gate knows exactly which of its transactions the
+// balance has already paid for.
+func (c *EVMClient) NativeStateAt(ctx context.Context, address string) (*big.Int, uint64, error) {
+	head, err := c.Client.BlockNumber(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read the head block: %w", err)
+	}
+	at := new(big.Int).SetUint64(head)
+	addr := common.HexToAddress(address)
+	bal, err := c.Client.BalanceAt(ctx, addr, at)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get balance for %s at %d: %w", address, head, err)
+	}
+	n, err := c.Client.NonceAt(ctx, addr, at)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get nonce for %s at %d: %w", address, head, err)
+	}
+	return bal, n, nil
+}
+
+// PendingNonce is the address's pending nonce, bounded by ctx.
+func (c *EVMClient) PendingNonce(ctx context.Context, address string) (uint64, error) {
+	n, err := c.Client.PendingNonceAt(ctx, common.HexToAddress(address))
+	if err != nil {
+		return 0, fmt.Errorf("failed to get pending nonce for %s: %w", address, err)
+	}
+	return n, nil
+}
+
+// LatestNonce is the address's nonce at the latest MINED block — never the
+// pending view a load-balanced RPC may lag on.
+func (c *EVMClient) LatestNonce(ctx context.Context, address string) (uint64, error) {
+	n, err := c.Client.NonceAt(ctx, common.HexToAddress(address), nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get mined nonce for %s: %w", address, err)
+	}
+	return n, nil
+}
+
 // GetNonce returns the next nonce for the given address.
 func (c *EVMClient) GetNonce(address string) (uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -237,6 +287,38 @@ func (c *EVMClient) SendRawTransaction(signedTx []byte) (string, error) {
 	}
 
 	return tx.Hash().Hex(), nil
+}
+
+// TxByHashReader is the one read TxKnown needs (*ethclient.Client).
+type TxByHashReader interface {
+	TransactionByHash(ctx context.Context, hash common.Hash) (*types.Transaction, bool, error)
+}
+
+// TxKnown reports whether the node holds txHash, pending or mined. Only
+// NotFound reads as "no"; any other failure is an error, never a "no". The one
+// helper every dropped-transaction check uses (key lanes, the company wallet).
+func TxKnown(ctx context.Context, r TxByHashReader, txHash string) (bool, error) {
+	_, _, err := r.TransactionByHash(ctx, common.HexToHash(txHash))
+	if errors.Is(err, ethereum.NotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// TransactionReceipt is one non-waiting receipt read (ethereum.NotFound while
+// the transaction is not mined).
+func (c *EVMClient) TransactionReceipt(ctx context.Context, hash common.Hash) (*types.Receipt, error) {
+	return c.Client.TransactionReceipt(ctx, hash)
+}
+
+// BlockNumber is the chain's latest block number.
+func (c *EVMClient) BlockNumber(ctx context.Context) (uint64, error) {
+	return c.Client.BlockNumber(ctx)
+}
+
+// TransactionKnown is TxKnown on this client.
+func (c *EVMClient) TransactionKnown(ctx context.Context, txHash string) (bool, error) {
+	return TxKnown(ctx, c.Client, txHash)
 }
 
 // GetTransactionReceipt retrieves the receipt for a mined transaction.

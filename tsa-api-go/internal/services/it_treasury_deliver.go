@@ -197,6 +197,8 @@ func (s *ITService) SendTreasuryBuy(ctx context.Context, intentID uuid.UUID) err
 
 // sendSale starts the desk's delivery of one order, at most once per order.
 func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UUID) error {
+	// An owed send: it spends the treasury lane reservation held for it (pre-check and send alike).
+	ctx = ReservedSend(ctx)
 	intent, err := s.saleIntent(ctx, sd, intentID)
 	if err != nil {
 		return err
@@ -335,37 +337,34 @@ func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UU
 	if existing != nil {
 		return nil // another tick holds the live sale
 	}
-	// 6. Send, writing the nonce on the leg before the broadcast (review C1).
-	// 7. Record the hash on a context that outlives ours.
-	hash, attempted, err := tr.TransferTokenRecorded(ctx, lane, token, intent.DestAddress, amount, func(nonce uint64) error {
-		res := s.db.WithContext(detached(ctx)).Model(&models.RampLeg{}).
-			Where("id = ? AND status = ?", leg.ID, models.RampLegStatusPending).Update("nonce", nonce)
-		if res.Error == nil && res.RowsAffected != 1 {
-			return fmt.Errorf("leg %s is no longer pending", leg.ID)
-		}
-		return res.Error
-	})
+	// 6. Send. The leg's nonce and hash are written in the key lane's own
+	// allocation transaction, only while the leg is still pending: the leg and
+	// the signed call commit together or not at all, so a refund that won the
+	// leg first means nothing is ever signed, and a committed call always
+	// shows on its leg. The leg is the operation: a retry of this same leg
+	// never gets a new nonce.
+	hash, attempted, err := tr.TransferTokenRecorded(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, token, intent.DestAddress, amount,
+		func(hctx context.Context, nonce uint64, txHash string) error {
+			res := LaneDB(hctx, s.db).Model(&models.RampLeg{}).
+				Where("id = ? AND status = ? AND (tx_hash = '' OR tx_hash IS NULL)", leg.ID, models.RampLegStatusPending).
+				Updates(map[string]any{"nonce": nonce, "tx_hash": txHash})
+			if res.Error == nil && res.RowsAffected != 1 {
+				return fmt.Errorf("leg %s is no longer pending", leg.ID)
+			}
+			return res.Error
+		})
 	if err != nil {
 		if !attempted {
-			// Provably never left: free the leg; the next tick sends attempt n+1.
-			if ferr := legs.Fail(detached(ctx), leg.ID, "not broadcast: "+RedactAlertText(err.Error())); ferr != nil {
+			// Nothing was committed: free the leg; the next tick sends attempt n+1.
+			if ferr := legs.FailExpected(detached(ctx), leg.ID, "", "not broadcast: "+RedactAlertText(err.Error())); ferr != nil {
 				log.Printf("%s ALERT ramp_treasury_leg_fail_unrecorded intent=%s leg=%s err=%s", sd.tag, intent.ID, leg.ID, RedactAlertText(ferr.Error()))
 			}
 			return err
 		}
-		if hash != "" {
-			if serr := legs.SetTxHash(detached(ctx), leg.ID, hash, ""); serr != nil {
-				log.Printf("%s ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(serr.Error()))
-			}
-		}
-		// Uncertain: the leg stays pending and is only ever observed, never
-		// re-sent by the machine.
+		// Committed and in flight (the lane keeps sending it): the leg already
+		// carries its hash, and is only ever observed, never re-sent.
 		log.Printf("%s ALERT ramp_treasury_broadcast_uncertain intent=%s leg=%s tx=%q err=%s", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
 		return nil
-	}
-	if err := legs.SetTxHash(detached(ctx), leg.ID, hash, ""); err != nil {
-		log.Printf("%s ALERT ramp_treasury_hash_unrecorded intent=%s leg=%s tx=%s err=%s — record it by hand", sd.tag, intent.ID, leg.ID, hash, RedactAlertText(err.Error()))
-		return err
 	}
 	log.Printf("%s METRIC ramp_treasury_sent intent=%s chain=%s token=%s amount=%s tx=%s", sd.tag, intent.ID, chain, token, amount, hash)
 	return nil
@@ -405,6 +404,19 @@ func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uui
 	if verifier == nil || probe == nil {
 		return fmt.Errorf("%s: no verifier or probe on %s", sd.label, leg.ChainKey)
 	}
+	// A sale the key lane sped up mines under the replacement's hash: verify
+	// (and record) whichever signing of the same call mined. One the lane
+	// CANCELLED never executed: the leg fails and the next tick sends a new
+	// attempt (a new operation, a new nonce) — paid exactly once.
+	var cancelled bool
+	leg.TxHash, cancelled = sd.wallet.Treasury().followCall(ctx, leg.ChainKey, probe, s.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash)
+	if cancelled && sd.wallet.Treasury().giveUp(ctx, leg.ChainKey, "ramp_leg:"+leg.ID.String(), leg.TxHash, RetirePermanent) {
+		log.Printf("%s ALERT ramp_treasury_send_cancelled intent=%s leg=%s tx=%s — the key lane cancelled it; a new attempt follows", sd.tag, intent.ID, leg.ID, leg.TxHash)
+		if err := s.treasuryLegs(s.db).FailExpected(ctx, leg.ID, leg.TxHash, "cancelled: "+ErrCallCancelled.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
+			return err
+		}
+		return nil
+	}
 	gen := probe.EndpointGeneration() // the verdict and its depth come from one endpoint
 	credited, verr := verifier.VerifyTransferFrom(ctx, leg.TxHash, sd.wallet.TokenAddress(leg.ChainKey, leg.Token),
 		sd.wallet.Address(), intent.DestAddress)
@@ -432,7 +444,7 @@ func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uui
 		}
 		// Free the leg; the next tick sends attempt n+1.
 		log.Printf("%s METRIC ramp_treasury_send_reverted intent=%s tx=%s", sd.tag, intent.ID, leg.TxHash)
-		if err := s.treasuryLegs(s.db).Fail(ctx, leg.ID, "reverted: "+verr.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
+		if err := s.treasuryLegs(s.db).FailExpected(ctx, leg.ID, leg.TxHash, "reverted: "+verr.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
 			return err
 		}
 		return nil
@@ -595,14 +607,17 @@ func (s *ITService) chainEvidenceFor(ctx context.Context, sd *saleDesk, db *gorm
 	}
 	gen := probe.EndpointGeneration()
 	if leg.TxHash != "" {
-		known, terr := txHashKnown(ctx, probe, leg.TxHash)
-		if terr != nil {
-			return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
-		}
-		if known {
-			ev.HashKnown = true
-			ev.Reason = "the node still knows " + leg.TxHash
-			return ev, nil
+		// Every signing of the same call (a speed-up replaces the hash).
+		for _, h := range sd.wallet.Treasury().keyLane(leg.ChainKey).signingsOf(ctx, leg.TxHash) {
+			known, terr := txHashKnown(ctx, probe, h)
+			if terr != nil {
+				return nil, fmt.Errorf("%s: dropped check: %w", sd.label, terr)
+			}
+			if known {
+				ev.HashKnown = true
+				ev.Reason = "the node still knows " + h
+				return ev, nil
+			}
 		}
 	}
 	addr := common.HexToAddress(sd.wallet.Address())
@@ -806,6 +821,19 @@ func (s *ITService) saleGate(ctx context.Context, sd *saleDesk, db *gorm.DB, int
 			}
 			if !ev.Allowed {
 				return fmt.Sprintf("attempt %d may still land or have landed: %s", leg.Attempt, ev.Reason), nil
+			}
+		case strings.HasPrefix(leg.Error, "cancelled:"):
+			// The key lane's record is the proof: the leg's nonce mined the
+			// lane's cancel, so its call never executed.
+			if sd == nil || sd.wallet == nil {
+				return "", ErrTreasuryUnavailable
+			}
+			cancelled, err := sd.wallet.Treasury().keyLane(leg.ChainKey).CallCancelled(ctx, leg.TxHash)
+			if err != nil {
+				return "", err
+			}
+			if !cancelled {
+				return fmt.Sprintf("attempt %d is not recorded as cancelled by the key lane", leg.Attempt), nil
 			}
 		case strings.HasPrefix(leg.Error, "reverted:"):
 			if sd == nil || sd.wallet == nil {

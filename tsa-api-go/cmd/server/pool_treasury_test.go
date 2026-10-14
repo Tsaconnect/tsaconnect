@@ -98,3 +98,24 @@ func TestBuildRampConversion_StillRefusesASharedKey(t *testing.T) {
 		t.Fatal("the extracted key check must still refuse a shared key")
 	}
 }
+
+// One key, one chain, one lane: the pool-only treasury and a sponsor lane
+// built from the same BlockchainService on the same key and chain id get the
+// same KeyLane from its SignerRegistry.
+func TestSignerRegistry_BootLanesOnOneKeyShareTheKeyLane(t *testing.T) {
+	cfg := poolTestConfig(t, "mainnet")
+	bs := services.NewBlockchainService(cfg)
+	tr := poolTreasuryFor(cfg, bs, nil)
+	if tr == nil || tr.Lane("bsc").KeyLane == nil {
+		t.Fatal("the pool treasury lane must come from the registry")
+	}
+	key, _ := crypto.HexToECDSA(testKeyB)
+	sponsor := buildSponsorLaneOn(bs, "mainnet", "bsc", "gas_sponsor", key, "ramp_sponsor_bsc", services.SponsorLimits{}, nil)
+	if sponsor == nil || sponsor.KeyLane != tr.Lane("bsc").KeyLane {
+		t.Fatal("a sponsor lane on the treasury's key and chain must share its KeyLane")
+	}
+	other, _ := crypto.HexToECDSA(testKeyA)
+	if l := buildSponsorLaneOn(bs, "mainnet", "bsc", "gas_sponsor", other, "x", services.SponsorLimits{}, nil); l.KeyLane == sponsor.KeyLane {
+		t.Fatal("another key must get its own lane")
+	}
+}

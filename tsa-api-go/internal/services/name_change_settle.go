@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"strings"
@@ -221,7 +223,18 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 	// The treasury's value caps read USD: a $1 stablecoin's amount is its value.
 	usd, _ := new(big.Float).Quo(new(big.Float).SetInt(amount),
 		new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(ch.PayDecimals)), nil))).Float64()
-	txHash, attempted, err := s.rail.Refund(ctx, ch.PayChain, ch.PayToken, ch.PayFrom, amount, usd)
+	// The refund's hash commits on the claimed row in the key lane's
+	// allocation transaction, with the signed transfer (or neither does).
+	sendCtx := WithPreBroadcast(ctx, func(hctx context.Context, _ uint64, hash string) error {
+		res := LaneDB(hctx, s.db).Model(&models.UserNameChange{}).
+			Where("id = ? AND fee_status = ? AND (fee_tx_hash = '' OR fee_tx_hash IS NULL)", ch.ID, models.NameChangeFeeRefundSending).Update("fee_tx_hash", hash)
+		if res.Error == nil && res.RowsAffected != 1 {
+			return errors.New("name change refund: the claim moved")
+		}
+		return res.Error
+	})
+	sendCtx = WithOperationRef(sendCtx, nameChangeRefundOp(ch))
+	txHash, attempted, err := s.rail.Refund(sendCtx, ch.PayChain, ch.PayToken, ch.PayFrom, amount, usd)
 	switch {
 	case err == nil:
 		s.setFee(ctx, ch.ID, []string{models.NameChangeFeeRefundSending}, models.NameChangeFeeRefunded, txHash)
@@ -232,6 +245,12 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 		log.Printf("[name-change] ALERT name_change_refund_uncertain_total=1 change=%s chain=%s tx=%s — the refund may have left; check the chain and record it as sent once mined, or leave it for support: %v",
 			ch.ID, ch.PayChain, txHash, err)
 	}
+}
+
+// nameChangeRefundOp is a refund attempt's operation key: one per attempt,
+// so a refund given up (refund_failed) is retried as a new operation.
+func nameChangeRefundOp(ch *models.UserNameChange) string {
+	return fmt.Sprintf("name_change_refund:%s:%d", ch.ID, ch.RefundAttempts)
 }
 
 // refundNotSent records a refund that provably never left — from one of from —

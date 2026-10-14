@@ -1101,10 +1101,37 @@ func (s *SellIntentService) ClearToppedUp(ctx context.Context, id uuid.UUID) err
 }
 
 // RecordTopUp writes down the top-up a claimed sale was actually sent.
+// Inside a key lane hook, LaneDB is the lane's allocation transaction.
 func (s *SellIntentService) RecordTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
-	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"top_up_tx_hash": txHash, "top_up_wei": amountWei}).Error
+	// Exactly one claimed intent with no top-up recorded yet: the hook's
+	// guard (else the allocation rolls back and nothing signs).
+	res := LaneDB(ctx, s.db).Model(&models.RampSellIntent{}).
+		Where("id = ? AND topped_up_at IS NOT NULL AND (top_up_tx_hash = '' OR top_up_tx_hash IS NULL)", id).
+		Updates(map[string]any{"top_up_tx_hash": txHash, "top_up_wei": amountWei})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("sell intent %s: no unrecorded claimed top-up", id)
+	}
+	return nil
+}
+
+// ClearCancelledTopUp gives a sale's top-up claim back, only while the intent
+// still records txHash (the top-up the key lane proved cancelled).
+func (s *SellIntentService) ClearCancelledTopUp(ctx context.Context, id uuid.UUID, txHash string) (bool, error) {
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND top_up_tx_hash = ? AND top_up_tx_hash <> ''", id, txHash).
+		Updates(map[string]any{"topped_up_at": nil, "top_up_tx_hash": "", "top_up_wei": ""})
+	return res.RowsAffected == 1, res.Error
+}
+
+// ClearCancelledDestTopUp is ClearCancelledTopUp for the destination top-up.
+func (s *SellIntentService) ClearCancelledDestTopUp(ctx context.Context, id uuid.UUID, txHash string) (bool, error) {
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND dest_top_up_tx_hash = ? AND dest_top_up_tx_hash <> ''", id, txHash).
+		Updates(map[string]any{"dest_topped_up_at": nil, "dest_top_up_tx_hash": "", "dest_top_up_wei": ""})
+	return res.RowsAffected == 1, res.Error
 }
 
 // ─── Destination gas top-up bookkeeping (GasTopUp.TopUpDestForIntent) ──────
@@ -1137,10 +1164,20 @@ func (s *SellIntentService) ClearDestToppedUp(ctx context.Context, id uuid.UUID)
 }
 
 // RecordDestTopUp writes down the destination top-up actually sent.
+// Inside a key lane hook, LaneDB is the lane's allocation transaction.
 func (s *SellIntentService) RecordDestTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error {
-	return s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"dest_top_up_tx_hash": txHash, "dest_top_up_wei": amountWei}).Error
+	// Exactly one claimed intent with no top-up recorded yet: the hook's
+	// guard (else the allocation rolls back and nothing signs).
+	res := LaneDB(ctx, s.db).Model(&models.RampSellIntent{}).
+		Where("id = ? AND dest_topped_up_at IS NOT NULL AND (dest_top_up_tx_hash = '' OR dest_top_up_tx_hash IS NULL)", id).
+		Updates(map[string]any{"dest_top_up_tx_hash": txHash, "dest_top_up_wei": amountWei})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return fmt.Errorf("sell intent %s: no unrecorded claimed top-up", id)
+	}
+	return nil
 }
 
 // load reads one intent BY ID AND OWNER. Never by id alone: every step of a

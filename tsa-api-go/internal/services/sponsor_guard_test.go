@@ -118,13 +118,12 @@ func TestSponsorGuard_ReleaseGasSkippedAfterDayRoll(t *testing.T) {
 	}
 }
 
-func TestSponsorGuard_CheckFloor(t *testing.T) {
+// Floors are alert-only (owner 2026-10-13): the guard's floor only alerts; the
+// one refusal is the key lane's fee gate (KeyLane.requireFee).
+func TestSponsorGuard_FloorOnlyAlerts(t *testing.T) {
 	g, _ := newTestGuard(t)
-	if err := g.CheckFloor(big.NewInt(999)); !errors.Is(err, ErrRelayerUnderfunded) {
-		t.Fatalf("below floor: want ErrRelayerUnderfunded, got %v", err)
-	}
-	if err := g.CheckFloor(big.NewInt(1_000)); err != nil {
-		t.Fatalf("at floor: %v", err)
+	if !g.AlertFloor(big.NewInt(999)) || g.AlertFloor(big.NewInt(1_000)) {
+		t.Fatal("AlertFloor must report below-floor only")
 	}
 }
 

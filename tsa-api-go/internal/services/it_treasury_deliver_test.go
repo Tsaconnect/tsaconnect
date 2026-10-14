@@ -55,6 +55,8 @@ type fakeTxProbe struct {
 	// blockTime is the receipt block's time; zero reads as now, so a test
 	// that does not care about it sees a transfer mined just now.
 	blockTime time.Time
+	// noReceipt: hashes with no receipt (a signing the key lane replaced).
+	noReceipt map[common.Hash]bool
 	// gen is the RPC endpoint generation. switchOnScan / switchOnReceipt fail
 	// the client over to another endpoint during a filtered scan / a receipt
 	// read: the reads either side of it may come from different nodes.
@@ -80,7 +82,10 @@ func (p *fakeTxProbe) NonceAt(_ context.Context, _ common.Address, block *big.In
 	return p.latest, nil
 }
 func (p *fakeTxProbe) BlockNumber(context.Context) (uint64, error) { return p.head, nil }
-func (p *fakeTxProbe) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
+func (p *fakeTxProbe) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
+	if p.noReceipt[h] {
+		return nil, ethereum.NotFound
+	}
 	if p.switchOnReceipt {
 		p.gen++
 	}
@@ -283,7 +288,11 @@ func TestSendTreasuryBuy_NotBroadcastAfterSigningWaitsForTheNonceToBeConsumed(t 
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err == nil {
 		t.Fatal("want the refusal reported")
 	}
-	if legs := r.legs(t); len(legs) != 1 || legs[0].Nonce == nil || *legs[0].Nonce != 7 {
+	// The key lane's outbox can no longer leave this shape (a committed sale
+	// is in flight, never "not broadcast"); a leg the pre-outbox release left
+	// has it, so the recovery path is kept: give the refused leg its nonce.
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("nonce", 7)
+	if legs := r.legs(t); len(legs) != 1 || legs[0].Nonce == nil || *legs[0].Nonce != 7 || legs[0].Status != models.RampLegStatusFailed {
 		t.Fatalf("legs = %+v, want the signed nonce 7 recorded", legs)
 	}
 	r.signer.err = nil
@@ -450,6 +459,9 @@ func TestResendTreasuryBuy_MinedButHashLostIsRefused(t *testing.T) {
 	if err := r.s.SendTreasuryBuy(ctx, r.intent.ID); err != nil {
 		t.Fatal(err)
 	}
+	// A nonce with no hash is a pre-outbox leg's shape (the key lane now
+	// commits both with the signed call); the recovery path is kept for it.
+	r.s.db.Model(&models.RampLeg{}).Where("order_id = ?", r.intent.ID).Update("nonce", 7)
 	leg := r.legs(t)[0]
 	if leg.TxHash != "" || leg.Nonce == nil || *leg.Nonce != 7 || leg.FromBlock != 100 {
 		t.Fatalf("leg = %+v, want the nonce and start block recorded before the broadcast", leg)

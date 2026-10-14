@@ -199,6 +199,19 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 	if err != nil {
 		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: reserve: %w", err)
 	}
+	if existing != nil && existing.TxHash != "" && lane.callCancelled(ctx, existing.TxHash) &&
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "auth_relay:"+existing.ID.String(), existing.TxHash, RetirePermanent) {
+		// The earlier relay was cancelled at its nonce (it never executed;
+		// authorizationState above still reads unused): its row goes and the
+		// authorization is relayed again.
+		if forgot, ferr := a.store.ForgetCancelled(ctx, existing.ID, existing.TxHash); ferr != nil || !forgot {
+			return AuthorizationRelayResult{}, ErrSponsorshipInProgress
+		}
+		log.Printf("[ramp-sponsor] relay %s for order=%s was cancelled by the key lane; relaying again", existing.TxHash, orderID)
+		if existing, err = a.store.Reserve(ctx, row); err != nil {
+			return AuthorizationRelayResult{}, fmt.Errorf("sponsor: reserve: %w", err)
+		}
+	}
 	if existing != nil {
 		if existing.TxHash != "" {
 			return AuthorizationRelayResult{TxHash: existing.TxHash}, nil
@@ -207,15 +220,6 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 	}
 	releaseRow := func() { releaseSponsorshipRow(ctx, a.store, row.ID) }
 
-	bal, err := lane.Chain.BalanceAt(ctx, common.HexToAddress(lane.Signer.Address()), nil)
-	if err != nil {
-		releaseRow()
-		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: read sponsor balance: %w", err)
-	}
-	if err := lane.Guard.CheckFloor(bal); err != nil {
-		releaseRow()
-		return AuthorizationRelayResult{}, err
-	}
 	gas, err := lane.Guard.ReserveGas(authorizationGasUnits)
 	if err != nil {
 		releaseRow()
@@ -240,8 +244,12 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 		return AuthorizationRelayResult{}, fmt.Errorf("%w: %v", ErrSimulationUnavailable, err)
 	}
 
-	txHash, broadcastAttempted, err := lane.send(ctx, func() ([]byte, error) {
+	// The sponsorship row's hash commits in the key lane's allocation
+	// transaction, with the signed relay (or neither does).
+	txHash, broadcastAttempted, err := lane.sendRecorded(WithOperationRef(ctx, "auth_relay:"+row.ID.String()), func() ([]byte, error) {
 		return lane.Builder.BuildUnsignedTx(lane.Signer.Address(), token, calldata)
+	}, func(hctx context.Context, _ uint64, hash string) error {
+		return a.store.SetTxHash(hctx, row.ID, hash, "")
 	})
 	if err != nil {
 		if broadcastAttempted {
@@ -254,7 +262,6 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 		releaseOurFault()
 		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: broadcast: %w", err)
 	}
-	recordSponsorshipTx(ctx, a.store, row.ID, txHash, "")
 	log.Printf("[ramp-sponsor] relayed authorization order=%s chain=%s token=%s tx=%s", orderID, lane.ChainKey, order.Token, txHash)
 	return AuthorizationRelayResult{TxHash: txHash}, nil
 }

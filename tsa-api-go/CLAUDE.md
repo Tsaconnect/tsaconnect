@@ -145,6 +145,188 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
   not yet implemented). Ignored outside production. When it lets a raw key through in
   production, boot logs `ALERT raw_signer_key_in_production=1 key=<NAME>` once per key —
   never the key material — so the exposure is visible in every log sink.
+- **Three hot keys, one lane per key and chain** (signer consolidation 2026-10-13 + owner
+  decisions the same day; `docs/plans/2026-10-13-signer-key-consolidation.md` outside the repo).
+  OPERATOR = `PM_RELEASE_PRIVATE_KEY`: PM/pool releases and cancels, and the IT operator and gas
+  sponsor whenever their own var is unset (`roleKey`, resolved where each signer is built — the operator secret is never copied into the role's config field; raw-key ALERTs name the var actually used, e.g. `key=PM_RELEASE_PRIVATE_KEY role=gas_sponsor`; boot lines `[signer] role=… signs
+  with the operator` / `[signer] DEPRECATED role=…`). RELAYER = `RELAYER_PRIVATE_KEY`, its own key:
+  never falls back (unset = gasless dormant), and boot refuses it equal to any other key; it relays
+  only while its key reads clean of swap owner/operator/guardian — at boot and on the 60 s
+  `relayer-role-probe` job (failure-streak alerted, `ALERT relayer_role_check_failed=1`); a failed
+  check takes only gasless down, never the API. TREASURY = `RAMP_TREASURY_PRIVATE_KEY`.
+  `assertDistinctKey` is class-based: only operator roles may share a key; the company wallet must
+  differ from all of them.
+- **KeyLane** (`services/release_signer_lanes.go`, store `services/key_lane_store.go`): every
+  signing path takes its lane from the one `SignerRegistry` (`BlockchainService.Signers()`), keyed by
+  (address, chain id); boot prints `[signer] operator=… roles=… lanes=[…]` and gives the registry the
+  database store. The in-process lane lock is ctx-aware (a dead ctx never acquires it); a held lane
+  refuses before any read or build. **A nonce only ever carries one call**, across processes and
+  restarts — the lane is an OUTBOX:
+  - **A.** Chain reads (pending, mined + balance at one block, gas price) happen first. Then, under a
+    per-(chain, address) `pg_advisory_xact_lock` (a process mutex on SQLite) in ONE transaction with no
+    network I/O: choose the nonce (max(pending, mined, every allocation + 1); never a hole), run the fee
+    gate, sign, write the allocation (`key_lane_nonces`: unique `(chain_id, address, nonce)`, the call's
+    fingerprint keccak(to|data|value), the caller's operation key) and its signing (`key_lane_txs`,
+    raw bytes, status `signed`), run the caller's **pre-broadcast hook**, commit. The hook
+    (`services.WithPreBroadcast(ctx, LaneHook)`, or the `*Recorded` helpers) is the caller's own
+    business write — DB only, through `services.LaneDB(ctx, db)`, which is that same transaction — so
+    the caller's state and the signed call commit together or not at all; a hook error rolls
+    everything back and nothing signed survives. Callers: treasury sale legs (`sendSale`: leg nonce +
+    hash, only while pending), conversion bridge/delivery/refund legs (`legSend`: hash + tool, only
+    while pending — a refund that won the leg means nothing is signed), pool slice opens
+    (`open_nonce` + `open_tx_hash`), pool slice releases (`release_tx_hash`, only while releasing),
+    slice resolves (hash replaces the claim), expiry cancels (the cancel DECISION — `dropped_at`
+    under the row lock — is taken in the hook), gas top-ups and authorization relays (the
+    sponsorship / intent row's hash), the name-change fee refund (`fee_tx_hash`). An approve never
+    inherits its route's hook: a bridge leg's approve records `approve_tx_hash` through its own
+    (`WithApproveHook`); a leg whose approve committed but whose route did not is freed after 2 min
+    only through a PERMANENT `KeyLane.RetireOp` of its `:route` operation, and then only while the
+    leg records no route hash; the route goes on a new attempt.
+    **The give-up rule:** a caller may abandon an operation (fail or free its record, clear a claim,
+    roll back, retry on a new operation) only after `KeyLane.RetireOp(op, hash)` — under the lane
+    lock — proved it holds nothing live or executed (by its key and by the allocation of its
+    recorded hash; a resolved-cancelled one does not count, nor a mined one that REVERTED) and
+    marked its tombstone (`key_lane_retired_ops`): **permanent** when the retry is a NEW key (legs and
+    routes, `gas_topup:<row>`, `auth_relay:<row>`, `p2p_drip`, `name_change_refund:<id>:<n>`, IT ops),
+    **sequenced** when the retry reuses the key (intent/destination top-ups, slice release/resolve,
+    AutoRelease) — an attempt begun before it is refused at its commit (`ErrOperationRetired`); a
+    permanent tombstone is never downgraded. The lane PROBES (no
+    tombstone) on every not-attempted answer for an operation — a hold, a fee/floor read, a build
+    error, the fee gate, a hook refusal, and the treasury's own pre-lane refusals (kill switch,
+    checks, gas gate, allowance read — every key of the operation under ONE lock): an allocation
+    found there is answered in flight (a different call under the key is logged and answered with
+    the committed one; a RELATED call — a route's approve — is in flight with no hash, never its
+    hash as the route's). A conversion leg left pending with no hash is re-probed after 5 min
+    (`recoverHashless`: a permanent `RetireOp` of its keys) and adopts the committed hash or is
+    freed. Every pre-broadcast hook
+    updates exactly one row under its expected-state guard, else the allocation rolls back.
+    A gasless relay in flight with no hash yet answers 202 `ErrRelayInProgress` naming its operation;
+    a retry of a committed relay is answered from its allocation before the rate limit, budget or
+    simulation.
+    Every operation therefore carries a key: legs `ramp_leg:<leg>`, opens `pool_open:<slice>`,
+    releases/resolves/cancels `p2p_release|p2p_resolve|p2p_cancel:<trade>`, IT ops
+    `it_op:<call hash>`, top-ups `gas_topup:<row>` / `gas_topup_intent|gas_topup_dest:<intent>` /
+    `p2p_drip:<uuid>`, relays `auth_relay:<row>` and `relay:<forward-request digest>` (a client retry
+    of the same request reuses its allocation; an in-flight relay answers its hash), name-change
+    refunds `name_change_refund:<change>:<attempt>`. Caller writes on give-up are conditional on the
+    recorded hash (`FailExpected`, `ClearCancelledTopUp` / `ClearCancelledDestTopUp`).
+    IT operator ops write their row before the call and resolve by the contract ref; a
+    not-attempted IT op still leaves a sequenced `it_op:` tombstone. A system release that mined and
+    REVERTED is never rolled back to `paid`: at settle depth it is parked `releasing` with
+    `release_reverted_at` set (`ALERT p2p_release_reverted_total`, deduped), out of the sweep and
+    refused by AutoRelease, for an admin to resolve. In-memory bookkeeping (the P2P drip memory) runs after the commit, never in a hook.
+    An error from the allocation transaction that is not the body's own refusal (fresh or reused
+    allocation) is re-checked under the RE-TAKEN lane lock by operation key: committed answers in
+    flight, provably absent answers not sent, and a re-check that fails (or an unreadable operation
+    key) answers `ErrSendOutcomeUnknown` — attempted, never "not sent".
+  - **B.** After the commit, outside every lock: the bytes are broadcast and a short transaction
+    records the outcome (`accepted` / `uncertain` / `refused`). Once committed the call is IN FLIGHT:
+    a broadcast the node refused or that timed out returns its hash with `ErrPendingBroadcast`
+    (attempted = true; never matches `ErrTxNotBroadcast`) — callers treat it as uncertain, never as
+    "not sent". `attempted = false` means nothing was committed.
+  - **C.** A committed signing IS its nonce's transaction until the chain mines that nonce (statuses
+    `signed` → `sent` → `mined`). Refused or lost, the upkeep re-broadcasts the same bytes or speeds up
+    the SAME call until it mines. A call that can NEVER be sent — with NO signing of it accepted, a
+    call-intrinsic refusal (intrinsic gas too low, over the block gas limit) or an RPC tx-fee-cap
+    refusal of its lowest-priced signing (`unsendableKind`); once any signing was accepted the lane
+    never cancels it and holds instead (that signing may still mine) — or that a super-admin
+    cancels (`POST .../cancel`) is replaced at its nonce by a 0-value self-transfer priced above every
+    earlier signing (same caps). A fee-cap refusal of a SPEED-UP while a cheaper signing is accepted
+    only stops the bumping (hold), never cancels. Once the cancel's receipt is max(`keyLaneCancelDepth`
+    (5), the deepest configured confirmations — `SetFinalityDepth` at boot) blocks deep against the
+    latest block the allocation is `cancelled`, its operation key freed, and verifiers
+    report `ErrCallCancelled` (shallower it stays in flight, re-read every tick: a reorg that puts the
+    original in resolves it as mined and the caller sees success). Every caller reads ONE verdict,
+    `KeyLane.CallOutcome` (one store read; a recorded `cancelled` is re-proven on chain each time — a
+    chain that disagrees is in flight): sale legs and the sale gate, conversion legs, gas top-ups
+    (order row forgotten / intent claim given back / P2P drip memory dropped), authorization relays
+    (relayed again), the name-change refund (back to `refund_failed`), IT sells (failed at once), slice
+    releases/resolves (`SliceHashReverted`) and AutoRelease — each then retries on a new operation
+    and nonce. The cancel is never followed as the
+    call's receipt. Only a hole NO process allocated — strictly below the highest allocated nonce —
+    is ever filled, and only by a super-admin (`fill-gap`).
+  - **D.** A signing the node lacks 15 s on is re-broadcast byte for byte once, then sped up with the
+    SAME call — decided, signed and committed under the lock (the bump counted in the committed row),
+    broadcast after: one +12.5% step per bump since the last ACCEPTED signing, above every earlier
+    signing, at least today's price, never above min(3 × today's price, `keyLaneFeeCeilingGwei`) or
+    the allocation's admin-raised `price_cap`, at most `BumpLimit` (3) bumps, through the full fee gate
+    INCLUDING the lane's reservations (the watch job's too) — except an owed call's (`ReservedSend`,
+    recorded as `reserved`), gated as its send was, never against its own reservation. Past a cap the
+    lane holds; a speed-up the balance cannot pay never holds — every tick retries it, so a top-up
+    re-arms the lane by itself. A hold is shared state (`key_lane_states`): every process refuses in
+    its allocation transaction (after the operation-key lookup: a committed operation is answered
+    even on a held lane) and adopts it on its watch; a hold whose persist failed is re-persisted,
+    never dropped; an ADMIN clear on any process clears it for all and (`clear_version`, bumped only
+    by admin clears — retry, raise-price-cap, cancel, fill-gap, clear-hold — not by the watch
+    clearing a passed hold or a cancel's unhold) resets every
+    process's gap timers and drops unpersisted local holds. Retry, raise-price-cap and clear-hold refuse a cancelled nonce (409, no
+    audit row); raise-price-cap stays the exit for a cancel held at the fee cap.
+  - **E.** `services.WithOperationRef(ctx, ref)` is the allocation's idempotency key: the same
+    operation retried (release `p2p_release:<trade>`, cancel, resolve, IT op `it_op:<call hash>`,
+    treasury legs `ramp_leg:<leg>` with `:approve`/`:route`) gets its existing allocation and its
+    honest status — the current hash, with `ErrPendingBroadcast` until a node accepted a signing —
+    before any fee read or hold can call it "not sent"; never a new nonce. A different call under the
+    same key is refused. A mined allocation frees its key.
+  - Every allocation update (outcomes, speed-ups, admin actions, marking mined) runs under the lane
+    lock and names the row's `version`; a stale copy or a mined row is never written back
+    (`errStaleAllocation`). `FinalHash` / receipt waits follow only signings of the SAME call
+    fingerprint. The fee gate's committed spend is two statements, never one per allocation.
+  - First use of a lane on an empty table reads the pending nonce twice a second apart (an old
+    process may still be sending) and the mined nonce, and starts above all of them.
+  - Receipt waits (`waitFollowingReplacements`: IT operator receipts, gas-drip confirms, the
+    treasury approve) poll EVERY signing of the call, so the original mining after a speed-up still
+    answers. Post-send verifiers keyed by a recorded hash go through ONE helper first
+    (`Treasury.followCall`: non-waiting receipt reads over every signing of the same call, refused ones
+    included; a read error defers): sale-leg finalize and its dropped-tx evidence, conversion
+    bridge/top-up/refund legs and pool slice opens verify whichever signing mined and record that hash
+    on the row. AutoRelease verifies the release on each signing of the call; an ordinary trade whose
+    release is committed but not yet accepted stays `releasing`, and a retried slice release writes
+    its allocation's hash back. Pool slice releases are proven from the escrow's `TradeReleased` log.
+  - A hole at a nonce NO process allocated (a send from outside the server) holds the lane after
+    15 s (`ALERT key_lane_nonce_gap_held_total`); transient read errors never hold. The 30 s
+    `key-lane-watch` job marks allocations below the mined nonce `mined` (raw bytes dropped), clears
+    holds the chain passed, reviews the allocation at the mined nonce (so an idle lane still moves),
+    and fails (failure-streak ALERT) while a lane is held.
+  - **The fee gate:** the balance and mined nonce read at ONE block (`NativeStateAt`), less the spend
+    of this lane's live allocations the balance has not paid (nonce ≥ that mined nonce: value + gas
+    limit × price of each current signing), must cover this tx's gas limit × gas price ×
+    `gasFeeBuffer` (2) + value + the lane's reservations; fails closed (`ALERT
+    key_lane_cannot_pay_total`, `ErrRelayerUnderfunded`). `CanPay` (quotes, opens) is the same.
+  - Reservations (`AddReservation`, `services.LaneCommitments`: DB-counted gas units, cached 5 s,
+    fresh on opens) keep back what in-flight work is owed (pool slice release/cancel/resolve on the
+    release key; pool deliveries, converting routes, company-wallet sales on treasury lanes). Only
+    owed call sites run as `services.ReservedSend(ctx)` (slice release/cancel/resolve, `sendSale`,
+    `startBridge`, `deliverShortfall`, `refund`, `RefundFromTreasury`).
+  - A signer that cannot sign without broadcasting is refused on the database store. Lanes are built
+    only in `release_signer_lanes*.go` (lint `TestKeyLanes_OnlyFromTheRegistry`; `SetOperatorSigner`
+    is tests-only); `SignAndBroadcast` on any signer outside `release_signer*.go` fails
+    `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
+  - **Runbook — never send from the OPERATOR (or any hot key) by hand.** A manual tx takes a nonce no
+    process allocated and holds that lane. Super admin: `GET /api/admin/signer/lanes`;
+    `POST /api/admin/signer/lanes/fill-gap {chainId, address, nonce}` (a 0-value self-transfer at a
+    hole NO process allocated; refused for any nonce in the record or already mined);
+    `POST .../retry {chainId, address, nonce}` (raises a held nonce's bump limit by 3; the fee cap still
+    applies); `POST .../raise-price-cap {chainId, address, nonce, maxGasPriceWei}` (the exit from a
+    fee-cap hold: that allocation's own speed-up ceiling — above every signing of it, at most 10× the
+    chain's default ceiling — plus a fresh bump count; audited with the old and new cap);
+    `POST .../clear-hold {chainId, address}` (after checking the chain by hand). Each writes a
+    `p2p_audit_logs` row; no key material is ever read or logged. `POST .../cancel {chainId, address,
+    nonce}` replaces a stuck committed call with the lane's 0-value cancel (its operation then fails
+    with `ErrCallCancelled` and retries as a new one); a call the node refuses for good is cancelled
+    automatically. `fill-gap` is refused for any nonce at or above the highest allocated one.
+  `MCGPSwapService.signMu` is only the operator SEQUENCE lock (held across receipt waits).
+- **IT operator role is verified, not assumed.** The IT key is wired but dormant (`HasOperator` false,
+  every operator op refused) until `operators(<key>)` reads true on the swap — at boot or on the 60 s
+  `it-operator-role-probe` job (failure-streak alerted; `ALERT signer_role_missing=1 role=it_operator`).
+  A release key that is not a Sonic escrow admin logs `WARNING signer_role_missing=1 role=pm_release`.
+  Never use the OPERATOR address by hand: a manual tx collides with server nonces.
+- **Floors are alert-only** (owner 2026-10-13): `SONIC_GAS_FLOOR_WEI`, `RAMP_SPONSOR_BALANCE_FLOOR_WEI_*`,
+  `RELAYER_BALANCE_FLOOR_WEI`, the pool `releaseGasFloorWei` and `RAMP_TREASURY_NATIVE_FLOOR_WEI_*`
+  only raise `*_underfunded_total` / float-monitor ALERTs; the lane fee gate decides. A pool open
+  asks whether the release key can pay every slice call already owed plus this order's `SliceCap`
+  (`ITService.poolReleaseGasOK`). Opens read the count, balance and gas price fresh (also
+  `Treasury.CanPayForGasFresh`); quotes reuse a 5 s count and a 5 s balance/price reading, falling
+  back to one up to 30 s old on a failed read.
 - **Rollout order matters.** As of 2026-09, production runs with `ENV` not exactly
   `"production"` — that is what currently keeps IT/bills/gasless/ramp-sponsorship alive with
   their raw keys. Flipping `ENV=production` alone would silently take all of them dormant.
@@ -288,7 +470,7 @@ P2P trading (Sonic) and the TSA Liquidity pool chain (BSC):
 - Pool settings are the `pool_*` `fee_configs` rows (admin console); `pool_order_max = 0` is the incident stop (no new pool orders). `pool_order_max` can never exceed `RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER`.
 - The expiry canceller (`jobs/p2p_expiry_canceller.go`, every minute, failure-streak alerted) is always on whenever the PM release key is set: it cancels unpaid pool slices and also cancels expired ordinary P2P trades 30 min after the expiry notice. Every tick defers while the central-account statement (the inbound poller, when Flutterwave is configured) is stale, so a paid order is never cancelled on a blind spot.
 - **Never pay a failed PM sell payout by hand.** A failed payout leaves the trade `pending_payment` with `cancel_reason` "pm payout failed (…)", and the expiry canceller refunds the seller's deposit on-chain; a hand payout on top of that pays the user twice.
-- Release-key calls go only through `ChainSender.Send` (one lock per chain); `.SignAndBroadcast` on a `ChainSender` outside `release_signer*.go` fails `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
+- Release-key calls go only through `ChainSender.Send` (the key's KeyLane per chain); `.SignAndBroadcast` on any signer outside `release_signer*.go` fails `TestReleaseKey_NoSignAndBroadcastOnAChainSender`.
 
 **Direct-P2P launch-readiness behaviour (Sonic, manual ads; PM/LP behaviour unchanged):**
 - **Mark-paid is on-chain.** `POST /p2p/trades/:id/mark-paid/prepare` `{proofImageUrl, callerAddress?}` → `{unsignedTx, trade}` (fiat payer only; proof saved after the tx builds), then the app signs/broadcasts and `POST .../mark-paid/confirm` `{txHash}` verifies the `TradePaid` receipt and flips `paid`. `markPaidCore` is shared with the reconciler (chain Paid + DB pending now also notifies both parties). The old `POST .../mark-paid` answers 409 `{code:"app_update_required"}` and changes nothing.
@@ -299,8 +481,8 @@ P2P trading (Sonic) and the TSA Liquidity pool chain (BSC):
 - **Operator alerts** (`P2PAlerter`/`NotifyP2P`, emailed to `INBOUND_ALERT_EMAILS`, reason text redacted and capped): `p2p_paid_trade_cancelled` (reconciler cancelled a trade the DB had as paid/releasing), `p2p_dispute_filed` (on confirm or reconciler backfill, only on the real flip), `p2p_paid_unreleased` (job: manual-ad trade paid/releasing longer than `P2P_PAID_UNRELEASED_ALERT_AFTER`; deduped by a `trade.paid_stale_alerted` audit row; CTA `consoleBaseURL/p2p-trades/<id>`).
 - **Ad rules.** Fixed-rate ads outside ±`P2P_FIXED_RATE_BAND_BPS` (default 2000 = ±20%) of the market reference are refused 400 `rate_out_of_band` (`data{referenceRate,minRate,maxRate,bandBps}`); skipped for float, non-stable, PM and pool ads, and allowed (logged) when no fresh reference exists. Suspended sellers' ads are hidden from browse/seller profile/express and cannot be opened (409 ad not active). Any KYC-verified user may post ads off the pool chain (merchant/admin/LP role is only for the pool chain); buy-ad openers must be KYC-verified. KYC refusals carry `code: kyc_verification_required`.
 - **Live fees.** Fee bps are read from the escrow (60 s cache), never hard-coded: `feeBps` on ads and `GET /p2p/chains` (`{SYMBOL: bps}`), and per trade `feeBps` (snapshot stored in nullable `p2p_trades.fee_bps` at open, from the same one `trades()` read that confirm/backfill already make; NULL for older trades) with derived `feeAmount` / `buyerNetAmount`. The fee comes out of the crypto receiver.
-- **Gas top-up** `POST /p2p/gas/top-up` `{action, tradeId?, adId?}` → `{txHash?, amountWei?, skipped}`. Actions: `approve`, `deposit`, `withdraw`, `cancel_ad` (adId), `open_trade` (adId), `mark_paid`, `release`, `cancel_trade`, `dispute` (tradeId). S is sent to the caller's proven wallet only when the action is really her turn (`RequireP2PGasNeed` mirrors each `Prepare*` gate; Sonic only). Codes: 400 bad action/id; 403 `WALLET_PROOF_REQUIRED` / `kyc_verification_required` / `kyc_legal_name_missing` (open_trade when OpenTrade's KYC tier would refuse her: a sell-ad needs a legal name) / not her own linked wallet (`ErrSponsorWallet`); 409 `gas_not_needed`, `gas_topup_unused` (last drip < 1 h old and not yet spent), `sponsorship_in_progress`; 429 daily cap (`P2P_GAS_TOPUPS_PER_DAY`, skips don't count); 503 `gas_unavailable` (no lane, below floor, over ceiling, budget, RPC, revert; an unconfirmed drip includes `data{txHash,amountWei}`). Per-user cap, in-flight lock and unused-drip memory are in-process.
-- **One Sonic sponsor lane.** P2P top-ups (always, when the lane exists) and checkout funding (only while `MARKETPLACE_SONIC_GAS` is on) share the one Sonic lane built by `buildSonicGasSponsorship` (key `RAMP_SPONSOR_PRIVATE_KEY`, floor/ceiling `SONIC_GAS_FLOOR_WEI` / `SONIC_GAS_TOPUP_MAX_WEI` — the old `MARKETPLACE_SONIC_GAS_*` names are read as deprecated fallbacks with a boot line — guard `sonic_gas`; two Sonic lanes on one key would race the nonce). Ramp sponsorship uses its own base/arbitrum/polygon/bsc lanes on the same key. The Sonic lane is live whenever that key is set and allowed; `RAMP_GAS_SPONSORSHIP` gates only the separate ramp lanes and `MARKETPLACE_SONIC_GAS` only checkout's use of the Sonic lane. Boot refuses a sponsor key equal to another signer key (`assertDistinctKey`) and, in production, a raw key unless `rawSignerKeyAllowed`. **Fund the sponsor address with S** (float monitor: below 10 S (2x the 5 S floor) logs `sonic_gas_float_low_total`, below 5 S `sonic_gas_float_empty_total`; renamed from `marketplace_sonic_gas_*`, so move any log alert keyed on the old names).
+- **Gas top-up** `POST /p2p/gas/top-up` `{action, tradeId?, adId?}` → `{txHash?, amountWei?, skipped}`. Actions: `approve`, `deposit`, `withdraw`, `cancel_ad` (adId), `open_trade` (adId), `mark_paid`, `release`, `cancel_trade`, `dispute` (tradeId). S is sent to the caller's proven wallet only when the action is really her turn (`RequireP2PGasNeed` mirrors each `Prepare*` gate; Sonic only). Codes: 400 bad action/id; 403 `WALLET_PROOF_REQUIRED` / `kyc_verification_required` / `kyc_legal_name_missing` (open_trade when OpenTrade's KYC tier would refuse her: a sell-ad needs a legal name) / not her own linked wallet (`ErrSponsorWallet`); 409 `gas_not_needed`, `gas_topup_unused` (last drip < 1 h old and not yet spent), `sponsorship_in_progress`; 429 daily cap (`P2P_GAS_TOPUPS_PER_DAY`, skips don't count); 503 `gas_unavailable` (no lane, sponsor cannot pay amount + fee, over ceiling, budget, RPC, revert; an unconfirmed drip includes `data{txHash,amountWei}`). Per-user cap, in-flight lock and unused-drip memory are in-process.
+- **One Sonic sponsor lane.** P2P top-ups (always, when the lane exists) and checkout funding (only while `MARKETPLACE_SONIC_GAS` is on) share the one Sonic lane built by `buildSonicGasSponsorship` (key `RAMP_SPONSOR_PRIVATE_KEY`, or the OPERATOR key when unset; alert floor/ceiling `SONIC_GAS_FLOOR_WEI` / `SONIC_GAS_TOPUP_MAX_WEI` — the old `MARKETPLACE_SONIC_GAS_*` names are read as deprecated fallbacks with a boot line — guard `sonic_gas`; every role on that key and chain shares its one KeyLane). Ramp sponsorship uses its own base/arbitrum/polygon/bsc lanes on the same key. The Sonic lane is live whenever that key is set and allowed; `RAMP_GAS_SPONSORSHIP` gates only the separate ramp lanes and `MARKETPLACE_SONIC_GAS` only checkout's use of the Sonic lane. Boot refuses a sponsor key equal to the TREASURY or company-wallet key (`assertDistinctKey`, class rule) and, in production, a raw key unless `rawSignerKeyAllowed`. **Fund the sponsor address with S** (float monitor: below 10 S (2x the 5 S floor) logs `sonic_gas_float_low_total`, below 5 S `sonic_gas_float_empty_total`; renamed from `marketplace_sonic_gas_*`, so move any log alert keyed on the old names).
 - **Notifications.** Every P2P event carries `data.actorId`; push and email are skipped for the actor; their DB row is kept but stored read (`is_read`, `read_at` set) so it never counts in `/notifications/unread-count`, and the WS frame still goes out. System/reconciler events carry no actorId.
 - **Expiry canceller on direct trades.** The always-on expiry canceller (`services/pool_expiry.go` legacy scope) also cancels expired direct trades on-chain with the PM release key, 30 min after the expiry notice and only while the chain still says Pending. It is dormant without that key and pauses every tick while the central-account statement is stale. A direct trade whose buyer saved payment proof (mark-paid prepare) but whose on-chain markPaid never landed is **not** cancelled: it gets one `ALERT p2p_expiry_proof_saved` (and a `p2p_expired_with_proof` operator email, deduped by a `trade.expired_proof_alerted` audit row) and is left to the parties (mark paid, dispute, or cancel by timeout). Once the canceller has decided a trade (`dropped_at`), the mark-paid prepare and the `mark_paid` / `cancel_trade` gas needs refuse it; a confirm or reconcile of a markPaid that already landed still flips it to paid. A user's cancel confirm that lost the race to another cancel returns the cancelled trade. Before deploy, check the release key holds S on Sonic.
 - **Image URLs.** Payment proofs (mark-paid prepare), P2P dispute evidence, order-dispute evidence and chat images must be `https://res.cloudinary.com/...` (`isUploadedImageURL`, exact hostname); anything else is a 400.
@@ -319,7 +501,8 @@ P2P trading (Sonic) and the TSA Liquidity pool chain (BSC):
       - `marketplace_sonic_gas_float_empty_total` → `sonic_gas_float_empty_total`
     - unchanged: `marketplace_sonic_gas_sent` (checkout funding's own send metric).
   - **Check the escrows answer the V3 `trades()` layout.** `cast call <escrow> "trades(bytes32)" 0x00…00 --rpc-url <rpc>` on the Sonic and BSC escrows must return 12 words. A shorter answer means a pre-V3 escrow: every `ReadTrade` (reconciler, confirm, backfill) then costs 2 RPCs and records no fee snapshot.
-  - The Sonic sponsor lane is built whenever `RAMP_SPONSOR_PRIVATE_KEY` is set, so `assertDistinctKey` can stop boot even with `MARKETPLACE_SONIC_GAS` off. Fund the sponsor address with **at least 10 S** first, or the float monitor ALERTs.
+  - The Sonic sponsor lane is built whenever a sponsor key exists (`RAMP_SPONSOR_PRIVATE_KEY`, else the OPERATOR), so `assertDistinctKey` can stop boot even with `MARKETPLACE_SONIC_GAS` off. Fund the sponsor address with **at least 10 S** first, or the float monitor ALERTs.
+  - **Funding after the signer consolidation:** OPERATOR on Sonic 15–20 S (releases, IT ops, gas top-ups); RELAYER keeps its own S; OPERATOR on BSC ≥ 0.025 BNB (pool releases/cancels; ≥ 0.03 if `bsc` is in `RAMP_SPONSOR_CHAINS`); OPERATOR on each `RAMP_SPONSOR_CHAINS` chain ≥ 2× its alert floor; TREASURY on BSC ≥ 0.02–0.025 BNB, and on every `RAMP_TREASURY_CHAINS` lane it serves.
 - **Settings:** `P2P_FIXED_RATE_BAND_BPS=2000`, `P2P_PAID_UNRELEASED_ALERT_AFTER=2h`, `P2P_GAS_TOPUPS_PER_DAY=6` (see `.env.example`). The defaults live only in `config` (`DefaultP2P*`); a non-positive override falls back to them.
 
 P2P trade-milestone emails (opened/paid/released/cancelled/disputed/resolved/expired) are sent to both parties via `notification_service.go` (role-aware, respect `mute_email`); per-message chat does not email. No CTA link — the app is mobile-only with no universal-link setup, so the email tells the user to open the app.

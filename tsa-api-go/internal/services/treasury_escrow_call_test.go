@@ -38,6 +38,31 @@ func (o *orderSigner) SignAndBroadcast(_ context.Context, _ []byte) (string, err
 	return "0x" + strings.Repeat("ab", 32), nil
 }
 
+// signRaw / broadcastRaw make orderSigner a raw signer: the key lane runs its
+// real outbox (hook inside the allocation transaction, then the broadcast).
+func (o *orderSigner) signRaw(unsigned []byte) ([]byte, string, error) {
+	return unsigned, crypto.Keccak256Hash(unsigned).Hex(), nil
+}
+func (o *orderSigner) broadcastRaw(raw []byte, hash string) (string, error) {
+	if _, err := o.SignAndBroadcast(context.Background(), raw); err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+// rawRelaySigner is fakeRelaySigner as a raw signer (outbox ordering tests).
+type rawRelaySigner struct{ *fakeRelaySigner }
+
+func (r rawRelaySigner) signRaw(unsigned []byte) ([]byte, string, error) {
+	return unsigned, crypto.Keccak256Hash(unsigned).Hex(), nil
+}
+func (r rawRelaySigner) broadcastRaw(raw []byte, hash string) (string, error) {
+	if _, err := r.SignAndBroadcast(context.Background(), raw); err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
 func escrowCallBuild(to string, nonce uint64) func() ([]byte, error) {
 	return func() ([]byte, error) {
 		return json.Marshal(blockchain.UnsignedTx{Nonce: nonce, To: to, Value: "0", GasPrice: "1", GasLimit: 200_000, ChainID: "8453", Data: "deadbeef"})
@@ -67,7 +92,7 @@ func TestCallEscrowRecorded_RefusesTxToAnotherAddress(t *testing.T) {
 	lane.EscrowCalls = []common.Address{common.HexToAddress(escrowCallTarget)}
 	hooked := false
 	_, attempted, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget,
-		escrowCallBuild(treasuryTestToken, 1), func(uint64) error { hooked = true; return nil })
+		escrowCallBuild(treasuryTestToken, 1), func(context.Context, uint64, string) error { hooked = true; return nil })
 	if !errors.Is(err, ErrTreasuryInvalidRoute) || attempted || hooked || signer.calls() != 0 {
 		t.Fatalf("err=%v attempted=%v hooked=%v broadcasts=%d", err, attempted, hooked, signer.calls())
 	}
@@ -80,7 +105,7 @@ func TestCallEscrowRecorded_RecordsNonceBeforeBroadcast(t *testing.T) {
 	var log []string
 	lane.Signer = &orderSigner{log: &log, addr: sponsorTestSigner}
 	hash, attempted, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 42),
-		func(n uint64) error {
+		func(_ context.Context, n uint64, _ string) error {
 			log = append(log, "nonce")
 			if n != 42 {
 				t.Errorf("nonce %d", n)
@@ -95,8 +120,9 @@ func TestCallEscrowRecorded_RecordsNonceBeforeBroadcast(t *testing.T) {
 func TestCallEscrowRecorded_HookFailureBroadcastsNothing(t *testing.T) {
 	tr, lane, _, signer := newTestTreasuryWithFakes(t)
 	lane.EscrowCalls = []common.Address{common.HexToAddress(escrowCallTarget)}
+	lane.Signer = rawRelaySigner{signer}
 	_, attempted, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 3),
-		func(uint64) error { return errors.New("db down") })
+		func(context.Context, uint64, string) error { return errors.New("db down") })
 	if err == nil || attempted || signer.calls() != 0 {
 		t.Fatalf("err=%v attempted=%v broadcasts=%d", err, attempted, signer.calls())
 	}
@@ -135,7 +161,7 @@ func TestCallEscrowRecorded_BackToBackSlicesGetDistinctNonces(t *testing.T) {
 	var log []string
 	lane.Signer = &orderSigner{log: &log, addr: sponsorTestSigner}
 	var got []uint64
-	record := func(n uint64) error { got = append(got, n); return nil }
+	record := func(_ context.Context, n uint64, _ string) error { got = append(got, n); return nil }
 	stale := escrowCallBuild(escrowCallTarget, 7) // the RPC answers 7 both times
 	for i := 0; i < 3; i++ {
 		if _, attempted, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, stale, record); err != nil || !attempted {
@@ -145,15 +171,15 @@ func TestCallEscrowRecorded_BackToBackSlicesGetDistinctNonces(t *testing.T) {
 	if len(got) != 3 || got[0] != 7 || got[1] != 8 || got[2] != 9 {
 		t.Fatalf("nonces = %v, want 7 8 9", got)
 	}
-	// A refusal that provably never broadcast hands exactly that nonce back
-	// (stepBackNonce, re-review N3) — the floor is not cleared.
+	// A refusal of a committed call keeps it in flight and does NOT hand its
+	// nonce to another call (outbox rule C): the next call takes the next nonce.
 	lane.Signer = &orderSigner{log: &log, addr: sponsorTestSigner, err: ErrTxNotBroadcast}
-	if _, attempted, _ := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 10), record); attempted {
-		t.Fatal("ErrTxNotBroadcast must report not attempted")
+	if _, attempted, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 10), record); !attempted || !errors.Is(err, ErrPendingBroadcast) {
+		t.Fatalf("a refused committed call: attempted=%v err=%v, want in flight", attempted, err)
 	}
 	lane.Signer = &orderSigner{log: &log, addr: sponsorTestSigner}
-	if _, _, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 10), record); err != nil || got[len(got)-1] != 10 {
-		t.Fatalf("after a non-broadcast the nonce is reused: %v %v", got, err)
+	if _, _, err := tr.CallEscrowRecorded(context.Background(), lane, escrowCallTarget, escrowCallBuild(escrowCallTarget, 10), record); err != nil || got[len(got)-1] != 11 {
+		t.Fatalf("after a non-broadcast: %v %v, want 11 (10 is never reused by another call)", got, err)
 	}
 }
 
@@ -235,19 +261,19 @@ func TestTreasury_TransferAfterASliceNeverReusesItsNonce(t *testing.T) {
 	}
 }
 
-// M-1 (b): a send the node definitely refused (here: underpriced) is not
-// broadcast, so its nonce is handed back and the next send within the floor's
-// TTL reuses it — no gap for later sends to queue behind.
-func TestTreasury_DefiniteRejectionHandsTheNonceBack(t *testing.T) {
+// M-1 (b), outbox rule C: a send the node definitely refused (underpriced) is
+// committed and in flight (the lane re-sends the same call), and its nonce is
+// never given to another call — the next send takes the next nonce.
+func TestTreasury_DefiniteRejectionNeverReusesTheNonce(t *testing.T) {
 	tr, lane, bc := treasuryLaneOnNode(t)
 	ctx := context.Background()
 	bc.err = errors.New("transaction underpriced")
-	if _, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); attempted || !errors.Is(err, ErrTxNotBroadcast) {
-		t.Fatalf("underpriced: attempted=%v err=%v, want not broadcast", attempted, err)
+	if hash, attempted, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); !attempted || hash == "" || !errors.Is(err, ErrPendingBroadcast) {
+		t.Fatalf("underpriced: hash=%q attempted=%v err=%v, want in flight", hash, attempted, err)
 	}
 	bc.err = nil
-	if _, _, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil || bc.last(t) != 7 {
-		t.Fatalf("next send: nonce %d err=%v, want 7 again", bc.last(t), err)
+	if _, _, err := tr.TransferTokenRecorded(ctx, lane, "USDC", testRoutedEVM, big.NewInt(1), nil); err != nil || bc.last(t) != 8 {
+		t.Fatalf("next send: nonce %d err=%v, want 8", bc.last(t), err)
 	}
 }
 

@@ -77,8 +77,12 @@ type P2PTrade struct {
 	OnChainTradeID  string    `gorm:"size:66;uniqueIndex" json:"onChainTradeId,omitempty"`
 	OpenTxHash      string    `gorm:"size:66" json:"openTxHash,omitempty"`
 	ReleaseTxHash   string    `gorm:"size:66" json:"releaseTxHash,omitempty"`
-	Status          string    `gorm:"size:24;not null;default:'pending_payment';index" json:"status"`
-	ProofImageURL   string    `gorm:"type:text" json:"proofImageUrl,omitempty"`
+	// ReleaseRevertedAt: the system release mined and REVERTED (at settle
+	// depth). The trade stays releasing for an operator: no sweep or
+	// reconciler rolls it back to paid (that would re-release it in a loop).
+	ReleaseRevertedAt *time.Time `json:"releaseRevertedAt,omitempty"`
+	Status            string     `gorm:"size:24;not null;default:'pending_payment';index" json:"status"`
+	ProofImageURL     string     `gorm:"type:text" json:"proofImageUrl,omitempty"`
 	// PM automation links (design §4). Empty on manual P2P trades.
 	PaymentRef          string `gorm:"size:32" json:"paymentRef,omitempty"`          // optional buyer reference aid
 	NombaInboundEventID string `gorm:"size:64" json:"nombaInboundEventId,omitempty"` // matched inbound webhook (buy)

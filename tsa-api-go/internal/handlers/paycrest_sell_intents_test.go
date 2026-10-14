@@ -56,6 +56,14 @@ func (s *stubSellIntents) MarkToppedUp(context.Context, uuid.UUID, time.Time) (b
 	return true, nil
 }
 func (s *stubSellIntents) ClearToppedUp(context.Context, uuid.UUID) error { return nil }
+func (s *stubSellIntents) ClearCancelledTopUp(context.Context, uuid.UUID, string) (bool, error) {
+	return false, nil
+}
+
+func (s *stubSellIntents) ClearCancelledDestTopUp(context.Context, uuid.UUID, string) (bool, error) {
+	return false, nil
+}
+
 func (s *stubSellIntents) RecordTopUp(context.Context, uuid.UUID, string, string) error {
 	return nil
 }
