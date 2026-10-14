@@ -35,6 +35,11 @@ function validateAddresses(cfg, network) {
     check("pool.owner", cfg.pool.owner);
     check("pool.ownerConfirm", cfg.pool.ownerConfirm);
   }
+  if (cfg.liquidityPool) {
+    for (const k of ["collateralProvider", "operator", "guardian", "recipient", "timelockAdmin", "timelockAdminConfirm"]) {
+      check(`liquidityPool.${k}`, cfg.liquidityPool[k]);
+    }
+  }
 }
 
 function requireAddr(cfg, label, value) {

@@ -15,6 +15,41 @@
 
 const CANONICAL_PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
+// Signer roles that are the SAME address on every EVM chain since the 2026-10
+// signer consolidation — what lets deploy/deterministic-escrow.js land one
+// escrow address everywhere. The operator (release admin) goes into the proxy's
+// initialize() calldata, so changing it changes the deterministic address.
+// Owner and treasury are per-chain setup, not part of the address.
+const DETERMINISTIC_ROLES = {
+  owner: process.env.DET_OWNER || "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",     // PM
+  operator: process.env.DET_OPERATOR || "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9", // release admin
+  treasury: process.env.DET_TREASURY || "0xA4123022c84E66A5E955fd96C5468A78bE84e205", // systemWallet
+};
+
+// Shared pool, 100% company collateral (deploy/liquidity-pool.js, spec
+// 2026-10-14). Amounts are whole tokens. Deploy-time inputs:
+//   LPOOL_COLLATERAL_PROVIDER — the PM's collateral wallet;
+//   LPOOL_GUARDIAN            — may pause fills/deposits only;
+//   LPOOL_TIMELOCK_ADMIN (+ _CONFIRM) — the timelock's proposer/executor.
+function liquidityPool() {
+  return {
+    token: "USDT",
+    collateralProvider: process.env.LPOOL_COLLATERAL_PROVIDER || null,
+    operator: process.env.LPOOL_OPERATOR || DETERMINISTIC_ROLES.operator,
+    guardian: process.env.LPOOL_GUARDIAN || null,
+    recipient: process.env.LPOOL_RECIPIENT || DETERMINISTIC_ROLES.treasury,
+    timelockAdmin: process.env.LPOOL_TIMELOCK_ADMIN || null,
+    timelockAdminConfirm: process.env.LPOOL_TIMELOCK_ADMIN_CONFIRM || null,
+    timelockDelaySec: Number(process.env.LPOOL_TIMELOCK_DELAY_SEC || 72 * 3600),
+    minDeposit: 5,
+    maxPerLp: 5000,
+    totalCap: Number(process.env.LPOOL_TOTAL_CAP || 50000),
+    maxFillPerTx: 2000,
+    fillWindowSec: 24 * 3600,
+    fillWindowCap: 20000,
+  };
+}
+
 // Public on-chain addresses only — deployer keys stay in .env.
 // Defaults migrated from the legacy scripts; env vars still override.
 const chains = {
@@ -69,6 +104,7 @@ const chains = {
       ownerConfirm: process.env.POOL_OWNER_CONFIRM || null,
       requireOwner: true,
     },
+    liquidityPool: liquidityPool(),
   },
   bscTestnet: {
     tokens: {
@@ -97,18 +133,9 @@ const chains = {
       ownerConfirm: process.env.POOL_OWNER_CONFIRM || null,
       requireOwner: false,
     },
+    liquidityPool: liquidityPool(),
   },
 };
 
-// Signer roles that are the SAME address on every EVM chain since the 2026-10
-// signer consolidation — what lets deploy/deterministic-escrow.js land one
-// escrow address everywhere. The operator (release admin) goes into the proxy's
-// initialize() calldata, so changing it changes the deterministic address.
-// Owner and treasury are per-chain setup, not part of the address.
-const DETERMINISTIC_ROLES = {
-  owner: process.env.DET_OWNER || "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",     // PM
-  operator: process.env.DET_OPERATOR || "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9", // release admin
-  treasury: process.env.DET_TREASURY || "0xA4123022c84E66A5E955fd96C5468A78bE84e205", // systemWallet
-};
 
 module.exports = { chains, CANONICAL_PERMIT2, DETERMINISTIC_ROLES };
