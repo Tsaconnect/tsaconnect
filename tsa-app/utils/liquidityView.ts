@@ -35,7 +35,11 @@ export function liquidityAmountError(me: LiquidityMe, action: LiquidityAction, i
   if (amount === 0n) return 'Enter an amount.';
   const principal = units(me.principal, d);
   if (action === 'withdraw') {
-    return amount > principal ? `You can withdraw at most ${formatLiquidityAmount(me.principal)} ${sym}.` : null;
+    const free = me.withdrawable ?? me.principal;
+    if (amount <= units(free, d)) return null;
+    return amount <= principal && me.lockedUntil
+      ? `You can withdraw ${formatLiquidityAmount(free)} ${sym} now. The rest of your deposit unlocks ${new Date(me.lockedUntil).toLocaleString()}.`
+      : `You can withdraw at most ${formatLiquidityAmount(free)} ${sym}.`;
   }
   if (amount < units(me.limits.min, d)) return `Add at least ${me.limits.min} ${sym}.`;
   const max = units(me.limits.max, d);

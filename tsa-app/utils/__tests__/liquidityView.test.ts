@@ -56,6 +56,16 @@ describe('liquidityAmountError', () => {
   });
 });
 
+describe('withdraw lock', () => {
+  it('limits a withdraw to the unlocked principal and says when the rest unlocks', () => {
+    const locked = me({ principal: '100', withdrawable: '60', lockedUntil: '2026-10-15T09:00:00Z' });
+    expect(liquidityAmountError(locked, 'withdraw', '60')).toBeNull();
+    expect(liquidityAmountError(locked, 'withdraw', '61')).toMatch(/withdraw 60 USDT now.*unlocks/);
+    expect(liquidityAmountError(locked, 'withdraw', '101')).toMatch(/at most 60 USDT/);
+    expect(liquidityAmountError(me({ principal: '100' }), 'withdraw', '100')).toBeNull(); // older API: no lock fields
+  });
+});
+
 describe('canClaimGasFree', () => {
   it('needs the minimum claim and the account still on the LP wallet', () => {
     expect(canClaimGasFree(me())).toBe(false);

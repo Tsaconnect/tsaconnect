@@ -31,6 +31,10 @@ export interface LiquidityMe {
   allowed: boolean;
   balanceReadable: boolean;
   principal?: string;
+  /** Principal that may be withdrawn now: a deposit is locked for 24 hours. */
+  withdrawable?: string;
+  /** When the rest of the principal unlocks; absent when nothing is locked. */
+  lockedUntil?: string;
   claimable?: string;
   /** Claimed + claimable, all time. */
   earned?: string;

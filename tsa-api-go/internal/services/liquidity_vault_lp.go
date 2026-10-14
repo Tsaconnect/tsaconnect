@@ -38,6 +38,9 @@ var (
 	ErrLPOldWalletHasFunds = errors.New("liquidity: withdraw and claim from your old wallet first")
 	ErrLPClaimTo           = errors.New("liquidity: the claim destination is not a valid address")
 	ErrLPNothingToClaim    = errors.New("liquidity: you have no earnings to claim yet")
+	// ErrLPDepositLocked: principal deposited in the last 24 h cannot leave
+	// yet (the contract's withdrawLock); earnings can always be claimed.
+	ErrLPDepositLocked = errors.New("liquidity: part of your deposit is still in its 24-hour lock")
 )
 
 // lpRevertError turns the vault's own refusal of an LP tx at estimate (its
@@ -50,6 +53,8 @@ func lpRevertError(err error) error {
 		return fmt.Errorf("%w: more than your deposited principal", ErrLPAmount)
 	case "Nothing to claim":
 		return ErrLPNothingToClaim
+	case "Deposit still locked":
+		return ErrLPDepositLocked
 	}
 	return err
 }
@@ -168,11 +173,15 @@ type LiquidityVaultMe struct {
 	BalanceReadable bool            `json:"balanceReadable"`
 	Principal       string          `json:"principal,omitempty"`
 	Claimable       string          `json:"claimable,omitempty"`
-	Earned          string          `json:"earned,omitempty"` // claimed + claimable, all time
-	SharePercent    string          `json:"sharePercent,omitempty"`
-	Limits          LiquidityLimits `json:"limits"`
-	MinClaim        string          `json:"minClaim"`
-	Paused          bool            `json:"paused"`
+	// Withdrawable is the principal that may leave now; LockedUntil, set
+	// only while some is locked, is when the rest does.
+	Withdrawable string          `json:"withdrawable,omitempty"`
+	LockedUntil  *time.Time      `json:"lockedUntil,omitempty"`
+	Earned       string          `json:"earned,omitempty"` // claimed + claimable, all time
+	SharePercent string          `json:"sharePercent,omitempty"`
+	Limits       LiquidityLimits `json:"limits"`
+	MinClaim     string          `json:"minClaim"`
+	Paused       bool            `json:"paused"`
 	// WalletChanged: the account's wallet is no longer the LP wallet. Deposits
 	// and gas-free claims wait for Activate from the current wallet;
 	// withdrawing and claiming (signed by the LP wallet itself) never do.
@@ -264,6 +273,14 @@ func (s *VaultLPService) Me(ctx context.Context, userID uuid.UUID) (*LiquidityVa
 	}
 	out.BalanceReadable, out.Allowed = true, pos.Allowed
 	out.Principal, out.Claimable = s.units(pos.Principal), s.units(pos.Claimable)
+	out.Withdrawable = out.Principal
+	if pos.Withdrawable != nil {
+		out.Withdrawable = s.units(pos.Withdrawable)
+		if !pos.LockedUntil.IsZero() {
+			t := pos.LockedUntil
+			out.LockedUntil = &t
+		}
+	}
 	out.Earned = s.units(new(big.Int).Add(claimed, pos.Claimable))
 	if snap != nil && snap.state.TotalPrincipal.Sign() > 0 {
 		out.SharePercent = ratioPercent(pos.Principal, snap.state.TotalPrincipal)

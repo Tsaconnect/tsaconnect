@@ -134,6 +134,11 @@ function Position({ me }: { me: LiquidityMe }) {
             <p className="col-span-full text-body-sm text-text-secondary">We can&apos;t read your balance right now. Try again in a minute.</p>
           )}
         </CardBody>
+        {me.balanceReadable && me.lockedUntil && (
+          <CardBody className="pt-0 text-caption text-text-secondary">
+            {amt(me.withdrawable)} can be withdrawn now. New deposits unlock 24 hours after they are added; the rest unlocks {dateTime(me.lockedUntil)}. Earnings can always be claimed.
+          </CardBody>
+        )}
         {!claimable && !me.walletChanged && (
           <CardBody className="pt-0 text-caption text-text-secondary">Claims start from {me.minClaim} {sym} here; smaller amounts can be claimed from the app.</CardBody>
         )}

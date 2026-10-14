@@ -13,6 +13,10 @@ export type LiquidityMe = {
   wallet?: string;
   balanceReadable: boolean;
   principal?: string;
+  /** Principal that may be withdrawn now: a deposit is locked for 24 hours. */
+  withdrawable?: string;
+  /** When the rest unlocks; absent when nothing is locked. */
+  lockedUntil?: string;
   claimable?: string;
   earned?: string;
   sharePercent?: string;

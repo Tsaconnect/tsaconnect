@@ -103,25 +103,29 @@ func TestVaultNode_FillDecodeAndLedger(t *testing.T) {
 		t.Fatalf("fill to a non-recipient: err = %v, want a decoded revert", err)
 	}
 
-	unsigned, err := vault.PrepareFill(f.Operator, f.Treasury, u(10), u(1), ref)
+	unsigned, err := vault.PrepareFill(f.Operator, f.Treasury, u(100), u(1), ref) // spread within the 3% cap
 	if err != nil {
 		t.Fatalf("prepare fill: %v", err)
 	}
 	r := sendAs(t, client, vaultNodeOperatorKey, unsigned)
 	ev := vault.FilledIn(r, ref)
-	if r.Status != 1 || ev == nil || ev.Amount.Cmp(u(10)) != 0 || ev.Spread.Cmp(u(1)) != 0 || !strings.EqualFold(ev.To, f.Treasury) {
+	if r.Status != 1 || ev == nil || ev.Amount.Cmp(u(100)) != 0 || ev.Spread.Cmp(u(1)) != 0 || !strings.EqualFold(ev.To, f.Treasury) {
 		t.Fatalf("receipt status=%d event=%+v", r.Status, ev)
 	}
 	if used, err := vault.FillUsed(ctx, ref); err != nil || !used {
 		t.Fatalf("FillUsed = %v %v", used, err)
 	}
 	st, _ = vault.State(ctx)
-	if new(big.Int).Sub(st.Outstanding, before).Cmp(u(11)) != 0 {
-		t.Fatalf("outstanding moved by %s, want 11", new(big.Int).Sub(st.Outstanding, before))
+	if new(big.Int).Sub(st.Outstanding, before).Cmp(u(101)) != 0 {
+		t.Fatalf("outstanding moved by %s, want 101", new(big.Int).Sub(st.Outstanding, before))
 	}
 	pos, err := vault.Position(ctx, f.LP)
 	if err != nil || !pos.Allowed || pos.Claimable.Sign() == 0 {
 		t.Fatalf("lp position = %+v %v", pos, err)
+	}
+	// The fixture runs with no deposit lock: all principal may leave.
+	if pos.Withdrawable == nil || pos.Withdrawable.Cmp(pos.Principal) != 0 || !pos.LockedUntil.IsZero() {
+		t.Fatalf("withdrawable = %v lockedUntil = %v, want all of %s", pos.Withdrawable, pos.LockedUntil, pos.Principal)
 	}
 
 	// The indexer reads the real logs, and the rebuilt books match StateAt.
@@ -143,7 +147,7 @@ func TestVaultNode_FillDecodeAndLedger(t *testing.T) {
 	}
 	var kinds []string
 	db.Model(&models.LiquidityLedgerEntry{}).Distinct("kind").Order("kind").Pluck("kind", &kinds)
-	if strings.Join(kinds, ",") != "collateral_posted,deposited,depositor_set,filled" {
+	if strings.Join(kinds, ",") != "collateral_posted,deposited,depositor_set,filled,operator_set" { // initialize sets the first operator
 		t.Fatalf("ledger kinds = %v", kinds)
 	}
 	rep, err := x.Reconcile(ctx)

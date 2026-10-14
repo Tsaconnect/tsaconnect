@@ -39,6 +39,16 @@ describe('liquidity earnings', () => {
     expect(init.headers['Idempotency-Key']).toBeTruthy();
   });
 
+  it('says what can be withdrawn now while a deposit is locked', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/liquidity/me': ok({ ...lp, withdrawable: '600', lockedUntil: '2026-10-15T09:00:00Z' }),
+      '/api/liquidity/me/activity': activity,
+    });
+    mountAt('/business/live/liquidity');
+    expect(await screen.findByText(/600 USDT can be withdrawn now/)).toBeInTheDocument();
+  });
+
   it('holds the claim below the minimum', async () => {
     stubFetch({
       '/api/pay/merchant': ok(merchant),

@@ -325,6 +325,10 @@ export default function LiquidityScreen() {
               {me.balanceReadable ? (
                 <>
                   <SummaryRow label="Your liquidity" value={amt(me.principal)} total />
+                  {me.lockedUntil && (
+                    <SummaryRow label="Withdrawable now" value={amt(me.withdrawable)}
+                      hint={`New deposits unlock 24 hours after you add them. The rest unlocks ${new Date(me.lockedUntil).toLocaleString()}.`} />
+                  )}
                   <SummaryRow label="Share of the pool" value={`${me.sharePercent ?? '0'}%`} />
                   <SummaryRow label="Ready to claim" value={amt(me.claimable)} valueColor="success" />
                   <SummaryRow label="Earned all time" value={amt(me.earned)} />
@@ -343,7 +347,7 @@ export default function LiquidityScreen() {
                   onPress={() => setSheet('deposit')} />
               </View>
               <View style={{ flex: 1 }}>
-                <Button title="Withdraw" variant="secondary" disabled={acting || isZeroAmount(me.principal)}
+                <Button title="Withdraw" variant="secondary" disabled={acting || isZeroAmount(me.withdrawable ?? me.principal)}
                   onPress={() => setSheet('withdraw')} />
               </View>
             </View>
@@ -392,13 +396,13 @@ export default function LiquidityScreen() {
       >
         <View style={{ gap: spacing.sm }}>
           <AmountInput value={amount} onChangeText={setAmount} symbol={sym} symbolPosition="suffix"
-            onMax={sheet === 'withdraw' ? () => setAmount(me.principal ?? '') : undefined} />
+            onMax={sheet === 'withdraw' ? () => setAmount(me.withdrawable ?? me.principal ?? '') : undefined} />
           {sheetError ? (
             <Text variant="caption" color="danger">{sheetError}</Text>
           ) : (
             <Text variant="caption" color="textSecondary">
               {sheet === 'deposit'
-                ? `From your wallet ${me.wallet}. You need a little ${gasSymbol} for the network fee.`
+                ? `From your wallet ${me.wallet}. It earns from the start and can be withdrawn 24 hours after you add it. You need a little ${gasSymbol} for the network fee.`
                 : `Back to your wallet ${me.wallet}. Earnings stay claimable.`}
             </Text>
           )}

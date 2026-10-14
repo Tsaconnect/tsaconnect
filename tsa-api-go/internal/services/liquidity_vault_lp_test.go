@@ -27,6 +27,13 @@ type fakeLPVault struct {
 	// stateCalls counts State reads; positionErr fails every Position read.
 	stateCalls  int
 	positionErr error
+	// locked: principal still inside its deposit lock, per wallet.
+	locked map[string]*lpLock
+}
+
+type lpLock struct {
+	amount *big.Int
+	until  time.Time
 }
 
 func newFakeLPVault() *fakeLPVault {
@@ -56,7 +63,12 @@ func (v *fakeLPVault) Position(_ context.Context, lp string) (*VaultPosition, er
 	if c == nil {
 		c = new(big.Int)
 	}
-	return &VaultPosition{Principal: new(big.Int).Set(p), Claimable: new(big.Int).Set(c), Allowed: v.allowed[k]}, nil
+	pos := &VaultPosition{Principal: new(big.Int).Set(p), Claimable: new(big.Int).Set(c), Allowed: v.allowed[k], Withdrawable: new(big.Int).Set(p)}
+	if l := v.locked[k]; l != nil {
+		pos.Withdrawable = new(big.Int).Sub(p, l.amount)
+		pos.LockedUntil = l.until
+	}
+	return pos, nil
 }
 func lpTx(method string, args ...string) ([]byte, error) {
 	return json.Marshal(blockchain.UnsignedTx{To: testVaultAddr.Hex(), Value: "0", ChainID: "97", Data: method + ":" + strings.Join(args, ":")})
@@ -472,6 +484,36 @@ func TestVaultLP_SyncRevokeIgnoresAStaleLedger(t *testing.T) {
 	r.db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user).Update("status", models.PaymentMerchantStatusPaused)
 	if n, err := r.svc.SyncDepositors(ctx); err != nil || n != 1 || r.vault.allowed[strings.ToLower(wallet)] {
 		t.Fatalf("revoke over a stale ledger = %d %v allowed=%v, want the wallet revoked", n, err, r.vault.allowed[strings.ToLower(wallet)])
+	}
+}
+
+// Owner 2026-10-14: a deposit is locked for 24 h. Me says what may leave now
+// and when the rest unlocks; the contract's refusal is a 400 deposit_locked.
+func TestVaultLP_MeShowsTheDepositLock(t *testing.T) {
+	r := newLPRig(t)
+	ctx := context.Background()
+	user, wallet := r.activeLP(t)
+	k := strings.ToLower(wallet)
+	r.vault.principal[k] = big.NewInt(100e6)
+	until := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	r.vault.locked = map[string]*lpLock{k: {amount: big.NewInt(40e6), until: until}}
+	me, err := r.svc.Me(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if me.LockedUntil == nil || !me.LockedUntil.Equal(until) {
+		t.Fatalf("lockedUntil = %v, want %v", me.LockedUntil, until)
+	}
+	if want := r.svc.units(big.NewInt(60e6)); me.Withdrawable != want {
+		t.Fatalf("withdrawable = %s, want %s", me.Withdrawable, want)
+	}
+	delete(r.vault.locked, k)
+	if me, _ = r.svc.Me(ctx, user); me.Withdrawable != me.Principal || me.LockedUntil != nil {
+		t.Fatalf("unlocked: withdrawable=%s lockedUntil=%v", me.Withdrawable, me.LockedUntil)
+	}
+	r.svc.c.Vault = revertingLPVault{fakeLPVault: r.vault, err: vaultRevert("Deposit still locked")}
+	if _, err := r.svc.PrepareWithdraw(ctx, user, "1"); !errors.Is(err, ErrLPDepositLocked) {
+		t.Fatalf("locked withdraw: %v, want ErrLPDepositLocked", err)
 	}
 }
 

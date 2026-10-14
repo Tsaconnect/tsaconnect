@@ -166,6 +166,10 @@ type VaultPosition struct {
 	Principal *big.Int
 	Claimable *big.Int
 	Allowed   bool // on the depositor allow-list (withdraw/claim never need it)
+	// Withdrawable is the principal past its deposit lock; LockedUntil is when
+	// the rest unlocks (zero when nothing is locked).
+	Withdrawable *big.Int
+	LockedUntil  time.Time
 }
 
 func (v *LiquidityVault) Position(ctx context.Context, lp string) (*VaultPosition, error) {
@@ -196,6 +200,16 @@ func (v *LiquidityVault) Position(ctx context.Context, lp string) (*VaultPositio
 		return nil, err
 	}
 	pos.Allowed = out[0].(bool)
+	if out, err = v.callAt(ctx, at, "withdrawable", who); err != nil {
+		return nil, err
+	}
+	pos.Withdrawable = out[0].(*big.Int)
+	if pos.Withdrawable.Cmp(pos.Principal) < 0 {
+		if out, err = v.callAt(ctx, at, "lockedUntil", who); err != nil {
+			return nil, err
+		}
+		pos.LockedUntil = time.Unix(out[0].(*big.Int).Int64(), 0).UTC()
+	}
 	return pos, nil
 }
 

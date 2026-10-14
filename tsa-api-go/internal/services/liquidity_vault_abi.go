@@ -4,6 +4,8 @@ package services
 // the backend reads, builds and decodes (spec 2026-10-14). Generated from the
 // Hardhat artifact; regenerate it when the contract's surface changes.
 const tsaLiquidityPoolABI = `[
+{"type":"function","name":"withdrawable","stateMutability":"view","inputs":[{"name":"lp","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
+{"type":"function","name":"lockedUntil","stateMutability":"view","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
 {"type":"event","name":"Claimed","inputs":[{"name":"lp","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
 {"type":"event","name":"CollateralPosted","inputs":[{"name":"amount","type":"uint256","indexed":false}]},
 {"type":"event","name":"CollateralWithdrawn","inputs":[{"name":"amount","type":"uint256","indexed":false}]},
