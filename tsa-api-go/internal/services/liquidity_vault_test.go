@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 
@@ -100,5 +101,28 @@ func TestVaultState_FreeCapacityNeverNegative(t *testing.T) {
 	s.Outstanding = big.NewInt(2)
 	if s.FreeCapacity().Int64() != 3 {
 		t.Fatalf("free = %s", s.FreeCapacity())
+	}
+}
+
+type nestedDataErr struct{ data map[string]interface{} }
+
+func (e nestedDataErr) Error() string  { return "execution reverted" }
+func (e nestedDataErr) ErrorCode() int { return -32603 }
+func (e nestedDataErr) ErrorData() any { return e.data }
+
+// Hardhat nests revert data ({"message", "data"}); geth sends the hex string.
+// Both must decode, or a vault refusal would read as a transient forever.
+func TestDecodeRevertReason_NestedRevertData(t *testing.T) {
+	str := vaultRevert("Not covered by collateral")
+	if got := decodeRevertReason(str); got != "Not covered by collateral" {
+		t.Fatalf("hex string data: %q", got)
+	}
+	var de revertDataErr
+	if !errors.As(str, &de) {
+		t.Fatal("no data error")
+	}
+	nested := nestedDataErr{data: map[string]interface{}{"message": "reverted", "data": de.data}}
+	if got := decodeRevertReason(nested); got != "Not covered by collateral" {
+		t.Fatalf("nested data: %q", got)
 	}
 }

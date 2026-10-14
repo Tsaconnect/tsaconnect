@@ -1301,7 +1301,14 @@ func decodeRevertReason(err error) string {
 	if !errors.As(err, &de) {
 		return ""
 	}
+	// geth (and BSC nodes) send the revert data as a hex string; Hardhat
+	// nests it as {"message": …, "data": "0x…"}.
 	raw, ok := de.ErrorData().(string)
+	if !ok {
+		if m, isMap := de.ErrorData().(map[string]interface{}); isMap {
+			raw, ok = m["data"].(string)
+		}
+	}
 	if !ok {
 		return ""
 	}
