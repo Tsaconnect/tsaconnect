@@ -11,7 +11,8 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 import {
   resolveSpotChain, resolveSpotLegChain, resolveLiFiChainId, isBitcoinSpotChain, unsupportedChainMessage,
-  singleParam, matchSpotBalance, spotLegLookup, isPinnedLegToken, type SpotBalanceRow, type SpotChain,
+  singleParam, matchSpotBalance, spotLegLookup, isPinnedLegToken, planQuoteLeg, spotMaxAmount,
+  type SpotBalanceRow, type SpotChain,
 } from '../spotChains';
 import {
   SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS, TRON_LIFI_CHAIN_ID, TRON_NATIVE_ADDRESS,
@@ -319,5 +320,47 @@ describe('matchSpotBalance', () => {
   it('refuses a family it was never taught, rather than guessing a rule', () => {
     expect(() => matchSpotBalance('aptos' as never, [], { symbol: 'USDC', address: '0x1' }))
       .toThrow(/Unhandled spot chain family/);
+  });
+});
+
+describe('planQuoteLeg', () => {
+  it('keeps a same-chain pair on its chain', () => {
+    expect(planQuoteLeg('bsc', '', false)).toEqual({ key: 'bsc' });
+  });
+
+  it('honours a quote chain the admin named', () => {
+    expect(planQuoteLeg('btc', 'base', false)).toEqual({ key: 'base' });
+  });
+
+  it('follows the balance on auto, falling back to the named chain, else the base chain', () => {
+    expect(planQuoteLeg('btc', 'bsc', true)).toEqual({ funded: true, fallback: 'bsc' });
+    expect(planQuoteLeg('ethereum', '', true)).toEqual({ funded: true, fallback: 'ethereum' });
+    // Bitcoin cannot hold the quote leg, so there is no base-chain fallback.
+    expect(planQuoteLeg('btc', '', true)).toEqual({ funded: true, fallback: undefined });
+  });
+
+  // The balance read only sees EVM chains: a Tron USDT holder would be sent
+  // across chains from whatever dust they keep on BSC.
+  it('keeps auto on a non-EVM base chain that can carry the pair', () => {
+    expect(planQuoteLeg('tron', 'bsc', true)).toEqual({ key: 'tron' });
+    expect(planQuoteLeg('solana', '', true)).toEqual({ key: 'solana' });
+  });
+});
+
+describe('spotMaxAmount', () => {
+  const tron = resolveSpotChain('tron') as SpotChain;
+  const bsc = resolveSpotChain('bsc') as SpotChain;
+
+  it('keeps TRX back for the network fee when selling native TRX', () => {
+    expect(spotMaxAmount(tron, TRON_NATIVE_ADDRESS, '100.5')).toBe('85.5');
+    expect(spotMaxAmount(tron, TRON_NATIVE_ADDRESS, '10')).toBe('0');
+  });
+
+  it('spends a whole token balance, whose fee is paid in TRX', () => {
+    expect(spotMaxAmount(tron, 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', '40')).toBe('40');
+  });
+
+  it('leaves EVM balances alone (gas is checked separately)', () => {
+    expect(spotMaxAmount(bsc, '0x0000000000000000000000000000000000000000', '1.5')).toBe('1.5');
   });
 });

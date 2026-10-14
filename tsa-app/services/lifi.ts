@@ -80,6 +80,9 @@ export function isNonEVMLiFiChain(chainId: number): boolean {
  * picker offers only these.
  */
 export function isSignableSourceChain(chainId: number): boolean {
+  // Tron signs only from the Spot desk, which pins its tokens (LiFi lists ~90
+  // impostor "USDT"s there) and derives the Tron address; All Swap does neither.
+  if (isTronLiFiChain(chainId)) return false;
   return isNonEVMLiFiChain(chainId) || getChainByChainId(chainId) !== undefined;
 }
 

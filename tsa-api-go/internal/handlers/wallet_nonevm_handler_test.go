@@ -341,7 +341,7 @@ func TestPrepareNonEVMTx_TronApproveAlreadyApprovedReturnsEmptyPayloads(t *testi
 	}))
 	defer srv.Close()
 	reg := chains.NewRegistry()
-	reg.Register("mainnet", "tron", tron.NewClient(config.NonEVMChainConfig{ChainKey: "tron", Family: "tron"}, tron.NewTronGrid(srv.URL, "")))
+	reg.Register("mainnet", "tron", tron.NewClient(config.NonEVMChainConfig{ChainKey: "tron", Family: "tron", Routers: []string{spender}}, tron.NewTronGrid(srv.URL, "")))
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()

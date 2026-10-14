@@ -11,10 +11,15 @@
 // this wallet, moving no more TRX than quoted, under a bounded fee limit — a
 // permission-changing transaction never gets a digest (internal/chains/tron).
 //
-// A TRC-20 source needs the LiFi contract approved first, exactly as on EVM.
-// The backend reads the current allowance and answers with nothing to sign
-// when it already covers the trade, so a repeat trade skips straight to the swap.
+// A TRC-20 source needs the LiFi contract approved first — for exactly the
+// trade's amount, never unlimited, so a bad quote or a future flaw in that
+// contract can only ever reach this one trade's tokens. The backend reads the
+// current allowance and answers with the next approval to sign: none when it
+// already covers the trade; a reset to 0 when it is non-zero but short (USDT-
+// style tokens refuse non-zero → non-zero); otherwise the exact amount. So
+// this signs rounds until the backend has nothing left to ask for.
 import { getNetwork } from '../../hooks/useNetwork';
+import { SWAP_COPY } from '../submitErrors';
 import { TRON_NATIVE_ADDRESS, type LiFiQuote } from '../lifi';
 import { getTronAddress } from './tronWallet';
 import { prepareTron, broadcastTron, type SendTronParams } from './tronSend';
@@ -25,6 +30,8 @@ const SWAP_NETWORK = 'mainnet';
 // Tron blocks are 3 s; an approval normally lands within a couple of them.
 const APPROVAL_POLL_MS = 3_000;
 const APPROVAL_TIMEOUT_MS = 90_000;
+// Reset to 0, approve the amount, then the confirming "nothing to sign".
+const MAX_APPROVAL_ROUNDS = 3;
 
 export interface ExecuteLiFiTronSwapParams {
   quote: LiFiQuote;
@@ -89,6 +96,7 @@ export async function executeLiFiTronSwap({
   await registerNonEVMAddress(walletAddress, 'tron', tronAddress).catch(() => {});
 
   const tokenAddr = fromTokenAddr && fromTokenAddr !== TRON_NATIVE_ADDRESS ? fromTokenAddr : '';
+  const routeTarget = quote.transactionRequest.to ?? '';
   const base: SendTronParams = {
     from: tronAddress,
     to: tronAddress,
@@ -97,23 +105,37 @@ export async function executeLiFiTronSwap({
     tokenAddr,
     walletAddress,
     network: SWAP_NETWORK,
+    errorCopy: SWAP_COPY,
   };
 
   if (tokenAddr && quote.approvalAddress) {
-    onStage?.('Step 1 of 2: Approving token…');
+    // The allowance goes only to the contract the swap itself calls; a quote
+    // naming two different contracts is not one we can reason about.
+    if (quote.approvalAddress !== routeTarget) {
+      throw new Error('This route asks to approve a different contract than it calls. Refresh the quote and try again.');
+    }
     const approval = { ...base, to: quote.approvalAddress, approve: true };
-    const { prepared } = await prepareTron(approval);
-    if (prepared.payloads.length > 0) {
-      const { txHash } = await broadcastTron(prepared, approval);
+    let approved = false;
+    for (let round = 0; round < MAX_APPROVAL_ROUNDS && !approved; round += 1) {
+      onStage?.('Step 1 of 2: Approving token…');
+      const { prepared } = await prepareTron(approval);
+      if (prepared.payloads.length === 0) {
+        approved = true;
+        break;
+      }
+      // An approval moves no tokens; recording it at the trade's amount would
+      // book a second outgoing transfer the user never made.
+      const { txHash } = await broadcastTron(prepared, { ...approval, amount: '0' });
       onStage?.('Step 1 of 2: Waiting for approval to confirm…');
       await waitForApproval(txHash, sleep);
     }
+    if (!approved) throw new Error('The token approval did not take effect. Try again.');
   }
 
   onStage?.(tokenAddr && quote.approvalAddress ? 'Step 2 of 2: Swapping…' : 'Swapping…');
   // `to` is the contract the route calls; the backend refuses a transaction
   // whose target differs from it, which pins what is signed to what was quoted.
-  const swap = { ...base, to: quote.transactionRequest.to ?? '', tronRawHex: rawHex, fee };
+  const swap = { ...base, to: routeTarget, tronRawHex: rawHex, fee };
   const { prepared } = await prepareTron(swap);
   const { txHash } = await broadcastTron(prepared, swap);
   return txHash;

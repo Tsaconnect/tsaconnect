@@ -53,14 +53,51 @@ it('skips the approval the backend reports as already covered', async () => {
   expect(mockPrepare.mock.calls[1][0]).toMatchObject({ to: DIAMOND, tronRawHex: '0a02abcd', network: 'mainnet' });
 });
 
+const none = { prepared: { ...payload, payloads: [] } };
+const confirmed = { found: true, confirmed: true, success: true };
+
 it('approves, waits for the approval to confirm, then swaps', async () => {
-  mockPrepare.mockResolvedValue({ prepared: payload });
+  mockPrepare
+    .mockResolvedValueOnce({ prepared: payload })
+    .mockResolvedValueOnce(none)
+    .mockResolvedValueOnce({ prepared: payload });
   mockBroadcast.mockResolvedValueOnce({ txHash: 'approvetx' }).mockResolvedValueOnce({ txHash: 'swaptx' });
-  mockStatus.mockResolvedValueOnce({ found: false }).mockResolvedValueOnce({ found: true, confirmed: true, success: true });
+  mockStatus.mockResolvedValueOnce({ found: false }).mockResolvedValueOnce(confirmed);
 
   await expect(run()).resolves.toBe('swaptx');
   expect(mockStatus).toHaveBeenCalledWith('tron', 'approvetx');
   expect(mockBroadcast).toHaveBeenCalledTimes(2);
+  // The approval is recorded as moving nothing, not as a second transfer.
+  expect(mockBroadcast.mock.calls[0][1]).toMatchObject({ approve: true, amount: '0' });
+});
+
+it('signs a reset to 0 and then the exact amount when the backend asks for both', async () => {
+  mockPrepare
+    .mockResolvedValueOnce({ prepared: payload })
+    .mockResolvedValueOnce({ prepared: payload })
+    .mockResolvedValueOnce(none)
+    .mockResolvedValueOnce({ prepared: payload });
+  mockBroadcast
+    .mockResolvedValueOnce({ txHash: 'reset' }).mockResolvedValueOnce({ txHash: 'approve' })
+    .mockResolvedValueOnce({ txHash: 'swaptx' });
+  mockStatus.mockResolvedValue(confirmed);
+
+  await expect(run()).resolves.toBe('swaptx');
+  expect(mockBroadcast).toHaveBeenCalledTimes(3);
+});
+
+it('gives up rather than approving forever', async () => {
+  mockPrepare.mockResolvedValue({ prepared: payload });
+  mockBroadcast.mockResolvedValue({ txHash: 'approvetx' });
+  mockStatus.mockResolvedValue(confirmed);
+
+  await expect(run()).rejects.toThrow(/did not take effect/);
+  expect(mockPrepare.mock.calls.every(([p]) => p.approve)).toBe(true);
+});
+
+it('refuses a route that approves one contract and calls another', async () => {
+  await expect(run({ quote: { ...quote, approvalAddress: 'TATTACKER' } })).rejects.toThrow(/different contract/);
+  expect(mockPrepare).not.toHaveBeenCalled();
 });
 
 it('stops at a reverted approval instead of swapping', async () => {

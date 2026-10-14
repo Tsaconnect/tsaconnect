@@ -188,6 +188,45 @@ export function resolveLiFiChainId(chain: unknown): number | null {
   return resolveSpotLegChain(chain)?.lifiChainId ?? null;
 }
 
+/**
+ * Where a pair's quote leg goes: a chain key, or `funded` — follow the user's
+ * largest balance of the quote asset (services/quoteChain), with `fallback`
+ * for a user who holds none.
+ *
+ * Same-chain unless the listing names a quote chain or asks for auto. Auto
+ * reads only EVM balances, so on a non-EVM base chain that can carry the whole
+ * pair (Tron, Solana, Sui) the quote leg stays on the base chain: a user with
+ * USDT on Tron would otherwise be sent across chains from a near-empty BSC
+ * balance. Elsewhere the fallback is the chain the listing named, else the
+ * base chain when it can hold the quote leg too.
+ */
+export type QuoteLegPlan = { key: string } | { funded: true; fallback?: string };
+
+export function planQuoteLeg(chain: string, quoteChain: string, auto: boolean): QuoteLegPlan {
+  if (!auto) return { key: quoteChain || chain };
+  const pairChain = resolveSpotChain(chain);
+  if (pairChain && pairChain.family !== 'evm') return { key: chain };
+  return { funded: true, fallback: quoteChain || (pairChain ? chain : undefined) };
+}
+
+/**
+ * Max for the leg being paid: the whole balance, less what a native source
+ * chain must keep for its own fee. Tron burns TRX for energy on every swap and
+ * the backend refuses a native sale that leaves under ~10 TRX; the reserve
+ * leaves headroom over that.
+ */
+const NATIVE_FEE_RESERVE: Partial<Record<NonEvmSpotChainFamily, { address: string; reserve: number }>> = {
+  tron: { address: TRON_NATIVE_ADDRESS, reserve: 15 },
+};
+
+export function spotMaxAmount(chain: SpotChain, tokenAddress: string, balance: string): string {
+  if (chain.family === 'evm') return balance;
+  const native = NATIVE_FEE_RESERVE[chain.family];
+  if (!native || native.address !== tokenAddress) return balance;
+  const left = Number(balance) - native.reserve;
+  return left > 0 ? String(Math.floor(left * 1e6) / 1e6) : '0';
+}
+
 /** True when both legs sit on one chain. */
 export function isSameSpotChain(a: SpotChain, b: SpotChain): boolean {
   return a.lifiChainId === b.lifiChainId;

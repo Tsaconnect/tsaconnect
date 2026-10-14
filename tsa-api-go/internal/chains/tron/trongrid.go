@@ -159,6 +159,9 @@ func (t *TronGrid) TriggerTransfer(ctx context.Context, from, tokenAddr, to stri
 	return t.triggerSmartContract(ctx, from, tokenAddr, "transfer(address,uint256)", param, feeLimit)
 }
 
+// approveSelector is approve(address,uint256).
+const approveSelector = "095ea7b3"
+
 // TriggerApprove builds a TRC-20 approve(spender, amount).
 func (t *TronGrid) TriggerApprove(ctx context.Context, from, tokenAddr, spender string, amount *big.Int, feeLimit int64) (*RawTx, error) {
 	spenderWord, err := abiAddressWord(spender)

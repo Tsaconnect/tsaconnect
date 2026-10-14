@@ -2,7 +2,7 @@ import { API_BASE_URL } from '../../constants/api/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getMnemonic } from '../wallet';
 import { getNetwork } from '../../hooks/useNetwork';
-import { txHashOrThrow, mapSubmitError, TRANSFER_COPY } from '../submitErrors';
+import { txHashOrThrow, mapSubmitError, TRANSFER_COPY, type SubmitErrorCopy } from '../submitErrors';
 import { deriveTronPrivateKey } from './derivation';
 import { signSecpDigest } from './sign';
 
@@ -49,6 +49,8 @@ export interface SendTronParams {
   fee?: { feature: string; amountHuman: string; chainId?: number };
   /** Network override; swaps pin mainnet, wallet sends follow the app toggle. */
   network?: string;
+  /** Wording for errors; a swap reads as a swap, not a transfer. */
+  errorCopy?: SubmitErrorCopy;
 }
 
 async function readJson(res: Response): Promise<any> {
@@ -82,12 +84,12 @@ export async function prepareTron(params: SendTronParams): Promise<TronPrepared>
     // 402 carries the friendly gas-preflight note in `message`.
     throw new Error(
       json?.message
-        ? mapSubmitError(json.message, TRANSFER_COPY)
+        ? mapSubmitError(json.message, params.errorCopy ?? TRANSFER_COPY)
         : `prepare-tx failed (${res.status})`,
     );
   }
   if (!json?.data?.prepared) {
-    throw new Error(json?.message ? mapSubmitError(json.message, TRANSFER_COPY) : 'prepare failed');
+    throw new Error(json?.message ? mapSubmitError(json.message, params.errorCopy ?? TRANSFER_COPY) : 'prepare failed');
   }
   return { prepared: json.data.prepared, fee: json.data.fee };
 }
@@ -134,7 +136,7 @@ export async function broadcastTron(
   return {
     txHash: txHashOrThrow(
       { success: res.ok, message: json?.message || `submit-tx failed (${res.status})`, data: json?.data },
-      TRANSFER_COPY,
+      params.errorCopy ?? TRANSFER_COPY,
     ),
   };
 }

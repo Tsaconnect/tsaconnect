@@ -16,7 +16,7 @@
 // chain id rather than one of our EVM ChainKeys, and the desk branches on VM
 // family exactly where the VM differs: which derived address signs, how a
 // balance is read, and whether gas is a thing at all.
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
@@ -42,7 +42,7 @@ import { getBtcAddress, getBtcBalances } from '@/services/chains/btcWallet';
 import { fundedQuoteChain } from '@/services/quoteChain';
 import {
   resolveSpotChain, resolveSpotLegChain, isSameSpotChain, matchSpotBalance, unsupportedChainMessage,
-  singleParam, unhandledFamily, spotLegLookup, isPinnedLegToken,
+  singleParam, unhandledFamily, spotLegLookup, isPinnedLegToken, planQuoteLeg, spotMaxAmount,
   type SpotChain, type NonEvmSpotChainFamily,
 } from '@/utils/spotChains';
 
@@ -173,25 +173,24 @@ export default function SpotTrade() {
 
   // Place both legs, resolve each symbol on its own chain, then read the live
   // balances the way each chain's VM allows.
+  // Only the newest setup may land: a retry, or params changing under a slow
+  // balance read, must not let an older run overwrite the legs.
+  const setupSeq = useRef(0);
   const setup = useCallback(async () => {
+    const seq = ++setupSeq.current;
+    const current = () => seq === setupSeq.current;
     setSetupLoading(true);
     setSetupError('');
+    // Anything priced against the previous legs is void.
+    setQuote(null);
+    setAmount('');
+    setError('');
     try {
       const baseChain = resolveSpotLegChain(chainParam);
       if (!baseChain) throw new Error(unsupportedChainMessage(chainParam));
 
-      // Same-chain unless the listing names a quote chain or asks for auto.
-      // Auto follows the user's largest balance of the quote asset, falling
-      // back to the chain the listing named, else to the base chain when that
-      // can hold the quote leg too.
-      let quoteKey = chainParam;
-      if (quoteAuto) {
-        quoteKey = await fundedQuoteChain(
-          quoteSymbol, quoteChainParam || (resolveSpotChain(chainParam) ? chainParam : undefined),
-        );
-      } else if (quoteChainParam) {
-        quoteKey = quoteChainParam;
-      }
+      const plan = planQuoteLeg(chainParam, quoteChainParam, quoteAuto);
+      const quoteKey = 'key' in plan ? plan.key : await fundedQuoteChain(quoteSymbol, plan.fallback);
       const quoteChain = resolveSpotLegChain(quoteKey);
       if (!quoteChain) throw new Error(unsupportedChainMessage(quoteKey));
       // Both legs on a single-asset chain is the one pair that cannot exist.
@@ -201,7 +200,6 @@ export default function SpotTrade() {
 
       const evmAddr = await getActiveWallet();
       if (!evmAddr) throw new Error('No wallet found. Set up your wallet first.');
-      setWalletId(evmAddr);
       // Every VM family derives its own key from the one mnemonic, so the
       // address on each leg is not always the EVM one.
       const addressOn = async (chain: SpotChain) => {
@@ -216,8 +214,11 @@ export default function SpotTrade() {
       const quoteLeg = { chain: quoteChain, address: quoteAddr };
       const from = side === 'buy' ? quoteLeg : base;
       const to = side === 'buy' ? base : quoteLeg;
-      setFromLeg(from);
-      setToLeg(to);
+      // A token this chain does not pin cannot be traded here at all; saying
+      // "check your connection" would send the user chasing the wrong problem.
+      for (const [chain, sym] of [[from.chain, fromSymbol], [to.chain, toSymbol]] as const) {
+        if (!spotLegLookup(chain, sym)) throw new Error(`${sym} can’t be traded on ${chain.name} here.`);
+      }
 
       // Resolve each leg with LiFi's single-token lookup (accepts a symbol,
       // tiny payload) — the full per-chain list is multi-MB and flaky on
@@ -247,8 +248,6 @@ export default function SpotTrade() {
         const [sym, chain] = !fromTok ? [fromSymbol, from.chain] : [toSymbol, to.chain];
         throw new Error(`Couldn’t load ${sym} on ${chain.name}. Check your connection and try again.`);
       }
-      setFromToken(fromTok);
-      setToToken(toTok);
 
       const [fb, tb] = isSameSpotChain(from.chain, to.chain)
         ? await readSpotBalances(from.chain, from.address, [fromTok, toTok])
@@ -256,13 +255,19 @@ export default function SpotTrade() {
           readSpotBalances(from.chain, from.address, [fromTok]),
           readSpotBalances(to.chain, to.address, [toTok]),
         ])).flat();
+      if (!current()) return;
+      setWalletId(evmAddr);
+      setFromLeg(from);
+      setToLeg(to);
+      setFromToken(fromTok);
+      setToToken(toTok);
       setFromBalance(fb == null ? null : Number(fb));
       setFromBalanceStr(fb ?? '0');
       setToBalance(tb == null ? null : Number(tb));
     } catch (e: any) {
-      setSetupError(e?.message || 'Could not load this pair');
+      if (current()) setSetupError(e?.message || 'Could not load this pair');
     } finally {
-      setSetupLoading(false);
+      if (current()) setSetupLoading(false);
     }
   }, [chainParam, quoteChainParam, quoteAuto, side, quoteSymbol, fromSymbol, toSymbol]);
 
@@ -511,7 +516,10 @@ export default function SpotTrade() {
             { symbol: fromSymbol, amount: fromBalance == null ? null : fmt(fromBalance), network: network(fromLeg) },
             { symbol: toSymbol, amount: toBalance == null ? null : fmt(toBalance), network: network(toLeg) },
           ]}
-          onMax={() => fromBalanceStr !== '0' && setAmount(fromBalanceStr)}
+          onMax={() => {
+            if (!fromLeg || !fromToken || fromBalanceStr === '0') return;
+            setAmount(spotMaxAmount(fromLeg.chain, fromToken.address, fromBalanceStr));
+          }}
           amountLabel={side === 'buy' ? 'Amount to spend' : 'Amount to sell'}
           amount={amount}
           onChangeAmount={setAmount}

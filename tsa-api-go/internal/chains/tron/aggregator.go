@@ -72,13 +72,29 @@ var acceptedContractTypes = map[uint64]string{
 // balance directly. A route calls the aggregator's contract, which pulls only
 // what the approval allows; a route that calls one of these instead is spending
 // the wallet outside the amount the user agreed to.
+//
+// Defence in depth only: the router allowlist (NonEVMChainConfig.Routers) is
+// what keeps a route on the aggregator's own contract.
 var tokenMovingSelectors = map[string]string{
 	"a9059cbb": "transfer",
 	"095ea7b3": "approve",
 	"23b872dd": "transferFrom",
 	"39509351": "increaseAllowance",
+	"d73dd623": "increaseApproval",
+	"cae9ca51": "approveAndCall",
+	"4000aea0": "transferAndCall",
+	"1296ee62": "transferAndCall",
+	"d505accf": "permit",
 	"a22cb465": "setApprovalForAll",
+	"42842e0e": "safeTransferFrom",
+	"b88d4fde": "safeTransferFrom",
+	"9bd9bbc6": "send",
 }
+
+// maxAggregatorExpiry bounds how far ahead a route's transaction may expire.
+// LiFi sets timestamp + 10 minutes; a far-off expiry turns a signed swap into
+// one that can be held back and broadcast long after its price is gone.
+const maxAggregatorExpiry = 15 * time.Minute
 
 // rawContract is the one contract of a decoded TransactionRaw, flattened across
 // the two parameter shapes we accept.
@@ -101,39 +117,56 @@ type decodedRaw struct {
 	Contracts    []rawContract
 }
 
+// fieldSpec is what one field of a message must look like on the wire.
+type fieldSpec struct {
+	typ      protowire.Type
+	repeated bool
+}
+
+type messageSchema struct {
+	name   string
+	fields map[protowire.Number]fieldSpec
+}
+
+var (
+	varintField   = fieldSpec{typ: protowire.VarintType}
+	bytesField    = fieldSpec{typ: protowire.BytesType}
+	repeatedBytes = fieldSpec{typ: protowire.BytesType, repeated: true}
+
+	// protocol.Transaction.raw. 9 auths and 12 scripts are deliberately absent:
+	// neither belongs in a swap, so they are refused like any unknown field.
+	transactionRawSchema = messageSchema{"transaction", map[protowire.Number]fieldSpec{
+		1: bytesField, 3: varintField, 4: bytesField, 8: varintField, 10: bytesField,
+		11: repeatedBytes, 14: varintField, 18: varintField,
+	}}
+	contractSchema = messageSchema{"contract", map[protowire.Number]fieldSpec{
+		1: varintField, 2: bytesField, 3: bytesField, 4: bytesField, 5: varintField,
+	}}
+	anySchema           = messageSchema{"parameter", map[protowire.Number]fieldSpec{1: bytesField, 2: bytesField}}
+	triggerSchema       = messageSchema{"TriggerSmartContract", map[protowire.Number]fieldSpec{1: bytesField, 2: bytesField, 3: varintField, 4: bytesField, 5: varintField, 6: varintField}}
+	transferValueSchema = messageSchema{"TransferContract", map[protowire.Number]fieldSpec{1: bytesField, 2: bytesField, 3: varintField}}
+)
+
 // decodeTransactionRaw parses a protocol.TransactionRaw. A field we do not know
 // is refused rather than skipped: the bytes are signed whole, so anything in
 // them we cannot interpret is something we would be signing blind.
 func decodeTransactionRaw(b []byte) (*decodedRaw, error) {
 	out := &decodedRaw{}
-	err := walkFields(b, func(num protowire.Number, typ protowire.Type, v uint64, bs []byte) error {
+	err := walkFields(b, transactionRawSchema, func(num protowire.Number, v uint64, bs []byte) error {
 		switch num {
-		case 1, 3, 4: // ref_block_bytes, ref_block_num, ref_block_hash
-		case 10: // data: a memo, carried but never executed
-		case 14: // timestamp
 		case 8:
-			if typ != protowire.VarintType {
-				return fmt.Errorf("expiration has the wrong wire type")
-			}
 			out.ExpirationMs = int64(v)
 		case 18:
-			if typ != protowire.VarintType {
-				return fmt.Errorf("fee_limit has the wrong wire type")
-			}
 			out.FeeLimit, out.HasFeeLimit = int64(v), true
 		case 11:
-			if typ != protowire.BytesType {
-				return fmt.Errorf("contract has the wrong wire type")
-			}
 			c, err := decodeContract(bs)
 			if err != nil {
 				return err
 			}
 			out.Contracts = append(out.Contracts, c)
-		default:
-			// 9 auths and 12 scripts included: neither belongs in a swap.
-			return fmt.Errorf("unexpected transaction field %d", num)
 		}
+		// 1, 3, 4 (ref block), 10 (memo) and 14 (timestamp) affect nothing we
+		// check; they are still held to the schema above.
 		return nil
 	})
 	if err != nil {
@@ -145,32 +178,27 @@ func decodeTransactionRaw(b []byte) (*decodedRaw, error) {
 func decodeContract(b []byte) (rawContract, error) {
 	var c rawContract
 	var param []byte
-	err := walkFields(b, func(num protowire.Number, typ protowire.Type, v uint64, bs []byte) error {
+	err := walkFields(b, contractSchema, func(num protowire.Number, v uint64, bs []byte) error {
 		switch num {
 		case 1:
 			c.Type = v
 		case 2:
 			param = bs
-		case 3, 4: // provider, ContractName: labels with no effect on execution
 		case 5:
 			c.PermissionID = v
-		default:
-			return fmt.Errorf("unexpected contract field %d", num)
 		}
+		// 3 provider, 4 ContractName: labels with no effect on execution.
 		return nil
 	})
 	if err != nil {
 		return c, err
 	}
 	var value []byte
-	err = walkFields(param, func(num protowire.Number, typ protowire.Type, v uint64, bs []byte) error {
-		switch num {
-		case 1:
+	err = walkFields(param, anySchema, func(num protowire.Number, v uint64, bs []byte) error {
+		if num == 1 {
 			c.TypeURL = string(bs)
-		case 2:
+		} else {
 			value = bs
-		default:
-			return fmt.Errorf("unexpected parameter field %d", num)
 		}
 		return nil
 	})
@@ -179,7 +207,7 @@ func decodeContract(b []byte) (rawContract, error) {
 	}
 	switch c.Type {
 	case contractTypeTriggerSmartContract:
-		err = walkFields(value, func(num protowire.Number, typ protowire.Type, v uint64, bs []byte) error {
+		err = walkFields(value, triggerSchema, func(num protowire.Number, v uint64, bs []byte) error {
 			switch num {
 			case 1:
 				c.Owner = bs
@@ -193,13 +221,11 @@ func decodeContract(b []byte) (rawContract, error) {
 				c.TokenValue = int64(v)
 			case 6:
 				c.TokenID = int64(v)
-			default:
-				return fmt.Errorf("unexpected TriggerSmartContract field %d", num)
 			}
 			return nil
 		})
 	case contractTypeTransfer:
-		err = walkFields(value, func(num protowire.Number, typ protowire.Type, v uint64, bs []byte) error {
+		err = walkFields(value, transferValueSchema, func(num protowire.Number, v uint64, bs []byte) error {
 			switch num {
 			case 1:
 				c.Owner = bs
@@ -207,8 +233,6 @@ func decodeContract(b []byte) (rawContract, error) {
 				c.Target = bs
 			case 3:
 				c.Value = int64(v)
-			default:
-				return fmt.Errorf("unexpected TransferContract field %d", num)
 			}
 			return nil
 		})
@@ -218,31 +242,59 @@ func decodeContract(b []byte) (rawContract, error) {
 	return c, err
 }
 
-// walkFields calls fn for every field of one protobuf message. Varints arrive
-// in v, length-delimited fields in bs; the two fixed-width types are refused
-// because none of the messages we accept uses them.
-func walkFields(b []byte, fn func(num protowire.Number, typ protowire.Type, v uint64, bs []byte) error) error {
+// walkFields calls fn for every field of one message, after holding the bytes
+// to the schema AND to the one encoding java-tron itself produces.
+//
+// The network does not hash the bytes it receives: it parses them and
+// re-serializes. Parsing is forgiving — a field repeated, or sent under a
+// different wire type, silently replaces or hides the value we read — so a
+// lenient decoder can be shown call_value 0 while the node executes 5 TRX.
+// Requiring the canonical form (known fields only, the declared wire type,
+// ascending field order, each non-repeated field at most once, minimal
+// varints, and no explicit proto3 default, which java never writes) means
+// there is exactly one reading of these bytes, and it is ours. It is the same
+// guarantee as re-encoding and comparing, without a second encoder to keep
+// in step.
+func walkFields(b []byte, sch messageSchema, fn func(num protowire.Number, v uint64, bs []byte) error) error {
+	var last protowire.Number
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
-			return fmt.Errorf("malformed protobuf tag")
+			return fmt.Errorf("malformed protobuf tag in %s", sch.name)
+		}
+		if n != protowire.SizeTag(num) {
+			return fmt.Errorf("non-canonical tag for %s field %d", sch.name, num)
 		}
 		b = b[n:]
+		spec, known := sch.fields[num]
+		if !known {
+			return fmt.Errorf("unexpected %s field %d", sch.name, num)
+		}
+		if typ != spec.typ {
+			return fmt.Errorf("%s field %d has the wrong wire type", sch.name, num)
+		}
+		if num < last || (num == last && !spec.repeated) {
+			return fmt.Errorf("%s field %d is repeated or out of order", sch.name, num)
+		}
+		last = num
 		var v uint64
 		var bs []byte
-		switch typ {
-		case protowire.VarintType:
+		if typ == protowire.VarintType {
 			v, n = protowire.ConsumeVarint(b)
-		case protowire.BytesType:
+			if n >= 0 && (n != protowire.SizeVarint(v) || v == 0) {
+				return fmt.Errorf("non-canonical value for %s field %d", sch.name, num)
+			}
+		} else {
 			bs, n = protowire.ConsumeBytes(b)
-		default:
-			return fmt.Errorf("unexpected protobuf wire type %d in field %d", typ, num)
+			if n >= 0 && (n != protowire.SizeBytes(len(bs)) || len(bs) == 0) {
+				return fmt.Errorf("non-canonical value for %s field %d", sch.name, num)
+			}
 		}
 		if n < 0 {
-			return fmt.Errorf("malformed protobuf field %d", num)
+			return fmt.Errorf("malformed protobuf field %d in %s", num, sch.name)
 		}
 		b = b[n:]
-		if err := fn(num, typ, v, bs); err != nil {
+		if err := fn(num, v, bs); err != nil {
 			return err
 		}
 	}
@@ -338,6 +390,9 @@ func validateAggregatorRaw(d *decodedRaw, req chains.TransferRequest, now time.T
 	if d.ExpirationMs <= now.UnixMilli() {
 		return chains.Invalid("the route's transaction has expired; get a new quote")
 	}
+	if d.ExpirationMs > now.Add(maxAggregatorExpiry).UnixMilli() {
+		return chains.Invalid("the route's transaction expires too far in the future; get a new quote")
+	}
 	return nil
 }
 
@@ -355,6 +410,9 @@ func decodeRawHex(s string) ([]byte, error) {
 // prepareFromRawHex validates an aggregator-supplied transaction against what
 // the user approved and returns its txID to sign.
 func (c *Client) prepareFromRawHex(req chains.TransferRequest) (chains.PreparedTx, error) {
+	if err := c.requireRouter(req.To); err != nil {
+		return chains.PreparedTx{}, err
+	}
 	raw, err := decodeRawHex(req.TronRawHex)
 	if err != nil {
 		return chains.PreparedTx{}, err
@@ -378,7 +436,9 @@ func (c *Client) prepareFromRawHex(req chains.TransferRequest) (chains.PreparedT
 	}, nil
 }
 
-// isAggregatorRaw reports whether a prepared RawTx came from prepareFromRawHex.
+// isAggregatorRaw reports whether a prepared RawTx carries only verified hex
+// (an aggregator route, or an approval we decoded), which is broadcast as
+// exactly those bytes.
 func isAggregatorRaw(raw *RawTx) bool {
 	return len(bytes.TrimSpace(raw.RawData)) == 0 || string(bytes.TrimSpace(raw.RawData)) == "null"
 }
@@ -408,4 +468,61 @@ func (c *Client) broadcastAggregatorRaw(ctx context.Context, raw *RawTx, sigHex 
 		return "", err
 	}
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// requireRouter refuses a route target or approval spender that is not one of
+// this network's configured aggregator contracts. The quote names both itself,
+// so this list — not the quote — is what decides who may be called or
+// approved. An empty list signs nothing.
+func (c *Client) requireRouter(addr string) error {
+	for _, r := range c.cfg.Routers {
+		if r == addr {
+			return nil
+		}
+	}
+	return chains.Invalid("%q is not a swap contract we sign for on tron", addr)
+}
+
+// verifyBuiltApprove checks the approve TronGrid built before its txID is
+// handed out: TronGrid is an upstream like any other, and the request we sent
+// it is only what we asked for, not what came back.
+func verifyBuiltApprove(raw *RawTx, from, token, spender string, amount *big.Int, now time.Time) error {
+	bad := func(why string) error { return fmt.Errorf("the node built an unexpected approval: %s", why) }
+	rawBytes, err := decodeRawHex(raw.RawHex)
+	if err != nil {
+		return bad("raw_data_hex is not hex")
+	}
+	digest := sha256.Sum256(rawBytes)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), raw.TxID) {
+		return bad("txID does not match its bytes")
+	}
+	d, err := decodeTransactionRaw(rawBytes)
+	if err != nil {
+		return bad(err.Error())
+	}
+	if len(d.Contracts) != 1 || d.Contracts[0].Type != contractTypeTriggerSmartContract {
+		return bad("not a single contract call")
+	}
+	c := d.Contracts[0]
+	ownerHex, _ := Base58ToHex(from)
+	tokenHex, _ := Base58ToHex(token)
+	if hex.EncodeToString(c.Owner) != ownerHex || hex.EncodeToString(c.Target) != tokenHex {
+		return bad("wrong owner or token")
+	}
+	if c.TypeURL != acceptedContractTypes[contractTypeTriggerSmartContract] || c.PermissionID != 0 ||
+		c.Value != 0 || c.TokenValue != 0 || c.TokenID != 0 {
+		return bad("unexpected value, permission or type")
+	}
+	spenderWord, err := abiAddressWord(spender)
+	if err != nil {
+		return bad("bad spender")
+	}
+	want := approveSelector + spenderWord + fmt.Sprintf("%064s", toHexNoPrefix(amount))
+	if hex.EncodeToString(c.Data) != want {
+		return bad("calldata is not approve(spender, amount)")
+	}
+	if !d.HasFeeLimit || d.FeeLimit > trc20FeeLimitSun || d.ExpirationMs <= now.UnixMilli() {
+		return bad("fee limit or expiration out of range")
+	}
+	return nil
 }
