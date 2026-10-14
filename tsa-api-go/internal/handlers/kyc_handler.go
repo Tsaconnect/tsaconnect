@@ -831,16 +831,6 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&req)
 
-	// AdminAuth also admits merchants and support. A typed name decides whose
-	// bank transfers get credited to this user, so only a true admin may type
-	// one; anyone allowed here may still approve with the Didit-read name.
-	if strings.TrimSpace(req.LegalName) != "" &&
-		adminUser.Role != models.RoleAdmin && adminUser.Role != models.RoleSuperAdmin {
-		c.JSON(http.StatusForbidden, gin.H{
-			"success": false, "message": "only an admin can enter a legal name by hand"})
-		return
-	}
-
 	name, source, refusal := h.overrideLegalName(c.Request.Context(), &user, req.LegalName)
 	if refusal != "" {
 		c.JSON(http.StatusBadRequest, gin.H{

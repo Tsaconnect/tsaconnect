@@ -260,7 +260,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		kycGroup.POST("/webhook", h.KYCWebhook)
 		kycGroup.GET("/status", auth, h.GetKYCStatus)
 		kycGroup.GET("/admin/verifications", adminAuth, h.GetAllVerifications)
-		kycGroup.POST("/admin/override/:id", adminAuth, h.AdminOverrideKYC)
+		// Admin-only (AdminAuth also admits merchant and support): an override
+		// marks someone verified and records the legal name their bank
+		// transfers are credited by.
+		kycGroup.POST("/admin/override/:id", adminAuth, middleware.RequireP2PAdmin(), h.AdminOverrideKYC)
 		kycGroup.POST("/admin/reject/:id", adminAuth, h.AdminRejectKYC)
 		// Repairs users verified before the Didit legal name was stored; run by
 		// hand, one bounded page at a time.
