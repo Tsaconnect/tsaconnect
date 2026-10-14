@@ -30,7 +30,7 @@ function validateAddresses(cfg, network) {
   check("systemWallet", cfg.systemWallet);
   (cfg.admins || []).forEach((a, i) => check(`admins[${i}]`, a));
   if (cfg.liquidityPool) {
-    for (const k of ["collateralProvider", "operator", "guardian", "recipient", "timelockAdmin", "timelockAdminConfirm"]) {
+    for (const k of ["collateralProvider", "operator", "guardian", "recipient", "owner", "ownerConfirm"]) {
       check(`liquidityPool.${k}`, cfg.liquidityPool[k]);
     }
   }

@@ -39,7 +39,9 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  *     at most its pro-rata share of those capped spreads.
  *   - Privileged roles use raw msg.sender, never the ERC-2771 forwarder
  *     (same rule as McgpEntitlementSwapV2).
- *   - UUPS; the owner is meant to be a TimelockController (spec O1), so LPs can
+ *   - UUPS while in development, owned by the owner's wallet (owner 2026-10-14:
+ *     no timelock now; the market-ready contract will not be upgradeable). A
+ *     TimelockController can own it unchanged, so LPs can
  *     exit before an upgrade lands.
  */
 contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradeable, UUPSUpgradeable {
@@ -330,7 +332,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     /// @notice An operator can only ever spend collateral (fills to approved
     ///         recipients, within the caps), never LP principal or earnings —
     ///         so the collateral provider, whose money that is, manages them
-    ///         directly, without the owner's timelock.
+    ///         directly, without going through the owner.
     function addOperator(address account) external {
         require(msg.sender == collateralProvider || msg.sender == owner(), "Not provider or owner");
         _setOperator(account, true);

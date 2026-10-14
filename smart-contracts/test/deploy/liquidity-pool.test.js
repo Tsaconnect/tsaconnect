@@ -15,9 +15,8 @@ async function fixture(over = {}) {
       operator: operator.address,
       guardian: guardian.address,
       recipient: treasury.address,
-      timelockAdmin: admin.address,
-      timelockAdminConfirm: admin.address,
-      timelockDelaySec: 72 * 3600,
+      owner: admin.address,
+      ownerConfirm: admin.address,
       minDeposit: 5, maxPerLp: 5000, totalCap: 50000,
       maxFillPerTx: 2000, fillWindowSec: 86400, fillWindowCap: 20000, maxSpreadBps: 300, withdrawLockSec: 86400,
       ...over,
@@ -27,26 +26,23 @@ async function fixture(over = {}) {
 }
 
 describe("deploy/liquidity-pool", () => {
-  it("wires every role and limit, then hands ownership to the timelock", async () => {
+  it("wires every role and limit, then hands ownership to the owner's wallet", async () => {
     const { chain, admin, treasury } = await fixture();
     const out = await deploy(hre, { chain });
     const pool = await ethers.getContractAt("TsaLiquidityPool", out.pool);
-    const tl = await ethers.getContractAt("TimelockController", out.timelock);
-    expect(await pool.owner()).to.equal(out.timelock);
+    expect(await pool.owner()).to.equal(admin.address);
     expect(await pool.recipient(treasury.address)).to.equal(true);
     expect(await pool.maxPerLp()).to.equal(ethers.parseUnits("5000", 18));
-    expect(await tl.getMinDelay()).to.equal(72n * 3600n);
-    expect(await tl.hasRole(await tl.PROPOSER_ROLE(), admin.address)).to.equal(true);
-    expect(await tl.hasRole(await tl.DEFAULT_ADMIN_ROLE(), admin.address)).to.equal(false);
+    expect(await pool.withdrawLock()).to.equal(86400n);
   });
 
-  it("refuses a timelock admin that is the deployer or not typed twice", async () => {
+  it("refuses an owner that is the deployer or not typed twice", async () => {
     const { chain, deployer, admin } = await fixture();
-    chain.liquidityPool.timelockAdmin = deployer.address;
-    chain.liquidityPool.timelockAdminConfirm = deployer.address;
+    chain.liquidityPool.owner = deployer.address;
+    chain.liquidityPool.ownerConfirm = deployer.address;
     await expect(deploy(hre, { chain })).to.be.rejectedWith(/is the deployer/);
-    chain.liquidityPool.timelockAdmin = admin.address;
-    chain.liquidityPool.timelockAdminConfirm = null;
+    chain.liquidityPool.owner = admin.address;
+    chain.liquidityPool.ownerConfirm = null;
     await expect(deploy(hre, { chain })).to.be.rejectedWith(/same address/);
   });
 

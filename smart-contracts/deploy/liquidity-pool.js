@@ -2,19 +2,19 @@
 //
 // TsaLiquidityPool (spec 2026-10-14) on any chain whose deploy/chains.js entry
 // has a `liquidityPool` block: the UUPS proxy, every initialize() value read
-// back and asserted, then a TimelockController deployed and made the owner
-// (spec O1) — the deployer never keeps ownership past a successful run.
+// back and asserted, then ownership handed to the owner's wallet — the
+// deployer never keeps ownership past a successful run. No timelock while
+// the product is in development (owner 2026-10-14); the market-ready
+// contracts will not be upgradeable at all.
 //
-//   LPOOL_TIMELOCK_ADMIN_CONFIRM=0x…  (type the timelock admin again: it is final)
-//   [LPOOL_COLLATERAL_PROVIDER, LPOOL_GUARDIAN, LPOOL_TIMELOCK_ADMIN default to
+//   LPOOL_OWNER_CONFIRM=0x…  (type the owner again)
+//   [LPOOL_COLLATERAL_PROVIDER, LPOOL_GUARDIAN, LPOOL_OWNER default to
 //    the owner's wallet (owner, 2026-10-14: the owner does all three);
 //    LPOOL_OPERATOR, LPOOL_RECIPIENT to the consolidated operator/treasury.
 //    More operators: the collateral provider calls addOperator directly.]
 //     npx hardhat run deploy/liquidity-pool.js --network bscMainnet
 const { getAddress } = require("ethers");
 const { resolveChain, assertOwnerConfirm, handOverOwnership, writeLedger } = require("./lib");
-
-const MIN_MAINNET_TIMELOCK_SEC = 72 * 3600;
 
 async function assertPool(pool, want) {
   const fail = (m) => { throw new Error(`liquidity-pool: assertion failed — ${m}`); };
@@ -35,13 +35,8 @@ async function deploy(hre, { chain } = {}) {
   const cfg = chain || resolveChain(hre);
   const lp = cfg.liquidityPool;
   if (!lp) throw new Error(`liquidity-pool: network ${hre.network.name} has no liquidityPool block in deploy/chains.js`);
-  for (const k of ["collateralProvider", "operator", "guardian", "recipient", "timelockAdmin"]) {
+  for (const k of ["collateralProvider", "operator", "guardian", "recipient", "owner"]) {
     if (!lp[k]) throw new Error(`liquidity-pool: ${k} is required`);
-  }
-  // The timelock is what lets LPs exit before an upgrade lands: never shorter
-  // than 72 h on a mainnet (review 2026-10-14).
-  if (/mainnet/i.test(hre.network.name) && lp.timelockDelaySec < MIN_MAINNET_TIMELOCK_SEC) {
-    throw new Error(`liquidity-pool: timelock delay ${lp.timelockDelaySec}s is under the 72h mainnet minimum`);
   }
   const tokenAddr = cfg.tokens[lp.token];
   if (!tokenAddr) throw new Error(`liquidity-pool: token ${lp.token} has no address on this network`);
@@ -49,15 +44,15 @@ async function deploy(hre, { chain } = {}) {
   const [deployer] = await ethers.getSigners();
   const deployerAddr = await deployer.getAddress();
   assertOwnerConfirm({
-    label: "liquidity-pool", owner: lp.timelockAdmin, confirm: lp.timelockAdminConfirm, deployerAddr,
-    ownerVar: "LPOOL_TIMELOCK_ADMIN", confirmVar: "LPOOL_TIMELOCK_ADMIN_CONFIRM",
+    label: "liquidity-pool", owner: lp.owner, confirm: lp.ownerConfirm, deployerAddr,
+    ownerVar: "LPOOL_OWNER", confirmVar: "LPOOL_OWNER_CONFIRM",
   });
 
   const decimals = Number(await (await ethers.getContractAt("MockERC20", tokenAddr)).decimals());
   const units = (n) => ethers.parseUnits(String(n), decimals);
   const params = {
     token: tokenAddr,
-    owner: deployerAddr, // handed to the timelock below, after the assertions
+    owner: deployerAddr, // handed to the owner below, after the assertions
     collateralProvider: lp.collateralProvider,
     operator: lp.operator,
     guardian: lp.guardian,
@@ -85,16 +80,10 @@ async function deploy(hre, { chain } = {}) {
     throw e;
   }
 
-  const Timelock = await ethers.getContractFactory("TimelockController");
-  const timelock = await Timelock.deploy(lp.timelockDelaySec, [lp.timelockAdmin], [lp.timelockAdmin], ethers.ZeroAddress);
-  await timelock.waitForDeployment();
-  const timelockAddr = await timelock.getAddress();
-  if ((await timelock.getMinDelay()) !== BigInt(lp.timelockDelaySec)) throw new Error("liquidity-pool: timelock delay read-back mismatch");
-
-  await handOverOwnership("liquidity-pool", [pool], timelockAddr);
-  if (!chain) writeLedger(hre.network.name, "TsaLiquidityPool", { proxy, timelock: timelockAddr });
-  console.log(`liquidity-pool: ready pool=${proxy} timelock=${timelockAddr} delay=${lp.timelockDelaySec}s admin=${lp.timelockAdmin}`);
-  return { pool: proxy, timelock: timelockAddr };
+  await handOverOwnership("liquidity-pool", [pool], lp.owner);
+  if (!chain) writeLedger(hre.network.name, "TsaLiquidityPool", { proxy, owner: lp.owner });
+  console.log(`liquidity-pool: ready pool=${proxy} owner=${lp.owner}`);
+  return { pool: proxy };
 }
 
 if (require.main === module) {
