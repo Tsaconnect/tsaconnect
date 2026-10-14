@@ -156,6 +156,12 @@ func (c *Client) PrepareTransfer(ctx context.Context, req chains.TransferRequest
 	if req.TxBytesB64 != "" {
 		return chains.PreparedTx{}, chains.Invalid("a Sui transaction cannot be signed on bitcoin")
 	}
+	if req.TronRawHex != "" {
+		return chains.PreparedTx{}, chains.Invalid("a Tron transaction cannot be signed on bitcoin")
+	}
+	if req.Approve {
+		return chains.PreparedTx{}, chains.Invalid("bitcoin has no token approvals")
+	}
 	// An aggregator-built spend is signed as given, once it has been proven to
 	// be ours to sign and to match the quote (see prepareFromPSBT).
 	if req.PSBTHex != "" {

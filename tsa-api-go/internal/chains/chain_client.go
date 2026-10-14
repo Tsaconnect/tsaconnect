@@ -71,6 +71,23 @@ type TransferRequest struct {
 	// It is NOT trusted: see the family's prepare path for what must hold first.
 	// Families that cannot sign one MUST reject a non-empty value.
 	TxBytesB64 string `json:"txBytesB64,omitempty"`
+
+	// TronRawHex is the same idea again for Tron: a serialized
+	// protocol.TransactionRaw (hex, 0x optional) an aggregator built — LiFi's
+	// transactionRequest.data on a Tron route. Its sha256 is the txID that gets
+	// signed, so the bytes are signed and broadcast exactly as given. It is NOT
+	// trusted: To must name the contract the route calls, and see
+	// prepareFromRawHex for everything else that must hold first. Families
+	// other than Tron MUST reject a non-empty value.
+	TronRawHex string `json:"tronRawHex,omitempty"`
+
+	// Approve asks for a TRC-20 approve(To, MaxUint256) on TokenAddr instead of
+	// a transfer: To is the spender (the aggregator's contract) and Amount is
+	// the allowance the swap actually NEEDS. When the current allowance already
+	// covers Amount, prepare answers with no payloads — nothing to sign, and the
+	// app goes straight to the swap. Families with no token approvals MUST
+	// reject it.
+	Approve bool `json:"approve,omitempty"`
 }
 
 // FeeQuote is the result of the mandatory pre-send gas check.

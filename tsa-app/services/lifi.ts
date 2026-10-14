@@ -47,13 +47,26 @@ export function isSuiLiFiChain(chainId: number): boolean {
   return mvmChainIds.has(chainId);
 }
 
+// LiFi's chain id for Tron (TVM family; added by LiFi by 2026-10, verified
+// live 2026-10-14). A Tron route's transactionRequest DOES carry a chainId —
+// this one — so without the branch it would reach the EVM path and fail there.
+export const TRON_LIFI_CHAIN_ID = 728126428;
+
+// LiFi's address for native TRX (the base58 form of the zero address).
+export const TRON_NATIVE_ADDRESS = 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb';
+
+export function isTronLiFiChain(chainId: number): boolean {
+  return chainId === TRON_LIFI_CHAIN_ID;
+}
+
 /**
  * True for any chain the swap flow signs through the non-EVM path (Bitcoin,
- * Solana or Sui). These have no entry in the EVM CHAINS map and no ERC-20
+ * Solana, Sui or Tron). These have no entry in the EVM CHAINS map and no ERC-20
  * balances, so every EVM-shaped lookup must be guarded by this.
  */
 export function isNonEVMLiFiChain(chainId: number): boolean {
-  return isSolanaLiFiChain(chainId) || isBtcLiFiChain(chainId) || isSuiLiFiChain(chainId);
+  return isSolanaLiFiChain(chainId) || isBtcLiFiChain(chainId) || isSuiLiFiChain(chainId)
+    || isTronLiFiChain(chainId);
 }
 
 /**
@@ -67,6 +80,9 @@ export function isNonEVMLiFiChain(chainId: number): boolean {
  * picker offers only these.
  */
 export function isSignableSourceChain(chainId: number): boolean {
+  // Tron signs only from the Spot desk, which pins its tokens (LiFi lists ~90
+  // impostor "USDT"s there) and derives the Tron address; All Swap does neither.
+  if (isTronLiFiChain(chainId)) return false;
   return isNonEVMLiFiChain(chainId) || getChainByChainId(chainId) !== undefined;
 }
 

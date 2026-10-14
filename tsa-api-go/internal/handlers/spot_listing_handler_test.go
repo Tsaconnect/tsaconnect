@@ -198,7 +198,7 @@ func TestCreateSpotListing_AllSwapQuoteChainValidated(t *testing.T) {
 	cases := map[string]struct{ body, wantMsg string }{
 		"unknown": {`{"baseSymbol":"BTC","quoteSymbol":"USDT","chain":"btc","route":"allswap","quoteChain":"dogechain"}`, "Unsupported quoteChain"},
 		// Rejected even when the base leg is an ordinary EVM chain.
-		"evm base, unknown quote": {`{"baseSymbol":"USDT","quoteSymbol":"BTC","chain":"ethereum","route":"allswap","quoteChain":"tron"}`, "Unsupported quoteChain"},
+		"evm base, unknown quote": {`{"baseSymbol":"USDT","quoteSymbol":"BTC","chain":"ethereum","route":"allswap","quoteChain":"aptos"}`, "Unsupported quoteChain"},
 		"stablecoin on bitcoin":   {`{"baseSymbol":"ETH","quoteSymbol":"USDT","chain":"ethereum","route":"allswap","quoteChain":"btc"}`, "USDT does not exist on \"btc\""},
 	}
 	for name, tc := range cases {
@@ -981,5 +981,110 @@ func TestSpotListings_LegacyRoutesUnaffected(t *testing.T) {
 	config.DB.First(&legacy, "base_symbol = ?", "ADA")
 	if legacy.DisplayOrder != 3 || legacy.QuoteChain != "" {
 		t.Fatalf("legacy row = %+v, want displayOrder 3 and empty quote chain", legacy)
+	}
+}
+
+// LiFi routes Tron, so a listing may name it — but only quoted in USDT: Tron has
+// no usable USDC (Circle's is discontinued; LiFi's "USDC" there is an
+// unverified 18-decimal token). The rule follows the quote LEG, wherever the
+// route puts it.
+func TestCreateSpotListing_TronQuotesInUSDTOnly(t *testing.T) {
+	cases := map[string]struct {
+		body string
+		ok   bool
+	}{
+		"same-chain USDT":           {`{"baseSymbol":"TRX","quoteSymbol":"USDT","chain":"tron"}`, true},
+		"same-chain USDC":           {`{"baseSymbol":"TRX","quoteSymbol":"USDC","chain":"tron"}`, false},
+		"allswap auto on tron USDC": {`{"baseSymbol":"TRX","quoteSymbol":"USDC","chain":"tron","route":"allswap"}`, false},
+		"allswap quote leg on tron": {`{"baseSymbol":"ETH","quoteSymbol":"USDC","chain":"ethereum","route":"allswap","quoteChain":"tron"}`, false},
+		"allswap tron USDT quote":   {`{"baseSymbol":"ETH","quoteSymbol":"USDT","chain":"ethereum","route":"allswap","quoteChain":"tron"}`, true},
+		// The base leg on Tron with the USDC leg elsewhere is fine.
+		"tron base, USDC on base": {`{"baseSymbol":"TRX","quoteSymbol":"USDC","chain":"tron","route":"allswap","quoteChain":"base"}`, true},
+		"allswap tron to tron":    {`{"baseSymbol":"TRX","quoteSymbol":"USDT","chain":"tron","route":"allswap","quoteChain":"tron"}`, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			setupSpotTestDB(t)
+			h := newSpotHandlers()
+			c, w := spotCtx(t, http.MethodPost, tc.body, adminUser())
+			h.CreateSpotListing(c)
+			if tc.ok {
+				if w.Code != http.StatusCreated {
+					t.Fatalf("status = %d, want 201; body = %s", w.Code, w.Body.String())
+				}
+				return
+			}
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+			}
+			if msg := spotErrMessage(t, w); !strings.Contains(msg, "Tron pairs must quote in USDT") {
+				t.Fatalf("message = %q, want the USDT-only reason", msg)
+			}
+		})
+	}
+}
+
+// A PUT that only changes the quote symbol cannot walk a Tron listing onto USDC.
+func TestUpdateSpotListing_TronQuoteSymbolToUSDCRejected(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	listing := models.SpotListing{BaseSymbol: "TRX", QuoteSymbol: "USDT", Chain: "tron", Route: models.SpotRouteLiFi, Enabled: true, Category: "spot"}
+	config.DB.Create(&listing)
+
+	w := putSpot(t, h, listing.ID.String(), `{"quoteSymbol":"usdc"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	var row models.SpotListing
+	config.DB.First(&row, "id = ?", listing.ID)
+	if row.QuoteSymbol != "USDT" {
+		t.Fatalf("quoteSymbol = %q, want USDT kept", row.QuoteSymbol)
+	}
+}
+
+// The app pins exactly TRX and USDT on Tron, so a Tron base leg is TRX (USDT
+// against USDT is meaningless, anything else is unpinned), and the MCGP desk,
+// which only trades on Sonic, cannot carry a Tron pair at all.
+func TestCreateSpotListing_TronBaseIsTRXAndNoMCGPRoute(t *testing.T) {
+	cases := map[string]struct{ body, wantMsg string }{
+		"USDT/USDT":               {`{"baseSymbol":"USDT","quoteSymbol":"USDT","chain":"tron"}`, "TRX as the base"},
+		"unpinned base":           {`{"baseSymbol":"SUN","quoteSymbol":"USDT","chain":"tron"}`, "TRX as the base"},
+		"USDT base, quote on bsc": {`{"baseSymbol":"USDT","quoteSymbol":"USDC","chain":"tron","route":"allswap","quoteChain":"bsc"}`, "TRX as the base"},
+		"mcgp route":              {`{"baseSymbol":"TRX","quoteSymbol":"USDT","chain":"tron","route":"mcgp"}`, "MCGP desk"},
+		"mcgp route, USDC":        {`{"baseSymbol":"MCGP","quoteSymbol":"USDC","chain":"tron","route":"mcgp"}`, "MCGP desk"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			setupSpotTestDB(t)
+			h := newSpotHandlers()
+			c, w := spotCtx(t, http.MethodPost, tc.body, adminUser())
+			h.CreateSpotListing(c)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+			}
+			if msg := spotErrMessage(t, w); !strings.Contains(msg, tc.wantMsg) {
+				t.Fatalf("message = %q, want it to name %q", msg, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// A PUT naming only the base symbol is checked against the stored Tron chain.
+func TestUpdateSpotListing_TronBaseSymbolChecked(t *testing.T) {
+	setupSpotTestDB(t)
+	h := newSpotHandlers()
+	listing := models.SpotListing{BaseSymbol: "TRX", QuoteSymbol: "USDT", Chain: "tron", Route: models.SpotRouteLiFi, Enabled: true, Category: "spot"}
+	config.DB.Create(&listing)
+
+	if w := putSpot(t, h, listing.ID.String(), `{"baseSymbol":"usdt"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	if w := putSpot(t, h, listing.ID.String(), `{"route":"mcgp"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("route mcgp: status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+	var row models.SpotListing
+	config.DB.First(&row, "id = ?", listing.ID)
+	if row.BaseSymbol != "TRX" || row.Route != models.SpotRouteLiFi {
+		t.Fatalf("row = %+v, want TRX on lifi kept", row)
 	}
 }

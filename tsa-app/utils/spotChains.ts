@@ -12,21 +12,20 @@
 // user's leg cannot be trusted on inspection alone, and nothing in a .tsx
 // screen can be imported by a test.
 //
-// Bitcoin is deliberately NOT resolvable here. LiFi lists exactly one token on
-// Bitcoin (BTC itself), so no same-chain pair exists — a BTC pair is inherently
-// cross-chain, which a single-`chain` listing cannot express and the same-chain
-// desk cannot trade. Returning null keeps such a listing from reaching a form
-// that could only fail at quote time.
+// Bitcoin resolves only as ONE LEG of a cross-chain pair (resolveSpotLegChain),
+// never as a same-chain pair (resolveSpotChain). LiFi lists exactly one token on
+// Bitcoin (BTC itself), so a BTC pair always has its quote leg on another chain.
 import {
   CHAINS, CHAIN_KEYS, NONEVM_CHAINS, isNonEVMChain, type ChainKey, type NonEVMChainKey,
 } from '@/constants/chains';
 import {
-  SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS, type LiFiToken,
+  SOLANA_LIFI_CHAIN_ID, SUI_LIFI_CHAIN_ID, BTC_LIFI_CHAIN_ID, TRON_LIFI_CHAIN_ID, SOLANA_NATIVE_ADDRESS,
+  TRON_NATIVE_ADDRESS, type LiFiToken,
 } from '@/services/lifi';
 import type { WalletBalanceWithChain } from '@/services/walletApi';
 
 /** VM family of a resolved listing chain — the axis the desk branches on. */
-export type SpotChainFamily = 'evm' | 'solana' | 'sui';
+export type SpotChainFamily = 'evm' | 'solana' | 'sui' | 'tron' | 'btc';
 /** The families whose balances come from the wallet's rows, not from an RPC. */
 export type NonEvmSpotChainFamily = Exclude<SpotChainFamily, 'evm'>;
 
@@ -55,13 +54,53 @@ export interface NonEvmSpotChain extends SpotChainBase {
  *  actually carries — an EVM chain cannot be read as a Solana one, or back. */
 export type SpotChain = EvmSpotChain | NonEvmSpotChain;
 
-/** LiFi ids for the non-EVM chains a same-chain spot pair can exist on. Typed
- *  as a total record: adding a VM family without giving it an id is a type
- *  error here, which is how the family stays impossible to half-support. */
+/** LiFi ids for the non-EVM chains a spot leg can live on. Typed as a total
+ *  record: adding a VM family without giving it an id is a type error here,
+ *  which is how the family stays impossible to half-support. */
 const NON_EVM_LIFI_IDS: Record<NonEvmSpotChainFamily, number> = {
   solana: SOLANA_LIFI_CHAIN_ID,
   sui: SUI_LIFI_CHAIN_ID,
+  tron: TRON_LIFI_CHAIN_ID,
+  btc: BTC_LIFI_CHAIN_ID,
 };
+
+/** Chains carrying a single tradeable token: a leg, never a whole pair. */
+const SINGLE_TOKEN_FAMILIES: ReadonlySet<NonEvmSpotChainFamily> = new Set(['btc']);
+
+/**
+ * Token addresses a leg on this family is pinned to, by symbol. A family listed
+ * here resolves ONLY these symbols, and only to these addresses.
+ *
+ * Tron needs it: LiFi lists ~90 tokens there called "USDT", nearly all of them
+ * impostors, and its only "USDC" is an unverified 18-decimal token (Circle
+ * retired Tron USDC). A symbol lookup that picked the wrong one would quote a
+ * worthless coin under the name the user trusts.
+ */
+const PINNED_LEG_TOKENS: Partial<Record<NonEvmSpotChainFamily, Record<string, string>>> = {
+  tron: { TRX: TRON_NATIVE_ADDRESS, USDT: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' },
+};
+
+/**
+ * What to look a leg's symbol up as on its chain: the pinned address where the
+ * family pins its tokens (null when the symbol is not pinned — that leg cannot
+ * be traded), else the symbol itself.
+ */
+export function spotLegLookup(chain: SpotChain, symbol: string): string | null {
+  if (chain.family === 'evm') return symbol;
+  const pins = PINNED_LEG_TOKENS[chain.family];
+  if (!pins) return symbol;
+  return pins[symbol.trim().toUpperCase()] ?? null;
+}
+
+/**
+ * Whether a token LiFi returned for a leg is the one that leg is pinned to.
+ * Only meaningful for pinning families; everything else is accepted as-is.
+ */
+export function isPinnedLegToken(chain: SpotChain, symbol: string, address: string | undefined): boolean {
+  if (chain.family === 'evm' || !PINNED_LEG_TOKENS[chain.family]) return true;
+  const wanted = spotLegLookup(chain, symbol);
+  return !!wanted && wanted === (address ?? '').trim();
+}
 
 const isTradableNonEvm = (key: NonEVMChainKey): key is NonEvmSpotChainFamily =>
   Object.prototype.hasOwnProperty.call(NON_EVM_LIFI_IDS, key);
@@ -97,14 +136,25 @@ export function singleParam(value: string | string[] | undefined): string {
 }
 
 /**
- * Maps a listing's chain key to its LiFi chain. Returns null for anything the
- * same-chain desk cannot trade: an unknown key, Tron (LiFi has no Tron route),
+ * Maps a listing's chain key to its LiFi chain, for a pair with BOTH legs on
+ * it. Returns null for anything that cannot carry a whole pair: an unknown key,
  * or Bitcoin (single-asset chain — see the note at the top of this file).
  *
  * The key is untrusted — it comes from the API and from the screen's own route
  * params. Anything that is not a recognised key resolves to null.
  */
 export function resolveSpotChain(chain: unknown): SpotChain | null {
+  const resolved = resolveSpotLegChain(chain);
+  if (resolved && resolved.family !== 'evm' && SINGLE_TOKEN_FAMILIES.has(resolved.family)) return null;
+  return resolved;
+}
+
+/**
+ * Maps a chain key to its LiFi chain for ONE leg of a pair. Unlike
+ * resolveSpotChain it accepts Bitcoin, which is a perfectly good leg as long
+ * as the other leg lives on another chain.
+ */
+export function resolveSpotLegChain(chain: unknown): SpotChain | null {
   if (typeof chain !== 'string') return null;
   const key = chain.trim().toLowerCase();
   if (!key) return null;
@@ -130,18 +180,56 @@ export function resolveSpotChain(chain: unknown): SpotChain | null {
 /**
  * LiFi's id for a listing chain, for callers that can trade ACROSS chains.
  *
- * Deliberately more permissive than resolveSpotChain: All Swap quotes a route
- * between two chains, so Bitcoin — rejected above because it has no same-chain
- * pair — is a perfectly good endpoint here. It lives next to that resolver so
- * the two cannot drift on what a chain key means.
- *
- * null still means "we have no LiFi id for this key" (an unknown key, or Tron,
- * which LiFi does not route at all). A caller must then leave its selection
- * alone rather than guess a chain the user never asked for.
+ * null means "we have no LiFi id for this key" (an unknown key). A caller must
+ * then leave its selection alone rather than guess a chain the user never
+ * asked for.
  */
 export function resolveLiFiChainId(chain: unknown): number | null {
-  if (isBitcoinSpotChain(chain)) return BTC_LIFI_CHAIN_ID;
-  return resolveSpotChain(chain)?.lifiChainId ?? null;
+  return resolveSpotLegChain(chain)?.lifiChainId ?? null;
+}
+
+/**
+ * Where a pair's quote leg goes: a chain key, or `funded` — follow the user's
+ * largest balance of the quote asset (services/quoteChain), with `fallback`
+ * for a user who holds none.
+ *
+ * Same-chain unless the listing names a quote chain or asks for auto. Auto
+ * reads only EVM balances, so on a non-EVM base chain that can carry the whole
+ * pair (Tron, Solana, Sui) the quote leg stays on the base chain: a user with
+ * USDT on Tron would otherwise be sent across chains from a near-empty BSC
+ * balance. Elsewhere the fallback is the chain the listing named, else the
+ * base chain when it can hold the quote leg too.
+ */
+export type QuoteLegPlan = { key: string } | { funded: true; fallback?: string };
+
+export function planQuoteLeg(chain: string, quoteChain: string, auto: boolean): QuoteLegPlan {
+  if (!auto) return { key: quoteChain || chain };
+  const pairChain = resolveSpotChain(chain);
+  if (pairChain && pairChain.family !== 'evm') return { key: chain };
+  return { funded: true, fallback: quoteChain || (pairChain ? chain : undefined) };
+}
+
+/**
+ * Max for the leg being paid: the whole balance, less what a native source
+ * chain must keep for its own fee. Tron burns TRX for energy on every swap and
+ * the backend refuses a native sale that leaves under ~10 TRX; the reserve
+ * leaves headroom over that.
+ */
+const NATIVE_FEE_RESERVE: Partial<Record<NonEvmSpotChainFamily, { address: string; reserve: number }>> = {
+  tron: { address: TRON_NATIVE_ADDRESS, reserve: 15 },
+};
+
+export function spotMaxAmount(chain: SpotChain, tokenAddress: string, balance: string): string {
+  if (chain.family === 'evm') return balance;
+  const native = NATIVE_FEE_RESERVE[chain.family];
+  if (!native || native.address !== tokenAddress) return balance;
+  const left = Number(balance) - native.reserve;
+  return left > 0 ? String(Math.floor(left * 1e6) / 1e6) : '0';
+}
+
+/** True when both legs sit on one chain. */
+export function isSameSpotChain(a: SpotChain, b: SpotChain): boolean {
+  return a.lifiChainId === b.lifiChainId;
 }
 
 /** True when the key is Bitcoin's — the one chain we reject by design. */
@@ -150,10 +238,10 @@ export function isBitcoinSpotChain(chain: unknown): boolean {
 }
 
 // Bitcoin gets its own wording: it is not a gap in the user's wallet, it is
-// that a single-asset chain has no same-chain pair for this desk to trade.
+// that a single-asset chain cannot hold both legs of a pair.
 export function unsupportedChainMessage(chain: unknown): string {
   return isBitcoinSpotChain(chain)
-    ? 'Bitcoin pairs have to route across chains, which this desk doesn’t do yet. Use All Swap to trade BTC.'
+    ? 'Bitcoin holds only BTC, so the other side of this pair has to be on another network.'
     : 'This pair’s network is not supported on this device.';
 }
 
@@ -247,6 +335,18 @@ export function matchSpotBalance(
       const row = rows.find((r) => (r.contractAddress
         ? canonicalSuiCoinType(r.contractAddress) === wanted
         : r.symbol.toUpperCase() === token.symbol.toUpperCase()));
+      return row?.balance ?? '0';
+    }
+    case 'tron': {
+      // Base58 addresses are case-sensitive, so compared exactly. Native TRX
+      // has LiFi's placeholder address and no contract on the wallet's row.
+      const isNative = address === TRON_NATIVE_ADDRESS;
+      const row = rows.find((r) => (isNative ? !r.contractAddress : r.contractAddress === address));
+      return row?.balance ?? '0';
+    }
+    case 'btc': {
+      // Bitcoin carries one asset; its row is the one with no contract.
+      const row = rows.find((r) => !r.contractAddress && r.symbol.toUpperCase() === 'BTC');
       return row?.balance ?? '0';
     }
     default:

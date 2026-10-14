@@ -108,7 +108,9 @@ jest.mock('@/services/lifi', () => ({
   SOLANA_LIFI_CHAIN_ID: 1151111081099710,
   SUI_LIFI_CHAIN_ID: 9270000000000000,
   BTC_LIFI_CHAIN_ID: 20000000000001,
+  TRON_LIFI_CHAIN_ID: 728126428,
   SOLANA_NATIVE_ADDRESS: '11111111111111111111111111111111',
+  TRON_NATIVE_ADDRESS: 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb',
   getLiFiToken: jest.fn(async () => null),
   getLiFiTokens: jest.fn(async () => []),
   getLiFiQuote: jest.fn(),
@@ -122,11 +124,21 @@ jest.mock('@/services/chains/solanaWallet', () => ({
 jest.mock('@/services/chains/suiWallet', () => ({
   __esModule: true, getSuiAddress: jest.fn(async () => null), getSuiBalances: jest.fn(async () => []),
 }));
+jest.mock('@/services/chains/tronWallet', () => ({
+  __esModule: true, getTronAddress: jest.fn(async () => null), getTronBalances: jest.fn(async () => []),
+}));
+jest.mock('@/services/chains/btcWallet', () => ({
+  __esModule: true,
+  getBtcAddress: jest.fn(async () => 'bc1qtrader'),
+  getBtcBalances: jest.fn(async () => [{ symbol: 'BTC', balance: '0.5', contractAddress: '' }]),
+}));
+jest.mock('@/services/quoteChain', () => ({ __esModule: true, fundedQuoteChain: jest.fn(async () => 'polygon') }));
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import * as ExpoRouter from 'expo-router';
 import SpotTrade from '../spot-trade';
+import * as LiFi from '@/services/lifi';
 
 const routerState = (ExpoRouter as unknown as {
   __state: { renders: number; cap: number; params: Record<string, string | string[]> };
@@ -160,10 +172,10 @@ describe('SpotTrade route params', () => {
     expect(repeated.renders).toBe(scalar.renders);
   });
 
-  it('keeps Bitcoin on its own wording, which the shared card must not flatten', async () => {
+  it('keeps Bitcoin on its own wording when a BTC pair arrives with no quote chain', async () => {
     const btc = await mount({ side: 'buy', base: 'BTC', quote: 'USDT', chain: 'btc' });
 
-    expect(btc.text).toContain('All Swap');
+    expect(btc.text).toContain('another network');
   });
 
   it('survives repeated symbol params, which used to crash on .toUpperCase()', async () => {
@@ -171,6 +183,33 @@ describe('SpotTrade route params', () => {
       side: ['buy', 'sell'], base: ['USDC', 'ETH'], quote: 'USDT', chain: 'btc',
     });
 
-    expect(text).toContain('All Swap');
+    expect(text).toContain('another network');
+  });
+
+  describe('cross-chain pair', () => {
+    const getLiFiToken = LiFi.getLiFiToken as jest.Mock;
+    beforeEach(() => {
+      getLiFiToken.mockImplementation(async (chainId: number, symbol: string) => (
+        { address: symbol === 'BTC' ? 'bitcoin' : '0xusdt', symbol, decimals: symbol === 'BTC' ? 8 : 18, chainId }
+      ));
+    });
+    afterEach(() => getLiFiToken.mockImplementation(async () => null));
+
+    it('opens a BTC pair on the form with each leg on its own chain', async () => {
+      const { text } = await mount({ side: 'buy', base: 'BTC', quote: 'USDT', chain: 'btc', quoteChain: 'bsc' });
+
+      expect(text).toContain('Amount to spend');
+      expect(text).toContain('on BNB Smart Chain');
+      expect(text).toContain('0.5 BTC on Bitcoin');
+      // The quote leg is looked up on BSC, the base leg on Bitcoin.
+      expect(getLiFiToken).toHaveBeenCalledWith(56, 'USDT');
+      expect(getLiFiToken).toHaveBeenCalledWith(20000000000001, 'BTC');
+    });
+
+    it('puts an auto listing’s quote leg where the user holds it', async () => {
+      await mount({ side: 'sell', base: 'BTC', quote: 'USDT', chain: 'btc', quoteChain: 'bsc', quoteAuto: '1' });
+
+      expect(getLiFiToken).toHaveBeenCalledWith(137, 'USDT');
+    });
   });
 });

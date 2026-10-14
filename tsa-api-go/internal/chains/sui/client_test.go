@@ -236,3 +236,20 @@ func TestPrepareRejectsBridgeMemo(t *testing.T) {
 		t.Fatalf("want chains.InvalidRequestError, got %T (%v)", err, err)
 	}
 }
+
+// Tron's aggregator transaction and its token approval have no meaning here.
+// Ignoring either would build a different transaction than the app asked for,
+// so each is refused as caller-fixable.
+func TestPrepareRejectsTronOnlyFields(t *testing.T) {
+	c := NewClient(config.NonEVMChainConfig{NativeSymbol: "SUI"}, nil)
+	for name, req := range map[string]chains.TransferRequest{
+		"tronRawHex": {From: vecAddr, To: vecAddr, Amount: "1000", Symbol: "SUI", TronRawHex: "0a020f37"},
+		"approve":    {From: vecAddr, To: vecAddr, Amount: "1000", Symbol: "SUI", Approve: true},
+	} {
+		_, err := c.PrepareTransfer(context.Background(), req)
+		var invalid *chains.InvalidRequestError
+		if !errors.As(err, &invalid) {
+			t.Fatalf("%s: want chains.InvalidRequestError, got %T (%v)", name, err, err)
+		}
+	}
+}

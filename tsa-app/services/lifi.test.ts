@@ -151,6 +151,10 @@ describe('isSignableSourceChain', () => {
     expect(isSignableSourceChain(SUI_LIFI_CHAIN_ID)).toBe(true);
   });
 
+  it('keeps Tron out of All Swap, whose pickers neither pin Tron tokens nor derive its address', () => {
+    expect(isSignableSourceChain(728126428)).toBe(false);
+  });
+
   it('refuses a LiFi EVM chain the wallet holds no signer config for', () => {
     expect(isSignableSourceChain(324)).toBe(false); // zkSync Era
     expect(isSignableSourceChain(1284)).toBe(false); // Moonbeam
