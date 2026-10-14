@@ -5,10 +5,11 @@
 // back and asserted, then a TimelockController deployed and made the owner
 // (spec O1) — the deployer never keeps ownership past a successful run.
 //
-//   LPOOL_COLLATERAL_PROVIDER=0x… (the PM's collateral wallet)
-//   LPOOL_GUARDIAN=0x…            (may pause fills/deposits; never withdraw/claim)
-//   LPOOL_TIMELOCK_ADMIN=0x… LPOOL_TIMELOCK_ADMIN_CONFIRM=0x…  (proposer + executor)
-//   [LPOOL_OPERATOR, LPOOL_RECIPIENT default to the consolidated operator/treasury]
+//   LPOOL_TIMELOCK_ADMIN_CONFIRM=0x…  (type the timelock admin again: it is final)
+//   [LPOOL_COLLATERAL_PROVIDER, LPOOL_GUARDIAN, LPOOL_TIMELOCK_ADMIN default to
+//    the owner's wallet (owner, 2026-10-14: the owner does all three);
+//    LPOOL_OPERATOR, LPOOL_RECIPIENT to the consolidated operator/treasury.
+//    More operators: the collateral provider calls addOperator directly.]
 //     npx hardhat run deploy/liquidity-pool.js --network bscMainnet
 const { getAddress } = require("ethers");
 const { resolveChain, assertOwnerConfirm, handOverOwnership, writeLedger } = require("./lib");
@@ -18,7 +19,7 @@ async function assertPool(pool, want) {
   const same = (a, b) => getAddress(a) === getAddress(b);
   if (!same(await pool.token(), want.token)) fail("token");
   if (!same(await pool.collateralProvider(), want.collateralProvider)) fail("collateralProvider");
-  if (!same(await pool.operator(), want.operator)) fail("operator");
+  if (!(await pool.operators(want.operator))) fail(`operator ${want.operator} not set`);
   if (!same(await pool.guardian(), want.guardian)) fail("guardian");
   if (!(await pool.recipient(want.recipient))) fail(`recipient ${want.recipient} not approved`);
   for (const k of ["minDeposit", "maxPerLp", "totalCap", "maxFillPerTx", "fillWindow", "fillWindowCap"]) {

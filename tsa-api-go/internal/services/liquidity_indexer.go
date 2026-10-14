@@ -165,7 +165,7 @@ func (x *VaultIndexer) rowsFor(ctx context.Context, logs []types.Log) ([]models.
 			sp := ev.Spread.String()
 			row.Spread = &sp
 		}
-		if ev.Kind == VaultEventDepositorSet {
+		if ev.Kind == VaultEventDepositorSet || ev.Kind == VaultEventOperatorSet {
 			allowed := ev.Allowed
 			row.Allowed = &allowed
 		}

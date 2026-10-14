@@ -153,11 +153,11 @@ func (v *LiquidityVault) Position(ctx context.Context, lp string) (*VaultPositio
 // Wiring is what the pool gates check before any order is taken.
 type VaultWiring struct {
 	Token     common.Address
-	Operator  common.Address
+	Operator  bool // the release key is one of the vault's operators
 	Recipient bool // the treasury may receive fills
 }
 
-func (v *LiquidityVault) Wiring(ctx context.Context, treasury string) (*VaultWiring, error) {
+func (v *LiquidityVault) Wiring(ctx context.Context, operator, treasury string) (*VaultWiring, error) {
 	if v == nil {
 		return nil, ErrVaultUnavailable
 	}
@@ -169,10 +169,10 @@ func (v *LiquidityVault) Wiring(ctx context.Context, treasury string) (*VaultWir
 		return nil, err
 	}
 	w.Token = out[0].(common.Address)
-	if out, err = v.callAt(ctx, nil, "operator"); err != nil {
+	if out, err = v.callAt(ctx, nil, "operators", common.HexToAddress(operator)); err != nil {
 		return nil, err
 	}
-	w.Operator = out[0].(common.Address)
+	w.Operator = out[0].(bool)
 	if out, err = v.callAt(ctx, nil, "recipient", common.HexToAddress(treasury)); err != nil {
 		return nil, err
 	}
@@ -289,13 +289,14 @@ const (
 	VaultEventCollateralPosted    = "collateral_posted"
 	VaultEventCollateralWithdrawn = "collateral_withdrawn"
 	VaultEventDepositorSet        = "depositor_set"
+	VaultEventOperatorSet         = "operator_set"
 )
 
 var vaultEventKinds = map[string]string{
 	"Deposited": VaultEventDeposited, "Withdrawn": VaultEventWithdrawn, "Claimed": VaultEventClaimed,
 	"Filled": VaultEventFilled, "Refilled": VaultEventRefilled, "SettledFromCollateral": VaultEventSettled,
 	"CollateralPosted": VaultEventCollateralPosted, "CollateralWithdrawn": VaultEventCollateralWithdrawn,
-	"DepositorSet": VaultEventDepositorSet,
+	"DepositorSet": VaultEventDepositorSet, "OperatorSet": VaultEventOperatorSet,
 }
 
 // VaultEvent is one decoded vault log. Fields a kind does not carry are zero.

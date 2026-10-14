@@ -252,12 +252,27 @@ describe("TsaLiquidityPool", function () {
       await expect(pool.connect(provider).upgradeToAndCall(stranger.address, "0x")).to.be.reverted;
     });
 
+    it("the collateral provider adds operators without the timelock; the guardian removes one at once", async function () {
+      const { pool, provider, operator, guardian, treasury, lps } = ctx;
+      const second = lps[4];
+      await expect(pool.connect(second).fill(treasury.address, 1, 0, refOf("a"))).to.be.revertedWith("Not operator");
+      await expect(pool.connect(lps[5]).addOperator(second.address)).to.be.revertedWith("Not provider or owner");
+      await expect(pool.connect(guardian).addOperator(second.address)).to.be.revertedWith("Not provider or owner");
+      await pool.connect(provider).addOperator(second.address);
+      await pool.connect(second).fill(treasury.address, u(1), 0, refOf("b"));
+      await pool.connect(operator).fill(treasury.address, u(1), 0, refOf("c")); // the first one still works
+      await pool.connect(guardian).removeOperator(second.address);
+      await expect(pool.connect(second).fill(treasury.address, u(1), 0, refOf("d"))).to.be.revertedWith("Not operator");
+      await expect(pool.connect(provider).addOperator(provider.address)).to.be.revertedWith("operator must not be the provider");
+      await expect(pool.connect(lps[5]).removeOperator(operator.address)).to.be.revertedWith("Not provider, owner or guardian");
+    });
+
     it("the collateral provider can only change once its collateral is gone", async function () {
       const { pool, provider, operator, guardian, lps } = ctx;
-      await expect(pool.setRoles(lps[5].address, operator.address, guardian.address))
+      await expect(pool.setRoles(lps[5].address, guardian.address))
         .to.be.revertedWith("Collateral still posted");
       await pool.connect(provider).withdrawCollateral(u(20000));
-      await pool.setRoles(lps[5].address, operator.address, guardian.address);
+      await pool.setRoles(lps[5].address, guardian.address);
       expect(await pool.collateralProvider()).to.equal(lps[5].address);
     });
   });

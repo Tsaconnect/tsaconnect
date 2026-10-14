@@ -25,7 +25,7 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  *
  *   - withdraw / claim are never paused and never gated by the depositor
  *     allow-list. That is the custody promise; do not add a guard to them.
- *   - The operator can only send tokens to owner-approved recipients (the
+ *   - Operators can only send tokens to owner-approved recipients (the
  *     treasury), capped per tx and per rolling window, and only within free
  *     collateral. It cannot reach principal or earnings.
  *   - Privileged roles use raw msg.sender, never the ERC-2771 forwarder
@@ -53,7 +53,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     IERC20 public token;
 
     address public collateralProvider;
-    address public operator;
+    mapping(address => bool) public operators;
     address public guardian;
     address public trustedForwarder;
 
@@ -94,13 +94,14 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     event CollateralWithdrawn(uint256 amount);
     event DepositorSet(address indexed account, bool allowed);
     event RecipientSet(address indexed account, bool allowed);
-    event RolesUpdated(address collateralProvider, address operator, address guardian);
+    event RolesUpdated(address collateralProvider, address guardian);
+    event OperatorSet(address indexed account, bool allowed);
     event LimitsUpdated(uint256 minDeposit, uint256 maxPerLp, uint256 totalCap);
     event FillCapsUpdated(uint256 maxFillPerTx, uint256 fillWindow, uint256 fillWindowCap);
     event TrustedForwarderUpdated(address oldForwarder, address newForwarder);
 
     modifier onlyOperator() {
-        require(msg.sender == operator, "Not operator");
+        require(operators[msg.sender], "Not operator");
         _;
     }
 
@@ -135,7 +136,8 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         __Pausable_init();
         _reentrancyStatus = _NOT_ENTERED;
         token = IERC20(p.token);
-        _setRoles(p.collateralProvider, p.operator, p.guardian);
+        _setRoles(p.collateralProvider, p.guardian);
+        _setOperator(p.operator, true);
         _setRecipient(p.recipient, true);
         _setLimits(p.minDeposit, p.maxPerLp, p.totalCap);
         _setFillCaps(p.maxFillPerTx, p.fillWindow, p.fillWindowCap);
@@ -220,7 +222,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     /// @notice Closes `amount` of outstanding against collateral: the company
     ///         keeps the fiat instead of refilling. No tokens move.
     function settleFromCollateral(uint256 amount, bytes32 ref) external nonReentrant {
-        require(msg.sender == operator || msg.sender == collateralProvider, "Not operator or provider");
+        require(operators[msg.sender] || msg.sender == collateralProvider, "Not operator or provider");
         _useSettleRef(ref);
         require(amount > 0 && amount <= outstanding, "Bad amount");
         outstanding -= amount;
@@ -229,7 +231,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     }
 
     function setDepositor(address account, bool allowed) external {
-        require(msg.sender == operator || msg.sender == owner(), "Not operator or owner");
+        require(operators[msg.sender] || msg.sender == owner(), "Not operator or owner");
         require(account != address(0), "account is zero");
         depositor[account] = allowed;
         emit DepositorSet(account, allowed);
@@ -277,9 +279,25 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
 
     /// @dev A new collateral provider would own the old one's collateral, so the
     ///      provider can only change once its collateral is fully withdrawn.
-    function setRoles(address _collateralProvider, address _operator, address _guardian) external onlyOwner {
+    function setRoles(address _collateralProvider, address _guardian) external onlyOwner {
         if (_collateralProvider != collateralProvider) require(collateral == 0, "Collateral still posted");
-        _setRoles(_collateralProvider, _operator, _guardian);
+        require(!operators[_collateralProvider], "provider must not be an operator");
+        _setRoles(_collateralProvider, _guardian);
+    }
+
+    /// @notice An operator can only ever spend collateral (fills to approved
+    ///         recipients, within the caps), never LP principal or earnings —
+    ///         so the collateral provider, whose money that is, manages them
+    ///         directly, without the owner's timelock.
+    function addOperator(address account) external {
+        require(msg.sender == collateralProvider || msg.sender == owner(), "Not provider or owner");
+        _setOperator(account, true);
+    }
+
+    /// @notice Removing is also open to the guardian: a leaked key is cut off at once.
+    function removeOperator(address account) external {
+        require(msg.sender == collateralProvider || msg.sender == owner() || msg.sender == guardian, "Not provider, owner or guardian");
+        _setOperator(account, false);
     }
 
     function setRecipient(address account, bool allowed) external onlyOwner {
@@ -342,13 +360,18 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         }
     }
 
-    function _setRoles(address _collateralProvider, address _operator, address _guardian) internal {
-        require(_collateralProvider != address(0) && _operator != address(0) && _guardian != address(0), "role is zero");
-        require(_operator != _collateralProvider, "operator must not be the provider");
+    function _setRoles(address _collateralProvider, address _guardian) internal {
+        require(_collateralProvider != address(0) && _guardian != address(0), "role is zero");
         collateralProvider = _collateralProvider;
-        operator = _operator;
         guardian = _guardian;
-        emit RolesUpdated(_collateralProvider, _operator, _guardian);
+        emit RolesUpdated(_collateralProvider, _guardian);
+    }
+
+    function _setOperator(address account, bool allowed) internal {
+        require(account != address(0), "operator is zero");
+        require(!allowed || account != collateralProvider, "operator must not be the provider");
+        operators[account] = allowed;
+        emit OperatorSet(account, allowed);
     }
 
     function _setRecipient(address account, bool allowed) internal {

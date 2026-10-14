@@ -28,17 +28,17 @@ const DETERMINISTIC_ROLES = {
 
 // Shared pool, 100% company collateral (deploy/liquidity-pool.js, spec
 // 2026-10-14). Amounts are whole tokens. Deploy-time inputs:
-//   LPOOL_COLLATERAL_PROVIDER — the PM's collateral wallet;
-//   LPOOL_GUARDIAN            — may pause fills/deposits only;
-//   LPOOL_TIMELOCK_ADMIN (+ _CONFIRM) — the timelock's proposer/executor.
+// The owner's wallet is the collateral provider, the guardian and the
+// timelock admin by default (owner, 2026-10-14); env overrides each.
+//   LPOOL_TIMELOCK_ADMIN_CONFIRM — the timelock admin typed again (final).
 function liquidityPool() {
   return {
     token: "USDT",
-    collateralProvider: process.env.LPOOL_COLLATERAL_PROVIDER || null,
+    collateralProvider: process.env.LPOOL_COLLATERAL_PROVIDER || DETERMINISTIC_ROLES.owner,
     operator: process.env.LPOOL_OPERATOR || DETERMINISTIC_ROLES.operator,
-    guardian: process.env.LPOOL_GUARDIAN || null,
+    guardian: process.env.LPOOL_GUARDIAN || DETERMINISTIC_ROLES.owner,
     recipient: process.env.LPOOL_RECIPIENT || DETERMINISTIC_ROLES.treasury,
-    timelockAdmin: process.env.LPOOL_TIMELOCK_ADMIN || null,
+    timelockAdmin: process.env.LPOOL_TIMELOCK_ADMIN || DETERMINISTIC_ROLES.owner,
     timelockAdminConfirm: process.env.LPOOL_TIMELOCK_ADMIN_CONFIRM || null,
     timelockDelaySec: Number(process.env.LPOOL_TIMELOCK_DELAY_SEC || 72 * 3600),
     minDeposit: 5,

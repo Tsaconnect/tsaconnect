@@ -92,8 +92,8 @@ func TestVaultNode_FillDecodeAndLedger(t *testing.T) {
 	if st.Collateral.Sign() == 0 || st.TotalPrincipal.Cmp(u(25)) < 0 || st.Paused {
 		t.Fatalf("fixture state = %+v", st)
 	}
-	w, err := vault.Wiring(ctx, f.Treasury)
-	if err != nil || !strings.EqualFold(w.Operator.Hex(), f.Operator) || !strings.EqualFold(w.Token.Hex(), f.Token) || !w.Recipient {
+	w, err := vault.Wiring(ctx, f.Operator, f.Treasury)
+	if err != nil || !w.Operator || !strings.EqualFold(w.Token.Hex(), f.Token) || !w.Recipient {
 		t.Fatalf("wiring = %+v %v", w, err)
 	}
 

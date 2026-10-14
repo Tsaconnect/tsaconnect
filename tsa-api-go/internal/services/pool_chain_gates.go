@@ -272,8 +272,8 @@ func (g *PoolChainGates) vaultGates(ctx context.Context, fail func(gate, reason 
 	}
 	if g.c.ReleaseAdmin == "" {
 		fail("release_admin", "no release key (PM_RELEASE_PRIVATE_KEY)")
-	} else if v, ok := read("operator"); ok && !strings.EqualFold(v.(common.Address).Hex(), g.c.ReleaseAdmin) {
-		fail("release_admin", fmt.Sprintf("the vault's operator is %s, not the release key %s", v.(common.Address).Hex(), g.c.ReleaseAdmin))
+	} else if v, ok := read("operators", common.HexToAddress(g.c.ReleaseAdmin)); ok && !v.(bool) {
+		fail("release_admin", "the release key "+g.c.ReleaseAdmin+" is not a vault operator")
 	}
 	l := g.c.TreasuryLane
 	if l == nil || l.SponsorLane == nil || l.Signer == nil {
