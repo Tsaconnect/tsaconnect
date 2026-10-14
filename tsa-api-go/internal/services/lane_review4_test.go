@@ -149,14 +149,15 @@ func TestRelayer_InFlightRelayReturnsItsHashAndRetriesReuseIt(t *testing.T) {
 	r.signer.mu.Lock()
 	r.signer.err = broadcastUncertainError{err: errors.New("read: i/o timeout"), txHash: "0xinflight"}
 	r.signer.mu.Unlock()
-	h, err := r.svc.Relay(context.Background(), userAddr, r.req())
+	req := r.req()
+	h, err := r.svc.Relay(context.Background(), userAddr, req)
 	if err != nil || h != "0xinflight" {
 		t.Fatalf("in-flight relay = %q %v, want its hash and no error", h, err)
 	}
 	r.signer.mu.Lock()
 	r.signer.err = nil
 	r.signer.mu.Unlock()
-	h2, err := r.svc.Relay(context.Background(), userAddr, r.req())
+	h2, err := r.svc.Relay(context.Background(), userAddr, req) // the same request again
 	if err != nil || h2 != "0xinflight" || r.signer.calls() != 1 {
 		t.Fatalf("retry = %q %v broadcasts=%d, want the same relay, sent once", h2, err, r.signer.calls())
 	}

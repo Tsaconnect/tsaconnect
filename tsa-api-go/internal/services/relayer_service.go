@@ -317,6 +317,19 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		r.metrics.RelayAttempt("rejected", "encode")
 		return "", err
 	}
+	op := "relay:" + crypto.Keccak256Hash(execData).Hex()
+	// A retry of a request already committed is answered from its allocation
+	// FIRST — before the rate limit, the budget or the simulation (which would
+	// now revert: the forwarder nonce is spent) — and holds nothing to release.
+	if h, found, err := r.lane.OperationStatus(ctx, r.signer.Address(), op); err != nil {
+		return "", fmt.Errorf("%w: %s", ErrRelayInProgress, op)
+	} else if found {
+		if h == "" {
+			return "", fmt.Errorf("%w: %s", ErrRelayInProgress, op)
+		}
+		r.metrics.RelayAttempt("ok", "retry")
+		return h, nil
+	}
 
 	if err := r.checkBalance(ctx); err != nil {
 		return "", err
@@ -360,7 +373,6 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 	// request, nonce included), so a client retry of the same request gets
 	// the same allocation, never a second relay.
 	built := false
-	op := "relay:" + crypto.Keccak256Hash(execData).Hex()
 	txHash, attempted, err := r.lane.Send(WithOperationRef(ctx, op), func() ([]byte, error) {
 		unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
 		if err != nil {

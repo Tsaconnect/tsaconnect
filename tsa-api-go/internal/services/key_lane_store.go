@@ -508,8 +508,7 @@ func (q *gormLaneTxn) RetiredSeq(opKey string) (int64, bool, error) {
 	if err := q.lane().Where("op_key = ?", opKey).Limit(1).Find(&rows).Error; err != nil || len(rows) == 0 {
 		return 0, false, err
 	}
-	// A row with seq 0 predates sequencing: a legacy tombstone, permanent.
-	return rows[0].Seq, rows[0].Permanent || rows[0].Seq == 0, nil
+	return rows[0].Seq, rows[0].Permanent, nil
 }
 
 func (q *gormLaneTxn) AllocationOfHash(hash string) (*models.KeyLaneNonce, error) {

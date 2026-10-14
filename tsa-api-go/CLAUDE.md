@@ -189,14 +189,20 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     marked its tombstone (`key_lane_retired_ops`): **permanent** when the retry is a NEW key (legs and
     routes, `gas_topup:<row>`, `auth_relay:<row>`, `p2p_drip`, `name_change_refund:<id>:<n>`, IT ops),
     **sequenced** when the retry reuses the key (intent/destination top-ups, slice release/resolve,
-    AutoRelease) — an attempt begun before it is refused at its commit (`ErrOperationRetired`). A
-    tombstone row with seq 0 predates sequencing and reads as permanent. The lane PROBES (no
+    AutoRelease) — an attempt begun before it is refused at its commit (`ErrOperationRetired`); a
+    permanent tombstone is never downgraded. The lane PROBES (no
     tombstone) on every not-attempted answer for an operation — a hold, a fee/floor read, a build
     error, the fee gate, a hook refusal, and the treasury's own pre-lane refusals (kill switch,
-    checks, gas gate, allowance read): an allocation found there is answered in flight (a different
-    call under the key is logged and answered with the committed one). Every pre-broadcast hook
+    checks, gas gate, allowance read — every key of the operation under ONE lock): an allocation
+    found there is answered in flight (a different call under the key is logged and answered with
+    the committed one; a RELATED call — a route's approve — is in flight with no hash, never its
+    hash as the route's). A conversion leg left pending with no hash is re-probed after 5 min
+    (`recoverHashless`: a permanent `RetireOp` of its keys) and adopts the committed hash or is
+    freed. Every pre-broadcast hook
     updates exactly one row under its expected-state guard, else the allocation rolls back.
-    A gasless relay in flight with no hash yet answers 202 `ErrRelayInProgress` naming its operation.
+    A gasless relay in flight with no hash yet answers 202 `ErrRelayInProgress` naming its operation;
+    a retry of a committed relay is answered from its allocation before the rate limit, budget or
+    simulation.
     Every operation therefore carries a key: legs `ramp_leg:<leg>`, opens `pool_open:<slice>`,
     releases/resolves/cancels `p2p_release|p2p_resolve|p2p_cancel:<trade>`, IT ops
     `it_op:<call hash>`, top-ups `gas_topup:<row>` / `gas_topup_intent|gas_topup_dest:<intent>` /
@@ -204,8 +210,11 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     of the same request reuses its allocation; an in-flight relay answers its hash), name-change
     refunds `name_change_refund:<change>:<attempt>`. Caller writes on give-up are conditional on the
     recorded hash (`FailExpected`, `ClearCancelledTopUp` / `ClearCancelledDestTopUp`).
-    IT operator ops write their row before the call and resolve by the contract ref, so they need
-    none. In-memory bookkeeping (the P2P drip memory) runs after the commit, never in a hook.
+    IT operator ops write their row before the call and resolve by the contract ref; a
+    not-attempted IT op still leaves a sequenced `it_op:` tombstone. A system release that mined and
+    REVERTED is never rolled back to `paid`: at settle depth it is parked `releasing` with
+    `release_reverted_at` set (`ALERT p2p_release_reverted_total`, deduped), out of the sweep and
+    refused by AutoRelease, for an admin to resolve. In-memory bookkeeping (the P2P drip memory) runs after the commit, never in a hook.
     An error from the allocation transaction that is not the body's own refusal (fresh or reused
     allocation) is re-checked under the RE-TAKEN lane lock by operation key: committed answers in
     flight, provably absent answers not sent, and a re-check that fails (or an unreadable operation
@@ -248,7 +257,8 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     its allocation transaction (after the operation-key lookup: a committed operation is answered
     even on a held lane) and adopts it on its watch; a hold whose persist failed is re-persisted,
     never dropped; an ADMIN clear on any process clears it for all and (`clear_version`, bumped only
-    by admin clears — not by the watch clearing a passed hold or a cancel's unhold) resets every
+    by admin clears — retry, raise-price-cap, cancel, fill-gap, clear-hold — not by the watch
+    clearing a passed hold or a cancel's unhold) resets every
     process's gap timers and drops unpersisted local holds. Retry, raise-price-cap and clear-hold refuse a cancelled nonce (409, no
     audit row); raise-price-cap stays the exit for a cancel held at the fee cap.
   - **E.** `services.WithOperationRef(ctx, ref)` is the allocation's idempotency key: the same

@@ -141,7 +141,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			escrow_contract_address TEXT,
 			escrow_tx_hash TEXT,
 			approve_tx_hash TEXT,
-			release_tx_hash TEXT,
+			release_tx_hash TEXT, release_reverted_at DATETIME,
 			buyer_upline TEXT,
 			delivery_proof_url TEXT,
 			tracking_number TEXT,

@@ -164,6 +164,7 @@ type raceStore struct {
 	byOpErr      atomic.Bool  // the outside-lock ByOp read fails
 	failCommit   atomic.Bool  // the next WithLock commits, then reports an error
 	failLock     atomic.Int32 // WithLock calls that fail before running
+	locks        atomic.Int32 // WithLock calls made
 	thenFailLock atomic.Bool  // after the commit error, the next WithLock fails
 	afterCommit  func()       // runs after a commit that then reports an error
 	allocOf      atomic.Int32 // AllocationOf calls
@@ -182,6 +183,7 @@ func (s *raceStore) ByOp(ctx context.Context, chainID int64, address, op string)
 }
 
 func (s *raceStore) WithLock(ctx context.Context, chainID int64, address string, fn func(q KeyLaneTxn) error) error {
+	s.locks.Add(1)
 	if s.failLock.Load() > 0 {
 		s.failLock.Add(-1)
 		return errors.New("lock: connection reset")

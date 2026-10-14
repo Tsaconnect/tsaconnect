@@ -475,22 +475,51 @@ func (l *KeyLane) sendWith(ctx context.Context, signer ReleaseSigner, build func
 	if attempted || op == "" {
 		return hash, attempted, err
 	}
-	return l.giveUpRefused(ctx, signer.Address(), op, err)
+	return l.giveUpRefused(ctx, signer.Address(), err, []string{op}, nil)
 }
 
 // giveUpRefused retires op after a refusal that committed nothing: the
 // refusal stands only if op holds no allocation; otherwise that allocation is
 // the honest answer (in flight), and a retire that cannot run is an unknown
 // outcome — never "not sent".
-func (l *KeyLane) giveUpRefused(ctx context.Context, address, op string, cause error) (string, bool, error) {
-	// A probe, not a tombstone: a refusal commits nothing, and the caller's
-	// own retry of this operation must not be refused (review 5).
-	a, err := l.RetireOp(ctx, address, op, "", RetireProbe)
+//
+// own are the caller's own call's keys (an allocation there is answered with
+// its hash and status); related are keys of OTHER calls of the same
+// operation (an ExecuteRoute's approve) — one held there means the operation
+// is in flight, answered ErrPendingBroadcast without that call's hash. One
+// lock, every key probed; a probe, not a tombstone: a refusal commits
+// nothing, and the caller's own retry must not be refused.
+func (l *KeyLane) giveUpRefused(ctx context.Context, address string, cause error, own, related []string) (string, bool, error) {
+	if l == nil {
+		return "", false, cause
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keyLaneReadTimeout)
+	defer cancel()
+	var found *models.KeyLaneNonce
+	isOwn := false
+	err := l.store.WithLock(rctx, l.chainID, address, func(q KeyLaneTxn) error {
+		for i, k := range append(append([]string{}, own...), related...) {
+			if k == "" {
+				continue
+			}
+			a, err := q.ByOp(k)
+			if err != nil {
+				return err
+			}
+			if a != nil {
+				found, isOwn = a, i < len(own)
+				return nil
+			}
+		}
+		return nil
+	})
 	switch {
 	case err != nil:
 		return "", true, outcomeUnknown("", fmt.Errorf("%v; give-up unproven: %w", cause, err))
-	case a != nil:
-		return l.inFlight(ctx, a)
+	case found != nil && isOwn:
+		return l.inFlight(ctx, found)
+	case found != nil:
+		return "", true, pendingBroadcast("", fmt.Errorf("a related call of this operation is in flight (nonce %d)", found.Nonce))
 	}
 	return "", false, cause
 }
@@ -1617,7 +1646,7 @@ func (l *KeyLane) RequestCancel(ctx context.Context, nonce uint64) error {
 		if err := q.Save(a); err != nil {
 			return err
 		}
-		return unholdLocked(q, &nonce, false)
+		return unholdLocked(q, &nonce, true)
 	})
 	if err != nil {
 		return err
@@ -1778,6 +1807,22 @@ func (l *KeyLane) receiptBlock(ctx context.Context, hash string) (uint64, bool, 
 	return r.BlockNumber.Uint64(), true, nil
 }
 
+// OperationStatus is a caller's read of operation op before it does any
+// work: found when op holds an allocation, with that allocation's current
+// hash ("" when none is signed yet).
+func (l *KeyLane) OperationStatus(ctx context.Context, address, op string) (string, bool, error) {
+	if l == nil || op == "" {
+		return "", false, nil
+	}
+	rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
+	defer cancel()
+	a, err := l.store.ByOp(rctx, l.chainID, address, op)
+	if err != nil || a == nil {
+		return "", false, err
+	}
+	return l.currentHash(rctx, a), true, nil
+}
+
 // CallData is the call data (hex) of the signing hash on this lane ("" when
 // unknown): what names an operation keyed by its call.
 func (l *KeyLane) CallData(ctx context.Context, hash string) (string, error) {
@@ -1793,15 +1838,27 @@ func (l *KeyLane) CallData(ctx context.Context, hash string) (string, error) {
 	return "", err
 }
 
-// CallReverted reports whether hash's call mined and REVERTED (non-waiting
-// receipt read): an executed allocation that moved nothing — a caller may
-// give it up as not done.
-func (l *KeyLane) CallReverted(ctx context.Context, hash string) bool {
+// CallReverted reports whether hash's call mined and REVERTED, at the
+// settle depth (cancelDepth) against the latest block — a revert a reorg can
+// no longer undo. Non-waiting reads; an error is "not known yet".
+func (l *KeyLane) CallReverted(ctx context.Context, hash string) (bool, error) {
 	if l == nil || l.receipts == nil || hash == "" {
-		return false
+		return false, nil
 	}
-	r, err := l.receipts.TransactionReceipt(ctx, common.HexToHash(hash))
-	return err == nil && r != nil && r.Status == types.ReceiptStatusFailed
+	rctx, cancel := context.WithTimeout(ctx, keyLaneReadTimeout)
+	defer cancel()
+	r, err := l.receipts.TransactionReceipt(rctx, common.HexToHash(hash))
+	if errors.Is(err, ethereum.NotFound) || (err == nil && (r == nil || r.BlockNumber == nil)) {
+		return false, nil
+	}
+	if err != nil || r.Status != types.ReceiptStatusFailed {
+		return false, err
+	}
+	head, err := l.receipts.BlockNumber(rctx)
+	if err != nil {
+		return false, err
+	}
+	return l.deepEnough(head, r.BlockNumber.Uint64()), nil
 }
 
 // CallCancelled reports whether hash's call is final as cancelled
@@ -1965,7 +2022,7 @@ func (l *KeyLane) RetrySpeedUp(ctx context.Context, nonce uint64) error {
 		if err := q.Save(a); err != nil {
 			return err
 		}
-		return unholdLocked(q, &nonce, false)
+		return unholdLocked(q, &nonce, true)
 	})
 	if err != nil {
 		return err
@@ -2024,7 +2081,7 @@ func (l *KeyLane) RaisePriceCap(ctx context.Context, nonce uint64, capWei *big.I
 		if err := q.Save(a); err != nil {
 			return err
 		}
-		return unholdLocked(q, &nonce, false)
+		return unholdLocked(q, &nonce, true)
 	})
 	if err != nil {
 		return "", err
@@ -2067,7 +2124,7 @@ func (l *KeyLane) FillGap(ctx context.Context, nonce uint64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := l.store.WithLock(ctx, l.chainID, l.Address(), func(q KeyLaneTxn) error { return unholdLocked(q, &nonce, false) }); err != nil {
+	if err := l.store.WithLock(ctx, l.chainID, l.Address(), func(q KeyLaneTxn) error { return unholdLocked(q, &nonce, true) }); err != nil {
 		log.Printf("[signer] key lane: clear the shared hold at %d: %v", nonce, err)
 	}
 	if h := l.held.Load(); h != nil && h.nonce == nonce {

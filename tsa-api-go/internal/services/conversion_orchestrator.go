@@ -997,7 +997,7 @@ func (o *ConversionOrchestrator) observeBridge(ctx context.Context, order *model
 			log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_hashless_total=1 order=%s leg=%s attempt=%d",
 				order.ID, leg.ID, leg.Attempt)
 		}
-		return nil
+		return o.recoverHashless(ctx, order, leg)
 	}
 	if o.followLeg(ctx, leg) {
 		return nil
@@ -1387,7 +1387,7 @@ func (o *ConversionOrchestrator) observeDeliver(ctx context.Context, order *mode
 		// the stall deadline is what eventually surfaces this.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_stalled_total=1 order=%s leg=%s kind=%s attempt=%d",
 			order.ID, leg.ID, leg.Kind, leg.Attempt)
-		return nil
+		return o.recoverHashless(ctx, order, leg)
 	}
 	dst, err := o.destination(order)
 	if err != nil {
@@ -1462,7 +1462,7 @@ func (o *ConversionOrchestrator) observeRefund(ctx context.Context, order *model
 		// verify yet; the stall deadline is what eventually surfaces this.
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_stalled_total=1 order=%s leg=%s kind=%s attempt=%d",
 			order.ID, leg.ID, leg.Kind, leg.Attempt)
-		return nil
+		return o.recoverHashless(ctx, order, leg)
 	}
 	lane := o.treasury.Lane(leg.ChainKey)
 	if lane == nil {
@@ -2492,6 +2492,57 @@ func (o *ConversionOrchestrator) resolveAdminRefund(ctx context.Context, adminID
 		return confirmed, nil
 	}
 	return pending, nil
+}
+
+// hashlessRecoverAfter bounds how long a leg may stay pending with no hash
+// (a send whose outcome the lane could not prove — ErrSendOutcomeUnknown)
+// before the store is asked again.
+const hashlessRecoverAfter = 5 * time.Minute
+
+// recoverHashless resolves a pending leg that never recorded a hash, after
+// hashlessRecoverAfter: each of its operations (the call, its route, its
+// approve) is retired through RetireOp under the lane lock — one that holds
+// an allocation is ADOPTED (its hash written on the leg, the approve's as
+// approve_tx_hash) and the leg goes on in flight; when none does, every key
+// is tombstoned for good and the leg is freed for a new attempt. A store
+// that cannot answer leaves it for the next tick: never a permanent wedge,
+// never a guess.
+func (o *ConversionOrchestrator) recoverHashless(ctx context.Context, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
+	if leg.TxHash != "" || leg.ApproveTxHash != "" || o.now().Before(leg.CreatedAt.Add(hashlessRecoverAfter)) {
+		return nil
+	}
+	lane := o.treasury.Lane(leg.ChainKey)
+	if lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil || lane.Signer == nil {
+		return nil
+	}
+	op := "ramp_leg:" + leg.ID.String()
+	for _, k := range []string{op + ":route", op, op + ":approve"} {
+		a, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), k, "", RetirePermanent)
+		if err != nil {
+			return nil // unknowable now: next tick
+		}
+		if a == nil {
+			continue
+		}
+		h := lane.KeyLane.currentHash(ctx, a)
+		if h == "" {
+			return nil
+		}
+		log.Printf("[ramp-conversion] order=%s leg=%s adopting %s from the key lane (op %s)", order.ID, leg.ID, h, k)
+		if strings.HasSuffix(k, ":approve") {
+			return ignoreNotPending(o.legs.SetApproveHash(ctx, leg.ID, h))
+		}
+		return ignoreNotPending(o.legs.SetTxHash(ctx, leg.ID, h, leg.LiFiTool))
+	}
+	log.Printf("[ramp-conversion] order=%s leg=%s hashless and nothing committed: freed for a new attempt", order.ID, leg.ID)
+	return ignoreNotPending(o.legs.FailExpected(detached(ctx), leg.ID, "", "not broadcast: nothing committed (proven by the key lane)"))
+}
+
+func ignoreNotPending(err error) error {
+	if errors.Is(err, ErrLegNotPending) {
+		return nil
+	}
+	return err
 }
 
 // bridgeRouteGrace is how long after its leg was reserved an approve-only

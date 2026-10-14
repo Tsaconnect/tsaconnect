@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,6 +142,7 @@ const (
 var spendSel = SelectorOf("spend(address,uint256,bytes32)")
 
 type rig struct {
+	seq     atomic.Int32 // each req() is a distinct request (one request = one relay operation)
 	svc     *RelayerService
 	signer  *fakeRelaySigner
 	chain   *fakeRelayChain
@@ -202,7 +204,7 @@ func (r *rig) req(mutate ...func(*ForwardRequest)) ForwardRequest {
 		Gas:       200_000,
 		Deadline:  uint64(r.clock.Add(2 * time.Minute).Unix()),
 		Data:      spendCalldata(5_000),
-		Signature: []byte{0x01, 0x02, 0x03},
+		Signature: []byte{0x01, 0x02, 0x03, byte(r.seq.Add(1))},
 	}
 	for _, m := range mutate {
 		m(&req)

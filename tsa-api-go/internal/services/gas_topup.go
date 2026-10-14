@@ -220,16 +220,18 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 	if lane == nil {
 		return GasTopUpResult{}, ErrSponsorNotAvailable
 	}
-	if h := intent.TopUpTxHash; h != "" && lane.callCancelled(ctx, h) &&
-		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_intent:"+intent.ID.String(), h, RetireSequenced) {
-		// Her earlier top-up was cancelled at its nonce (it never arrived):
-		// the once-per-sale claim is given back — only while the intent still
-		// records that cancelled top-up.
+	if h := intent.TopUpTxHash; h != "" && lane.callCancelled(ctx, h) {
+		// Her earlier top-up was cancelled at its nonce (it never arrived).
+		// The conditional clear decides who gives the claim back (only while
+		// the intent still records that cancelled top-up); only its winner
+		// tombstones the operation, so concurrent requests cannot cancel
+		// each other.
 		if cleared, err := store.ClearCancelledTopUp(ctx, intent.ID, h); err != nil {
 			return GasTopUpResult{}, err
 		} else if !cleared {
 			return GasTopUpResult{}, ErrSponsorshipInProgress // the intent moved on meanwhile
 		}
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_intent:"+intent.ID.String(), h, RetireSequenced)
 		intent.TopUpTxHash = ""
 	}
 	need, err := g.intentGasNeeded(lane, intent)
@@ -357,16 +359,14 @@ func (g *GasTopUp) TopUpDestForIntent(ctx context.Context, user *models.User, in
 	if lane == nil {
 		return GasTopUpResult{}, ErrDestGasUnavailable
 	}
-	if h := intent.DestTopUpTxHash; h != "" && lane.callCancelled(ctx, h) &&
-		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_dest:"+intent.ID.String(), h, RetireSequenced) {
-		// The earlier destination top-up was cancelled (it never arrived):
-		// the once-per-checkout claim is given back — only while the intent
-		// still records that cancelled top-up.
+	if h := intent.DestTopUpTxHash; h != "" && lane.callCancelled(ctx, h) {
+		// As TopUpForIntent: the conditional clear's winner alone tombstones.
 		if cleared, err := store.ClearCancelledDestTopUp(ctx, intent.ID, h); err != nil {
 			return GasTopUpResult{}, err
 		} else if !cleared {
 			return GasTopUpResult{}, ErrSponsorshipInProgress // the intent moved on meanwhile
 		}
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_dest:"+intent.ID.String(), h, RetireSequenced)
 		intent.DestTopUpTxHash = ""
 	}
 	now := g.now()

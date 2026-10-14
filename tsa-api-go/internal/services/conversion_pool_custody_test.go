@@ -19,7 +19,7 @@ import (
 func seedPoolCustody(t *testing.T, r *conversionRig, hashes ...string) uuid.UUID {
 	t.Helper()
 	if err := r.db.Exec(`CREATE TABLE p2p_trades (id TEXT PRIMARY KEY, it_intent_id TEXT, status TEXT NOT NULL,
-		release_tx_hash TEXT, cancel_reason TEXT, dropped_at DATETIME, created_at DATETIME)`).Error; err != nil {
+		release_tx_hash TEXT, release_reverted_at DATETIME, cancel_reason TEXT, dropped_at DATETIME, created_at DATETIME)`).Error; err != nil {
 		t.Fatal(err)
 	}
 	intent := uuid.New()

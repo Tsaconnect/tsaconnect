@@ -346,7 +346,7 @@ func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UU
 	hash, attempted, err := tr.TransferTokenRecorded(WithOperationRef(ctx, "ramp_leg:"+leg.ID.String()), lane, token, intent.DestAddress, amount,
 		func(hctx context.Context, nonce uint64, txHash string) error {
 			res := LaneDB(hctx, s.db).Model(&models.RampLeg{}).
-				Where("id = ? AND status = ?", leg.ID, models.RampLegStatusPending).
+				Where("id = ? AND status = ? AND (tx_hash = '' OR tx_hash IS NULL)", leg.ID, models.RampLegStatusPending).
 				Updates(map[string]any{"nonce": nonce, "tx_hash": txHash})
 			if res.Error == nil && res.RowsAffected != 1 {
 				return fmt.Errorf("leg %s is no longer pending", leg.ID)

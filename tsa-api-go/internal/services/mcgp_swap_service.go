@@ -494,8 +494,8 @@ func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData 
 	}
 	// The call itself (it carries the debit/credit ref) is the operation: a
 	// retry of the same op never gets a new nonce.
-	opCtx := WithOperationRef(ctx, "it_op:"+crypto.Keccak256Hash(callData).Hex())
-	hash, _, err := s.operatorLane.Send(opCtx, func() ([]byte, error) {
+	op := "it_op:" + crypto.Keccak256Hash(callData).Hex()
+	hash, attempted, err := s.operatorLane.Send(WithOperationRef(ctx, op), func() ([]byte, error) {
 		unsigned, err := s.buildUnsignedTx(s.operator.Address(), callData)
 		if err != nil {
 			// Nonce, gas price and gas estimate are all reads: nothing was sent.
@@ -503,6 +503,20 @@ func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData 
 		}
 		return unsigned, nil
 	})
+	if err != nil && !attempted {
+		// IT ops have no guarded pre-broadcast hook, and their callers fail
+		// the row on "not sent": tombstone the op (sequenced) so an attempt
+		// begun earlier can never commit after that answer — or, if one
+		// already did, answer in flight.
+		a, rerr := s.operatorLane.RetireOp(ctx, s.operator.Address(), op, "", RetireSequenced)
+		switch {
+		case rerr != nil:
+			return "", outcomeUnknown("", fmt.Errorf("%v; give-up unproven: %w", err, rerr))
+		case a != nil:
+			h, _, ierr := s.operatorLane.inFlight(ctx, a)
+			return h, ierr
+		}
+	}
 	return hash, err
 }
 

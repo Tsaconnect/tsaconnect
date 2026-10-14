@@ -68,7 +68,7 @@ func TestP2PPMFields_Persist(t *testing.T) {
 			payment_method_id TEXT NOT NULL,
 			on_chain_trade_id TEXT UNIQUE,
 			open_tx_hash TEXT,
-			release_tx_hash TEXT,
+			release_tx_hash TEXT, release_reverted_at DATETIME,
 			status TEXT NOT NULL DEFAULT 'pending_payment',
 			proof_image_url TEXT,
 			cancel_reason TEXT,

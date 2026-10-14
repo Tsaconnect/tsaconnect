@@ -227,7 +227,7 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 	// allocation transaction, with the signed transfer (or neither does).
 	sendCtx := WithPreBroadcast(ctx, func(hctx context.Context, _ uint64, hash string) error {
 		res := LaneDB(hctx, s.db).Model(&models.UserNameChange{}).
-			Where("id = ? AND fee_status = ?", ch.ID, models.NameChangeFeeRefundSending).Update("fee_tx_hash", hash)
+			Where("id = ? AND fee_status = ? AND (fee_tx_hash = '' OR fee_tx_hash IS NULL)", ch.ID, models.NameChangeFeeRefundSending).Update("fee_tx_hash", hash)
 		if res.Error == nil && res.RowsAffected != 1 {
 			return errors.New("name change refund: the claim moved")
 		}

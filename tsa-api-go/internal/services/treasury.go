@@ -456,7 +456,9 @@ const maxRouteGasLimit uint64 = 5_000_000
 func (t *Treasury) ExecuteRoute(ctx context.Context, lane *TreasuryLane, token string, amount *big.Int, route *LiFiRoute) (string, bool, error) {
 	h, attempted, err := t.executeRoute(ctx, lane, token, amount, route)
 	if err != nil && !attempted {
-		return t.refuseOp(ctx, lane, err, ":approve", ":route")
+		// The route is the caller's call; the approve is a related call (in
+		// flight means the operation is, never success with its hash).
+		return t.refuseOp(ctx, lane, err, []string{"", ":route"}, []string{":approve"})
 	}
 	return h, attempted, err
 }
@@ -635,27 +637,19 @@ func approveHook(ctx context.Context) LaneHook {
 // of its sub-operations) already holds an allocation it is in flight, never
 // "not sent"; a probe that cannot run is an unknown outcome. Nothing is
 // tombstoned: a refusal commits nothing.
-func (t *Treasury) refuseOp(ctx context.Context, lane *TreasuryLane, cause error, subOps ...string) (string, bool, error) {
+func (t *Treasury) refuseOp(ctx context.Context, lane *TreasuryLane, cause error, own, related []string) (string, bool, error) {
 	op := operationRef(ctx)
 	if op == "" || lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil || lane.Signer == nil {
 		return "", false, cause
 	}
-	for _, k := range append([]string{op}, func() []string {
-		out := make([]string, len(subOps))
-		for i, sfx := range subOps {
-			out[i] = op + sfx
+	keys := func(sfx []string) []string {
+		out := make([]string, len(sfx))
+		for i, x := range sfx {
+			out[i] = op + x
 		}
 		return out
-	}()...) {
-		a, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), k, "", RetireProbe)
-		if err != nil {
-			return "", true, outcomeUnknown("", fmt.Errorf("%v; refusal unproven: %w", cause, err))
-		}
-		if a != nil {
-			return lane.KeyLane.inFlight(ctx, a)
-		}
 	}
-	return "", false, cause
+	return lane.KeyLane.giveUpRefused(ctx, lane.Signer.Address(), cause, keys(own), keys(related))
 }
 
 // keyLane is the treasury's key lane on chainKey (nil without one).
@@ -723,7 +717,7 @@ func (t *Treasury) TransferToken(ctx context.Context, lane *TreasuryLane, token,
 func (t *Treasury) TransferTokenRecorded(ctx context.Context, lane *TreasuryLane, token, to string, amount *big.Int, onPrepared LaneHook) (string, bool, error) {
 	h, attempted, err := t.transferTokenRecorded(ctx, lane, token, to, amount, onPrepared)
 	if err != nil && !attempted {
-		return t.refuseOp(ctx, lane, err)
+		return t.refuseOp(ctx, lane, err, []string{""}, nil)
 	}
 	return h, attempted, err
 }
@@ -827,7 +821,7 @@ func (t *Treasury) StartEscrowBurst(ctx context.Context, lane *TreasuryLane, esc
 func (b *EscrowBurst) Call(ctx context.Context, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
 	h, attempted, err := b.call(ctx, build, onPrepared)
 	if err != nil && !attempted {
-		return (*Treasury)(nil).refuseOp(ctx, b.lane, err)
+		return (*Treasury)(nil).refuseOp(ctx, b.lane, err, []string{""}, nil)
 	}
 	return h, attempted, err
 }

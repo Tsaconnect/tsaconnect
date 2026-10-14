@@ -180,57 +180,6 @@ func TestKeyLane_RoutineClearKeepsAnUnpersistedHold(t *testing.T) {
 	}
 }
 
-// Item 8: a release that mined and REVERTED moved nothing: the give-up
-// treats it as not executed and the trade rolls back as before.
-func TestAutoRelease_RevertedReleaseRollsBack(t *testing.T) {
-	db := setupTradeDB(t)
-	svc, esc, _ := newService(t, db)
-	trade := seedOpenedPMTrade(t, svc)
-	if _, err := svc.SystemMarkPaid(context.Background(), trade.ID, "nomba:evt_r"); err != nil {
-		t.Fatal(err)
-	}
-	store := sqliteLaneStore(t)
-	node := newChainNode(146)
-	clock := time.Now()
-	lane := durableLane(t, store, newEcdsaKey(), node, &clock)
-	ctx := context.Background()
-	h, _, err := lane.Send(WithOperationRef(ctx, "p2p_release:"+trade.ID.String()), callTo(146, callA, "aa", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	node.mu.Lock()
-	node.mined = 1
-	node.reverted = map[common.Hash]bool{common.HexToHash(h): true}
-	node.mu.Unlock()
-	node.mine(common.HexToHash(h), 10, 20)
-	_ = lane.Watch(ctx)
-	esc.verifyReleasedErr = errors.New("execution reverted")
-	s := &reusedReleaseSender{fakeReleaseSigner: fakeReleaseSigner{addr: lane.Address(), hash: h}, lane: lane}
-	if _, err := svc.AutoRelease(ctx, trade.ID, s); err == nil {
-		t.Fatal("want the verify error")
-	}
-	var got models.P2PTrade
-	db.First(&got, "id = ?", trade.ID)
-	if got.Status != models.P2PTradeStatusPaid {
-		t.Fatalf("status = %s, want rolled back to paid after a reverted release", got.Status)
-	}
-}
-
-// Item 9: a tombstone written before sequencing (seq 0) is permanent.
-func TestKeyLane_LegacyTombstoneIsPermanent(t *testing.T) {
-	store := sqliteLaneStore(t)
-	node := newChainNode(56)
-	node.mined = 3
-	clock := time.Now()
-	lane := durableLane(t, store, newEcdsaKey(), node, &clock)
-	if err := store.DB.Create(&models.KeyLaneRetiredOp{ChainID: 56, Address: strings.ToLower(lane.Address()), OpKey: "ramp_leg:old:route"}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if _, attempted, err := lane.Send(WithOperationRef(context.Background(), "ramp_leg:old:route"), callTo(56, callA, "aa", 3)); attempted || !errors.Is(err, ErrOperationRetired) {
-		t.Fatalf("legacy tombstone = %v %v, want refused for good", attempted, err)
-	}
-}
-
 // Item 7: a cancelled intent top-up whose claim-clear matched nothing (the
 // intent moved on meanwhile) is in progress — never a second top-up.
 func TestTopUpForIntent_ClearMatchingNothingIsInProgress(t *testing.T) {
