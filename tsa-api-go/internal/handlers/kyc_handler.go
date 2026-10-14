@@ -163,6 +163,35 @@ func approvedIdentity(decision *diditDecisionResponse) *diditIDVerification {
 	return nil
 }
 
+// errDiditNoDocument means Didit holds the session but the user never submitted
+// an identity document in it (Not Started, Expired before upload), so there is
+// no name to read and nothing for an admin to approve.
+var errDiditNoDocument = errors.New("didit: session has no submitted document")
+
+// fetchDiditDocumentName reads the document name for an admin who is approving
+// the session by override: a passed check first, else any check that read a
+// name — Declined or In Review is exactly what an override approves, so the
+// admin's decision vouches for that reading. Never use it where no admin has
+// approved: there the unpassed reading is only the scan's guess
+// (fetchDiditVerifiedName).
+func fetchDiditDocumentName(ctx context.Context, baseURL, apiKey, sessionID string) (string, error) {
+	decision, err := fetchDiditDecision(ctx, baseURL, apiKey, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if item := approvedIdentity(decision); item != nil {
+		return item.name(), nil
+	}
+	for _, block := range [][]diditIDVerification{decision.IDVerifications, decision.NFCVerifications} {
+		for i := range block {
+			if name := block[i].name(); name != "" {
+				return name, nil
+			}
+		}
+	}
+	return "", errDiditNoDocument
+}
+
 // fetchDiditIdentity is what a session's decision says about the person, for a
 // name change's same-person check: the approved document's name, date of
 // birth, document number and issuing country, and the earlier sessions Didit's
@@ -832,9 +861,8 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 	c.ShouldBindJSON(&req)
 
 	name, source, refusal := h.overrideLegalName(c.Request.Context(), &user, req.LegalName)
-	if refusal != "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false, "message": refusal, "code": "legal_name_required"})
+	if refusal != nil {
+		c.JSON(refusal.status, gin.H{"success": false, "message": refusal.message, "code": refusal.code})
 		return
 	}
 
@@ -893,39 +921,65 @@ const (
 	legalNameSourceExisting = "existing"
 )
 
-// overrideLegalName settles the legal name an admin approval stores, or returns
-// the refusal to show the admin.
+// overrideRefusal is why an override was not applied, as the admin sees it.
+type overrideRefusal struct {
+	status        int
+	code, message string
+}
+
+var noDocumentRefusal = &overrideRefusal{http.StatusConflict, "kyc_no_document",
+	"this user never submitted an ID document in Didit — ask them to finish verification in the app first"}
+
+// overrideLegalName settles the legal name an admin approval stores, or the
+// refusal to show the admin.
 //
 // An approval without a name is worse than no approval: the money-in gate
 // refuses a verified user with no name (requireVerifiedForMoneyIn), so the user
 // sees "verified" and is still turned away, with nothing they can do about it.
 //
-// The admin's typed name wins — they are looking at the document. Without one,
-// the Didit session is asked, then any name already stored. A typed name never
-// replaces a different stored one: changing a verified name is the name-change
-// review's job, not a side effect of re-approving.
-func (h *Handlers) overrideLegalName(ctx context.Context, user *models.User, typed string) (name, source, refusal string) {
+// The name comes from the user's Didit document, so nobody copies it by hand.
+// An override of a session with no document at all is refused: there is no
+// identity to approve, and the user has to finish verification first — so is a
+// user who never opened a session. A typed name is only the fallback for a
+// session Didit no longer holds (or no Didit at all) — never while Didit is unreachable, or an outage would skip the
+// document check. A stored name is kept, and is never replaced by a different
+// one: changing a verified name is the name-change review's job.
+func (h *Handlers) overrideLegalName(ctx context.Context, user *models.User, typed string) (string, string, *overrideRefusal) {
 	typed = strings.Join(strings.Fields(typed), " ")
 	stored := strings.TrimSpace(user.VerifiedLegalName)
 
-	if typed != "" {
-		if stored != "" && !strings.EqualFold(stored, typed) {
-			return "", "", "this user already has a different verified legal name — change it through a name-change review"
-		}
-		if stored != "" {
-			return stored, legalNameSourceExisting, ""
-		}
-		return typed, legalNameSourceAdmin, ""
-	}
 	if stored != "" {
-		return stored, legalNameSourceExisting, ""
-	}
-	if updates := h.verifiedNameUpdates(ctx, user.ID, user.DiditSessionID); updates != nil {
-		if fetched, _ := updates["verified_legal_name"].(string); fetched != "" {
-			return fetched, legalNameSourceDidit, ""
+		if typed != "" && !strings.EqualFold(stored, typed) {
+			return "", "", &overrideRefusal{http.StatusBadRequest, "legal_name_conflict",
+				"this user already has a different verified legal name — change it through a name-change review"}
 		}
+		return stored, legalNameSourceExisting, nil
 	}
-	return "", "", "enter the user's legal name exactly as it appears on their ID — payments into their account are matched against it"
+
+	diditOn := h.Config != nil && h.Config.DiditAPIKey != ""
+	if diditOn && user.DiditSessionID == "" {
+		return "", "", noDocumentRefusal
+	}
+	if diditOn {
+		name, err := fetchDiditDocumentName(ctx, h.Config.DiditBaseURL, h.Config.DiditAPIKey, user.DiditSessionID)
+		switch {
+		case err == nil:
+			return name, legalNameSourceDidit, nil
+		case errors.Is(err, errDiditNoDocument):
+			return "", "", noDocumentRefusal
+		case !errors.Is(err, errDiditNameUnresolved):
+			log.Printf("[KYC] override document lookup failed for user %s: %v", user.ID, err)
+			return "", "", &overrideRefusal{http.StatusServiceUnavailable, "kyc_provider_unavailable",
+				"could not reach the verification provider to read the user's document — try again shortly"}
+		}
+		// Didit no longer holds the session: only a typed name is left.
+	}
+
+	if typed != "" {
+		return typed, legalNameSourceAdmin, nil
+	}
+	return "", "", &overrideRefusal{http.StatusBadRequest, "legal_name_required",
+		"Didit holds no document for this user — enter their legal name exactly as it appears on their ID"}
 }
 
 // AdminRejectKYC allows an admin to reject a user's verification.
@@ -1040,6 +1094,7 @@ func (h *Handlers) AdminBackfillVerifiedNames(c *gin.Context) {
 			"failed":            result.Failed,
 			"remaining":         remaining - int64(result.Updated),
 			"unresolvedUserIds": result.UnresolvedUserIDs,
+			"noDocumentUserIds": result.NoDocumentUserIDs,
 		},
 	})
 }
@@ -1050,6 +1105,29 @@ type NameBackfillResult struct {
 	Updated           int
 	Failed            int
 	UnresolvedUserIDs []string
+	// NoDocumentUserIDs were approved by admin override with no document ever
+	// submitted to Didit.
+	NoDocumentUserIDs []string
+}
+
+// adminOverriddenUsers is the subset of users an admin approved by override.
+// A failed read just means nobody is treated as overridden: the stricter read.
+func adminOverriddenUsers(users []models.User) map[uuid.UUID]bool {
+	ids := make([]uuid.UUID, len(users))
+	for i := range users {
+		ids[i] = users[i].ID
+	}
+	var hits []uuid.UUID
+	if err := config.DB.Model(&models.VerificationLog{}).
+		Where("action = ? AND user_id IN ?", models.VerificationActionAdminOverride, ids).
+		Distinct().Pluck("user_id", &hits).Error; err != nil {
+		log.Printf("[KYC] backfill could not read override history: %v", err)
+	}
+	out := make(map[uuid.UUID]bool, len(hits))
+	for _, id := range hits {
+		out[id] = true
+	}
+	return out
 }
 
 // pendingLegalNames selects the users a backfill repairs: ones the platform
@@ -1079,11 +1157,24 @@ func BackfillAllVerifiedNames(ctx context.Context, cfg *config.Config) (NameBack
 // adminID is nil for the server-side run.
 func backfillVerifiedNames(ctx context.Context, cfg *config.Config, users []models.User, adminID *uuid.UUID) NameBackfillResult {
 	result := NameBackfillResult{Scanned: len(users), UnresolvedUserIDs: make([]string, 0, len(users))}
+	overridden := adminOverriddenUsers(users)
 
 	for i := range users {
 		user := users[i]
-		name, err := fetchDiditVerifiedName(ctx, cfg.DiditBaseURL, cfg.DiditAPIKey, user.DiditSessionID)
+		// An admin who overrode the session approved its document, so the
+		// reading of an unpassed check is theirs to vouch for; anyone else's
+		// name must come from a check Didit passed.
+		read := fetchDiditVerifiedName
+		if overridden[user.ID] {
+			read = fetchDiditDocumentName
+		}
+		name, err := read(ctx, cfg.DiditBaseURL, cfg.DiditAPIKey, user.DiditSessionID)
 		switch {
+		case errors.Is(err, errDiditNoDocument):
+			// Approved by override without ever submitting a document: there
+			// is no name anywhere, and the user has to verify for real.
+			result.NoDocumentUserIDs = append(result.NoDocumentUserIDs, user.ID.String())
+			continue
 		case errors.Is(err, errDiditNameUnresolved):
 			// Sessions Didit no longer holds, and users verified by admin
 			// override who never had one. Reported so they can be chased by

@@ -698,3 +698,145 @@ func TestAdminOverrideNeverReplacesADifferentStoredName(t *testing.T) {
 		t.Fatalf("stored name replaced with %q", name)
 	}
 }
+
+func decisionWithIDStatus(status, fullName string) string {
+	return fmt.Sprintf(`{"session_id":"s","status":%q,
+		"id_verifications":[{"node_id":"id_verification_1","status":%q,"full_name":%q}]}`,
+		status, status, fullName)
+}
+
+func rejectedUserWithSession(t *testing.T, db *gorm.DB, sessionID string) *models.User {
+	t.Helper()
+	u := createKYCTestUser(t, db, models.VerificationStatusRejected)
+	db.Model(u).Update("didit_session_id", sessionID)
+	u.DiditSessionID = sessionID
+	return u
+}
+
+// The override is the approval of a check Didit did not pass, so the name that
+// check read is used — nobody copies it from the Didit dashboard by hand.
+func TestAdminOverrideUsesNameFromUnpassedDocument(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	declined := rejectedUserWithSession(t, db, "sess-declined")
+	inReview := rejectedUserWithSession(t, db, "sess-review")
+	didit := diditDecisionStub(t, map[string]string{
+		"sess-declined": decisionWithIDStatus("Declined", "UGWU CHIAMAKA"),
+		"sess-review":   decisionWithIDStatus("In Review", "IKECHUKWU OBI"),
+	})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	for user, want := range map[*models.User]string{declined: "UGWU CHIAMAKA", inReview: "IKECHUKWU OBI"} {
+		// A typed name does not override what the document says.
+		if w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"SOMETHING ELSE"}`); w.Code != http.StatusOK {
+			t.Fatalf("override: %d %s", w.Code, w.Body.String())
+		}
+		if _, name := storedIdentity(t, db, user.ID); name != want {
+			t.Fatalf("got name %q, want %q", name, want)
+		}
+	}
+}
+
+// No document means no identity to approve — even with a name typed in.
+func TestAdminOverrideRefusesSessionWithNoDocument(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := rejectedUserWithSession(t, db, "sess-empty")
+	didit := diditDecisionStub(t, map[string]string{
+		"sess-empty": `{"session_id":"s","status":"Not Started","id_verifications":[]}`,
+	})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"ANY NAME"}`)
+
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "kyc_no_document") {
+		t.Fatalf("want 409 kyc_no_document, got %d %s", w.Code, w.Body.String())
+	}
+	if status, _ := storedIdentity(t, db, user.ID); status != models.VerificationStatusRejected {
+		t.Fatalf("refused override changed status to %q", status)
+	}
+}
+
+// A session Didit no longer holds leaves the typed name as the only source.
+func TestAdminOverrideFallsBackToTypedNameWhenSessionIsGone(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := rejectedUserWithSession(t, db, "sess-gone")
+	didit := diditDecisionStub(t, map[string]string{})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	if w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"ADA OBI"}`); w.Code != http.StatusOK {
+		t.Fatalf("override: %d %s", w.Code, w.Body.String())
+	}
+	if _, name := storedIdentity(t, db, user.ID); name != "ADA OBI" {
+		t.Fatalf("got name %q", name)
+	}
+}
+
+// An outage must not turn into a way past the document check.
+func TestAdminOverrideRefusesWhileDiditUnreachable(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := rejectedUserWithSession(t, db, "sess-1")
+	didit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(didit.Close)
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	if w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"ANY NAME"}`); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// The backfill reads an unpassed check's name only for users an admin
+// overrode; for anyone else that reading is just the scan's guess.
+func TestBackfillReadsUnpassedDocumentOnlyForOverriddenUsers(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	db.Model(admin).Update("verified_legal_name", "ADMIN USER") // not part of the run
+	overridden := verifiedUserWithSession(t, db, "sess-a")
+	notOverridden := verifiedUserWithSession(t, db, "sess-b")
+	noDocument := verifiedUserWithSession(t, db, "sess-c")
+	for _, u := range []*models.User{overridden, noDocument} {
+		db.Create(&models.VerificationLog{UserID: u.ID, Action: models.VerificationActionAdminOverride,
+			Status: models.VerificationLogStatusVerified, AdminID: &admin.ID})
+	}
+	didit := diditDecisionStub(t, map[string]string{
+		"sess-a": decisionWithIDStatus("Declined", "ODAH CHINAZA"),
+		"sess-b": decisionWithIDStatus("Declined", "SCAN GUESS"),
+		"sess-c": `{"session_id":"s","status":"Expired","id_verifications":[]}`,
+	})
+	cfg := &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}
+
+	result, err := BackfillAllVerifiedNames(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Updated != 1 || len(result.NoDocumentUserIDs) != 1 || len(result.UnresolvedUserIDs) != 1 {
+		t.Fatalf("got %+v", result)
+	}
+	if _, name := storedIdentity(t, db, overridden.ID); name != "ODAH CHINAZA" {
+		t.Fatalf("overridden user got %q", name)
+	}
+	if _, name := storedIdentity(t, db, notOverridden.ID); name != "" {
+		t.Fatalf("non-overridden user got the scan's guess %q", name)
+	}
+	if result.NoDocumentUserIDs[0] != noDocument.ID.String() {
+		t.Fatalf("no-document user not reported: %+v", result)
+	}
+}
+
+// A user who never opened a Didit session has no document either.
+func TestAdminOverrideRefusesUserWithNoSession(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := createKYCTestUser(t, db, models.VerificationStatusRejected)
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: "http://unused.invalid"}}
+
+	w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"ANY NAME"}`)
+
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "kyc_no_document") {
+		t.Fatalf("want 409 kyc_no_document, got %d %s", w.Code, w.Body.String())
+	}
+}

@@ -19,8 +19,12 @@ func runLegalNameBackfill(cfg *config.Config) {
 	if err != nil {
 		log.Fatalf("[backfill-legal-names] %v", err)
 	}
-	log.Printf("[backfill-legal-names] scanned=%d updated=%d unresolved=%d failed=%d",
-		result.Scanned, result.Updated, len(result.UnresolvedUserIDs), result.Failed)
+	log.Printf("[backfill-legal-names] scanned=%d updated=%d unresolved=%d no_document=%d failed=%d",
+		result.Scanned, result.Updated, len(result.UnresolvedUserIDs), len(result.NoDocumentUserIDs), result.Failed)
+	if len(result.NoDocumentUserIDs) > 0 {
+		log.Printf("[backfill-legal-names] approved by override but never submitted an ID document: %s",
+			strings.Join(result.NoDocumentUserIDs, ","))
+	}
 	if len(result.UnresolvedUserIDs) > 0 {
 		log.Printf("[backfill-legal-names] no Didit name for user ids: %s",
 			strings.Join(result.UnresolvedUserIDs, ","))
