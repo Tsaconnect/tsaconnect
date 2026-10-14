@@ -23,6 +23,10 @@ type poolPreset struct {
 	tokens             []string
 	releaseGasFloorWei string // the release EOA's native floor (spec §4.4)
 	logChunkBlocks     uint64 // ranged eth_getLogs window (spec §5, R1)
+	// vault is the shared-pool TsaLiquidityPool proxy (spec 2026-10-14). Set,
+	// pool orders fill from it; empty, the pool desk stays dormant.
+	vault            string
+	vaultDeployBlock uint64 // where the ledger indexer starts
 }
 
 // PoolChainConfig is the pool block of the one P2P chain with Purpose pool.
@@ -31,6 +35,8 @@ type PoolChainConfig struct {
 	Tokens             []string
 	ReleaseGasFloorWei string
 	LogChunkBlocks     uint64
+	Vault              string
+	VaultDeployBlock   uint64
 }
 
 // bscPresets: BSC is the TSA Liquidity pool chain (decision 6). An empty
@@ -165,9 +171,18 @@ func addP2PChain(cfg *Config, chainKey, network string, p chainPreset) error {
 		if f, ok := new(big.Int).SetString(p.pool.releaseGasFloorWei, 10); !ok || f.Sign() <= 0 {
 			return fmt.Errorf("P2P %s %s: invalid release gas floor %q", chainKey, network, p.pool.releaseGasFloorWei)
 		}
+		if p.pool.vault != "" {
+			if err := validateContractAddress(chainKey+" "+network+" pool vault", p.pool.vault); err != nil {
+				return err
+			}
+			if p.pool.vaultDeployBlock == 0 {
+				return fmt.Errorf("P2P %s %s: a pool vault needs its deploy block (the ledger indexer starts there)", chainKey, network)
+			}
+		}
 		cc.Assets = append([]string(nil), p.pool.tokens...)
 		cc.Pool = &PoolChainConfig{FeeManager: p.pool.feeManager, Tokens: append([]string(nil), p.pool.tokens...),
-			ReleaseGasFloorWei: p.pool.releaseGasFloorWei, LogChunkBlocks: p.pool.logChunkBlocks}
+			ReleaseGasFloorWei: p.pool.releaseGasFloorWei, LogChunkBlocks: p.pool.logChunkBlocks,
+			Vault: p.pool.vault, VaultDeployBlock: p.pool.vaultDeployBlock}
 	}
 	if prev, dup := cfg.P2PChains[chainID]; dup {
 		return fmt.Errorf("chain %d has two P2P rows (%s and %s): one escrow per chain (spec S5)", chainID, prev.ChainKey, chainKey)
