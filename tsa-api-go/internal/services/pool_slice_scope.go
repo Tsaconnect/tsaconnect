@@ -48,21 +48,19 @@ func (s *P2PTradeService) isPoolAd(ctx context.Context, ad *models.P2PAd) (bool,
 	return pm.IsLP(), nil
 }
 
-// excludePoolAds keeps retired pool stock ads (owned by an LP row) out of
-// every public read. LP ids are read in Go (a handful of rows) to keep the
-// browse query join-free; without a PM service every tagged ad hides.
-func (s *P2PTradeService) excludePoolAds(ctx context.Context, q *gorm.DB) (*gorm.DB, error) {
+// excludePoolAds keeps retired pool stock ads (owned by an LP row, any status)
+// out of every public read. A correlated NOT EXISTS on the LP row's primary
+// key, not an id list: with instant activation the LP rows grow with every
+// user, and a list would be re-read and re-sent on every browse. Every LP row
+// counts, vault-activated or not: a slice-era row re-activated on the vault
+// keeps its id (and its leftover stock ads). Without a PM service every
+// tagged ad hides.
+func (s *P2PTradeService) excludePoolAds(_ context.Context, q *gorm.DB) (*gorm.DB, error) {
 	if s.pm == nil {
 		return q.Where("pm_id IS NULL"), nil
 	}
-	ids, err := s.pm.LPIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(ids) > 0 {
-		q = q.Where("(pm_id IS NULL OR pm_id NOT IN ?)", ids)
-	}
-	return q, nil
+	return q.Where("(pm_id IS NULL OR NOT EXISTS (SELECT 1 FROM payment_merchants pool_lp WHERE pool_lp.id = p2p_ads.pm_id AND pool_lp.kind = ?))",
+		models.PaymentMerchantKindLP), nil
 }
 
 // GetAdForViewer is GetAd that answers a retired pool stock ad as not found to

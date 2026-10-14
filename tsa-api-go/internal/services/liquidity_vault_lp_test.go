@@ -401,3 +401,98 @@ func TestVaultLP_WalletChangedGatesDepositAndClaimFor(t *testing.T) {
 		t.Fatal("me does not say the wallet changed")
 	}
 }
+
+// ─── Review fixes (2026-10-14, round 2) ─────────────────────────────────────
+
+// indexDepositorSet records a DepositorSet the indexer would have written.
+func (r *lpRig) indexDepositorSet(t *testing.T, wallet string, allowed bool, block uint64) {
+	t.Helper()
+	if err := r.db.Create(&models.LiquidityLedgerEntry{ID: uuid.New(), ChainID: poolTestChain, Vault: strings.ToLower(testVaultAddr.Hex()),
+		TxHash: common.BytesToHash(uuid.New().NodeID()).Hex(), Block: block, Kind: VaultEventDepositorSet,
+		Account: common.HexToAddress(wallet).Hex(), Allowed: &allowed, BlockTime: time.Now()}).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The sync reports the setDepositor calls it sent, not the rows it walked.
+func TestVaultLP_SyncCountsOnlyWrites(t *testing.T) {
+	r := newLPRig(t)
+	ctx := context.Background()
+	user, _ := r.activeLP(t)
+	r.activeLP(t)
+	if n, err := r.svc.SyncDepositors(ctx); err != nil || n != 0 {
+		t.Fatalf("in-sync tick = %d %v, want 0 writes", n, err)
+	}
+	r.db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user).Update("status", models.PaymentMerchantStatusPaused)
+	if n, err := r.svc.SyncDepositors(ctx); err != nil || n != 1 {
+		t.Fatalf("pause tick = %d %v, want 1 write", n, err)
+	}
+	if n, err := r.svc.SyncDepositors(ctx); err != nil || n != 0 {
+		t.Fatalf("next tick = %d %v, want 0 writes", n, err)
+	}
+}
+
+// A wallet whose last indexed DepositorSet already matches costs no RPC; with
+// no event, or one that disagrees, the vault is read as before.
+func TestVaultLP_SyncTrustsTheLedgerWhenItAgrees(t *testing.T) {
+	r := newLPRig(t)
+	ctx := context.Background()
+	user, wallet := r.activeLP(t)
+	r.indexDepositorSet(t, wallet, false, 10)
+	r.indexDepositorSet(t, strings.ToLower(wallet), true, 11) // the latest wins, any case
+	calls := len(r.sender.calls)
+	r.vault.positionErr = errors.New("rpc down")
+	if n, err := r.svc.SyncDepositors(ctx); err != nil || n != 0 || len(r.sender.calls) != calls {
+		t.Fatalf("ledger agrees: %d %v (calls %d→%d), want no RPC and no write", n, err, calls, len(r.sender.calls))
+	}
+	other, _ := r.activeLP(t) // positionErr: its own allow-list write is deferred
+	if _, err := r.svc.SyncDepositors(ctx); err == nil {
+		t.Fatal("a wallet with no indexed event was not read from the vault")
+	}
+	r.db.Exec("DELETE FROM payment_merchants WHERE user_id = ?", other)
+	r.db.Model(&models.PaymentMerchant{}).Where("user_id = ?", user).Update("status", models.PaymentMerchantStatusPaused)
+	if _, err := r.svc.SyncDepositors(ctx); err == nil {
+		t.Fatal("a ledger that disagrees (paused, indexed allowed) was trusted")
+	}
+	r.vault.positionErr = nil
+	if n, err := r.svc.SyncDepositors(ctx); err != nil || n != 1 || r.vault.allowed[strings.ToLower(wallet)] {
+		t.Fatalf("revoke = %d %v, want the paused wallet revoked", n, err)
+	}
+}
+
+// revertingLPVault refuses withdraw and claim at estimate the way the
+// contract does, or fails the RPC.
+type revertingLPVault struct {
+	*fakeLPVault
+	err error
+}
+
+func (v revertingLPVault) PrepareWithdraw(string, *big.Int) ([]byte, error) { return nil, v.err }
+func (v revertingLPVault) PrepareClaim(string) ([]byte, error)              { return nil, v.err }
+func (v revertingLPVault) PrepareClaimTo(string, string) ([]byte, error)    { return nil, v.err }
+
+// The vault's own refusals of an LP tx are the LP's 400s, not a 500: a
+// withdraw over her principal ("Bad amount"), a claim with nothing earned
+// ("Nothing to claim"). An RPC failure stays an error as before.
+func TestVaultLP_WithdrawAndClaimRefusalsAreTheLPs(t *testing.T) {
+	r := newLPRig(t)
+	ctx := context.Background()
+	user, _ := r.activeLP(t)
+	set := func(err error) { r.svc.c.Vault = revertingLPVault{fakeLPVault: r.vault, err: err} }
+
+	set(vaultRevert("Bad amount"))
+	if _, err := r.svc.PrepareWithdraw(ctx, user, "1"); !errors.Is(err, ErrLPAmount) {
+		t.Fatalf("withdraw over principal: %v, want ErrLPAmount", err)
+	}
+	set(vaultRevert("Nothing to claim"))
+	if _, err := r.svc.PrepareClaim(ctx, user, ""); !errors.Is(err, ErrLPNothingToClaim) {
+		t.Fatalf("claim: %v, want ErrLPNothingToClaim", err)
+	}
+	if _, err := r.svc.PrepareClaim(ctx, user, newLPWallet()); !errors.Is(err, ErrLPNothingToClaim) {
+		t.Fatalf("claimTo: %v, want ErrLPNothingToClaim", err)
+	}
+	set(errors.New("dial tcp: i/o timeout"))
+	if _, err := r.svc.PrepareWithdraw(ctx, user, "1"); err == nil || errors.Is(err, ErrLPAmount) {
+		t.Fatalf("rpc failure: %v, want the plain error", err)
+	}
+}

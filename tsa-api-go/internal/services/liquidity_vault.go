@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -336,20 +335,11 @@ func (v *LiquidityVault) build(from, method string, args ...any) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("liquidity vault: pack %s: %w", method, err)
 	}
-	nonce, err := v.client.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("get nonce: %w", err)
+	unsigned, err := v.client.PrepareContractCall(from, v.addr.Hex(), data, nil, 0)
+	if errors.Is(err, blockchain.ErrEstimateGas) {
+		return nil, withRevertReason(err)
 	}
-	gasPrice, err := v.client.SuggestGasPrice()
-	if err != nil {
-		return nil, fmt.Errorf("suggest gas price: %w", err)
-	}
-	gas, err := v.client.EstimateGas(ethereum.CallMsg{From: common.HexToAddress(from), To: &v.addr, Data: data})
-	if err != nil {
-		return nil, fmt.Errorf("estimate gas (would revert): %w", withRevertReason(err))
-	}
-	return json.Marshal(blockchain.UnsignedTx{Nonce: nonce, GasPrice: gasPrice.String(), GasLimit: gas,
-		To: v.addr.Hex(), Value: "0", Data: common.Bytes2Hex(data), ChainID: v.client.ChainID().String()})
+	return unsigned, err
 }
 
 // ─── Events ─────────────────────────────────────────────────────────────────

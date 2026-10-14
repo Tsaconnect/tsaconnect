@@ -22,6 +22,8 @@ func TestVaultLPError_NewRefusals(t *testing.T) {
 	}{
 		{fmt.Errorf("wrapped: %w", services.ErrLPOldWalletHasFunds), http.StatusConflict, "liquidity_old_wallet_has_funds"},
 		{services.ErrLPClaimTo, http.StatusBadRequest, ""},
+		{services.ErrLPNothingToClaim, http.StatusBadRequest, ""},
+		{fmt.Errorf("%w: more than your deposited principal", services.ErrLPAmount), http.StatusBadRequest, ""},
 	} {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)

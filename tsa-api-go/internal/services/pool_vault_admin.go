@@ -108,17 +108,27 @@ func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, er
 		if rep, err := x.Reconcile(ctx); err == nil {
 			out.Ledger = rep
 		}
-		var rows []models.LiquidityLedgerEntry
-		if err := s.db.WithContext(ctx).Where("chain_id = ? AND kind = ? AND block_time >= ?", d.c.Token.ChainID, VaultEventFilled,
-			time.Now().Add(-30*24*time.Hour)).Select("spread").Find(&rows).Error; err == nil {
-			sum := new(big.Int)
-			for _, r := range rows {
-				sum.Add(sum, bigFromDecimal(r.Spread))
-			}
+		if sum, err := ledgerSpreadSince(ctx, s.db, d.c.Token.ChainID, d.c.Vault.Address(), time.Now().Add(-30*24*time.Hour)); err == nil {
 			out.Spread30d = BaseUnitsToDecimal(sum, dec)
 		}
 	}
 	return out, nil
+}
+
+// ledgerSpreadSince is the spread this vault's fills credited LPs since since,
+// from the ledger (summed in Go: chain units overflow SQLite's numerics). The
+// indexer writes vault in lower case.
+func ledgerSpreadSince(ctx context.Context, db *gorm.DB, chainID int64, vault string, since time.Time) (*big.Int, error) {
+	var rows []models.LiquidityLedgerEntry
+	if err := db.WithContext(ctx).Where("chain_id = ? AND vault = ? AND kind = ? AND block_time >= ?",
+		chainID, strings.ToLower(vault), VaultEventFilled, since).Select("spread").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	sum := new(big.Int)
+	for _, r := range rows {
+		sum.Add(sum, bigFromDecimal(r.Spread))
+	}
+	return sum, nil
 }
 
 // vaultOperators replays the ledger's OperatorSet events: the accounts whose

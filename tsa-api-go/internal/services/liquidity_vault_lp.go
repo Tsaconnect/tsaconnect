@@ -37,7 +37,22 @@ var (
 	// one still holds principal or earnings would strand them in the app.
 	ErrLPOldWalletHasFunds = errors.New("liquidity: withdraw and claim from your old wallet first")
 	ErrLPClaimTo           = errors.New("liquidity: the claim destination is not a valid address")
+	ErrLPNothingToClaim    = errors.New("liquidity: you have no earnings to claim yet")
 )
+
+// lpRevertError turns the vault's own refusal of an LP tx at estimate (its
+// revert reason) into the LP's error: a withdraw over her principal is
+// ErrLPAmount, a claim with no earnings ErrLPNothingToClaim. Anything else —
+// an RPC failure included — is returned as is.
+func lpRevertError(err error) error {
+	switch revertReasonOf(err) {
+	case "Bad amount":
+		return fmt.Errorf("%w: more than your deposited principal", ErrLPAmount)
+	case "Nothing to claim":
+		return ErrLPNothingToClaim
+	}
+	return err
+}
 
 // lpPoolViewTTL: the pool card is one read for every caller this often.
 const lpPoolViewTTL = 5 * time.Second
@@ -305,16 +320,7 @@ func (s *VaultLPService) vaultScope(db *gorm.DB) *gorm.DB {
 }
 
 func (s *VaultLPService) spreadSince(ctx context.Context, since time.Time) (*big.Int, error) {
-	var rows []models.LiquidityLedgerEntry
-	if err := s.vaultScope(s.c.DB.WithContext(ctx)).Where("kind = ? AND block_time >= ?", VaultEventFilled, since).
-		Select("spread").Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	sum := new(big.Int)
-	for _, r := range rows {
-		sum.Add(sum, bigFromDecimal(r.Spread))
-	}
-	return sum, nil
+	return ledgerSpreadSince(ctx, s.c.DB, s.c.Token.ChainID, s.c.Vault.Address(), since)
 }
 
 func (s *VaultLPService) claimedTotal(ctx context.Context, wallet string) (*big.Int, error) {
@@ -724,27 +730,51 @@ func (s *VaultLPService) createLP(ctx context.Context, userID uuid.UUID, wallet 
 }
 
 // setDepositor writes the allow-list for wallet (lp's current or a previous
-// wallet) when the vault does not already say so. Idempotent across retries
-// and processes: the operation key names the LP, the wallet and the target
-// state, so the key lane answers a repeat from the call already committed (a
-// mined call frees its key, so a later flip back is a new call).
+// wallet) when the vault does not already say so (sendDepositor).
 func (s *VaultLPService) setDepositor(ctx context.Context, lpID uuid.UUID, wallet string, allowed bool) error {
+	_, err := s.sendDepositor(ctx, lpID, wallet, allowed)
+	return err
+}
+
+// sendDepositor is setDepositor reporting whether a setDepositor call went
+// to the key lane (false: the vault already says so). Idempotent across
+// retries and processes: the operation key names the LP, the wallet and the
+// target state, so the key lane answers a repeat from the call already
+// committed — a write sent but not yet mined is never sent twice (a mined
+// call frees its key, so a later flip back is a new call).
+func (s *VaultLPService) sendDepositor(ctx context.Context, lpID uuid.UUID, wallet string, allowed bool) (bool, error) {
 	pos, err := s.c.Vault.Position(ctx, wallet)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if pos.Allowed == allowed {
-		return nil
+		return false, nil
 	}
 	op := fmt.Sprintf("pool_depositor:%s:%s:%t", lpID, strings.ToLower(wallet), allowed)
 	hash, err := s.c.Sender.Send(WithOperationRef(ctx, op), s.c.Token.ChainID, func() ([]byte, error) {
 		return s.c.Vault.PrepareSetDepositor(s.c.Sender.Address(), wallet, allowed)
 	})
 	if err != nil && !errors.Is(err, ErrPendingBroadcast) {
-		return err
+		return false, err
 	}
 	log.Printf("[liquidity] METRIC liquidity_depositor_set lp=%s wallet=%s allowed=%t tx=%s", lpID, wallet, allowed, hash)
-	return nil
+	return true, nil
+}
+
+// indexedDepositors is each wallet's (lower-case) allow-list state as the
+// ledger last indexed it: the latest DepositorSet event on this vault. A
+// wallet with no event is absent.
+func (s *VaultLPService) indexedDepositors(ctx context.Context) (map[string]bool, error) {
+	var rows []models.LiquidityLedgerEntry
+	if err := s.vaultScope(s.c.DB.WithContext(ctx)).Where("kind = ? AND allowed IS NOT NULL", VaultEventDepositorSet).
+		Order("block, log_index").Select("account", "allowed").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		out[strings.ToLower(r.Account)] = *r.Allowed
+	}
+	return out, nil
 }
 
 // wantAllowed is the allow-list state lp's current wallet should have: a vault
@@ -780,7 +810,8 @@ func (s *VaultLPService) wantAllowed(ctx context.Context, lp *models.PaymentMerc
 
 // SyncDepositors makes the vault's allow-list match the LP rows (withdraw and
 // claim never need it): a wallet is allowed only while wantAllowed holds, and
-// every wallet a row moved away from stays revoked.
+// every wallet a row moved away from stays revoked. It returns how many
+// setDepositor calls it sent.
 //
 // RUNBOOK: to stop an LP's deposits, an owner/guardian pauses the LP row
 // (admin console). Never call setDepositor(wallet, false) on the vault by
@@ -797,6 +828,15 @@ func (s *VaultLPService) SyncDepositors(ctx context.Context) (int, error) {
 			current[strings.ToLower(w)] = true
 		}
 	}
+	// The ledger's last DepositorSet per wallet spares the Position read for
+	// a wallet already as wanted. It lags the chain by the indexer's depth: a
+	// write it has not indexed yet is read from the chain (and a pending one
+	// is answered by its operation key, never sent again).
+	indexed, err := s.indexedDepositors(ctx)
+	if err != nil {
+		log.Printf("[liquidity] depositor sync: ledger unreadable, reading every wallet from the vault: %s", RedactAlertText(err.Error()))
+		indexed = nil
+	}
 	changed := 0
 	var firstErr error
 	fail := func(lp *models.PaymentMerchant, err error) {
@@ -805,15 +845,26 @@ func (s *VaultLPService) SyncDepositors(ctx context.Context) (int, error) {
 		}
 		log.Printf("[liquidity] depositor sync lp=%s: %s", lp.ID, RedactAlertText(err.Error()))
 	}
+	apply := func(lp *models.PaymentMerchant, wallet string, want bool) {
+		if got, ok := indexed[strings.ToLower(wallet)]; ok && got == want {
+			return
+		}
+		sent, err := s.sendDepositor(ctx, lp.ID, wallet, want)
+		if err != nil {
+			fail(lp, err)
+			return
+		}
+		if sent {
+			changed++
+		}
+	}
 	for i := range rows {
 		lp := &rows[i]
 		for _, prev := range previousWallets(lp) {
 			if current[strings.ToLower(prev)] {
 				continue
 			}
-			if err := s.setDepositor(ctx, lp.ID, prev, false); err != nil {
-				fail(lp, err)
-			}
+			apply(lp, prev, false)
 		}
 		if lp.OperatorWalletAddress == "" {
 			continue
@@ -826,11 +877,7 @@ func (s *VaultLPService) SyncDepositors(ctx context.Context) (int, error) {
 		if !want && isVaultLP(lp) && lp.Status == models.PaymentMerchantStatusActive {
 			log.Printf("[liquidity] depositor sync lp=%s wallet=%s not allowed: %s", lp.ID, lp.OperatorWalletAddress, why)
 		}
-		if err := s.setDepositor(ctx, lp.ID, lp.OperatorWalletAddress, want); err != nil {
-			fail(lp, err)
-			continue
-		}
-		changed++
+		apply(lp, lp.OperatorWalletAddress, want)
 	}
 	return changed, firstErr
 }
@@ -928,7 +975,7 @@ func (s *VaultLPService) PrepareWithdraw(ctx context.Context, userID uuid.UUID, 
 	}
 	tx, err := s.c.Vault.PrepareWithdraw(lp.OperatorWalletAddress, n)
 	if err != nil {
-		return nil, err
+		return nil, lpRevertError(err)
 	}
 	return &LPTxPlan{Step: "withdraw", Txs: []json.RawMessage{tx}}, nil
 }
@@ -951,7 +998,7 @@ func (s *VaultLPService) PrepareClaim(ctx context.Context, userID uuid.UUID, to 
 		tx, err = s.c.Vault.PrepareClaimTo(lp.OperatorWalletAddress, to)
 	}
 	if err != nil {
-		return nil, err
+		return nil, lpRevertError(err)
 	}
 	return &LPTxPlan{Step: "claim", Txs: []json.RawMessage{tx}}, nil
 }

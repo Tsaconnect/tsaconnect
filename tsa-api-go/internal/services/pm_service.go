@@ -145,14 +145,6 @@ func firstPM(q *gorm.DB) (*models.PaymentMerchant, error) {
 	return &pm, nil
 }
 
-// LPIDs are every LP row's id, any status: the ads they own never list (S29).
-func (s *PMService) LPIDs(ctx context.Context) ([]uuid.UUID, error) {
-	var ids []uuid.UUID
-	err := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
-		Where("kind = ?", models.PaymentMerchantKindLP).Pluck("id", &ids).Error
-	return ids, err
-}
-
 // GetByID looks up a PM by its primary key UUID.
 // Returns ErrPMNotFound when no row matches.
 func (s *PMService) GetByID(ctx context.Context, id uuid.UUID) (*models.PaymentMerchant, error) {

@@ -125,14 +125,17 @@ func (v *fakeVault) PrepareSettleFromCollateral(_ string, amount *big.Int, ref [
 // pre-broadcast hook (the key lane's allocation transaction), and "mines" the
 // fill at the probe's head unless noMine — reverted when revert is set.
 type vaultSender struct {
-	vault    *fakeVault
-	probe    *vaultProbe
-	mu       sync.Mutex
-	noMine   bool
-	revert   bool
-	notSent  error // when set, Send refuses before anything is committed
-	sends    int
-	lastData string
+	vault   *fakeVault
+	probe   *vaultProbe
+	mu      sync.Mutex
+	noMine  bool
+	revert  bool
+	notSent error // when set, Send refuses before anything is committed
+	// beforeSend runs inside Send before the build: the gap between the
+	// fill's decision (under the pool lock) and the lane's allocation.
+	beforeSend func()
+	sends      int
+	lastData   string
 }
 
 func (s *vaultSender) Address() string { return "0x00000000000000000000000000000000000000a1" }
@@ -143,6 +146,9 @@ func (s *vaultSender) SignAndBroadcast(context.Context, []byte) (string, error) 
 func (s *vaultSender) Send(ctx context.Context, _ int64, build func() ([]byte, error)) (string, error) {
 	if s.notSent != nil {
 		return "", notBroadcast(s.notSent)
+	}
+	if s.beforeSend != nil {
+		s.beforeSend()
 	}
 	unsigned, err := build()
 	if err != nil {
@@ -1010,5 +1016,131 @@ func TestVaultAdmin_SettleFromCollateralIsIdempotent(t *testing.T) {
 	}
 	if _, err := r.it.SettlePoolFromCollateral(ctx, admin, uuid.New(), "5", "a second settle"); err != nil {
 		t.Fatalf("a new operation: %v", err)
+	}
+}
+
+// ─── Review fixes (2026-10-14, round 2) ─────────────────────────────────────
+
+// Money race: the fill is decided under the pool lock, which is released
+// before the lane signs. Another tick parks the order and an operator refunds
+// it in that gap (no hash yet); the pre-broadcast hook must then refuse, so
+// nothing is signed and she is never both refunded and filled.
+func TestVaultSettle_ParkAndRefundBeforeTheHookSendsNothing(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	intent := r.openPaid(t, "5000")
+	var refundErr error
+	r.sender.beforeSend = func() {
+		r.sender.beforeSend = nil
+		if err := r.it.parkVaultFill(context.Background(), r.desk, intent.ID, "", "parked by another tick"); err != nil {
+			refundErr = err
+			return
+		}
+		_, refundErr = r.it.refundPoolBuy(context.Background(), uuid.New(), intent.ID, "refunded in the gap")
+	}
+	_ = r.advance(t, intent.ID)
+	if refundErr != nil {
+		t.Fatalf("park+refund in the gap: %v", refundErr)
+	}
+	if got := r.intent(t, intent.ID); got.Status != models.ITStatusRefunded {
+		t.Fatalf("status = %s, want refunded", got.Status)
+	}
+	if o := r.order(t, intent.ID); o.FillTxHash != "" || r.sender.sends != 0 {
+		t.Fatalf("fill hash = %q sends = %d, want nothing sent for a refunded order", o.FillTxHash, r.sender.sends)
+	}
+}
+
+// Claim runs the contract's fill limits too: an amount over maxFillPerTx would
+// only revert at estimate, so it parks at once with the reason, snapshot kept.
+func TestVaultClaim_OverThePerFillLimitParksAtClaim(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	intent, err := r.openFor(t, r.userID, "5000")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	r.vault.mu.Lock()
+	r.vault.caps.MaxFillPerTx = usdt18(1)
+	r.vault.mu.Unlock()
+	ok, err := r.it.claimAndPriceStableBuy(context.Background(), intent, "sess_"+intent.ID.String()[:8], intent.AmountMinor, time.Now(), false, PayInCentral)
+	if !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	got := r.intent(t, intent.ID)
+	if got.Status != models.ITStatusBuyAwaitingRate || got.FailureReason != models.ITFailurePoolFillRefused+": "+fillRefusedPerTx {
+		t.Fatalf("status = %s %q, want a per-fill-limit park", got.Status, got.FailureReason)
+	}
+	if o := r.order(t, intent.ID); *o.FillUnits != usdt18Units(t, got.AssetAmount) {
+		t.Fatalf("parked snapshot fill = %s, want the intent's %s", *o.FillUnits, usdt18Units(t, got.AssetAmount))
+	}
+	if err := r.advance(t, intent.ID); err != nil || r.sender.sends != 0 {
+		t.Fatalf("advance: %v sends=%d, want nothing sent", err, r.sender.sends)
+	}
+}
+
+// Retry refuses (stays parked) an amount the contract's fill limits refuse,
+// instead of estimating it into another park; its own reservation is not
+// counted twice against the window.
+func TestVaultRetry_RefusedOverTheContractsFillCaps(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	intent := r.openPaid(t, "5000")
+	r.vault.mu.Lock()
+	r.vault.collateral = usdt18(1)
+	r.vault.mu.Unlock()
+	if err := r.advance(t, intent.ID); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	r.vault.mu.Lock()
+	r.vault.collateral = usdt18(100)
+	r.vault.caps.MaxFillPerTx = usdt18(1)
+	r.vault.mu.Unlock()
+	_, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "collateral posted")
+	if !errors.Is(err, ErrPoolCannotFill) || !strings.Contains(err.Error(), fillRefusedPerTx) {
+		t.Fatalf("retry err = %v, want the per-fill-limit refusal", err)
+	}
+	if got := r.intent(t, intent.ID); got.Status != models.ITStatusBuyAwaitingRate {
+		t.Fatalf("status = %s, want still parked", got.Status)
+	}
+	// A window with room for exactly this order: its own reserve is not
+	// counted against itself.
+	o := r.order(t, intent.ID)
+	r.vault.mu.Lock()
+	r.vault.caps.MaxFillPerTx = usdt18(10_000)
+	r.vault.caps.FillWindowCap = new(big.Int).Add(bigFromDecimal(o.FillUnits), bigFromDecimal(o.SpreadUnits))
+	r.vault.mu.Unlock()
+	if _, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "limit raised"); err != nil {
+		t.Fatalf("retry within the window: %v", err)
+	}
+	if err := r.advance(t, intent.ID); err != nil || r.sender.sends != 1 {
+		t.Fatalf("advance after retry: %v sends=%d", err, r.sender.sends)
+	}
+}
+
+// The console's 30-day spread is this vault's: another vault on the same
+// chain (a redeploy) never counts.
+func TestVaultAdmin_Spread30dIsThisVaults(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	if err := r.db.AutoMigrate(&models.LiquidityIndexCursor{}); err != nil {
+		t.Fatal(err)
+	}
+	books := &fakeBooks{LiquidityVault: &LiquidityVault{addr: testVaultAddr},
+		state: VaultState{Collateral: new(big.Int), Outstanding: new(big.Int), TotalPrincipal: new(big.Int)}}
+	x, err := NewVaultIndexer(VaultIndexerConfig{DB: r.db, ChainID: poolTestChain, Vault: books, Reader: &fakeLogReader{head: 1}, DeployBlock: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.it.SetVaultLedger(x)
+	other := "0x00000000000000000000000000000000000000ee"
+	for i, v := range []string{strings.ToLower(testVaultAddr.Hex()), other} {
+		spread := usdt18(int64(i + 1)).String() // ours 1, the other vault's 2
+		if err := r.db.Create(&models.LiquidityLedgerEntry{ID: uuid.New(), ChainID: poolTestChain, Vault: v,
+			TxHash: fmt.Sprintf("0x%064x", i+1), Block: 101, Kind: VaultEventFilled, Spread: &spread, BlockTime: time.Now()}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum, err := r.it.VaultPoolSummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Spread30d != "1" {
+		t.Fatalf("spread30d = %q, want this vault's 1", sum.Spread30d)
 	}
 }

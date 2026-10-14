@@ -3,6 +3,7 @@ package blockchain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -175,9 +176,18 @@ func (c *EVMClient) GetTokenAllowance(tokenAddress, owner, spender string) (*big
 	return allowance, nil
 }
 
-// PrepareNativeTransfer builds an unsigned native token transfer transaction and returns it as JSON bytes.
-func (c *EVMClient) PrepareNativeTransfer(from, to string, amountWei *big.Int) ([]byte, error) {
-	fromAddr := common.HexToAddress(from)
+// ErrEstimateGas marks a PrepareContractCall whose gas estimate failed (with
+// no fallback): the call would revert, or the node could not say. The node's
+// error stays in the chain, so a caller can still decode its revert data.
+var ErrEstimateGas = errors.New("estimate gas (would revert)")
+
+// PrepareContractCall is the one unsigned-transaction builder: nonce (a hint —
+// a KeyLane chooses its own), gas price with headroom (SuggestGasPrice), the
+// gas estimate of the call, and the UnsignedTx JSON every signer and the app
+// take. to is written as given; a nil value is a zero-value call. A failed
+// estimate uses fallbackGas when it is non-zero, else returns ErrEstimateGas
+// wrapping the node's error.
+func (c *EVMClient) PrepareContractCall(from, to string, data []byte, value *big.Int, fallbackGas uint64) ([]byte, error) {
 	toAddr := common.HexToAddress(to)
 
 	nonce, err := c.GetNonce(from)
@@ -190,111 +200,49 @@ func (c *EVMClient) PrepareNativeTransfer(from, to string, amountWei *big.Int) (
 		return nil, fmt.Errorf("failed to get gas price: %w", err)
 	}
 
-	gasLimit, err := c.EstimateGas(ethereum.CallMsg{
-		From:  fromAddr,
-		To:    &toAddr,
-		Value: amountWei,
-	})
+	gasLimit, err := c.EstimateGas(ethereum.CallMsg{From: common.HexToAddress(from), To: &toAddr, Value: value, Data: data})
 	if err != nil {
-		gasLimit = 21000
+		if fallbackGas == 0 {
+			return nil, fmt.Errorf("%w: %w", ErrEstimateGas, err)
+		}
+		gasLimit = fallbackGas
 	}
 
-	tx := UnsignedTx{
+	txValue := "0"
+	if value != nil {
+		txValue = value.String()
+	}
+	return json.Marshal(UnsignedTx{
 		Nonce:    nonce,
 		GasPrice: gasPrice.String(),
 		GasLimit: gasLimit,
 		To:       to,
-		Value:    amountWei.String(),
-		Data:     "",
+		Value:    txValue,
+		Data:     common.Bytes2Hex(data),
 		ChainID:  c.chainID.String(),
-	}
+	})
+}
 
-	return json.Marshal(tx)
+// PrepareNativeTransfer builds an unsigned native token transfer transaction and returns it as JSON bytes.
+func (c *EVMClient) PrepareNativeTransfer(from, to string, amountWei *big.Int) ([]byte, error) {
+	return c.PrepareContractCall(from, to, nil, amountWei, 21000)
 }
 
 // PrepareERC20Transfer builds an unsigned ERC-20 transfer transaction and returns it as JSON bytes.
 func (c *EVMClient) PrepareERC20Transfer(tokenAddress, from, to string, amount *big.Int) ([]byte, error) {
-	toAddr := common.HexToAddress(to)
-	tokenAddr := common.HexToAddress(tokenAddress)
-	fromAddr := common.HexToAddress(from)
-
-	data, err := ERC20TransferData(toAddr, amount)
+	data, err := ERC20TransferData(common.HexToAddress(to), amount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack transfer call: %w", err)
 	}
-
-	nonce, err := c.GetNonce(from)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %w", err)
-	}
-
-	gasPrice, err := c.SuggestGasPrice()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get gas price: %w", err)
-	}
-
-	gasLimit, err := c.EstimateGas(ethereum.CallMsg{
-		From: fromAddr,
-		To:   &tokenAddr,
-		Data: data,
-	})
-	if err != nil {
-		// Use a reasonable default if estimation fails
-		gasLimit = 100000
-	}
-
-	tx := UnsignedTx{
-		Nonce:    nonce,
-		GasPrice: gasPrice.String(),
-		GasLimit: gasLimit,
-		To:       tokenAddress,
-		Value:    "0",
-		Data:     common.Bytes2Hex(data),
-		ChainID:  c.chainID.String(),
-	}
-
-	return json.Marshal(tx)
+	// A failed estimate takes a reasonable default.
+	return c.PrepareContractCall(from, tokenAddress, data, nil, 100000)
 }
 
 // PrepareERC20Approve builds an unsigned ERC-20 approve transaction and returns it as JSON bytes.
 func (c *EVMClient) PrepareERC20Approve(tokenAddress, owner, spender string, amount *big.Int) ([]byte, error) {
-	spenderAddr := common.HexToAddress(spender)
-	tokenAddr := common.HexToAddress(tokenAddress)
-	ownerAddr := common.HexToAddress(owner)
-
-	data, err := parsedERC20ABI.Pack("approve", spenderAddr, amount)
+	data, err := parsedERC20ABI.Pack("approve", common.HexToAddress(spender), amount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack approve call: %w", err)
 	}
-
-	nonce, err := c.GetNonce(owner)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get nonce: %w", err)
-	}
-
-	gasPrice, err := c.SuggestGasPrice()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get gas price: %w", err)
-	}
-
-	gasLimit, err := c.EstimateGas(ethereum.CallMsg{
-		From: ownerAddr,
-		To:   &tokenAddr,
-		Data: data,
-	})
-	if err != nil {
-		gasLimit = 80000
-	}
-
-	tx := UnsignedTx{
-		Nonce:    nonce,
-		GasPrice: gasPrice.String(),
-		GasLimit: gasLimit,
-		To:       tokenAddress,
-		Value:    "0",
-		Data:     common.Bytes2Hex(data),
-		ChainID:  c.chainID.String(),
-	}
-
-	return json.Marshal(tx)
+	return c.PrepareContractCall(owner, tokenAddress, data, nil, 80000)
 }
