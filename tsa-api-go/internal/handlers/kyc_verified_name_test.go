@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -586,5 +588,105 @@ func TestGetAllVerificationsExposesVerifiedName(t *testing.T) {
 	}
 	if len(resp.Data) != 1 || resp.Data[0].VerifiedLegalName != "ADAEZE NWANKWO" {
 		t.Fatalf("expected verifiedLegalName on the listing row, got %+v", resp.Data)
+	}
+}
+
+// ---------- admin override ----------
+
+func adminOverrideRequest(h *Handlers, admin *models.User, userID uuid.UUID, body string) *httptest.ResponseRecorder {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", admin)
+	c.Params = gin.Params{{Key: "id", Value: userID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/api/kyc/admin/override/"+userID.String(),
+		strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.AdminOverrideKYC(c)
+	return w
+}
+
+func storedIdentity(t *testing.T, db *gorm.DB, id uuid.UUID) (status, name string) {
+	t.Helper()
+	var row struct {
+		VerificationStatus string
+		VerifiedLegalName  sql.NullString
+	}
+	db.Table("users").Select("verification_status", "verified_legal_name").Where("id = ?", id).Scan(&row)
+	return row.VerificationStatus, row.VerifiedLegalName.String
+}
+
+// An approval that stores no name leaves the user "verified" yet refused at
+// every pay-in, so the override refuses rather than half-approve.
+func TestAdminOverrideRefusesWithoutAnyLegalName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	user := createKYCTestUser(t, db, models.VerificationStatusRejected)
+
+	w := adminOverrideRequest(&Handlers{Config: &config.Config{}}, admin, user.ID, `{"notes":"ok"}`)
+
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "legal_name_required") {
+		t.Fatalf("want 400 legal_name_required, got %d %s", w.Code, w.Body.String())
+	}
+	if status, _ := storedIdentity(t, db, user.ID); status != models.VerificationStatusRejected {
+		t.Fatalf("refused override still changed status to %q", status)
+	}
+}
+
+func TestAdminOverrideStoresTypedLegalName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	user := createKYCTestUser(t, db, models.VerificationStatusRejected)
+
+	w := adminOverrideRequest(&Handlers{Config: &config.Config{}}, admin, user.ID,
+		`{"notes":"ok","legalName":"  ADEBAYO   OKONKWO "}`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("override: %d %s", w.Code, w.Body.String())
+	}
+	status, name := storedIdentity(t, db, user.ID)
+	if status != models.VerificationStatusVerified || name != "ADEBAYO OKONKWO" {
+		t.Fatalf("got status %q name %q", status, name)
+	}
+	var entries []models.VerificationLog
+	db.Where("user_id = ?", user.ID).Find(&entries)
+	for _, e := range entries {
+		if strings.Contains(e.Notes+string(e.Metadata), "ADEBAYO") {
+			t.Fatalf("verification log stored identity data: %s", e.Metadata)
+		}
+	}
+}
+
+func TestAdminOverrideReadsNameFromDiditSession(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	user := createKYCTestUser(t, db, models.VerificationStatusRejected)
+	db.Model(user).Update("didit_session_id", "sess-1")
+	user.DiditSessionID = "sess-1"
+	didit := diditDecisionStub(t, map[string]string{"sess-1": approvedDecision("CHIOMA EZE")})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	if w := adminOverrideRequest(h, admin, user.ID, `{}`); w.Code != http.StatusOK {
+		t.Fatalf("override: %d %s", w.Code, w.Body.String())
+	}
+	if _, name := storedIdentity(t, db, user.ID); name != "CHIOMA EZE" {
+		t.Fatalf("got name %q", name)
+	}
+}
+
+// Re-approving must not become a back door around the name-change review.
+func TestAdminOverrideNeverReplacesADifferentStoredName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	user := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	db.Model(user).Update("verified_legal_name", "CHIOMA EZE")
+
+	w := adminOverrideRequest(&Handlers{Config: &config.Config{}}, admin, user.ID, `{"legalName":"SOMEONE ELSE"}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d %s", w.Code, w.Body.String())
+	}
+	if _, name := storedIdentity(t, db, user.ID); name != "CHIOMA EZE" {
+		t.Fatalf("stored name replaced with %q", name)
 	}
 }
