@@ -115,15 +115,22 @@ type KeyLaneState struct {
 
 func (KeyLaneState) TableName() string { return "key_lane_states" }
 
-// KeyLaneRetiredOp is a tombstone: an operation key the caller gave up on,
-// proven (under the lane lock) never to have been allocated. Any later
-// allocation for it is refused, so a slow or concurrent attempt of the
-// retired operation can never be sent after the caller moved on.
+// KeyLaneRetiredOp is a tombstone: an operation key a caller gave up on,
+// proven (under the lane lock) to hold no live allocation. Seq counts the
+// give-ups: an attempt of the operation that began before the latest one (it
+// read a lower seq) is refused at its commit, so a slow or concurrent attempt
+// can never be sent after the caller moved on; an attempt begun after it (a
+// deliberate retry) proceeds.
 type KeyLaneRetiredOp struct {
-	ChainID   int64     `gorm:"primaryKey;autoIncrement:false" json:"chainId"`
-	Address   string    `gorm:"primaryKey;size:42" json:"address"` // lower-case
-	OpKey     string    `gorm:"primaryKey;size:200" json:"opKey"`
+	ChainID int64  `gorm:"primaryKey;autoIncrement:false" json:"chainId"`
+	Address string `gorm:"primaryKey;size:42" json:"address"` // lower-case
+	OpKey   string `gorm:"primaryKey;size:200" json:"opKey"`
+	Seq     int64  `gorm:"not null;default:0" json:"seq"`
+	// Permanent: no attempt of the key may ever commit again (a give-up whose
+	// retry is a NEW operation, e.g. a freed bridge leg's route).
+	Permanent bool      `gorm:"not null;default:false" json:"permanent"`
 	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 func (KeyLaneRetiredOp) TableName() string { return "key_lane_retired_ops" }

@@ -552,7 +552,9 @@ func (d *PoolDesk) broadcast(ctx context.Context, opens []*sliceOpen) {
 			log.Printf("[liquidity] slice=%s open not sent: %s", o.slice.ID, RedactAlertText(pre.err.Error()))
 			continue
 		}
-		hash, attempted, err := burst.Call(ctx, func() ([]byte, error) {
+		// The slice's open is the operation: a refusal is "not sent" only once
+		// the lane proved (RetireOp) nothing of it was committed.
+		hash, attempted, err := burst.Call(WithOperationRef(ctx, "pool_open:"+o.slice.ID.String()), func() ([]byte, error) {
 			// Under the lane lock, per slice: the chain's pending nonce, which
 			// the lane's floor then raises past a slice the RPC has not seen.
 			n, err := d.c.Probe.PendingNonceAt(ctx, treasury)

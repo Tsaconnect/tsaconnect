@@ -199,7 +199,8 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 	if err != nil {
 		return AuthorizationRelayResult{}, fmt.Errorf("sponsor: reserve: %w", err)
 	}
-	if existing != nil && existing.TxHash != "" && lane.callCancelled(ctx, existing.TxHash) {
+	if existing != nil && existing.TxHash != "" && lane.callCancelled(ctx, existing.TxHash) &&
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "auth_relay:"+existing.ID.String(), existing.TxHash) {
 		// The earlier relay was cancelled at its nonce (it never executed;
 		// authorizationState above still reads unused): its row goes and the
 		// authorization is relayed again.
@@ -245,7 +246,7 @@ func (a *AuthorizationRelayer) Relay(ctx context.Context, userID uuid.UUID, wall
 
 	// The sponsorship row's hash commits in the key lane's allocation
 	// transaction, with the signed relay (or neither does).
-	txHash, broadcastAttempted, err := lane.sendRecorded(ctx, func() ([]byte, error) {
+	txHash, broadcastAttempted, err := lane.sendRecorded(WithOperationRef(ctx, "auth_relay:"+row.ID.String()), func() ([]byte, error) {
 		return lane.Builder.BuildUnsignedTx(lane.Signer.Address(), token, calldata)
 	}, func(hctx context.Context, _ uint64, hash string) error {
 		return a.store.SetTxHash(hctx, row.ID, hash, "")

@@ -243,8 +243,10 @@ func TestPoolOpen_DuplicateTradeIdNeverLocksTwice(t *testing.T) {
 	units, _ := new(big.Int).SetString(sl.TokenAmount, 10)
 	o := &sliceOpen{slice: sl, ad: ad, units: units}
 	r.desk.broadcast(context.Background(), []*sliceOpen{o})
-	if r.chain.broadcasts != before || o.sent {
-		t.Fatalf("re-broadcast of slice %s: broadcasts %d → %d", sl.ID, before, r.chain.broadcasts)
+	// The slice's open operation already holds its allocation: the answer is
+	// that open, in flight (its own hash) — never a second broadcast.
+	if r.chain.broadcasts != before || (o.sent && !strings.EqualFold(o.hash, sl.OpenTxHash)) {
+		t.Fatalf("re-broadcast of slice %s: broadcasts %d → %d (sent=%v hash=%s want %s)", sl.ID, before, r.chain.broadcasts, o.sent, o.hash, sl.OpenTxHash)
 	}
 }
 

@@ -204,6 +204,13 @@ func (s *stubLegStore) Fail(ctx context.Context, id uuid.UUID, reason string) er
 	return s.rampLegStore.Fail(ctx, id, reason)
 }
 
+func (s *stubLegStore) FailExpected(ctx context.Context, id uuid.UUID, txHash, reason string) error {
+	if s.failErr != nil {
+		return s.failErr
+	}
+	return s.rampLegStore.FailExpected(ctx, id, txHash, reason)
+}
+
 // ── rig ────────────────────────────────────────────────────────────────────
 
 // conversionRig is one converted buy mid-flight: Paycrest has already paid the

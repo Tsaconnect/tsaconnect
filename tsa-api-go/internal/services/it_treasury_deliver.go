@@ -356,7 +356,7 @@ func (s *ITService) sendSale(ctx context.Context, sd *saleDesk, intentID uuid.UU
 	if err != nil {
 		if !attempted {
 			// Nothing was committed: free the leg; the next tick sends attempt n+1.
-			if ferr := legs.Fail(detached(ctx), leg.ID, "not broadcast: "+RedactAlertText(err.Error())); ferr != nil {
+			if ferr := legs.FailExpected(detached(ctx), leg.ID, "", "not broadcast: "+RedactAlertText(err.Error())); ferr != nil {
 				log.Printf("%s ALERT ramp_treasury_leg_fail_unrecorded intent=%s leg=%s err=%s", sd.tag, intent.ID, leg.ID, RedactAlertText(ferr.Error()))
 			}
 			return err
@@ -410,9 +410,9 @@ func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uui
 	// attempt (a new operation, a new nonce) — paid exactly once.
 	var cancelled bool
 	leg.TxHash, cancelled = sd.wallet.Treasury().followCall(ctx, leg.ChainKey, probe, s.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash)
-	if cancelled {
+	if cancelled && sd.wallet.Treasury().giveUp(ctx, leg.ChainKey, "ramp_leg:"+leg.ID.String(), leg.TxHash) {
 		log.Printf("%s ALERT ramp_treasury_send_cancelled intent=%s leg=%s tx=%s — the key lane cancelled it; a new attempt follows", sd.tag, intent.ID, leg.ID, leg.TxHash)
-		if err := s.treasuryLegs(s.db).Fail(ctx, leg.ID, "cancelled: "+ErrCallCancelled.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
+		if err := s.treasuryLegs(s.db).FailExpected(ctx, leg.ID, leg.TxHash, "cancelled: "+ErrCallCancelled.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
 			return err
 		}
 		return nil
@@ -444,7 +444,7 @@ func (s *ITService) finalizeSale(ctx context.Context, sd *saleDesk, intentID uui
 		}
 		// Free the leg; the next tick sends attempt n+1.
 		log.Printf("%s METRIC ramp_treasury_send_reverted intent=%s tx=%s", sd.tag, intent.ID, leg.TxHash)
-		if err := s.treasuryLegs(s.db).Fail(ctx, leg.ID, "reverted: "+verr.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
+		if err := s.treasuryLegs(s.db).FailExpected(ctx, leg.ID, leg.TxHash, "reverted: "+verr.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
 			return err
 		}
 		return nil

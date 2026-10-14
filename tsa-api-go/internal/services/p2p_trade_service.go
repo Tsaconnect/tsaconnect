@@ -2095,7 +2095,7 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 		// the treasury) until its hash is proven reverted (review C-1). A
 		// release the key lane COMMITTED (ErrPendingBroadcast: it keeps
 		// sending it) is in flight: never rolled back either.
-		if errors.Is(err, ErrTxNotBroadcast) || (!trade.IsPoolSlice() && !errors.Is(err, ErrPendingBroadcast)) {
+		if errors.Is(err, ErrTxNotBroadcast) || (!trade.IsPoolSlice() && !errors.Is(err, ErrPendingBroadcast) && !errors.Is(err, ErrSendOutcomeUnknown)) {
 			rollback()
 		}
 		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
@@ -2104,10 +2104,10 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	// wait is the release, not a failure).
 	ev, minedHash, err := s.verifyReleaseFollowing(ctx, escrow, signer, &trade, txHash)
 	if err != nil {
-		if !trade.IsPoolSlice() {
-			// Safe to step back: a retry is the same operation (the lane
-			// answers with this allocation, never a second release), and the
-			// reconciler settles a release that did land.
+		// Step back only when the lane proves the release holds nothing live
+		// or executed (RetireOp); a committed release stays releasing for the
+		// reconciler.
+		if !trade.IsPoolSlice() && laneOfSender(signer, trade.ChainID).GiveUp(ctx, signer.Address(), "p2p_release:"+trade.ID.String(), minedHash) {
 			rollback()
 		}
 		return nil, fmt.Errorf("verify on-chain release: %w", err)

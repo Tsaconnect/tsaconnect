@@ -351,8 +351,12 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 
 	// Built and broadcast under the key's lane: the nonce read in the build
 	// and the broadcast never interleave with another send on the same key.
+	// The request itself is the operation (its digest: the signed forward
+	// request, nonce included), so a client retry of the same request gets
+	// the same allocation, never a second relay.
 	built := false
-	txHash, _, err := r.lane.Send(ctx, func() ([]byte, error) {
+	op := "relay:" + crypto.Keccak256Hash(execData).Hex()
+	txHash, attempted, err := r.lane.Send(WithOperationRef(ctx, op), func() ([]byte, error) {
 		unsigned, err := r.builder.BuildUnsignedTx(r.signer.Address(), r.forwarder, execData)
 		if err != nil {
 			return nil, err
@@ -360,8 +364,18 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		built = true
 		return unsigned, nil
 	})
+	if txHash == "" {
+		txHash = uncertainTxHash(err)
+	}
 	switch {
 	case err == nil:
+	case attempted:
+		// Committed (in flight: ErrPendingBroadcast) or not provably unsent
+		// (ErrSendOutcomeUnknown): the relay may land, so its budget and the
+		// user's slot stay spent and the client gets the hash to follow.
+		r.metrics.RelayAttempt("ok", "in_flight")
+		log.Printf("[relayer] relay %s in flight: %s", txHash, RedactAlertText(err.Error()))
+		return txHash, nil
 	case errors.Is(err, ErrRelayerUnderfunded):
 		// The key lane's fee gate: this relay's own fee (plus the lane's
 		// reservation) is more than the relayer holds.
@@ -372,16 +386,12 @@ func (r *RelayerService) Relay(ctx context.Context, authenticatedWallet string, 
 		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "build")
 		return "", fmt.Errorf("relayer: build tx: %w", err)
-	case errors.Is(err, ErrTxNotBroadcast):
-		// Refused before it reached any mempool (a definite node refusal, a
-		// tx the lane would not sign): nothing was broadcast.
+	default:
+		// Not attempted: the lane proved (RetireOp) nothing of this request
+		// was committed.
 		releaseOurFault()
 		r.metrics.RelayAttempt("rejected", "not_broadcast")
 		return "", fmt.Errorf("relayer: not broadcast: %w", err)
-	default:
-		releaseOurFault()
-		r.metrics.RelayAttempt("error", "broadcast")
-		return "", fmt.Errorf("relayer: broadcast: %w", err)
 	}
 
 	r.metrics.RelayGasUnits(new(big.Int).SetUint64(req.Gas))

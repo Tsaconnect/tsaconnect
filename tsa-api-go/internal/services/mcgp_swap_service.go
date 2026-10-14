@@ -510,7 +510,15 @@ func (s *MCGPSwapService) operatorBroadcastLocked(ctx context.Context, callData 
 // transaction never executed (cancelled at its nonce, proven at the finality
 // depth): the op it carried can be decided as not done.
 func (s *MCGPSwapService) OperatorCallCancelled(ctx context.Context, txHash string) (bool, error) {
-	return s.operatorLane.CallCancelled(ctx, txHash)
+	c, err := s.operatorLane.CallCancelled(ctx, txHash)
+	if err != nil || !c {
+		return false, err
+	}
+	// Given up only through RetireOp: nothing live or executed holds it.
+	if s.operator == nil || !s.operatorLane.GiveUp(ctx, s.operator.Address(), "", txHash) {
+		return false, nil
+	}
+	return true, nil
 }
 
 // OperatorOps are the operator transactions a sequence may send.

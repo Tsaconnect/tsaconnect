@@ -116,7 +116,7 @@ func (g *GasTopUp) TopUp(ctx context.Context, user *models.User, orderID uuid.UU
 			}
 			return GasTopUpResult{}, ErrSponsorshipInProgress
 		}
-		if lane.callCancelled(ctx, existing.TxHash) {
+		if lane.callCancelled(ctx, existing.TxHash) && lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup:"+existing.ID.String(), existing.TxHash) {
 			// The earlier top-up was cancelled at its nonce: it never
 			// arrived. Its row goes; this request sends a new one.
 			if forgot, err := g.store.ForgetCancelled(ctx, existing.ID, existing.TxHash); err != nil || !forgot {
@@ -136,7 +136,7 @@ func (g *GasTopUp) TopUp(ctx context.Context, user *models.User, orderID uuid.UU
 		return GasTopUpResult{}, err
 	}
 	return g.sendTopUp(ctx, topUpSend{
-		lane: lane, wallet: order.WalletAddress, need: need, ref: "order=" + orderID.String(),
+		lane: lane, wallet: order.WalletAddress, need: need, ref: "order=" + orderID.String(), op: "gas_topup:" + row.ID.String(),
 		// The unused cap only applies when gas would actually be sent, so it
 		// runs after the balance read: a capped user who already holds enough
 		// gas still gets Skipped and can make their own transfer, rather than
@@ -174,6 +174,9 @@ type IntentTopUpStore interface {
 	MarkToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error)
 	ClearToppedUp(ctx context.Context, id uuid.UUID) error
 	RecordTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error
+	// ClearCancelledTopUp gives the claim back only while the intent still
+	// records txHash (the top-up the key lane cancelled).
+	ClearCancelledTopUp(ctx context.Context, id uuid.UUID, txHash string) (bool, error)
 }
 
 // TopUpForIntent sends her the source-chain gas to sign a sale's swap when she
@@ -217,13 +220,12 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 	if lane == nil {
 		return GasTopUpResult{}, ErrSponsorNotAvailable
 	}
-	if intent.TopUpTxHash != "" && lane.callCancelled(ctx, intent.TopUpTxHash) {
+	if h := intent.TopUpTxHash; h != "" && lane.callCancelled(ctx, h) &&
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_intent:"+intent.ID.String(), h) {
 		// Her earlier top-up was cancelled at its nonce (it never arrived):
-		// the once-per-sale claim is given back.
-		if err := store.ClearToppedUp(ctx, intent.ID); err != nil {
-			return GasTopUpResult{}, err
-		}
-		if err := store.RecordTopUp(ctx, intent.ID, "", ""); err != nil {
+		// the once-per-sale claim is given back — only while the intent still
+		// records that cancelled top-up.
+		if _, err := store.ClearCancelledTopUp(ctx, intent.ID, h); err != nil {
 			return GasTopUpResult{}, err
 		}
 		intent.TopUpTxHash = ""
@@ -236,7 +238,7 @@ func (g *GasTopUp) TopUpForIntent(ctx context.Context, user *models.User, intent
 	now := g.now()
 	claimed := false
 	return g.sendTopUp(ctx, topUpSend{
-		lane: lane, wallet: intent.SourceAddress, need: need, ref: "intent=" + intent.ID.String(),
+		lane: lane, wallet: intent.SourceAddress, need: need, ref: "intent=" + intent.ID.String(), op: "gas_topup_intent:" + intent.ID.String(),
 		admit: func() error {
 			y, m, d := now.UTC().Date()
 			today, err := store.CountToppedUpSince(ctx, user.ID, time.Date(y, m, d, 0, 0, 0, 0, time.UTC))
@@ -299,6 +301,8 @@ type DestTopUpStore interface {
 	MarkDestToppedUp(ctx context.Context, id uuid.UUID, at time.Time) (bool, error)
 	ClearDestToppedUp(ctx context.Context, id uuid.UUID) error
 	RecordDestTopUp(ctx context.Context, id uuid.UUID, txHash, amountWei string) error
+	// ClearCancelledDestTopUp: ClearCancelledTopUp for the destination top-up.
+	ClearCancelledDestTopUp(ctx context.Context, id uuid.UUID, txHash string) (bool, error)
 }
 
 // ErrDestGasUnavailable: a delivered checkout needs the destination chain's
@@ -351,13 +355,12 @@ func (g *GasTopUp) TopUpDestForIntent(ctx context.Context, user *models.User, in
 	if lane == nil {
 		return GasTopUpResult{}, ErrDestGasUnavailable
 	}
-	if intent.DestTopUpTxHash != "" && lane.callCancelled(ctx, intent.DestTopUpTxHash) {
+	if h := intent.DestTopUpTxHash; h != "" && lane.callCancelled(ctx, h) &&
+		lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), "gas_topup_dest:"+intent.ID.String(), h) {
 		// The earlier destination top-up was cancelled (it never arrived):
-		// the once-per-checkout claim is given back.
-		if err := store.ClearDestToppedUp(ctx, intent.ID); err != nil {
-			return GasTopUpResult{}, err
-		}
-		if err := store.RecordDestTopUp(ctx, intent.ID, "", ""); err != nil {
+		// the once-per-checkout claim is given back — only while the intent
+		// still records that cancelled top-up.
+		if _, err := store.ClearCancelledDestTopUp(ctx, intent.ID, h); err != nil {
 			return GasTopUpResult{}, err
 		}
 		intent.DestTopUpTxHash = ""
@@ -365,7 +368,7 @@ func (g *GasTopUp) TopUpDestForIntent(ctx context.Context, user *models.User, in
 	now := g.now()
 	claimed := false
 	res, err := g.sendTopUp(ctx, topUpSend{
-		lane: lane, wallet: intent.DestAddress, need: need, maxSend: priced, ref: "dest-intent=" + intent.ID.String(),
+		lane: lane, wallet: intent.DestAddress, need: need, maxSend: priced, ref: "dest-intent=" + intent.ID.String(), op: "gas_topup_dest:" + intent.ID.String(),
 		admit: func() error {
 			y, m, d := now.UTC().Date()
 			today, err := store.CountDestToppedUpSince(ctx, user.ID, time.Date(y, m, d, 0, 0, 0, 0, time.UTC))
@@ -534,6 +537,9 @@ type topUpSend struct {
 	// record is the top-up's pre-broadcast write, run in the key lane's
 	// allocation transaction (ctx carries it: LaneDB); its error sends nothing.
 	record func(ctx context.Context, txHash, amountWei string) error
+	// op is the top-up's operation key: a refusal is "not sent" only once the
+	// lane proved nothing of it committed, and a retry reuses its allocation.
+	op string
 	// sent is in-memory bookkeeping run after the commit, once the top-up was
 	// attempted (sent or in flight) — never inside the lane's transaction.
 	sent func(txHash string)
@@ -595,7 +601,11 @@ func (g *GasTopUp) sendTopUp(ctx context.Context, s topUpSend) (GasTopUpResult, 
 	if s.record != nil {
 		hook = func(hctx context.Context, _ uint64, hash string) error { return s.record(hctx, hash, amount.String()) }
 	}
-	txHash, broadcastAttempted, err := lane.sendRecorded(ctx, func() ([]byte, error) {
+	sendCtx := ctx
+	if s.op != "" {
+		sendCtx = WithOperationRef(ctx, s.op)
+	}
+	txHash, broadcastAttempted, err := lane.sendRecorded(sendCtx, func() ([]byte, error) {
 		return lane.Native.PrepareNativeTransfer(lane.Signer.Address(), s.wallet, amount)
 	}, hook)
 	if broadcastAttempted && s.sent != nil {

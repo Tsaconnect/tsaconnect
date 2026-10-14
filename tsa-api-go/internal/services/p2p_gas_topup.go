@@ -132,6 +132,7 @@ type p2pDrip struct {
 	at          time.Time
 	postBalance *big.Int
 	txHash      string
+	op          string
 }
 
 // NewP2PGasSponsor is nil when sponsor has no lane or there is no need
@@ -207,8 +208,9 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 	}
 
 	var slot SponsorReservation
+	dripOp := "p2p_drip:" + uuid.NewString() // one drip, one operation
 	res, err := g.sendTopUp(ctx, topUpSend{
-		lane: lane, wallet: wallet, need: need,
+		lane: lane, wallet: wallet, need: need, op: dripOp,
 		ref: "p2p=" + string(req.Action) + " user=" + user.ID.String(),
 		admit: func() error {
 			s, err := p.perUser.ReserveUser("p2p:" + user.ID.String())
@@ -227,7 +229,7 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 		sent: func(txHash string) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			p.lastDrip[user.ID] = p2pDrip{at: p.now(), postBalance: new(big.Int).Set(need), txHash: txHash}
+			p.lastDrip[user.ID] = p2pDrip{at: p.now(), postBalance: new(big.Int).Set(need), txHash: txHash, op: dripOp}
 		},
 	})
 	switch {
@@ -252,7 +254,7 @@ func (p *P2PGasSponsor) refuseUnusedDrip(ctx context.Context, lane *SponsorLane,
 	if !ok {
 		return nil
 	}
-	if lane.callCancelled(ctx, last.txHash) {
+	if lane.callCancelled(ctx, last.txHash) && lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), last.op, last.txHash) {
 		// The last drip was cancelled at its nonce: it never arrived, so it
 		// is not an unused drip — a new one may go.
 		p.mu.Lock()

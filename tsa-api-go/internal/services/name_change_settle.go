@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"strings"
@@ -232,6 +233,7 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 		}
 		return res.Error
 	})
+	sendCtx = WithOperationRef(sendCtx, nameChangeRefundOp(ch))
 	txHash, attempted, err := s.rail.Refund(sendCtx, ch.PayChain, ch.PayToken, ch.PayFrom, amount, usd)
 	switch {
 	case err == nil:
@@ -243,6 +245,12 @@ func (s *NameChangeService) refund(ctx context.Context, ch *models.UserNameChang
 		log.Printf("[name-change] ALERT name_change_refund_uncertain_total=1 change=%s chain=%s tx=%s — the refund may have left; check the chain and record it as sent once mined, or leave it for support: %v",
 			ch.ID, ch.PayChain, txHash, err)
 	}
+}
+
+// nameChangeRefundOp is a refund attempt's operation key: one per attempt,
+// so a refund given up (refund_failed) is retried as a new operation.
+func nameChangeRefundOp(ch *models.UserNameChange) string {
+	return fmt.Sprintf("name_change_refund:%s:%d", ch.ID, ch.RefundAttempts)
 }
 
 // refundNotSent records a refund that provably never left — from one of from —

@@ -30,6 +30,7 @@ type rampLegStore interface {
 	Confirm(ctx context.Context, id uuid.UUID, amountReceived string, at time.Time) error
 	Fail(ctx context.Context, id uuid.UUID, reason string) error
 	FailUnsent(ctx context.Context, id uuid.UUID, reason string) error
+	FailExpected(ctx context.Context, id uuid.UUID, txHash, reason string) error
 	ForOrder(ctx context.Context, orderID uuid.UUID) ([]models.RampLeg, error)
 	NextAttempt(ctx context.Context, orderID uuid.UUID, kind string) (int, error)
 }
@@ -158,6 +159,26 @@ func (s *GormRampLegStore) Fail(ctx context.Context, id uuid.UUID, reason string
 	res := s.DB.WithContext(ctx).Model(&models.RampLeg{}).
 		Where("id = ? AND status = ?", id, models.RampLegStatusPending).
 		Updates(map[string]any{"status": models.RampLegStatusFailed, "error": reason})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrLegNotPending
+	}
+	return nil
+}
+
+// FailExpected fails a pending leg only while it still records txHash (""
+// for none): a leg whose recorded transaction moved on (a speed-up hash
+// written, a send committed) is never failed by a caller that read it stale.
+func (s *GormRampLegStore) FailExpected(ctx context.Context, id uuid.UUID, txHash, reason string) error {
+	q := s.DB.WithContext(ctx).Model(&models.RampLeg{}).Where("id = ? AND status = ?", id, models.RampLegStatusPending)
+	if txHash == "" {
+		q = q.Where("(tx_hash = '' OR tx_hash IS NULL)")
+	} else {
+		q = q.Where("tx_hash = ?", txHash)
+	}
+	res := q.Updates(map[string]any{"status": models.RampLegStatusFailed, "error": truncateRunes(reason, 512)})
 	if res.Error != nil {
 		return res.Error
 	}

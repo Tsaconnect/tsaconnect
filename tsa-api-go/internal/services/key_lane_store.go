@@ -55,6 +55,9 @@ type KeyLaneStore interface {
 	Cancelling(ctx context.Context, chainID int64, address string, below uint64) ([]models.KeyLaneNonce, error)
 	// Hold is the lane's shared state (nil when none was ever written).
 	Hold(ctx context.Context, chainID int64, address string) (*models.KeyLaneState, error)
+	// RetiredSeq is an operation key's tombstone sequence, read outside the
+	// lock when an attempt begins.
+	RetiredSeq(ctx context.Context, chainID int64, address, opKey string) (int64, error)
 }
 
 // errStaleAllocation: an allocation update named a version (or a status)
@@ -81,11 +84,20 @@ type KeyLaneTxn interface {
 	// MarkMined marks allocations below mined as mined and drops the raw
 	// bytes of their signings.
 	MarkMined(mined uint64) error
-	// RetireOp tombstones opKey if it holds no allocation (allocated=false);
-	// Retired reports a tombstone. Both under the lane lock, so a retire and
-	// an allocation for the same key can never both win.
-	RetireOp(opKey string) (allocated bool, err error)
-	Retired(opKey string) (bool, error)
+	// RetireOp gives up on opKey: when neither the key nor the signing hash
+	// (if given) holds an allocation that is live or executed (a cancelled
+	// one does not count), it bumps the key's tombstone sequence and returns
+	// nil; otherwise it returns that allocation. RetiredSeq is the key's
+	// tombstone sequence (0: never retired). Both under the lane lock, so a
+	// retire and an allocation for the same key can never both win.
+	RetireOp(opKey, hash string, permanent bool) (*models.KeyLaneNonce, error)
+	RetiredSeq(opKey string) (seq int64, permanent bool, err error)
+	// AllocationOfHash is the allocation a signing hash belongs to.
+	AllocationOfHash(hash string) (*models.KeyLaneNonce, error)
+	// Withdraw removes an allocation whose call provably never left — only
+	// the in-memory store's test path for signers that sign and broadcast in
+	// one call; the database store refuses it.
+	Withdraw(allocID uuid.UUID) error
 	// Hold is the lane's shared hold; SetHold writes it (nil nonce clears).
 	Hold() (*models.KeyLaneState, error)
 	SetHold(nonce *uint64, reason string, at time.Time) error
@@ -316,6 +328,11 @@ func (s *GormKeyLaneStore) Cancelling(ctx context.Context, chainID int64, addres
 	return out, err
 }
 
+func (s *GormKeyLaneStore) RetiredSeq(ctx context.Context, chainID int64, address, opKey string) (int64, error) {
+	seq, _, err := s.txn(ctx, chainID, address).RetiredSeq(opKey)
+	return seq, err
+}
+
 func (s *GormKeyLaneStore) Hold(ctx context.Context, chainID int64, address string) (*models.KeyLaneState, error) {
 	return s.txn(ctx, chainID, address).Hold()
 }
@@ -440,24 +457,49 @@ func (q *gormLaneTxn) MarkMined(mined uint64) error {
 
 func (q *gormLaneTxn) DB() *gorm.DB { return q.db }
 
-func (q *gormLaneTxn) RetireOp(opKey string) (bool, error) {
+func (q *gormLaneTxn) RetireOp(opKey, hash string, permanent bool) (*models.KeyLaneNonce, error) {
 	if a, err := q.ByOp(opKey); err != nil || a != nil {
-		return a != nil, err
+		return a, err
 	}
-	// No live allocation (a MINED one freed its key: the caller's own record,
-	// written by its hook, proves that case): tombstone the key so no later
-	// allocation for it is ever made.
-	return false, q.db.Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&models.KeyLaneRetiredOp{ChainID: q.chainID, Address: q.address, OpKey: opKey, CreatedAt: time.Now()}).Error
+	if hash != "" {
+		a, err := q.AllocationOfHash(hash)
+		if err != nil || (a != nil && a.Status != models.KeyLaneNonceCancelled) {
+			return a, err // live, or executed (mined): never given up
+		}
+	}
+	if opKey == "" {
+		return nil, nil
+	}
+	now := time.Now()
+	set := map[string]any{"seq": gorm.Expr("key_lane_retired_ops.seq + 1"), "updated_at": now}
+	if permanent {
+		set["permanent"] = true
+	}
+	return nil, q.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "chain_id"}, {Name: "address"}, {Name: "op_key"}},
+		DoUpdates: clause.Assignments(set),
+	}).Create(&models.KeyLaneRetiredOp{ChainID: q.chainID, Address: q.address, OpKey: opKey, Seq: 1, Permanent: permanent, CreatedAt: now, UpdatedAt: now}).Error
 }
 
-func (q *gormLaneTxn) Retired(opKey string) (bool, error) {
+func (q *gormLaneTxn) Withdraw(uuid.UUID) error {
+	return errors.New("key lane: a committed allocation is never withdrawn from the database store")
+}
+
+func (q *gormLaneTxn) RetiredSeq(opKey string) (int64, bool, error) {
 	if opKey == "" {
-		return false, nil
+		return 0, false, nil
 	}
-	var n int64
-	err := q.lane().Model(&models.KeyLaneRetiredOp{}).Where("op_key = ?", opKey).Count(&n).Error
-	return n > 0, err
+	var rows []models.KeyLaneRetiredOp
+	if err := q.lane().Where("op_key = ?", opKey).Limit(1).Find(&rows).Error; err != nil || len(rows) == 0 {
+		return 0, false, err
+	}
+	return rows[0].Seq, rows[0].Permanent, nil
+}
+
+func (q *gormLaneTxn) AllocationOfHash(hash string) (*models.KeyLaneNonce, error) {
+	sub := q.db.Model(&models.KeyLaneTx{}).Select("allocation_id").
+		Where("hash = ? AND chain_id = ? AND address = ?", strings.ToLower(hash), q.chainID, q.address)
+	return firstOrNil(q.db.Where("id IN (?)", sub))
 }
 
 func (q *gormLaneTxn) Hold() (*models.KeyLaneState, error) {
@@ -515,10 +557,11 @@ func (q *gormLaneTxn) Signings(allocID uuid.UUID) ([]models.KeyLaneTx, error) {
 // memKeyLaneStore is the KeyLaneStore in memory: a registry without the
 // database (tests, local tooling). Not durable.
 type memKeyLaneStore struct {
-	mu     sync.Mutex
-	allocs []*models.KeyLaneNonce
-	txs    []*models.KeyLaneTx
-	states map[string]models.KeyLaneState
+	mu      sync.Mutex
+	allocs  []*models.KeyLaneNonce
+	txs     []*models.KeyLaneTx
+	states  map[string]models.KeyLaneState
+	retired map[string]int64
 }
 
 func newMemKeyLaneStore() *memKeyLaneStore { return &memKeyLaneStore{} }
@@ -529,9 +572,12 @@ func (m *memKeyLaneStore) WithLock(_ context.Context, chainID int64, address str
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// A failed body must leave nothing behind: work on copies, commit on success.
-	work := &memKeyLaneStore{states: map[string]models.KeyLaneState{}}
+	work := &memKeyLaneStore{states: map[string]models.KeyLaneState{}, retired: map[string]int64{}}
 	for k, v := range m.states {
 		work.states[k] = v
+	}
+	for k, v := range m.retired {
+		work.retired[k] = v
 	}
 	for _, a := range m.allocs {
 		c := *a
@@ -544,7 +590,7 @@ func (m *memKeyLaneStore) WithLock(_ context.Context, chainID int64, address str
 	if err := fn(&memLaneTxn{m: work, chainID: chainID, address: strings.ToLower(address)}); err != nil {
 		return err
 	}
-	m.allocs, m.txs, m.states = work.allocs, work.txs, work.states
+	m.allocs, m.txs, m.states, m.retired = work.allocs, work.txs, work.states, work.retired
 	return nil
 }
 
@@ -642,6 +688,13 @@ func (m *memKeyLaneStore) Cancelling(_ context.Context, chainID int64, address s
 		}
 	}
 	return out, nil
+}
+
+func (m *memKeyLaneStore) RetiredSeq(_ context.Context, chainID int64, address, opKey string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seq, _, err := m.read(chainID, address).RetiredSeq(opKey)
+	return seq, err
 }
 
 func (m *memKeyLaneStore) Hold(_ context.Context, chainID int64, address string) (*models.KeyLaneState, error) {
@@ -774,20 +827,59 @@ func (q *memLaneTxn) MarkMined(mined uint64) error {
 
 func (q *memLaneTxn) DB() *gorm.DB { return nil }
 
-func (q *memLaneTxn) RetireOp(opKey string) (bool, error) {
+func (q *memLaneTxn) RetireOp(opKey, hash string, permanent bool) (*models.KeyLaneNonce, error) {
 	if a, _ := q.ByOp(opKey); a != nil {
-		return true, nil
+		return a, nil
 	}
-	if q.m.states == nil {
-		q.m.states = map[string]models.KeyLaneState{}
+	if hash != "" {
+		if a, _ := q.AllocationOfHash(hash); a != nil && a.Status != models.KeyLaneNonceCancelled {
+			return a, nil
+		}
 	}
-	q.m.states["retired:"+q.stateKey()+":"+opKey] = models.KeyLaneState{}
-	return false, nil
+	if opKey == "" {
+		return nil, nil
+	}
+	if q.m.retired == nil {
+		q.m.retired = map[string]int64{}
+	}
+	k := q.stateKey() + ":" + opKey
+	q.m.retired[k]++
+	if permanent {
+		q.m.retired[k] = 1 << 62 // never below any attempt's view: refused for good
+	}
+	return nil, nil
 }
 
-func (q *memLaneTxn) Retired(opKey string) (bool, error) {
-	_, ok := q.m.states["retired:"+q.stateKey()+":"+opKey]
-	return ok && opKey != "", nil
+func (q *memLaneTxn) Withdraw(allocID uuid.UUID) error {
+	allocs := q.m.allocs[:0]
+	for _, a := range q.m.allocs {
+		if a.ID != allocID {
+			allocs = append(allocs, a)
+		}
+	}
+	q.m.allocs = allocs
+	txs := q.m.txs[:0]
+	for _, t := range q.m.txs {
+		if t.AllocationID != allocID {
+			txs = append(txs, t)
+		}
+	}
+	q.m.txs = txs
+	return nil
+}
+
+func (q *memLaneTxn) RetiredSeq(opKey string) (int64, bool, error) {
+	n := q.m.retired[q.stateKey()+":"+opKey]
+	return n, n >= 1<<62, nil
+}
+
+func (q *memLaneTxn) AllocationOfHash(hash string) (*models.KeyLaneNonce, error) {
+	for _, t := range q.m.txs {
+		if t.ChainID == q.chainID && t.Address == q.address && strings.EqualFold(t.Hash, hash) {
+			return q.ByID(t.AllocationID)
+		}
+	}
+	return nil, nil
 }
 
 func (q *memLaneTxn) stateKey() string { return fmt.Sprintf("%d:%s", q.chainID, q.address) }

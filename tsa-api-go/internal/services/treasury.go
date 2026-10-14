@@ -632,6 +632,17 @@ func (t *Treasury) keyLane(chainKey string) *KeyLane {
 	return nil
 }
 
+// giveUp is RetireOp for a call this treasury's lane on chainKey sent: true
+// only when the operation (and hash's allocation) holds nothing live or
+// executed — the caller may then fail or retry it.
+func (t *Treasury) giveUp(ctx context.Context, chainKey, op, hash string) bool {
+	lane := t.Lane(chainKey)
+	if lane == nil || lane.SponsorLane == nil || lane.KeyLane == nil {
+		return true
+	}
+	return lane.KeyLane.GiveUp(ctx, lane.Signer.Address(), op, hash)
+}
+
 // followCall is the one post-send step every verifier keyed by a recorded
 // hash takes first: the call this treasury's lane on chainKey sent under old
 // is followed to whichever signing of the SAME call mined (refused signings

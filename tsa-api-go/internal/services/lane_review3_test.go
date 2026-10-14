@@ -165,6 +165,7 @@ type raceStore struct {
 	failCommit   atomic.Bool  // the next WithLock commits, then reports an error
 	failLock     atomic.Int32 // WithLock calls that fail before running
 	thenFailLock atomic.Bool  // after the commit error, the next WithLock fails
+	afterCommit  func()       // runs after a commit that then reports an error
 	allocOf      atomic.Int32 // AllocationOf calls
 	others       atomic.Int32 // other signing reads
 }
@@ -189,6 +190,9 @@ func (s *raceStore) WithLock(ctx context.Context, chainID int64, address string,
 	if err == nil && s.failCommit.CompareAndSwap(true, false) {
 		if s.thenFailLock.CompareAndSwap(true, false) {
 			s.failLock.Store(1)
+		}
+		if s.afterCommit != nil {
+			s.afterCommit()
 		}
 		return errors.New("driver: bad connection")
 	}
@@ -416,13 +420,13 @@ func TestGasTopUp_CancelledTopUpIsReplaced(t *testing.T) {
 func TestP2PGas_CancelledDripAllowsANewOne(t *testing.T) {
 	node := newChainNode(146)
 	var h string
-	kl, _, _ := cancelledLane(t, node, func(kl *KeyLane, raw *LocalKeyReleaseSigner) string {
-		h, _, _ = kl.Send(context.Background(), callTo(146, callA, "aa", 0))
+	kl, raw, _ := cancelledLane(t, node, func(kl *KeyLane, raw *LocalKeyReleaseSigner) string {
+		h, _, _ = kl.Send(WithOperationRef(context.Background(), "p2p_drip:d1"), callTo(146, callA, "aa", 0))
 		return h
 	})
 	user := uuid.New()
-	p := &P2PGasSponsor{now: time.Now, lastDrip: map[uuid.UUID]p2pDrip{user: {at: time.Now(), postBalance: big.NewInt(1), txHash: h}}}
-	lane := &SponsorLane{KeyLane: kl}
+	p := &P2PGasSponsor{now: time.Now, lastDrip: map[uuid.UUID]p2pDrip{user: {at: time.Now(), postBalance: big.NewInt(1), txHash: h, op: "p2p_drip:d1"}}}
+	lane := &SponsorLane{KeyLane: kl, Signer: raw}
 	if err := p.refuseUnusedDrip(context.Background(), lane, user, sponsorTestUser, big.NewInt(10)); err != nil {
 		t.Fatalf("a cancelled drip: %v, want a new one allowed", err)
 	}
@@ -479,7 +483,7 @@ type cancellingRail struct {
 	cancelled string
 }
 
-func (c *cancellingRail) CallCancelled(_ context.Context, _, h string) (bool, error) {
+func (c *cancellingRail) GiveUpCancelled(_ context.Context, _, _, h string) (bool, error) {
 	return strings.EqualFold(h, c.cancelled), nil
 }
 

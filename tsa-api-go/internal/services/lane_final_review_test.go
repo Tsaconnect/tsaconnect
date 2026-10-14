@@ -73,7 +73,7 @@ func TestFinalizeTreasuryBuy_RefusedFirstSigningSettlesOnTheMinedSpeedUp(t *test
 
 // Item 7: following is a NON-waiting receipt read, and a read error defers —
 // never "no receipt": the recorded hash is kept for the next tick.
-func TestMinedSigning_ReceiptReadErrorDefers(t *testing.T) {
+func TestCallOutcome_ReceiptReadErrorDefers(t *testing.T) {
 	store := sqliteLaneStore(t)
 	node := newChainNode(146)
 	node.mined = 5
@@ -90,12 +90,12 @@ func TestMinedSigning_ReceiptReadErrorDefers(t *testing.T) {
 	}
 	clock = clock.Add(keyLaneGapGrace + time.Second)
 	_ = lane.Watch(ctx)
-	got, err := lane.MinedSigning(ctx, h1, func(context.Context, string) (bool, error) { return false, errors.New("429") })
+	got, _, err := lane.CallOutcome(ctx, h1, func(context.Context, string) (bool, error) { return false, errors.New("429") })
 	if err == nil || got != h1 {
 		t.Fatalf("read error: %s %v, want %s kept with the error", got, err, h1)
 	}
 	final := lane.FinalHash(ctx, h1)
-	got, err = lane.MinedSigning(ctx, h1, func(_ context.Context, h string) (bool, error) { return strings.EqualFold(h, final), nil })
+	got, _, err = lane.CallOutcome(ctx, h1, func(_ context.Context, h string) (bool, error) { return strings.EqualFold(h, final), nil })
 	if err != nil || !strings.EqualFold(got, final) || strings.EqualFold(got, h1) {
 		t.Fatalf("mined replacement: %s %v, want %s", got, err, final)
 	}
@@ -581,12 +581,12 @@ func testRetiredRouteNeverRacesTheRetry(t *testing.T, store *GormKeyLaneStore, r
 	}
 	// The resume step, as resumeBridgeAfterApprove takes it.
 	free := func(leg *models.RampLeg) bool {
-		allocated, err := lane.RetireOp(ctx, lane.Address(), "ramp_leg:"+leg.ID.String()+":route")
+		held, err := lane.RetireOp(ctx, lane.Address(), "ramp_leg:"+leg.ID.String()+":route", "", true)
 		if err != nil {
 			t.Error(err)
 			return false
 		}
-		if allocated {
+		if held != nil {
 			return false
 		}
 		return legs.FailUnsent(ctx, leg.ID, "approve only: the route was never sent") == nil

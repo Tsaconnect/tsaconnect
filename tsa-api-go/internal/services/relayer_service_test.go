@@ -684,12 +684,15 @@ func TestRelayer_ConcurrentRelaysOnTheKeyLaneGetDistinctNonces(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			if _, err := r.svc.Relay(context.Background(), userAddr, r.req()); err != nil {
+			// Three different requests (one request is one operation: a
+			// retry of the same one reuses its allocation).
+			req := r.req(func(f *ForwardRequest) { f.Data = spendCalldata(int64(5_000 + i)) })
+			if _, err := r.svc.Relay(context.Background(), userAddr, req); err != nil {
 				t.Error(err)
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
 	seen := map[uint64]bool{}

@@ -180,11 +180,23 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     sponsorship / intent row's hash), the name-change fee refund (`fee_tx_hash`). An approve never
     inherits its route's hook: a bridge leg's approve records `approve_tx_hash` through its own
     (`WithApproveHook`); a leg whose approve committed but whose route did not is freed after 2 min
-    only through `KeyLane.RetireOp` — atomic under the lane lock: refused if the `:route` operation
-    holds an allocation, else a tombstone (`key_lane_retired_ops`) refuses any later allocation of it
-    (`ErrOperationRetired`, not sent) — and then only while the leg records no route hash
-    (`FailUnsent`); the route goes on a new attempt. This is the only "never allocated ⇒ free" path:
-    every other leg is failed only on its own send's not-attempted answer.
+    only through a PERMANENT `KeyLane.RetireOp` of its `:route` operation, and then only while the
+    leg records no route hash; the route goes on a new attempt.
+    **The give-up rule:** a caller may abandon an operation (fail or free its record, clear a claim,
+    roll back, retry on a new operation) only after `KeyLane.RetireOp(op, hash)` — under the lane
+    lock — proved it holds nothing live or executed (by its key and by the allocation of its
+    recorded hash; one resolved cancelled does not count) and bumped its tombstone
+    (`key_lane_retired_ops.seq`: an attempt of the op begun earlier is refused at its commit with
+    `ErrOperationRetired`; `permanent` refuses every later one). The lane applies it itself: every
+    not-attempted answer for an operation (a hold, a fee/floor read, a build error, the fee gate, a
+    hook refusal) passes through it, and an allocation found there is answered in flight instead.
+    Every operation therefore carries a key: legs `ramp_leg:<leg>`, opens `pool_open:<slice>`,
+    releases/resolves/cancels `p2p_release|p2p_resolve|p2p_cancel:<trade>`, IT ops
+    `it_op:<call hash>`, top-ups `gas_topup:<row>` / `gas_topup_intent|gas_topup_dest:<intent>` /
+    `p2p_drip:<uuid>`, relays `auth_relay:<row>` and `relay:<forward-request digest>` (a client retry
+    of the same request reuses its allocation; an in-flight relay answers its hash), name-change
+    refunds `name_change_refund:<change>:<attempt>`. Caller writes on give-up are conditional on the
+    recorded hash (`FailExpected`, `ClearCancelledTopUp` / `ClearCancelledDestTopUp`).
     IT operator ops write their row before the call and resolve by the contract ref, so they need
     none. In-memory bookkeeping (the P2P drip memory) runs after the commit, never in a hook.
     An error from the allocation transaction that is not the body's own refusal (fresh or reused
@@ -198,9 +210,10 @@ Raw signer keys (IT operator, gasless relayer, ramp gas sponsor, PM release loca
     "not sent". `attempted = false` means nothing was committed.
   - **C.** A committed signing IS its nonce's transaction until the chain mines that nonce (statuses
     `signed` → `sent` → `mined`). Refused or lost, the upkeep re-broadcasts the same bytes or speeds up
-    the SAME call until it mines. A call that can NEVER be sent — refused as call-intrinsic (intrinsic
-    gas too low, over the block gas limit), or for the RPC's tx-fee cap at its lowest-priced signing
-    with none accepted (`unsendableKind`) — or that a super-admin
+    the SAME call until it mines. A call that can NEVER be sent — with NO signing of it accepted, a
+    call-intrinsic refusal (intrinsic gas too low, over the block gas limit) or an RPC tx-fee-cap
+    refusal of its lowest-priced signing (`unsendableKind`); once any signing was accepted the lane
+    never cancels it and holds instead (that signing may still mine) — or that a super-admin
     cancels (`POST .../cancel`) is replaced at its nonce by a 0-value self-transfer priced above every
     earlier signing (same caps). A fee-cap refusal of a SPEED-UP while a cheaper signing is accepted
     only stops the bumping (hold), never cancels. Once the cancel's receipt is max(`keyLaneCancelDepth`

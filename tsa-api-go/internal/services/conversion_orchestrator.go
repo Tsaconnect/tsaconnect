@@ -1709,8 +1709,10 @@ func creditedToUser(order *models.PaycrestOrderRecord, legs []models.RampLeg) *b
 
 // failLeg records a leg as failed, treating "already terminal" as another tick
 // having got there first rather than as an error of its own.
+// failLeg fails a leg that recorded no transaction (a refusal before any
+// commit — the lane proved it, RetireOp — or a pre-send check).
 func (o *ConversionOrchestrator) failLeg(ctx context.Context, id uuid.UUID, reason string) error {
-	if err := o.legs.Fail(ctx, id, reason); err != nil && !errors.Is(err, ErrLegNotPending) {
+	if err := o.legs.FailExpected(ctx, id, "", reason); err != nil && !errors.Is(err, ErrLegNotPending) {
 		return err
 	}
 	return nil
@@ -2515,11 +2517,11 @@ func (o *ConversionOrchestrator) resumeBridgeAfterApprove(ctx context.Context, o
 	// stays in flight on it) or its operation key is tombstoned so no slow or
 	// concurrent attempt of it can ever be sent — only then is the leg freed,
 	// and only while it still records no route hash.
-	allocated, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), "ramp_leg:"+leg.ID.String()+":route")
+	held, err := lane.KeyLane.RetireOp(ctx, lane.Signer.Address(), "ramp_leg:"+leg.ID.String()+":route", "", true)
 	if err != nil {
 		return err
 	}
-	if allocated {
+	if held != nil {
 		log.Printf("[ramp-conversion] ALERT ramp_conversion_route_unrecorded_total=1 order=%s leg=%s — the route is committed but not on the leg", order.ID, leg.ID)
 		return nil
 	}
@@ -2541,13 +2543,20 @@ func (o *ConversionOrchestrator) followLeg(ctx context.Context, leg *models.Ramp
 	}
 	var cancelled bool
 	leg.TxHash, cancelled = o.treasury.followCall(ctx, leg.ChainKey, nil, o.db, &models.RampLeg{}, "tx_hash", leg.ID, leg.TxHash)
-	if cancelled {
-		log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_cancelled_total=1 leg=%s kind=%s tx=%s — the key lane cancelled it", leg.ID, leg.Kind, leg.TxHash)
-		if err := o.failLeg(detached(ctx), leg.ID, "cancelled: "+ErrCallCancelled.Error()); err != nil {
-			log.Printf("[ramp-conversion] fail cancelled leg %s: %v", leg.ID, err)
-		}
+	if !cancelled {
+		return false
 	}
-	return cancelled
+	// Give up only through RetireOp: nothing of this leg's operations may be
+	// live (a late attempt) or executed.
+	op := "ramp_leg:" + leg.ID.String()
+	if !o.treasury.giveUp(ctx, leg.ChainKey, op, leg.TxHash) || !o.treasury.giveUp(ctx, leg.ChainKey, op+":route", "") {
+		return false // in flight after all: keep observing
+	}
+	log.Printf("[ramp-conversion] ALERT ramp_conversion_leg_cancelled_total=1 leg=%s kind=%s tx=%s — the key lane cancelled it", leg.ID, leg.Kind, leg.TxHash)
+	if err := o.legs.FailExpected(detached(ctx), leg.ID, leg.TxHash, "cancelled: "+ErrCallCancelled.Error()); err != nil && !errors.Is(err, ErrLegNotPending) {
+		log.Printf("[ramp-conversion] fail cancelled leg %s: %v", leg.ID, err)
+	}
+	return true
 }
 
 // legSend is the send context of a treasury leg: the leg is the operation

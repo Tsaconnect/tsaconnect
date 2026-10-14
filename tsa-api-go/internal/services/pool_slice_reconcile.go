@@ -421,8 +421,18 @@ func (s *ITService) SliceHashReverted(ctx context.Context, slice *models.P2PTrad
 	}
 	// A release (or resolve) the release key's lane CANCELLED at its nonce
 	// never executed: as final a "moved nothing" as a deep revert.
-	if c, err := laneOfSender(d.c.Sender, slice.ChainID).CallCancelled(ctx, slice.ReleaseTxHash); err != nil || c {
-		return c, err
+	if lane := laneOfSender(d.c.Sender, slice.ChainID); lane != nil {
+		c, err := lane.CallCancelled(ctx, slice.ReleaseTxHash)
+		if err != nil {
+			return false, err
+		}
+		if c {
+			// Given up only through RetireOp (the release or resolve
+			// operation holds nothing live or executed).
+			addr := d.c.Sender.Address()
+			return lane.GiveUp(ctx, addr, "p2p_release:"+slice.ID.String(), slice.ReleaseTxHash) &&
+				lane.GiveUp(ctx, addr, "p2p_resolve:"+slice.ID.String(), ""), nil
+		}
 	}
 	gen := d.c.Probe.EndpointGeneration()
 	need := s.saleDepth()

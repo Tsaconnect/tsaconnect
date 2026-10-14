@@ -52,6 +52,16 @@ func (f *fakeDestTopUps) RecordDestTopUp(_ context.Context, id uuid.UUID, tx, we
 	return nil
 }
 
+func (f *fakeDestTopUps) ClearCancelledDestTopUp(_ context.Context, id uuid.UUID, txHash string) (bool, error) {
+	if f.recorded[id][0] != txHash {
+		return false, nil
+	}
+	delete(f.recorded, id)
+	delete(f.claimed, id)
+	f.cleared++
+	return true, nil
+}
+
 const destNeedWei = "400000000000000" // 0.0004 S, under the rig lane's 0.001 ceiling
 
 func newDestTopUpRig(t *testing.T) (*GasTopUp, *models.User, *sponsorRig) {

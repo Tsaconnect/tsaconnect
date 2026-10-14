@@ -1108,6 +1108,23 @@ func (s *SellIntentService) RecordTopUp(ctx context.Context, id uuid.UUID, txHas
 		Updates(map[string]any{"top_up_tx_hash": txHash, "top_up_wei": amountWei}).Error
 }
 
+// ClearCancelledTopUp gives a sale's top-up claim back, only while the intent
+// still records txHash (the top-up the key lane proved cancelled).
+func (s *SellIntentService) ClearCancelledTopUp(ctx context.Context, id uuid.UUID, txHash string) (bool, error) {
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND top_up_tx_hash = ? AND top_up_tx_hash <> ''", id, txHash).
+		Updates(map[string]any{"topped_up_at": nil, "top_up_tx_hash": "", "top_up_wei": ""})
+	return res.RowsAffected == 1, res.Error
+}
+
+// ClearCancelledDestTopUp is ClearCancelledTopUp for the destination top-up.
+func (s *SellIntentService) ClearCancelledDestTopUp(ctx context.Context, id uuid.UUID, txHash string) (bool, error) {
+	res := s.db.WithContext(ctx).Model(&models.RampSellIntent{}).
+		Where("id = ? AND dest_top_up_tx_hash = ? AND dest_top_up_tx_hash <> ''", id, txHash).
+		Updates(map[string]any{"dest_topped_up_at": nil, "dest_top_up_tx_hash": "", "dest_top_up_wei": ""})
+	return res.RowsAffected == 1, res.Error
+}
+
 // ─── Destination gas top-up bookkeeping (GasTopUp.TopUpDestForIntent) ──────
 
 // CountDestToppedUpSince is how many of her intents had destination gas sent

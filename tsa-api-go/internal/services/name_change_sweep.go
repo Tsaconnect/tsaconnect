@@ -344,9 +344,9 @@ func (s *NameChangeService) sweepAlerts(ctx context.Context) (int, error) {
 		ch := stuck[i]
 		if ch.FeeStatus == models.NameChangeFeeRefundUncertain && ch.FeeTxHash != "" {
 			if rc, ok := s.rail.(interface {
-				CallCancelled(ctx context.Context, chain, txHash string) (bool, error)
+				GiveUpCancelled(ctx context.Context, chain, op, txHash string) (bool, error)
 			}); ok {
-				if c, err := rc.CallCancelled(ctx, ch.PayChain, ch.FeeTxHash); err == nil && c {
+				if c, err := rc.GiveUpCancelled(ctx, ch.PayChain, nameChangeRefundOp(&ch), ch.FeeTxHash); err == nil && c {
 					// The refund never executed (cancelled at its nonce): it
 					// goes back to refund_failed and the sweep sends it again
 					// as a new operation.
