@@ -54,6 +54,7 @@ type VaultChain interface {
 	State(ctx context.Context) (*VaultState, error)
 	FillUsed(ctx context.Context, ref [32]byte) (bool, error)
 	PrepareFill(from, to string, amount, spread *big.Int, ref [32]byte) ([]byte, error)
+	PrepareSettleFromCollateral(from string, amount *big.Int, ref [32]byte) ([]byte, error)
 	FilledIn(r *types.Receipt, ref [32]byte) *VaultEvent
 }
 

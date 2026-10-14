@@ -89,6 +89,16 @@ func (v *fakeVault) FilledIn(r *types.Receipt, ref [32]byte) *VaultEvent {
 	return v.decoder.FilledIn(r, ref)
 }
 
+func (v *fakeVault) PrepareSettleFromCollateral(_ string, amount *big.Int, ref [32]byte) ([]byte, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if amount.Cmp(v.outstanding) > 0 {
+		return nil, vaultRevert("Bad amount")
+	}
+	return json.Marshal(blockchain.UnsignedTx{To: testVaultAddr.Hex(), Value: "0", ChainID: "97",
+		Data: fmt.Sprintf("settle:%s:%s", hex.EncodeToString(ref[:]), amount)})
+}
+
 // vaultSender is the release key: it builds inside Send, runs the caller's
 // pre-broadcast hook (the key lane's allocation transaction), and "mines" the
 // fill at the probe's head unless noMine — reverted when revert is set.
@@ -127,7 +137,7 @@ func (s *vaultSender) Send(ctx context.Context, _ int64, build func() ([]byte, e
 	s.lastData = u.Data
 	noMine, revert := s.noMine, s.revert
 	s.mu.Unlock()
-	if noMine {
+	if noMine || !strings.HasPrefix(u.Data, "fill:") {
 		return hash.Hex(), nil
 	}
 	parts := strings.Split(strings.TrimPrefix(u.Data, "fill:"), ":")
@@ -569,5 +579,49 @@ func TestVaultClaim_RepricedArrivalCreditsTheLiveSpread(t *testing.T) {
 	live := CurrentPoolSettings().SpreadBps
 	if o.PoolSpreadBps != int(live) || *o.SpreadUnits != vaultSpreadUnits(fill, live).String() {
 		t.Fatalf("spread bps=%d units=%s, want the live %d bps", o.PoolSpreadBps, *o.SpreadUnits, live)
+	}
+}
+
+// The console: reserved is what open orders hold back, and free never counts it.
+func TestVaultAdmin_SummaryShowsReserve(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	intent, err := r.openFor(t, r.userID, "5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum, err := r.it.VaultPoolSummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := r.order(t, intent.ID)
+	reserved := new(big.Int).Add(bigFromDecimal(o.FillUnits), bigFromDecimal(o.SpreadUnits))
+	free := new(big.Int).Sub(usdt18(100), reserved)
+	if sum.Reserved != BaseUnitsToDecimal(reserved, 18) || sum.Free != BaseUnitsToDecimal(free, 18) || sum.Collateral != "100" {
+		t.Fatalf("summary = %+v", sum)
+	}
+}
+
+// Settle-from-collateral: a note, a positive amount, sent by the operator with
+// a fresh ref, audited.
+func TestVaultAdmin_SettleFromCollateral(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	if err := r.db.AutoMigrate(&models.P2PAuditLog{}); err != nil {
+		t.Skip("p2p_audit_logs needs Postgres defaults:", err)
+	}
+	r.vault.mu.Lock()
+	r.vault.outstanding = usdt18(10)
+	r.vault.mu.Unlock()
+	admin := uuid.New()
+	if _, err := r.it.SettlePoolFromCollateral(context.Background(), admin, "5", ""); !errors.Is(err, ErrITOperatorNoteRequired) {
+		t.Fatalf("no note: %v", err)
+	}
+	if _, err := r.it.SettlePoolFromCollateral(context.Background(), admin, "0", "x"); !errors.Is(err, ErrLPAmount) {
+		t.Fatalf("zero: %v", err)
+	}
+	if _, err := r.it.SettlePoolFromCollateral(context.Background(), admin, "5", "PM keeps the naira for this week's fills"); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if !strings.HasPrefix(r.sender.lastData, "settle:") {
+		t.Fatalf("sent %q", r.sender.lastData)
 	}
 }

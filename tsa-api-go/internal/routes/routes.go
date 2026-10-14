@@ -1290,6 +1290,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				act.POST("/:id/slices/:sliceId/pay-lp", ith.AdminPayPoolSliceLP)
 				act.POST("/:id/slices/:sliceId/returned", ith.AdminNotePoolSliceReturned)
 				act.POST("/:id/slices/:sliceId/clear-release", ith.AdminClearPoolSliceRelease)
+				if ith.VaultPoolEnabled() {
+					act.POST("/:id/retry-fill", ith.AdminRetryPoolFill)
+				}
+			}
+		}
+		// Shared pool (spec 2026-10-14 §7): the books for P2P admins; the
+		// operator's settle-from-collateral for super admins.
+		if ith.VaultPoolEnabled() {
+			vp := api.Group("/admin/liquidity/pool")
+			vp.Use(adminAuth, middleware.RequireP2PAdmin())
+			{
+				vp.GET("", ith.AdminVaultPool)
+				vp.POST("/settle-from-collateral", middleware.RequireSuperAdmin(), ith.AdminSettlePoolFromCollateral)
 			}
 		}
 		// Any settlement forward, merchant or LP (re-review I-D).

@@ -249,6 +249,10 @@ func attachPoolSettle(w *poolWiring, it *services.ITService, itH *handlers.ITHan
 		return
 	}
 	itH.SetPoolOrdersAdmin(it)
+	if it.PoolVaultMode() {
+		it.SetVaultLedger(w.ledger)
+		itH.SetVaultPoolAdmin(it)
+	}
 }
 
 // registerPoolSettleJob runs pool settlement in its own job (review I-8), alert-watched.

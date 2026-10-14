@@ -133,6 +133,8 @@ type ITService struct {
 	// agree, else one checked against the FX feed, else closed). Nil:
 	// company-wallet live pricing is unavailable. See treasury_market_rate.go.
 	treasuryRates TreasuryRateSource
+	// vaultLedger is the shared-pool ledger (console reads); nil otherwise.
+	vaultLedger *VaultIndexer
 
 	// wallet is the company wallet (spec 2.3 #1). Nil: the provider is dormant.
 	wallet *CompanyWallet

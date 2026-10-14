@@ -201,5 +201,13 @@ func poolAdminError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusNotFound, "Slice not found", "not_found")
 		return
 	}
+	if errors.Is(err, services.ErrLPAmount) {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, services.RedactAlertText(err.Error()), "bad_amount")
+		return
+	}
+	if errors.Is(err, services.ErrLiquidityNotVault) {
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "pool_unavailable")
+		return
+	}
 	companyWalletAdminError(c, err)
 }
