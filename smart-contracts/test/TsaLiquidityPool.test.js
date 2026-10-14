@@ -31,6 +31,8 @@ async function deployPool(overrides = {}) {
     fillWindow: 24 * HOUR,
     fillWindowCap: u(10000),
     maxSpreadBps: 1000,
+    // Most cases exercise custody, not the lock: no lock unless a test sets one.
+    withdrawLock: 0,
     ...overrides.params,
   };
   const Pool = await ethers.getContractFactory("TsaLiquidityPool");
@@ -236,6 +238,64 @@ describe("TsaLiquidityPool", function () {
       await pool.connect(B).withdraw(await pool.principal(B.address));
       await pool.connect(A).claim();
       await pool.connect(B).claim();
+    });
+  });
+
+  // Owner 2026-10-14: a deposit earns from the start but cannot leave for
+  // withdrawLock, so a depositor cannot deposit just before a fill and
+  // withdraw right after with a share of its spread.
+  describe("withdraw lock", function () {
+    const DAY = 24 * HOUR;
+    let c;
+    beforeEach(async function () {
+      c = await deployPool({ params: { withdrawLock: DAY } });
+      await c.pool.connect(c.operator).setDepositor(c.lps[0].address, true);
+      await c.pool.connect(c.provider).postCollateral(u(1000));
+    });
+
+    it("a fresh deposit earns at once but cannot be withdrawn until the lock ends; earnings can be claimed", async function () {
+      const { pool, operator, treasury, lps } = c;
+      await pool.connect(lps[0]).deposit(u(100));
+      await pool.connect(operator).fill(treasury.address, u(100), u(1), refOf("a"));
+      expect(await pool.claimable(lps[0].address)).to.equal(u(1)); // earning from the deposit on
+      expect(await pool.withdrawable(lps[0].address)).to.equal(0);
+      await expect(pool.connect(lps[0]).withdraw(u(1))).to.be.revertedWith("Deposit still locked");
+      await pool.connect(lps[0]).claim(); // earnings are never locked
+      await time.increase(DAY);
+      expect(await pool.withdrawable(lps[0].address)).to.equal(u(100));
+      await pool.connect(lps[0]).withdraw(u(100));
+    });
+
+    it("locks only the new money: older, unlocked principal stays withdrawable after a top-up", async function () {
+      const { pool, lps } = c;
+      await pool.connect(lps[0]).deposit(u(100));
+      await time.increase(DAY);
+      await pool.connect(lps[0]).deposit(u(50));
+      expect(await pool.withdrawable(lps[0].address)).to.equal(u(100));
+      await expect(pool.connect(lps[0]).withdraw(u(101))).to.be.revertedWith("Deposit still locked");
+      await pool.connect(lps[0]).withdraw(u(100));
+      // Two deposits inside one lock join it and unlock a day after the newest.
+      await time.increase(HOUR);
+      await pool.connect(lps[0]).deposit(u(20));
+      expect(await pool.withdrawable(lps[0].address)).to.equal(0);
+      await time.increase(DAY - HOUR + 1);
+      expect(await pool.withdrawable(lps[0].address)).to.equal(0); // the first one's day passed, the newest's has not
+      await time.increase(HOUR);
+      expect(await pool.withdrawable(lps[0].address)).to.equal(u(70));
+    });
+
+    it("the lock holds while paused too, and only the owner (timelock) changes it, up to 7 days", async function () {
+      const { pool, guardian, lps } = c;
+      await pool.connect(lps[0]).deposit(u(100));
+      await pool.connect(guardian).pause();
+      await expect(pool.connect(lps[0]).withdraw(u(1))).to.be.revertedWith("Deposit still locked");
+      await expect(pool.connect(lps[0]).setWithdrawLock(0)).to.be.reverted;
+      await expect(pool.setWithdrawLock(7 * DAY + 1)).to.be.revertedWith("withdraw lock over maximum");
+      await pool.setWithdrawLock(0);
+      // The change applies to new deposits; the existing lock keeps its end.
+      expect(await pool.withdrawable(lps[0].address)).to.equal(0);
+      await time.increase(DAY);
+      await pool.connect(lps[0]).withdraw(u(100));
     });
   });
 

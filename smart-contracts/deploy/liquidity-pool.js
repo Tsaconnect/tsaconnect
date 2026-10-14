@@ -24,7 +24,7 @@ async function assertPool(pool, want) {
   if (!(await pool.operators(want.operator))) fail(`operator ${want.operator} not set`);
   if (!same(await pool.guardian(), want.guardian)) fail("guardian");
   if (!(await pool.recipient(want.recipient))) fail(`recipient ${want.recipient} not approved`);
-  for (const k of ["minDeposit", "maxPerLp", "totalCap", "maxFillPerTx", "fillWindow", "fillWindowCap", "maxSpreadBps"]) {
+  for (const k of ["minDeposit", "maxPerLp", "totalCap", "maxFillPerTx", "fillWindow", "fillWindowCap", "maxSpreadBps", "withdrawLock"]) {
     if ((await pool[k]()) !== BigInt(want[k])) fail(`${k} is not ${want[k]}`);
   }
   if ((await pool.totalPrincipal()) !== 0n || (await pool.collateral()) !== 0n) fail("fresh pool is not empty");
@@ -69,6 +69,7 @@ async function deploy(hre, { chain } = {}) {
     fillWindow: lp.fillWindowSec,
     fillWindowCap: units(lp.fillWindowCap),
     maxSpreadBps: lp.maxSpreadBps,
+    withdrawLock: lp.withdrawLockSec,
   };
 
   const Pool = await ethers.getContractFactory("TsaLiquidityPool");

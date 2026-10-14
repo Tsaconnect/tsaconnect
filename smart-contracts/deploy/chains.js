@@ -51,6 +51,9 @@ function liquidityPool() {
     // pool_spread ceiling (300 bps). Bounds what a leaked operator key can
     // credit to LPs (review 2026-10-14).
     maxSpreadBps: 300,
+    // A deposit cannot be withdrawn for this long (owner 2026-10-14): no
+    // depositing just before a fill and leaving right after with its spread.
+    withdrawLockSec: 24 * 3600,
   };
 }
 

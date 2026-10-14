@@ -18,7 +18,7 @@ async function main() {
   const pool = await upgrades.deployProxy(Pool, [{
     token: await token.getAddress(), owner: owner.address, collateralProvider: provider.address,
     operator: operator.address, guardian: guardian.address, recipient: treasury.address,
-    minDeposit: u(5), maxPerLp: u(5000), totalCap: u(50000), maxFillPerTx: u(1000), fillWindow: 86400, fillWindowCap: u(10000), maxSpreadBps: 300,
+    minDeposit: u(5), maxPerLp: u(5000), totalCap: u(50000), maxFillPerTx: u(1000), fillWindow: 86400, fillWindowCap: u(10000), maxSpreadBps: 300, withdrawLock: 0,
   }], { kind: "uups" });
   await pool.waitForDeployment();
   const deployBlock = await ethers.provider.getBlockNumber();

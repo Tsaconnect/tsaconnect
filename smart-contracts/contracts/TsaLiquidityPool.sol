@@ -27,6 +27,10 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  *
  *   - withdraw / claim are never paused and never gated by the depositor
  *     allow-list. That is the custody promise; do not add a guard to them.
+ *     The one bound: principal deposited in the last withdrawLock seconds
+ *     (24 h by default) cannot be withdrawn yet, so a depositor cannot
+ *     deposit just before a fill and leave right after with its spread
+ *     (owner, 2026-10-14). New principal earns from the deposit on.
  *   - Operators can only send tokens to owner-approved recipients (the
  *     treasury), capped per tx and per fixed window (amount + spread both
  *     count), with the spread at most maxSpreadBps of the amount, and only
@@ -90,8 +94,18 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     uint256 public maxSpreadBps;
     /// @notice Refill refs are the provider's own: an operator cannot burn one.
     mapping(bytes32 => bool) public usedRefillRef;
+    /// @notice Seconds a deposit stays unwithdrawable (owner-set, at most 7 days).
+    uint256 public withdrawLock;
+    /// @notice Principal still inside its lock, and when that lock ends. A
+    ///         deposit made while an earlier one is locked joins it, and the
+    ///         joined amount unlocks withdrawLock after the newest deposit.
+    mapping(address => uint256) public lockedPrincipal;
+    mapping(address => uint256) public lockedUntil;
 
-    uint256[28] private __gap;
+    uint256[25] private __gap;
+
+    /// @notice The longest withdrawLock may be set to.
+    uint256 public constant MAX_WITHDRAW_LOCK = 7 days;
 
     /// @notice The ceiling setFillCaps may raise maxSpreadBps to: 10%.
     uint256 public constant SPREAD_BPS_CEILING = 1_000;
@@ -111,6 +125,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     event LimitsUpdated(uint256 minDeposit, uint256 maxPerLp, uint256 totalCap);
     event FillCapsUpdated(uint256 maxFillPerTx, uint256 fillWindow, uint256 fillWindowCap, uint256 maxSpreadBps);
     event TrustedForwarderUpdated(address oldForwarder, address newForwarder);
+    event WithdrawLockUpdated(uint256 withdrawLock);
 
     modifier onlyOperator() {
         require(operators[msg.sender], "Not operator");
@@ -141,6 +156,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         uint256 fillWindow;
         uint256 fillWindowCap;
         uint256 maxSpreadBps;
+        uint256 withdrawLock;
     }
 
     function initialize(InitParams calldata p) public initializer {
@@ -154,6 +170,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _setRecipient(p.recipient, true);
         _setLimits(p.minDeposit, p.maxPerLp, p.totalCap);
         _setFillCaps(p.maxFillPerTx, p.fillWindow, p.fillWindowCap, p.maxSpreadBps);
+        _setWithdrawLock(p.withdrawLock);
     }
 
     // ───────────────────────────── LPs ─────────────────────────────
@@ -168,14 +185,18 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         principal[lp] += amount;
         totalPrincipal += amount;
         rewardDebt[lp] = _debt(principal[lp]);
+        lockedPrincipal[lp] = (block.timestamp < lockedUntil[lp] ? lockedPrincipal[lp] : 0) + amount;
+        lockedUntil[lp] = block.timestamp + withdrawLock;
         _pullExact(lp, amount);
         emit Deposited(lp, amount);
     }
 
     /// @notice Never paused, never allow-list gated: the custody promise.
+    ///         Only principal past its deposit lock can leave.
     function withdraw(uint256 amount) external nonReentrant {
         address lp = _msgSender();
         require(amount > 0 && amount <= principal[lp], "Bad amount");
+        require(amount <= withdrawable(lp), "Deposit still locked");
         _harvest(lp);
         principal[lp] -= amount;
         totalPrincipal -= amount;
@@ -198,6 +219,12 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     /// @notice Anyone may pay the gas; earnings only ever go to the LP itself.
     function claimFor(address lp) external nonReentrant returns (uint256) {
         return _claim(lp, lp);
+    }
+
+    /// @notice Principal that may leave now: all of it once the lock ends.
+    function withdrawable(address lp) public view returns (uint256) {
+        uint256 locked = block.timestamp < lockedUntil[lp] ? lockedPrincipal[lp] : 0;
+        return principal[lp] > locked ? principal[lp] - locked : 0;
     }
 
     function claimable(address lp) public view returns (uint256) {
@@ -327,6 +354,11 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _setFillCaps(perTx, window, windowCap, spreadBps);
     }
 
+    /// @dev Applies to deposits made after the change; existing locks keep their end.
+    function setWithdrawLock(uint256 seconds_) external onlyOwner {
+        _setWithdrawLock(seconds_);
+    }
+
     function setTrustedForwarder(address fwd) external onlyOwner {
         emit TrustedForwarderUpdated(trustedForwarder, fwd);
         trustedForwarder = fwd;
@@ -430,6 +462,12 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         fillWindowStart = block.timestamp;
         filledInWindow = 0;
         emit FillCapsUpdated(perTx, window, windowCap, spreadBps);
+    }
+
+    function _setWithdrawLock(uint256 seconds_) internal {
+        require(seconds_ <= MAX_WITHDRAW_LOCK, "withdraw lock over maximum");
+        withdrawLock = seconds_;
+        emit WithdrawLockUpdated(seconds_);
     }
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
