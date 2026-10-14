@@ -22,6 +22,15 @@ var ErrCompanyUserCannotBeLP = errors.New("liquidity: the company account cannot
 // CompanyAccountNotEligibleCode is the API code for ErrCompanyUserCannotBeLP.
 const CompanyAccountNotEligibleCode = "company_account_not_eligible"
 
+// CompanyPMUserID is IT_PM_ID's user, whatever the row's status or kind.
+func CompanyPMUserID(ctx context.Context, db *gorm.DB, id string) (uuid.UUID, error) {
+	pm, err := companyPMRow(ctx, db, id)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return pm.UserID, nil
+}
+
 // companyPMRow is IT_PM_ID's row, any status and kind. Every refusal wraps
 // ErrCompanyPMUnusable; a database failure is returned as itself.
 func companyPMRow(ctx context.Context, db *gorm.DB, id string) (*models.PaymentMerchant, error) {

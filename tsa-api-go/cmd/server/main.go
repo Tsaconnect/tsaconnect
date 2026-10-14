@@ -1930,6 +1930,7 @@ func main() {
 	liquidity := wireLiquidity(config.DB, pmSvc, p2pEscrowRegistry, p2pTradeSvc, poolGates,
 		blockchainService.TokenAddressForChainID, poolChainName(cfg), pmOnboarding, bankDirectory)
 	attachLiquidity(liquidity, p2pHandler, pmh, pmOnboarding, p2pTradeSvc, scheduler)
+	attachVaultLiquidity(wireVaultLiquidity(cfg, blockchainService, p2pEscrowRegistry, pmSvc, releaseSigner, poolGates), p2pHandler, scheduler)
 
 	if treasuryRates == nil { // Paycrest off: Flutterwave mid against the FX feed
 		treasuryRates = wireTreasuryMarketRate(itService, nil, cfg.RampTreasuryRateTolBps)

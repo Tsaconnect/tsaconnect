@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
@@ -63,6 +66,49 @@ func attachLiquidity(liq *services.LiquidityService, p2p *handlers.P2PHandler, p
 	}
 	// A dead sweep leaves expired stock ads open and LPs unwarned.
 	scheduler.Register(jobs.NewLiquidityVoucherRenewal(trade, liquidityVoucherRenewalInterval), jobs.AlertOnFailureStreak())
+}
+
+// wireVaultLiquidity is the shared pool's LP side (spec 2026-10-14 §5, §6),
+// whenever the pool row names a vault: nil (dormant, reason logged) unless
+// the chain client, the operator key and the pool token all exist.
+func wireVaultLiquidity(cfg *config.Config, bs *services.BlockchainService, reg *services.P2PEscrowRegistry,
+	pm *services.PMService, release services.ChainSender, gate services.PoolGate) *services.VaultLPService {
+	pc, ok := cfg.PoolChain()
+	if !ok || pc.Pool.Vault == "" || bs == nil || config.DB == nil || pm == nil {
+		return nil
+	}
+	client, _ := bs.ClientForChainID(pc.ChainID)
+	tok, okTok := services.NewPoolStock(reg, bs.TokenAddressForChainID).Token()
+	if client == nil || release == nil || !okTok {
+		log.Printf("[liquidity] ALERT liquidity_vault_lp_dormant chain=%s reason=no client, operator key or pool token", pc.ChainKey)
+		return nil
+	}
+	var opener services.PoolOpener
+	if gate != nil {
+		opener = gate
+	}
+	svc, err := services.NewVaultLPService(services.VaultLPConfig{DB: config.DB, PM: pm,
+		Vault: services.NewLiquidityVault(client, pc.Pool.Vault), Tokens: client, Sender: release,
+		Token: tok, ChainName: poolChainName(cfg), Gate: opener,
+		CompanyUser: func(ctx context.Context) (uuid.UUID, error) {
+			return services.CompanyPMUserID(ctx, config.DB, cfg.ITPMID)
+		}})
+	if err != nil {
+		log.Printf("[liquidity] ALERT liquidity_vault_lp_dormant reason=%s", services.RedactAlertText(err.Error()))
+		return nil
+	}
+	log.Printf("[liquidity] LP side mode=vault chain=%s(%d) vault=%s", pc.ChainKey, pc.ChainID, pc.Pool.Vault)
+	return svc
+}
+
+// attachVaultLiquidity serves /liquidity from the shared pool and keeps the
+// depositor allow-list in sync. Nil attaches nothing.
+func attachVaultLiquidity(lp *services.VaultLPService, p2p *handlers.P2PHandler, scheduler *jobs.Scheduler) {
+	if lp == nil || p2p == nil {
+		return
+	}
+	p2p.SetVaultLiquidity(lp)
+	scheduler.Register(jobs.NewLiquidityDepositorSyncJob(lp, 2*time.Minute), jobs.AlertOnFailureStreak())
 }
 
 // poolChainName is the pool chain's display name ("BNB Smart Chain").

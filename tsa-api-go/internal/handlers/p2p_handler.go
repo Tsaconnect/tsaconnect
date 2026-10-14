@@ -41,6 +41,9 @@ type P2PHandler struct {
 	central CentralAccountSource
 	// liquidity is the LP read side; nil until a pool chain exists.
 	liquidity LiquidityReader
+	// vaultLP is the shared-pool LP side (spec 2026-10-14); when set it
+	// serves /liquidity instead of liquidity.
+	vaultLP VaultLiquidity
 	// gas drips S for the caller's next P2P tx; nil while the Sonic sponsor
 	// lane is dormant (GasTopUp then answers 503 gas_unavailable).
 	gas P2PGasSponsor

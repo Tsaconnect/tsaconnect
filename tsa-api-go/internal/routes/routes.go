@@ -887,7 +887,19 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// TSA Liquidity (spec §15): the caller's own LP state. Registered only
 		// when a pool chain exists (the handlers assume a wired reader).
 		// Signed-in users only; no KYC gate, so a non-LP gets status "none".
-		if p2p.HasLiquidity() {
+		if p2p.HasVaultLiquidity() {
+			// Shared pool (spec 2026-10-14): instant activation, the LP's own
+			// unsigned txs, a gas-free claim to the LP's own wallet.
+			liq := api.Group("/liquidity")
+			liq.Use(auth)
+			liq.GET("/me", p2p.VaultLiquidityMe)
+			liq.GET("/me/activity", p2p.VaultLiquidityActivity)
+			liq.POST("/activate", idem, p2p.ActivateLiquidity)
+			liq.POST("/deposit/prepare", p2p.PrepareLiquidityDeposit)
+			liq.POST("/withdraw/prepare", p2p.PrepareLiquidityWithdraw)
+			liq.POST("/claim/prepare", p2p.PrepareLiquidityClaim)
+			liq.POST("/claim-for", idem, p2p.ClaimLiquidityForMe)
+		} else if p2p.HasLiquidity() {
 			liq := api.Group("/liquidity")
 			liq.Use(auth)
 			liq.GET("/me", p2p.GetLiquidityMe)
