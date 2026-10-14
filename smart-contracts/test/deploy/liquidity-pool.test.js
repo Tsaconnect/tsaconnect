@@ -36,11 +36,14 @@ describe("deploy/liquidity-pool", () => {
     expect(await pool.withdrawLock()).to.equal(86400n);
   });
 
-  it("refuses an owner that is the deployer or not typed twice", async () => {
+  it("lets the owner deploy with their own wallet and keep it; refuses an owner not typed twice", async () => {
     const { chain, deployer, admin } = await fixture();
     chain.liquidityPool.owner = deployer.address;
     chain.liquidityPool.ownerConfirm = deployer.address;
-    await expect(deploy(hre, { chain })).to.be.rejectedWith(/is the deployer/);
+    const out = await deploy(hre, { chain });
+    expect(await (await ethers.getContractAt("TsaLiquidityPool", out.pool)).owner()).to.equal(deployer.address);
+    chain.liquidityPool.ownerConfirm = null;
+    await expect(deploy(hre, { chain })).to.be.rejectedWith(/same address/);
     chain.liquidityPool.owner = admin.address;
     chain.liquidityPool.ownerConfirm = null;
     await expect(deploy(hre, { chain })).to.be.rejectedWith(/same address/);

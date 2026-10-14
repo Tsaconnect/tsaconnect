@@ -43,10 +43,20 @@ async function deploy(hre, { chain } = {}) {
 
   const [deployer] = await ethers.getSigners();
   const deployerAddr = await deployer.getAddress();
-  assertOwnerConfirm({
-    label: "liquidity-pool", owner: lp.owner, confirm: lp.ownerConfirm, deployerAddr,
-    ownerVar: "LPOOL_OWNER", confirmVar: "LPOOL_OWNER_CONFIRM",
-  });
+  // The owner may deploy with their own wallet (owner 2026-10-14); then it
+  // simply keeps ownership. Any other deployer must hand it over, and is
+  // refused as the owner (a server key must never own the pool).
+  if (getAddress(lp.owner) === getAddress(deployerAddr)) {
+    if (!lp.ownerConfirm || getAddress(lp.ownerConfirm) !== getAddress(lp.owner)) {
+      throw new Error("liquidity-pool: set LPOOL_OWNER_CONFIRM to the same address as LPOOL_OWNER");
+    }
+    if (getAddress(deployerAddr) === getAddress(lp.operator)) throw new Error("liquidity-pool: the operator key must not deploy or own the pool");
+  } else {
+    assertOwnerConfirm({
+      label: "liquidity-pool", owner: lp.owner, confirm: lp.ownerConfirm, deployerAddr,
+      ownerVar: "LPOOL_OWNER", confirmVar: "LPOOL_OWNER_CONFIRM",
+    });
+  }
 
   const decimals = Number(await (await ethers.getContractAt("MockERC20", tokenAddr)).decimals());
   const units = (n) => ethers.parseUnits(String(n), decimals);
