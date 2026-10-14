@@ -606,6 +606,14 @@ func adminOverrideRequest(h *Handlers, admin *models.User, userID uuid.UUID, bod
 	return w
 }
 
+// overrideAdmin is a true admin: only they may type a legal name.
+func overrideAdmin(t *testing.T, db *gorm.DB) *models.User {
+	t.Helper()
+	admin := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	admin.Role = models.RoleAdmin
+	return admin
+}
+
 func storedIdentity(t *testing.T, db *gorm.DB, id uuid.UUID) (status, name string) {
 	t.Helper()
 	var row struct {
@@ -635,7 +643,7 @@ func TestAdminOverrideRefusesWithoutAnyLegalName(t *testing.T) {
 
 func TestAdminOverrideStoresTypedLegalName(t *testing.T) {
 	db := setupKYCTestDB(t, true)
-	admin := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	admin := overrideAdmin(t, db)
 	user := createKYCTestUser(t, db, models.VerificationStatusRejected)
 
 	w := adminOverrideRequest(&Handlers{Config: &config.Config{}}, admin, user.ID,
@@ -677,7 +685,7 @@ func TestAdminOverrideReadsNameFromDiditSession(t *testing.T) {
 // Re-approving must not become a back door around the name-change review.
 func TestAdminOverrideNeverReplacesADifferentStoredName(t *testing.T) {
 	db := setupKYCTestDB(t, true)
-	admin := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	admin := overrideAdmin(t, db)
 	user := createKYCTestUser(t, db, models.VerificationStatusVerified)
 	db.Model(user).Update("verified_legal_name", "CHIOMA EZE")
 
@@ -688,5 +696,23 @@ func TestAdminOverrideNeverReplacesADifferentStoredName(t *testing.T) {
 	}
 	if _, name := storedIdentity(t, db, user.ID); name != "CHIOMA EZE" {
 		t.Fatalf("stored name replaced with %q", name)
+	}
+}
+
+// AdminAuth admits support and merchants too; a typed name decides whose bank
+// transfers this user is credited with, so they may not enter one.
+func TestAdminOverrideTypedNameNeedsAdminRole(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	support := createKYCTestUser(t, db, models.VerificationStatusVerified)
+	support.Role = "support"
+	user := createKYCTestUser(t, db, models.VerificationStatusRejected)
+
+	w := adminOverrideRequest(&Handlers{Config: &config.Config{}}, support, user.ID, `{"legalName":"ANY NAME"}`)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d %s", w.Code, w.Body.String())
+	}
+	if status, name := storedIdentity(t, db, user.ID); status != models.VerificationStatusRejected || name != "" {
+		t.Fatalf("refused override still wrote status %q name %q", status, name)
 	}
 }

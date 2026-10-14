@@ -831,6 +831,16 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 	}
 	c.ShouldBindJSON(&req)
 
+	// AdminAuth also admits merchants and support. A typed name decides whose
+	// bank transfers get credited to this user, so only a true admin may type
+	// one; anyone allowed here may still approve with the Didit-read name.
+	if strings.TrimSpace(req.LegalName) != "" &&
+		adminUser.Role != models.RoleAdmin && adminUser.Role != models.RoleSuperAdmin {
+		c.JSON(http.StatusForbidden, gin.H{
+			"success": false, "message": "only an admin can enter a legal name by hand"})
+		return
+	}
+
 	name, source, refusal := h.overrideLegalName(c.Request.Context(), &user, req.LegalName)
 	if refusal != "" {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -844,13 +854,23 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 		"verification_notes":  req.Notes,
 		"updated_at":          now,
 	}
+	write := config.DB.Model(&models.User{}).Where("id = ?", user.ID)
 	if source != legalNameSourceExisting {
 		updates["verified_legal_name"] = name
 		updates["verified_legal_name_at"] = now
+		// Fill the name only if it is still empty: a webhook or name change
+		// that stored one since we read the row must not be overwritten.
+		write = write.Where("verified_legal_name IS NULL OR verified_legal_name = ''")
 	}
-	if err := config.DB.Model(&user).Updates(updates).Error; err != nil {
-		log.Printf("[KYC] override failed to store approval for user %s: %v", user.ID, err)
+	res := write.Updates(updates)
+	if res.Error != nil {
+		log.Printf("[KYC] override failed to store approval for user %s: %v", user.ID, res.Error)
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to approve verification"})
+		return
+	}
+	if res.RowsAffected == 0 {
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false, "message": "this user's legal name changed while approving — reload and try again"})
 		return
 	}
 
