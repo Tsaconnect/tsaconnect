@@ -21,6 +21,7 @@ type poolWiring struct {
 	gates    services.PoolGate
 	desk     *services.PoolDesk
 	nonces   *services.TreasuryNonceWatch
+	ledger   *services.VaultIndexer // shared-pool vault mode only
 }
 
 // wirePoolOrders builds the pool chain's treasury lane and gates (Plan A) and
@@ -38,6 +39,7 @@ func wirePoolOrders(cfg *config.Config, bs *services.BlockchainService, reg *ser
 	w.treasury = poolTreasuryFor(cfg, bs, rampTreasury) // sets the lane's EscrowCalls to the pool escrow only
 	w.gates = buildPoolChain(cfg, bs, reg, release, w.treasury)
 	w.desk, w.nonces = buildPoolDesk(cfg, bs, reg, trades, pm, release, it, w.treasury, w.gates)
+	w.ledger = buildVaultLedger(cfg, bs)
 	if w.desk != nil && it != nil {
 		it.SetPoolDesk(w.desk)
 		if err := it.PoolHonourFits(); err != nil { // review I4: opens refuse until the env values shrink
@@ -185,6 +187,29 @@ func buildVaultDesk(cfg *config.Config, bs *services.BlockchainService, reg *ser
 	return desk, nonces
 }
 
+// buildVaultLedger is the vault's indexer + reconciler, whenever the pool row
+// names a vault — even while orders are dormant, so LP history and the books
+// keep up.
+func buildVaultLedger(cfg *config.Config, bs *services.BlockchainService) *services.VaultIndexer {
+	pc, ok := cfg.PoolChain()
+	if !ok || pc.Pool.Vault == "" || bs == nil || config.DB == nil {
+		return nil
+	}
+	client, _ := bs.ClientForChainID(pc.ChainID)
+	if client == nil || client.Client == nil {
+		log.Printf("[liquidity] ALERT liquidity_vault_ledger_dormant chain=%s reason=no client", pc.ChainKey)
+		return nil
+	}
+	x, err := services.NewVaultIndexer(services.VaultIndexerConfig{DB: config.DB, ChainID: pc.ChainID,
+		Vault: services.NewLiquidityVault(client, pc.Pool.Vault), Reader: client.Client,
+		DeployBlock: pc.Pool.VaultDeployBlock, Chunk: pc.Pool.LogChunkBlocks})
+	if err != nil {
+		log.Printf("[liquidity] ALERT liquidity_vault_ledger_dormant reason=%s", services.RedactAlertText(err.Error()))
+		return nil
+	}
+	return x
+}
+
 // companyPMUser is IT_PM_ID's user: every slice's DB buyer (S10). Never an
 // LP's user (review M4).
 func companyPMUser(cfg *config.Config) (uuid.UUID, error) {
@@ -200,6 +225,9 @@ func companyPMUser(cfg *config.Config) (uuid.UUID, error) {
 
 // registerPoolOrderJobs: the stuck-nonce watch (F24) while the desk exists.
 func registerPoolOrderJobs(scheduler *jobs.Scheduler, w *poolWiring) {
+	if w != nil && w.ledger != nil {
+		scheduler.Register(jobs.NewLiquidityVaultIndexerJob(w.ledger, 30*time.Second), jobs.AlertOnFailureStreak())
+	}
 	if w == nil || w.desk == nil || w.nonces == nil {
 		return
 	}

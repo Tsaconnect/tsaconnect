@@ -605,7 +605,13 @@ func (s *ITService) claimVault(ctx context.Context, candidate *models.ITIntent, 
 		if err != nil {
 			return err
 		}
-		spread := vaultSpreadUnits(fill, int64(o.PoolSpreadBps))
+		// The LPs are credited the spread she paid: the snapshot's when honoured,
+		// the live settings' when re-priced (which then become the snapshot's).
+		spreadBps := int64(o.PoolSpreadBps)
+		if p != nil {
+			spreadBps = p.Settings.SpreadBps
+		}
+		spread := vaultSpreadUnits(fill, spreadBps)
 		rctx, cancel := context.WithTimeout(ctx, poolFreshReadTimeout)
 		st, err := d.c.Vault.State(rctx)
 		cancel()
@@ -622,7 +628,7 @@ func (s *ITService) claimVault(ctx context.Context, candidate *models.ITIntent, 
 		free := new(big.Int).Sub(st.FreeCapacity(), reserved)
 		fs, ss := fill.String(), spread.String()
 		if err := tx.Model(&models.PoolOrder{}).Where("intent_id = ? AND generation = 1 AND fill_tx_hash = ''", locked.ID).
-			Updates(map[string]any{"fill_units": fs, "spread_units": ss}).Error; err != nil {
+			Updates(map[string]any{"fill_units": fs, "spread_units": ss, "pool_spread_bps": spreadBps}).Error; err != nil {
 			return err
 		}
 		if st.Paused || free.Cmp(new(big.Int).Add(fill, spread)) < 0 {

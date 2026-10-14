@@ -156,6 +156,8 @@ func AutoMigrate() error {
 		&models.P2PAd{},
 		&models.P2PTrade{},
 		&models.PoolOrder{},
+		&models.LiquidityLedgerEntry{},
+		&models.LiquidityIndexCursor{},
 		&models.P2PMessage{},
 		&models.P2PDispute{},
 		&models.P2PAuditLog{},

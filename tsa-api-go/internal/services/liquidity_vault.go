@@ -77,8 +77,23 @@ func (v *LiquidityVault) State(ctx context.Context) (*VaultState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("liquidity vault: read head: %w", err)
 	}
-	at := new(big.Int).SetUint64(head)
-	st := &VaultState{Block: head}
+	return v.stateAt(ctx, head)
+}
+
+// StateAt is State at a given block (the reconciler compares the ledger,
+// indexed up to a block, with the books at that same block).
+func (v *LiquidityVault) StateAt(ctx context.Context, block uint64) (*VaultState, error) {
+	if v == nil {
+		return nil, ErrVaultUnavailable
+	}
+	ctx, cancel := context.WithTimeout(ctx, v.timeout)
+	defer cancel()
+	return v.stateAt(ctx, block)
+}
+
+func (v *LiquidityVault) stateAt(ctx context.Context, block uint64) (*VaultState, error) {
+	at := new(big.Int).SetUint64(block)
+	st := &VaultState{Block: block}
 	for _, r := range []struct {
 		method string
 		into   **big.Int

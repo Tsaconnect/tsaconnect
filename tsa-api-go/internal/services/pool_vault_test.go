@@ -546,3 +546,28 @@ func TestVaultClaim_ParksWhenTheVaultShrankSinceOpen(t *testing.T) {
 		t.Fatal("the parked order's reserve was released")
 	}
 }
+
+// Amount integrity: money that arrives late is re-priced at the live spread,
+// and the LPs are credited that spread, not the open-time snapshot's.
+func TestVaultClaim_RepricedArrivalCreditsTheLiveSpread(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	r.it.SetTreasuryMarketRate(&fixedTreasuryRate{rate: poolMid})
+	intent, err := r.openFor(t, r.userID, "5000")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	r.db.Model(&models.PoolOrder{}).Where("intent_id = ?", intent.ID).Update("pool_spread_bps", 999) // stale snapshot
+	late := time.Now().Add(time.Hour)
+	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("rate_expires_at", time.Now().Add(-2*time.Hour))
+	got := r.intent(t, intent.ID)
+	ok, err := r.it.claimAndPriceStableBuy(context.Background(), &got, "sess_late", got.AmountMinor, late, false, PayInCentral)
+	if !ok || err != nil {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	o := r.order(t, intent.ID)
+	fill, _ := new(big.Int).SetString(*o.FillUnits, 10)
+	live := CurrentPoolSettings().SpreadBps
+	if o.PoolSpreadBps != int(live) || *o.SpreadUnits != vaultSpreadUnits(fill, live).String() {
+		t.Fatalf("spread bps=%d units=%s, want the live %d bps", o.PoolSpreadBps, *o.SpreadUnits, live)
+	}
+}
