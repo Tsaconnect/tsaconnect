@@ -40,7 +40,9 @@ SELECT t.id, t.it_intent_id, t.status, t.token, t.token_amount, t.fiat_amount,
    AND t.status NOT IN ('released', 'cancelled', 'resolved')
  ORDER BY t.created_at;
 
--- 2. Live slice-era pool orders (a vault order has pool_orders.fill_units).
+-- 2. Live slice-era pool orders. Run BEFORE the deploy, every tsa_pool order
+--    is slice-era (pool_orders.fill_units does not exist yet), so none is
+--    excluded here; the boot check excludes vault orders after the migration.
 SELECT i.id, i.user_id, i.status, i.asset, i.asset_amount, i.ngn_kobo,
        i.failure_reason, i.created_at, i.updated_at,
        (SELECT count(*) FROM p2p_trades s WHERE s.it_intent_id = i.id) AS slices,
@@ -50,8 +52,6 @@ SELECT i.id, i.user_id, i.status, i.asset, i.asset_amount, i.ngn_kobo,
  WHERE i.provider = 'tsa_pool'
    AND i.status IN ('opening', 'pending_payment', 'payment_received',
                     'awaiting_funds', 'delivering', 'buy_awaiting_rate')
-   AND NOT EXISTS (SELECT 1 FROM pool_orders po
-                    WHERE po.intent_id = i.id AND po.fill_units IS NOT NULL)
  ORDER BY i.created_at;
 
 -- 3. LP naira forwards not landed (3a blocks boot; 3b = failed, owed by hand).
