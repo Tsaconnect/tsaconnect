@@ -142,6 +142,8 @@ func netlifyProxyAlert(cfg *config.Config) string {
 func main() {
 	migrateFlag := flag.Bool("migrate", false,
 		"run database migrations and exit; used by the deploy between build and restart")
+	backfillLegalNamesFlag := flag.Bool("backfill-legal-names", false,
+		"one-time: read the Didit legal name for every verified user missing one, then exit")
 	flag.Parse()
 
 	// Load .env from the PROCESS WORKING DIRECTORY, and say which one that was.
@@ -258,6 +260,11 @@ func main() {
 	_, err := config.ConnectDB(cfg)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+	}
+
+	if *backfillLegalNamesFlag {
+		runLegalNameBackfill(cfg)
+		return
 	}
 
 	// Schema migration runs once per deploy, not once per process — several

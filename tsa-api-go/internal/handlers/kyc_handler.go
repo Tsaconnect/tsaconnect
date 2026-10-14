@@ -826,21 +826,40 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 	}
 
 	var req struct {
-		Notes string `json:"notes"`
+		Notes     string `json:"notes"`
+		LegalName string `json:"legalName"`
 	}
 	c.ShouldBindJSON(&req)
 
+	name, source, refusal := h.overrideLegalName(c.Request.Context(), &user, req.LegalName)
+	if refusal != "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false, "message": refusal, "code": "legal_name_required"})
+		return
+	}
+
 	now := time.Now()
-	config.DB.Model(&user).Updates(map[string]interface{}{
+	updates := map[string]interface{}{
 		"verification_status": models.VerificationStatusVerified,
 		"verification_notes":  req.Notes,
 		"updated_at":          now,
-	})
+	}
+	if source != legalNameSourceExisting {
+		updates["verified_legal_name"] = name
+		updates["verified_legal_name_at"] = now
+	}
+	if err := config.DB.Model(&user).Updates(updates).Error; err != nil {
+		log.Printf("[KYC] override failed to store approval for user %s: %v", user.ID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to approve verification"})
+		return
+	}
 
+	// The name itself never goes in the log, only where it came from.
 	metadata, _ := json.Marshal(map[string]string{
-		"admin_id":   adminUser.ID.String(),
-		"admin_name": adminUser.Name,
-		"reason":     req.Notes,
+		"admin_id":          adminUser.ID.String(),
+		"admin_name":        adminUser.Name,
+		"reason":            req.Notes,
+		"legal_name_source": source,
 	})
 	config.DB.Create(&models.VerificationLog{
 		UserID:   user.ID,
@@ -855,6 +874,48 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 		"success": true,
 		"message": "User verification overridden to approved",
 	})
+}
+
+// Where an override's legal name came from, recorded on its verification log.
+const (
+	legalNameSourceAdmin    = "admin"
+	legalNameSourceDidit    = "didit"
+	legalNameSourceExisting = "existing"
+)
+
+// overrideLegalName settles the legal name an admin approval stores, or returns
+// the refusal to show the admin.
+//
+// An approval without a name is worse than no approval: the money-in gate
+// refuses a verified user with no name (requireVerifiedForMoneyIn), so the user
+// sees "verified" and is still turned away, with nothing they can do about it.
+//
+// The admin's typed name wins — they are looking at the document. Without one,
+// the Didit session is asked, then any name already stored. A typed name never
+// replaces a different stored one: changing a verified name is the name-change
+// review's job, not a side effect of re-approving.
+func (h *Handlers) overrideLegalName(ctx context.Context, user *models.User, typed string) (name, source, refusal string) {
+	typed = strings.Join(strings.Fields(typed), " ")
+	stored := strings.TrimSpace(user.VerifiedLegalName)
+
+	if typed != "" {
+		if stored != "" && !strings.EqualFold(stored, typed) {
+			return "", "", "this user already has a different verified legal name — change it through a name-change review"
+		}
+		if stored != "" {
+			return stored, legalNameSourceExisting, ""
+		}
+		return typed, legalNameSourceAdmin, ""
+	}
+	if stored != "" {
+		return stored, legalNameSourceExisting, ""
+	}
+	if updates := h.verifiedNameUpdates(ctx, user.ID, user.DiditSessionID); updates != nil {
+		if fetched, _ := updates["verified_legal_name"].(string); fetched != "" {
+			return fetched, legalNameSourceDidit, ""
+		}
+	}
+	return "", "", "enter the user's legal name exactly as it appears on their ID — payments into their account are matched against it"
 }
 
 // AdminRejectKYC allows an admin to reject a user's verification.
@@ -945,13 +1006,7 @@ func (h *Handlers) AdminBackfillVerifiedNames(c *gin.Context) {
 		limit = nameBackfillRunLimit
 	}
 
-	// Only users the platform already treats as verified: an unverified user
-	// has no decision worth reading, and a named one is already done.
-	pending := func() *gorm.DB {
-		return config.DB.Model(&models.User{}).Where(
-			"verification_status = ? AND (verified_legal_name IS NULL OR verified_legal_name = '')",
-			models.VerificationStatusVerified)
-	}
+	pending := func() *gorm.DB { return pendingLegalNames(config.DB) }
 
 	var remaining int64
 	pending().Count(&remaining)
@@ -963,22 +1018,70 @@ func (h *Handlers) AdminBackfillVerifiedNames(c *gin.Context) {
 		return
 	}
 
-	updated, unresolved, failed := 0, 0, 0
-	unresolvedIDs := make([]string, 0, len(users))
+	result := backfillVerifiedNames(c.Request.Context(), h.Config, users, &admin.ID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Verified name backfill complete",
+		"data": gin.H{
+			"scanned":           result.Scanned,
+			"updated":           result.Updated,
+			"unresolved":        len(result.UnresolvedUserIDs),
+			"failed":            result.Failed,
+			"remaining":         remaining - int64(result.Updated),
+			"unresolvedUserIds": result.UnresolvedUserIDs,
+		},
+	})
+}
+
+// NameBackfillResult counts one pass of the legal-name backfill.
+type NameBackfillResult struct {
+	Scanned           int
+	Updated           int
+	Failed            int
+	UnresolvedUserIDs []string
+}
+
+// pendingLegalNames selects the users a backfill repairs: ones the platform
+// already treats as verified but holds no legal name for. An unverified user has
+// no decision worth reading, and a named one is already done.
+func pendingLegalNames(db *gorm.DB) *gorm.DB {
+	return db.Model(&models.User{}).Where(
+		"verification_status = ? AND (verified_legal_name IS NULL OR verified_legal_name = '')",
+		models.VerificationStatusVerified)
+}
+
+// BackfillAllVerifiedNames is the one-time server-side run of the backfill
+// (`tsa-api -backfill-legal-names`): every pending user in one pass, with no
+// request timeout to outlive, so no admin page is needed for it.
+func BackfillAllVerifiedNames(ctx context.Context, cfg *config.Config) (NameBackfillResult, error) {
+	if cfg == nil || cfg.DiditAPIKey == "" {
+		return NameBackfillResult{}, errors.New("Didit is not configured (DIDIT_API_KEY); cannot read verified names")
+	}
+	var users []models.User
+	if err := pendingLegalNames(config.DB).Order("updated_at ASC").Find(&users).Error; err != nil {
+		return NameBackfillResult{}, fmt.Errorf("list users: %w", err)
+	}
+	return backfillVerifiedNames(ctx, cfg, users, nil), nil
+}
+
+// backfillVerifiedNames reads and stores the Didit legal name for each user.
+// adminID is nil for the server-side run.
+func backfillVerifiedNames(ctx context.Context, cfg *config.Config, users []models.User, adminID *uuid.UUID) NameBackfillResult {
+	result := NameBackfillResult{Scanned: len(users), UnresolvedUserIDs: make([]string, 0, len(users))}
 
 	for i := range users {
 		user := users[i]
-		name, err := fetchDiditVerifiedName(c.Request.Context(), h.Config.DiditBaseURL, h.Config.DiditAPIKey, user.DiditSessionID)
+		name, err := fetchDiditVerifiedName(ctx, cfg.DiditBaseURL, cfg.DiditAPIKey, user.DiditSessionID)
 		switch {
 		case errors.Is(err, errDiditNameUnresolved):
 			// Sessions Didit no longer holds, and users verified by admin
 			// override who never had one. Reported so they can be chased by
 			// hand — a run must not stop on them.
-			unresolved++
-			unresolvedIDs = append(unresolvedIDs, user.ID.String())
+			result.UnresolvedUserIDs = append(result.UnresolvedUserIDs, user.ID.String())
 			continue
 		case err != nil:
-			failed++
+			result.Failed++
 			log.Printf("[KYC] backfill lookup failed for user %s: %v", user.ID, err)
 			continue
 		}
@@ -988,41 +1091,31 @@ func (h *Handlers) AdminBackfillVerifiedNames(c *gin.Context) {
 			"verified_legal_name":    name,
 			"verified_legal_name_at": now,
 		}).Error; err != nil {
-			failed++
+			result.Failed++
 			log.Printf("[KYC] backfill failed to store name for user %s: %v", user.ID, err)
 			continue
 		}
-		updated++
+		result.Updated++
 
-		metadata, _ := json.Marshal(map[string]string{
-			"session_id": user.DiditSessionID,
-			"admin_id":   admin.ID.String(),
-			"source":     "backfill",
-		})
+		meta := map[string]string{"session_id": user.DiditSessionID, "source": "backfill"}
+		if adminID != nil {
+			meta["admin_id"] = adminID.String()
+		} else {
+			meta["source"] = "backfill-cli"
+		}
+		metadata, _ := json.Marshal(meta)
 		if err := config.DB.Create(&models.VerificationLog{
 			UserID:   user.ID,
 			Action:   models.VerificationActionDiditNameCaptured,
 			Status:   models.VerificationLogStatusVerified,
 			Notes:    "Didit legal name backfilled",
 			Metadata: datatypes.JSON(metadata),
-			AdminID:  &admin.ID,
+			AdminID:  adminID,
 		}).Error; err != nil {
 			log.Printf("[KYC] backfill failed to write verification log for user %s: %v", user.ID, err)
 		}
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Verified name backfill complete",
-		"data": gin.H{
-			"scanned":           len(users),
-			"updated":           updated,
-			"unresolved":        unresolved,
-			"failed":            failed,
-			"remaining":         remaining - int64(updated),
-			"unresolvedUserIds": unresolvedIDs,
-		},
-	})
+	return result
 }
 
 // UserWithLog is one row of the admin verification queue.
