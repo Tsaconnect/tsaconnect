@@ -156,6 +156,8 @@ func AutoMigrate() error {
 		&models.P2PAd{},
 		&models.P2PTrade{},
 		&models.PoolOrder{},
+		&models.LiquidityLedgerEntry{},
+		&models.LiquidityIndexCursor{},
 		&models.P2PMessage{},
 		&models.P2PDispute{},
 		&models.P2PAuditLog{},
@@ -415,6 +417,11 @@ func AutoMigrate() error {
 	// one-per-user index is dropped only by deploy/one-off/2026-10-13-…sql.
 	if err := MigratePaymentMerchantRoleIndex(DB); err != nil {
 		log.Printf("[Migrate] WARNING %s: %v — a second role cannot be added until it exists", PaymentMerchantRoleIndexName, err)
+	}
+	// One LP account per wallet (shared pool, spec 2026-10-14 §5): a vault
+	// position must never be read or claimed through two accounts.
+	if err := MigrateLPWalletIndex(DB); err != nil {
+		log.Printf("[Migrate] ALERT %s: %v — duplicate LP wallets? find them with SELECT LOWER(operator_wallet_address), count(*) FROM payment_merchants WHERE kind = 'lp' AND operator_wallet_address <> '' GROUP BY 1 HAVING count(*) > 1", LPWalletIndexName, err)
 	}
 
 	// PM (payment-merchant) inbound account must be unique — PMAutomationService
@@ -689,6 +696,18 @@ func MigratePoolSliceIndexes(db *gorm.DB) error {
 	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pool_slice_per_order_gen_ad
 	    ON p2p_trades (it_intent_id, generation, ad_id)
 	    WHERE it_intent_id IS NOT NULL AND status <> 'cancelled'`).Error
+}
+
+// LPWalletIndexName keeps one LP row per wallet (case-insensitive).
+const LPWalletIndexName = "uq_payment_merchants_lp_wallet"
+
+// MigrateLPWalletIndex builds the LP wallet index without locking out writes.
+func MigrateLPWalletIndex(db *gorm.DB) error {
+	if uniqueIndexReady(db, "payment_merchants", LPWalletIndexName) {
+		return nil
+	}
+	return buildUniqueIndex(db, LPWalletIndexName,
+		` ON payment_merchants (LOWER(operator_wallet_address)) WHERE kind = 'lp' AND operator_wallet_address <> ''`)
 }
 
 // PaymentMerchantRoleIndexName keeps one payment_merchants row per (user, kind).

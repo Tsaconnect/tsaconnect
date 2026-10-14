@@ -291,26 +291,6 @@ func (s *reusedReleaseSender) Send(_ context.Context, _ int64, build func() ([]b
 
 func (s *reusedReleaseSender) Lane(int64) *KeyLane { return s.lane }
 
-// Item 5: a slice reset (cleared to paid, hash emptied) whose release
-// operation still holds its allocation gets that allocation's hash written
-// back — never `releasing` with an empty hash.
-func TestAutoRelease_RetriedSliceReleaseRecordsTheAllocationsHash(t *testing.T) {
-	db := setupTradeDB(t)
-	svc, _, _ := newService(t, db)
-	sl := seedReleasableSlice(t, svc)
-	hash := "0x" + strings.Repeat("5e", 32)
-	s := &reusedReleaseSender{fakeReleaseSigner: fakeReleaseSigner{addr: "0x00000000000000000000000000000000000000a1", hash: hash},
-		err: pendingBroadcast(hash, nil)}
-	if _, err := svc.AutoRelease(context.Background(), sl.ID, s); err == nil {
-		t.Fatal("want the in-flight error")
-	}
-	var got models.P2PTrade
-	db.First(&got, "id = ?", sl.ID)
-	if got.Status != models.P2PTradeStatusReleasing || got.ReleaseTxHash != hash {
-		t.Fatalf("slice = %s hash=%q, want releasing with the allocation's hash", got.Status, got.ReleaseTxHash)
-	}
-}
-
 // Item 6 (a): an ordinary trade's release the lane committed but no node
 // accepted yet is IN FLIGHT: the trade stays releasing, never rolled back.
 func TestAutoRelease_PendingBroadcastKeepsAnOrdinaryTradeReleasing(t *testing.T) {

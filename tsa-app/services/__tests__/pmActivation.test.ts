@@ -68,9 +68,9 @@ describe('activatePmAccount', () => {
 
   it('names the role in the query when asked to (one user may hold both)', async () => {
     respond({ status: 'active' });
-    await activatePmAccount(undefined, undefined, 'lp');
+    await activatePmAccount(undefined, undefined, 'merchant');
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toMatch(/\/p2p\/pm\/activate\?kind=lp$/);
+    expect(String(url)).toMatch(/\/p2p\/pm\/activate\?kind=merchant$/);
     expect(JSON.parse(init.body)).toEqual({});
   });
 

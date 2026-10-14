@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -20,19 +22,18 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
-	"github.com/ojimcy/tsa-api-go/internal/testutil"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-// Production today: no pool row → no desk, no provider, nothing to wire. The
+// Production today: no pool row → no desk, no ledger, nothing to wire. The
 // pool_order_max ceiling still follows the treasury's per-order cap: the
 // admin console can edit pool settings while the pool is dormant.
-func TestWirePoolOrders_DormantWithoutPoolChain(t *testing.T) {
+func TestWirePoolOrders_DormantWithoutAVault(t *testing.T) {
 	t.Cleanup(func() { services.SetPoolOrderMaxCeilingUSD(2000) })
-	cfg := &config.Config{P2PChains: map[int64]config.P2PChainConfig{}, RampTreasuryMaxInflightUSDPerOrder: 500}
-	w := wirePoolOrders(cfg, nil, services.NewP2PEscrowRegistryFromMap(nil, "2"), nil, nil, nil, nil, nil)
-	if w.desk != nil || w.gates != nil || w.nonces != nil {
+	cfg := &config.Config{RampTreasuryMaxInflightUSDPerOrder: 500}
+	w := wirePoolOrders(cfg, nil, nil, nil, nil)
+	if w.desk != nil || w.gates != nil || w.nonces != nil || w.ledger != nil {
 		t.Fatalf("dormant wiring = %+v", w)
 	}
 	err := services.ValidatePoolSetting(nil, models.FeaturePoolOrderMax, 0, 600)
@@ -46,107 +47,98 @@ func TestWirePoolOrders_DormantWithoutPoolChain(t *testing.T) {
 	}
 }
 
-// windowEscrow is the pool escrow as the desk sees it: an address and its
-// paymentWindow(). Nothing else is called while the desk is built.
-type windowEscrow struct {
-	services.P2PEscrowAdapter
-	w time.Duration
+// fakeRPC answers what boot asks the pool chain: its id, a block, code at any
+// address, and eth_call — every call returns uint256(18) (the token's
+// decimals; the gates read the rest as wrong and close, which is fine here).
+func fakeRPC(t *testing.T, chainID int64) string {
+	t.Helper()
+	word := "0x" + strings.Repeat("0", 62) + "12"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		var result any
+		switch req.Method {
+		case "eth_chainId":
+			result = hexutil.EncodeBig(big.NewInt(chainID))
+		case "eth_blockNumber":
+			result = "0x10"
+		case "eth_getCode":
+			result = "0x60"
+		case "eth_call":
+			result = word
+		case "eth_gasPrice":
+			result = "0x3b9aca00"
+		case "eth_getBalance":
+			result = "0x0"
+		default:
+			result = nil
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
-
-func (windowEscrow) ContractAddress() string                     { return testPoolEscrow }
-func (e windowEscrow) ReadPaymentWindow() (time.Duration, error) { return e.w, nil }
 
 // poolDeskWorld is a BSC testnet pool row with every part the desk needs: an
-// RPC client (lazy, never dialled), a router-less treasury lane, an active
-// IT_PM_ID merchant and an escrow reporting window.
-func poolDeskWorld(t *testing.T, window time.Duration) (*config.Config, *services.BlockchainService, *services.P2PEscrowRegistry, *services.P2PTradeService, *services.ITService) {
-	return poolDeskWorldOn(t, "testnet", 97, window)
-}
-
-// poolDeskWorldOn is a pool row on network's BSC chain with every desk part,
-// including the P2P claim source with a settlement forwarder that pays LPs
-// (review I-4: the desk refuses to serve without one).
-func poolDeskWorldOn(t *testing.T, network string, chainID int64, window time.Duration) (*config.Config, *services.BlockchainService, *services.P2PEscrowRegistry, *services.P2PTradeService, *services.ITService) {
+// RPC client (a fake node), a router-less treasury lane and a database.
+func poolDeskWorld(t *testing.T) (*config.Config, *services.BlockchainService, *services.ITService) {
 	t.Helper()
-	cfg := poolTestConfig(t, network)
+	cfg := poolTestConfig(t, "testnet")
+	nc := cfg.Networks["testnet"]
+	bsc := nc.Chains["bsc"]
+	bsc.RPCURL = fakeRPC(t, 97)
+	nc.Chains["bsc"] = bsc
+	cfg.Networks["testnet"] = nc
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.PaymentMerchant{}); err != nil {
-		t.Fatal(err)
-	}
-	pm := models.PaymentMerchant{ID: uuid.New(), UserID: uuid.New(), Name: "TSA", Status: models.PaymentMerchantStatusActive}
-	if err := db.Create(&pm).Error; err != nil {
-		t.Fatal(err)
-	}
-	cfg.ITPMID = pm.ID.String()
 	prev := config.DB
 	config.DB = db
 	t.Cleanup(func() { config.DB = prev })
-	reg := services.NewP2PEscrowRegistryFromEntries(map[int64]services.P2PRegistryEntry{
-		chainID: {Escrow: windowEscrow{w: window}, ChainKey: "bsc", Purpose: config.P2PPurposePool, Assets: []string{"USDT"}, Decimals: map[string]int{"USDT": 18}},
-	}, "2")
-	trades := services.NewP2PTradeService(db, reg, nil, nil, chainID)
-	pmSvc := services.NewPMService(db)
-	claims := services.NewP2PTradeClaimSource(db, pmSvc, trades, fakeSender{})
-	claims.SetForwarder(services.NewP2PSettlementForwarder(db, pmSvc, nil, nil, "TSA"))
-	it := services.NewITService(db, nil, nil)
-	it.SetPoolForwards(claims)
-	return cfg, services.NewBlockchainService(cfg), reg, trades, it
+	return cfg, services.NewBlockchainService(cfg), services.NewITService(db, nil, nil)
 }
 
-// The rehearsal chain (BSC testnet, 97) with every part: the desk, its nonce
-// watch (alert-watched) and the pinned card are all wired.
-func TestWirePoolOrders_TestnetRowBuildsTheDesk(t *testing.T) {
-	cfg, bs, reg, trades, it := poolDeskWorld(t, 60*time.Minute)
+// A vault row with every part: the desk (handed to ITService), its nonce
+// watch and the ledger indexer (both alert-watched), and the pinned card.
+func TestWirePoolOrders_VaultRowBuildsTheDeskAndLedger(t *testing.T) {
+	cfg, bs, it := poolDeskWorld(t)
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	w := wirePoolOrders(cfg, bs, reg, trades, services.NewPMService(config.DB), fakeSender{}, it, nil)
-	if w.treasury == nil || w.gates == nil || w.desk == nil || w.nonces == nil {
-		t.Fatalf("testnet wiring = %+v, want every part\n%s", w, buf.String())
+	w := wirePoolOrders(cfg, bs, fakeSender{}, it, nil)
+	if w.treasury == nil || w.gates == nil || w.desk == nil || w.nonces == nil || w.ledger == nil {
+		t.Fatalf("wiring = %+v, want every part\n%s", w, buf.String())
 	}
 	if !it.HasPool() {
 		t.Fatal("the desk must be handed to ITService (the pool provider and the card read it)")
 	}
-	if lane := w.treasury.Lane("bsc"); lane == nil || len(lane.EscrowCalls) != 1 || lane.EscrowCalls[0] != common.HexToAddress(testPoolEscrow) {
-		t.Fatalf("the pool lane may call the pool escrow and nothing else: %+v", lane)
-	}
-	if !strings.Contains(buf.String(), "pool orders ready chain=bsc(97)") {
+	if !strings.Contains(strings.ToLower(buf.String()), strings.ToLower("pool orders ready chain=bsc(97) vault="+testPoolVault)) {
 		t.Fatalf("no ready line:\n%s", buf.String())
 	}
-
 	s := jobs.NewScheduler()
 	registerPoolOrderJobs(s, w)
-	if s.Count() != 1 {
-		t.Fatalf("registered %d, want the treasury nonce watch", s.Count())
+	if s.Count() != 2 {
+		t.Fatalf("registered %d, want the ledger indexer and the treasury nonce watch", s.Count())
 	}
-	assertAlertWatched(t, s, "liquidity-treasury-nonce-watch")
-
-	if got := poolCardEnabled(t, w, it); !got {
+	assertAlertWatched(t, s, "liquidity-vault-indexer")
+	if !poolCardEnabled(t, w, it) {
 		t.Fatal("a wired desk shows the pinned card")
 	}
 }
 
-// Re-review N7: an escrow deployed with another paymentWindow builds no desk,
-// so the pool provider and the card stay off.
-func TestWirePoolOrders_PaymentWindowMismatchBuildsNoDesk(t *testing.T) {
-	cfg, bs, reg, trades, it := poolDeskWorld(t, 30*time.Minute)
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-
-	w := wirePoolOrders(cfg, bs, reg, trades, services.NewPMService(config.DB), fakeSender{}, it, nil)
-	if w.gates == nil || w.desk != nil || w.nonces != nil || it.HasPool() {
-		t.Fatalf("mismatched window wiring = %+v hasPool=%t", w, it.HasPool())
-	}
-	if !strings.Contains(buf.String(), "liquidity_pool_payment_window_mismatch") {
-		t.Fatalf("no mismatch alert:\n%s", buf.String())
-	}
-	if poolCardEnabled(t, w, it) {
-		t.Fatal("no desk: the card stays hidden (O-C1-1)")
+// No operator key: the desk is never built (it could take naira it cannot
+// fill), but the ledger still keeps LP history up.
+func TestWirePoolOrders_NoOperatorBuildsNoDesk(t *testing.T) {
+	cfg, bs, it := poolDeskWorld(t)
+	w := wirePoolOrders(cfg, bs, nil, it, nil)
+	if w.desk != nil || it.HasPool() || w.ledger == nil {
+		t.Fatalf("wiring = %+v hasPool=%t, want a ledger and no desk", w, it.HasPool())
 	}
 }
 
@@ -190,26 +182,25 @@ func assertAlertWatched(t *testing.T, s *jobs.Scheduler, name string) {
 	}
 }
 
-// S24 / decision 17: the canceller runs with a release key, pool or not, and
-// a silent death of it alerts.
+// The canceller runs with a release key, pool or not, and a silent death of
+// it alerts.
 func TestRegisterExpiryCanceller_AlwaysWithAReleaseKey(t *testing.T) {
 	s := jobs.NewScheduler()
 	trades := services.NewP2PTradeService(nil, services.NewP2PEscrowRegistryFromMap(nil, "2"), nil, nil, 146)
-	registerExpiryCanceller(s, trades, &fakeSender{}, nil, nil, nil)
+	registerExpiryCanceller(s, trades, &fakeSender{}, nil, nil)
 	if s.Count() != 1 {
 		t.Fatalf("registered %d, want the canceller", s.Count())
 	}
 	assertAlertWatched(t, s, "p2p-expiry-canceller")
 	s2 := jobs.NewScheduler()
-	registerExpiryCanceller(s2, trades, nil, nil, nil, nil)
+	registerExpiryCanceller(s2, trades, nil, nil, nil)
 	if s2.Count() != 0 {
 		t.Fatal("a canceller with no release key cannot send; it must not be registered")
 	}
 }
 
 // The canceller's statement-freshness source is the inbound poller, and a
-// missing poller is a true nil interface (the typed-nil lesson): the canceller
-// then runs without the freshness pause instead of calling a nil poller.
+// missing poller is a true nil interface (the typed-nil lesson).
 func TestStatementFreshness_InboundPollerOrTrueNil(t *testing.T) {
 	if f := statementFreshness(nil); f != nil {
 		t.Fatalf("no poller = %#v, want a nil interface", f)
@@ -217,59 +208,6 @@ func TestStatementFreshness_InboundPollerOrTrueNil(t *testing.T) {
 	p := jobs.NewInboundCreditPoller(nil, time.Minute)
 	if f := statementFreshness(p); f == nil || f.(*jobs.InboundCreditPoller) != p {
 		t.Fatalf("the poller must be the freshness source, got %#v", f)
-	}
-}
-
-// §25 step 12 (S46): unconfiguring the pool chain with live slices refuses boot.
-// Review I-6: the decision is the configuration's (the row was removed), never
-// the runtime registry's — a pool RPC that fails to dial at boot leaves the
-// chain out of the registry and must not crash-loop the whole API.
-// Postgres (review I7): P2PTrade's default:gen_random_uuid() does not migrate
-// on SQLite (the codebase notes it at p2p_merchant_stats_service_test.go:104).
-func TestCheckPoolUnconfigure_FatalWithLiveSlicesOffThePoolChain_Postgres(t *testing.T) {
-	db := testutil.TempPostgres(t, "liq_c1_unconf_", &models.P2PTrade{})
-	unconfigured := &config.Config{P2PChains: map[int64]config.P2PChainConfig{}}
-	dialFailed := services.NewP2PEscrowRegistryFromMap(nil, "2") // the pool chain's RPC never dialled
-	if err := checkPoolUnconfigure(db, unconfigured, dialFailed); err != nil {
-		t.Fatalf("no slices: %v", err)
-	}
-	intent := uuid.New()
-	db.Create(&models.P2PTrade{ID: uuid.New(), AdID: uuid.New(), BuyerID: uuid.New(), SellerID: uuid.New(), Token: "USDT",
-		ChainID: 56, TokenAmount: "1", FiatAmount: "1", FiatCurrency: "NGN", Rate: "1",
-		Status: models.P2PTradeStatusPendingPayment, ExpiresAt: time.Now(), ITIntentID: &intent})
-	if err := checkPoolUnconfigure(db, unconfigured, dialFailed); err == nil || !strings.Contains(err.Error(), "liquidity_pool_unconfigure_refused") {
-		t.Fatalf("live slice on an unconfigured chain: %v", err)
-	}
-	configured := &config.Config{P2PChains: map[int64]config.P2PChainConfig{56: {Purpose: config.P2PPurposePool}}}
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	if err := checkPoolUnconfigure(db, configured, dialFailed); err != nil {
-		t.Fatalf("a configured pool chain whose RPC is down must boot: %v", err)
-	}
-	if !strings.Contains(buf.String(), "WARN liquidity_pool_chain_not_running") {
-		t.Fatalf("no warning for a configured pool chain the registry is not running:\n%s", buf.String())
-	}
-}
-
-// Pre-merge review M-5: a read error is not a finding. An unreadable slice
-// table (a transient DB error, or a binary started before -migrate) must not
-// crash-loop the whole API; it is an ALERT and boot goes on. Only a read that
-// finds live slices off the pool chain refuses (the test above).
-func TestCheckPoolUnconfigure_ReadErrorAlertsAndBoots(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{}) // no p2p_trades table
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	cfg := &config.Config{P2PChains: map[int64]config.P2PChainConfig{}}
-	if err := checkPoolUnconfigure(db, cfg, services.NewP2PEscrowRegistryFromMap(nil, "2")); err != nil {
-		t.Fatalf("a read error refused boot: %v", err)
-	}
-	if !strings.Contains(buf.String(), "ALERT liquidity_pool_unconfigure_unchecked") {
-		t.Fatalf("no alert for the unreadable check:\n%s", buf.String())
 	}
 }
 

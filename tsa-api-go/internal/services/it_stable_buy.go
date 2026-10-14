@@ -505,6 +505,9 @@ const stableBuyExpiredReason = "expired before payment"
 // pending_payment and an age inside the window, so a row this touches was
 // already unclaimable.
 func (s *ITService) expireStaleStableBuys(ctx context.Context, userID uuid.UUID) error {
+	if err := s.expireStaleOpeningBuys(ctx, userID); err != nil {
+		return err
+	}
 	// One cutoff for both reads: every row the update retires was also read
 	// as routed or not, so no converted buy's record is left behind.
 	cutoff := time.Now().Add(-stableBuyClaimWindow)
@@ -558,6 +561,59 @@ func (s *ITService) expireStaleStableBuys(ctx context.Context, userID uuid.UUID)
 			routed[i].ID, userID, models.ITIntentProvider(&routed[i]))
 	}
 	return nil
+}
+
+// stableBuyOpeningStaleAfter is the retired slice pool's opening sweep bound
+// (SweepStaleOpening, spec 2026-10-08 F3): an open took seconds, so an order
+// still `opening` after it was left by a crash.
+const stableBuyOpeningStaleAfter = 2 * time.Minute
+
+// expireStaleOpeningBuys retires this user's stuck `opening` pool orders.
+// Only the retired slice pool ever wrote `opening` (the shared vault never
+// does), and its sweep went with it — so without this a crash mid-open wedges
+// the user out of stablecoin buys forever (findOpenStableBuy counts it).
+// Closed as a failed open (hidden from her lists, never an abandon), exactly
+// as the old sweep did — but only while no slice of the order is still live:
+// a slice row is written before its on-chain open, so a live one may hold
+// LP money on-chain, and an operator settles that by hand.
+func (s *ITService) expireStaleOpeningBuys(ctx context.Context, userID uuid.UUID) error {
+	cutoff := time.Now().Add(-stableBuyOpeningStaleAfter)
+	var ids []uuid.UUID
+	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
+		Where("user_id = ? AND direction = ? AND status = ? AND created_at < ?",
+			userID, models.ITDirectionBuy, models.ITStatusOpening, cutoff).
+		Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+		return err
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, id := range ids {
+			var live int64
+			if err := tx.Model(&models.P2PTrade{}).Where("it_intent_id = ? AND status NOT IN ?", id,
+				[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusCancelled, models.P2PTradeStatusResolved}).
+				Count(&live).Error; err != nil {
+				return err
+			}
+			if live > 0 {
+				log.Printf("[liquidity] ALERT liquidity_slice_opening_stuck intent=%s user=%s live_slices=%d — not expired; settle the slices by hand",
+					id, userID, live)
+				continue
+			}
+			res := tx.Model(&models.ITIntent{}).Where("id = ? AND status = ?", id, models.ITStatusOpening).
+				Updates(map[string]any{"status": models.ITStatusCancelled, "failure_reason": models.ITFailurePoolOpenFailed})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected != 1 {
+				continue
+			}
+			if err := markConversion(ctx, tx, id, []string{models.PaycrestStatusAwaitingPayment},
+				map[string]any{"status": models.PaycrestStatusExpired}); err != nil {
+				return err
+			}
+			log.Printf("[liquidity] METRIC ramp_pool_open outcome=swept intent=%s user=%s", id, userID)
+		}
+		return nil
+	})
 }
 
 // CancelStableBuy is the stablecoin-only form of CancelBuy, kept for the

@@ -258,37 +258,42 @@ func forEachGoFile(t *testing.T, fn func(*testing.T, string, *ast.File)) {
 	}
 }
 
-// The buffered accessor is only the default if the builders actually take it.
+// The buffered accessor is only the default if the builders actually take it:
+// PrepareContractCall prices with SuggestGasPrice, and every Prepare* builder
+// in token.go goes through it.
 func TestTransactionBuildersPriceWithHeadroom(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "token.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse token.go: %v", err)
 	}
 
-	builders := map[string]bool{
-		"PrepareNativeTransfer": false,
-		"PrepareERC20Transfer":  false,
-		"PrepareERC20Approve":   false,
+	calls := map[string]string{
+		"PrepareContractCall":   "SuggestGasPrice",
+		"PrepareNativeTransfer": "PrepareContractCall",
+		"PrepareERC20Transfer":  "PrepareContractCall",
+		"PrepareERC20Approve":   "PrepareContractCall",
 	}
+	found := map[string]bool{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {
 			continue
 		}
-		if _, want := builders[fn.Name.Name]; !want {
+		want, ok := calls[fn.Name.Name]
+		if !ok {
 			continue
 		}
 		ast.Inspect(fn, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "SuggestGasPrice" {
-				builders[fn.Name.Name] = true
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == want {
+				found[fn.Name.Name] = true
 			}
 			return true
 		})
 	}
 
-	for name, found := range builders {
-		if !found {
-			t.Errorf("%s does not price via SuggestGasPrice — it will build transactions at a stale base fee", name)
+	for name, want := range calls {
+		if !found[name] {
+			t.Errorf("%s does not call %s — it will build transactions at a stale base fee", name, want)
 		}
 	}
 }

@@ -177,11 +177,3 @@ export function createAdStatusError(status: number | undefined, message: string 
   }
   return p2pErrorMessage(res ?? { status, message }, 'Server rejected the request');
 }
-
-/** LP-specific HTTP copy (review M4): a 503 here is the pool closing or the
- *  chain being unreachable, never a stale rate. */
-export function lpStatusError(status?: number, message?: string, res?: P2PErrorLike): string {
-  if (status === 503) return 'The pool is closed or the network is busy right now. Your funds are safe; try again later.';
-  if (status === 409) return p2pErrorMessage(res ?? { status, message }, 'You already have a live pool ad.');
-  return createAdStatusError(status, message, res);
-}

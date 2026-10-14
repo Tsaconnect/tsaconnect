@@ -39,10 +39,6 @@ var ErrPMKYCRequired = errors.New("a BVN or NIN is required to activate the paym
 // the one-row-per-user index (dropped by the 2026-10-13 one-off) still stands.
 var ErrSecondRoleNotEnabled = errors.New("payment merchant: a second role needs the 2026-10-13 one-off index migration")
 
-// ErrLiquidityUnavailable: no pool chain is configured (or the pool is closed
-// for activation), so an LP cannot be approved or activated.
-var ErrLiquidityUnavailable = errors.New("liquidity: providing liquidity is not available right now")
-
 // AccountNameResolver re-resolves a settlement account's name (S34).
 // BankDirectory satisfies it.
 type AccountNameResolver interface {
@@ -69,16 +65,6 @@ type PMOnboardingService struct {
 	// ever send a buyer to it, and so needs no BVN/NIN.
 	virtualAccountsRetired bool
 
-	// TSA Liquidity (spec §8). poolChainID is set at boot only when the
-	// registry has a pool chain; zero leaves LP approval and activation off.
-	poolChainID int64
-	accounts    AccountNameResolver
-	poolGate    PoolOpener
-
-	// companyPMID is IT_PM_ID: its user buys every pool slice, so it is never
-	// approved or activated as an LP (review M5).
-	companyPMID string
-
 	// secondRoleEnabled latches once the one-row-per-user index is gone.
 	secondRoleEnabled atomic.Bool
 }
@@ -95,19 +81,6 @@ func NewPMOnboardingService(db *gorm.DB, provisioner NombaProvisioner) *PMOnboar
 // that routes P2P buyers to the company account, so the two cannot disagree.
 func (s *PMOnboardingService) SetVirtualAccountsRetired(retired bool) {
 	s.virtualAccountsRetired = retired
-}
-
-// SetLiquidity enables LP onboarding on poolChainID. Called once at boot.
-func (s *PMOnboardingService) SetLiquidity(poolChainID int64, accounts AccountNameResolver, gate PoolOpener) {
-	s.poolChainID, s.accounts, s.poolGate = poolChainID, accounts, gate
-}
-
-// LiquidityChainID is the pool chain new LPs are approved onto, if any.
-func (s *PMOnboardingService) LiquidityChainID() (int64, bool) {
-	if s == nil || s.poolChainID == 0 {
-		return 0, false
-	}
-	return s.poolChainID, true
 }
 
 // NeedsIdentity reports whether activation asks the merchant for a BVN/NIN.
@@ -160,14 +133,6 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 	if !ok {
 		return nil, fmt.Errorf("pm_onboarding: %s does not make a payment merchant", req.BusinessType)
 	}
-	var poolChainID *int64
-	if kind == models.PaymentMerchantKindLP {
-		id, ok := s.LiquidityChainID()
-		if !ok {
-			return nil, ErrLiquidityUnavailable
-		}
-		poolChainID = &id
-	}
 	tx = tx.WithContext(ctx)
 	// NO KEY UPDATE serializes two approvals for the user (defence in depth,
 	// see above) without blocking rows that merely reference it (KEY SHARE).
@@ -176,25 +141,11 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 	if err := tx.Clauses(clause.Locking{Strength: "NO KEY UPDATE"}).Select("id").Where("id = ?", req.UserID).Find(&locked).Error; err != nil {
 		return nil, fmt.Errorf("pm_onboarding: lock user: %w", err)
 	}
-	if kind == models.PaymentMerchantKindLP {
-		if err := s.refuseCompanyUserAsLP(ctx, tx, req.UserID); err != nil {
-			return nil, err
-		}
-	}
-	pm, err := s.upsertPendingRow(ctx, tx, req, kind, poolChainID)
+	pm, err := s.upsertPendingRow(ctx, tx, req, kind)
 	if err != nil {
 		return nil, fmt.Errorf("pm_onboarding: upsert: %w", err)
 	}
-	if kind == models.PaymentMerchantKindLP && (pm.Status == models.PaymentMerchantStatusActive || pm.Status == models.PaymentMerchantStatusPaused) {
-		// A live LP's settlement name is the bank's, verified at activation
-		// (S34); re-copying the request would replace it with the typed one.
-		return nil, ErrInvalidPMTransition
-	}
-
 	perTrade, daily := req.RequestedPerTradeCapUSD, req.RequestedDailyCapUSD
-	if kind == models.PaymentMerchantKindLP {
-		perTrade, daily = 0, 0 // LP limits are on stake (spec §8.3), never per-trade caps
-	}
 	fields := map[string]interface{}{
 		"settlement_bank_code":      req.SettlementBankCode,
 		"settlement_account_number": req.SettlementAccountNumber,
@@ -202,9 +153,6 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 		"operator_wallet_address":   req.MakerWalletAddress,
 		"per_trade_cap_usd":         perTrade,
 		"daily_cap_usd":             daily,
-	}
-	if poolChainID != nil {
-		fields["pool_chain_id"] = *poolChainID
 	}
 	// Only advance pending → approved; never downgrade an already-active PM.
 	if pm.Status == models.PaymentMerchantStatusPending {
@@ -222,9 +170,6 @@ func (s *PMOnboardingService) ApproveFromRequestTx(ctx context.Context, tx *gorm
 	pm.OperatorWalletAddress = req.MakerWalletAddress
 	pm.PerTradeCapUSD = perTrade
 	pm.DailyCapUSD = daily
-	if poolChainID != nil {
-		pm.PoolChainID = poolChainID
-	}
 
 	return pm, nil
 }
@@ -372,24 +317,13 @@ func (s *PMOnboardingService) ActivateWithKYC(ctx context.Context, pmID, userID 
 // A rejected LP re-applying as an LP is reset to pending in one guarded
 // statement so the approval can advance it (plan B P18); merchant rows are
 // reused exactly as they are.
-func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, db *gorm.DB, req *models.MerchantRequest, kind string, poolChainID *int64) (*models.PaymentMerchant, error) {
+func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, db *gorm.DB, req *models.MerchantRequest, kind string) (*models.PaymentMerchant, error) {
 	var pm models.PaymentMerchant
 	db = db.WithContext(ctx)
 
 	// Try to find an existing row for this user (from a prior attempt).
 	err := wherePMKind(db.Where("user_id = ?", req.UserID), kind).First(&pm).Error
 	if err == nil {
-		if kind == models.PaymentMerchantKindLP && pm.Status == models.PaymentMerchantStatusRejected {
-			res := db.Model(&models.PaymentMerchant{}).
-				Where("id = ? AND status = ?", pm.ID, models.PaymentMerchantStatusRejected).
-				Updates(map[string]interface{}{"status": models.PaymentMerchantStatusPending, "review_note": ""})
-			if res.Error != nil {
-				return nil, res.Error
-			}
-			if res.RowsAffected == 1 {
-				pm.Status, pm.ReviewNote = models.PaymentMerchantStatusPending, ""
-			}
-		}
 		return &pm, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -397,9 +331,6 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, db *gorm.DB,
 	}
 
 	perTrade, daily := req.RequestedPerTradeCapUSD, req.RequestedDailyCapUSD
-	if kind == models.PaymentMerchantKindLP {
-		perTrade, daily = 0, 0
-	}
 
 	// No existing row — create one in pending state.
 	pm = models.PaymentMerchant{
@@ -408,7 +339,6 @@ func (s *PMOnboardingService) upsertPendingRow(ctx context.Context, db *gorm.DB,
 		Name:                    req.BusinessName,
 		Status:                  models.PaymentMerchantStatusPending,
 		Kind:                    kind,
-		PoolChainID:             poolChainID,
 		ProvisioningStatus:      models.PMProvisioningPending,
 		SettlementBankCode:      req.SettlementBankCode,
 		SettlementAccountNumber: req.SettlementAccountNumber,
@@ -451,98 +381,4 @@ func (s *PMOnboardingService) persistFields(ctx context.Context, pm *models.Paym
 	return s.db.WithContext(ctx).
 		Model(pm).
 		Updates(fields).Error
-}
-
-// ErrSettlementNameMismatch: the bank's name for the settlement account is not
-// the LP's verified legal name (S34).
-var ErrSettlementNameMismatch = errors.New("liquidity: the settlement account name does not match your verified name")
-
-// ErrSettlementAccountUnresolved: the bank directory could not resolve the
-// settlement account right now.
-var ErrSettlementAccountUnresolved = errors.New("liquidity: the settlement account could not be verified with the bank")
-
-// ActivateLP takes an approved LP live (spec §8.2 step 2, plan B P4). No BVN/NIN
-// and no virtual account in either inbound mode: LP naira is forwarded from the
-// company account. It requires the pool open, a Didit-verified legal name, and
-// the settlement account re-resolved with the bank, whose name must match the
-// legal name (S34). The bank's name is what is stored.
-//
-// provisioning_status=active is load-bearing: it closes the merchant-request
-// retry path (isPMRetry), which would otherwise re-run ApproveFromRequest and
-// overwrite the verified settlement name with the applicant-typed one.
-func (s *PMOnboardingService) ActivateLP(ctx context.Context, pmID, userID uuid.UUID) (*models.PaymentMerchant, error) {
-	var pm models.PaymentMerchant
-	if err := s.db.WithContext(ctx).First(&pm, "id = ?", pmID).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrPMNotFound
-		}
-		return nil, err
-	}
-	if pm.UserID != userID {
-		return nil, ErrPMNotFound
-	}
-	if !pm.IsLP() {
-		return nil, ErrInvalidPMTransition
-	}
-	if pm.Status == models.PaymentMerchantStatusActive {
-		return &pm, nil
-	}
-	if pm.Status != models.PaymentMerchantStatusApproved {
-		return nil, ErrInvalidPMTransition
-	}
-	if err := s.RefuseCompanyUserAsLP(ctx, userID); err != nil {
-		return nil, err
-	}
-	chainID, ok := s.LiquidityChainID()
-	if !ok || pm.PoolChainID == nil || *pm.PoolChainID != chainID || s.poolGate == nil || !s.poolGate.Open() || s.accounts == nil {
-		return nil, ErrLiquidityUnavailable
-	}
-	verified, legal, err := verifiedIdentity(ctx, s.db, userID)
-	if err != nil {
-		return nil, fmt.Errorf("pm_onboarding: check verification: %w", err)
-	}
-	if !verified {
-		return nil, ErrKYCVerificationRequired
-	}
-	if legal == "" {
-		return nil, ErrKYCLegalNameMissing
-	}
-	res, err := s.accounts.Resolve(ctx, pm.SettlementBankCode, pm.SettlementAccountNumber)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrSettlementAccountUnresolved, RedactAlertText(err.Error()))
-	}
-	bankName := strings.TrimSpace(res.AccountName)
-	if bankName == "" {
-		return nil, ErrSettlementAccountUnresolved
-	}
-	if !MatchAccountName(legal, bankName).IsMatch() {
-		return nil, ErrSettlementNameMismatch
-	}
-
-	// Guarded on the row still being the approved one whose account was just
-	// resolved: a concurrent pause, reject or re-approval must not be overwritten
-	// by an activation, nor the bank's name stored against another account.
-	upd := s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
-		Where("id = ? AND user_id = ? AND kind = ? AND status = ? AND settlement_bank_code = ? AND settlement_account_number = ?",
-			pm.ID, userID, models.PaymentMerchantKindLP, models.PaymentMerchantStatusApproved, pm.SettlementBankCode, pm.SettlementAccountNumber).
-		Updates(map[string]interface{}{
-			"settlement_account_name": bankName,
-			"provisioning_status":     models.PMProvisioningActive,
-			"status":                  models.PaymentMerchantStatusActive,
-		})
-	if upd.Error != nil {
-		return nil, fmt.Errorf("pm_onboarding: activate LP: %w", upd.Error)
-	}
-	if upd.RowsAffected != 1 {
-		var current models.PaymentMerchant
-		if err := s.db.WithContext(ctx).First(&current, "id = ?", pm.ID).Error; err == nil &&
-			current.Status == models.PaymentMerchantStatusActive && current.SettlementAccountName == bankName {
-			return &current, nil // a concurrent activation of the same account won
-		}
-		return nil, ErrInvalidPMTransition
-	}
-	pm.SettlementAccountName = bankName
-	pm.ProvisioningStatus = models.PMProvisioningActive
-	pm.Status = models.PaymentMerchantStatusActive
-	return &pm, nil
 }

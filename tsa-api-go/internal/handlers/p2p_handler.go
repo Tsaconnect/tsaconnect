@@ -39,8 +39,9 @@ type P2PHandler struct {
 	// it nil once INBOUND_MODE=central is on hands buyers the merchant's own
 	// account, which no longer feeds the statement the ingestor reads.
 	central CentralAccountSource
-	// liquidity is the LP read side; nil until a pool chain exists.
-	liquidity LiquidityReader
+	// vaultLP is the shared-pool LP side (spec 2026-10-14); nil while the
+	// pool has no vault (the /liquidity routes are then not registered).
+	vaultLP VaultLiquidity
 	// gas drips S for the caller's next P2P tx; nil while the Sonic sponsor
 	// lane is dormant (GasTopUp then answers 503 gas_unavailable).
 	gas P2PGasSponsor
@@ -160,20 +161,6 @@ func mapServiceError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	// An LP deposit outside the pool limits: the app shows the headroom, so it
-	// is sent both as a decimal string and in exact base units (18 dp on BSC).
-	var lim *services.LiquidityLimitError
-	if errors.As(err, &lim) {
-		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
-			"success": false, "message": err.Error(), "code": lim.Code,
-			"data": gin.H{
-				"headroom":      services.BaseUnitsToDecimal(lim.Headroom, lim.Decimals),
-				"headroomUnits": lim.Headroom.String(),
-				"decimals":      lim.Decimals,
-			},
-		})
-		return true
-	}
 	var band *services.RateBandError
 	if errors.As(err, &band) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
@@ -209,7 +196,6 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrDisputeAlreadyOpen),
 		errors.Is(err, services.ErrActiveTradeExists),
 		errors.Is(err, services.ErrSellerPoolInsufficient),
-		errors.Is(err, services.ErrPoolStockAdExists),
 		// The asset was delisted from P2P after this ad/pool existed. Creating
 		// an ad in it also carries ErrInvalidParams and maps to 400 above.
 		errors.Is(err, services.ErrAssetNotTradeable):
@@ -263,17 +249,14 @@ func unsignedTxJSON(raw []byte) any {
 
 // ─── Chains ────────────────────────────────────────────────────────────────
 
-// GetChains returns the P2P-enabled chains + their tradeable assets, plus the
-// pool chain for a liquidity provider bound to it.
+// GetChains returns the P2P-enabled chains + their tradeable assets.
 func (h *P2PHandler) GetChains(c *gin.Context) {
-	user, ok := h.require(c)
-	if !ok {
+	if _, ok := h.require(c); !ok {
 		return
 	}
 	chains := []services.P2PChainInfo{}
 	if h.trade != nil {
-		// The pool chain is added for an LP bound to it (plan B P10, review I1).
-		if cs := h.trade.ChainsFor(c.Request.Context(), user.ID); cs != nil {
+		if cs := h.trade.LiveChains(c.Request.Context()); cs != nil {
 			chains = cs
 		}
 	}
@@ -746,17 +729,7 @@ func (h *P2PHandler) CreateAd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	// Any KYC-verified user (require() above) may post an ad. The TSA Liquidity
-	// pool chain keeps its stricter rule: merchants, admin tiers, and an active
-	// LP (for its stock ad) only.
-	if h.trade.IsPoolChain(req.ChainID) && user.Role != models.RoleMerchant &&
-		!hasAdminPrivilege(c, user) && !h.trade.IsActiveLP(c.Request.Context(), user.ID) {
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"success": false,
-			"message": "Merchant account required to publish P2P ads.",
-		})
-		return
-	}
+	// Any KYC-verified user (require() above) may post an ad.
 	// Validate side up-front so a typo doesn't silently fall through to the
 	// sell-ad path. Empty defaults to "sell".
 	side := strings.ToLower(strings.TrimSpace(req.Side))

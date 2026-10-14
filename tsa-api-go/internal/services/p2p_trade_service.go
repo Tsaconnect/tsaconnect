@@ -31,10 +31,6 @@ var (
 	ErrInsufficientRemaining = errors.New("p2p: trade amount exceeds ad remaining")
 	ErrSelfTrade             = errors.New("p2p: seller cannot open a trade on their own ad")
 	ErrInvalidTransition     = errors.New("p2p: invalid state transition")
-	// ErrSliceReleaseInFlight: a pool slice's release was already sent (or is
-	// being sent by another caller); AutoRelease refuses to send it again and
-	// the reconciler decides it from the recorded hash.
-	ErrSliceReleaseInFlight  = errors.New("p2p: pool slice release already in flight")
 	ErrForbidden             = errors.New("p2p: not authorized for this action")
 	ErrRateStale             = errors.New("p2p: rate source is stale; cannot quote")
 	ErrAmountOverflow        = errors.New("p2p: amount exceeds uint96 maximum supported by contract")
@@ -212,23 +208,8 @@ type P2PTradeService struct {
 	// NGN reservation (non-PM ads, or PM feature dormant).
 	pm *PMService
 
-	// poolGate answers "is the TSA Liquidity pool open?" for the LP route
-	// (plan B P6, P14). Nil reads closed.
-	poolGate PoolOpener
-	// balanceMoved is told of every confirmed deposit and withdrawal (the LP
-	// balance cache, review I4); nil when liquidity is dormant.
-	balanceMoved func(chainID int64, wallet, token string)
-
 	// alerter emails operators about P2P money events (p2p_alert.go). Nil-safe.
 	alerter P2PAlerter
-	// poolSlices and poolSender handle LP-side actions on pool slices (spec
-	// S42, F21–F22; plan C1 P14). Nil: dormant pool — the reconciler alerts
-	// and waits.
-	poolSlices PoolSliceOrders
-	poolSender ChainSender
-	// sliceOpenAlerts throttles the unresolved-open alert per slice (M-12,
-	// re-review N-6): once, then hourly.
-	sliceOpenAlerts *alertThrottle
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -240,14 +221,13 @@ const defaultFloatOffsetMaxBps = 1000
 
 func NewP2PTradeService(db *gorm.DB, escrows *P2PEscrowRegistry, rates RateProvider, bus EventPublisher, defaultChainID int64) *P2PTradeService {
 	return &P2PTradeService{
-		sliceOpenAlerts: &alertThrottle{},
-		db:              db,
-		escrows:         escrows,
-		rates:           rates,
-		bus:             bus,
-		clock:           SystemClock,
-		defaultChainID:  defaultChainID,
-		adFeeBudget:     p2pAdFeeBudget,
+		db:             db,
+		escrows:        escrows,
+		rates:          rates,
+		bus:            bus,
+		clock:          SystemClock,
+		defaultChainID: defaultChainID,
+		adFeeBudget:    p2pAdFeeBudget,
 	}
 }
 
@@ -260,6 +240,11 @@ func (s *P2PTradeService) resolve(chainID int64) (P2PEscrowAdapter, int64, strin
 }
 
 // EnabledChains returns the P2P-enabled chains for the marketplace/create-ad UI.
+// LiveChains is EnabledChains with each chain's live fees.
+func (s *P2PTradeService) LiveChains(ctx context.Context) []P2PChainInfo {
+	return s.withLiveFees(ctx, s.EnabledChains())
+}
+
 func (s *P2PTradeService) EnabledChains() []P2PChainInfo {
 	if s.escrows == nil {
 		return nil
@@ -638,16 +623,6 @@ const defaultVoucherTTL = 30 * 24 * time.Hour
 // The seller must call SignAd next, presenting their signature over the
 // returned typed data. Until then the ad is invisible to buyers.
 func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sellerAddress string, params CreateAdParams) (*CreateAdResult, error) {
-	// The pool chain takes only LP stock ads (spec S5, §8.4). The caller's own
-	// LP row decides; nothing in the request can.
-	if s.IsPoolChain(params.ChainID) {
-		lp, err := s.openableFor(ctx, sellerID, params.ChainID, params.Token)
-		if err != nil {
-			return nil, err
-		}
-		return s.createPoolAd(ctx, lp, sellerID, sellerAddress, params)
-	}
-
 	// Buy-ads (merchant offers to BUY crypto from users) take a wholly
 	// separate path: no on-chain pool, no voucher, no signature. The user
 	// deposits crypto JIT at trade-open instead. Branch before the sell-ad's
@@ -999,14 +974,15 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	if ad.Status != models.P2PAdStatusPending {
 		return nil, fmt.Errorf("%w: ad status=%s", ErrInvalidTransition, ad.Status)
 	}
-	// An ad drafted before its asset was delisted must not go live after; on
-	// the pool chain only the active LP may sign, from its registered wallet.
-	lp, err := s.openableFor(ctx, sellerID, ad.ChainID, ad.Token)
-	if err != nil {
+	// An ad drafted before its asset was delisted must not go live after, and
+	// an LP stock ad of the retired slice pool never does.
+	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
 		return nil, err
 	}
-	if lp != nil && common.HexToAddress(sellerAddress) != common.HexToAddress(lp.OperatorWalletAddress) {
-		return nil, fmt.Errorf("%w: sign with your registered liquidity wallet", ErrInvalidParams)
+	if pool, err := s.isPoolAd(ctx, &ad); err != nil {
+		return nil, err
+	} else if pool {
+		return nil, refuse(ErrAdNotActive)
 	}
 
 	voucher, err := s.adVoucher(&ad, sellerAddress)
@@ -1062,9 +1038,6 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	}
 	ad.Status = models.P2PAdStatusActive
 	ad.VoucherSignature = sigHex
-	if lp != nil {
-		s.closeSupersededStockAds(ctx, &ad)
-	}
 
 	s.audit(ctx, models.P2PAuditAdSigned, &sellerID, &ad.ID, nil, map[string]any{
 		"voucherHash": ad.VoucherHash,
@@ -1231,11 +1204,21 @@ func (s *P2PTradeService) PauseAd(ctx context.Context, adID, sellerID uuid.UUID)
 
 // ResumeAd puts a paused ad back on the market, so it counts as new activity:
 // an ad whose asset has since been delisted stays paused, and a stock ad
-// resumes only for its active LP while the pool is open (openableFor).
+// never resumes as a retired pool stock ad.
 func (s *P2PTradeService) ResumeAd(ctx context.Context, adID, sellerID uuid.UUID) error {
 	return s.flipAdStatus(ctx, adID, sellerID, models.P2PAdStatusPaused, models.P2PAdStatusActive,
 		models.P2PAuditAdResumed, events.P2PAdResumed,
-		func(ad *models.P2PAd) error { _, err := s.openableFor(ctx, sellerID, ad.ChainID, ad.Token); return err })
+		func(ad *models.P2PAd) error {
+			if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
+				return err
+			}
+			if pool, err := s.isPoolAd(ctx, ad); err != nil {
+				return err
+			} else if pool {
+				return refuse(ErrAdNotActive)
+			}
+			return nil
+		})
 }
 
 func (s *P2PTradeService) flipAdStatus(ctx context.Context, adID, sellerID uuid.UUID, from, to, action, event string, guard func(*models.P2PAd) error) error {
@@ -2006,8 +1989,8 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	if trade.ReleaseRevertedAt != nil {
 		return nil, fmt.Errorf("%w: trade=%s its release reverted on chain; an operator decides", ErrInvalidTransition, trade.ID)
 	}
-	if trade.IsPoolSlice() && (trade.Status == models.P2PTradeStatusReleasing || trade.ReleaseTxHash != "") {
-		return nil, fmt.Errorf("%w: slice=%s status=%s tx=%q", ErrSliceReleaseInFlight, trade.ID, trade.Status, trade.ReleaseTxHash)
+	if trade.IsPoolSlice() {
+		return nil, fmt.Errorf("%w: trade=%s is a retired pool slice; settled by an operator", ErrInvalidTransition, trade.ID)
 	}
 	escrow, _, _, err := s.resolve(trade.ChainID)
 	if err != nil {
@@ -2021,19 +2004,11 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 		q := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
 			Where("id = ? AND (status = ? OR (status = ? AND dropped_at IS NULL))", trade.ID,
 				models.P2PTradeStatusPaid, models.P2PTradeStatusPendingPayment)
-		if trade.IsPoolSlice() {
-			// The CAS that makes this caller the only sender; a slice its order
-			// dropped is never released to the treasury, paid or not.
-			q = q.Where("release_tx_hash = '' AND dropped_at IS NULL")
-		}
 		res := q.Updates(map[string]any{"status": models.P2PTradeStatusReleasing, "updated_at": s.clock.Now()})
 		if res.Error != nil {
 			return nil, res.Error
 		}
 		if res.RowsAffected == 0 {
-			if trade.IsPoolSlice() {
-				return nil, fmt.Errorf("%w: slice=%s lost the release flip", ErrSliceReleaseInFlight, trade.ID)
-			}
 			return nil, ErrInvalidTransition
 		}
 	}
@@ -2063,42 +2038,16 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	// under this chain's release-key lock, shared with every other release-key job.
 	// The trade's release is the operation: a retry never gets a new nonce.
 	sendCtx := WithOperationRef(ctx, "p2p_release:"+trade.ID.String())
-	if trade.IsPoolSlice() {
-		// A slice's release is what the release lane's pool reservation is
-		// held for: it spends it rather than being refused by it.
-		sendCtx = ReservedSend(sendCtx)
-		// Plan C2 P2: the slice's release hash commits in the key lane's
-		// allocation transaction, with the signed release, or nothing does.
-		sendCtx = WithPreBroadcast(sendCtx, func(hctx context.Context, _ uint64, hash string) error {
-			res := LaneDB(hctx, s.db).Model(&models.P2PTrade{}).
-				Where("id = ? AND status = ? AND release_tx_hash IN ('', 'reconciled')", trade.ID, models.P2PTradeStatusReleasing).
-				Update("release_tx_hash", hash)
-			if res.Error == nil && res.RowsAffected != 1 {
-				return fmt.Errorf("%w: slice=%s no longer releasing without a hash", ErrSliceReleaseInFlight, trade.ID)
-			}
-			return res.Error
-		})
-	}
 	txHash, err := signer.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
 		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
 	})
 	if txHash == "" {
 		txHash = uncertainTxHash(err)
 	}
-	if trade.IsPoolSlice() && txHash != "" {
-		// The retried path: an allocation this release already holds answers
-		// with its hash without running the hook again, so a slice reset meanwhile
-		// (cleared to paid, hash emptied) gets it here — same conditional write.
-		s.db.WithContext(detached(ctx)).Model(&models.P2PTrade{}).
-			Where("id = ? AND status = ? AND release_tx_hash IN ('', 'reconciled')", trade.ID, models.P2PTradeStatusReleasing).
-			Update("release_tx_hash", txHash)
-	}
 	if err != nil {
-		// A slice whose release may have been broadcast stays `releasing` (at
-		// the treasury) until its hash is proven reverted (review C-1). A
-		// release the key lane COMMITTED (ErrPendingBroadcast: it keeps
-		// sending it) is in flight: never rolled back either.
-		if errors.Is(err, ErrTxNotBroadcast) || (!trade.IsPoolSlice() && !errors.Is(err, ErrPendingBroadcast) && !errors.Is(err, ErrSendOutcomeUnknown)) {
+		// A release the key lane COMMITTED (ErrPendingBroadcast: it keeps
+		// sending it) is in flight: never rolled back.
+		if errors.Is(err, ErrTxNotBroadcast) || (!errors.Is(err, ErrPendingBroadcast) && !errors.Is(err, ErrSendOutcomeUnknown)) {
 			rollback()
 		}
 		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
@@ -2115,13 +2064,11 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 		// burning release-key gas. It stays releasing, flagged for an
 		// operator. Otherwise step back only when the lane proves the release
 		// holds nothing live or executed.
-		if !trade.IsPoolSlice() {
-			lane := laneOfSender(signer, trade.ChainID)
-			if reverted, rerr := lane.CallReverted(ctx, minedHash); rerr == nil && reverted {
-				s.markReleaseReverted(ctx, &trade, minedHash)
-			} else if rerr == nil && lane.GiveUp(ctx, signer.Address(), "p2p_release:"+trade.ID.String(), minedHash, RetireSequenced) {
-				rollback()
-			}
+		lane := laneOfSender(signer, trade.ChainID)
+		if reverted, rerr := lane.CallReverted(ctx, minedHash); rerr == nil && reverted {
+			s.markReleaseReverted(ctx, &trade, minedHash)
+		} else if rerr == nil && lane.GiveUp(ctx, signer.Address(), "p2p_release:"+trade.ID.String(), minedHash, RetireSequenced) {
+			rollback()
 		}
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
@@ -2691,6 +2638,11 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	if isTerminalTradeStatus(trade.Status) {
 		return ReconcileResult{}, nil
 	}
+	// Rows of the retired slice pool (spec 2026-10-14) are never moved
+	// automatically; an operator settles any leftover by hand.
+	if trade.IsPoolSlice() {
+		return ReconcileResult{}, nil
+	}
 
 	// Reconcile against the trade's own chain — fail-loud if it's unconfigured
 	// (§8.5: a wrong-chain ReadTrade would compare against the wrong escrow and
@@ -2709,21 +2661,9 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// appear on chain. Such a row permanently holds reserved/remaining capacity,
 	// so reclaim it — cancel + restore the ad's off-chain counters.
 	if !onchain.Exists {
-		// An ordinary trade keeps today's rule (no open hash). A slice is
-		// judged by S44 alone, hash or not (review I1): its open is gone only
-		// when it can never land.
 		if trade.Status == models.P2PTradeStatusPendingPayment &&
-			s.clock.Now().After(trade.ExpiresAt) &&
-			((!trade.IsPoolSlice() && !trade.OpenRecorded()) || (trade.IsPoolSlice() && s.sliceOrphanable(ctx, &trade))) {
-			if trade.IsPoolSlice() {
-				s.notePaidSliceLost(ctx, &trade, "never_opened") // a paid order's slice is never silently gone
-			}
+			s.clock.Now().After(trade.ExpiresAt) && !trade.OpenRecorded() {
 			return s.reconcileOrphanOpen(ctx, &trade)
-		}
-		// Re-review N5: a slice not on-chain yet, still inside its window, is
-		// rotated too, so an hour of failed opens never holds the window.
-		if trade.IsPoolSlice() && trade.Status == models.P2PTradeStatusPendingPayment && !s.clock.Now().After(trade.ExpiresAt) {
-			s.rotateSlice(ctx, &trade)
 		}
 		return ReconcileResult{}, nil
 	}
@@ -2744,10 +2684,7 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// under our id is not the one we prepared, so its Paid/Released/Resolved/
 	// Disputed must never reach our row; only Cancelled is applied, as it just
 	// returns the capacity our row reserved. The rest waits for an operator.
-	// A pool slice is never backfilled: its open is proven by the pool's own
-	// path (opened_at, S44) and it has no opener_address, so the matcher would
-	// refuse it and stall the slice rules in the switch below.
-	if !trade.IsPoolSlice() && !trade.OpenRecorded() {
+	if !trade.OpenRecorded() {
 		if ok, err := s.recordOpenFromChain(ctx, &trade, onchain); err != nil {
 			if !errors.Is(err, ErrInvalidTransition) && !errors.Is(err, ErrUnsupportedToken) {
 				return ReconcileResult{}, fmt.Errorf("backfill open: %w", err)
@@ -2771,24 +2708,12 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 
 	switch onchain.Status {
 	case OnChainP2PStatusReleased:
-		if trade.IsPoolSlice() {
-			s.noteSliceSelfRelease(ctx, &trade)
-		}
 		return s.reconcileToReleased(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusCancelled:
-		if trade.IsPoolSlice() {
-			s.notePaidSliceLost(ctx, &trade, "cancelled") // review I3
-		}
 		return s.reconcileToCancelled(ctx, &trade, funding)
 	case OnChainP2PStatusResolved:
-		if trade.IsPoolSlice() {
-			return s.reconcileSliceResolved(ctx, &trade)
-		}
 		return s.reconcileToResolved(ctx, &trade, funding, onChainFee)
 	case OnChainP2PStatusDisputed:
-		if trade.IsPoolSlice() {
-			return s.reconcileSliceDisputed(ctx, &trade)
-		}
 		return s.reconcileToDisputed(ctx, &trade)
 	case OnChainP2PStatusPaid:
 		// Chain Paid + DB pending_payment → the payer's markPaid landed but its
@@ -2812,29 +2737,6 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 		}
 		return ReconcileResult{}, nil
 	case OnChainP2PStatusPending:
-		if trade.IsPoolSlice() && s.clock.Now().Sub(trade.UpdatedAt) > releasingStaleAfter &&
-			(trade.Status == models.P2PTradeStatusReleasing || (trade.ReleaseTxHash != "" &&
-				(trade.Status == models.P2PTradeStatusPendingPayment || trade.Status == models.P2PTradeStatusPaid))) {
-			if !s.sliceHashProvenReverted(ctx, &trade) {
-				// Review C-1 / re-review I-C: still possibly at the treasury.
-				if trade.ReleaseTxHash == "" {
-					s.noteSliceUnresolved(ctx, &trade, "liquidity_pool_release_unrecorded")
-				}
-				s.rotateSlice(ctx, &trade)
-				return ReconcileResult{}, nil
-			}
-			// Proven reverted (re-review m-3 covers pending/paid with a hash too):
-			// back to paid with the hash cleared — guarded on that exact hash.
-			res := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
-				Where("id = ? AND release_tx_hash = ? AND status IN ?", trade.ID, trade.ReleaseTxHash,
-					[]string{models.P2PTradeStatusReleasing, models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid}).
-				Updates(map[string]any{"status": models.P2PTradeStatusPaid, "release_tx_hash": "", "updated_at": s.clock.Now()})
-			if res.Error != nil {
-				return ReconcileResult{}, res.Error
-			}
-			return ReconcileResult{Changed: res.RowsAffected > 0, FromStatus: trade.Status, ToStatus: models.P2PTradeStatusPaid,
-				Reason: "pool slice release proven reverted"}, nil
-		}
 		// Release tx lost — DB stuck in `releasing` for too long. Revert
 		// to `paid` so the seller can retry. We assume the prepared-but-
 		// never-broadcast window is bounded by the user's session; older
@@ -2899,7 +2801,7 @@ func (s *P2PTradeService) reconcileToReleased(ctx context.Context, trade *models
 				}).
 			Updates(map[string]any{
 				"status":          models.P2PTradeStatusReleased,
-				"release_tx_hash": reconciledReleaseHash(trade),
+				"release_tx_hash": "reconciled",
 				"released_at":     now,
 				"updated_at":      now,
 			})
@@ -3261,7 +3163,10 @@ func (s *P2PTradeService) ListNonTerminalTrades(ctx context.Context, limit int) 
 		limit = 200
 	}
 	var out []models.P2PTrade
-	if err := s.db.WithContext(ctx).
+	if err := s.db.WithContext(ctx).Model(&models.P2PTrade{}).
+		// Leftover slices are never reconciled; unscoped, 200 of them would
+		// fill every page and starve ordinary trades.
+		Scopes(notPoolSlice).
 		Where("status NOT IN ?", []string{
 			models.P2PTradeStatusReleased,
 			models.P2PTradeStatusCancelled,
@@ -3975,8 +3880,7 @@ func (s *P2PTradeService) PrepareApprove(ctx context.Context, sellerID uuid.UUID
 	}
 	// Approve exists only to fund a deposit or a JIT trade open — both new
 	// activity. No exit path (release, cancel, withdraw) needs an allowance.
-	// On the pool chain only an active LP passes (plan B P6).
-	if _, err := s.openableFor(ctx, sellerID, chainID, tokenSymbol); err != nil {
+	if err := s.requireOpenable(chainID, tokenSymbol); err != nil {
 		return nil, err
 	}
 	return escrow.PrepareApprove(sellerAddress, tokenAddr, amt)
@@ -4030,18 +3934,9 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	// New money into the pool. On the pool chain only an active LP passes, and
-	// its limits apply on a fresh read (plan B P6, P7). ConfirmDeposit is
-	// deliberately NOT gated: a deposit already broadcast has moved the funds,
-	// and refusing to record it would only hide them. Withdraw is never gated.
-	lp, err := s.openableFor(ctx, sellerID, chainID, tokenSymbol)
-	if err != nil {
+	// New money into the escrow: refused for a delisted asset. Withdraw never is.
+	if err := s.requireOpenable(chainID, tokenSymbol); err != nil {
 		return nil, err
-	}
-	if lp != nil {
-		if err := s.checkLPDeposit(ctx, lp, escrow, sellerAddress, tokenAddr, s.TokenDecimals(chainID, tokenSymbol), amt); err != nil {
-			return nil, err
-		}
 	}
 	s.audit(ctx, models.P2PAuditDepositPrepared, &sellerID, nil, nil, map[string]any{
 		"token":  strings.ToUpper(tokenSymbol),
@@ -4090,7 +3985,6 @@ func (s *P2PTradeService) ConfirmDeposit(ctx context.Context, sellerID uuid.UUID
 		"txHash":  txHash,
 		"chainId": chainID,
 	})
-	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
 	s.emit(events.P2PDepositConfirmed, sellerID, sellerID, "Deposit confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil
@@ -4170,7 +4064,6 @@ func (s *P2PTradeService) ConfirmWithdraw(ctx context.Context, sellerID uuid.UUI
 		"txHash":  txHash,
 		"chainId": chainID,
 	})
-	s.poolBalanceMoved(chainID, sellerAddress, tokenSymbol)
 	s.emit(events.P2PWithdrawConfirmed, sellerID, sellerID, "Withdrawal confirmed", "",
 		map[string]any{"token": strings.ToUpper(tokenSymbol), "amount": ev.Amount.String()})
 	return ev, nil

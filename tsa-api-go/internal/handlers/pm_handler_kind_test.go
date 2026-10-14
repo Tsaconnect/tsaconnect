@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,17 +13,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
-type fakeLPView struct{}
-
-func (fakeLPView) AdminLPViews(_ context.Context, lps []models.PaymentMerchant) map[uuid.UUID]*services.LPAdminView {
-	out := map[uuid.UUID]*services.LPAdminView{}
-	for _, p := range lps {
-		out[p.ID] = &services.LPAdminView{Stake: "40", OwedNgn: "0.00"}
-	}
-	return out
-}
-
-func TestListPMs_KindFilterAndLPView(t *testing.T) {
+func TestListPMs_KindFilter(t *testing.T) {
 	db := newSQLiteForPMHandler(t)
 	chain := int64(97)
 	for _, pm := range []*models.PaymentMerchant{
@@ -36,7 +25,6 @@ func TestListPMs_KindFilterAndLPView(t *testing.T) {
 		}
 	}
 	h := NewPMHandler(&fakePMAutomation{}, services.NewPMService(db))
-	h.SetLiquidityView(fakeLPView{})
 
 	list := func(q string) (int, []map[string]any) {
 		gin.SetMode(gin.TestMode)
@@ -51,14 +39,14 @@ func TestListPMs_KindFilterAndLPView(t *testing.T) {
 		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 		return w.Code, resp.Data
 	}
-	if code, rows := list(""); code != 200 || len(rows) != 2 || rows[0]["lp"] != nil || rows[1]["lp"] != nil {
-		t.Fatalf("all = %d %v (the unfiltered list never reads the chain, review I7)", code, rows)
+	if code, rows := list(""); code != 200 || len(rows) != 2 {
+		t.Fatalf("all = %d %v", code, rows)
 	}
 	code, rows := list("?kind=lp")
-	if code != 200 || len(rows) != 1 || rows[0]["kind"] != "lp" || rows[0]["lp"] == nil {
+	if code != 200 || len(rows) != 1 || rows[0]["kind"] != "lp" {
 		t.Fatalf("lp = %d %v", code, rows)
 	}
-	if _, rows := list("?kind=merchant"); len(rows) != 1 || rows[0]["lp"] != nil {
+	if _, rows := list("?kind=merchant"); len(rows) != 1 || rows[0]["kind"] == "lp" {
 		t.Fatalf("merchants = %v", rows)
 	}
 	if code, _ := list("?kind=other"); code != http.StatusBadRequest {

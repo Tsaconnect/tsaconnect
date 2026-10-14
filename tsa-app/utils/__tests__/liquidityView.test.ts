@@ -4,16 +4,18 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 /* eslint-disable import/first */
-import { formatLiquidityAmount, liquidityStage, lpDepositPlan, lpMaxAddable, lpWalletShortfall } from '@/utils/liquidityView';
+import {
+  canClaimGasFree, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage, oldWalletHasFunds,
+} from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
 
 const me = (over: Partial<LiquidityMe> = {}): LiquidityMe => ({
-  status: 'active', poolOpen: true, balanceReadable: true, owedNgn: '0.00', paused: false,
-  chain: { id: 97, key: 'bsc', name: 'BNB Smart Chain Testnet' },
-  token: { symbol: 'USDT', address: '0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7', decimals: 18 },
-  wallet: '0x00000000000000000000000000000000000000d1',
-  available: '0', locked: '0', stake: '0', aboveMax: '0', headroom: '5000',
-  limits: { min: '5', max: '5000' },
+  mode: 'vault', status: 'active', poolOpen: true, balanceReadable: true, paused: false, allowed: true, walletChanged: false,
+  chain: { id: 56, key: 'bsc', name: 'BNB Smart Chain' },
+  token: { symbol: 'USDT', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18 },
+  vault: '0x00000000000000000000000000000000000000v1', wallet: '0x00000000000000000000000000000000000000d1',
+  principal: '100', claimable: '0.4', earned: '1.2', sharePercent: '2',
+  limits: { min: '5', max: '5000' }, minClaim: '0.5',
   ...over,
 });
 
@@ -27,55 +29,73 @@ describe('formatLiquidityAmount', () => {
   });
 });
 
-describe('liquidityStage', () => {
-  it('maps approved to the activation step', () => {
-    expect(liquidityStage(me({ status: 'approved' }))).toBe('activate');
-    expect(liquidityStage(me({ status: 'none' }))).toBe('none');
-    expect(liquidityStage(me({ status: 'paused', paused: true }))).toBe('paused');
+describe('isZeroAmount', () => {
+  it('reads empty and all-zero decimals as zero', () => {
+    expect(isZeroAmount(undefined)).toBe(true);
+    expect(isZeroAmount('0.000')).toBe(true);
+    expect(isZeroAmount('0.000000000000000001')).toBe(false);
   });
 });
 
-describe('lpDepositPlan', () => {
-  it('works in 18-dp base units', () => {
-    const plan = lpDepositPlan(me({ available: '40.5', headroom: '4959.5', voucher: { adId: 'a', status: 'active', remaining: '500000', renewDue: false } }), '10.25');
-    expect(plan).toEqual({ ok: true, amountBaseUnits: '10250000000000000000', needsStockAd: false });
+describe('liquidityAmountError', () => {
+  it('rejects malformed input and too many decimals', () => {
+    expect(liquidityAmountError(me(), 'deposit', 'abc')).toMatch(/valid amount/);
+    expect(liquidityAmountError(me(), 'deposit', '1e3')).toMatch(/valid amount/);
+    expect(liquidityAmountError(me(), 'deposit', '0')).toMatch(/Enter an amount/);
+    expect(liquidityAmountError(me(), 'deposit', `5.${'1'.repeat(19)}`)).toMatch(/18 decimal places/);
   });
-  it('refuses above the headroom and below the first-deposit minimum', () => {
-    expect(lpDepositPlan(me({ headroom: '100' }), '100.000000000000000001').ok).toBe(false);
-    expect(lpDepositPlan(me(), '4.99').ok).toBe(false);
-    expect(lpDepositPlan(me(), '5').ok).toBe(true);
+  it('holds every deposit to the minimum and the total to the maximum', () => {
+    expect(liquidityAmountError(me(), 'deposit', '4.99')).toMatch(/at least 5 USDT/);
+    expect(liquidityAmountError(me(), 'deposit', '4900')).toBeNull();
+    expect(liquidityAmountError(me(), 'deposit', '4900.000000000000000001')).toMatch(/at most 4900 USDT/);
   });
-  it('allows a renew-only plan when stock is held and the voucher is due', () => {
-    const plan = lpDepositPlan(me({ available: '40', voucher: { adId: 'a', status: 'active', remaining: '1', renewDue: true } }), '');
-    expect(plan).toEqual({ ok: true, amountBaseUnits: '0', needsStockAd: true });
-  });
-  // Review I4: the deposit landed but the stock ad failed. The cached view can
-  // still show nothing held; Renew must not demand a second deposit.
-  it('allows a renew-only plan without a cached balance when a stock ad is needed', () => {
-    expect(lpDepositPlan(me(), '')).toEqual({ ok: true, amountBaseUnits: '0', needsStockAd: true });
-    expect(lpDepositPlan(me({ voucher: { adId: 'a', status: 'active', remaining: '500000', renewDue: false } }), '').ok).toBe(false);
-  });
-  it('needs a stock ad when none exists or the live one is paused, and refuses a paused LP', () => {
-    expect(lpDepositPlan(me(), '10')).toMatchObject({ ok: true, needsStockAd: true });
-    expect(lpDepositPlan(me({ voucher: { adId: 'a', status: 'paused', remaining: '1', renewDue: false } }), '10')).toMatchObject({ ok: true, needsStockAd: true });
-    expect(lpDepositPlan(me({ status: 'paused', paused: true }), '10').ok).toBe(false);
+  it('withdraws up to the principal, exactly', () => {
+    expect(liquidityAmountError(me(), 'withdraw', '100')).toBeNull();
+    expect(liquidityAmountError(me(), 'withdraw', '0.5')).toBeNull();
+    expect(liquidityAmountError(me(), 'withdraw', '100.000000000000000001')).toMatch(/at most 100 USDT/);
   });
 });
 
-describe('LP wallet view', () => {
-  const wallet = (token: string | null, native: string | null = '0.01') => ({ token, native, nativeSymbol: 'tBNB' });
-
-  it('Max is the wallet balance, capped by the headroom', () => {
-    expect(lpMaxAddable(me(), wallet('120.5'))).toBe('120.5');
-    expect(lpMaxAddable(me({ headroom: '100' }), wallet('120.5'))).toBe('100');
-    expect(lpMaxAddable(me(), wallet(null))).toBeNull();
+describe('withdraw lock', () => {
+  it('limits a withdraw to the unlocked principal and says when the rest unlocks', () => {
+    const locked = me({ principal: '100', withdrawable: '60', lockedUntil: '2026-10-15T09:00:00Z' });
+    expect(liquidityAmountError(locked, 'withdraw', '60')).toBeNull();
+    expect(liquidityAmountError(locked, 'withdraw', '61')).toMatch(/withdraw 60 USDT now.*unlocks/);
+    expect(liquidityAmountError(locked, 'withdraw', '101')).toMatch(/at most 60 USDT/);
+    expect(liquidityAmountError(me({ principal: '100' }), 'withdraw', '100')).toBeNull(); // older API: no lock fields
   });
+});
 
-  it('flags more than the wallet holds, then missing gas, and never blocks on unknowns', () => {
-    expect(lpWalletShortfall(me(), wallet('10'), '20')).toMatch(/Your wallet has 10 USDT/);
-    expect(lpWalletShortfall(me(), wallet('100', '0'), '20')).toMatch(/a little tBNB/);
-    expect(lpWalletShortfall(me(), wallet('100'), '20')).toBeNull();
-    expect(lpWalletShortfall(me(), wallet(null, null), '20')).toBeNull();
-    expect(lpWalletShortfall(me(), wallet('10'), '')).toBeNull();
+describe('canClaimGasFree', () => {
+  it('needs the minimum claim and the account still on the LP wallet', () => {
+    expect(canClaimGasFree(me())).toBe(false);
+    expect(canClaimGasFree(me({ claimable: '0.5' }))).toBe(true);
+    expect(canClaimGasFree(me({ claimable: '3', walletChanged: true }))).toBe(false);
+  });
+});
+
+describe('oldWalletHasFunds', () => {
+  it('is false while the account is still on its LP wallet', () => {
+    expect(oldWalletHasFunds(me())).toBe(false);
+  });
+  it('is true when the old wallet still holds principal or earnings', () => {
+    expect(oldWalletHasFunds(me({ walletChanged: true }))).toBe(true);
+    expect(oldWalletHasFunds(me({ walletChanged: true, principal: '0' }))).toBe(true);
+  });
+  it('is false once the old wallet is empty', () => {
+    expect(oldWalletHasFunds(me({ walletChanged: true, principal: '0', claimable: '0.0' }))).toBe(false);
+  });
+});
+
+describe('liquidityMessage', () => {
+  it('strips the package prefix from a server message', () => {
+    expect(liquidityMessage('liquidity: the pool is closed', 'x')).toBe('The pool is closed');
+  });
+  it('falls back when there is no message', () => {
+    expect(liquidityMessage(undefined, 'Try again.')).toBe('Try again.');
+    expect(liquidityMessage('liquidity: ', 'Try again.')).toBe('Try again.');
+  });
+  it('leaves an ordinary message alone', () => {
+    expect(liquidityMessage('Your liquidity is paused', 'x')).toBe('Your liquidity is paused');
   });
 });

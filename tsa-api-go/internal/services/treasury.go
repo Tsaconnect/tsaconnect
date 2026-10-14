@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -16,7 +15,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"gorm.io/gorm"
 )
 
@@ -54,12 +52,6 @@ type TreasuryLane struct {
 	// means no route may execute: a lane without an allowlist is a lane that
 	// would sign anything.
 	Routers []common.Address
-
-	// EscrowCalls is the allowlist of escrow contracts this lane may call
-	// (spec 2026-10-08 S21): the TSA Liquidity pool escrow on its chain,
-	// derived from config at boot. Separate from Routers on purpose — a LiFi
-	// route must never be able to call the escrow.
-	EscrowCalls []common.Address
 
 	// convertCh is a capacity-1 channel used as a context-aware lock that
 	// serialises the whole allowance-read -> approve -> route sequence for
@@ -755,112 +747,6 @@ func (t *Treasury) transferTokenRecorded(ctx context.Context, lane *TreasuryLane
 			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast transfer: %w", err)
 		}
 		return "", false, fmt.Errorf("treasury: broadcast transfer: %w", err)
-	}
-	return txHash, true, nil
-}
-
-// treasuryEscrowCallGas budgets one escrow call from the treasury: openTrade
-// is about 150–200k gas on BSC (spec §4.4), with headroom.
-const treasuryEscrowCallGas uint64 = 300_000
-
-// CallEscrowRecorded calls a P2P escrow from the treasury (spec 2026-10-08
-// S21, S43): the pool's slice opens. Same contract as TransferTokenRecorded —
-// kill switch, gas, nonce and hash written by the hook in the allocation's own
-// transaction BEFORE broadcast, an uncertain
-// broadcast reported as attempted with its hash when known — plus two guards a
-// transfer does not need:
-//   - escrow must be on the lane's EscrowCalls (never on Routers: a LiFi route
-//     can never reach the escrow, and this can never reach a router);
-//   - the prepared transaction must target escrow with zero value on this
-//     lane's chain, so a build that went wrong is refused, never signed.
-func (t *Treasury) CallEscrowRecorded(ctx context.Context, lane *TreasuryLane, escrow string, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
-	b, err := t.StartEscrowBurst(ctx, lane, escrow, 1)
-	if err != nil {
-		return "", false, err
-	}
-	return b.Call(ctx, build, onPrepared)
-}
-
-// EscrowBurst is a run of escrow calls on one lane — a pool order's slice
-// opens (pre-merge review I-1): the lane, the escrow allowlist and the gas
-// for every call in it are checked once, so each call is only its nonce,
-// record and broadcast under the lane lock.
-type EscrowBurst struct {
-	lane   *TreasuryLane
-	escrow string
-}
-
-// StartEscrowBurst checks what CallEscrowRecorded checks, once, for calls
-// escrow calls: the kill switch, EscrowCalls and that the lane can pay all
-// of their gas.
-func (t *Treasury) StartEscrowBurst(ctx context.Context, lane *TreasuryLane, escrow string, calls int) (*EscrowBurst, error) {
-	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
-		return nil, ErrSponsorNotAvailable
-	}
-	if lane.Guard.Killed() {
-		return nil, ErrTreasuryKilled
-	}
-	// routerAllowed is the generic strict address-list match; the LIST is
-	// EscrowCalls, separate from Routers by design (S21).
-	if !routerAllowed(lane.EscrowCalls, escrow) {
-		log.Printf("[ramp-conversion] ALERT ramp_treasury_escrow_call_refused_total=1 chain=%s to=%s", lane.ChainKey, escrow)
-		return nil, fmt.Errorf("%w: %s is not an escrow this lane may call", ErrTreasuryInvalidRoute, escrow)
-	}
-	if calls < 1 {
-		calls = 1
-	}
-	if err := t.requireGas(ctx, lane, treasuryEscrowCallGas*uint64(calls)); err != nil {
-		return nil, err
-	}
-	return &EscrowBurst{lane: lane, escrow: escrow}, nil
-}
-
-// Call sends one escrow call of the burst: the kill switch again (in memory),
-// then the prepared tx's guards, the key lane's nonce floor, the hook (in the
-// allocation's transaction) and the broadcast under its send lock. Same contract as CallEscrowRecorded.
-func (b *EscrowBurst) Call(ctx context.Context, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
-	h, attempted, err := b.call(ctx, build, onPrepared)
-	if err != nil && !attempted {
-		return (*Treasury)(nil).refuseOp(ctx, b.lane, err, []string{""}, nil)
-	}
-	return h, attempted, err
-}
-
-func (b *EscrowBurst) call(ctx context.Context, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
-	lane, escrow := b.lane, b.escrow
-	if lane.Guard.Killed() {
-		return "", false, ErrTreasuryKilled
-	}
-	// The escrow guards run on the prepared tx first; then the key lane takes
-	// the nonce from its floor, not the escrow client's pending view (review
-	// I2), under its one send lock.
-	checked := func() ([]byte, error) {
-		unsigned, err := build()
-		if err != nil {
-			return nil, err
-		}
-		var u blockchain.UnsignedTx
-		if err := json.Unmarshal(unsigned, &u); err != nil {
-			return nil, fmt.Errorf("treasury: read the prepared escrow call: %w", err)
-		}
-		// Review M3: the chain id is required and must be this lane's; an empty
-		// one is a client-less development build (nonce 0), never signed.
-		if !strings.EqualFold(u.To, escrow) || !routeValueIsZero(u.Value) ||
-			u.ChainID == "" || u.ChainID != strconv.FormatInt(lane.ChainID, 10) {
-			log.Printf("[ramp-conversion] ALERT ramp_treasury_escrow_call_mismatch_total=1 chain=%s to=%s value=%q tx_chain=%s",
-				lane.ChainKey, u.To, u.Value, u.ChainID)
-			return nil, fmt.Errorf("%w: the prepared call is not a zero-value call to the escrow on %s", ErrTreasuryInvalidRoute, lane.ChainKey)
-		}
-		return unsigned, nil
-	}
-	txHash, attempted, err := lane.sendRecorded(ctx, checked, onPrepared)
-	if err != nil {
-		if attempted {
-			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=escrow_call tx=%s err=%s",
-				lane.ChainKey, uncertainTxHash(err), RedactAlertText(err.Error()))
-			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast escrow call: %w", err)
-		}
-		return "", false, fmt.Errorf("treasury: escrow call: %w", err)
 	}
 	return txHash, true, nil
 }

@@ -76,8 +76,19 @@ var poolSites = []providerSite{
 		send, hold := s.routedDeliveryAmounts(i, big.NewInt(100))
 		return send.Int64() == 100 && hold.Int64() == 100
 	}},
-	// The generic refund never runs a pool buy's: S37's refundPoolBuy does (P3).
+	// With no pool desk the generic refund runs a pool buy's only while no
+	// crypto moved for it: a live slice refuses (the refunding branch is
+	// TestMarkStableBuyRefunded_PoolWithoutDesk_RefundsWhenNothingMoved).
 	{"MarkStableBuyRefunded", models.ITStatusBuyAwaitingRate, func(t *testing.T, s *ITService, _ uuid.UUID, i *models.ITIntent) bool {
+		if err := s.db.AutoMigrate(&models.PoolOrder{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.Exec(`CREATE TABLE IF NOT EXISTS p2p_trades (id TEXT PRIMARY KEY, it_intent_id TEXT, status TEXT NOT NULL)`).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := s.db.Exec(`INSERT INTO p2p_trades (id, it_intent_id, status) VALUES (?, ?, 'paid')`, uuid.New(), i.ID).Error; err != nil {
+			t.Fatal(err)
+		}
 		_, err := s.MarkStableBuyRefunded(context.Background(), uuid.New(), i.ID, "note")
 		var got models.ITIntent
 		s.db.First(&got, "id = ?", i.ID)

@@ -11,11 +11,6 @@
 //   5. POST /p2p/ads/:id/sign with the signature → ad goes active.
 //   (3–5 live in services/adPublish.ts → createAndSignAd.)
 //
-// `?mode=lp` is the TSA Liquidity "Add liquidity" form (spec §17): the same
-// screen, header and recovery banner, with one amount field. Its submit is
-// services/lpDeposit.ts → runLpDeposit: deposit exactly the typed amount on the
-// pool chain, then (re)sign the LP's stock ad when one is needed.
-//
 // Funding runs FIRST so a published ad is always backed; if the deposit
 // confirms but create/sign fails, the funds are safe in `available`. If the
 // deposit broadcasts but its confirm POST fails, a recovery banner (keyed off
@@ -25,7 +20,7 @@
 // The EIP-712 voucher signing flow, field validation, payment-method
 // selection, and fixed/float rate logic are unchanged.
 
-import { router, Stack, useLocalSearchParams } from 'expo-router';
+import { router } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -54,25 +49,19 @@ import { promptKycRefusal } from '../../utils/kycRefusal';
 import {
   createAdStatusError,
   fundingPreflight,
-  lpStatusError,
   publishActionForFunding,
   publishFailureMessage,
 } from '../../services/createAdFunding';
 import { listPending, removePending, type PendingEscrowConfirm } from '../../services/p2pPending';
 import { getActiveWallet, verifyWalletKey } from '../../services/wallet';
 import { createAndSignAd } from '../../services/adPublish';
-import { goBack } from '../../utils/back';
-import { runLpDeposit } from '../../services/lpDeposit';
-import { liquidityApi, type LiquidityMe } from '../../services/liquidityApi';
-import { formatLiquidityAmount, lpDepositPlan, lpMaxAddable, lpWalletShortfall, type LpWalletView } from '../../utils/liquidityView';
-import TokenAvatar from '../../components/wallet/TokenAvatar';
 import { exchangeRateService } from '../../services/exchangeRateApi';
 import { MAX_FLOAT_OFFSET_PCT, pctToBps } from '../../constants/p2p';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import CurrencySelector from '../../components/currency/CurrencySelector';
-import { getChainByChainId, getNetworkDisplayName, networkOfChainId } from '../../constants/chains';
+import { getChainByChainId, getNetworkDisplayName } from '../../constants/chains';
 import { getWalletBalances, normalizeWalletBalances } from '../../services/walletApi';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
@@ -164,49 +153,6 @@ const CreateAdScreen: React.FC = () => {
   // info card and the publish requirement is waived for them.
   const { isPm } = useIsPaymentMerchant();
 
-  // TSA Liquidity "Add liquidity" mode (?mode=lp): the LP's own pool view
-  // drives the form; the marketplace form state below goes unused.
-  const { mode } = useLocalSearchParams<{ mode?: string }>();
-  const isLp = mode === 'lp';
-  const [lpMe, setLpMe] = useState<LiquidityMe | null>(null);
-  const [lpLoadFailed, setLpLoadFailed] = useState(false);
-  const loadLpMe = React.useCallback(async () => {
-    const res = await liquidityApi.me();
-    if (res.success && res.data) {
-      setLpMe(res.data);
-      setLpLoadFailed(false);
-    } else {
-      setLpLoadFailed(true);
-    }
-  }, []);
-  useEffect(() => {
-    if (isLp) loadLpMe();
-  }, [isLp, loadLpMe]);
-
-  // The LP's own wallet on the pool chain (the token it deposits and the gas
-  // coin), re-read whenever the pool view reloads. Unknown never blocks.
-  const [lpWallet, setLpWallet] = useState<LpWalletView | null>(null);
-  useEffect(() => {
-    if (!lpMe?.chain || !lpMe.wallet || !lpMe.token) return;
-    const chain = getChainByChainId(lpMe.chain.id);
-    const nativeSymbol = chain?.nativeCurrency.symbol ?? 'BNB';
-    const sym = lpMe.token.symbol.toUpperCase();
-    let live = true;
-    (async () => {
-      try {
-        const res = await getWalletBalances(lpMe.chain!.id, lpMe.wallet!, networkOfChainId(lpMe.chain!.id));
-        if (!live) return;
-        const entries = res.success && res.data ? normalizeWalletBalances(res.data, chain?.key) : [];
-        const find = (symbol: string) => entries.find((e) => e.symbol.toUpperCase() === symbol.toUpperCase())?.balance ?? null;
-        setLpWallet({ token: find(sym), native: find(nativeSymbol), nativeSymbol });
-      } catch {
-        if (live) setLpWallet({ token: null, native: null, nativeSymbol });
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [lpMe]);
   const [adCurrencyCode, setAdCurrencyCode] = useState<string | null>(null);
   const currencyCode = (adCurrencyCode ?? marketCurrency.code).toUpperCase();
   const currencyConfig =
@@ -771,54 +717,6 @@ const CreateAdScreen: React.FC = () => {
     }
   };
 
-  // TSA Liquidity submit: deposit exactly the typed amount on the pool chain
-  // (fresh balance, runLpDeposit), then (re)sign the stock ad when needed.
-  const handleLpSubmit = async () => {
-    if (!lpMe || submitting) return;
-    const sym = lpMe.token?.symbol ?? 'USDT';
-    const wallet = await getActiveWallet();
-    if (!wallet || wallet.toLowerCase() !== (lpMe.wallet ?? '').toLowerCase()) {
-      Alert.alert('Switch wallet', `Add liquidity from your registered wallet ${lpMe.wallet}.`);
-      return;
-    }
-    setSubmitting(true);
-    try {
-      await assertWalletKey(wallet);
-      const res = await runLpDeposit({
-        me: lpMe,
-        input: amountInput,
-        wallet,
-        onStage: setSubmitStage,
-        onGasAlert: (m) => Alert.alert('Need gas', m),
-        statusError: lpStatusError,
-      });
-      if (res.status === 'invalid') {
-        Alert.alert('Check the amount', res.error);
-      } else if (res.status === 'recover') {
-        await refreshPendingDeposits();
-        Alert.alert(
-          'Deposit sent — confirm pending',
-          `Your ${sym} deposit was broadcast, but the server could not record it yet. Use “Retry confirm” above, then add it to the pool. Don't send the deposit again.`,
-        );
-      } else if (res.status === 'done') {
-        Alert.alert(
-          'Liquidity updated',
-          res.depositedUnits === '0' ? 'Your place in the pool is renewed.' : `Your ${sym} is in the pool.`,
-          // Back to the dashboard that opened this form (it reloads on focus);
-          // a cold start lands on it instead.
-          [{ text: 'OK', onPress: () => goBack('/liquidity') }],
-        );
-      }
-    } catch (err) {
-      Alert.alert('Could not add liquidity', p2pCaughtMessage(err));
-    } finally {
-      setSubmitting(false);
-      setSubmitStage('');
-      // The balance or the stock ad may have changed whatever the outcome.
-      loadLpMe();
-    }
-  };
-
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
       <KeyboardAvoidingView
@@ -829,22 +727,14 @@ const CreateAdScreen: React.FC = () => {
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
           keyboardShouldPersistTaps="handled"
         >
-          {isLp && <Stack.Screen options={{ title: 'Add liquidity' }} />}
           <Text variant="title1" weight="700">
-            {isLp ? 'Add liquidity' : 'Create sell ad'}
+            Create sell ad
           </Text>
-          {isLp ? (
-            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
-              Your {lpMe?.token?.symbol ?? 'USDT'} goes into your escrow balance and is offered through the
-              TSA Connect pool. You can withdraw what isn&apos;t locked in an order at any time.
-            </Text>
-          ) : (
-            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
-              You&apos;re offering {token.symbol} for {currencyCode}. We&apos;ll lock the amount in
-              escrow as part of publishing — depositing only what isn&apos;t already covered — then
-              you sign a voucher to authorise trades.
-            </Text>
-          )}
+          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+            You&apos;re offering {token.symbol} for {currencyCode}. We&apos;ll lock the amount in
+            escrow as part of publishing — depositing only what isn&apos;t already covered — then
+            you sign a voucher to authorise trades.
+          </Text>
 
           {/* ── Recovery banner ──────────────────────────────────────────
               A deposit that broadcast on-chain but whose server confirm
@@ -892,561 +782,409 @@ const CreateAdScreen: React.FC = () => {
             );
           })}
 
-          {isLp ? (
-            <LpAddForm
-              me={lpMe}
-              wallet={lpWallet}
-              loadFailed={lpLoadFailed}
-              onReload={loadLpMe}
-              amount={amountInput}
-              onChangeAmount={setAmountInput}
-              submitting={submitting}
-              stage={submitStage}
-              onSubmit={handleLpSubmit}
+            {/* ── Currency ─────────────────────────────────────────────── */}
+            <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+              Currency
+            </Text>
+            <CurrencySelector
+              variant="card"
+              selectedCode={currencyCode}
+              onSelectCode={(code) => setAdCurrencyCode(code)}
             />
-          ) : (
-            <>
-              {/* ── Currency ─────────────────────────────────────────────── */}
-              <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
-                Currency
-              </Text>
-              <CurrencySelector
-                variant="card"
-                selectedCode={currencyCode}
-                onSelectCode={(code) => setAdCurrencyCode(code)}
-              />
 
-              {/* ── Token ────────────────────────────────────────────────── */}
-              <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
-                Token
-              </Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-                {availableTokens.map((t) => (
-                  <Chip
-                    key={t.symbol}
-                    label={t.symbol}
-                    selected={token.symbol === t.symbol}
-                    onPress={() => setToken(t)}
-                  />
-                ))}
-              </View>
-
-              {/* ── Chain ────────────────────────────────────────────────── */}
-              {showChainChooser && (
-                <>
-                  <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
-                    Network
-                  </Text>
-                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-                    {chainsForToken.map((c) => (
-                      <Chip
-                        key={c.chainId}
-                        label={getNetworkDisplayName(c.chainId)}
-                        selected={selectedChainId === c.chainId}
-                        onPress={() => setSelectedChainId(c.chainId)}
-                      />
-                    ))}
-                  </View>
-                </>
-              )}
-
-              {/* ── Amount ───────────────────────────────────────────────── */}
-              <View style={{ marginTop: spacing.lg }}>
-                <AmountInput
-                  label={`Amount (${token.symbol})`}
-                  placeholder="0.00"
-                  symbol={token.symbol}
-                  symbolPosition="suffix"
-                  value={amountInput}
-                  onChangeText={setAmountInput}
+            {/* ── Token ────────────────────────────────────────────────── */}
+            <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+              Token
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+              {availableTokens.map((t) => (
+                <Chip
+                  key={t.symbol}
+                  label={t.symbol}
+                  selected={token.symbol === t.symbol}
+                  onPress={() => setToken(t)}
                 />
-                {/* Spendable wallet balance for the ACTIVE wallet on the selected
-                    chain — the exact balance the deposit pulls from. Lets the seller
-                    confirm they hold the token (right chain + right wallet) and warns
-                    when it can't cover the ad, instead of a post-publish revert. */}
-                {(() => {
-                  if (walletBalanceHuman == null) {
-                    return (
-                      <Text variant="caption" color="textSecondary" style={{ marginTop: spacing.sm }}>
-                        Checking wallet balance…
-                      </Text>
-                    );
-                  }
-                  if (walletBalanceHuman === '-') {
-                    return (
-                      <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm }}>
-                        Wallet balance unavailable
-                      </Text>
-                    );
-                  }
-                  const walNum = parseFloat(walletBalanceHuman) || 0;
-                  const amtNum = parseFloat(amountInput || '0') || 0;
-                  const low = amtNum > 0 && walNum < amtNum;
-                  const short = activeWalletAddr
-                    ? ` · ${activeWalletAddr.slice(0, 6)}…${activeWalletAddr.slice(-4)}`
-                    : '';
+              ))}
+            </View>
+
+            {/* ── Chain ────────────────────────────────────────────────── */}
+            {showChainChooser && (
+              <>
+                <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+                  Network
+                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                  {chainsForToken.map((c) => (
+                    <Chip
+                      key={c.chainId}
+                      label={getNetworkDisplayName(c.chainId)}
+                      selected={selectedChainId === c.chainId}
+                      onPress={() => setSelectedChainId(c.chainId)}
+                    />
+                  ))}
+                </View>
+              </>
+            )}
+
+            {/* ── Amount ───────────────────────────────────────────────── */}
+            <View style={{ marginTop: spacing.lg }}>
+              <AmountInput
+                label={`Amount (${token.symbol})`}
+                placeholder="0.00"
+                symbol={token.symbol}
+                symbolPosition="suffix"
+                value={amountInput}
+                onChangeText={setAmountInput}
+              />
+              {/* Spendable wallet balance for the ACTIVE wallet on the selected
+                  chain — the exact balance the deposit pulls from. Lets the seller
+                  confirm they hold the token (right chain + right wallet) and warns
+                  when it can't cover the ad, instead of a post-publish revert. */}
+              {(() => {
+                if (walletBalanceHuman == null) {
                   return (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}>
-                      <Icon name="wallet" size={14} color={low ? colors.danger : colors.textMuted} />
-                      <Text variant="caption" color={low ? 'danger' : 'textSecondary'} style={{ flex: 1 }}>
-                        Wallet: {walNum.toLocaleString(undefined, { maximumFractionDigits: 4 })} {token.symbol}
-                        {short}
-                        {low ? ` — not enough to back ${amountInput} ${token.symbol}` : ''}
-                      </Text>
-                    </View>
+                    <Text variant="caption" color="textSecondary" style={{ marginTop: spacing.sm }}>
+                      Checking wallet balance…
+                    </Text>
                   );
-                })()}
-                {/* Allowance-aware funding summary: tells the seller exactly what
-                    publishing will do (no deposit when `available` already covers
-                    the ad; otherwise the shortfall deposit + whether an approval is
-                    needed). Computed async from the on-chain balance + allowance. */}
-                {fundingSummary && (
-                  <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.sm }}>
+                }
+                if (walletBalanceHuman === '-') {
+                  return (
+                    <Text variant="caption" color="textMuted" style={{ marginTop: spacing.sm }}>
+                      Wallet balance unavailable
+                    </Text>
+                  );
+                }
+                const walNum = parseFloat(walletBalanceHuman) || 0;
+                const amtNum = parseFloat(amountInput || '0') || 0;
+                const low = amtNum > 0 && walNum < amtNum;
+                const short = activeWalletAddr
+                  ? ` · ${activeWalletAddr.slice(0, 6)}…${activeWalletAddr.slice(-4)}`
+                  : '';
+                return (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}>
+                    <Icon name="wallet" size={14} color={low ? colors.danger : colors.textMuted} />
+                    <Text variant="caption" color={low ? 'danger' : 'textSecondary'} style={{ flex: 1 }}>
+                      Wallet: {walNum.toLocaleString(undefined, { maximumFractionDigits: 4 })} {token.symbol}
+                      {short}
+                      {low ? ` — not enough to back ${amountInput} ${token.symbol}` : ''}
+                    </Text>
+                  </View>
+                );
+              })()}
+              {/* Allowance-aware funding summary: tells the seller exactly what
+                  publishing will do (no deposit when `available` already covers
+                  the ad; otherwise the shortfall deposit + whether an approval is
+                  needed). Computed async from the on-chain balance + allowance. */}
+              {fundingSummary && (
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.sm }}>
+                  <Icon name="info" size={14} color={colors.accent} />
+                  <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+                    {fundingSummary}
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            {/* ── Rate type ────────────────────────────────────────────── */}
+            <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+              Rate type
+            </Text>
+            <SegmentedControl<RateType>
+              segments={[
+                { key: 'fixed', label: 'Fixed' },
+                { key: 'float', label: 'Float (auto-update)' },
+              ]}
+              value={rateType}
+              onChange={(k) => {
+                // Float requires a live Bybit anchor; ignore the tap if the
+                // selected currency has none (mirrors the old disabled segment).
+                if (k === 'float' && !floatSupported) return;
+                setRateType(k);
+              }}
+              style={!floatSupported ? { opacity: 0.85 } : undefined}
+            />
+            {!floatSupported && (
+              <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
+                Float rate isn&apos;t available for {currencyCode} — use a fixed rate.
+              </Text>
+            )}
+
+            {/* ── Rate input (fixed | float) ───────────────────────────── */}
+            {rateType === 'fixed' ? (
+              <View style={{ marginTop: spacing.lg }}>
+                <Input
+                  label={`Rate (${currencyCode} per 1 ${token.symbol})`}
+                  placeholder={suggestedRate ? String(suggestedRate) : '0.00'}
+                  keyboardType="decimal-pad"
+                  value={rateInput}
+                  onChangeText={setRateInput}
+                  leftAdornment={
+                    <Text variant="bodyMed" weight="700" color="textSecondary">
+                      {symbol}
+                    </Text>
+                  }
+                />
+                {suggestedRate !== null && (
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: spacing.xs,
+                      marginTop: spacing.sm,
+                    }}
+                  >
+                    <Icon name="info" size={14} color={rateStale ? colors.danger : colors.accent} />
+                    <Text variant="caption" color={rateStale ? 'danger' : 'textSecondary'} style={{ flex: 1 }}>
+                      {rateStale
+                        ? 'Market rate stale — verify before publishing'
+                        : `Current market P2P sell rate: ${symbol}${suggestedRate.toFixed(2)}`}
+                    </Text>
+                    <PressableScale onPress={() => setRateInput(String(suggestedRate))}>
+                      <Text variant="caption" weight="700" color="accent">
+                        Use
+                      </Text>
+                    </PressableScale>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <View style={{ marginTop: spacing.lg }}>
+                <Input
+                  label="Offset from market"
+                  placeholder="0.00"
+                  keyboardType="numbers-and-punctuation"
+                  value={floatOffsetPctInput}
+                  onChangeText={setFloatOffsetPctInput}
+                  leftAdornment={
+                    <Text variant="bodyMed" weight="700" color="textSecondary">
+                      %
+                    </Text>
+                  }
+                  helper={`Positive sells above market, negative below. Capped at ±${MAX_FLOAT_OFFSET_PCT}%.`}
+                />
+                {suggestedRate == null || rateStale ? (
+                  <View
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}
+                  >
+                    <Icon name="warning" size={14} color={colors.danger} />
+                    <Text variant="caption" color="danger" style={{ flex: 1 }}>
+                      Live rate unavailable — float ads can&apos;t be published right now.
+                    </Text>
+                  </View>
+                ) : (
+                  <View
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}
+                  >
                     <Icon name="info" size={14} color={colors.accent} />
                     <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                      {fundingSummary}
+                      Anchor: market P2P sell · Market: {symbol}{suggestedRate.toFixed(2)}
+                      {effectiveRate != null && ` · Your rate: ${symbol}${effectiveRate.toFixed(2)}`}
+                    </Text>
+                  </View>
+                )}
+                {!floatOffsetPctValid && floatOffsetPctInput.trim() !== '' && (
+                  <View
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs }}
+                  >
+                    <Icon name="warning" size={14} color={colors.danger} />
+                    <Text variant="caption" color="danger" style={{ flex: 1 }}>
+                      Enter a number within ±{MAX_FLOAT_OFFSET_PCT}%.
                     </Text>
                   </View>
                 )}
               </View>
+            )}
 
-              {/* ── Rate type ────────────────────────────────────────────── */}
-              <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
-                Rate type
-              </Text>
-              <SegmentedControl<RateType>
-                segments={[
-                  { key: 'fixed', label: 'Fixed' },
-                  { key: 'float', label: 'Float (auto-update)' },
-                ]}
-                value={rateType}
-                onChange={(k) => {
-                  // Float requires a live Bybit anchor; ignore the tap if the
-                  // selected currency has none (mirrors the old disabled segment).
-                  if (k === 'float' && !floatSupported) return;
-                  setRateType(k);
-                }}
-                style={!floatSupported ? { opacity: 0.85 } : undefined}
-              />
-              {!floatSupported && (
-                <Text variant="caption" color="textMuted" style={{ marginTop: spacing.xs }}>
-                  Float rate isn&apos;t available for {currencyCode} — use a fixed rate.
-                </Text>
-              )}
-
-              {/* ── Rate input (fixed | float) ───────────────────────────── */}
-              {rateType === 'fixed' ? (
-                <View style={{ marginTop: spacing.lg }}>
-                  <Input
-                    label={`Rate (${currencyCode} per 1 ${token.symbol})`}
-                    placeholder={suggestedRate ? String(suggestedRate) : '0.00'}
-                    keyboardType="decimal-pad"
-                    value={rateInput}
-                    onChangeText={setRateInput}
-                    leftAdornment={
-                      <Text variant="bodyMed" weight="700" color="textSecondary">
-                        {symbol}
-                      </Text>
-                    }
-                  />
-                  {suggestedRate !== null && (
-                    <View
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        gap: spacing.xs,
-                        marginTop: spacing.sm,
-                      }}
-                    >
-                      <Icon name="info" size={14} color={rateStale ? colors.danger : colors.accent} />
-                      <Text variant="caption" color={rateStale ? 'danger' : 'textSecondary'} style={{ flex: 1 }}>
-                        {rateStale
-                          ? 'Market rate stale — verify before publishing'
-                          : `Current market P2P sell rate: ${symbol}${suggestedRate.toFixed(2)}`}
-                      </Text>
-                      <PressableScale onPress={() => setRateInput(String(suggestedRate))}>
-                        <Text variant="caption" weight="700" color="accent">
-                          Use
-                        </Text>
-                      </PressableScale>
-                    </View>
-                  )}
-                </View>
-              ) : (
-                <View style={{ marginTop: spacing.lg }}>
-                  <Input
-                    label="Offset from market"
-                    placeholder="0.00"
-                    keyboardType="numbers-and-punctuation"
-                    value={floatOffsetPctInput}
-                    onChangeText={setFloatOffsetPctInput}
-                    leftAdornment={
-                      <Text variant="bodyMed" weight="700" color="textSecondary">
-                        %
-                      </Text>
-                    }
-                    helper={`Positive sells above market, negative below. Capped at ±${MAX_FLOAT_OFFSET_PCT}%.`}
-                  />
-                  {suggestedRate == null || rateStale ? (
-                    <View
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}
-                    >
-                      <Icon name="warning" size={14} color={colors.danger} />
-                      <Text variant="caption" color="danger" style={{ flex: 1 }}>
-                        Live rate unavailable — float ads can&apos;t be published right now.
-                      </Text>
-                    </View>
-                  ) : (
-                    <View
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.sm }}
-                    >
-                      <Icon name="info" size={14} color={colors.accent} />
-                      <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                        Anchor: market P2P sell · Market: {symbol}{suggestedRate.toFixed(2)}
-                        {effectiveRate != null && ` · Your rate: ${symbol}${effectiveRate.toFixed(2)}`}
-                      </Text>
-                    </View>
-                  )}
-                  {!floatOffsetPctValid && floatOffsetPctInput.trim() !== '' && (
-                    <View
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs }}
-                    >
-                      <Icon name="warning" size={14} color={colors.danger} />
-                      <Text variant="caption" color="danger" style={{ flex: 1 }}>
-                        Enter a number within ±{MAX_FLOAT_OFFSET_PCT}%.
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              )}
-
-              {/* ── Order limits ─────────────────────────────────────────── */}
-              <View style={{ flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg }}>
-                <View style={{ flex: 1 }}>
-                  <Input
-                    label={`Min order (${currencyCode})`}
-                    placeholder="Optional"
-                    keyboardType="decimal-pad"
-                    value={minLimitInput}
-                    onChangeText={setMinLimitInput}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Input
-                    label={`Max order (${currencyCode})`}
-                    placeholder="Optional"
-                    keyboardType="decimal-pad"
-                    value={maxLimitInput}
-                    onChangeText={setMaxLimitInput}
-                  />
-                </View>
+            {/* ── Order limits ─────────────────────────────────────────── */}
+            <View style={{ flexDirection: 'row', gap: spacing.md, marginTop: spacing.lg }}>
+              <View style={{ flex: 1 }}>
+                <Input
+                  label={`Min order (${currencyCode})`}
+                  placeholder="Optional"
+                  keyboardType="decimal-pad"
+                  value={minLimitInput}
+                  onChangeText={setMinLimitInput}
+                />
               </View>
+              <View style={{ flex: 1 }}>
+                <Input
+                  label={`Max order (${currencyCode})`}
+                  placeholder="Optional"
+                  keyboardType="decimal-pad"
+                  value={maxLimitInput}
+                  onChangeText={setMaxLimitInput}
+                />
+              </View>
+            </View>
 
-              {/* ── Payment methods ──────────────────────────────────────── */}
-              <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
-                {isPm ? 'Payment method' : 'Payment methods'}
-              </Text>
-              {isPm ? (
-                // PM ads settle automatically — buyers are shown the account to pay
-                // on the trade (the merchant's virtual account, or TSA Connect's
-                // under central inbound). No manual payment method is selected or
-                // required.
-                <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                    <Icon name="checkCircle" size={22} color={colors.accent} />
-                    <View style={{ flex: 1 }}>
-                      <Text variant="bodyMed" weight="700">
-                        Settled automatically
-                      </Text>
-                      <Text variant="caption" color="textSecondary">
-                        Buyers pay into the account shown on the trade and crypto releases automatically — no manual payment method needed.
-                      </Text>
-                    </View>
+            {/* ── Payment methods ──────────────────────────────────────── */}
+            <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+              {isPm ? 'Payment method' : 'Payment methods'}
+            </Text>
+            {isPm ? (
+              // PM ads settle automatically — buyers are shown the account to pay
+              // on the trade (the merchant's virtual account, or TSA Connect's
+              // under central inbound). No manual payment method is selected or
+              // required.
+              <Card padding="md" style={{ borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentMuted }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                  <Icon name="checkCircle" size={22} color={colors.accent} />
+                  <View style={{ flex: 1 }}>
+                    <Text variant="bodyMed" weight="700">
+                      Settled automatically
+                    </Text>
+                    <Text variant="caption" color="textSecondary">
+                      Buyers pay into the account shown on the trade and crypto releases automatically — no manual payment method needed.
+                    </Text>
                   </View>
-                </Card>
-              ) : loadingPms ? (
-                <View style={{ paddingVertical: spacing.lg }}>
-                  <Spinner />
-                </View>
-              ) : paymentMethods.length === 0 ? (
-                <PressableScale onPress={() => router.push('/p2p/payment-methods/new')}>
-                  <AccentCard padding="md">
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                      <Icon name="plus" size={20} color={colors.accent} />
-                      <Text variant="bodyMed" weight="700" style={{ flex: 1 }}>
-                        Add a payment method before publishing
-                      </Text>
-                      <Icon name="chevronRight" size={18} color={colors.textMuted} />
-                    </View>
-                  </AccentCard>
-                </PressableScale>
-              ) : (
-                <View style={{ gap: spacing.sm }}>
-                  {paymentMethods.map((m) => {
-                    const selected = selectedPmIds.includes(m.id);
-                    return (
-                      <PressableScale key={m.id} onPress={() => togglePm(m.id)}>
-                        <Card
-                          padding="md"
-                          style={{
-                            borderWidth: 1,
-                            borderColor: selected ? colors.accent : colors.border,
-                            backgroundColor: selected ? colors.accentMuted : colors.surface,
-                          }}
-                        >
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                            {selected ? (
-                              <Icon name="checkCircle" size={22} color={colors.accent} />
-                            ) : (
-                              // Unselected = empty outline circle (a checkbox affordance),
-                              // not a ✕ — an X reads as "remove/error", not "tap to select".
-                              <View
-                                style={{
-                                  width: 22,
-                                  height: 22,
-                                  borderRadius: 11,
-                                  borderWidth: 2,
-                                  borderColor: colors.border,
-                                }}
-                              />
-                            )}
-                            <View style={{ flex: 1 }}>
-                              <Text variant="bodyMed" weight="600">
-                                {m.bankName}
-                              </Text>
-                              <Text variant="caption" color="textSecondary">
-                                {m.accountName} · {m.accountNumber.slice(-4)}
-                              </Text>
-                            </View>
-                          </View>
-                        </Card>
-                      </PressableScale>
-                    );
-                  })}
-                </View>
-              )}
-
-              {/* ── Preview ──────────────────────────────────────────────── */}
-              <Card style={{ marginTop: spacing.xl }}>
-                <Text variant="overline" color="textMuted">
-                  PREVIEW
-                </Text>
-                <Divider spacing="sm" />
-                <SummaryCard>
-                  <SummaryRow label="Selling" value={`${amountInput || '0'} ${token.symbol}`} />
-                  <SummaryRow
-                    label="At"
-                    value={
-                      <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                        <Text variant="bodyMed" weight="600" numeric>
-                          {symbol}{effectiveRate != null ? effectiveRate.toFixed(2) : '0'} / {token.symbol}
-                        </Text>
-                        {rateType === 'float' && (
-                          <Text variant="caption" color="accent">
-                            (auto)
-                          </Text>
-                        )}
-                      </View>
-                    }
-                  />
-                  <SummaryRow
-                    label="Total value"
-                    value={`${symbol}${previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-                  />
-                  <SummaryRow
-                    label={feePct ? `Fee (${feePct})` : 'Fee'}
-                    value={previewFee
-                      ? `${formatTokenAmount(previewFee.fee, adDecimals, 4)} ${token.symbol}`
-                      : 'Shown on each trade'}
-                  />
-                  {previewFee && (
-                    <SummaryRow
-                      label="Buyers receive"
-                      value={`${formatTokenAmount(previewFee.net, adDecimals, 4)} ${token.symbol}`}
-                    />
-                  )}
-                </SummaryCard>
-
-                {/* Fee disclosure — rate from the API; on a sell ad the buyer is the crypto receiver. */}
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'flex-start',
-                    gap: spacing.sm,
-                    marginTop: spacing.md,
-                    backgroundColor: colors.infoBg,
-                    borderRadius: radius.sm,
-                    padding: spacing.md,
-                  }}
-                >
-                  <Icon name="info" size={16} color={colors.info} />
-                  <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-                    {feePct
-                      ? `A ${feePct} fee comes out of the ${token.symbol} the buyer receives when a trade completes. You are not charged on top.`
-                      : `A fee comes out of the ${token.symbol} the buyer receives when a trade completes. The exact rate shows on each trade.`}
-                  </Text>
                 </View>
               </Card>
+            ) : loadingPms ? (
+              <View style={{ paddingVertical: spacing.lg }}>
+                <Spinner />
+              </View>
+            ) : paymentMethods.length === 0 ? (
+              <PressableScale onPress={() => router.push('/p2p/payment-methods/new')}>
+                <AccentCard padding="md">
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                    <Icon name="plus" size={20} color={colors.accent} />
+                    <Text variant="bodyMed" weight="700" style={{ flex: 1 }}>
+                      Add a payment method before publishing
+                    </Text>
+                    <Icon name="chevronRight" size={18} color={colors.textMuted} />
+                  </View>
+                </AccentCard>
+              </PressableScale>
+            ) : (
+              <View style={{ gap: spacing.sm }}>
+                {paymentMethods.map((m) => {
+                  const selected = selectedPmIds.includes(m.id);
+                  return (
+                    <PressableScale key={m.id} onPress={() => togglePm(m.id)}>
+                      <Card
+                        padding="md"
+                        style={{
+                          borderWidth: 1,
+                          borderColor: selected ? colors.accent : colors.border,
+                          backgroundColor: selected ? colors.accentMuted : colors.surface,
+                        }}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                          {selected ? (
+                            <Icon name="checkCircle" size={22} color={colors.accent} />
+                          ) : (
+                            // Unselected = empty outline circle (a checkbox affordance),
+                            // not a ✕ — an X reads as "remove/error", not "tap to select".
+                            <View
+                              style={{
+                                width: 22,
+                                height: 22,
+                                borderRadius: 11,
+                                borderWidth: 2,
+                                borderColor: colors.border,
+                              }}
+                            />
+                          )}
+                          <View style={{ flex: 1 }}>
+                            <Text variant="bodyMed" weight="600">
+                              {m.bankName}
+                            </Text>
+                            <Text variant="caption" color="textSecondary">
+                              {m.accountName} · {m.accountNumber.slice(-4)}
+                            </Text>
+                          </View>
+                        </View>
+                      </Card>
+                    </PressableScale>
+                  );
+                })}
+              </View>
+            )}
 
-              {/* ── Publish ──────────────────────────────────────────────── */}
-              <Button
-                title="Publish ad"
-                leftIcon="check"
-                onPress={handleSubmit}
-                disabled={!valid || submitting}
-                loading={submitting}
-                style={{ marginTop: spacing.xl }}
-              />
-              {submitting && !!submitStage && (
-                <View style={{ alignItems: 'center', marginTop: spacing.sm }}>
-                  <Text variant="caption" color="textSecondary">
-                    {submitStage}
-                  </Text>
-                </View>
-              )}
-            </>
-          )}
+            {/* ── Preview ──────────────────────────────────────────────── */}
+            <Card style={{ marginTop: spacing.xl }}>
+              <Text variant="overline" color="textMuted">
+                PREVIEW
+              </Text>
+              <Divider spacing="sm" />
+              <SummaryCard>
+                <SummaryRow label="Selling" value={`${amountInput || '0'} ${token.symbol}`} />
+                <SummaryRow
+                  label="At"
+                  value={
+                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                      <Text variant="bodyMed" weight="600" numeric>
+                        {symbol}{effectiveRate != null ? effectiveRate.toFixed(2) : '0'} / {token.symbol}
+                      </Text>
+                      {rateType === 'float' && (
+                        <Text variant="caption" color="accent">
+                          (auto)
+                        </Text>
+                      )}
+                    </View>
+                  }
+                />
+                <SummaryRow
+                  label="Total value"
+                  value={`${symbol}${previewFiat.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                />
+                <SummaryRow
+                  label={feePct ? `Fee (${feePct})` : 'Fee'}
+                  value={previewFee
+                    ? `${formatTokenAmount(previewFee.fee, adDecimals, 4)} ${token.symbol}`
+                    : 'Shown on each trade'}
+                />
+                {previewFee && (
+                  <SummaryRow
+                    label="Buyers receive"
+                    value={`${formatTokenAmount(previewFee.net, adDecimals, 4)} ${token.symbol}`}
+                  />
+                )}
+              </SummaryCard>
+
+              {/* Fee disclosure — rate from the API; on a sell ad the buyer is the crypto receiver. */}
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  gap: spacing.sm,
+                  marginTop: spacing.md,
+                  backgroundColor: colors.infoBg,
+                  borderRadius: radius.sm,
+                  padding: spacing.md,
+                }}
+              >
+                <Icon name="info" size={16} color={colors.info} />
+                <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
+                  {feePct
+                    ? `A ${feePct} fee comes out of the ${token.symbol} the buyer receives when a trade completes. You are not charged on top.`
+                    : `A fee comes out of the ${token.symbol} the buyer receives when a trade completes. The exact rate shows on each trade.`}
+                </Text>
+              </View>
+            </Card>
+
+            {/* ── Publish ──────────────────────────────────────────────── */}
+            <Button
+              title="Publish ad"
+              leftIcon="check"
+              onPress={handleSubmit}
+              disabled={!valid || submitting}
+              loading={submitting}
+              style={{ marginTop: spacing.xl }}
+            />
+            {submitting && !!submitStage && (
+              <View style={{ alignItems: 'center', marginTop: spacing.sm }}>
+                <Text variant="caption" color="textSecondary">
+                  {submitStage}
+                </Text>
+              </View>
+            )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 };
 
-/**
- * The `?mode=lp` form: where the LP's liquidity stands, one amount, one button.
- * Amounts are the API's decimal strings (18 dp on the pool chain), formatted
- * without floats. Limits shown here are guidance; runLpDeposit re-checks them
- * on a fresh balance read and the API checks them again.
- */
-function LpAddForm({
-  me,
-  wallet,
-  loadFailed,
-  onReload,
-  amount,
-  onChangeAmount,
-  submitting,
-  stage,
-  onSubmit,
-}: {
-  me: LiquidityMe | null;
-  wallet: LpWalletView | null;
-  loadFailed: boolean;
-  onReload: () => void;
-  amount: string;
-  onChangeAmount: (v: string) => void;
-  submitting: boolean;
-  stage: string;
-  onSubmit: () => void;
-}) {
-  const { colors, spacing } = useTheme();
-  if (!me) {
-    return loadFailed ? (
-      <View style={{ marginTop: spacing.lg, gap: spacing.sm }}>
-        <Text variant="bodySm" color="textSecondary">
-          We couldn&apos;t load your liquidity right now.
-        </Text>
-        <Button title="Try again" variant="secondary" fullWidth={false} size="sm" onPress={onReload} />
-      </View>
-    ) : (
-      <View style={{ paddingVertical: spacing.lg }}>
-        <Spinner />
-      </View>
-    );
-  }
-  const sym = me.token?.symbol ?? 'USDT';
-  const isZero = (v?: string) => !v || /^0*(\.0*)?$/.test(v);
-  const nothingHeld = me.balanceReadable && isZero(me.available) && isZero(me.locked);
-  // An empty amount re-signs the stock ad, which only makes sense when one is
-  // needed and stock is already held — exactly when the plan accepts ''.
-  // Renew is offered once there has been stock (held, or a stock ad); a first-time
-  // LP with an empty amount just has nothing to submit yet.
-  const neverStocked = nothingHeld && !me.voucher;
-  const amountEmpty = amount.trim() === '';
-  const renewOnly = amountEmpty && !neverStocked && lpDepositPlan(me, '').ok;
-  const chainKey = me.chain ? getChainByChainId(me.chain.id)?.key : undefined;
-  const maxAddable = wallet ? lpMaxAddable(me, wallet) : null;
-  const shortfall = wallet ? lpWalletShortfall(me, wallet, amount) : null;
-  const walletLine = (v: string | null | undefined, unit: string) =>
-    wallet == null ? 'Loading…' : v == null ? '—' : `${formatLiquidityAmount(v)} ${unit}`;
-  return (
-    <View style={{ marginTop: spacing.lg }}>
-      {/* The pool takes one token per network; paying with another token is a later step. */}
-      <Card padding="md" style={{ marginBottom: spacing.md }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-          <TokenAvatar symbol={sym} chainKey={chainKey} size={40} />
-          <View style={{ flex: 1 }}>
-            <Text variant="bodyMed" weight="700">{sym}</Text>
-            <Text variant="caption" color="textSecondary">{me.chain?.name ?? 'Pool network'}</Text>
-          </View>
-        </View>
-        <SummaryRow label="In your wallet" value={walletLine(wallet?.token, sym)} />
-        <SummaryRow label="For network fees" value={walletLine(wallet?.native, wallet?.nativeSymbol ?? '')} />
-      </Card>
-      <Card padding="md">
-        <Text variant="bodyMed" weight="700">
-          Your pool position
-        </Text>
-        {me.balanceReadable ? (
-          <>
-            <SummaryRow label="In the pool" value={`${formatLiquidityAmount(me.stake)} ${sym}`} />
-            <SummaryRow label="You can add up to" value={`${formatLiquidityAmount(me.headroom)} ${sym}`} />
-          </>
-        ) : (
-          <Text variant="caption" color="textSecondary" style={{ marginTop: spacing.sm }}>
-            We can&apos;t read your balance right now; we&apos;ll check it again before depositing.
-          </Text>
-        )}
-        {nothingHeld && (
-          <Text variant="caption" color="textSecondary">
-            Your first deposit must be at least {me.limits.min} {sym}.
-          </Text>
-        )}
-      </Card>
-      {!me.poolOpen && (
-        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.md }}>
-          <Icon name="info" size={14} color={colors.warning} />
-          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-            The pool is closed right now. Your balance is safe and you can withdraw it.
-          </Text>
-        </View>
-      )}
-      <View style={{ marginTop: spacing.lg }}>
-        <AmountInput
-          label={`Amount (${sym})`}
-          placeholder="0.00"
-          symbol={sym}
-          symbolPosition="suffix"
-          value={amount}
-          onChangeText={onChangeAmount}
-          onMax={maxAddable && maxAddable !== '0' ? () => onChangeAmount(maxAddable) : undefined}
-        />
-      </View>
-      {!!shortfall && (
-        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs, marginTop: spacing.sm }}>
-          <Icon name="info" size={14} color={colors.warning} />
-          <Text variant="caption" color="textSecondary" style={{ flex: 1 }}>
-            {shortfall}
-          </Text>
-        </View>
-      )}
-      <Button
-        title={renewOnly ? 'Renew' : 'Add liquidity'}
-        leftIcon="check"
-        onPress={onSubmit}
-        disabled={!me.poolOpen || submitting || !!shortfall || (amountEmpty && !renewOnly)}
-        loading={submitting}
-        style={{ marginTop: spacing.xl }}
-      />
-      {submitting && !!stage && (
-        <View style={{ alignItems: 'center', marginTop: spacing.sm }}>
-          <Text variant="caption" color="textSecondary">
-            {stage}
-          </Text>
-        </View>
-      )}
-    </View>
-  );
-}
 
 export default CreateAdScreen;

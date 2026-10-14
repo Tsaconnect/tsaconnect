@@ -121,24 +121,20 @@ func (c *LaneCommitments) wait(ctx context.Context, r *commitmentsRead) (uint64,
 	}
 }
 
-// NewPoolReleaseCommitments counts the release-key calls the pool chain's live
-// slices still owe — one each: adminRelease once paid, cancelByTimeout (the
-// expiry canceller, release key) if never paid, adminResolve if disputed.
-func NewPoolReleaseCommitments(db *gorm.DB, chainID int64) *LaneCommitments {
-	return newLaneCommitments(fmt.Sprintf("pool_releases_%d", chainID), func(ctx context.Context) (uint64, error) {
+// NewPoolFillCommitments counts the fills the release key still owes
+// shared-pool orders: one per order that may still fill and has none recorded
+// (an unpaid order only while it can still be claimed: poolReservingIntents).
+func NewPoolFillCommitments(db *gorm.DB) *LaneCommitments {
+	c := newLaneCommitments("pool_fills", nil)
+	c.count = func(ctx context.Context) (uint64, error) {
 		var n int64
-		err := db.WithContext(ctx).Model(&models.P2PTrade{}).
-			Where("it_intent_id IS NOT NULL AND chain_id = ? AND status IN ?", chainID, poolSliceOutstandingStatuses).
+		err := poolReservingIntents(db.WithContext(ctx).Model(&models.PoolOrder{}).
+			Joins("JOIN it_intents ON it_intents.id = pool_orders.intent_id"), c.now()).
+			Where("pool_orders.fill_units IS NOT NULL AND pool_orders.fill_tx_hash = ''").
 			Count(&n).Error
-		return uint64(n) * poolReleaseCallGas, err
-	})
-}
-
-// poolSliceOutstandingStatuses are the slice states that still need one
-// release-key transaction each.
-var poolSliceOutstandingStatuses = []string{
-	models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-	models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed,
+		return uint64(n) * vaultFillGas, err
+	}
+	return c
 }
 
 // treasuryRouteReserveGas is one converted order's owed route on a treasury
@@ -147,18 +143,23 @@ const treasuryRouteReserveGas = maxRouteGasLimit + treasuryERC20Gas
 
 // NewPoolTreasuryCommitments counts what the pool chain's treasury lane owes
 // pool orders already in flight: one delivery transfer per pool order opened
-// or paid but not delivered. (A converted delivery's route is counted by the
-// conversion lane's own NewConversionTreasuryCommitments.)
+// or paid but not delivered — an unpaid one only while it can still be
+// claimed (stableBuyClaimWindow). (A converted delivery's route is counted by
+// the conversion lane's own NewConversionTreasuryCommitments.)
 func NewPoolTreasuryCommitments(db *gorm.DB) *LaneCommitments {
-	return newLaneCommitments("pool_treasury_owed", func(ctx context.Context) (uint64, error) {
+	c := newLaneCommitments("pool_treasury_owed", nil)
+	c.count = func(ctx context.Context) (uint64, error) {
 		var n int64
 		err := db.WithContext(ctx).Model(&models.ITIntent{}).
 			Where("provider IN ?", poolProviders()).
-			Where("direction = ? AND status IN ?", models.ITDirectionBuy,
-				[]string{models.ITStatusPendingPayment, models.ITStatusPaymentReceived, models.ITStatusDelivering}).
+			Where("direction = ?", models.ITDirectionBuy).
+			Where("(status IN ? OR (status = ? AND created_at > ?))",
+				[]string{models.ITStatusPaymentReceived, models.ITStatusDelivering}, models.ITStatusPendingPayment,
+				c.now().Add(-stableBuyClaimWindow)).
 			Count(&n).Error
 		return uint64(n) * treasuryERC20Gas, err
-	})
+	}
+	return c
 }
 
 // NewConversionTreasuryCommitments counts one route (+ approve) per converted

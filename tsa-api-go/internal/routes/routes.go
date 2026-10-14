@@ -887,11 +887,18 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// TSA Liquidity (spec §15): the caller's own LP state. Registered only
 		// when a pool chain exists (the handlers assume a wired reader).
 		// Signed-in users only; no KYC gate, so a non-LP gets status "none".
-		if p2p.HasLiquidity() {
+		if p2p.HasVaultLiquidity() {
+			// Shared pool (spec 2026-10-14): instant activation, the LP's own
+			// unsigned txs, a gas-free claim to the LP's own wallet.
 			liq := api.Group("/liquidity")
 			liq.Use(auth)
-			liq.GET("/me", p2p.GetLiquidityMe)
-			liq.GET("/me/activity", p2p.ListLiquidityActivity)
+			liq.GET("/me", p2p.VaultLiquidityMe)
+			liq.GET("/me/activity", p2p.VaultLiquidityActivity)
+			liq.POST("/activate", idem, p2p.ActivateLiquidity)
+			liq.POST("/deposit/prepare", p2p.PrepareLiquidityDeposit)
+			liq.POST("/withdraw/prepare", p2p.PrepareLiquidityWithdraw)
+			liq.POST("/claim/prepare", p2p.PrepareLiquidityClaim)
+			liq.POST("/claim-for", idem, p2p.ClaimLiquidityForMe)
 		}
 
 		// Admin dispute resolution — funds-moving, audit-writing. AdminAuth
@@ -1272,12 +1279,22 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			{
 				lq.GET("/:id", ith.AdminPoolOrder)
 				act := lq.Group("", middleware.RequireSuperAdmin())
-				act.POST("/:id/redeliver", ith.AdminRedeliverPoolBuy)
 				act.POST("/:id/resend", ith.AdminResendPoolBuy)
-				act.POST("/:id/refund-override", ith.AdminRefundPoolBuyOverride)
-				act.POST("/:id/slices/:sliceId/pay-lp", ith.AdminPayPoolSliceLP)
-				act.POST("/:id/slices/:sliceId/returned", ith.AdminNotePoolSliceReturned)
-				act.POST("/:id/slices/:sliceId/clear-release", ith.AdminClearPoolSliceRelease)
+				if ith.VaultPoolEnabled() {
+					act.POST("/:id/retry-fill", ith.AdminRetryPoolFill)
+				}
+			}
+		}
+		// Shared pool (spec 2026-10-14 §7): the books for P2P admins; the
+		// operator's settle-from-collateral for super admins.
+		if ith.VaultPoolEnabled() {
+			vp := api.Group("/admin/liquidity/pool")
+			vp.Use(adminAuth, middleware.RequireP2PAdmin())
+			{
+				vp.GET("", ith.AdminVaultPool)
+				// operationId in the body makes the settle itself idempotent;
+				// the Idempotency-Key replay answers a retried request as before.
+				vp.POST("/settle-from-collateral", middleware.RequireSuperAdmin(), middleware.Idempotency(config.DB), ith.AdminSettlePoolFromCollateral)
 			}
 		}
 		// Any settlement forward, merchant or LP (re-review I-D).

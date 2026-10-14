@@ -10,7 +10,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { isValidPmIdNumber } from '@/app/merchants/activate-pm';
+import { activationOutcome, isValidPmIdNumber } from '@/app/merchants/activate-pm';
 
 describe('isValidPmIdNumber', () => {
   it('accepts exactly 11 digits', () => {
@@ -27,5 +27,17 @@ describe('isValidPmIdNumber', () => {
   it('rejects non-numeric input', () => {
     expect(isValidPmIdNumber('2223334445a')).toBe(false);
     expect(isValidPmIdNumber('222-333-444-5')).toBe(false);
+  });
+});
+
+describe('activationOutcome', () => {
+  it('sends an activated merchant to the dashboard', () => {
+    expect(activationOutcome({ success: true })).toMatchObject({ kind: 'success', route: '/merchants/dashboard' });
+  });
+  it('routes KYC refusals to verification', () => {
+    expect(activationOutcome({ success: false, code: 'kyc_verification_required' })).toEqual({ kind: 'kyc' });
+  });
+  it('shows the server message otherwise', () => {
+    expect(activationOutcome({ success: false, code: 'settlement_name_mismatch', message: 'x' })).toEqual({ kind: 'error', title: 'Activation failed', message: 'x' });
   });
 });

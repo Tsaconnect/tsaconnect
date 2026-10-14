@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
 // Review I3: the admin merchant-request queue is staff work. A marketplace
@@ -49,10 +50,13 @@ func requestIDOfType(t *testing.T, db *gorm.DB, businessType string) string {
 
 func TestListMerchantRequests_StaffOnlyAndRedactedForSupport(t *testing.T) {
 	db := setupMerchantTestDB(t)
-	h := lpHandler(t, db, true)
+	h := pmRequestHandler(t, db)
 	applicant := createMerchantTestUser(t, db, "user")
 	db.Model(&models.User{}).Where("id = ?", applicant.ID).Update("wallet_address", "0x52908400098527886E0F7030069857D2E4169EE7")
-	lpRequestID(t, db, h, applicant)
+	seedMerchantRequest(t, db, applicant.ID, models.BusinessTypeP2PMerchant, models.MerchantRequestStatusPending)
+	db.Model(&models.MerchantRequest{}).Where("user_id = ?", applicant.ID).Updates(map[string]any{
+		"settlement_bank_code": "058", "settlement_account_number": "0123456789", "settlement_account_name": "ACME LTD",
+		"maker_wallet_address": "0x52908400098527886E0F7030069857D2E4169EE7"})
 
 	if code, _ := listMerchantRequestsAs(h, nil); code != http.StatusUnauthorized {
 		t.Fatalf("no caller = %d, want 401", code)
@@ -66,15 +70,12 @@ func TestListMerchantRequests_StaffOnlyAndRedactedForSupport(t *testing.T) {
 
 	code, rows := listMerchantRequestsAs(h, createMerchantTestUser(t, db, "support"))
 	if code != http.StatusOK || len(rows) != 1 {
-		t.Fatalf("support list = %d (%d rows), want 200 with the LP request", code, len(rows))
+		t.Fatalf("support list = %d (%d rows), want 200 with the request", code, len(rows))
 	}
 	for _, f := range sensitive {
 		if _, ok := rows[0][f]; ok {
 			t.Errorf("support sees %s", f)
 		}
-	}
-	if rows[0]["businessName"] == "ADA OBI" {
-		t.Error("support sees the LP's verified legal name")
 	}
 	// Review N1: nor through the applicant's user object.
 	if u, _ := rows[0]["user"].(map[string]any); u == nil || u["walletAddress"] != nil {
@@ -82,7 +83,7 @@ func TestListMerchantRequests_StaffOnlyAndRedactedForSupport(t *testing.T) {
 	}
 
 	code, rows = listMerchantRequestsAs(h, createMerchantTestUser(t, db, "admin"))
-	if code != http.StatusOK || len(rows) != 1 || rows[0]["businessName"] != "ADA OBI" {
+	if code != http.StatusOK || len(rows) != 1 || rows[0]["businessName"] != "Seed Corp" {
 		t.Fatalf("admin list = %d %v", code, rows)
 	}
 	if u, _ := rows[0]["user"].(map[string]any); u == nil || u["walletAddress"] == nil {
@@ -115,7 +116,7 @@ func TestRejectMerchantRequest_StaffAndAdminGates(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.businessType+"/"+tc.role, func(t *testing.T) {
 			db := setupMerchantTestDB(t)
-			h := lpHandler(t, db, true)
+			h := pmRequestHandler(t, db)
 			id := requestIDOfType(t, db, tc.businessType)
 			if code := rejectAs(h, createMerchantTestUser(t, db, tc.role), id); code != tc.want {
 				t.Fatalf("reject = %d, want %d", code, tc.want)
@@ -128,7 +129,7 @@ func TestRejectMerchantRequest_StaffAndAdminGates(t *testing.T) {
 		})
 	}
 	db := setupMerchantTestDB(t)
-	h := lpHandler(t, db, true)
+	h := pmRequestHandler(t, db)
 	id := requestIDOfType(t, db, models.BusinessTypeGeneralProducts)
 	w, c := newMerchantContext("POST", "/", map[string]any{"note": "no"}, nil)
 	c.Params = gin.Params{{Key: "id", Value: id}}
@@ -140,7 +141,7 @@ func TestRejectMerchantRequest_StaffAndAdminGates(t *testing.T) {
 
 func TestApproveMerchantRequest_MarketplaceMerchantForbidden(t *testing.T) {
 	db := setupMerchantTestDB(t)
-	h := lpHandler(t, db, true)
+	h := pmRequestHandler(t, db)
 	id := requestIDOfType(t, db, models.BusinessTypeGeneralProducts)
 	if code := approveAs(t, h, createMerchantTestUser(t, db, "merchant"), id); code != http.StatusForbidden {
 		t.Fatalf("merchant approve = %d, want 403", code)
@@ -153,41 +154,45 @@ func TestApproveMerchantRequest_MarketplaceMerchantForbidden(t *testing.T) {
 // Review N4: a non-staff caller learns nothing about which request ids exist.
 func TestRejectMerchantRequest_NonStaffGets403BeforeTheLookup(t *testing.T) {
 	db := setupMerchantTestDB(t)
-	h := lpHandler(t, db, true)
+	h := pmRequestHandler(t, db)
 	if code := rejectAs(h, createMerchantTestUser(t, db, "merchant"), "00000000-0000-0000-0000-000000000001"); code != http.StatusForbidden {
 		t.Fatalf("merchant reject of an unknown id = %d, want 403", code)
 	}
 }
 
-// Review N3, reversed by the owner (2026-10-13): a user whose p2p_merchant
-// request was approved while PM was dormant (no merchant row; role already
-// merchant) may still be approved as an LP. The LP approval writes only the LP
-// row, leaves the role and the merchant request as they are, and the merchant
-// setup can still be finished by re-approving it.
-func TestApproveLPRequest_AfterAnUnfinishedMerchantApprovalSucceeds(t *testing.T) {
+func pmRequestHandler(t *testing.T, db *gorm.DB) *MerchantRequestHandler {
+	t.Helper()
+	h := NewMerchantRequestHandlerWithPM(db, newTestEventBus(t), services.NewPMOnboardingService(db, nil))
+	h.PMService = services.NewPMService(db)
+	return h
+}
+
+func approveAs(t *testing.T, h *MerchantRequestHandler, caller *models.User, reqID string) int {
+	t.Helper()
+	w, c := newMerchantContext("POST", "/api/admin/merchant-requests/"+reqID+"/approve", map[string]any{"note": "ok"}, caller)
+	c.Params = gin.Params{{Key: "id", Value: reqID}}
+	h.ApproveMerchantRequest(c)
+	return w.Code
+}
+
+// The shared pool activates LPs itself (spec 2026-10-14 §5): a liquidity
+// application left pending from the slice pool is never approved, and a new
+// one is not a valid request type.
+func TestApproveMerchantRequest_LegacyLPApplicationRefused(t *testing.T) {
 	db := setupMerchantTestDB(t)
-	h := lpHandler(t, db, true)
-	u := createMerchantTestUser(t, db, "merchant")
-	seedMerchantRequest(t, db, u.ID, models.BusinessTypeP2PMerchant, models.MerchantRequestStatusApproved)
-	verifyUser(t, db, u, "ADA OBI")
-	if code, body := submitLP(t, h, u); code != http.StatusCreated {
-		t.Fatalf("submit = %d %v", code, body)
+	h := pmRequestHandler(t, db)
+	id := requestIDOfType(t, db, models.BusinessTypeLiquidityProvider)
+	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), id); code != http.StatusConflict {
+		t.Fatalf("approve = %d, want 409", code)
 	}
-	var lpReq models.MerchantRequest
-	db.Where("user_id = ? AND business_type = ?", u.ID, models.BusinessTypeLiquidityProvider).First(&lpReq)
-	if code := approveAs(t, h, createMerchantTestUser(t, db, "admin"), lpReq.ID.String()); code != http.StatusOK {
-		t.Fatalf("approve = %d, want 200", code)
+	var rows int64
+	db.Model(&models.PaymentMerchant{}).Count(&rows)
+	if rows != 0 {
+		t.Fatalf("payment_merchants rows = %d, want none", rows)
 	}
-	var rows []models.PaymentMerchant
-	db.Where("user_id = ?", u.ID).Find(&rows)
-	if len(rows) != 1 || !rows[0].IsLP() {
-		t.Fatalf("rows = %+v, want one LP row and no merchant row", rows)
-	}
-	var role string
-	db.Model(&models.User{}).Where("id = ?", u.ID).Pluck("role", &role)
-	var pmReq models.MerchantRequest
-	db.Where("user_id = ? AND business_type = ?", u.ID, models.BusinessTypeP2PMerchant).First(&pmReq)
-	if role != models.RoleMerchant || pmReq.Status != models.MerchantRequestStatusApproved {
-		t.Fatalf("role=%s merchant request=%s: the LP approval touched the merchant side", role, pmReq.Status)
+	for _, bt := range models.ValidBusinessTypes {
+		if bt == models.BusinessTypeLiquidityProvider {
+			t.Fatal("liquidity_provider is still a valid request type")
+		}
 	}
 }

@@ -12,8 +12,7 @@ import (
 
 // Plan A I1 / P18: a converted pool order's record carries the 18-dp leg.
 func TestPoolConverted_RecordLegDecimals18(t *testing.T) {
-	r := newPoolOpenRig(t)
-	r.addLP(t, 50)
+	r := newVaultRig(t, 100, 25)
 	r.it.SetConvertedBuys(ConvertedBuys{TreasuryAddress: poolTestTreasury, Treasury: r.desk.c.Treasury})
 	p := r.price(t, "5000")
 	leg, _ := CanonicalToChainUnits(p.Quote.AssetUnits, 18)
@@ -34,17 +33,16 @@ func TestPoolConverted_RecordLegDecimals18(t *testing.T) {
 // §15 pool-card: rate and limits without an amount; never a provider name or
 // a voucher signature.
 func TestPoolCard_RateAndLimits(t *testing.T) {
-	r := newPoolOpenRig(t)
-	threeLPs(t, r) // free 125 USDT across the top 3
+	r := newVaultRig(t, 126, 25) // free 126 USDT of collateral: ~125.37 deliverable at a 0.5% spread
 	r.it.SetTreasuryMarketRate(&fixedTreasuryRate{rate: poolMid})
 	card, err := r.it.PoolCard(context.Background())
 	if err != nil || !card.Enabled || !card.Available || card.Rate != "1361.51" || card.FundingFeePercent != "1.4" ||
-		card.MinNgn != "2828.00" || card.Name != "TSA Connect" || card.Badge != "Recommended" || card.Token.Decimals != 18 {
+		card.MinNgn != "2817.00" || card.Name != "TSA Connect" || card.Badge != "Recommended" || card.Token.Decimals != 18 {
 		t.Fatalf("card = %+v %v", card, err)
 	}
 	maxNgn, _ := new(big.Rat).SetString(card.MaxNgn)
-	if maxNgn.Cmp(big.NewRat(171_000, 1)) < 0 || maxNgn.Cmp(big.NewRat(173_000, 1)) > 0 {
-		t.Fatalf("maxNgn = %s, want ≈ the naira for 125 USDT net", card.MaxNgn)
+	if maxNgn.Cmp(big.NewRat(172_500, 1)) < 0 || maxNgn.Cmp(big.NewRat(173_500, 1)) > 0 { // 125.37 ÷ 0.986 × ₦1,361.51 ≈ ₦173,116
+		t.Fatalf("maxNgn = %s, want ≈ the naira for 125.37 USDT net", card.MaxNgn)
 	}
 	b, _ := json.Marshal(card)
 	if strings.Contains(strings.ToLower(string(b)), "voucher") {

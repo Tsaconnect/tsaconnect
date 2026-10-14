@@ -154,17 +154,13 @@ type P2PChainInfo struct {
 }
 
 // Chains lists the chains open to ordinary P2P (chainID + tradeable assets),
-// sorted by chainID for stable output. The pool chain is omitted (spec S5 /
-// plan P8): ordinary P2P never opens on it.
+// sorted by chainID for stable output.
 func (r *P2PEscrowRegistry) Chains() []P2PChainInfo {
 	if r == nil {
 		return nil
 	}
 	out := make([]P2PChainInfo, 0, len(r.byChain))
 	for id, e := range r.byChain {
-		if e.purpose == config.P2PPurposePool {
-			continue
-		}
 		var decimals map[string]int
 		if len(e.decimals) > 0 {
 			decimals = make(map[string]int, len(e.decimals))
@@ -245,9 +241,6 @@ func (r *P2PEscrowRegistry) AssetAllowed(chainID int64, symbol string) bool {
 	e, ok := r.byChain[chainID]
 	if !ok {
 		return false
-	}
-	if e.purpose == config.P2PPurposePool {
-		return false // spec S5 / plan P8: ordinary P2P never opens on the pool chain (Plan B adds the LP route)
 	}
 	if len(e.assets) == 0 {
 		return true
@@ -339,11 +332,6 @@ func resolveAssetDecimals(chainID int64, chainKey, purpose string, assets []stri
 			d, err = r.GetTokenDecimals(addr)
 		}
 		if err != nil {
-			if purpose == config.P2PPurposePool {
-				log.Printf("[config] ALERT p2p_asset_decimals_unreadable chain=%s(%d) asset=%s err=%s — dropped from the pool",
-					chainKey, chainID, sym, RedactAlertText(err.Error()))
-				continue
-			}
 			log.Printf("[config] ALERT p2p_asset_decimals_unreadable chain=%s(%d) asset=%s err=%s — keeping the table value %d",
 				chainKey, chainID, sym, RedactAlertText(err.Error()), tokenDecimalsFor(chainID, sym))
 			kept = append(kept, sym)
@@ -386,44 +374,6 @@ func (r *P2PEscrowRegistry) Purpose(chainID int64) string {
 		return e.purpose
 	}
 	return ""
-}
-
-// PoolChainInfo is the one pool chain (spec S36), for LP flows only: ordinary
-// P2P never sees it (Chains() omits it, plan A P8).
-type PoolChainInfo struct {
-	ChainID  int64
-	ChainKey string
-	Assets   []string       // the pool tokens
-	Decimals map[string]int // read on-chain at boot (S6)
-}
-
-// HasAsset reports whether symbol is a pool token.
-func (p PoolChainInfo) HasAsset(symbol string) bool {
-	for _, a := range p.Assets {
-		if strings.EqualFold(a, symbol) {
-			return true
-		}
-	}
-	return false
-}
-
-// PoolChain is the registered chain whose purpose is pool. ok=false when the
-// preset row is dormant or its chain could not be dialled at boot.
-func (r *P2PEscrowRegistry) PoolChain() (PoolChainInfo, bool) {
-	if r == nil {
-		return PoolChainInfo{}, false
-	}
-	for id, e := range r.byChain {
-		if e.purpose != config.P2PPurposePool {
-			continue
-		}
-		dec := make(map[string]int, len(e.decimals))
-		for k, v := range e.decimals {
-			dec[k] = v
-		}
-		return PoolChainInfo{ChainID: id, ChainKey: e.chainKey, Assets: append([]string(nil), e.assets...), Decimals: dec}, true
-	}
-	return PoolChainInfo{}, false
 }
 
 // verifyP2PChainAtBoot warns (does not abort) when the escrow address has no

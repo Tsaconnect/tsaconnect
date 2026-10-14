@@ -47,6 +47,8 @@ type ITHandler struct {
 	// poolAdmin serves the TSA Liquidity pool-order console (plan C2 §15).
 	// Nil: the routes are not registered.
 	poolAdmin PoolOrdersAdmin
+	// vaultAdmin is the shared-pool console; nil unless the pool fills from a vault.
+	vaultAdmin VaultPoolAdmin
 	// fwdRecheck re-asks the provider about any settlement forward. Nil: the
 	// recheck route is not registered.
 	fwdRecheck ForwardRechecker

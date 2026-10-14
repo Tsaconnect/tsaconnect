@@ -20,23 +20,17 @@ type routesPoolAdmin struct{}
 func (routesPoolAdmin) PoolOrderDetail(context.Context, uuid.UUID) (*services.PoolOrderDetail, error) {
 	return &services.PoolOrderDetail{}, nil
 }
-func (routesPoolAdmin) RedeliverPoolBuy(context.Context, uuid.UUID, uuid.UUID, string) (*models.ITIntent, error) {
-	return &models.ITIntent{}, nil
-}
 func (routesPoolAdmin) ResendPoolBuy(context.Context, uuid.UUID, uuid.UUID, string) (*models.ITIntent, error) {
 	return &models.ITIntent{}, nil
 }
-func (routesPoolAdmin) RefundPoolBuyOverride(context.Context, uuid.UUID, uuid.UUID, string) (*models.ITIntent, error) {
+func (routesPoolAdmin) VaultPoolSummary(context.Context) (*services.VaultPoolSummary, error) {
+	return &services.VaultPoolSummary{}, nil
+}
+func (routesPoolAdmin) SettlePoolFromCollateral(context.Context, uuid.UUID, uuid.UUID, string, string) (string, error) {
+	return "0x1", nil
+}
+func (routesPoolAdmin) RetryPoolFill(context.Context, uuid.UUID, uuid.UUID, string) (*models.ITIntent, error) {
 	return &models.ITIntent{}, nil
-}
-func (routesPoolAdmin) PayPoolSliceLP(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (*models.P2PSettlementForward, error) {
-	return &models.P2PSettlementForward{}, nil
-}
-func (routesPoolAdmin) NotePoolSliceReturned(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) error {
-	return nil
-}
-func (routesPoolAdmin) ClearPoolSliceRelease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) error {
-	return nil
 }
 
 type routesRechecker struct{}
@@ -65,22 +59,19 @@ func liquidityRoutesRig(t *testing.T, wire func(*handlers.ITHandler)) (*gin.Engi
 	return r, db, cfg
 }
 
-// §15 / P20: P2P admins read a pool order; only super admins move money on it
-// (override, re-deliver, re-send, F22 pay/returned, forward recheck).
+// P2P admins read a pool order and the pool's books; only super admins move
+// money (re-send, retry a fill, settle from collateral, forward recheck).
 func TestLiquidityAdminRoutes_ActionsNeedSuperAdmin(t *testing.T) {
 	r, db, cfg := liquidityRoutesRig(t, func(h *handlers.ITHandler) {
 		h.SetPoolOrdersAdmin(routesPoolAdmin{})
+		h.SetVaultPoolAdmin(routesPoolAdmin{})
 		h.SetForwardRechecker(routesRechecker{})
 	})
 	order := "/api/admin/liquidity/orders/" + uuid.NewString()
-	slice := order + "/slices/" + uuid.NewString()
 	actions := []string{
-		order + "/redeliver",
 		order + "/resend",
-		order + "/refund-override",
-		slice + "/pay-lp",
-		slice + "/returned",
-		slice + "/clear-release",
+		order + "/retry-fill",
+		"/api/admin/liquidity/pool/settle-from-collateral",
 		"/api/admin/p2p/forwards/" + uuid.NewString() + "/recheck",
 	}
 	for _, tc := range []struct {
@@ -93,11 +84,13 @@ func TestLiquidityAdminRoutes_ActionsNeedSuperAdmin(t *testing.T) {
 		{models.RoleUser, http.StatusForbidden, http.StatusForbidden},
 	} {
 		tok := payRoutesToken(t, cfg.JWTSecret, payRoutesUser(t, db, tc.role).ID)
-		if w := payRoutesDo(r, "GET", order, tok, nil); w.Code != tc.get {
-			t.Fatalf("%s GET: %d %s", tc.role, w.Code, w.Body.String())
+		for _, g := range []string{order, "/api/admin/liquidity/pool"} {
+			if w := payRoutesDo(r, "GET", g, tok, nil); w.Code != tc.get {
+				t.Fatalf("%s GET %s: %d %s", tc.role, g, w.Code, w.Body.String())
+			}
 		}
 		for _, p := range actions {
-			if w := payRoutesDo(r, "POST", p, tok, map[string]string{"note": "n", "txHash": "0x1"}); w.Code != tc.actions {
+			if w := payRoutesDo(r, "POST", p, tok, map[string]string{"note": "n", "amount": "1", "operationId": uuid.NewString()}); w.Code != tc.actions {
 				t.Fatalf("%s POST %s: %d %s", tc.role, p, w.Code, w.Body.String())
 			}
 		}

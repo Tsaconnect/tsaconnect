@@ -5,14 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/big"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // stableBuyClaimWindow bounds how long an unpaid stablecoin buy intent may
@@ -315,7 +313,8 @@ func (s *ITService) claimAndPriceStableBuy(
 
 	switch {
 	case parkedReason != "":
-		if parkedReason == "stock" || parkedReason == "daily_cap" || parkedReason == models.ITFailurePoolSlicesShort {
+		if parkedReason == "stock" || parkedReason == "daily_cap" || parkedReason == models.ITFailurePoolSlicesShort ||
+			parkedReason == models.ITFailurePoolFillRefused {
 			// Deterministic for this money, like a pricing error (D32):
 			// retrying cannot help, a human must decide.
 			log.Printf("[it stable buy] ALERT it_stable_buy_parked_unpriceable intent=%s payment=%s reason=%q",
@@ -486,111 +485,12 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 	return s.getIntent(ctx, intentID)
 }
 
-// claimPool claims a pool buy (spec §12.3) under the pool lock with the
-// intent row locked — the lock the expiry canceller (decideSliceCancel) and
-// F21 (ClaimSliceResolve) decide under, so whoever locks the intent first
-// wins (P1, M7). The owed units are the honoured quote's, or for a buy priced
-// live (S18) the current mid and settings'. Either way they must be covered
-// by this order's slices that still back it (never a dropped one, review
-// C-2): covered → claim (dropping the unselected slices, booking the
-// surplus); not → park pool_slices_short (dropping every pending slice for
-// the canceller). A deterministic pricing error parks and drops too. A
-// transient one (no mid) writes nothing: the central poller retries in 30 s.
+// claimPool claims a pool buy under the pool lock (claimVault, spec
+// 2026-10-14 §4): the amount owed must fit the vault's free collateral.
 func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, claim map[string]any, amountMinor string,
 	ch PayInChannel, arrival *routedArrival, write func(*gorm.DB) *gorm.DB) (*gorm.DB, string, error) {
-	d := s.poolDesk
-	if d == nil {
+	if s.poolDesk == nil {
 		return nil, "", fmt.Errorf("%w: the pool is not wired", ErrStableQuoteUnavailable)
 	}
-	paid, ok := new(big.Int).SetString(strings.TrimSpace(amountMinor), 10)
-	if !ok || paid.Sign() <= 0 {
-		return nil, "", fmt.Errorf("%w: unusable amount %q", ErrStableBuyBelowMinimum, amountMinor)
-	}
-	var mid *big.Rat
-	if !arrival.honoured {
-		if s.treasuryRates == nil {
-			return nil, "", fmt.Errorf("%w: the pool is not wired", ErrStableQuoteUnavailable)
-		}
-		var err error
-		if mid, err = s.treasuryRates.BuyRate(ctx, candidate.Currency); err != nil {
-			return nil, "", err
-		}
-	}
-	var res *gorm.DB
-	parked := ""
-	err := withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
-		var locked models.ITIntent
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, "id = ?", candidate.ID).Error; err != nil {
-			return err
-		}
-		now := d.now()
-		releasedUnits, pending, err := d.orderSliceUnits(tx, locked.ID)
-		if err != nil {
-			return err
-		}
-		released := sumUnits(releasedUnits)
-		pendingIDs := make([]uuid.UUID, len(pending))
-		for i := range pending {
-			pendingIDs[i] = pending[i].ID
-		}
-		if locked.Status != models.ITStatusPendingPayment {
-			res = write(tx) // lost the race: RowsAffected 0, the caller re-checks by ref
-			return res.Error
-		}
-		var p *PoolPrice
-		var cov PoolCoverage
-		if arrival.honoured {
-			cov = EvaluatePoolCoverage(arrival.units, released, pending, CurrentPoolSettings().MinSliceUnits)
-		} else {
-			var perr error
-			if p, cov, perr = s.poolSettlePrice(locked.Asset, locked.Currency, paid, mid, ch, releasedUnits, pending); perr != nil {
-				parkClaim(claim, "could not price at settlement: "+RedactAlertText(perr.Error())) // review M13
-				parked = parkReasonOf(perr)
-				if err := d.dropAllSlices(tx, pendingIDs, now); err != nil {
-					return err
-				}
-				res = write(tx)
-				return res.Error
-			}
-		}
-		if !cov.Covered {
-			parkClaim(claim, models.ITFailurePoolSlicesShort+": the amount owed is not covered by this order's locked slices")
-			parked = models.ITFailurePoolSlicesShort
-			log.Printf("[liquidity] ALERT liquidity_pool_slices_short intent=%s owed=%s honoured=%v", locked.ID, cov.Owed, arrival.honoured)
-			if err := d.dropAllSlices(tx, pendingIDs, now); err != nil {
-				return err
-			}
-			res = write(tx)
-			return res.Error
-		}
-		if arrival.honoured {
-			arrival.writeTo(claim)
-		} else {
-			setQuoteColumns(claim, p.Quote.AssetUnits, p.Quote.RatePerUnitMinor, p.Quote.DisplayRateMinor, p.Quote.Fees)
-			claim["repriced"] = true
-			arrival.units, arrival.rate, arrival.quote = p.Quote.AssetUnits, p.Quote.RatePerUnitMinor, p.Quote
-		}
-		res = write(tx)
-		if res.Error != nil || res.RowsAffected == 0 {
-			return res.Error
-		}
-		if err := d.dropAllSlices(tx, cov.Drop, now); err != nil {
-			return err
-		}
-		var gen int
-		if err := tx.Model(&models.PoolOrder{}).Where("intent_id = ?", locked.ID).
-			Select("COALESCE(MAX(generation), 1)").Scan(&gen).Error; err != nil {
-			return err
-		}
-		sr := tx.Model(&models.PoolOrder{}).Where("intent_id = ? AND generation = ?", locked.ID, gen).
-			Update("surplus_units", cov.Surplus.String())
-		if sr.Error == nil && sr.RowsAffected == 0 {
-			// Review M-13: the claim stands (the money is hers); the
-			// snapshot it books against is missing, so C2's accounting
-			// would miss the surplus.
-			log.Printf("[liquidity] ALERT liquidity_pool_surplus_unrecorded intent=%s generation=%d surplus=%s — no pool order snapshot", locked.ID, gen, cov.Surplus)
-		}
-		return sr.Error
-	})
-	return res, parked, err
+	return s.claimVault(ctx, candidate, claim, amountMinor, ch, arrival, write)
 }

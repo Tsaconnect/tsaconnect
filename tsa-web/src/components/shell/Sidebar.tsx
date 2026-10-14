@@ -1,6 +1,6 @@
 import type { ComponentType, ReactNode } from 'react';
 import { Link, NavLink } from 'react-router-dom';
-import { BookOpen, CreditCard, KeyRound, Landmark, LayoutGrid, Link2, LogOut, ReceiptText, UserRound } from 'lucide-react';
+import { BookOpen, Coins, CreditCard, KeyRound, Landmark, LayoutGrid, Link2, LogOut, ReceiptText, UserRound } from 'lucide-react';
 import { useSession } from '@/session/context';
 import { initials } from '@/lib/format';
 import { cn } from '@/lib/cn';
@@ -94,6 +94,7 @@ export function Sidebar({ section, mode, merchant, onNavigate }: {
             <Heading>Business</Heading>
             <Item to={biz('payouts')} icon={Landmark} onNavigate={onNavigate}>Payouts</Item>
             <Item to={biz('reconciliation')} icon={ReceiptText} onNavigate={onNavigate}>Refunds &amp; reconciliation</Item>
+            <Item to={biz('liquidity')} icon={Coins} onNavigate={onNavigate}>Liquidity earnings</Item>
             <Heading>Developers</Heading>
             <Item to={biz('developers')} icon={KeyRound} onNavigate={onNavigate}>API keys &amp; webhooks</Item>
             <Item to="/docs" icon={BookOpen} onNavigate={onNavigate}>Docs</Item>

@@ -3,14 +3,13 @@ package main
 import (
 	"testing"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
 const (
-	testPoolEscrow  = "0x00000000000000000000000000000000000A11CE"
+	testPoolVault   = "0x00000000000000000000000000000000000BA017"
 	testnetPoolUSDT = "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7"
 )
 
@@ -30,14 +29,13 @@ func poolTestConfig(t *testing.T, network string) *config.Config {
 		Chains:         map[string]config.ChainConfig{"bsc": {RPCURL: "http://127.0.0.1:1", ChainID: id}},
 		TokenAddresses: map[string]string{"bsc:USDT": testnetPoolUSDT},
 	}}
-	cfg.P2PChains = map[int64]config.P2PChainConfig{id: {ChainID: id, ChainKey: "bsc", Network: network,
-		EscrowAddress: testPoolEscrow, EIP712Version: "2", Purpose: config.P2PPurposePool, Assets: []string{"USDT"},
-		Pool: &config.PoolChainConfig{FeeManager: "0x00000000000000000000000000000000000FEE00", Tokens: []string{"USDT"},
-			ReleaseGasFloorWei: "10000000000000000", LogChunkBlocks: 2000}}}
+	cfg.LiquidityPoolRow = &config.LiquidityPoolConfig{ChainID: id, ChainKey: "bsc", Network: network,
+		Vault: testPoolVault, VaultDeployBlock: 1, Token: "USDT", TokenAddress: testnetPoolUSDT,
+		ReleaseGasFloorWei: "10000000000000000", LogChunkBlocks: 2000}
 	return cfg
 }
 
-// Spec §5 / I8: a testnet pool gets a router-less lane with no conversion flag.
+// A testnet pool gets a router-less lane with no conversion flag: transfers only.
 func TestRampConversion_PoolBuildsLanesWithoutConversionBuy(t *testing.T) {
 	cfg := poolTestConfig(t, "testnet")
 	cfg.RampConversionBuyEnabled = false
@@ -46,8 +44,7 @@ func TestRampConversion_PoolBuildsLanesWithoutConversionBuy(t *testing.T) {
 		t.Fatal("the pool must get a treasury lane without RAMP_CONVERSION_BUY")
 	}
 	lane := tr.Lane("bsc")
-	if lane == nil || lane.ChainID != 97 || len(lane.Routers) != 0 ||
-		len(lane.EscrowCalls) != 1 || lane.EscrowCalls[0] != common.HexToAddress(testPoolEscrow) || lane.Tokens["USDT"] != testnetPoolUSDT {
+	if lane == nil || lane.ChainID != 97 || len(lane.Routers) != 0 || lane.Tokens["USDT"] != testnetPoolUSDT {
 		t.Fatalf("lane = %+v", lane)
 	}
 	key, _ := crypto.HexToECDSA(testKeyB)
@@ -65,9 +62,6 @@ func TestPoolTreasury_MainnetPoolReusesTheConversionTreasury(t *testing.T) {
 	}}, services.TreasuryCaps{MaxInFlightUSDPerOrder: 2000}, nil)
 	if got := poolTreasuryFor(cfg, services.NewBlockchainService(cfg), conv); got != conv {
 		t.Fatal("a mainnet pool must use the conversion treasury itself")
-	}
-	if l := conv.Lane("bsc"); len(l.EscrowCalls) != 1 || l.EscrowCalls[0] != common.HexToAddress(testPoolEscrow) {
-		t.Fatalf("escrow calls = %v", l.EscrowCalls)
 	}
 }
 

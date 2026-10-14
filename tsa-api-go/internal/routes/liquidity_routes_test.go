@@ -10,7 +10,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
-type noLiquidity struct{ handlers.LiquidityReader }
+type noLiquidity struct{ handlers.VaultLiquidity }
 
 func hasRoute(r *gin.Engine, method, path string) bool {
 	for _, rt := range r.Routes() {
@@ -26,7 +26,7 @@ func liquidityRouter(withLiquidity bool) *gin.Engine {
 	r := gin.New()
 	p2p := handlers.NewP2PHandler(nil, services.NewP2PTradeService(nil, nil, nil, nil, 146), nil, nil, nil)
 	if withLiquidity {
-		p2p.SetLiquidity(noLiquidity{})
+		p2p.SetVaultLiquidity(noLiquidity{})
 	}
 	// p2p is SetupRoutes' 12th argument (after ch, mrh, sch, swh, slh, psh, wsHub, eh).
 	SetupRoutes(r, &config.Config{}, &handlers.Handlers{}, nil, nil, nil, nil, nil, nil, nil, nil, p2p,
@@ -39,7 +39,11 @@ func TestLiquidityRoutes_RegisteredOnlyWithLiquidity(t *testing.T) {
 		t.Fatal("dormant: no /liquidity routes")
 	}
 	r := liquidityRouter(true)
-	if !hasRoute(r, "GET", "/api/liquidity/me") || !hasRoute(r, "GET", "/api/liquidity/me/activity") {
-		t.Fatal("liquidity routes missing")
+	for _, rt := range [][2]string{{"GET", "/api/liquidity/me"}, {"GET", "/api/liquidity/me/activity"},
+		{"POST", "/api/liquidity/activate"}, {"POST", "/api/liquidity/deposit/prepare"}, {"POST", "/api/liquidity/withdraw/prepare"},
+		{"POST", "/api/liquidity/claim/prepare"}, {"POST", "/api/liquidity/claim-for"}} {
+		if !hasRoute(r, rt[0], rt[1]) {
+			t.Fatalf("missing %s %s", rt[0], rt[1])
+		}
 	}
 }

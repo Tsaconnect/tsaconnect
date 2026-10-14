@@ -607,66 +607,31 @@ func (o *ConversionOrchestrator) takeCustody(ctx context.Context, order *models.
 	return nil
 }
 
-// poolCustodyReceived sums VerifyTransfer over the releases of every slice of
-// the intent that is at the treasury by sliceAtTreasury (released, disputed or
-// resolved, and still backing the order — never a dropped self-release or one
-// an operator handed back to its LP — plan C2 P1, review I-1) and
-// carries a real hash, each distinct hash once. reused names the first hash
-// any other record names (recordsNamingDelivery, a superset of
-// claimedFromDelivery's claims): one release can never back two records.
-//
-// Releasing slices, and pending slices with a recorded but unresolved hash,
-// are deliberately not summed: they are not proven. The settle engine hands
-// off only after every kept slice is proven, so on a correct path every
-// release is already here.
+// poolCustodyReceived is a pool order's custody (spec 2026-10-14 §4): its one
+// fill from the vault to the treasury, proven by the settle engine (filled_at)
+// and claimed by no other record.
 func (o *ConversionOrchestrator) poolCustodyReceived(ctx context.Context, order *models.PaycrestOrderRecord, lane *TreasuryLane,
 	verifier ERC20TransferVerifier) (*big.Int, string, error) {
 	intentID, err := uuid.Parse(strings.TrimPrefix(order.Reference, ITConversionRefPrefix))
 	if err != nil {
 		return nil, "", fmt.Errorf("conversion: pool record %s has no intent reference: %w", order.ID, err)
 	}
-	var slices []models.P2PTrade
-	if err := o.db.WithContext(ctx).Where("it_intent_id = ? AND release_tx_hash NOT IN ? AND status IN ?",
-		intentID, []string{"", "reconciled"},
-		[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusResolved, models.P2PTradeStatusDisputed}).
-		Order("created_at").Find(&slices).Error; err != nil {
+	var po models.PoolOrder
+	if err := o.db.WithContext(ctx).Where("intent_id = ? AND generation = 1", intentID).Limit(1).Find(&po).Error; err != nil {
 		return nil, "", err
 	}
-	var hashes []string
-	for _, sl := range slices {
-		if sliceAtTreasury(sl.Status, sl.DroppedAt, sl.ReleaseTxHash, sl.CancelReason) &&
-			!strings.HasPrefix(sl.ReleaseTxHash, sliceResolveClaimPrefix) { // a resolve claim is not a transaction yet
-			hashes = append(hashes, sl.ReleaseTxHash)
-		}
+	if po.FilledAt == nil || po.FillTxHash == "" {
+		return nil, "", errors.New("conversion: no proven pool fill yet")
 	}
-	if len(hashes) == 0 {
-		return nil, "", errors.New("conversion: no proven pool release yet")
+	others, err := o.recordsNamingDelivery(ctx, order, po.FillTxHash, false)
+	if err != nil {
+		return nil, "", err
 	}
-	total := new(big.Int)
-	seen := make(map[string]bool, len(hashes))
-	for _, h := range hashes {
-		// One release transaction is verified and counted once, however many
-		// slice rows carry it (a resolve can restate a slice's hash).
-		if seen[h] {
-			continue
-		}
-		seen[h] = true
-		// Any other record naming this release, whatever its holder, means it
-		// already backs (or is about to back) another order.
-		others, err := o.recordsNamingDelivery(ctx, order, h, false)
-		if err != nil {
-			return nil, "", err
-		}
-		if len(others) > 0 {
-			return nil, h, nil
-		}
-		got, err := verifier.VerifyTransfer(ctx, h, lane.tokenAddress(order.Token), o.treasury.Address())
-		if err != nil {
-			return nil, "", err
-		}
-		total.Add(total, got)
+	if len(others) > 0 {
+		return nil, po.FillTxHash, nil
 	}
-	return total, "", nil
+	got, err := verifier.VerifyTransfer(ctx, po.FillTxHash, lane.tokenAddress(order.Token), o.treasury.Address())
+	return got, "", err
 }
 
 // claimedFromDelivery totals what other converted buys have already taken

@@ -10,6 +10,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const lpWallet = "0x00000000000000000000000000000000000000d1"
+
 // secondRole gives userID a row of kind, created after (newer than) the
 // user's first row, which is the order that broke "the newest row" reads.
 func secondRole(t *testing.T, db *gorm.DB, userID uuid.UUID, kind, status, wallet string) *models.PaymentMerchant {
@@ -53,31 +55,6 @@ func TestGetRolesByUserID_SplitsTheRowsByKind(t *testing.T) {
 	}
 }
 
-func TestChainsFor_DualUserWithNewerMerchantRowStillGetsPoolChain(t *testing.T) {
-	r := newPoolRig(t)
-	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, lpWallet)
-	secondRole(t, r.db, lp.UserID, models.PaymentMerchantKindMerchant, models.PaymentMerchantStatusActive, "0x00000000000000000000000000000000000000a1")
-	for _, c := range r.svc.ChainsFor(context.Background(), lp.UserID) {
-		if c.ChainID == poolTestChain {
-			return
-		}
-	}
-	t.Fatal("a dual user lost the pool chain to the newer merchant row")
-}
-
-func TestLiquidityMe_DualUserReadsTheLPRow(t *testing.T) {
-	r, svc := newLiquidityRig(t)
-	lp := seedPMRow(t, r.db, models.PaymentMerchantKindLP, models.PaymentMerchantStatusApproved, lpWallet)
-	secondRole(t, r.db, lp.UserID, models.PaymentMerchantKindMerchant, models.PaymentMerchantStatusActive, "0x00000000000000000000000000000000000000a1")
-	me, err := svc.Me(context.Background(), lp.UserID)
-	if err != nil || me.Status != LiquidityStatusApproved || me.Wallet != lpWallet {
-		t.Fatalf("me = %+v err = %v: a merchant row hid the LP", me, err)
-	}
-	if _, err := svc.Activity(context.Background(), lp.UserID, "payouts", "", 20); err != nil {
-		t.Fatalf("activity for a dual user: %v", err)
-	}
-}
-
 func TestDualRole_PausingLPLeavesMerchantAndItsAdsLive(t *testing.T) {
 	r := newPoolRig(t)
 	ctx := context.Background()
@@ -100,4 +77,12 @@ func TestDualRole_PausingLPLeavesMerchantAndItsAdsLive(t *testing.T) {
 	if ids := adIDs(ads); !ids[merchantAd.ID] || ids[stockAd.ID] {
 		t.Fatalf("browse = %v: want the merchant's Sonic ad and never the LP stock ad", ids)
 	}
+}
+
+func adIDs(ads []models.P2PAd) map[uuid.UUID]bool {
+	out := make(map[uuid.UUID]bool, len(ads))
+	for _, a := range ads {
+		out[a.ID] = true
+	}
+	return out
 }

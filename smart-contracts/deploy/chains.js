@@ -15,6 +15,49 @@
 
 const CANONICAL_PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
+// Signer roles that are the SAME address on every EVM chain since the 2026-10
+// signer consolidation — what lets deploy/deterministic-escrow.js land one
+// escrow address everywhere. The operator (release admin) goes into the proxy's
+// initialize() calldata, so changing it changes the deterministic address.
+// Owner and treasury are per-chain setup, not part of the address.
+const DETERMINISTIC_ROLES = {
+  owner: process.env.DET_OWNER || "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",     // PM
+  operator: process.env.DET_OPERATOR || "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9", // release admin
+  treasury: process.env.DET_TREASURY || "0xA4123022c84E66A5E955fd96C5468A78bE84e205", // systemWallet
+};
+
+// Shared pool, 100% company collateral (deploy/liquidity-pool.js, spec
+// 2026-10-14). Amounts are whole tokens. Deploy-time inputs:
+// The owner's wallet is the collateral provider, the guardian and the
+// owner by default (owner, 2026-10-14); env overrides each. No timelock in
+// development; the market-ready contracts will not be upgradeable.
+//   LPOOL_OWNER_CONFIRM — the owner typed again.
+function liquidityPool() {
+  return {
+    token: "USDT",
+    collateralProvider: process.env.LPOOL_COLLATERAL_PROVIDER || DETERMINISTIC_ROLES.owner,
+    operator: process.env.LPOOL_OPERATOR || DETERMINISTIC_ROLES.operator,
+    guardian: process.env.LPOOL_GUARDIAN || DETERMINISTIC_ROLES.owner,
+    recipient: process.env.LPOOL_RECIPIENT || DETERMINISTIC_ROLES.treasury,
+    owner: process.env.LPOOL_OWNER || DETERMINISTIC_ROLES.owner,
+    ownerConfirm: process.env.LPOOL_OWNER_CONFIRM || null,
+    minDeposit: 5,
+    maxPerLp: 5000,
+    totalCap: Number(process.env.LPOOL_TOTAL_CAP || 50000),
+    // Room for pool_order_max (2000) plus its spread: fill + spread is capped.
+    maxFillPerTx: 2100,
+    fillWindowSec: 24 * 3600,
+    fillWindowCap: 20000,
+    // A fill's spread may be at most this share of its amount: the console's
+    // pool_spread ceiling (300 bps). Bounds what a leaked operator key can
+    // credit to LPs (review 2026-10-14).
+    maxSpreadBps: 300,
+    // A deposit cannot be withdrawn for this long (owner 2026-10-14): no
+    // depositing just before a fill and leaving right after with its spread.
+    withdrawLockSec: 24 * 3600,
+  };
+}
+
 // Public on-chain addresses only — deployer keys stay in .env.
 // Defaults migrated from the legacy scripts; env vars still override.
 const chains = {
@@ -53,22 +96,7 @@ const chains = {
     owner: process.env.OWNER_ADDRESS || null,
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
-    // TSA Liquidity pool (deploy/pool.js). Operator-supplied at deploy time:
-    //   POOL_RELEASE_ADMIN — the PM release EOA (PM_ADMIN_EOA_ADDRESS);
-    //   POOL_SYSTEM_WALLET — the conversion treasury (never receives anything at fee 0);
-    //   POOL_OWNER_ADDRESS — the owner's personal wallet (decision 18), moved to
-    //                        the main owner later with transferOwnership.
-    pool: {
-      tokens: ["USDT"],
-      paymentWindowSec: 3600,
-      releaseAdmin: process.env.POOL_RELEASE_ADMIN || null,
-      systemWallet: process.env.POOL_SYSTEM_WALLET || null,
-      owner: process.env.POOL_OWNER_ADDRESS || null,
-      // One-step Ownable is irreversible: on requireOwner networks the owner
-      // address must be typed twice (review m1).
-      ownerConfirm: process.env.POOL_OWNER_CONFIRM || null,
-      requireOwner: true,
-    },
+    liquidityPool: liquidityPool(),
   },
   bscTestnet: {
     tokens: {
@@ -81,34 +109,9 @@ const chains = {
     owner: process.env.OWNER_ADDRESS || null,
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
-    // TSA Liquidity pool (deploy/pool.js). Operator-supplied at deploy time:
-    //   POOL_RELEASE_ADMIN — the PM release EOA (PM_ADMIN_EOA_ADDRESS);
-    //   POOL_SYSTEM_WALLET — the conversion treasury (never receives anything at fee 0);
-    //   POOL_OWNER_ADDRESS — the owner's personal wallet (decision 18), moved to
-    //                        the main owner later with transferOwnership.
-    pool: {
-      tokens: ["USDT"],
-      paymentWindowSec: 3600,
-      releaseAdmin: process.env.POOL_RELEASE_ADMIN || null,
-      systemWallet: process.env.POOL_SYSTEM_WALLET || null,
-      owner: process.env.POOL_OWNER_ADDRESS || null,
-      // One-step Ownable is irreversible: on requireOwner networks the owner
-      // address must be typed twice (review m1).
-      ownerConfirm: process.env.POOL_OWNER_CONFIRM || null,
-      requireOwner: false,
-    },
+    liquidityPool: liquidityPool(),
   },
 };
 
-// Signer roles that are the SAME address on every EVM chain since the 2026-10
-// signer consolidation — what lets deploy/deterministic-escrow.js land one
-// escrow address everywhere. The operator (release admin) goes into the proxy's
-// initialize() calldata, so changing it changes the deterministic address.
-// Owner and treasury are per-chain setup, not part of the address.
-const DETERMINISTIC_ROLES = {
-  owner: process.env.DET_OWNER || "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",     // PM
-  operator: process.env.DET_OPERATOR || "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9", // release admin
-  treasury: process.env.DET_TREASURY || "0xA4123022c84E66A5E955fd96C5468A78bE84e205", // systemWallet
-};
 
 module.exports = { chains, CANONICAL_PERMIT2, DETERMINISTIC_ROLES };

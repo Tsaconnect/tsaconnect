@@ -165,7 +165,7 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 			}
 			// ErrPMNotFound — no active merchant row, allow submission to continue.
 		}
-	} else if input.BusinessType != models.BusinessTypePaymentAcceptance && input.BusinessType != models.BusinessTypeLiquidityProvider {
+	} else if input.BusinessType != models.BusinessTypePaymentAcceptance {
 		// Non-PM, non-TSA-Pay path: a user who is already a merchant cannot
 		// re-apply as a general merchant (unchanged behaviour).
 		if user.Role == models.RoleMerchant {
@@ -237,17 +237,6 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 		if err != nil || len(raw) > 255 || site.Scheme != "https" || site.User != nil ||
 			!services.ValidPayDomain(strings.ToLower(site.Hostname())) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Enter your website's https address")
-			return
-		}
-	}
-
-	if input.BusinessType == models.BusinessTypeLiquidityProvider {
-		if status, msg, code := h.prepareLPRequest(c.Request.Context(), user, &input); status != 0 {
-			if code != "" {
-				utils.ErrorResponseWithCode(c, status, msg, code)
-			} else {
-				utils.ErrorResponse(c, status, msg)
-			}
 			return
 		}
 	}
@@ -331,6 +320,13 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Merchant request submitted successfully", req)
 }
 
+// isBusinessTypeFilter: a type a read may filter on — every type a request
+// can be submitted as, plus the retired liquidity_provider, whose old rows
+// still exist and must stay readable. Submitting one stays refused.
+func isBusinessTypeFilter(t string) bool {
+	return slices.Contains(models.ValidBusinessTypes, t) || t == models.BusinessTypeLiquidityProvider
+}
+
 // GetMyMerchantRequest handles GET /api/merchant-requests/my-request[?type=<businessType>].
 // Returns the caller's most recent request (of that type, when given), or 200
 // with nil data if none exists. An unknown type is 400.
@@ -343,7 +339,7 @@ func (h *MerchantRequestHandler) GetMyMerchantRequest(c *gin.Context) {
 
 	q := h.DB.Where("user_id = ?", user.ID)
 	if t := c.Query("type"); t != "" {
-		if !slices.Contains(models.ValidBusinessTypes, t) {
+		if !isBusinessTypeFilter(t) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid business type")
 			return
 		}
@@ -400,7 +396,7 @@ func (h *MerchantRequestHandler) ListMerchantRequests(c *gin.Context) {
 		query = query.Where("status = ?", status)
 	}
 	if bt := c.Query("businessType"); bt != "" {
-		if !slices.Contains(models.ValidBusinessTypes, bt) {
+		if !isBusinessTypeFilter(bt) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid business type filter")
 			return
 		}
@@ -498,35 +494,11 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		}
 	}
 
-	// LP approvals (S35, plan B P2): a true admin, a configured pool, a
-	// still-verified applicant and an unregistered wallet, all before any write.
+	// A slice-pool LP application left pending: the shared pool activates LPs
+	// itself (spec 2026-10-14 §5), so it is never approved here.
 	if req.BusinessType == models.BusinessTypeLiquidityProvider {
-		if !hasAdminPrivilege(c, admin) {
-			utils.ErrorResponse(c, http.StatusForbidden, "P2P admin role required to approve a liquidity provider")
-			return
-		}
-		if _, ok := h.PMOnboarding.LiquidityChainID(); !ok {
-			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
-			return
-		}
-		verified, err := services.IsKYCVerified(c.Request.Context(), h.DB, req.UserID)
-		if err != nil {
-			log.Printf("ApproveMerchantRequest: KYC check failed for request %s: %v", req.ID, err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the applicant's identity")
-			return
-		}
-		if !verified {
-			utils.ErrorResponseWithCode(c, http.StatusConflict, "The applicant's identity is no longer verified.", "applicant_not_verified")
-			return
-		}
-		if taken, err := h.walletTaken(c.Request.Context(), req.UserID, req.MakerWalletAddress); err != nil {
-			log.Printf("ApproveMerchantRequest: wallet check failed for request %s: %v", req.ID, err)
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the wallet")
-			return
-		} else if taken {
-			utils.ErrorResponseWithCode(c, http.StatusConflict, "This wallet is already registered to another payment merchant or liquidity provider", "wallet_in_use")
-			return
-		}
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Liquidity providers now activate from the Provide liquidity screen; reject this request", "use_liquidity_activate")
+		return
 	}
 
 	// Pre-flight gate for TSA Pay (payment_acceptance) approvals — same shape
@@ -699,7 +671,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			// Nor to a liquidity provider (plan B P2): the LP role never grants
 			// the console role. A user who is also an approved payment merchant
 			// holds it through that approval, as every merchant does.
-			if req.BusinessType != models.BusinessTypePaymentAcceptance && req.BusinessType != models.BusinessTypeLiquidityProvider {
+			if req.BusinessType != models.BusinessTypePaymentAcceptance {
 				if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
 					Update("role", models.RoleMerchant).Error; err != nil {
 					return err
@@ -714,13 +686,6 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			utils.ErrorResponseWithCode(c, http.StatusConflict,
 				"This applicant already has the other role, and holding both isn't switched on yet. Nothing was approved; try again after the database update.",
 				"second_role_not_enabled")
-			return
-		case pmErr != nil && errors.Is(pmErr, services.ErrLiquidityUnavailable):
-			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
-			return
-		case pmErr != nil && errors.Is(pmErr, services.ErrCompanyUserCannotBeLP):
-			utils.ErrorResponseWithCode(c, http.StatusConflict,
-				"This applicant is the company payment merchant and can't provide liquidity. Nothing was approved.", services.CompanyAccountNotEligibleCode)
 			return
 		case pmErr != nil && errors.Is(pmErr, services.ErrInvalidPMTransition):
 			utils.ErrorResponse(c, http.StatusConflict, "This liquidity provider is already live")
@@ -778,9 +743,6 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 
 	if h.EventBus != nil {
 		title := "Merchant Request Approved"
-		if req.BusinessType == models.BusinessTypeLiquidityProvider {
-			title = "Liquidity application approved"
-		}
 		h.EventBus.Publish(events.Event{
 			Type:    events.MerchantApproved,
 			UserID:  req.UserID,
@@ -805,9 +767,6 @@ var errApprovalRaceLost = errors.New("merchant request is no longer pending")
 // applicants sell nothing on the marketplace, so they must not be told they
 // can list products; they set up on the web app, at webAppOrigin when known.
 func approvalMessage(businessType, webAppOrigin string) string {
-	if businessType == models.BusinessTypeLiquidityProvider {
-		return "Your application to provide liquidity is approved. Open the TSA Connect app to activate and add your USDT."
-	}
 	if businessType == models.BusinessTypePaymentAcceptance {
 		where := "the TSA Connect web app"
 		if webAppOrigin != "" {
@@ -937,60 +896,4 @@ func (h *MerchantRequestHandler) pmRowFor(ctx context.Context, userID uuid.UUID,
 		pms = services.NewPMService(h.DB)
 	}
 	return services.OptionalPM(pms.GetByUserIDKind(ctx, userID, kind))
-}
-
-// walletTaken reports whether another user's payment_merchants row already
-// registers wallet (review M7): an LP's stake must never be counted twice.
-func (h *MerchantRequestHandler) walletTaken(ctx context.Context, userID uuid.UUID, wallet string) (bool, error) {
-	var n int64
-	err := h.DB.WithContext(ctx).Model(&models.PaymentMerchant{}).
-		Where("LOWER(operator_wallet_address) = ? AND user_id <> ?", strings.ToLower(strings.TrimSpace(wallet)), userID).
-		Count(&n).Error
-	return n > 0, err
-}
-
-// prepareLPRequest validates a liquidity_provider application and normalises
-// it (spec §8.1, plan B P3): pool configured, no live LP profile (a merchant
-// may also be an LP, owner 2026-10-13), a Didit-verified legal name (which becomes the business name),
-// a settlement account and a wallet; caps are always 0. status 0 = proceed.
-func (h *MerchantRequestHandler) prepareLPRequest(ctx context.Context, user *models.User, in *submitMerchantRequestInput) (status int, msg, code string) {
-	if _, ok := h.PMOnboarding.LiquidityChainID(); !ok {
-		return http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable"
-	}
-	row, err := h.pmRowFor(ctx, user.ID, models.PaymentMerchantKindLP)
-	if err != nil {
-		log.Printf("SubmitMerchantRequest: payment_merchants lookup error: %v", err)
-		return http.StatusInternalServerError, "Failed to check your profile", ""
-	}
-	// Only a REJECTED LP row may re-apply (its approval resets it, review I2).
-	if row != nil && row.Status != models.PaymentMerchantStatusRejected {
-		return http.StatusBadRequest, "You already have a liquidity provider profile", ""
-	}
-	switch err := h.PMOnboarding.RefuseCompanyUserAsLP(ctx, user.ID); {
-	case errors.Is(err, services.ErrCompanyUserCannotBeLP):
-		return http.StatusForbidden, "This account can't provide liquidity", services.CompanyAccountNotEligibleCode
-	case err != nil:
-		log.Printf("SubmitMerchantRequest: company PM check failed for %s: %v", user.ID, err)
-		return http.StatusInternalServerError, "Failed to check your profile", ""
-	}
-	verified, legal, err := services.KYCIdentity(ctx, h.DB, user.ID)
-	if err != nil {
-		log.Printf("SubmitMerchantRequest: KYC read failed for %s: %v", user.ID, err)
-		return http.StatusInternalServerError, "Failed to check your verification", ""
-	}
-	if !verified {
-		return http.StatusForbidden, "Verify your identity before applying to provide liquidity", services.KYCVerificationRequiredCode
-	}
-	if legal == "" {
-		return http.StatusForbidden, "Verify your identity again so we have your legal name", services.KYCLegalNameMissingCode
-	}
-	if in.SettlementBankCode == "" || in.SettlementAccountNumber == "" || in.SettlementAccountName == "" {
-		return http.StatusBadRequest, "Settlement bank code, account number, and account name are required", ""
-	}
-	if !common.IsHexAddress(in.MakerWalletAddress) || common.HexToAddress(in.MakerWalletAddress) == (common.Address{}) {
-		return http.StatusBadRequest, "A valid wallet address is required", ""
-	}
-	in.BusinessName = legal
-	in.RequestedPerTradeCapUsd, in.RequestedDailyCapUsd = 0, 0
-	return 0, "", ""
 }

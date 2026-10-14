@@ -24,6 +24,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 // eslint-disable-next-line import/first
 import {
+  cachesMerchantRole,
   isValidEvmAddress,
   validatePmFields,
   initBusinessType,
@@ -335,6 +336,14 @@ describe('isPickerLocked — locked single-chip mode vs selectable chip row', ()
 // dashboard reads the real status from /p2p/pm/me — the two must agree).
 
 describe('resolveMerchantGate', () => {
+  it('sends a retired liquidity_provider request to self-serve liquidity, pending or approved', () => {
+    for (const status of ['pending', 'approved']) {
+      const existingRequest = { status, businessType: 'liquidity_provider' };
+      expect(resolveMerchantGate({ existingRequest, formType: 'general_products', pmActive: false }))
+        .toEqual({ screen: 'liquidity' });
+    }
+  });
+
   it('shows the form when there is no existing request', () => {
     expect(resolveMerchantGate({ existingRequest: null, formType: 'p2p_merchant', pmActive: false }))
       .toEqual({ screen: 'form' });
@@ -497,25 +506,40 @@ describe('rejected → Apply Again: businessType stays in PM mode', () => {
 //
 // The add-on forms gate on a request of their OWN type, fetched with
 // my-request?type=, so a newer approved p2p_merchant request never hides a
-// pending LP application (and vice versa).
+// pending TSA Pay application (and vice versa).
 
 describe('requestTypeFilter', () => {
   it('filters by the add-on types', () => {
-    for (const t of ['p2p_merchant', 'payment_acceptance', 'liquidity_provider']) {
+    for (const t of ['p2p_merchant', 'payment_acceptance']) {
       expect(requestTypeFilter(t)).toBe(t);
     }
   });
   it('does not filter the general types', () => {
-    for (const t of ['general_products', 'digital_products', 'service_provider', '']) {
+    for (const t of ['general_products', 'digital_products', 'service_provider', 'liquidity_provider', '']) {
       expect(requestTypeFilter(t)).toBeUndefined();
     }
   });
 });
 
-describe('resolveMerchantGate — LP form with its own typed request', () => {
-  it('a pending LP request shows the LP pending screen', () => {
+describe('cachesMerchantRole', () => {
+  it('caches the merchant role only for marketplace types', () => {
+    expect(cachesMerchantRole('liquidity_provider')).toBe(false);
+    expect(cachesMerchantRole('payment_acceptance')).toBe(false);
+    expect(cachesMerchantRole('general_products')).toBe(true);
+    expect(cachesMerchantRole('p2p_merchant')).toBe(true);
+  });
+});
+
+describe('resolveMerchantGate — a legacy liquidity_provider request', () => {
+  it('is no longer an add-on: it gates the general form, pointing at self-serve liquidity', () => {
     const existingRequest = { status: 'pending', businessType: 'liquidity_provider' };
-    expect(resolveMerchantGate({ existingRequest, formType: 'liquidity_provider', pmActive: true }))
-      .toEqual({ screen: 'pending', pm: false, lp: true });
+    expect(resolveMerchantGate({ existingRequest, formType: 'general_products', pmActive: false }))
+      .toEqual({ screen: 'liquidity' });
+    expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: false }))
+      .toEqual({ screen: 'form' });
+  });
+  it('is not a lockable form type', () => {
+    expect(initBusinessType('liquidity_provider')).toBe('general_products');
+    expect(isPickerLocked('liquidity_provider')).toBe(false);
   });
 });

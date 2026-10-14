@@ -1301,7 +1301,14 @@ func decodeRevertReason(err error) string {
 	if !errors.As(err, &de) {
 		return ""
 	}
+	// geth (and BSC nodes) send the revert data as a hex string; Hardhat
+	// nests it as {"message": …, "data": "0x…"}.
 	raw, ok := de.ErrorData().(string)
+	if !ok {
+		if m, isMap := de.ErrorData().(map[string]interface{}); isMap {
+			raw, ok = m["data"].(string)
+		}
+	}
 	if !ok {
 		return ""
 	}
@@ -1318,6 +1325,10 @@ func decodeRevertReason(err error) string {
 		return "panic 0x" + new(big.Int).SetBytes(data[4:]).Text(16)
 	default:
 		if abiErr, lookupErr := parsedP2PEscrowABI.ErrorByID([4]byte(data[:4])); lookupErr == nil {
+			return abiErr.Sig
+		}
+		// The liquidity vault's custom errors (OZ Pausable's EnforcedPause).
+		if abiErr, lookupErr := parsedLiquidityVaultABI.ErrorByID([4]byte(data[:4])); lookupErr == nil {
 			return abiErr.Sig
 		}
 	}

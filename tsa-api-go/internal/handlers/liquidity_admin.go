@@ -20,12 +20,7 @@ import (
 // uses (plan C2 §15, P20). The routes gate the actions to super admins.
 type PoolOrdersAdmin interface {
 	PoolOrderDetail(ctx context.Context, intentID uuid.UUID) (*services.PoolOrderDetail, error)
-	RedeliverPoolBuy(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
 	ResendPoolBuy(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
-	RefundPoolBuyOverride(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
-	PayPoolSliceLP(ctx context.Context, adminID, intentID, sliceID uuid.UUID, note string) (*models.P2PSettlementForward, error)
-	NotePoolSliceReturned(ctx context.Context, adminID, intentID, sliceID uuid.UUID, txHash, note string) error
-	ClearPoolSliceRelease(ctx context.Context, adminID, intentID, sliceID uuid.UUID, note string) error
 }
 
 // ForwardRechecker is the operator's "recheck by reference" on any settlement
@@ -85,29 +80,18 @@ func (h *ITHandler) AdminPoolOrder(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Pool order", gin.H{"order": d})
 }
 
-// POST …/:id/redeliver — F6: open a new generation for the owed units.
-func (h *ITHandler) AdminRedeliverPoolBuy(c *gin.Context) {
-	h.companyWalletAction(c, h.poolAdmin.RedeliverPoolBuy)
-}
-
 // POST …/:id/resend — re-send the sale after the dropped-transaction check.
 func (h *ITHandler) AdminResendPoolBuy(c *gin.Context) {
 	h.companyWalletAction(c, h.poolAdmin.ResendPoolBuy)
 }
 
-// POST …/:id/refund-override — S37's super-admin exit (review I-6).
-func (h *ITHandler) AdminRefundPoolBuyOverride(c *gin.Context) {
-	h.companyWalletAction(c, h.poolAdmin.RefundPoolBuyOverride)
-}
-
-type poolSliceActionBody struct {
-	Note   string `json:"note"`
-	TxHash string `json:"txHash"`
+type operatorNoteBody struct {
+	Note string `json:"note"`
 }
 
 // operatorNote reads the action body and refuses an action without a note.
-func operatorNote(c *gin.Context) (*models.User, poolSliceActionBody, bool) {
-	var body poolSliceActionBody
+func operatorNote(c *gin.Context) (*models.User, operatorNoteBody, bool) {
+	var body operatorNoteBody
 	_ = c.ShouldBindJSON(&body) // an empty body reaches the note check below
 	if strings.TrimSpace(body.Note) == "" {
 		companyWalletAdminError(c, services.ErrITOperatorNoteRequired)
@@ -119,53 +103,6 @@ func operatorNote(c *gin.Context) (*models.User, poolSliceActionBody, bool) {
 		return nil, body, false
 	}
 	return user, body, true
-}
-
-// poolSliceAction runs a slice action for the order in the route: the
-// service refuses a slice of any other order (review m-8).
-func (h *ITHandler) poolSliceAction(c *gin.Context, act func(ctx context.Context, adminID, intentID, sliceID uuid.UUID, body poolSliceActionBody) (any, error)) {
-	intentID, err := uuid.Parse(strings.TrimSpace(c.Param("id")))
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid id")
-		return
-	}
-	sliceID, err := uuid.Parse(strings.TrimSpace(c.Param("sliceId")))
-	if err != nil {
-		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid slice id")
-		return
-	}
-	user, body, ok := operatorNote(c)
-	if !ok {
-		return
-	}
-	out, err := act(c.Request.Context(), user.ID, intentID, sliceID, body)
-	if err != nil {
-		poolAdminError(c, err)
-		return
-	}
-	utils.SuccessResponse(c, http.StatusOK, "OK", gin.H{"result": out})
-}
-
-// POST …/slices/:sliceId/pay-lp — F22: pay the LP at the snapshot rate.
-func (h *ITHandler) AdminPayPoolSliceLP(c *gin.Context) {
-	h.poolSliceAction(c, func(ctx context.Context, admin, intentID, id uuid.UUID, b poolSliceActionBody) (any, error) {
-		return h.poolAdmin.PayPoolSliceLP(ctx, admin, intentID, id, b.Note)
-	})
-}
-
-// POST …/slices/:sliceId/returned — F22: record a hand return of the USDT.
-func (h *ITHandler) AdminNotePoolSliceReturned(c *gin.Context) {
-	h.poolSliceAction(c, func(ctx context.Context, admin, intentID, id uuid.UUID, b poolSliceActionBody) (any, error) {
-		return nil, h.poolAdmin.NotePoolSliceReturned(ctx, admin, intentID, id, strings.TrimSpace(b.TxHash), b.Note)
-	})
-}
-
-// POST …/slices/:sliceId/clear-release — a stuck release, cleared only on
-// the chain's evidence (review m-5); the settle engine releases it again.
-func (h *ITHandler) AdminClearPoolSliceRelease(c *gin.Context) {
-	h.poolSliceAction(c, func(ctx context.Context, admin, intentID, id uuid.UUID, b poolSliceActionBody) (any, error) {
-		return nil, h.poolAdmin.ClearPoolSliceRelease(ctx, admin, intentID, id, b.Note)
-	})
 }
 
 // POST /api/admin/p2p/forwards/:id/recheck — look the transfer up by its
@@ -194,11 +131,18 @@ func (h *ITHandler) AdminRecheckForward(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Rechecked", nil)
 }
 
-// poolAdminError maps a slice action's error; the pool's order refusals are
 // in companyWalletAdminError, which the order actions share.
 func poolAdminError(c *gin.Context, err error) {
 	if errors.Is(err, services.ErrTradeNotFound) {
 		utils.ErrorResponseWithCode(c, http.StatusNotFound, "Slice not found", "not_found")
+		return
+	}
+	if errors.Is(err, services.ErrLPAmount) {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, services.RedactAlertText(err.Error()), "bad_amount")
+		return
+	}
+	if errors.Is(err, services.ErrLiquidityNotVault) {
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "pool_unavailable")
 		return
 	}
 	companyWalletAdminError(c, err)

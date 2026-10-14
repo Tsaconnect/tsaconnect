@@ -21,6 +21,8 @@ const (
 	ITAuditPoolSliceLPPaid    = "it.pool.slice_lp_paid"
 	ITAuditPoolSliceReturned  = "it.pool.slice_returned"
 	ITAuditPoolRefundOverride = "it.pool.refund_override"
+	// An operator sent a pool_fill_refused order back to delivering.
+	ITAuditPoolFillRetried = "it.pool.fill_retried"
 	// A super admin cleared a stuck slice release on the chain's evidence.
 	ITAuditPoolSliceReleaseCleared = "it.pool.slice_release_cleared"
 )

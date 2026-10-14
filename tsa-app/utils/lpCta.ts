@@ -1,5 +1,5 @@
-// utils/lpCta.ts — the P2P screen's TSA Liquidity entry point (spec §17).
-export const LP_APPLY_ROUTE = '/merchants/merchant-request?type=liquidity_provider';
+// utils/lpCta.ts — the TSA Liquidity entry point (spec 2026-10-14 §6). The
+// dashboard itself offers Activate, so everyone goes there.
 export const LP_DASHBOARD_ROUTE = '/liquidity';
 
 export interface LpCtaInput {
@@ -11,16 +11,15 @@ export interface LpCtaInput {
   lpStatus?: string;
 }
 
-/**
- * null = no card. An LP (or a merchant who is also one) goes to the dashboard;
- * anyone else, merchants included, may apply (owner, 2026-10-13: one user may hold both).
- */
+/** null = no card. One user may be a merchant and an LP (owner, 2026-10-13). */
 export function lpCta(i: LpCtaInput): { title: string; subtitle: string; route: string } | null {
   if (i.loading || !i.liquidityAvailable) return null;
-  if (i.lpStatus || i.kind === 'lp') return { title: 'Your liquidity', subtitle: 'Stock, limits and payouts', route: LP_DASHBOARD_ROUTE };
+  if (i.lpStatus === 'active' || i.lpStatus === 'paused' || i.kind === 'lp') {
+    return { title: 'Your liquidity', subtitle: 'Balance, earnings and claims', route: LP_DASHBOARD_ROUTE };
+  }
   return {
     title: 'Provide liquidity & earn',
-    subtitle: 'Add USDT to the TSA Connect pool and get paid in naira when it sells.',
-    route: LP_APPLY_ROUTE,
+    subtitle: 'Add USDT to the TSA Connect pool and earn a share of every sale.',
+    route: LP_DASHBOARD_ROUTE,
   };
 }

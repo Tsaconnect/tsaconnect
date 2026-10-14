@@ -22,6 +22,15 @@ var ErrCompanyUserCannotBeLP = errors.New("liquidity: the company account cannot
 // CompanyAccountNotEligibleCode is the API code for ErrCompanyUserCannotBeLP.
 const CompanyAccountNotEligibleCode = "company_account_not_eligible"
 
+// CompanyPMUserID is IT_PM_ID's user, whatever the row's status or kind.
+func CompanyPMUserID(ctx context.Context, db *gorm.DB, id string) (uuid.UUID, error) {
+	pm, err := companyPMRow(ctx, db, id)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return pm.UserID, nil
+}
+
 // companyPMRow is IT_PM_ID's row, any status and kind. Every refusal wraps
 // ErrCompanyPMUnusable; a database failure is returned as itself.
 func companyPMRow(ctx context.Context, db *gorm.DB, id string) (*models.PaymentMerchant, error) {
@@ -69,33 +78,4 @@ func LoadCompanyPM(ctx context.Context, db *gorm.DB, id string) (*models.Payment
 		return nil, fmt.Errorf("%w: IT_PM_ID %s's user is also a liquidity provider", ErrCompanyPMUnusable, pm.ID)
 	}
 	return pm, nil
-}
-
-// SetCompanyPMID names IT_PM_ID, whose user may never become an LP. Called
-// once at boot.
-func (s *PMOnboardingService) SetCompanyPMID(id string) { s.companyPMID = strings.TrimSpace(id) }
-
-// refuseCompanyUserAsLP fails closed: an unreadable IT_PM_ID row is an error,
-// never "not the company". The row's own status does not matter: a paused
-// company PM's user is still the slice buyer once it resumes.
-func (s *PMOnboardingService) refuseCompanyUserAsLP(ctx context.Context, db *gorm.DB, userID uuid.UUID) error {
-	if s.companyPMID == "" {
-		return nil
-	}
-	pm, err := companyPMRow(ctx, db, s.companyPMID)
-	if errors.Is(err, ErrCompanyPMUnusable) {
-		return nil // no company PM row, so no company user
-	}
-	if err != nil {
-		return fmt.Errorf("pm_onboarding: company PM lookup: %w", err)
-	}
-	if pm.UserID == userID {
-		return ErrCompanyUserCannotBeLP
-	}
-	return nil
-}
-
-// RefuseCompanyUserAsLP is refuseCompanyUserAsLP for an LP application.
-func (s *PMOnboardingService) RefuseCompanyUserAsLP(ctx context.Context, userID uuid.UUID) error {
-	return s.refuseCompanyUserAsLP(ctx, s.db, userID)
 }
