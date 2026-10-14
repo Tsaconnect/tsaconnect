@@ -52,6 +52,9 @@ type poolTerms struct {
 	mid, base       *big.Rat
 	lpRate, display *big.Int
 	funding         passThroughCost
+	// vault: the shared pool (spec 2026-10-14) — one fill, no LP naira payout,
+	// so neither a payout-fee line nor the payout's transfer minimum applies.
+	vault bool
 }
 
 // poolTermsAt gates a pool price — the incident stop (quotes and opens only)
@@ -70,10 +73,12 @@ func (s *ITService) poolTermsAt(mid *big.Rat, set PoolSettings, ch PayInChannel,
 	if err != nil {
 		return poolTerms{}, err
 	}
-	t := poolTerms{set: set, ch: ch, mid: new(big.Rat).Set(mid), base: poolBaseRate(mid, set), funding: funding}
+	t := poolTerms{set: set, ch: ch, mid: new(big.Rat).Set(mid), base: poolBaseRate(mid, set), funding: funding, vault: s.PoolVaultMode()}
 	t.lpRate = floorRatMinor(t.base)
 	t.display = inHouseDisplayRate(t.base, set.TakeBps)
-	t.set.MinSliceUnits = poolEffectiveMinSlice(set.MinSliceUnits, t.lpRate)
+	if !t.vault {
+		t.set.MinSliceUnits = poolEffectiveMinSlice(set.MinSliceUnits, t.lpRate)
+	}
 	return t, nil
 }
 
@@ -116,7 +121,11 @@ func (s *ITService) poolQuoteAt(asset, currency string, fiatMinor *big.Int, mid 
 // quote or an open, false for live pricing of money that already arrived
 // (the minimum still applies; the maximum does not — S46).
 func poolPriceOn(t poolTerms, asset, currency string, fiatMinor *big.Int, slices []*big.Int, enforceMax bool, expires time.Time) (*PoolPrice, error) {
-	p := priceInHouseBuy(fiatMinor, t.base, t.set.TakeBps, poolCosts(t.funding, slices, t.lpRate, t.display, t.set))
+	costs := poolCosts(t.funding, slices, t.lpRate, t.display, t.set)
+	if t.vault {
+		costs = vaultCosts(t.funding, t.set)
+	}
+	p := priceInHouseBuy(fiatMinor, t.base, t.set.TakeBps, costs)
 	if p.net.Sign() <= 0 || p.net.Cmp(t.set.MinSliceUnits) < 0 {
 		return nil, fmt.Errorf("%w: minimum is %g %s", ErrStableBuyBelowMinimum, StableFromBaseUnits(t.set.MinSliceUnits), asset)
 	}
@@ -167,6 +176,13 @@ func poolCosts(funding passThroughCost, slices []*big.Int, lpRateMinor, displayR
 		{kind: FeeKindNetwork, label: "Network fee", flat: poolNetworkFeeUnits(len(slices), set)},
 		{kind: FeeKindPayout, label: "Payout fee", flat: poolPayoutFeeUnits(slices, lpRateMinor, displayRateMinor)},
 	}
+}
+
+// vaultCosts are a shared-pool order's costs: funding, then the network fee
+// of its one fill (pool_gas_per_slice, the release key's call) and the
+// delivery. No payout line: LPs are paid their spread in the vault itself.
+func vaultCosts(funding passThroughCost, set PoolSettings) []passThroughCost {
+	return []passThroughCost{funding, {kind: FeeKindNetwork, label: "Network fee", flat: poolNetworkFeeUnits(1, set)}}
 }
 
 // poolNetworkFeeUnits is the gas an order costs the treasury, in canonical

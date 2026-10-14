@@ -135,12 +135,13 @@ func buildPoolChain(cfg *config.Config, bs *services.BlockchainService, reg *ser
 		ReleaseGasFloorWei: bigFromDecimal(pool.Pool.ReleaseGasFloorWei),
 		Chain:              chain, Receipts: receipts,
 		TreasuryLane: lane, CompanyPM: companyPMCheck(cfg), MinPaymentWindowSec: 3600,
+		Vault: pool.Pool.Vault,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	st := g.Check(ctx)
-	log.Printf("[liquidity] pool chain=%s(%d) network=%s escrow=%s fee_manager=%s decimals=%v release_admin=%s treasury_lane=%t open=%t failures=%d",
-		pool.ChainKey, pool.ChainID, pool.Network, pool.EscrowAddress, pool.Pool.FeeManager, decimals, admin, lane != nil, st.Open, len(st.Failures))
+	log.Printf("[liquidity] pool chain=%s(%d) network=%s escrow=%s fee_manager=%s vault=%s decimals=%v release_admin=%s treasury_lane=%t open=%t failures=%d",
+		pool.ChainKey, pool.ChainID, pool.Network, pool.EscrowAddress, pool.Pool.FeeManager, pool.Pool.Vault, decimals, admin, lane != nil, st.Open, len(st.Failures))
 	return g
 }
 

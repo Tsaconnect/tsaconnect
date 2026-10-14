@@ -38,6 +38,11 @@ func (s *ITService) refundPoolBuy(ctx context.Context, adminID, intentID uuid.UU
 		if intent.Status != models.ITStatusPaymentReceived && intent.Status != models.ITStatusBuyAwaitingRate {
 			return fmt.Errorf("%w: a TSA pool buy is refundable only while paid and undelivered (status %s)", ErrITBadState, intent.Status)
 		}
+		if d.vaultMode() {
+			if err := vaultRefundable(tx, intentID); err != nil {
+				return err
+			}
+		}
 		var slices []models.P2PTrade
 		if err := tx.Where("it_intent_id = ?", intentID).Find(&slices).Error; err != nil {
 			return err
@@ -366,6 +371,9 @@ func poolF22Open(orderStatus string, droppedAt *time.Time) bool {
 
 // poolOrderActions are the operator actions the server allows right now (P20).
 func (s *ITService) poolOrderActions(ctx context.Context, intent *models.ITIntent) []string {
+	if s.poolDesk.vaultMode() {
+		return s.vaultOrderActions(ctx, intent)
+	}
 	out := []string{}
 	var slices []models.P2PTrade
 	if err := s.db.WithContext(ctx).Where("it_intent_id = ?", intent.ID).Find(&slices).Error; err != nil {

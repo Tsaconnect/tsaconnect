@@ -57,6 +57,9 @@ func wirePoolOrders(cfg *config.Config, bs *services.BlockchainService, reg *ser
 func buildPoolDesk(cfg *config.Config, bs *services.BlockchainService, reg *services.P2PEscrowRegistry, trades *services.P2PTradeService,
 	pm *services.PMService, release services.ChainSender, it *services.ITService, treasury *services.Treasury,
 	gates services.PoolGate) (*services.PoolDesk, *services.TreasuryNonceWatch) {
+	if pc, ok := cfg.PoolChain(); ok && pc.Pool.Vault != "" {
+		return buildVaultDesk(cfg, bs, reg, release, treasury, gates)
+	}
 	pool, ok := reg.PoolChain()
 	if !ok || bs == nil || trades == nil || pm == nil || treasury == nil || gates == nil {
 		log.Printf("[liquidity] pool orders dormant: a part is missing (chain=%v trades=%v pm=%v treasury=%v gates=%v)",
@@ -130,6 +133,55 @@ func buildPoolDesk(cfg *config.Config, bs *services.BlockchainService, reg *serv
 		return nil, nil
 	}
 	log.Printf("[liquidity] pool orders ready chain=%s(%d) token=%s decimals=%d treasury=%s", tok.ChainKey, tok.ChainID, tok.Symbol, tok.Decimals, treasury.Address())
+	return desk, nonces
+}
+
+// buildVaultDesk is the shared-pool desk (spec 2026-10-14): the vault, the
+// release key that fills from it, the treasury lane that delivers. Nil — pool
+// orders dormant, the reason logged — unless every part exists.
+func buildVaultDesk(cfg *config.Config, bs *services.BlockchainService, reg *services.P2PEscrowRegistry,
+	release services.ChainSender, treasury *services.Treasury, gates services.PoolGate) (*services.PoolDesk, *services.TreasuryNonceWatch) {
+	pc, _ := cfg.PoolChain()
+	if bs == nil || treasury == nil || gates == nil || release == nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant mode=vault reason=a part is missing (treasury=%v gates=%v release=%v)",
+			treasury != nil, gates != nil, release != nil)
+		return nil, nil
+	}
+	client, _ := bs.ClientForChainID(pc.ChainID)
+	lane := treasury.Lane(pc.ChainKey)
+	if client == nil || lane == nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant mode=vault chain=%s reason=no client or treasury lane", pc.ChainKey)
+		return nil, nil
+	}
+	vault := services.NewLiquidityVault(client, pc.Pool.Vault)
+	tok, ok := services.NewPoolStock(reg, bs.TokenAddressForChainID).Token()
+	if vault == nil || !ok {
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant mode=vault chain=%s reason=no vault or pool token", pc.ChainKey)
+		return nil, nil
+	}
+	verifier := services.NewLogTransferVerifier(client.Client)
+	sale := services.NewCompanyWallet(services.CompanyWalletConfig{
+		Treasury: treasury, Decimals: map[string]map[string]int{pc.ChainKey: {tok.Symbol: tok.Decimals}},
+		Verifiers:          map[string]services.ERC20SourcedTransferVerifier{pc.ChainKey: verifier},
+		Probes:             map[string]services.TreasuryTxProbe{pc.ChainKey: client.Probe()},
+		ConversionTreasury: treasury.Address(),
+	})
+	if sale == nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant mode=vault chain=%s reason=the treasury lane cannot sell %s", pc.ChainKey, tok.Symbol)
+		return nil, nil
+	}
+	nonces := services.NewTreasuryNonceWatch(pc.ChainKey, client.Probe(), treasury.Address(), 30*time.Second, nil)
+	desk, err := services.NewPoolDesk(services.PoolDeskConfig{
+		DB: config.DB, Token: tok, Treasury: treasury, Gates: gates, Probe: client.Probe(), Nonces: nonces,
+		ChainName: poolChainName(cfg), Sender: release, Verifier: verifier, Sale: sale, LogChunk: pc.Pool.LogChunkBlocks,
+		Generation: client.EndpointGeneration, Vault: vault,
+	})
+	if err != nil {
+		log.Printf("[liquidity] ALERT liquidity_pool_orders_dormant mode=vault reason=%s", services.RedactAlertText(err.Error()))
+		return nil, nil
+	}
+	log.Printf("[liquidity] pool orders ready mode=vault chain=%s(%d) vault=%s token=%s decimals=%d treasury=%s",
+		tok.ChainKey, tok.ChainID, vault.Address(), tok.Symbol, tok.Decimals, treasury.Address())
 	return desk, nonces
 }
 

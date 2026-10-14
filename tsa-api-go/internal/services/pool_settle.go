@@ -87,6 +87,9 @@ func (s *ITService) AdvancePoolBuy(ctx context.Context, id uuid.UUID) error {
 	default:
 		return nil
 	}
+	if d.vaultMode() {
+		return s.advanceVaultDelivering(ctx, d, intent)
+	}
 	return s.advancePoolDelivering(ctx, d, intent)
 }
 

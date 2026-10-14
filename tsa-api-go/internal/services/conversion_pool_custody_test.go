@@ -22,6 +22,9 @@ func seedPoolCustody(t *testing.T, r *conversionRig, hashes ...string) uuid.UUID
 		release_tx_hash TEXT, release_reverted_at DATETIME, cancel_reason TEXT, dropped_at DATETIME, created_at DATETIME)`).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := r.db.AutoMigrate(&models.PoolOrder{}); err != nil { // a vault order's fill is looked up first
+		t.Fatal(err)
+	}
 	intent := uuid.New()
 	r.db.Model(r.order).Updates(map[string]any{"holder": models.HolderPool, "reference": ITConversionRef(intent), "tx_hash": hashes[0]})
 	for _, h := range hashes {
@@ -146,5 +149,40 @@ func TestOrchestrator_PoolCustodyIgnoresADroppedSelfRelease(t *testing.T) {
 	mustAdvance(t, r)
 	if got := r.reload(t); got.TokenAmount != "60" {
 		t.Fatalf("amount = %s, want 60 — the dropped self-release is not hers", got.TokenAmount)
+	}
+}
+
+// Shared pool: a vault order has no slices — its one proven fill is the leg.
+func TestOrchestrator_PoolCustodyFromTheVaultFill(t *testing.T) {
+	r := newConversionRig(t)
+	intent := seedPoolCustody(t, r, "0xunused")
+	r.db.Exec("DELETE FROM p2p_trades")
+	fill, at := "100000000000000000000", time.Now()
+	if err := r.db.Create(&models.PoolOrder{IntentID: intent, Generation: 1, ChainID: 97, Token: "USDT", TokenDecimals: 18,
+		MidMinor: "0", LPRateMinor: "0", DisplayRateMinor: "0", OpenedUnits: "0", SurplusUnits: "0",
+		FillUnits: &fill, FillTxHash: "0xfill", FilledAt: &at}).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.db.Model(r.order).Update("tx_hash", "0xfill")
+	r.transfers.amountByTx = map[string]*big.Int{"0xfill": big.NewInt(100_000000)}
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Holder != models.HolderTreasury || got.TokenAmount != "100" {
+		t.Fatalf("holder=%s amount=%s, want treasury custody of the fill's 100", got.Holder, got.TokenAmount)
+	}
+}
+
+// An unproven fill is never custody, whatever the treasury holds.
+func TestOrchestrator_PoolCustodyWaitsForAProvenFill(t *testing.T) {
+	r := newConversionRig(t)
+	intent := seedPoolCustody(t, r, "0xunused")
+	r.db.Exec("DELETE FROM p2p_trades")
+	fill := "100000000000000000000"
+	r.db.Create(&models.PoolOrder{IntentID: intent, Generation: 1, ChainID: 97, Token: "USDT", TokenDecimals: 18,
+		MidMinor: "0", LPRateMinor: "0", DisplayRateMinor: "0", OpenedUnits: "0", SurplusUnits: "0",
+		FillUnits: &fill, FillTxHash: "0xfill"})
+	r.transfers.amountByTx = map[string]*big.Int{"0xfill": big.NewInt(100_000000)}
+	mustAdvance(t, r)
+	if got := r.reload(t); got.Holder != models.HolderPool {
+		t.Fatalf("holder=%s, want no custody before the fill is proven", got.Holder)
 	}
 }

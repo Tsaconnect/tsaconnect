@@ -315,7 +315,8 @@ func (s *ITService) claimAndPriceStableBuy(
 
 	switch {
 	case parkedReason != "":
-		if parkedReason == "stock" || parkedReason == "daily_cap" || parkedReason == models.ITFailurePoolSlicesShort {
+		if parkedReason == "stock" || parkedReason == "daily_cap" || parkedReason == models.ITFailurePoolSlicesShort ||
+			parkedReason == models.ITFailurePoolFillRefused {
 			// Deterministic for this money, like a pricing error (D32):
 			// retrying cannot help, a human must decide.
 			log.Printf("[it stable buy] ALERT it_stable_buy_parked_unpriceable intent=%s payment=%s reason=%q",
@@ -501,6 +502,9 @@ func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, c
 	d := s.poolDesk
 	if d == nil {
 		return nil, "", fmt.Errorf("%w: the pool is not wired", ErrStableQuoteUnavailable)
+	}
+	if d.vaultMode() {
+		return s.claimVault(ctx, candidate, claim, amountMinor, ch, arrival, write)
 	}
 	paid, ok := new(big.Int).SetString(strings.TrimSpace(amountMinor), 10)
 	if !ok || paid.Sign() <= 0 {

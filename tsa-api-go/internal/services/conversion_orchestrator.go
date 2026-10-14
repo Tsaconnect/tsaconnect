@@ -625,6 +625,26 @@ func (o *ConversionOrchestrator) poolCustodyReceived(ctx context.Context, order 
 	if err != nil {
 		return nil, "", fmt.Errorf("conversion: pool record %s has no intent reference: %w", order.ID, err)
 	}
+	// A shared-pool (vault) order has no slices: its one proven fill is the leg.
+	var po models.PoolOrder
+	if err := o.db.WithContext(ctx).Where("intent_id = ? AND generation = 1 AND fill_units IS NOT NULL", intentID).
+		Limit(1).Find(&po).Error; err != nil {
+		return nil, "", err
+	}
+	if po.FillUnits != nil {
+		if po.FilledAt == nil || po.FillTxHash == "" {
+			return nil, "", errors.New("conversion: no proven pool fill yet")
+		}
+		others, err := o.recordsNamingDelivery(ctx, order, po.FillTxHash, false)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(others) > 0 {
+			return nil, po.FillTxHash, nil
+		}
+		got, err := verifier.VerifyTransfer(ctx, po.FillTxHash, lane.tokenAddress(order.Token), o.treasury.Address())
+		return got, "", err
+	}
 	var slices []models.P2PTrade
 	if err := o.db.WithContext(ctx).Where("it_intent_id = ? AND release_tx_hash NOT IN ? AND status IN ?",
 		intentID, []string{"", "reconciled"},

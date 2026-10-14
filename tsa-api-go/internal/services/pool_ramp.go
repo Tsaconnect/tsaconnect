@@ -20,7 +20,11 @@ func (s *ITService) PoolLegOpen(ctx context.Context) bool {
 	if !s.HasPool() || s.payInChannelNow() != PayInCentral || CurrentPoolSettings().OrdersStopped {
 		return false
 	}
-	return s.poolDesk.c.Gates.Open() && s.poolReleaseGasOK(ctx, CurrentPoolSettings().SliceCap, false)
+	calls := CurrentPoolSettings().SliceCap
+	if s.poolDesk.vaultMode() {
+		calls = 1 // one fill
+	}
+	return s.poolDesk.c.Gates.Open() && s.poolReleaseGasOK(ctx, calls, false)
 }
 
 // poolReleaseGasOK asks the gates whether the release key can pay for every
@@ -158,9 +162,14 @@ func (s *ITService) PoolCard(ctx context.Context) (*PoolCard, error) {
 	// The smallest order is one effective minimum slice plus its flat costs
 	// (gas and one payout fee), which come off after funding.
 	lpRate := floorRatMinor(poolBaseRate(mid, set))
-	minSlice := poolEffectiveMinSlice(set.MinSliceUnits, lpRate)
+	minSlice := set.MinSliceUnits
+	if !d.vaultMode() { // a slice pays its LP in naira: the transfer minimum and fee apply
+		minSlice = poolEffectiveMinSlice(set.MinSliceUnits, lpRate)
+	}
 	minLeft := new(big.Int).Add(minSlice, poolNetworkFeeUnits(1, set))
-	minLeft.Add(minLeft, poolPayoutFeeUnits([]*big.Int{minSlice}, lpRate, display))
+	if !d.vaultMode() {
+		minLeft.Add(minLeft, poolPayoutFeeUnits([]*big.Int{minSlice}, lpRate, display))
+	}
 	card.MinNgn = FormatMinor(fiatForNet(minLeft, display, funding.bps, true).String())
 	card.MaxNgn = FormatMinor(fiatForNet(maxUnits, display, funding.bps, false).String())
 	return card, nil

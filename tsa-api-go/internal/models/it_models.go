@@ -88,6 +88,9 @@ const ITStatusOpening = "opening"
 const (
 	ITFailurePoolOpenFailed  = "pool_open_failed"
 	ITFailurePoolSlicesShort = "pool_slices_short"
+	// ITFailurePoolFillRefused parks a paid shared-pool order whose vault fill
+	// cannot be made (reverted, or the vault refuses it): retry or refund.
+	ITFailurePoolFillRefused = "pool_fill_refused"
 )
 
 // Routed stablecoin buy providers (docs/specs/2026-10-03-ramp-flutterwave-provider-design.md §4.2).

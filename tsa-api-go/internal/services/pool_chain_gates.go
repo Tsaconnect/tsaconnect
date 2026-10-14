@@ -38,6 +38,9 @@ type PoolChainGatesConfig struct {
 	TreasuryLane        *TreasuryLane // the conversion treasury's lane on this chain
 	CompanyPM           func(ctx context.Context) error
 	MinPaymentWindowSec uint64
+	// Vault set: the shared pool (spec 2026-10-14). Its gates replace the
+	// escrow's (fee invariant, payment window, escrow admin, company PM).
+	Vault string
 }
 
 type PoolGateStatus struct {
@@ -155,6 +158,11 @@ func (g *PoolChainGates) Check(ctx context.Context) PoolGateStatus {
 		fail("bytecode", "no chain client on "+g.c.ChainKey+" (fix the RPC, then restart)")
 		return g.record(fails)
 	}
+	if g.c.Vault != "" {
+		g.vaultGates(ctx, fail)
+		g.commonGates(ctx, fail)
+		return g.record(fails)
+	}
 	// 1. Bytecode.
 	for _, c := range []struct{ label, addr string }{{"escrow", g.c.Escrow}, {"fee_manager", g.c.FeeManager}} {
 		code, err := g.c.Chain.CodeAt(ctx, common.HexToAddress(c.addr), nil)
@@ -190,6 +198,19 @@ func (g *PoolChainGates) Check(ctx context.Context) PoolGateStatus {
 	if reason := g.treasuryLane(); reason != "" {
 		fail("treasury_lane", reason)
 	}
+	g.commonGates(ctx, fail)
+	// 7. IT_PM_ID is an active PM (the slice buyer identity, S10).
+	if g.c.CompanyPM == nil {
+		fail("company_pm", "no check wired")
+	} else if err := g.c.CompanyPM(ctx); err != nil {
+		fail("company_pm", err.Error())
+	}
+	return g.record(fails)
+}
+
+// commonGates are the gates every pool kind shares: token decimals read
+// on-chain (S6, S7) and receipts (S38).
+func (g *PoolChainGates) commonGates(ctx context.Context, fail func(gate, reason string)) {
 	// 5. Decimals ≥ 6, read on-chain (S6, S7).
 	for _, sym := range slices.Sorted(maps.Keys(g.c.Tokens)) {
 		if d, ok := g.c.Decimals[strings.ToUpper(sym)]; !ok {
@@ -210,13 +231,66 @@ func (g *PoolChainGates) Check(ctx context.Context) PoolGateStatus {
 			log.Printf("[liquidity] ALERT liquidity_pool_receipts_unreadable chain=%s err=%s", g.c.ChainKey, RedactAlertText(err.Error()))
 		}
 	}
-	// 7. IT_PM_ID is an active PM (the slice buyer identity, S10).
-	if g.c.CompanyPM == nil {
-		fail("company_pm", "no check wired")
-	} else if err := g.c.CompanyPM(ctx); err != nil {
-		fail("company_pm", err.Error())
+}
+
+// vaultGates: the vault has code, holds the pool token, the release key is its
+// operator, the treasury may receive fills, it is not paused, and the
+// treasury lane holds the token it will deliver.
+func (g *PoolChainGates) vaultGates(ctx context.Context, fail func(gate, reason string)) {
+	vault := common.HexToAddress(g.c.Vault)
+	code, err := g.c.Chain.CodeAt(ctx, vault, nil)
+	switch {
+	case err != nil:
+		fail("bytecode", "vault unreadable: "+err.Error())
+		return
+	case len(code) == 0:
+		fail("bytecode", "vault has no code at "+g.c.Vault)
+		return
 	}
-	return g.record(fails)
+	read := func(method string, args ...any) (any, bool) {
+		data, err := parsedLiquidityVaultABI.Pack(method, args...)
+		if err != nil {
+			fail("vault", method+": "+err.Error())
+			return nil, false
+		}
+		raw, err := g.c.Chain.CallContract(ctx, ethereum.CallMsg{To: &vault, Data: data}, nil)
+		if err != nil {
+			fail("vault", method+" unreadable: "+err.Error())
+			return nil, false
+		}
+		out, err := parsedLiquidityVaultABI.Unpack(method, raw)
+		if err != nil || len(out) == 0 {
+			fail("vault", method+" undecodable")
+			return nil, false
+		}
+		return out[0], true
+	}
+	for _, sym := range slices.Sorted(maps.Keys(g.c.Tokens)) {
+		if v, ok := read("token"); ok && !strings.EqualFold(v.(common.Address).Hex(), g.c.Tokens[sym]) {
+			fail("vault", fmt.Sprintf("token() is %s, not the pool's %s %s", v.(common.Address).Hex(), sym, g.c.Tokens[sym]))
+		}
+	}
+	if g.c.ReleaseAdmin == "" {
+		fail("release_admin", "no release key (PM_RELEASE_PRIVATE_KEY)")
+	} else if v, ok := read("operator"); ok && !strings.EqualFold(v.(common.Address).Hex(), g.c.ReleaseAdmin) {
+		fail("release_admin", fmt.Sprintf("the vault's operator is %s, not the release key %s", v.(common.Address).Hex(), g.c.ReleaseAdmin))
+	}
+	l := g.c.TreasuryLane
+	if l == nil || l.SponsorLane == nil || l.Signer == nil {
+		fail("treasury_lane", "no conversion-treasury lane on "+g.c.ChainKey)
+	} else {
+		if v, ok := read("recipient", common.HexToAddress(l.Signer.Address())); ok && !v.(bool) {
+			fail("vault", "the conversion treasury "+l.Signer.Address()+" is not an approved fill recipient")
+		}
+		for _, sym := range slices.Sorted(maps.Keys(g.c.Tokens)) {
+			if !strings.EqualFold(l.Tokens[sym], g.c.Tokens[sym]) {
+				fail("treasury_lane", "the lane does not hold "+sym+" at "+g.c.Tokens[sym])
+			}
+		}
+	}
+	if v, ok := read("paused"); ok && v.(bool) {
+		fail("vault", "the vault is paused")
+	}
 }
 
 // record stores one Check's outcome and alerts each failure.

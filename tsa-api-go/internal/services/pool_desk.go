@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -41,7 +42,22 @@ type PoolDeskConfig struct {
 	// a direct P2P release, an IT op, a slice open) spends them.
 	ReleaseCommitments  *LaneCommitments
 	TreasuryCommitments *LaneCommitments
+	// Vault set: orders fill from the shared-pool vault (spec 2026-10-14) and
+	// the slice parts (PM, Trades, Stock, Escrow, BuyerUserID) are not used.
+	Vault VaultChain
 }
+
+// VaultChain is what the pool desk asks of the shared-pool vault;
+// *LiquidityVault is the chain's, tests use a fake.
+type VaultChain interface {
+	Address() string
+	State(ctx context.Context) (*VaultState, error)
+	FillUsed(ctx context.Context, ref [32]byte) (bool, error)
+	PrepareFill(from, to string, amount, spread *big.Int, ref [32]byte) ([]byte, error)
+	FilledIn(r *types.Receipt, ref [32]byte) *VaultEvent
+}
+
+var _ VaultChain = (*LiquidityVault)(nil)
 
 // PoolDesk is the TSA Liquidity pool's order desk: free stock, allocation,
 // (Task 10) the open, and plan C2's settle side. One per process; ITService holds it like the company
@@ -51,6 +67,7 @@ type PoolDesk struct {
 	cached      *cachedReader[[]poolCandidate]
 	proveWindow time.Duration // poolProveWindow; tests shorten it
 	breaker     poolOpenBreaker
+	vaultCache  *cachedReader[*big.Int] // the vault's free collateral, public paths only
 }
 
 const (
@@ -66,6 +83,9 @@ var errPoolDeskIncomplete = errors.New("liquidity pool: desk is missing a part")
 // NewPoolDesk refuses an incomplete desk; boot then leaves pool orders
 // dormant while Plan B's LP onboarding (which never uses the desk) keeps working.
 func NewPoolDesk(c PoolDeskConfig) (*PoolDesk, error) {
+	if c.Vault != nil {
+		return newVaultDesk(c)
+	}
 	switch {
 	case c.DB == nil, c.PM == nil, c.Trades == nil, c.Stock == nil, c.Escrow == nil, c.EscrowAddr == "",
 		c.Treasury == nil, c.Gates == nil, c.Probe == nil, c.Generation == nil, c.Nonces == nil,
@@ -89,6 +109,34 @@ func NewPoolDesk(c PoolDeskConfig) (*PoolDesk, error) {
 		crs.Lane(c.Token.ChainID).AddReservation("pool_releases", c.ReleaseCommitments.Units)
 	}
 	return &PoolDesk{c: c, cached: newCachedReader[[]poolCandidate](poolTotalsTTL, poolBalanceFailTTL), proveWindow: poolProveWindow}, nil
+}
+
+// newVaultDesk is the shared-pool desk: the vault, the release key that
+// fills from it, and the treasury lane that delivers. Every part is needed —
+// a desk that could take naira it cannot fill or deliver is never built.
+func newVaultDesk(c PoolDeskConfig) (*PoolDesk, error) {
+	switch {
+	case c.DB == nil, c.Treasury == nil, c.Gates == nil, c.Probe == nil, c.Generation == nil, c.Nonces == nil,
+		c.Sender == nil, c.Sale == nil, c.Token.Decimals < StableAssetDecimals:
+		return nil, errPoolDeskIncomplete
+	}
+	if c.Treasury.Lane(c.Token.ChainKey) == nil {
+		return nil, fmt.Errorf("%w: no treasury lane on %s", errPoolDeskIncomplete, c.Token.ChainKey)
+	}
+	if c.Now == nil {
+		c.Now = time.Now
+	}
+	if c.ReleaseCommitments == nil {
+		c.ReleaseCommitments = NewPoolFillCommitments(c.DB)
+	}
+	if c.TreasuryCommitments == nil {
+		c.TreasuryCommitments = NewPoolTreasuryCommitments(c.DB)
+	}
+	c.Treasury.Lane(c.Token.ChainKey).nonceLane().AddReservation("pool_treasury_owed", c.TreasuryCommitments.Units)
+	if crs, ok := c.Sender.(*ChainReleaseSigner); ok {
+		crs.Lane(c.Token.ChainID).AddReservation("pool_fills", c.ReleaseCommitments.Units)
+	}
+	return &PoolDesk{c: c, proveWindow: poolProveWindow, vaultCache: newCachedReader[*big.Int](poolTotalsTTL, poolBalanceFailTTL)}, nil
 }
 
 func (s *ITService) SetPoolDesk(d *PoolDesk) { s.poolDesk = d }
@@ -116,6 +164,9 @@ func (d *PoolDesk) cachedCandidates(ctx context.Context, set PoolSettings) ([]po
 // FreeTopN is Σ of the top pool_slice_cap LPs' free stock: what the pool can
 // promise right now (quote feasibility §9.3 step 4, the card's maximum).
 func (d *PoolDesk) FreeTopN(ctx context.Context, set PoolSettings) (*big.Int, error) {
+	if d.vaultMode() {
+		return d.vaultDeliverable(ctx, set)
+	}
 	cs, err := d.cachedCandidates(ctx, set)
 	if err != nil {
 		return nil, err
@@ -128,6 +179,16 @@ func (d *PoolDesk) FreeTopN(ctx context.Context, set PoolSettings) (*big.Int, er
 // A quote prices its per-slice costs on it; the open re-plans on fresh stock.
 // ErrPoolCannotFill when no allocation fits.
 func (d *PoolDesk) QuoteSliceUnits(ctx context.Context, units *big.Int, set PoolSettings) ([]*big.Int, error) {
+	if d.vaultMode() { // one fill, if the vault's free collateral covers it
+		free, err := d.vaultDeliverable(ctx, set)
+		if err != nil {
+			return nil, err
+		}
+		if free.Cmp(units) < 0 {
+			return nil, ErrPoolCannotFill
+		}
+		return []*big.Int{new(big.Int).Set(units)}, nil
+	}
 	cs, err := d.cachedCandidates(ctx, set)
 	if err != nil {
 		return nil, err

@@ -134,6 +134,20 @@ func NewPoolReleaseCommitments(db *gorm.DB, chainID int64) *LaneCommitments {
 	})
 }
 
+// NewPoolFillCommitments counts the fills the release key still owes
+// shared-pool orders: one per order that may still fill and has none recorded.
+func NewPoolFillCommitments(db *gorm.DB) *LaneCommitments {
+	return newLaneCommitments("pool_fills", func(ctx context.Context) (uint64, error) {
+		var n int64
+		err := db.WithContext(ctx).Model(&models.PoolOrder{}).
+			Joins("JOIN it_intents ON it_intents.id = pool_orders.intent_id").
+			Where("it_intents.provider IN ? AND it_intents.status IN ?", poolProviders(), poolVaultReservedStatuses).
+			Where("pool_orders.fill_units IS NOT NULL AND pool_orders.fill_tx_hash = ''").
+			Count(&n).Error
+		return uint64(n) * vaultFillGas, err
+	})
+}
+
 // poolSliceOutstandingStatuses are the slice states that still need one
 // release-key transaction each.
 var poolSliceOutstandingStatuses = []string{

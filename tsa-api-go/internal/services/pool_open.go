@@ -100,6 +100,9 @@ func (d *PoolDesk) noteOpenOutcome(opened bool, sent int, now time.Time) {
 // payment could be claimed after the slices became cancellable on-chain, a
 // paid order could have no stock behind it. Then pool orders refuse to open.
 func (s *ITService) PoolHonourFits() error {
+	if s.PoolVaultMode() {
+		return nil // no slice window: a vault order holds nothing on-chain before it is paid
+	}
 	need := s.stableLockTTL() + s.rampTerms().honourGrace + poolHonourSafety
 	if need >= poolSliceWindow {
 		return fmt.Errorf("%w: rate lock %s + honour grace %s + %s safety reaches the %s slice window",
@@ -155,6 +158,9 @@ func (s *ITService) openPoolBuy(ctx context.Context, userID uuid.UUID, p *PoolPr
 	d := s.poolDesk
 	if d == nil || p == nil || p.Quote == nil {
 		return nil, nil, ErrPoolClosed
+	}
+	if d.vaultMode() {
+		return s.openVaultBuy(ctx, userID, p, destAddress, also)
 	}
 	started := d.now()
 	// 1. Guards (the company wallet's order, plus the pool's own).

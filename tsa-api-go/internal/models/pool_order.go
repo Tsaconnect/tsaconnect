@@ -36,11 +36,20 @@ type PoolOrder struct {
 	PayoutFeeKobo *string `gorm:"type:numeric(38,0)" json:"payoutFeeKobo,omitempty"`
 	// NetworkFeeKobo is the network fee her price carried (its fee line's
 	// naira): the gas the treasury spends on the order, booked as a cost.
-	NetworkFeeKobo *string    `gorm:"type:numeric(38,0)" json:"networkFeeKobo,omitempty"`
-	KeepKobo       *string    `gorm:"type:numeric(38,0)" json:"keepKobo,omitempty"`
-	SettledAt      *time.Time `json:"settledAt,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	NetworkFeeKobo *string `gorm:"type:numeric(38,0)" json:"networkFeeKobo,omitempty"`
+	KeepKobo       *string `gorm:"type:numeric(38,0)" json:"keepKobo,omitempty"`
+	// Shared-pool vault orders (spec 2026-10-14), all in the token's chain
+	// units. FillUnits + SpreadUnits is what the open reserved against the
+	// vault's free collateral until the fill is recorded. FillSpreadUnits is
+	// what the fill actually credited to LPs (0 when no LP held principal).
+	FillUnits       *string    `gorm:"type:numeric(78,0)" json:"fillUnits,omitempty"`
+	SpreadUnits     *string    `gorm:"type:numeric(78,0)" json:"spreadUnits,omitempty"`
+	FillTxHash      string     `gorm:"size:66;not null;default:''" json:"fillTxHash,omitempty"`
+	FillSpreadUnits *string    `gorm:"type:numeric(78,0)" json:"fillSpreadUnits,omitempty"`
+	FilledAt        *time.Time `json:"filledAt,omitempty"`
+	SettledAt       *time.Time `json:"settledAt,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 func (PoolOrder) TableName() string { return "pool_orders" }
