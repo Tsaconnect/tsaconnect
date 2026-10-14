@@ -1327,6 +1327,10 @@ func decodeRevertReason(err error) string {
 		if abiErr, lookupErr := parsedP2PEscrowABI.ErrorByID([4]byte(data[:4])); lookupErr == nil {
 			return abiErr.Sig
 		}
+		// The liquidity vault's custom errors (OZ Pausable's EnforcedPause).
+		if abiErr, lookupErr := parsedLiquidityVaultABI.ErrorByID([4]byte(data[:4])); lookupErr == nil {
+			return abiErr.Sig
+		}
 	}
 	return raw
 }

@@ -41,6 +41,8 @@ var (
 	// ErrLPDepositLocked: principal deposited in the last 24 h cannot leave
 	// yet (the contract's withdrawLock); earnings can always be claimed.
 	ErrLPDepositLocked = errors.New("liquidity: part of your deposit is still in its 24-hour lock")
+	// ErrLPPoolPaused: the vault is paused — deposits wait; withdraw and claim never do.
+	ErrLPPoolPaused = errors.New("liquidity: the pool is paused, so deposits are on hold; you can still withdraw and claim")
 )
 
 // lpRevertError turns the vault's own refusal of an LP tx at estimate (its
@@ -55,6 +57,8 @@ func lpRevertError(err error) error {
 		return ErrLPNothingToClaim
 	case "Deposit still locked":
 		return ErrLPDepositLocked
+	case "EnforcedPause()":
+		return ErrLPPoolPaused
 	}
 	return err
 }
@@ -979,7 +983,7 @@ func (s *VaultLPService) PrepareDeposit(ctx context.Context, userID uuid.UUID, a
 	}
 	tx, err := s.c.Vault.PrepareDeposit(lp.OperatorWalletAddress, n)
 	if err != nil {
-		return nil, err
+		return nil, lpRevertError(err)
 	}
 	return &LPTxPlan{Step: "deposit", Txs: []json.RawMessage{tx}}, nil
 }

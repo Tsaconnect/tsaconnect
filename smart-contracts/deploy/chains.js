@@ -44,7 +44,8 @@ function liquidityPool() {
     minDeposit: 5,
     maxPerLp: 5000,
     totalCap: Number(process.env.LPOOL_TOTAL_CAP || 50000),
-    maxFillPerTx: 2000,
+    // Room for pool_order_max (2000) plus its spread: fill + spread is capped.
+    maxFillPerTx: 2100,
     fillWindowSec: 24 * 3600,
     fillWindowCap: 20000,
     // A fill's spread may be at most this share of its amount: the console's

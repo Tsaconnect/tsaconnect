@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -514,6 +516,17 @@ func TestVaultLP_MeShowsTheDepositLock(t *testing.T) {
 	r.svc.c.Vault = revertingLPVault{fakeLPVault: r.vault, err: vaultRevert("Deposit still locked")}
 	if _, err := r.svc.PrepareWithdraw(ctx, user, "1"); !errors.Is(err, ErrLPDepositLocked) {
 		t.Fatalf("locked withdraw: %v, want ErrLPDepositLocked", err)
+	}
+}
+
+// Testnet rehearsal 2026-10-14: a deposit while the vault is paused reverted
+// with OZ's EnforcedPause() custom error, which surfaced as raw hex. It is
+// decoded and answered as ErrLPPoolPaused.
+func TestVaultLP_DepositWhilePausedIsReadable(t *testing.T) {
+	sel := hexutil.MustDecode("0xd93c0665") // EnforcedPause()
+	err := fmt.Errorf("estimate gas (would revert): %w", withRevertReason(revertDataErr{data: hexutil.Encode(sel)}))
+	if got := lpRevertError(err); !errors.Is(got, ErrLPPoolPaused) {
+		t.Fatalf("paused deposit = %v, want ErrLPPoolPaused", got)
 	}
 }
 

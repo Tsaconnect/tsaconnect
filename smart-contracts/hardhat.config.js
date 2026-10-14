@@ -64,7 +64,7 @@ module.exports = {
       accounts: ACCOUNTS,
     },
     bscTestnet: {
-      url: process.env.BSC_TESTNET_RPC || "https://data-seed-prebsc-1-s1.binance.org:8545",
+      url: process.env.BSC_TESTNET_RPC || "https://bsc-testnet-rpc.publicnode.com",
       chainId: 97,
       accounts: ACCOUNTS,
     },

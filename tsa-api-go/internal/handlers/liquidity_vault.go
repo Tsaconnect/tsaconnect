@@ -49,6 +49,8 @@ func vaultLPError(c *gin.Context, err error) bool {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "liquidity_wallet_changed")
 	case errors.Is(err, services.ErrLPNotAllowedYet):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "depositor_pending")
+	case errors.Is(err, services.ErrLPPoolPaused):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "pool_paused")
 	case errors.Is(err, services.ErrLPDepositLocked):
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest, err.Error(), "deposit_locked")
 	case errors.Is(err, services.ErrLPAmount), errors.Is(err, services.ErrLPClaimTooSmall), errors.Is(err, services.ErrLPClaimTo),
