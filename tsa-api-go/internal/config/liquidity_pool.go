@@ -40,7 +40,10 @@ type liquidityPoolPreset struct {
 var liquidityPoolPresets = map[string]map[string]liquidityPoolPreset{
 	"bsc": {
 		"mainnet": {token: "USDT", releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000}, // 0.01 BNB
-		"testnet": {token: "USDT", releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000},
+		// BSC testnet rehearsal vault (2026-10-14): owner/provider/guardian are
+		// the throwaway LIQ_C2 deployer, operator the LIQ_C1 release key.
+		"testnet": {vault: "0x3Aa24E530CffEb797140d03907117f9C3653403C", vaultDeployBlock: 136773203,
+			token: "USDT", releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000},
 	},
 }
 
