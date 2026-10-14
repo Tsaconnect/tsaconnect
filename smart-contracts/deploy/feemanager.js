@@ -3,7 +3,7 @@ const { resolveChain, writeLedger } = require("./lib");
 
 // Options (all optional; none given = the behaviour this module always had):
 //   deferOwnership — initialise owned by the deployer so a caller can wire it
-//                    first and transfer last (deploy/pool.js);
+//                    first and transfer last;
 //   writeLedgerKey — the ledger key written on the CLI path (default "FeeManager").
 async function deploy(hre, { chain, deferOwnership = false, writeLedgerKey } = {}) {
   const { ethers, upgrades, network } = hre;

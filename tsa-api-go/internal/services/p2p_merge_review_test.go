@@ -142,23 +142,6 @@ func TestMarkPaid_DecidedTradeOnChainPaidStillFlips(t *testing.T) {
 	})
 }
 
-// Review M3: a slice on chain Paid writes only the reconciler's drift audit,
-// as on main — no trade.marked_paid row.
-func TestReconcile_SliceChainPaidWritesOnlyTheDriftAudit(t *testing.T) {
-	r := newPoolRig(t)
-	_, sl := isolatedSlice(t, r, models.P2PTradeStatusPendingPayment, time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC))
-	r.pool.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPaid, Amount: usdt18(5)}
-	if _, err := r.svc.ReconcileTrade(context.Background(), sl.ID); err != nil {
-		t.Fatal(err)
-	}
-	var marked, drift int64
-	r.db.Model(&models.P2PAuditLog{}).Where("trade_id = ? AND action = ?", sl.ID, models.P2PAuditTradeMarkedPaid).Count(&marked)
-	r.db.Model(&models.P2PAuditLog{}).Where("trade_id = ? AND action = ?", sl.ID, models.P2PAuditReconcilerDrift).Count(&drift)
-	if marked != 0 || drift != 1 {
-		t.Fatalf("marked_paid=%d drift=%d, want 0 and 1", marked, drift)
-	}
-}
-
 // Review M6: her cancel lost to another cancelByTimeout and reverted, but the
 // trade is cancelled on chain — the confirm applies it instead of erroring.
 func TestConfirmCancel_LostRaceStillReturnsTheCancelledTrade(t *testing.T) {
@@ -177,18 +160,5 @@ func TestConfirmCancel_LostRaceStillReturnsTheCancelledTrade(t *testing.T) {
 	db.First(&ad, "id = ?", tr.AdID)
 	if ad.Reserved != "0" || ad.Remaining != "100" {
 		t.Fatalf("ad reserved=%s remaining=%s, want capacity restored once", ad.Reserved, ad.Remaining)
-	}
-}
-
-// Review M7: a pool slice is invisible to the admin trade view and its
-// messages, as everywhere outside the pool console.
-func TestAdminTradeView_PoolSliceIsNotFound(t *testing.T) {
-	r := newPoolRig(t)
-	_, sl := isolatedSlice(t, r, models.P2PTradeStatusPendingPayment, time.Date(2026, 10, 8, 9, 0, 0, 0, time.UTC))
-	if _, err := r.svc.AdminTradeDetail(context.Background(), sl.ID); !errors.Is(err, ErrTradeNotFound) {
-		t.Fatalf("AdminTradeDetail = %v, want not found", err)
-	}
-	if _, err := NewP2PMessageService(r.db, nil).AdminList(context.Background(), sl.ID, MessageFilter{}); !errors.Is(err, ErrTradeNotFound) {
-		t.Fatalf("AdminList = %v, want not found", err)
 	}
 }

@@ -121,19 +121,6 @@ func (c *LaneCommitments) wait(ctx context.Context, r *commitmentsRead) (uint64,
 	}
 }
 
-// NewPoolReleaseCommitments counts the release-key calls the pool chain's live
-// slices still owe — one each: adminRelease once paid, cancelByTimeout (the
-// expiry canceller, release key) if never paid, adminResolve if disputed.
-func NewPoolReleaseCommitments(db *gorm.DB, chainID int64) *LaneCommitments {
-	return newLaneCommitments(fmt.Sprintf("pool_releases_%d", chainID), func(ctx context.Context) (uint64, error) {
-		var n int64
-		err := db.WithContext(ctx).Model(&models.P2PTrade{}).
-			Where("it_intent_id IS NOT NULL AND chain_id = ? AND status IN ?", chainID, poolSliceOutstandingStatuses).
-			Count(&n).Error
-		return uint64(n) * poolReleaseCallGas, err
-	})
-}
-
 // NewPoolFillCommitments counts the fills the release key still owes
 // shared-pool orders: one per order that may still fill and has none recorded.
 func NewPoolFillCommitments(db *gorm.DB) *LaneCommitments {
@@ -146,13 +133,6 @@ func NewPoolFillCommitments(db *gorm.DB) *LaneCommitments {
 			Count(&n).Error
 		return uint64(n) * vaultFillGas, err
 	})
-}
-
-// poolSliceOutstandingStatuses are the slice states that still need one
-// release-key transaction each.
-var poolSliceOutstandingStatuses = []string{
-	models.P2PTradeStatusPendingPayment, models.P2PTradeStatusPaid,
-	models.P2PTradeStatusReleasing, models.P2PTradeStatusDisputed,
 }
 
 // treasuryRouteReserveGas is one converted order's owed route on a treasury

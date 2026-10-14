@@ -199,7 +199,7 @@ func (p *vaultProbe) deepen(n uint64) {
 // ─── Rig ────────────────────────────────────────────────────────────────────
 
 type vaultRig struct {
-	*poolOpenRig
+	*vaultBase
 	vault        *fakeVault
 	sender       *vaultSender
 	probe        *vaultProbe
@@ -210,26 +210,23 @@ type vaultRig struct {
 // principal in whole USDT (18 dp).
 func newVaultRig(t *testing.T, collateralWhole, principalWhole int64) *vaultRig {
 	t.Helper()
-	base := newPoolOpenRig(t)
-	if err := base.db.AutoMigrate(&models.RampLeg{}, &models.JobRunMarker{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := base.db.Exec(models.RampLegsOneLiveSaleIndexSQL).Error; err != nil {
-		t.Fatal(err)
-	}
-	sale, _, saleVerifier, _ := newPoolSaleWallet(t, usdt18(1_000))
+	base := newVaultBase(t)
+	sale, treasury, saleVerifier := newPoolSaleWallet(t, usdt18(1_000))
 	vault := newFakeVault(usdt18(collateralWhole), usdt18(principalWhole))
-	probe := &vaultProbe{TreasuryTxProbe: base.chain, head: 100, receipts: map[common.Hash]*types.Receipt{}}
+	chain := &fakeTxProbe{head: 100}
+	probe := &vaultProbe{TreasuryTxProbe: chain, head: 100, receipts: map[common.Hash]*types.Receipt{}}
 	sender := &vaultSender{vault: vault, probe: probe}
-	desk, err := NewPoolDesk(PoolDeskConfig{DB: base.db, Token: base.desk.c.Token, Treasury: base.desk.c.Treasury,
-		Gates: base.gates, Probe: probe, Generation: base.chain.EndpointGeneration, Nonces: base.desk.c.Nonces,
-		Sender: sender, Verifier: &settleVerifier{credited: map[string]*big.Int{}}, Sale: sale, Vault: vault})
+	nonces := NewTreasuryNonceWatch("bsc", chain, treasury.Address(), 30*time.Second, nil)
+	desk, err := NewPoolDesk(PoolDeskConfig{DB: base.db,
+		Token:    PoolToken{ChainID: poolTestChain, ChainKey: "bsc", Symbol: "USDT", Address: poolTestUSDT, Decimals: 18},
+		Treasury: treasury, Gates: base.gates, Probe: probe, Generation: chain.EndpointGeneration, Nonces: nonces,
+		Sender: sender, Sale: sale, Vault: vault})
 	if err != nil {
 		t.Fatalf("vault desk: %v", err)
 	}
 	base.desk = desk
 	base.it.SetPoolDesk(desk)
-	return &vaultRig{poolOpenRig: base, vault: vault, sender: sender, probe: probe, saleVerifier: saleVerifier}
+	return &vaultRig{vaultBase: base, vault: vault, sender: sender, probe: probe, saleVerifier: saleVerifier}
 }
 
 func (r *vaultRig) openFor(t *testing.T, user uuid.UUID, naira string) (*models.ITIntent, error) {
@@ -339,9 +336,6 @@ func TestVaultQuote_NoPayoutFeeLine(t *testing.T) {
 		if f.Kind == FeeKindPayout {
 			t.Fatalf("fees = %+v, want no payout line", p.Quote.Fees)
 		}
-	}
-	if len(p.SliceUnits) != 1 || p.SliceUnits[0].Cmp(p.Quote.AssetUnits) < 0 {
-		t.Fatalf("slices = %v, want one fill covering %s", p.SliceUnits, p.Quote.AssetUnits)
 	}
 }
 

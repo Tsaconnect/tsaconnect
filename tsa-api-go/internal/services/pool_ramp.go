@@ -20,11 +20,7 @@ func (s *ITService) PoolLegOpen(ctx context.Context) bool {
 	if !s.HasPool() || s.payInChannelNow() != PayInCentral || CurrentPoolSettings().OrdersStopped {
 		return false
 	}
-	calls := CurrentPoolSettings().SliceCap
-	if s.poolDesk.vaultMode() {
-		calls = 1 // one fill
-	}
-	return s.poolDesk.c.Gates.Open() && s.poolReleaseGasOK(ctx, calls, false)
+	return s.poolDesk.c.Gates.Open() && s.poolReleaseGasOK(ctx, 1, false) // one fill
 }
 
 // poolReleaseGasOK asks the gates whether the release key can pay for every
@@ -69,7 +65,7 @@ func (s *ITService) PoolCanFill(ctx context.Context, units *big.Int, set PoolSet
 	if !s.HasPool() {
 		return false
 	}
-	free, err := s.poolDesk.FreeTopN(ctx, set)
+	free, err := s.poolDesk.FreeUnits(ctx, set)
 	return err == nil && free.Cmp(units) >= 0
 }
 
@@ -90,7 +86,7 @@ func (s *ITService) OpenPoolConvertedBuy(ctx context.Context, userID uuid.UUID, 
 		return nil, nil, nil, err
 	}
 	var rec *models.PaycrestOrderRecord
-	intent, payInto, err := s.openPoolBuy(ctx, userID, p, treasury, func(tx *gorm.DB, intent *models.ITIntent) error {
+	intent, payInto, err := s.openVaultBuy(ctx, userID, p, treasury, func(tx *gorm.DB, intent *models.ITIntent) error {
 		rec = newConversionRecord(intent, in, models.HolderPool)
 		return tx.Create(rec).Error
 	})
@@ -148,7 +144,7 @@ func (s *ITService) PoolCard(ctx context.Context) (*PoolCard, error) {
 		return card, nil
 	}
 	display := inHouseDisplayRate(poolBaseRate(mid, set), set.TakeBps) // the quote's own rate (review M-2)
-	free, err := d.FreeTopN(ctx, set)
+	free, err := d.FreeUnits(ctx, set)
 	if err != nil || free.Cmp(set.MinSliceUnits) < 0 {
 		return card, nil
 	}
@@ -161,15 +157,9 @@ func (s *ITService) PoolCard(ctx context.Context) (*PoolCard, error) {
 	card.FundingFeePercent = formatBps(funding.bps)
 	// The smallest order is one effective minimum slice plus its flat costs
 	// (gas and one payout fee), which come off after funding.
-	lpRate := floorRatMinor(poolBaseRate(mid, set))
-	minSlice := set.MinSliceUnits
-	if !d.vaultMode() { // a slice pays its LP in naira: the transfer minimum and fee apply
-		minSlice = poolEffectiveMinSlice(set.MinSliceUnits, lpRate)
-	}
-	minLeft := new(big.Int).Add(minSlice, poolNetworkFeeUnits(1, set))
-	if !d.vaultMode() {
-		minLeft.Add(minLeft, poolPayoutFeeUnits([]*big.Int{minSlice}, lpRate, display))
-	}
+	// The smallest order is pool_min_slice plus its flat costs (the network
+	// fee), which come off after funding.
+	minLeft := new(big.Int).Add(set.MinSliceUnits, poolNetworkFeeUnits(set))
 	card.MinNgn = FormatMinor(fiatForNet(minLeft, display, funding.bps, true).String())
 	card.MaxNgn = FormatMinor(fiatForNet(maxUnits, display, funding.bps, false).String())
 	return card, nil

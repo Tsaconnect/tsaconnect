@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"log"
-	"math/big"
 	"os"
 	"sort"
 	"strings"
@@ -11,52 +10,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-const (
-	P2PPurposeP2P  = "p2p"
-	P2PPurposePool = "pool"
-)
+const P2PPurposeP2P = "p2p"
 
-// poolPreset is a pool row's on-chain inputs, bundled in code (decision 17: a
-// hot-fix is a code change, never an env var).
-type poolPreset struct {
-	feeManager         string
-	tokens             []string
-	releaseGasFloorWei string // the release EOA's native floor (spec §4.4)
-	logChunkBlocks     uint64 // ranged eth_getLogs window (spec §5, R1)
-	// vault is the shared-pool TsaLiquidityPool proxy (spec 2026-10-14). Set,
-	// pool orders fill from it; empty, the pool desk stays dormant.
-	vault            string
-	vaultDeployBlock uint64 // where the ledger indexer starts
-}
-
-// PoolChainConfig is the pool block of the one P2P chain with Purpose pool.
-type PoolChainConfig struct {
-	FeeManager         string
-	Tokens             []string
-	ReleaseGasFloorWei string
-	LogChunkBlocks     uint64
-	Vault              string
-	VaultDeployBlock   uint64
-}
-
-// bscPresets: BSC is the TSA Liquidity pool chain (decision 6). An empty
-// p2pEscrow leaves it dormant. Chain id and token addresses come from
-// cfg.Networks. Ordinary P2P on BSC is not offered (spec S5). The mainnet row
-// is live: the incident stop is pool_order_max = 0, never emptying the row
-// while slices are open (boot refuses: liquidity_pool_unconfigure_refused).
+// bscPresets: ordinary P2P on BSC. Empty rows: dormant. (The shared
+// liquidity pool on BSC is its own preset, liquidity_pool.go.)
 var bscPresets = map[string]chainPreset{
-	"mainnet": {
-		p2pEscrow:     "0xeBF3Fc37C57Eff8353bB4c30F51b6899F4ae22cD", // mainnet rollout 2026-10-13; owner PM 0x62bA…1b96, admin = release 0x38cE…2c9
-		eip712Version: "2", purpose: P2PPurposePool,
-		pool: &poolPreset{feeManager: "0x32CBeb22B468da660241c2Bbb635BdFE768A8f6c", tokens: []string{"USDT"},
-			releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000}, // 0.01 BNB
-	},
-	"testnet": {
-		p2pEscrow:     "0x2B19e2e2194880A1a8AF9135923e3AeE0bD1adE5", // Plan C2 Task 14, deployed 2026-10-12 (block 136370349)
-		eip712Version: "2", purpose: P2PPurposePool,
-		pool: &poolPreset{feeManager: "0x2F6f3e1514efA38a3683696FB156d66d450a5DcA", tokens: []string{"USDT"},
-			releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000},
-	},
+	"mainnet": {},
+	"testnet": {},
 }
 
 // p2pPresets is every P2P chain, one row per network. A new chain is a new
@@ -110,15 +70,6 @@ func assembleP2PChains(cfg *Config, presets map[string]map[string]chainPreset) e
 			return err
 		}
 	}
-	pools := 0
-	for _, cc := range cfg.P2PChains {
-		if cc.Purpose == P2PPurposePool {
-			pools++
-		}
-	}
-	if pools > 1 {
-		return fmt.Errorf("%d pool chains are configured: one pool chain at a time (spec S36)", pools)
-	}
 	return nil
 }
 
@@ -156,34 +107,6 @@ func addP2PChain(cfg *Config, chainKey, network string, p chainPreset) error {
 	}
 	cc := P2PChainConfig{ChainID: chainID, ChainKey: chainKey, Network: network, EscrowAddress: escrow,
 		EIP712Version: version, Assets: append([]string(nil), p.assets...), Purpose: purpose}
-	if purpose == P2PPurposePool {
-		if p.pool == nil {
-			return fmt.Errorf("P2P %s %s: a pool row needs a pool block", chainKey, network)
-		}
-		if err := validateContractAddress(chainKey+" "+network+" pool FeeManager", p.pool.feeManager); err != nil {
-			return err
-		}
-		for _, sym := range p.pool.tokens {
-			if cfg.Networks[network].TokenAddresses[chainKey+":"+sym] == "" {
-				return fmt.Errorf("pool token %s has no address on %s %s (cfg.Networks)", sym, network, chainKey)
-			}
-		}
-		if f, ok := new(big.Int).SetString(p.pool.releaseGasFloorWei, 10); !ok || f.Sign() <= 0 {
-			return fmt.Errorf("P2P %s %s: invalid release gas floor %q", chainKey, network, p.pool.releaseGasFloorWei)
-		}
-		if p.pool.vault != "" {
-			if err := validateContractAddress(chainKey+" "+network+" pool vault", p.pool.vault); err != nil {
-				return err
-			}
-			if p.pool.vaultDeployBlock == 0 {
-				return fmt.Errorf("P2P %s %s: a pool vault needs its deploy block (the ledger indexer starts there)", chainKey, network)
-			}
-		}
-		cc.Assets = append([]string(nil), p.pool.tokens...)
-		cc.Pool = &PoolChainConfig{FeeManager: p.pool.feeManager, Tokens: append([]string(nil), p.pool.tokens...),
-			ReleaseGasFloorWei: p.pool.releaseGasFloorWei, LogChunkBlocks: p.pool.logChunkBlocks,
-			Vault: p.pool.vault, VaultDeployBlock: p.pool.vaultDeployBlock}
-	}
 	if prev, dup := cfg.P2PChains[chainID]; dup {
 		return fmt.Errorf("chain %d has two P2P rows (%s and %s): one escrow per chain (spec S5)", chainID, prev.ChainKey, chainKey)
 	}
@@ -203,16 +126,6 @@ func validateContractAddress(label, addr string) error {
 		return fmt.Errorf("%s %q is the zero address", label, addr)
 	}
 	return nil
-}
-
-// PoolChain is the one chain whose preset row carries a pool escrow (S36).
-func (c *Config) PoolChain() (P2PChainConfig, bool) {
-	for _, cc := range c.P2PChains {
-		if cc.Purpose == P2PPurposePool && cc.Pool != nil {
-			return cc, true
-		}
-	}
-	return P2PChainConfig{}, false
 }
 
 // assembleFeeManagerChains is the FEE_MANAGER_ADDRESS_* registry, moved
@@ -257,19 +170,4 @@ func (c *Config) selectedP2PNetwork(chainKey string) string {
 		return n
 	}
 	return "mainnet"
-}
-
-// checkPoolFeeManagerExcluded (S4): the admin Author flow pushes one rate to
-// every FeeManagerChains entry; the pool FeeManager must never be one.
-func checkPoolFeeManagerExcluded(cfg *Config) error {
-	pool, ok := cfg.PoolChain()
-	if !ok {
-		return nil
-	}
-	for id, fm := range cfg.FeeManagerChains {
-		if strings.EqualFold(strings.TrimSpace(fm.Address), strings.TrimSpace(pool.Pool.FeeManager)) {
-			return fmt.Errorf("the pool FeeManager %s is registered for chain %d via FEE_MANAGER_ADDRESS_*: the admin fee flow would push non-zero rates to it (spec S4) — unset it", pool.Pool.FeeManager, id)
-		}
-	}
-	return nil
 }

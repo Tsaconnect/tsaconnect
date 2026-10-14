@@ -88,22 +88,6 @@ const chains = {
     owner: process.env.OWNER_ADDRESS || null,
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
-    // TSA Liquidity pool (deploy/pool.js). Operator-supplied at deploy time:
-    //   POOL_RELEASE_ADMIN — the PM release EOA (PM_ADMIN_EOA_ADDRESS);
-    //   POOL_SYSTEM_WALLET — the conversion treasury (never receives anything at fee 0);
-    //   POOL_OWNER_ADDRESS — the owner's personal wallet (decision 18), moved to
-    //                        the main owner later with transferOwnership.
-    pool: {
-      tokens: ["USDT"],
-      paymentWindowSec: 3600,
-      releaseAdmin: process.env.POOL_RELEASE_ADMIN || null,
-      systemWallet: process.env.POOL_SYSTEM_WALLET || null,
-      owner: process.env.POOL_OWNER_ADDRESS || null,
-      // One-step Ownable is irreversible: on requireOwner networks the owner
-      // address must be typed twice (review m1).
-      ownerConfirm: process.env.POOL_OWNER_CONFIRM || null,
-      requireOwner: true,
-    },
     liquidityPool: liquidityPool(),
   },
   bscTestnet: {
@@ -117,22 +101,6 @@ const chains = {
     owner: process.env.OWNER_ADDRESS || null,
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
-    // TSA Liquidity pool (deploy/pool.js). Operator-supplied at deploy time:
-    //   POOL_RELEASE_ADMIN — the PM release EOA (PM_ADMIN_EOA_ADDRESS);
-    //   POOL_SYSTEM_WALLET — the conversion treasury (never receives anything at fee 0);
-    //   POOL_OWNER_ADDRESS — the owner's personal wallet (decision 18), moved to
-    //                        the main owner later with transferOwnership.
-    pool: {
-      tokens: ["USDT"],
-      paymentWindowSec: 3600,
-      releaseAdmin: process.env.POOL_RELEASE_ADMIN || null,
-      systemWallet: process.env.POOL_SYSTEM_WALLET || null,
-      owner: process.env.POOL_OWNER_ADDRESS || null,
-      // One-step Ownable is irreversible: on requireOwner networks the owner
-      // address must be typed twice (review m1).
-      ownerConfirm: process.env.POOL_OWNER_CONFIRM || null,
-      requireOwner: false,
-    },
     liquidityPool: liquidityPool(),
   },
 };

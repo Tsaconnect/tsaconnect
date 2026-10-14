@@ -35,6 +35,37 @@ var (
 	ErrLiquidityNotVault = errors.New("liquidity: the shared pool is not configured")
 )
 
+const (
+	LiquidityStatusNone   = "none"
+	LiquidityStatusActive = "active"
+	LiquidityStatusPaused = "paused"
+)
+
+var (
+	ErrNotLiquidityProvider    = errors.New("liquidity: not a liquidity provider")
+	ErrLiquidityActivityCursor = errors.New("liquidity: invalid activity cursor")
+)
+
+type LiquidityChain struct {
+	ID   int64  `json:"id"`
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+type LiquidityToken struct {
+	Symbol   string `json:"symbol"`
+	Address  string `json:"address"`
+	Decimals int    `json:"decimals"`
+}
+
+// LiquidityLimits are USD at the 1 USDT = $1 peg.
+type LiquidityLimits struct {
+	Min string `json:"min"`
+	Max string `json:"max"`
+}
+
+func trimUSD(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
+
 // lpMinClaimUSD is the smallest gas-free claim (PM, 2026-10-14: $0.50).
 const lpMinClaimUSD = 0.5
 

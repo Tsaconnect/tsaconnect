@@ -79,32 +79,3 @@ func LoadCompanyPM(ctx context.Context, db *gorm.DB, id string) (*models.Payment
 	}
 	return pm, nil
 }
-
-// SetCompanyPMID names IT_PM_ID, whose user may never become an LP. Called
-// once at boot.
-func (s *PMOnboardingService) SetCompanyPMID(id string) { s.companyPMID = strings.TrimSpace(id) }
-
-// refuseCompanyUserAsLP fails closed: an unreadable IT_PM_ID row is an error,
-// never "not the company". The row's own status does not matter: a paused
-// company PM's user is still the slice buyer once it resumes.
-func (s *PMOnboardingService) refuseCompanyUserAsLP(ctx context.Context, db *gorm.DB, userID uuid.UUID) error {
-	if s.companyPMID == "" {
-		return nil
-	}
-	pm, err := companyPMRow(ctx, db, s.companyPMID)
-	if errors.Is(err, ErrCompanyPMUnusable) {
-		return nil // no company PM row, so no company user
-	}
-	if err != nil {
-		return fmt.Errorf("pm_onboarding: company PM lookup: %w", err)
-	}
-	if pm.UserID == userID {
-		return ErrCompanyUserCannotBeLP
-	}
-	return nil
-}
-
-// RefuseCompanyUserAsLP is refuseCompanyUserAsLP for an LP application.
-func (s *PMOnboardingService) RefuseCompanyUserAsLP(ctx context.Context, userID uuid.UUID) error {
-	return s.refuseCompanyUserAsLP(ctx, s.db, userID)
-}

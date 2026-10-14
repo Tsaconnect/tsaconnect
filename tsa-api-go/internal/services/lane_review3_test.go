@@ -463,22 +463,6 @@ func TestReconcileSell_CancelledDebitFailsAtOnce(t *testing.T) {
 	}
 }
 
-// Item 8: a pool slice release the release lane cancelled moved nothing:
-// as final as a deep revert, so the slice is released again.
-func TestSliceHashReverted_CancelledReleaseCounts(t *testing.T) {
-	r, _, sl, _, _ := openOne(t)
-	node := newChainNode(sl.ChainID)
-	kl, _, h := cancelledLane(t, node, func(kl *KeyLane, raw *LocalKeyReleaseSigner) string {
-		h, _, _ := kl.Send(context.Background(), callTo(sl.ChainID, callA, "aa", 0))
-		return h
-	})
-	r.it.poolDesk.c.Sender = &reusedReleaseSender{fakeReleaseSigner: fakeReleaseSigner{addr: "0x00000000000000000000000000000000000000a1"}, lane: kl}
-	sl.ReleaseTxHash = h
-	if gone, err := r.it.SliceHashReverted(context.Background(), &sl); err != nil || !gone {
-		t.Fatalf("SliceHashReverted = %v %v, want true for a cancelled release", gone, err)
-	}
-}
-
 // cancellingRail is the name-change fee rail whose lane cancelled tx.
 type cancellingRail struct {
 	*fakeStableRail

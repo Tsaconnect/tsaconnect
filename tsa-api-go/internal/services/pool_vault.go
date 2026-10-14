@@ -38,11 +38,6 @@ const (
 var poolVaultReservedStatuses = []string{models.ITStatusPendingPayment, models.ITStatusPaymentReceived,
 	models.ITStatusDelivering, models.ITStatusBuyAwaitingRate}
 
-func (d *PoolDesk) vaultMode() bool { return d != nil && d.c.Vault != nil }
-
-// VaultMode reports whether pool orders fill from the shared-pool vault.
-func (s *ITService) PoolVaultMode() bool { return s.HasPool() && s.poolDesk.vaultMode() }
-
 // vaultFillRef is the order's fill ref on-chain: HashID of the intent, so a
 // replayed fill for the same order is refused by the contract itself.
 func vaultFillRef(intentID uuid.UUID) [32]byte { return HashID(intentID) }
@@ -215,9 +210,12 @@ func (d *PoolDesk) insertVaultOrder(ctx context.Context, intent *models.ITIntent
 		if err := tx.Create(intent).Error; err != nil {
 			return err
 		}
-		snap := d.snapshot(intent.ID, 1, p, []PoolSlicePlan{{Units: p.Quote.AssetUnits}})
 		fs, ss := fill.String(), spread.String()
-		snap.FillUnits, snap.SpreadUnits = &fs, &ss
+		snap := &models.PoolOrder{IntentID: intent.ID, Generation: 1, ChainID: d.c.Token.ChainID, Token: d.c.Token.Symbol,
+			TokenDecimals: d.c.Token.Decimals, MidMinor: p.MidMinor.String(), PoolSpreadBps: int(p.Settings.SpreadBps),
+			PoolTakeBps: int(p.Settings.TakeBps), FundingBps: int(p.FundingBps), BandBps: int(p.Settings.BandBps),
+			LPRateMinor: p.LPRateMinor.String(), DisplayRateMinor: p.Quote.DisplayRateMinor.String(),
+			SliceCount: 1, OpenedUnits: p.Quote.AssetUnits.String(), SurplusUnits: "0", FillUnits: &fs, SpreadUnits: &ss}
 		if err := tx.Create(snap).Error; err != nil {
 			return err
 		}
@@ -479,7 +477,7 @@ func (s *ITService) RetryPoolFill(ctx context.Context, adminID, intentID uuid.UU
 		return nil, ErrITOperatorNoteRequired
 	}
 	d := s.poolDesk
-	if !d.vaultMode() {
+	if d == nil {
 		return nil, ErrPoolSettleUnwired
 	}
 	err := withAdvisoryLock(ctx, s.db, poolLockKey(d.ChainKey(), d.TokenSymbol()), "liquidity pool: order lock", func(tx *gorm.DB) error {
@@ -589,7 +587,7 @@ func (s *ITService) claimVault(ctx context.Context, candidate *models.ITIntent, 
 		var p *PoolPrice
 		if !arrival.honoured {
 			var perr error
-			if p, perr = s.poolQuoteAt(locked.Asset, locked.Currency, paid, mid, set, ch, false, nil); perr != nil {
+			if p, perr = s.poolQuoteAt(locked.Asset, locked.Currency, paid, mid, set, ch, false); perr != nil {
 				parkClaim(claim, "could not price at settlement: "+RedactAlertText(perr.Error()))
 				parked = parkReasonOf(perr)
 				res = write(tx)

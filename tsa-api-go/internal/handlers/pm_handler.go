@@ -58,13 +58,6 @@ type PMActivator interface {
 	NeedsIdentity() bool
 }
 
-// LPActivator takes an approved LP live (S34) and says whether LP onboarding
-// is on at all. *services.PMOnboardingService satisfies it.
-type LPActivator interface {
-	ActivateLP(ctx context.Context, pmID, userID uuid.UUID) (*models.PaymentMerchant, error)
-	LiquidityChainID() (int64, bool)
-}
-
 // PMHandler serves the PM operator endpoints (manual-release queue, release
 // action, sell-payout kick, and the read-only PM list) plus the dormant-safe
 // user-facing PM-status read.
@@ -74,21 +67,10 @@ type PMHandler struct {
 	pmStatus  PMStatusGetter // nil when PM stack is unconfigured (dormant)
 	approver  PMApprover     // nil when no fiat provider: approve returns 503
 	activator PMActivator    // nil when no fiat provider: activate returns 503
-	// lpActivator is nil until boot wires LP onboarding; an LP's activation
-	// then 503s liquidity_unavailable and /p2p/pm/me reports no liquidity.
-	lpActivator LPActivator
-	// lpView adds the LP columns to /admin/pm?kind=lp; nil leaves them out.
-	lpView LPAdminViewer
+	// liquidityOn: the shared pool's LP side is wired (/liquidity/activate);
+	// it shows the app's "Provide liquidity" CTA.
+	liquidityOn bool
 }
-
-// LPAdminViewer adds the LP columns to the admin list (spec §20), bounded and
-// deadline-limited (review I7). *services.LiquidityService satisfies it.
-type LPAdminViewer interface {
-	AdminLPViews(ctx context.Context, lps []models.PaymentMerchant) map[uuid.UUID]*services.LPAdminView
-}
-
-// SetLiquidityView wires the LP columns. Pass only a non-nil viewer.
-func (h *PMHandler) SetLiquidityView(v LPAdminViewer) { h.lpView = v }
 
 // NewPMHandler creates a PMHandler backed by the given PMAutomation and an
 // optional PMService for read-only PM list queries and the GetMyPMStatus read.
@@ -109,18 +91,11 @@ func (h *PMHandler) SetApprover(a PMApprover) { h.approver = a }
 // (the default) when no fiat provider is configured, in which case ActivatePM 503s.
 func (h *PMHandler) SetActivator(a PMActivator) { h.activator = a }
 
-// SetLPActivator wires LP activation. Pass only a non-nil service.
-func (h *PMHandler) SetLPActivator(a LPActivator) { h.lpActivator = a }
+// SetLiquidityAvailable says the shared pool's LP side is wired.
+func (h *PMHandler) SetLiquidityAvailable(on bool) { h.liquidityOn = on }
 
-// liquidityAvailable reports whether LP onboarding is on (a pool chain is
-// configured), which gates the app's "Provide liquidity" CTA (O-B5).
-func (h *PMHandler) liquidityAvailable() bool {
-	if h.lpActivator == nil {
-		return false
-	}
-	_, ok := h.lpActivator.LiquidityChainID()
-	return ok
-}
+// liquidityAvailable gates the app's "Provide liquidity" CTA.
+func (h *PMHandler) liquidityAvailable() bool { return h.liquidityOn }
 
 // pmStatusResponse is the JSON payload for GetMyPMStatus. Status is the raw PM
 // status ("pending"|"approved"|"active"|"paused"|"rejected" or "" when none) so
@@ -227,8 +202,6 @@ type pmListItem struct {
 	Kind                    string     `json:"kind"`
 	PoolChainID             *int64     `json:"poolChainId,omitempty"`
 	UserID                  string     `json:"userId"`
-	// LP is set only on the ?kind=lp list (review I7).
-	LP *services.LPAdminView `json:"lp,omitempty"`
 }
 
 // toPMListItem maps a PaymentMerchant to the safe projection. Single source of
@@ -275,17 +248,9 @@ func (h *PMHandler) ListPMs(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load payment merchants")
 		return
 	}
-	// Chain reads only for the LP view (?kind=lp): the default list never
-	// touches the pool RPC (review I7).
-	var views map[uuid.UUID]*services.LPAdminView
-	if kind == models.PaymentMerchantKindLP && h.lpView != nil {
-		views = h.lpView.AdminLPViews(c.Request.Context(), pms)
-	}
 	items := make([]pmListItem, 0, len(pms))
 	for i := range pms {
-		item := toPMListItem(&pms[i])
-		item.LP = views[pms[i].ID]
-		items = append(items, item)
+		items = append(items, toPMListItem(&pms[i]))
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment merchants", items)
 }
@@ -495,7 +460,7 @@ func (h *PMHandler) ActivatePM(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
 		return
 	}
-	if h.pmStatus == nil || (h.activator == nil && h.lpActivator == nil) {
+	if h.pmStatus == nil || h.activator == nil {
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "PM activation unavailable: no fiat provider configured")
 		return
 	}
@@ -526,8 +491,8 @@ func (h *PMHandler) ActivatePM(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusNotFound, "No payment merchant to activate")
 		return
 	}
-	if pm.IsLP() {
-		h.activateLP(c, pm, user.ID)
+	if pm.IsLP() { // the shared pool activates LPs itself (spec 2026-10-14 §5)
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Activate liquidity from the Provide liquidity screen", "use_liquidity_activate")
 		return
 	}
 	if h.activator == nil {
@@ -578,39 +543,6 @@ func (h *PMHandler) ActivatePM(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment merchant activated", toPMListItem(out))
-}
-
-// activateLP maps ActivateLP's outcomes (spec §8.2 step 2). The body is never
-// read: an LP activates with a settlement-name match, never a BVN/NIN.
-func (h *PMHandler) activateLP(c *gin.Context, pm *models.PaymentMerchant, userID uuid.UUID) {
-	if h.lpActivator == nil {
-		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available yet", "liquidity_unavailable")
-		return
-	}
-	out, err := h.lpActivator.ActivateLP(c.Request.Context(), pm.ID, userID)
-	switch {
-	case err == nil:
-		utils.SuccessResponse(c, http.StatusOK, "Liquidity provider activated", toPMListItem(out))
-	case errors.Is(err, services.ErrSettlementNameMismatch):
-		utils.ErrorResponseWithCode(c, http.StatusConflict,
-			"The name on your settlement account doesn't match your verified name. Apply again with an account in your own name.", "settlement_name_mismatch")
-	case errors.Is(err, services.ErrSettlementAccountUnresolved):
-		utils.ErrorResponseWithCode(c, http.StatusBadGateway, "We couldn't verify your settlement account right now. Try again shortly.", "settlement_account_unresolved")
-	case errors.Is(err, services.ErrLiquidityUnavailable):
-		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Providing liquidity isn't available right now", "liquidity_unavailable")
-	case errors.Is(err, services.ErrCompanyUserCannotBeLP):
-		utils.ErrorResponseWithCode(c, http.StatusConflict, "This account can't provide liquidity", services.CompanyAccountNotEligibleCode)
-	case services.KYCRefusalCode(err) != "":
-		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity before activating", services.KYCRefusalCode(err))
-	case errors.Is(err, services.ErrPMNotFound):
-		utils.ErrorResponse(c, http.StatusNotFound, "No liquidity provider profile to activate")
-	case errors.Is(err, services.ErrInvalidPMTransition):
-		utils.ErrorResponse(c, http.StatusConflict, "Your liquidity provider profile is not awaiting activation")
-	default:
-		// err may carry provider text; ActivateLP already redacts its resolve error.
-		log.Printf("[pm handler] ActivateLP pm=%s: %v", pm.ID, err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Activation failed — please try again")
-	}
 }
 
 // RejectPM handles POST /api/admin/pm/:id/reject — declines a pending PM. A

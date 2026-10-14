@@ -75,15 +75,13 @@ func TestPaymentMerchant_KindDefaultsToMerchant(t *testing.T) {
 }
 
 func TestPaymentMerchantKindFor(t *testing.T) {
-	for bt, want := range map[string]string{
-		BusinessTypeP2PMerchant:       PaymentMerchantKindMerchant,
-		BusinessTypeLiquidityProvider: PaymentMerchantKindLP,
-	} {
-		if got, ok := PaymentMerchantKindFor(bt); !ok || got != want {
-			t.Errorf("%s → %q %v, want %q", bt, got, ok, want)
-		}
+	if got, ok := PaymentMerchantKindFor(BusinessTypeP2PMerchant); !ok || got != PaymentMerchantKindMerchant {
+		t.Errorf("p2p_merchant → %q %v", got, ok)
 	}
-	if _, ok := PaymentMerchantKindFor(BusinessTypeGeneralProducts); ok {
-		t.Error("general_products is not a payment-merchant type")
+	// LPs activate on the shared pool itself (spec 2026-10-14 §5), never by request.
+	for _, bt := range []string{BusinessTypeGeneralProducts, BusinessTypeLiquidityProvider} {
+		if _, ok := PaymentMerchantKindFor(bt); ok {
+			t.Errorf("%s is not a payment-merchant request type", bt)
+		}
 	}
 }

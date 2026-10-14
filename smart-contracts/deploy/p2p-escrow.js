@@ -26,7 +26,7 @@ async function wireEscrow(esc, { cfg, tokens, systemWallet, feeManager }) {
 
 // Options (all optional; none given = the behaviour this module always had):
 //   feeManager, deferOwnership, admins, tokens, systemWallet, writeLedgerKey —
-//   see deploy/pool.js, the one caller that sets them.
+//   a caller that wires more before the handover sets them.
 async function deploy(hre, { chain, feeManager, deferOwnership = false, admins, tokens, systemWallet, writeLedgerKey } = {}) {
   const { ethers, upgrades, network } = hre;
   const cfg = chain || resolveChain(hre);

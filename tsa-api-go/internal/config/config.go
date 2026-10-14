@@ -29,12 +29,10 @@ type chainPreset struct {
 	// that disagrees with the on-chain contract makes ecrecover resolve to a
 	// wrong address and rejects every sell-ad signature.
 	eip712Version string
-	// purpose: P2PPurposeP2P (default when empty) or P2PPurposePool (TSA
-	// Liquidity, spec 2026-10-08 S36). assets are the tradeable symbols of an
-	// ordinary row; a pool row trades its pool.tokens.
+	// purpose: P2PPurposeP2P (the default when empty). assets are the row's
+	// tradeable symbols.
 	purpose string
 	assets  []string
-	pool    *poolPreset
 	// Legacy env aliases (Sonic only): an operator hot-fix override of the
 	// escrow, its EIP-712 version and the chain id, kept exactly as before.
 	escrowEnv, versionEnv, chainIDEnv string
@@ -95,11 +93,10 @@ type P2PChainConfig struct {
 	EscrowAddress string
 	EIP712Version string
 	Assets        []string // e.g. ["USDT","USDC"] on Sonic; a pool row's pool tokens
-	// Purpose is P2PPurposeP2P or P2PPurposePool; Network names the
-	// cfg.Networks entry the chain was taken from; Pool is set only for a pool.
+	// Purpose is P2PPurposeP2P; Network names the cfg.Networks entry the chain
+	// was taken from.
 	Purpose string
 	Network string
-	Pool    *PoolChainConfig
 }
 
 // FeeManagerChainConfig is the per-chain FeeManager deployment the configurable-
@@ -620,6 +617,9 @@ type Config struct {
 	// chosen once by assembleP2PChains so every later reader agrees and an
 	// unknown value alerts once (review M4).
 	p2pNetworks map[string]string
+	// LiquidityPoolRow is the shared pool row with a vault, nil when dormant
+	// (liquidity_pool.go). Read it through LiquidityPool().
+	LiquidityPoolRow *LiquidityPoolConfig
 
 	// SonicNetwork records which preset was active for this boot
 	// ("mainnet" or "testnet"). Downstream code that needs to query the
@@ -1543,7 +1543,7 @@ func Load() *Config {
 		log.Fatalf("[config] %v", err)
 	}
 	assembleFeeManagerChains(cfg)
-	if err := checkPoolFeeManagerExcluded(cfg); err != nil {
+	if err := assembleLiquidityPool(cfg, liquidityPoolPresets); err != nil {
 		log.Fatalf("[config] %v", err)
 	}
 	return cfg

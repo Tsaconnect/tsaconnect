@@ -18,7 +18,9 @@ const (
 	BusinessTypeP2PMerchant       = "p2p_merchant"
 	BusinessTypeServiceProvider   = "service_provider"
 	BusinessTypePaymentAcceptance = "payment_acceptance"
-	// BusinessTypeLiquidityProvider applies to provide TSA Liquidity (spec §8.1).
+	// BusinessTypeLiquidityProvider was the slice pool's LP application. The
+	// shared pool activates LPs instantly (spec 2026-10-14 §5); old rows keep
+	// the value, new requests are refused.
 	BusinessTypeLiquidityProvider = "liquidity_provider"
 )
 
@@ -28,7 +30,6 @@ var ValidBusinessTypes = []string{
 	BusinessTypeP2PMerchant,
 	BusinessTypeServiceProvider,
 	BusinessTypePaymentAcceptance,
-	BusinessTypeLiquidityProvider,
 }
 
 // PaymentMerchantKindFor maps a request type to the payment_merchants kind it
@@ -37,8 +38,6 @@ func PaymentMerchantKindFor(businessType string) (kind string, ok bool) {
 	switch businessType {
 	case BusinessTypeP2PMerchant:
 		return PaymentMerchantKindMerchant, true
-	case BusinessTypeLiquidityProvider:
-		return PaymentMerchantKindLP, true
 	}
 	return "", false
 }

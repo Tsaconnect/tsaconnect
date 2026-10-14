@@ -263,46 +263,6 @@ func TestKeyLane_FeeGateFailsClosedOnAnUnpricedTx(t *testing.T) {
 	}
 }
 
-// Owner decision B: the pool's treasury lane keeps back the delivery every
-// earlier pool order is owed. Two orders whose owed treasury calls together
-// exceed the balance: the second open is refused; the first order's owed
-// delivery itself still goes.
-func TestPoolOpen_TreasuryKeepsBackWhatEarlierOrdersAreOwed(t *testing.T) {
-	r := newPoolOpenRig(t)
-	r.addLP(t, 50)
-	r.addLP(t, 50)
-	if _, _, err := r.open(t, "5000"); err != nil {
-		t.Fatalf("first open: %v", err)
-	}
-	tr := r.desk.c.Treasury
-	lane := tr.Lane("bsc")
-	sc := lane.Chain.(*fakeSponsorChain)
-	price := big.NewInt(1_000_000_000)
-	slices := uint64(CurrentPoolSettings().SliceCap + 1)
-	// Enough for the second order's slice opens alone, not for those plus the
-	// first order's owed delivery.
-	sc.balances[strings.ToLower(lane.Signer.Address())] = feeNeed(treasuryEscrowCallGas*slices, price, nil)
-	tr.gasMu.Lock()
-	tr.gasCache = map[string]gasReading{}
-	tr.gasMu.Unlock()
-	if _, _, err := r.open(t, "5000"); !errors.Is(err, ErrPoolClosed) || !strings.Contains(err.Error(), "treasury cannot pay") {
-		t.Fatalf("second open with the first's delivery owed = %v, want ErrPoolClosed (treasury cannot pay)", err)
-	}
-	// The owed delivery itself (an owed call site marks ReservedSend) spends
-	// its reservation: a balance covering its own fee, but not fee +
-	// reservation, still sends it — and the same transfer from a call site
-	// that is NOT owed (a name-change refund) is refused by the reservation.
-	// (+1e6 wei: the slice opens already broadcast and not yet mined.)
-	sc.balances[strings.ToLower(lane.Signer.Address())] = new(big.Int).Add(feeNeed(treasuryERC20Gas, price, nil), big.NewInt(1_000_000))
-	lane.Signer = &fakeRelaySigner{addr: lane.Signer.Address(), txHash: "0xdelivered"} // the rig's chain only signs escrow calls
-	if _, _, err := tr.TransferToken(context.Background(), lane, "USDT", treasuryTestRecipient, big.NewInt(1)); !errors.Is(err, ErrRelayerUnderfunded) {
-		t.Fatalf("a non-owed transfer under the reservation = %v, want refused", err)
-	}
-	if _, _, err := tr.TransferToken(ReservedSend(context.Background()), lane, "USDT", treasuryTestRecipient, big.NewInt(1)); err != nil {
-		t.Fatalf("the owed delivery must go: %v", err)
-	}
-}
-
 // Review item 6: a quote reuses the release-gas reading for a few seconds and,
 // when a read fails (a 429), falls back to a recent one rather than closing.
 func TestPoolGates_ReleaseGasReadingIsReusedAndStaleOnError(t *testing.T) {

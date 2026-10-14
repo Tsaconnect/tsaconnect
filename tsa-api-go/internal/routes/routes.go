@@ -899,11 +899,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			liq.POST("/withdraw/prepare", p2p.PrepareLiquidityWithdraw)
 			liq.POST("/claim/prepare", p2p.PrepareLiquidityClaim)
 			liq.POST("/claim-for", idem, p2p.ClaimLiquidityForMe)
-		} else if p2p.HasLiquidity() {
-			liq := api.Group("/liquidity")
-			liq.Use(auth)
-			liq.GET("/me", p2p.GetLiquidityMe)
-			liq.GET("/me/activity", p2p.ListLiquidityActivity)
 		}
 
 		// Admin dispute resolution — funds-moving, audit-writing. AdminAuth
@@ -1284,12 +1279,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			{
 				lq.GET("/:id", ith.AdminPoolOrder)
 				act := lq.Group("", middleware.RequireSuperAdmin())
-				act.POST("/:id/redeliver", ith.AdminRedeliverPoolBuy)
 				act.POST("/:id/resend", ith.AdminResendPoolBuy)
-				act.POST("/:id/refund-override", ith.AdminRefundPoolBuyOverride)
-				act.POST("/:id/slices/:sliceId/pay-lp", ith.AdminPayPoolSliceLP)
-				act.POST("/:id/slices/:sliceId/returned", ith.AdminNotePoolSliceReturned)
-				act.POST("/:id/slices/:sliceId/clear-release", ith.AdminClearPoolSliceRelease)
 				if ith.VaultPoolEnabled() {
 					act.POST("/:id/retry-fill", ith.AdminRetryPoolFill)
 				}

@@ -47,7 +47,7 @@ type VaultPoolSummary struct {
 
 func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, error) {
 	d := s.poolDesk
-	if !d.vaultMode() {
+	if d == nil {
 		return nil, ErrLiquidityNotVault
 	}
 	st, err := d.c.Vault.State(ctx)
@@ -100,7 +100,7 @@ func (s *ITService) SettlePoolFromCollateral(ctx context.Context, adminID uuid.U
 		return "", ErrITOperatorNoteRequired
 	}
 	d := s.poolDesk
-	if !d.vaultMode() {
+	if d == nil {
 		return "", ErrLiquidityNotVault
 	}
 	n, err := DecimalToBaseUnits(strings.TrimSpace(amount), d.c.Token.Decimals)

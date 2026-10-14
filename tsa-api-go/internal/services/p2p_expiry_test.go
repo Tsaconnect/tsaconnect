@@ -21,126 +21,6 @@ type fixedFresh struct{ at time.Time }
 
 func (f fixedFresh) LastIngestOK() time.Time { return f.at }
 
-// abandoned opens a ₦5,000 order and ages it past the 60-minute escrow window
-// and the honour window + grace + 5 min, unpaid.
-func abandoned(t *testing.T) (*poolOpenRig, *models.ITIntent, models.P2PTrade, *chainCountingSender) {
-	t.Helper()
-	r := newPoolOpenRig(t)
-	r.addLP(t, 50)
-	intent, _, err := r.open(t, "5000")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sender := releaseSender()
-	sender.onSent = r.chain.sent
-	r.trades.SetPoolSlices(r.it, sender)
-	sl := r.slicesOf(t, intent.ID)[0]
-	agePoolSlice(t, r, sl, 61*time.Minute)
-	past := time.Now().Add(-40 * time.Minute)
-	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("rate_expires_at", past)
-	intent.RateExpiresAt = &past
-	return r, intent, sl, sender
-}
-
-func agePoolSlice(t *testing.T, r *poolOpenRig, sl models.P2PTrade, by time.Duration) {
-	t.Helper()
-	at := time.Now().Add(-by)
-	r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Update("created_at", at)
-	r.chain.cmu.Lock()
-	if tr := r.chain.trades[HashID(sl.ID)]; tr != nil {
-		tr.CreatedAt = big.NewInt(at.Unix())
-	}
-	r.chain.cmu.Unlock()
-}
-
-func canceller(r *poolOpenRig, sender ChainSender, fresh StatementFreshness) *ExpiryCanceller {
-	return NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.trades, Signer: sender, Pool: r.it, Fresh: fresh})
-}
-
-// §14 / F4: an unpaid order's slice is cancelled on-chain once the window passed.
-func TestExpiry_CancelsAbandonedPoolSliceAfterWindow(t *testing.T) {
-	r, _, sl, sender := abandoned(t)
-	tick, err := canceller(r, sender, nil).RunOnce(context.Background())
-	if err != nil || tick.Pool != 1 || len(r.chain.cancels) != 1 || sender.direct != 0 {
-		t.Fatalf("tick=%+v err=%v cancels=%d direct=%d", tick, err, len(r.chain.cancels), sender.direct)
-	}
-	var got models.P2PTrade
-	r.db.First(&got, "id = ?", sl.ID)
-	b, _ := r.chain.ReadBalance(r.chain.trades[HashID(sl.ID)].Seller.Hex(), "")
-	if b.Locked.Sign() != 0 || got.DroppedAt == nil {
-		t.Fatalf("dropped=%v locked=%s, want decided and the LP's stock back on-chain", got.DroppedAt, b.Locked)
-	}
-	// Pre-merge review M-6: the canceller only sends. A reconcile right after
-	// the send always ran before the cancel mined; the chain reconciler moves
-	// the row once it has.
-	if got.Status != models.P2PTradeStatusPendingPayment {
-		t.Fatalf("slice=%s right after the send, want the row left to the reconciler", got.Status)
-	}
-	if _, err := r.trades.ReconcileTrade(context.Background(), sl.ID); err != nil {
-		t.Fatal(err)
-	}
-	r.db.First(&got, "id = ?", sl.ID)
-	if got.Status != models.P2PTradeStatusCancelled {
-		t.Fatalf("slice=%s after the reconciler, want cancelled", got.Status)
-	}
-}
-
-// Roadmap risk 6: a paid order's slices are never cancelled.
-func TestExpiry_NeverCancelsPaidPoolSlice(t *testing.T) {
-	r, intent, _, sender := abandoned(t)
-	r.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).Update("status", models.ITStatusPaymentReceived)
-	tick, err := canceller(r, sender, nil).RunOnce(context.Background())
-	if err != nil || tick.Pool != 0 || len(r.chain.cancels) != 0 {
-		t.Fatalf("tick=%+v cancels=%d, want nothing for a paid order", tick, len(r.chain.cancels))
-	}
-}
-
-// M1: a Flutterwave statement outage defers every cancel (P15: both scopes).
-func TestExpiry_DeferredWhileStatementStale(t *testing.T) {
-	r, _, _, sender := abandoned(t)
-	tick, _ := canceller(r, sender, fixedFresh{at: time.Now().Add(-11 * time.Minute)}).RunOnce(context.Background())
-	if !tick.Deferred || len(r.chain.cancels) != 0 {
-		t.Fatalf("stale statement: tick=%+v cancels=%d", tick, len(r.chain.cancels))
-	}
-	tick, _ = canceller(r, sender, fixedFresh{at: time.Now().Add(-30 * time.Second)}).RunOnce(context.Background())
-	if tick.Deferred || tick.Pool != 1 {
-		t.Fatalf("fresh statement: tick=%+v", tick)
-	}
-}
-
-// F3: an opening order older than 2 minutes is cancelled, hidden, and its
-// slices are freed.
-func TestExpiry_SweepsStaleOpening(t *testing.T) {
-	r := newPoolOpenRig(t)
-	_, ad := r.addLP(t, 50)
-	stuck := seedProviderIntent(t, r.it, r.userID, models.ITProviderPool, models.ITStatusOpening)
-	r.db.Model(stuck).Updates(map[string]any{"created_at": time.Now().Add(-3 * time.Minute), "rate_expires_at": nil})
-	sl := seedPoolSlice(t, r.db, sliceSeed{Intent: stuck.ID, Ad: ad, Units: usdt18(3)})
-	tick, err := canceller(r, releaseSender(), nil).RunOnce(context.Background())
-	got := r.intent(t, stuck.ID)
-	var s models.P2PTrade
-	r.db.First(&s, "id = ?", sl.ID)
-	if err != nil || tick.Opening != 1 || got.Status != models.ITStatusCancelled || got.FailureReason != models.ITFailurePoolOpenFailed || s.DroppedAt == nil {
-		t.Fatalf("tick=%+v intent=%s/%s slice dropped=%v", tick, got.Status, got.FailureReason, s.DroppedAt)
-	}
-}
-
-// Roadmap risk 7 / S44: an open that landed after its row was closed is
-// cancelled on-chain after its window; the LP's stock always comes back.
-func TestExpiry_CancelsZombieOpenAfterOrphanReconcile(t *testing.T) {
-	r, _, sl, sender := abandoned(t)
-	r.db.Model(&models.P2PTrade{}).Where("id = ?", sl.ID).Updates(map[string]any{
-		"status": models.P2PTradeStatusCancelled, "cancel_reason": "reconciled_orphan", "updated_at": time.Now()})
-	tick, err := canceller(r, sender, nil).RunOnce(context.Background())
-	if err != nil || tick.Zombies != 1 || len(r.chain.cancels) != 1 {
-		t.Fatalf("tick=%+v err=%v cancels=%d", tick, err, len(r.chain.cancels))
-	}
-	tr, _ := r.chain.ReadTrade(HashID(sl.ID))
-	if tr.Status != OnChainP2PStatusCancelled {
-		t.Fatalf("zombie still %v on-chain", tr.Status)
-	}
-}
-
 // S24 / roadmap risk 9: the legacy scope runs with no pool at all.
 func TestExpiry_LegacyScopeAlwaysOn(t *testing.T) {
 	r := newPoolRig(t)
@@ -169,47 +49,6 @@ func TestExpiry_LegacyNeverTouchesPaidOrDisputed(t *testing.T) {
 	}
 }
 
-// Review M10: an unmined cancelByTimeout is not re-sent every minute.
-func TestExpiry_DoesNotResendWhileTheCancelIsUnmined(t *testing.T) {
-	r, _, _, sender := abandoned(t)
-	r.chain.cancelNoMine = true
-	now := time.Now()
-	ec := canceller(r, sender, nil)
-	ec.c.Now = func() time.Time { return now }
-	ctx := context.Background()
-	ec.RunOnce(ctx)
-	now = now.Add(time.Minute)
-	ec.RunOnce(ctx)
-	if len(r.chain.cancels) != 1 {
-		t.Fatalf("cancels = %d within the back-off, want 1", len(r.chain.cancels))
-	}
-	now = now.Add(expiryResendAfter)
-	ec.RunOnce(ctx)
-	if len(r.chain.cancels) != 2 {
-		t.Fatalf("cancels = %d after the back-off, want a second try", len(r.chain.cancels))
-	}
-}
-
-// Review I1: a full page of rows the canceller cannot act on (opens that
-// never landed, waiting for S44) does not starve the rows behind it.
-func TestExpiry_PagesPastRowsItCannotCancel(t *testing.T) {
-	r, _, _, sender := abandoned(t)
-	_, ad := r.addLP(t, 50)
-	old := time.Now().Add(-3 * time.Hour)
-	for i := 0; i < expiryScanLimit; i++ {
-		seedPoolSlice(t, r.db, sliceSeed{Intent: uuid.New(), Ad: ad, Units: usdt18(1), Dropped: true,
-			CreatedAt: old.Add(time.Duration(i) * time.Millisecond)}) // not on-chain
-	}
-	ec := canceller(r, sender, nil)
-	ctx := context.Background()
-	if tick, _ := ec.RunOnce(ctx); tick.Pool != 0 {
-		t.Fatalf("first page = %+v, want only the unopened rows", tick)
-	}
-	if tick, _ := ec.RunOnce(ctx); tick.Pool != 1 {
-		t.Fatalf("second page = %+v, want the abandoned slice cancelled", tick)
-	}
-}
-
 func TestExpiry_AtMost20PerChainPerTick(t *testing.T) {
 	r := newPoolRig(t)
 	sender := releaseSender()
@@ -220,28 +59,6 @@ func TestExpiry_AtMost20PerChainPerTick(t *testing.T) {
 	tick, _ := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: sender}).RunOnce(context.Background())
 	if tick.Legacy != 20 || len(sender.sendChains) != 20 {
 		t.Fatalf("tick=%+v sends=%d, want 20", tick, len(sender.sendChains))
-	}
-}
-
-// S46: the incident stop closes quotes and opens; claims and expiry keep running.
-func TestPoolSettings_OrderMaxZeroClosesQuotesKeepsSettlement(t *testing.T) {
-	r, intent, _, sender := abandoned(t)
-	stopped := specPoolSettings()
-	stopped.OrdersStopped, stopped.OrderMaxUnits = true, new(big.Int)
-	if _, err := r.it.QuotePoolBuy(context.Background(), "USDT", "5000", "NGN", poolMid, stopped); err == nil {
-		t.Fatal("quote while stopped")
-	}
-	if tick, _ := canceller(r, sender, nil).RunOnce(context.Background()); tick.Pool != 1 {
-		t.Fatalf("expiry stopped with the orders: %+v", tick)
-	}
-	r2 := newPoolOpenRig(t)
-	r2.addLP(t, 50)
-	paid, _, err := r2.open(t, "5000")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := r2.it.claimAndPriceStableBuy(context.Background(), paid, "sess_stop", paid.AmountMinor, time.Now(), false, PayInCentral); !ok || err != nil {
-		t.Fatalf("claim while stopped: %v %v (order %s)", ok, err, intent.ID)
 	}
 }
 
@@ -591,5 +408,28 @@ func TestExpiry_LegacyCancelAlertsAMatchingHeldCredit(t *testing.T) {
 		!strings.Contains(out, "trade="+r.trade.ID.String()) || !strings.Contains(out, "credit="+held.ID.String()) ||
 		strings.Contains(out, other.ID.String()) || strings.Contains(out, "JOHN DOE") {
 		t.Fatalf("want one alert linking the trade to the held credit, no name:\n%s", out)
+	}
+}
+
+// Review M10: an unmined cancelByTimeout is not re-sent every minute.
+func TestExpiry_DoesNotResendWhileTheCancelIsUnmined(t *testing.T) {
+	r := newPoolRig(t)
+	sender := releaseSender()
+	created := time.Now().Add(-61 * time.Minute)
+	legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-31*time.Minute))
+	r.sonic.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, CreatedAt: big.NewInt(created.Unix())}
+	now := time.Now()
+	ec := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: sender, Now: func() time.Time { return now }})
+	ctx := context.Background()
+	ec.RunOnce(ctx)
+	now = now.Add(time.Minute)
+	ec.RunOnce(ctx)
+	if len(sender.sendChains) != 1 {
+		t.Fatalf("sends = %d within the back-off, want 1", len(sender.sendChains))
+	}
+	now = now.Add(expiryResendAfter)
+	ec.RunOnce(ctx)
+	if len(sender.sendChains) != 2 {
+		t.Fatalf("sends = %d after the back-off, want a second try", len(sender.sendChains))
 	}
 }

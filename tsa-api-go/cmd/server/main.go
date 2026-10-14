@@ -502,9 +502,6 @@ func main() {
 	// (eth_chainId + bytecode per chain) runs inside the constructor. The trade
 	// service resolves escrow + EIP-712 domain per entity-chain from this registry.
 	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg)
-	if err := checkPoolUnconfigure(config.DB, cfg, p2pEscrowRegistry); err != nil {
-		fatalf("[config] REFUSING TO START: %v", err)
-	}
 
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
@@ -1278,7 +1275,6 @@ func main() {
 	var pmOnboarding *services.PMOnboardingService
 	if prov := pmProvisioner(cfg, fwClient, fwCustomerID, nombaClient); prov != nil {
 		pmOnboarding = services.NewPMOnboardingService(config.DB, prov)
-		pmOnboarding.SetCompanyPMID(cfg.ITPMID)
 		mrh.PMOnboarding = pmOnboarding
 		log.Printf("[pm] onboarding service ready (provider=%s)", cfg.ResolveFiatProvider())
 	} else {
@@ -1549,9 +1545,6 @@ func main() {
 			settlementForwarder.SetFeeReader(fwClient)      // S47: the actual payout fee, once per settled forward
 			settlementForwarder.SetTransferLookup(fwClient) // review I-1: a started forward is looked up before any re-ask
 		}
-		if itService != nil {
-			settlementForwarder.SetOnSettled(itService.PoolForwardSettled) // a no-op for every non-pool forward
-		}
 		if itHandler != nil {
 			itHandler.SetForwardRechecker(settlementForwarder) // re-review I-D: the operator recheck, every forward
 		}
@@ -1565,9 +1558,6 @@ func main() {
 		// is credited and forwarded to; see inbound_claim_p2p.go.
 		p2pClaims := services.NewP2PTradeClaimSource(config.DB, pmSvc, p2pTradeSvc, releaseSigner)
 		p2pClaims.SetForwarder(settlementForwarder)
-		if itService != nil {
-			itService.SetPoolForwards(p2pClaims) // the pool pays its LPs through the same forwarder (review I-4)
-		}
 		registerInboundClaim(services.InboundClaimTypeP2PTrade, p2pClaims)
 		// Read below to decide whether P2P buyers may be sent to the company
 		// account at all. Set from the registration itself, never from the
@@ -1762,7 +1752,7 @@ func main() {
 		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
 		wireConvertedBuys(itService, rampTreasury, blockchainService, cfg, paycrestQuotes)
 		// TSA Liquidity before the router: the pool provider needs its desk.
-		pool = wirePoolOrders(cfg, blockchainService, p2pEscrowRegistry, p2pTradeSvc, pmSvc, releaseSigner, itService, rampTreasury)
+		pool = wirePoolOrders(cfg, blockchainService, releaseSigner, itService, rampTreasury)
 		// The ramp router (Paycrest is its only provider today) answers the
 		// hub's legs and serves /api/ramp/*. Without an order service there
 		// is nothing to route, and the legs come straight from the quotes.
@@ -1895,16 +1885,14 @@ func main() {
 		log.Printf("[paycrest] dormant — set PAYCREST_API_KEY to enable")
 	}
 
-	// TSA Liquidity (spec 2026-10-08): the pool chain's treasury lane, boot
-	// gates and order desk, all built by wirePoolOrders — inside the Paycrest
-	// block when Paycrest is on (the router needs the desk), here otherwise:
-	// LP flows and the canceller need the pool either way (review I6). Dormant
-	// unless a preset row carries a pool escrow; the desk (and its settle job)
-	// only with the release key and the P2P settlement forwarder. All of
-	// it runs before scheduler.Start: poolTreasuryFor may set EscrowCalls on
-	// the shared conversion lane in place, and the gates are checked once.
+	// The shared liquidity pool (spec 2026-10-14): the pool chain's treasury
+	// lane, gates, order desk and ledger, all built by wirePoolOrders — inside
+	// the Paycrest block when Paycrest is on (the router needs the desk), here
+	// otherwise. Dormant unless the pool row names a vault; the desk only with
+	// the operator key. All of it runs before scheduler.Start: the gates are
+	// checked once at boot.
 	if pool == nil {
-		pool = wirePoolOrders(cfg, blockchainService, p2pEscrowRegistry, p2pTradeSvc, pmSvc, releaseSigner, itService, rampTreasury)
+		pool = wirePoolOrders(cfg, blockchainService, releaseSigner, itService, rampTreasury)
 	}
 	poolGates := pool.gates
 	registerPoolJobs(scheduler, poolGates)
@@ -1920,17 +1908,14 @@ func main() {
 	// The expiry canceller (§14) runs whether or not the pool exists: it also
 	// cancels expired ordinary P2P trades. A tick defers while the
 	// central-account statement is stale.
-	registerExpiryCanceller(scheduler, p2pTradeSvc, releaseSigner, itService, statementFreshness(inboundPoller), poolAlerts)
+	registerExpiryCanceller(scheduler, p2pTradeSvc, releaseSigner, statementFreshness(inboundPoller), poolAlerts)
 
 	// TSA Liquidity plan B: LP onboarding, the /liquidity reads and the voucher
 	// renewal job, live only with a pool chain (prod stays dormant until the
 	// BSC mainnet row is filled). bankDirectory is an interface value (nil when
 	// dormant, never a typed nil); pmOnboarding is its final value here — the
 	// central-inbound block above may have built it.
-	liquidity := wireLiquidity(config.DB, pmSvc, p2pEscrowRegistry, p2pTradeSvc, poolGates,
-		blockchainService.TokenAddressForChainID, poolChainName(cfg), pmOnboarding, bankDirectory)
-	attachLiquidity(liquidity, p2pHandler, pmh, pmOnboarding, p2pTradeSvc, scheduler)
-	attachVaultLiquidity(wireVaultLiquidity(cfg, blockchainService, p2pEscrowRegistry, pmSvc, releaseSigner, poolGates), p2pHandler, scheduler)
+	attachVaultLiquidity(wireVaultLiquidity(cfg, blockchainService, pmSvc, releaseSigner, poolGates), p2pHandler, pmh, scheduler)
 
 	if treasuryRates == nil { // Paycrest off: Flutterwave mid against the FX feed
 		treasuryRates = wireTreasuryMarketRate(itService, nil, cfg.RampTreasuryRateTolBps)

@@ -23,24 +23,19 @@ type PoolChainReader interface {
 	SuggestGasPrice(ctx context.Context) (*big.Int, error)
 }
 
-// PoolChainGatesConfig is everything the TSA Liquidity boot gates read
-// (spec 2026-10-08 §6.2).
+// PoolChainGatesConfig is everything the shared pool's gates read (spec
+// 2026-10-14 §4; the money guards behind the configuration switch).
 type PoolChainGatesConfig struct {
-	ChainID             int64
-	ChainKey, Network   string
-	Escrow, FeeManager  string
-	Tokens              map[string]string // pool token symbol → address
-	Decimals            map[string]int    // as the registry read them on-chain
-	ReleaseAdmin        string            // the release signer's address; "" = no release key
-	ReleaseGasFloorWei  *big.Int
-	Chain               PoolChainReader
-	Receipts            RawRPCCaller
-	TreasuryLane        *TreasuryLane // the conversion treasury's lane on this chain
-	CompanyPM           func(ctx context.Context) error
-	MinPaymentWindowSec uint64
-	// Vault set: the shared pool (spec 2026-10-14). Its gates replace the
-	// escrow's (fee invariant, payment window, escrow admin, company PM).
-	Vault string
+	ChainID            int64
+	ChainKey, Network  string
+	Vault              string
+	Tokens             map[string]string // pool token symbol → address
+	Decimals           map[string]int    // read on-chain at boot
+	ReleaseAdmin       string            // the operator's address; "" = no operator key
+	ReleaseGasFloorWei *big.Int
+	Chain              PoolChainReader
+	Receipts           RawRPCCaller
+	TreasuryLane       *TreasuryLane // the conversion treasury's lane on this chain
 }
 
 type PoolGateStatus struct {
@@ -142,74 +137,26 @@ func (g *PoolChainGates) Close(reason string) {
 // receipts included (S38).
 func (g *PoolChainGates) ReprobeReceipts(ctx context.Context) { g.Check(ctx) }
 
-// Check runs §6.2 gates 1–7 plus the payment-window floor (plan P13).
+// Check runs every gate: a chain client, the vault's wiring, decimals and
+// receipts. Any failure keeps the pool closed (ALERT logged).
 func (g *PoolChainGates) Check(ctx context.Context) PoolGateStatus {
 	if g == nil {
 		return g.Status()
 	}
 	var fails []string
 	fail := func(gate, reason string) { fails = append(fails, gate+": "+RedactAlertText(reason)) }
-
-	// Every gate below reads the chain, so without a client the pool is closed
-	// now. The client, the release signer's lane and the token decimals are
-	// all dialled once at boot, so this stays closed until a restart: opening
-	// on a later client would take orders the release key cannot send on.
+	// Without a client the pool is closed until a restart dials one: the
+	// operator's lane and the token decimals are dialled once at boot.
 	if g.c.Chain == nil {
 		fail("bytecode", "no chain client on "+g.c.ChainKey+" (fix the RPC, then restart)")
 		return g.record(fails)
 	}
-	if g.c.Vault != "" {
-		g.vaultGates(ctx, fail)
-		g.commonGates(ctx, fail)
-		return g.record(fails)
-	}
-	// 1. Bytecode.
-	for _, c := range []struct{ label, addr string }{{"escrow", g.c.Escrow}, {"fee_manager", g.c.FeeManager}} {
-		code, err := g.c.Chain.CodeAt(ctx, common.HexToAddress(c.addr), nil)
-		switch {
-		case err != nil:
-			fail("bytecode", c.label+" unreadable: "+err.Error())
-		case len(code) == 0:
-			fail("bytecode", c.label+" has no code at "+c.addr)
-		}
-	}
-	// 2. Fee invariant (S2, M7).
-	if reason := g.feeInvariant(ctx); reason != "" {
-		fail("fee_invariant", reason)
-		log.Printf("[liquidity] ALERT liquidity_pool_fee_invariant_broken chain=%s reason=%q", g.c.ChainKey, RedactAlertText(reason))
-	}
-	// Payment window ≥ honour window + grace + release margin (S3, M4).
-	if vals, err := callP2PView(ctx, g.c.Chain, g.c.Escrow, "paymentWindow"); err != nil {
-		fail("payment_window", "unreadable: "+err.Error())
-	} else if w, err := paymentWindowOf(vals); err != nil {
-		fail("payment_window", err.Error())
-	} else if w < time.Duration(g.c.MinPaymentWindowSec)*time.Second {
-		fail("payment_window", fmt.Sprintf("paymentWindow() is %s, below %d s", w, g.c.MinPaymentWindowSec))
-	}
-	// 3. The release EOA is an escrow admin.
-	if g.c.ReleaseAdmin == "" {
-		fail("release_admin", "no release key (PM_RELEASE_PRIVATE_KEY)")
-	} else if vals, err := callP2PView(ctx, g.c.Chain, g.c.Escrow, "isAdmin", common.HexToAddress(g.c.ReleaseAdmin)); err != nil {
-		fail("release_admin", "unreadable: "+err.Error())
-	} else if ok, _ := vals[0].(bool); !ok {
-		fail("release_admin", g.c.ReleaseAdmin+" is not an escrow admin")
-	}
-	// 4. The conversion treasury's lane (S21).
-	if reason := g.treasuryLane(); reason != "" {
-		fail("treasury_lane", reason)
-	}
+	g.vaultGates(ctx, fail)
 	g.commonGates(ctx, fail)
-	// 7. IT_PM_ID is an active PM (the slice buyer identity, S10).
-	if g.c.CompanyPM == nil {
-		fail("company_pm", "no check wired")
-	} else if err := g.c.CompanyPM(ctx); err != nil {
-		fail("company_pm", err.Error())
-	}
 	return g.record(fails)
 }
 
-// commonGates are the gates every pool kind shares: token decimals read
-// on-chain (S6, S7) and receipts (S38).
+// commonGates: token decimals read on-chain and receipts readable.
 func (g *PoolChainGates) commonGates(ctx context.Context, fail func(gate, reason string)) {
 	// 5. Decimals ≥ 6, read on-chain (S6, S7).
 	for _, sym := range slices.Sorted(maps.Keys(g.c.Tokens)) {
@@ -306,59 +253,6 @@ func (g *PoolChainGates) record(fails []string) PoolGateStatus {
 	return st
 }
 
-func (g *PoolChainGates) feeInvariant(ctx context.Context) string {
-	if len(g.c.Tokens) == 0 {
-		return "no pool tokens configured, so the zero fee cannot be proven"
-	}
-	for _, sym := range slices.Sorted(maps.Keys(g.c.Tokens)) {
-		for _, feature := range []string{"p2p_platform", "p2p"} {
-			row, err := readEscrowFeeRow(ctx, g.c.Chain, g.c.Escrow, g.c.Tokens[sym], feature)
-			switch {
-			case err != nil:
-				return fmt.Sprintf("%s/%s unreadable: %s", feature, sym, err.Error())
-			case row.noFeeManager || !strings.EqualFold(row.feeManager.Hex(), g.c.FeeManager):
-				return fmt.Sprintf("escrow.feeManager() is %s, not the preset %s", row.feeManager.Hex(), g.c.FeeManager)
-			case !row.active || row.bps != 0:
-				return fmt.Sprintf("%s/%s is (bps %d, active %t); the pool needs (0, active)", feature, row.symbol, row.bps, row.active)
-			}
-		}
-	}
-	vals, err := callP2PView(ctx, g.c.Chain, g.c.Escrow, "feeBps")
-	if err != nil {
-		return "feeBps() unreadable: " + err.Error()
-	}
-	if bps, _ := vals[0].(uint16); bps != 0 {
-		return fmt.Sprintf("legacy feeBps() is %d, want 0", bps)
-	}
-	return ""
-}
-
-func (g *PoolChainGates) treasuryLane() string {
-	l := g.c.TreasuryLane
-	if l == nil || l.SponsorLane == nil {
-		return "no conversion-treasury lane on " + g.c.ChainKey
-	}
-	escrow := common.HexToAddress(g.c.Escrow)
-	for _, r := range l.Routers {
-		if r == escrow {
-			return "the pool escrow is on the lane's LiFi router allowlist"
-		}
-	}
-	allowed := false
-	for _, a := range l.EscrowCalls {
-		allowed = allowed || a == escrow
-	}
-	if !allowed {
-		return "the lane's EscrowCalls does not list the pool escrow"
-	}
-	for _, sym := range slices.Sorted(maps.Keys(g.c.Tokens)) {
-		if !strings.EqualFold(l.Tokens[sym], g.c.Tokens[sym]) {
-			return "the lane does not hold " + sym + " at " + g.c.Tokens[sym]
-		}
-	}
-	return ""
-}
-
 // Enabled / FloatBalances make the gates the GasFloatMonitor reader for the
 // release EOA on the pool chain (spec §4.4, F11).
 func (g *PoolChainGates) Enabled() bool {
@@ -381,9 +275,8 @@ func (g *PoolChainGates) FloatBalances(ctx context.Context) ([]SponsorFloat, err
 	return []SponsorFloat{{Chain: g.c.ChainKey, Address: g.c.ReleaseAdmin, BalanceWei: bal, FloorWei: g.c.ReleaseGasFloorWei}}, nil
 }
 
-// poolReleaseCallGas budgets one adminRelease of a slice from the release key:
-// the same allowance the treasury makes for one escrow call.
-const poolReleaseCallGas = treasuryEscrowCallGas
+// poolReleaseCallGas budgets one operator call on the pool chain (a fill).
+const poolReleaseCallGas uint64 = 300_000
 
 // ReleaseGasOK: paid orders must always be able to release, so a pool open is
 // refused unless the release key can pay for `releases` release-key calls — the

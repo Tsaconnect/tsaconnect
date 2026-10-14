@@ -13,17 +13,19 @@ import (
 )
 
 const (
-	gateAdmin = "0x00000000000000000000000000000000000AD000"
-	gateUSDT  = "0x55d398326f99059fF775485246999027B3197955"
+	gateAdmin    = "0x00000000000000000000000000000000000AD000"
+	gateUSDT     = "0x55d398326f99059fF775485246999027B3197955"
+	gateVault    = "0x00000000000000000000000000000000000BA017"
+	gateTreasury = "0x7E5a000000000000000000000000000000000001"
 )
 
-// fakePoolChain answers the P2P escrow views on top of fakeEscrowChain's
-// feeManager/tokenSymbol/rateFor.
+// fakePoolChain answers the vault's views (token, operators, recipient,
+// paused), bytecode and the operator's balance.
 type fakePoolChain struct {
-	fakeEscrowChain
-	feeBps     uint16
-	window     int64
-	admins     map[common.Address]bool
+	token      common.Address
+	operators  map[common.Address]bool
+	recipients map[common.Address]bool
+	paused     bool
 	noCode     map[common.Address]bool
 	balance    *big.Int
 	balanceErr error
@@ -37,19 +39,24 @@ func (f *fakePoolChain) SuggestGasPrice(context.Context) (*big.Int, error) {
 	return f.gasPrice, nil
 }
 
-func (f *fakePoolChain) CallContract(ctx context.Context, call ethereum.CallMsg, n *big.Int) ([]byte, error) {
-	m := parsedP2PEscrowABI.Methods
+func (f *fakePoolChain) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
+	m := parsedLiquidityVaultABI.Methods
 	sel := call.Data[:4]
-	switch {
-	case bytes.Equal(sel, m["feeBps"].ID):
-		return m["feeBps"].Outputs.Pack(f.feeBps)
-	case bytes.Equal(sel, m["paymentWindow"].ID):
-		return m["paymentWindow"].Outputs.Pack(big.NewInt(f.window))
-	case bytes.Equal(sel, m["isAdmin"].ID):
-		args, _ := m["isAdmin"].Inputs.Unpack(call.Data[4:])
-		return m["isAdmin"].Outputs.Pack(f.admins[args[0].(common.Address)])
+	arg := func(name string) common.Address {
+		args, _ := m[name].Inputs.Unpack(call.Data[4:])
+		return args[0].(common.Address)
 	}
-	return f.fakeEscrowChain.CallContract(ctx, call, n)
+	switch {
+	case bytes.Equal(sel, m["token"].ID):
+		return m["token"].Outputs.Pack(f.token)
+	case bytes.Equal(sel, m["operators"].ID):
+		return m["operators"].Outputs.Pack(f.operators[arg("operators")])
+	case bytes.Equal(sel, m["recipient"].ID):
+		return m["recipient"].Outputs.Pack(f.recipients[arg("recipient")])
+	case bytes.Equal(sel, m["paused"].ID):
+		return m["paused"].Outputs.Pack(f.paused)
+	}
+	return nil, errors.New("fakePoolChain: unexpected call")
 }
 func (f *fakePoolChain) CodeAt(_ context.Context, a common.Address, _ *big.Int) ([]byte, error) {
 	if f.noCode[a] {
@@ -62,26 +69,28 @@ func (f *fakePoolChain) BalanceAt(context.Context, common.Address, *big.Int) (*b
 }
 
 func healthyPoolChain() *fakePoolChain {
-	esc := withFeeManager(map[string][4]interface{}{
-		"p2p_platform": {uint16(0), uint64(0), false, true},
-		"p2p":          {uint16(0), uint64(0), false, true},
-	})
-	esc.symbol = "USDT"
-	return &fakePoolChain{fakeEscrowChain: esc, window: 3600,
-		admins: map[common.Address]bool{common.HexToAddress(gateAdmin): true}, balance: big.NewInt(5e16)}
+	return &fakePoolChain{token: common.HexToAddress(gateUSDT),
+		operators:  map[common.Address]bool{common.HexToAddress(gateAdmin): true},
+		recipients: map[common.Address]bool{common.HexToAddress(gateTreasury): true},
+		noCode:     map[common.Address]bool{}, balance: big.NewInt(5e16)}
+}
+
+type gateSigner struct{}
+
+func (gateSigner) Address() string { return gateTreasury }
+func (gateSigner) SignAndBroadcast(context.Context, []byte) (string, error) {
+	return "", errors.New("unused")
 }
 
 func healthyGates(chain *fakePoolChain) PoolChainGatesConfig {
 	withTx := map[string]map[string]any{"latest": {"number": "0x10", "transactions": []string{"0xaa"}}}
 	return PoolChainGatesConfig{
-		ChainID: 56, ChainKey: "bsc", Network: "mainnet", Escrow: testEscrow, FeeManager: testFeeManager,
+		ChainID: 56, ChainKey: "bsc", Network: "mainnet", Vault: gateVault,
 		Tokens: map[string]string{"USDT": gateUSDT}, Decimals: map[string]int{"USDT": 18},
 		ReleaseAdmin: gateAdmin, ReleaseGasFloorWei: big.NewInt(1e16), Chain: chain,
 		Receipts: &fakeRawRPC{blocks: withTx, receipt: `{"status":"0x1"}`},
-		TreasuryLane: &TreasuryLane{SponsorLane: &SponsorLane{ChainKey: "bsc", Tokens: map[string]string{"USDT": gateUSDT}},
-			ChainID: 56, EscrowCalls: []common.Address{common.HexToAddress(testEscrow)}},
-		CompanyPM:           func(context.Context) error { return nil },
-		MinPaymentWindowSec: 3600,
+		TreasuryLane: &TreasuryLane{SponsorLane: &SponsorLane{ChainKey: "bsc", Signer: gateSigner{},
+			Tokens: map[string]string{"USDT": gateUSDT}}, ChainID: 56},
 	}
 }
 
@@ -108,69 +117,6 @@ func assertClosedBy(t *testing.T, cfg PoolChainGatesConfig, gate string) {
 	t.Fatalf("failures = %v, want one from gate %q", st.Failures, gate)
 }
 
-// Review Focus 4: an inactive row falls back to legacy feeBps on-chain (S2).
-func TestPoolGates_InactiveFeeRowClosesPool(t *testing.T) {
-	c := healthyPoolChain()
-	c.rates["p2p"] = [4]interface{}{uint16(0), uint64(0), false, false}
-	assertClosedBy(t, healthyGates(c), "fee_invariant")
-}
-
-func TestPoolGates_NonZeroLegacyFeeBpsClosesPool(t *testing.T) {
-	c := healthyPoolChain()
-	c.feeBps = 50
-	assertClosedBy(t, healthyGates(c), "fee_invariant")
-}
-
-func TestPoolGates_NonZeroRowClosesPool(t *testing.T) {
-	c := healthyPoolChain()
-	c.rates["p2p_platform"] = [4]interface{}{uint16(100), uint64(0), false, true}
-	assertClosedBy(t, healthyGates(c), "fee_invariant")
-}
-
-func TestPoolGates_WrongFeeManagerClosesPool(t *testing.T) {
-	cfg := healthyGates(healthyPoolChain())
-	cfg.FeeManager = "0x00000000000000000000000000000000000FEE99"
-	assertClosedBy(t, cfg, "fee_invariant")
-}
-
-func TestPoolGates_MissingBytecodeClosesPool(t *testing.T) {
-	c := healthyPoolChain()
-	c.noCode = map[common.Address]bool{common.HexToAddress(testFeeManager): true}
-	assertClosedBy(t, healthyGates(c), "bytecode")
-}
-
-func TestPoolGates_ShortPaymentWindowClosesPool(t *testing.T) {
-	c := healthyPoolChain()
-	c.window = 1800
-	assertClosedBy(t, healthyGates(c), "payment_window")
-}
-
-func TestPoolGates_ReleaseKeyNotAdminClosesPool(t *testing.T) {
-	cfg := healthyGates(healthyPoolChain())
-	cfg.ReleaseAdmin = "0x00000000000000000000000000000000000BAD00"
-	assertClosedBy(t, cfg, "release_admin")
-	cfg.ReleaseAdmin = ""
-	assertClosedBy(t, cfg, "release_admin")
-}
-
-func TestPoolGates_TreasuryLaneGate(t *testing.T) {
-	cfg := healthyGates(healthyPoolChain())
-	cfg.TreasuryLane = nil
-	assertClosedBy(t, cfg, "treasury_lane")
-
-	cfg = healthyGates(healthyPoolChain())
-	cfg.TreasuryLane.EscrowCalls = nil
-	assertClosedBy(t, cfg, "treasury_lane")
-
-	cfg = healthyGates(healthyPoolChain())
-	cfg.TreasuryLane.Routers = []common.Address{common.HexToAddress(testEscrow)} // a LiFi route could call it
-	assertClosedBy(t, cfg, "treasury_lane")
-
-	cfg = healthyGates(healthyPoolChain())
-	cfg.TreasuryLane.SponsorLane.Tokens = map[string]string{}
-	assertClosedBy(t, cfg, "treasury_lane")
-}
-
 func TestPoolGates_DecimalsGate(t *testing.T) {
 	cfg := healthyGates(healthyPoolChain())
 	cfg.Decimals = map[string]int{} // dropped by the registry (unreadable)
@@ -192,12 +138,6 @@ func TestPoolGates_ReceiptsUnreadableClosesPoolAndReprobeReopens(t *testing.T) {
 	if !g.Open() {
 		t.Fatalf("a passing re-probe must reopen: %+v", g.Status())
 	}
-}
-
-func TestPoolGates_CompanyPMGate(t *testing.T) {
-	cfg := healthyGates(healthyPoolChain())
-	cfg.CompanyPM = func(context.Context) error { return errors.New("IT_PM_ID is not an active payment merchant") }
-	assertClosedBy(t, cfg, "company_pm")
 }
 
 func TestPoolGates_CloseLatchesUntilRestart(t *testing.T) {
@@ -246,10 +186,6 @@ func TestPoolGates_MissingChainOrTokensFailsClosed(t *testing.T) {
 		t.Fatal("no chain client: release gas must not read as OK")
 	}
 
-	cfg = healthyGates(healthyPoolChain())
-	cfg.Tokens = nil
-	assertClosedBy(t, cfg, "fee_invariant")
-
 	g := NewPoolChainGates(healthyGates(healthyPoolChain()))
 	g.Check(context.Background())
 	g.Close("")
@@ -293,4 +229,41 @@ func TestPoolGates_FloatBalancesRedactsTheRPCError(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "SECRETKEY123") {
 		t.Fatalf("err = %v, want the RPC URL redacted", err)
 	}
+}
+
+func TestPoolGates_VaultWiring(t *testing.T) {
+	c := healthyPoolChain()
+	c.noCode[common.HexToAddress(gateVault)] = true
+	assertClosedBy(t, healthyGates(c), "bytecode")
+
+	c = healthyPoolChain()
+	c.token = common.HexToAddress("0x00000000000000000000000000000000000000ee")
+	assertClosedBy(t, healthyGates(c), "vault")
+
+	c = healthyPoolChain()
+	c.recipients = map[common.Address]bool{}
+	assertClosedBy(t, healthyGates(c), "vault")
+
+	c = healthyPoolChain()
+	c.paused = true
+	assertClosedBy(t, healthyGates(c), "vault")
+}
+
+// The operator key must be one of the vault's operators.
+func TestPoolGates_OperatorGate(t *testing.T) {
+	cfg := healthyGates(healthyPoolChain())
+	cfg.ReleaseAdmin = "0x00000000000000000000000000000000000BAD00"
+	assertClosedBy(t, cfg, "release_admin")
+	cfg.ReleaseAdmin = ""
+	assertClosedBy(t, cfg, "release_admin")
+}
+
+func TestPoolGates_TreasuryLaneGate(t *testing.T) {
+	cfg := healthyGates(healthyPoolChain())
+	cfg.TreasuryLane = nil
+	assertClosedBy(t, cfg, "treasury_lane")
+
+	cfg = healthyGates(healthyPoolChain())
+	cfg.TreasuryLane.SponsorLane.Tokens = map[string]string{}
+	assertClosedBy(t, cfg, "treasury_lane")
 }
