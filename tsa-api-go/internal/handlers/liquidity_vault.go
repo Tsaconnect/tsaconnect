@@ -41,9 +41,13 @@ func vaultLPError(c *gin.Context, err error) bool {
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, "The company account cannot provide liquidity", services.CompanyAccountNotEligibleCode)
 	case errors.Is(err, services.ErrLPPausedByAdmin):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "liquidity_paused")
+	case errors.Is(err, services.ErrLPWalletInUse):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "wallet_in_use")
+	case errors.Is(err, services.ErrLPWalletMismatch):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "liquidity_wallet_changed")
 	case errors.Is(err, services.ErrLPNotAllowedYet):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "depositor_pending")
-	case errors.Is(err, services.ErrLPAmount), errors.Is(err, services.ErrLPClaimTooSmall), errors.Is(err, services.ErrLPWalletMismatch):
+	case errors.Is(err, services.ErrLPAmount), errors.Is(err, services.ErrLPClaimTooSmall):
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, services.ErrLPClaimRateLimit):
 		utils.ErrorResponse(c, http.StatusTooManyRequests, err.Error())

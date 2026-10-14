@@ -150,10 +150,19 @@ func newLPWallet() string { u := uuid.New(); return common.BytesToAddress(u[:]).
 func (r *lpRig) activeLP(t *testing.T) (uuid.UUID, string) {
 	t.Helper()
 	user, wallet := seedVerifiedUser(t, r.db), newLPWallet()
+	r.link(t, user, wallet)
 	if _, err := r.svc.Activate(context.Background(), user, wallet); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
 	return user, wallet
+}
+
+// link is the account's proven wallet, as the handler passes it.
+func (r *lpRig) link(t *testing.T, user uuid.UUID, wallet string) {
+	t.Helper()
+	if err := r.db.Exec("UPDATE users SET wallet_address = ? WHERE id = ?", wallet, user).Error; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Spec §5: a KYC-verified user is an LP at once — row active, wallet
@@ -343,5 +352,39 @@ func TestVaultLP_MeShowsPositionShareAndEarned(t *testing.T) {
 	if me.Mode != "vault" || me.Status != LiquidityStatusActive || !me.Allowed || me.SharePercent != "25.00" ||
 		me.Principal != "10" || me.Claimable != "1" || me.Earned != "1" || me.Pool == nil || me.Pool.Outstanding != "50" {
 		t.Fatalf("me = %+v pool = %+v", me, me.Pool)
+	}
+}
+
+// One vault position, one account: a wallet already backing another LP is
+// refused, so no account reads or gas-free claims another's position.
+func TestVaultLP_WalletBacksOneAccountOnly(t *testing.T) {
+	r := newLPRig(t)
+	_, wallet := r.activeLP(t)
+	other := seedVerifiedUser(t, r.db)
+	r.link(t, other, wallet)
+	if _, err := r.svc.Activate(context.Background(), other, wallet); !errors.Is(err, ErrLPWalletInUse) {
+		t.Fatalf("err = %v, want ErrLPWalletInUse", err)
+	}
+}
+
+// The account re-linked another wallet: deposits and gas-free claims wait for
+// a re-activation from it; withdraw and claim (signed by the LP wallet) don't.
+func TestVaultLP_WalletChangedGatesDepositAndClaimFor(t *testing.T) {
+	r := newLPRig(t)
+	user, wallet := r.activeLP(t)
+	r.vault.claimable[strings.ToLower(wallet)] = usdt18(2)
+	r.link(t, user, newLPWallet())
+	if _, err := r.svc.PrepareDeposit(context.Background(), user, "10"); !errors.Is(err, ErrLPWalletMismatch) {
+		t.Fatalf("deposit err = %v", err)
+	}
+	if _, err := r.svc.ClaimForMe(context.Background(), user); !errors.Is(err, ErrLPWalletMismatch) {
+		t.Fatalf("claim-for err = %v", err)
+	}
+	if _, err := r.svc.PrepareWithdraw(context.Background(), user, "1"); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	me, _ := r.svc.Me(context.Background(), user)
+	if !me.WalletChanged {
+		t.Fatal("me does not say the wallet changed")
 	}
 }

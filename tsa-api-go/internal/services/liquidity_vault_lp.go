@@ -30,7 +30,8 @@ var (
 	ErrLPAmount          = errors.New("liquidity: amount out of range")
 	ErrLPClaimTooSmall   = errors.New("liquidity: earnings below the minimum claim")
 	ErrLPClaimRateLimit  = errors.New("liquidity: a gas-free claim was made recently — try again later or claim from your wallet")
-	ErrLPWalletMismatch  = errors.New("liquidity: that is not your liquidity wallet")
+	ErrLPWalletMismatch  = errors.New("liquidity: your account wallet is not your liquidity wallet — activate again from this wallet")
+	ErrLPWalletInUse     = errors.New("liquidity: that wallet already provides liquidity for another account")
 	ErrLiquidityNotVault = errors.New("liquidity: the shared pool is not configured")
 )
 
@@ -110,7 +111,11 @@ type LiquidityVaultMe struct {
 	Limits          LiquidityLimits `json:"limits"`
 	MinClaim        string          `json:"minClaim"`
 	Paused          bool            `json:"paused"`
-	Pool            *VaultPoolView  `json:"pool,omitempty"`
+	// WalletChanged: the account's wallet is no longer the LP wallet. Deposits
+	// and gas-free claims wait for Activate from the current wallet;
+	// withdrawing and claiming (signed by the LP wallet itself) never do.
+	WalletChanged bool           `json:"walletChanged"`
+	Pool          *VaultPoolView `json:"pool,omitempty"`
 }
 
 // VaultPoolView is the pool card every LP sees.
@@ -153,6 +158,9 @@ func (s *VaultLPService) Me(ctx context.Context, userID uuid.UUID) (*LiquidityVa
 		return nil, err
 	}
 	out.Wallet = lp.OperatorWalletAddress
+	if current, err := s.accountWallet(ctx, userID); err == nil && !SameEVMAddress(current, lp.OperatorWalletAddress) {
+		out.WalletChanged = true
+	}
 	switch lp.Status {
 	case models.PaymentMerchantStatusActive:
 		out.Status = LiquidityStatusActive
@@ -351,6 +359,9 @@ func (s *VaultLPService) Activate(ctx context.Context, userID uuid.UUID, wallet 
 	if err := s.eligible(ctx, userID); err != nil {
 		return nil, err
 	}
+	if err := s.walletFree(ctx, userID, wallet); err != nil {
+		return nil, err
+	}
 	lp, err := s.lpRow(ctx, userID)
 	switch {
 	case errors.Is(err, ErrPMNotFound):
@@ -367,6 +378,9 @@ func (s *VaultLPService) Activate(ctx context.Context, userID uuid.UUID, wallet 
 		if err := s.c.DB.WithContext(ctx).Model(&models.PaymentMerchant{}).Where("id = ?", lp.ID).
 			Updates(map[string]any{"status": models.PaymentMerchantStatusActive, "operator_wallet_address": wallet,
 				"pool_chain_id": chain, "review_note": "activated (shared pool, spec 2026-10-14 §5)"}).Error; err != nil {
+			if isUniqueViolation(err) { // another account took the wallet first
+				return nil, ErrLPWalletInUse
+			}
 			return nil, err
 		}
 		lp.Status, lp.OperatorWalletAddress = models.PaymentMerchantStatusActive, wallet
@@ -375,6 +389,48 @@ func (s *VaultLPService) Activate(ctx context.Context, userID uuid.UUID, wallet 
 		log.Printf("[liquidity] allow-list lp=%s wallet=%s deferred to the sync job: %s", lp.ID, wallet, RedactAlertText(err.Error()))
 	}
 	return s.Me(ctx, userID)
+}
+
+// walletFree: a vault position belongs to one account. Another account's LP
+// row on the same wallet would read (and gas-free claim) that position.
+func (s *VaultLPService) walletFree(ctx context.Context, userID uuid.UUID, wallet string) error {
+	var n int64
+	if err := s.c.DB.WithContext(ctx).Model(&models.PaymentMerchant{}).
+		Where("kind = ? AND user_id <> ? AND LOWER(operator_wallet_address) = ?", models.PaymentMerchantKindLP, userID, strings.ToLower(wallet)).
+		Count(&n).Error; err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrLPWalletInUse
+	}
+	return nil
+}
+
+// accountWallet is the account's linked wallet now (users.wallet_address).
+func (s *VaultLPService) accountWallet(ctx context.Context, userID uuid.UUID) (string, error) {
+	var u models.User
+	if err := s.c.DB.WithContext(ctx).Select("id", "wallet_address").First(&u, "id = ?", userID).Error; err != nil {
+		return "", err
+	}
+	return u.WalletAddress, nil
+}
+
+// currentLP is activeLP whose wallet is still the account's: what deposits
+// and gas-free claims need (withdraw and claim are signed by the LP wallet
+// itself, so they never do).
+func (s *VaultLPService) currentLP(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
+	lp, err := s.activeLP(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	current, err := s.accountWallet(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !SameEVMAddress(current, lp.OperatorWalletAddress) {
+		return nil, ErrLPWalletMismatch
+	}
+	return lp, nil
 }
 
 func (s *VaultLPService) eligible(ctx context.Context, userID uuid.UUID) error {
@@ -412,8 +468,13 @@ func (s *VaultLPService) createLP(ctx context.Context, userID uuid.UUID, wallet 
 		OperatorWalletAddress: wallet, ProvisioningStatus: models.PMProvisioningActive,
 		ReviewedAt: &now, ReviewNote: "activated (shared pool, spec 2026-10-14 §5)"}
 	if err := s.c.DB.WithContext(ctx).Create(lp).Error; err != nil {
-		if isUniqueViolation(err) { // a concurrent activation won: use its row
-			return s.lpRow(ctx, userID)
+		if isUniqueViolation(err) {
+			// A concurrent activation of this account won (use its row), or
+			// another account took the wallet first (uq_payment_merchants_lp_wallet).
+			if row, rerr := s.lpRow(ctx, userID); rerr == nil {
+				return row, nil
+			}
+			return nil, ErrLPWalletInUse
 		}
 		return nil, err
 	}
@@ -502,7 +563,7 @@ func (s *VaultLPService) parseAmount(amount string) (*big.Int, error) {
 // PrepareDeposit: within the LP limits and allowed on-chain; an approval
 // first when the allowance is short.
 func (s *VaultLPService) PrepareDeposit(ctx context.Context, userID uuid.UUID, amount string) (*LPTxPlan, error) {
-	lp, err := s.activeLP(ctx, userID)
+	lp, err := s.currentLP(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -586,7 +647,7 @@ func (s *VaultLPService) PrepareClaim(ctx context.Context, userID uuid.UUID, to 
 // paid only to the LP's own wallet (the contract's rule) — once per
 // lpClaimForEvery and only from lpMinClaimUSD.
 func (s *VaultLPService) ClaimForMe(ctx context.Context, userID uuid.UUID) (string, error) {
-	lp, err := s.activeLP(ctx, userID)
+	lp, err := s.currentLP(ctx, userID)
 	if err != nil {
 		return "", err
 	}
