@@ -18,6 +18,20 @@ const units = (v: string | undefined, d: number) => BigInt(parseTokenAmount(v ||
 
 export const isZeroAmount = (v?: string) => !v || /^0*(\.0*)?$/.test(v);
 
+/**
+ * Everything the pool holds for this user, as a decimal string in the pool
+ * token: principal (staked) + earnings not yet claimed + withdrawn principal
+ * not yet paid out. Claimed earnings already sit in the wallet, so the
+ * all-time `earned` is deliberately not added. Null when the API could not
+ * read the position — unknown, never zero.
+ */
+export function liquidityHoldings(me: LiquidityMe): string | null {
+  if (!me.balanceReadable || !me.token) return me.status === 'none' ? '0' : null;
+  const d = me.token.decimals;
+  const total = units(me.principal, d) + units(me.claimable, d) + units(me.pendingWithdrawal, d);
+  return formatTokenAmount(total.toString(), d, d);
+}
+
 export type LiquidityAction = 'deposit' | 'withdraw';
 
 /**

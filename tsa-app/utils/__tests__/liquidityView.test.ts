@@ -5,7 +5,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 /* eslint-disable import/first */
 import {
-  canClaimGasFree, claimRefusalMessage, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage,
+  canClaimGasFree, claimRefusalMessage, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityHoldings, liquidityMessage,
   limitsKnown, oldWalletFundsMessage, oldWalletHasFunds, overBalanceError, withdrawalMessage,
 } from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
@@ -157,5 +157,23 @@ describe('unreadable pool limits', () => {
   });
   it('treats an API without the flag as readable', () => {
     expect(limitsKnown(me())).toBe(true);
+  });
+});
+
+describe('liquidityHoldings', () => {
+  it('adds staked principal, unclaimed earnings and a pending withdrawal, exactly', () => {
+    expect(liquidityHoldings(me({ principal: '100.1', claimable: '0.2', pendingWithdrawal: '5' }))).toBe('105.3');
+  });
+
+  it('leaves out already-claimed earnings (they are in the wallet)', () => {
+    expect(liquidityHoldings(me({ principal: '100', claimable: '0.4', earned: '9' }))).toBe('100.4');
+  });
+
+  it('is 0 for a user who never joined the pool', () => {
+    expect(liquidityHoldings(me({ status: 'none', balanceReadable: false, principal: undefined, claimable: undefined }))).toBe('0');
+  });
+
+  it('is unknown, never zero, when an LP position could not be read', () => {
+    expect(liquidityHoldings(me({ balanceReadable: false }))).toBeNull();
   });
 });

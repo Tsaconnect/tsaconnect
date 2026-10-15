@@ -22,6 +22,8 @@ import { NAME_CHANGE, TSA_PAY_APPLY } from "@/constants/routes";
 import { useNameChangeEntry } from "@/hooks/useNameChangeEntry";
 import { useIsPaymentMerchant } from "@/hooks/useIsPaymentMerchant";
 import { lpCta } from "@/utils/lpCta";
+import { liquidityApi } from "@/services/liquidityApi";
+import { formatLiquidityAmount, liquidityHoldings } from "@/utils/liquidityView";
 import {
   AccentCard,
   Avatar,
@@ -103,6 +105,24 @@ const ProfileScreen = () => {
       if (token) {
         getLoggedInUser();
       }
+    }, [token])
+  );
+
+  // My Balance = what the liquidity pool holds for the user (staked principal
+  // + unclaimed earnings + pending withdrawal). undefined while loading, null
+  // when it could not be read.
+  const [poolBalance, setPoolBalance] = useState<string | null | undefined>(undefined);
+  useFocusEffect(
+    useCallback(() => {
+      if (!token) return;
+      let live = true;
+      liquidityApi
+        .me()
+        .then((res) => live && setPoolBalance(res.success && res.data ? liquidityHoldings(res.data) : null))
+        .catch(() => live && setPoolBalance(null));
+      return () => {
+        live = false;
+      };
     }, [token])
   );
 
@@ -333,15 +353,22 @@ const ProfileScreen = () => {
               </Row>
             ))}
 
-            {/* Balance row */}
-            <Row icon="wallet">
+            {/* Balance row: liquidity staked + earnings; opens the pool when the user is an LP */}
+            <Row
+              icon="wallet"
+              onPress={liquidity && pm.lpStatus ? () => router.push(liquidity.route as never) : undefined}
+            >
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
                 <Text variant="body" weight="500">
                   My Balance
                 </Text>
-                <Text variant="bodyMed" weight="700" numeric>
-                  {user?.balance || "0"} USD
-                </Text>
+                {poolBalance === undefined ? (
+                  <Spinner size="small" />
+                ) : (
+                  <Text variant="bodyMed" weight="700" numeric>
+                    {poolBalance === null ? "—" : `${formatLiquidityAmount(poolBalance, 2)} USD`}
+                  </Text>
+                )}
               </View>
             </Row>
 
