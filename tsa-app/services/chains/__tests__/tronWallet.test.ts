@@ -1,9 +1,15 @@
 import { getTronBalances, loadTronWallet, getTronAddress } from '../tronWallet';
 import * as nonevmApi from '../nonevmApi';
 import * as wallet from '../../wallet';
+import { clearNonEvmAddressCache } from '../nonEvmAddresses';
 
 // Factory mocks so the real modules (which import AsyncStorage / SecureStore
 // native shims) never load under jest.
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  getItem: jest.fn().mockResolvedValue(null),
+  setItem: jest.fn().mockResolvedValue(undefined),
+  removeItem: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../nonevmApi', () => ({
   registerNonEVMAddress: jest.fn(),
   getNonEVMBalances: jest.fn(),
@@ -22,6 +28,7 @@ const mockedWallet = wallet as jest.Mocked<typeof wallet>;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  clearNonEvmAddressCache();
   mockedWallet.getActiveWallet.mockResolvedValue(EVM);
   mockedWallet.getMnemonic.mockResolvedValue(M);
 });
@@ -82,6 +89,7 @@ describe('loadTronWallet', () => {
     expect(result).not.toBeNull();
     expect(result!.address).toMatch(/^T/);
     expect(result!.balances).toEqual([]);
+    expect(result!.failed).toBe(true);
   });
 
   it('returns null when no mnemonic is available', async () => {

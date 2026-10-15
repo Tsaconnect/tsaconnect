@@ -11,6 +11,8 @@ import { MIN_SWAP_RESERVE_WEI, swapGasReserve } from './gasReserve';
 // Circular with solanaWallet (it reads getMnemonic) — safe because both sides
 // only call the other inside function bodies, never during module evaluation.
 import { forgetSolanaDerivation } from './chains/solanaWallet';
+import { forgetNonEvmAddresses } from './chains/nonEvmAddresses';
+import { forgetWalletSnapshots } from './walletSnapshot';
 
 const WALLET_LIST_KEY = 'tsa-wallet-list';
 const ACTIVE_WALLET_KEY = 'tsa-active-wallet';
@@ -106,6 +108,8 @@ export async function removeWallet(address: string): Promise<void> {
   await SecureStore.deleteItemAsync(`tsa-wallet-pk-${address}`);
   await SecureStore.deleteItemAsync(`tsa-wallet-mn-${address}`);
   await forgetSolanaDerivation(address);
+  await forgetNonEvmAddresses(address);
+  await forgetWalletSnapshots(address);
   let list = await getWalletList();
   list = list.filter(w => w.address !== address);
   await AsyncStorage.setItem(WALLET_LIST_KEY, JSON.stringify(list));

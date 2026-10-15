@@ -337,3 +337,23 @@ func TestCoinGeckoKey_SentAsHeaderOnEveryCall(t *testing.T) {
 		})
 	}
 }
+
+func TestGetPrices_SameSymbolsInAnyOrderShareACacheEntry(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Write([]byte(`{"tether":{"usd":1},"ethereum":{"usd":2000}}`))
+	}))
+	t.Cleanup(srv.Close)
+	ps := NewPriceService()
+	ps.SetBaseURLForTest(srv.URL)
+
+	for _, symbols := range [][]string{{"USDT", "ETH"}, {"ETH", "USDT"}} {
+		if _, err := ps.GetPrices(symbols); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("CoinGecko called %d times, want 1", got)
+	}
+}

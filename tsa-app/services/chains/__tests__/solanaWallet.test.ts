@@ -15,7 +15,8 @@ import {
   clearSolanaCache,
 } from '../solanaWallet';
 import { getNonEVMBalances, registerNonEVMAddress } from '../nonevmApi';
-import { deriveSolanaAddresses } from '../derivation';
+import { deriveNonEvmAddresses } from '../derivation';
+import { clearNonEvmAddressCache } from '../nonEvmAddresses';
 import { getNetwork } from '../../../hooks/useNetwork';
 
 // Phantom path m/44'/501'/0'/0' and Trust Wallet path m/44'/501'/0' addresses
@@ -41,7 +42,7 @@ jest.mock('../../wallet', () => ({
 // Spy on the one-seed derivation without changing what it returns.
 jest.mock('../derivation', () => {
   const actual = jest.requireActual('../derivation');
-  return { ...actual, deriveSolanaAddresses: jest.fn(actual.deriveSolanaAddresses) };
+  return { ...actual, deriveNonEvmAddresses: jest.fn(actual.deriveNonEvmAddresses) };
 });
 
 jest.mock('../nonevmApi', () => ({
@@ -59,7 +60,11 @@ const mockedGetItem = AsyncStorage.getItem as jest.Mock;
 const mockedSetItem = AsyncStorage.setItem as jest.Mock;
 const mockedGetNetwork = getNetwork as jest.Mock;
 
-const mockedDeriveBoth = deriveSolanaAddresses as jest.Mock;
+const mockedDeriveAll = deriveNonEvmAddresses as jest.Mock;
+// The shared address store also writes to AsyncStorage; these tests are about
+// the path decision only.
+const derivationWrites = () =>
+  mockedSetItem.mock.calls.filter(([key]) => String(key).startsWith('tsa-solana-derivation'));
 
 const row = (raw: string) => ({ symbol: 'SOL', raw, decimals: 9, isNative: true });
 const spl = (symbol: string, raw: string, usdPrice?: number) => ({
@@ -71,6 +76,7 @@ beforeEach(() => {
   mockedGetItem.mockResolvedValue(null);
   mockedGetNetwork.mockReturnValue('mainnet');
   clearSolanaCache();
+  clearNonEvmAddressCache();
 });
 
 describe('getSolanaAddress derivation resolution', () => {
@@ -102,14 +108,14 @@ describe('getSolanaAddress derivation resolution', () => {
     mockedGetItem.mockResolvedValue('trustwallet');
     await expect(getSolanaAddress(WALLET)).resolves.toBe(TRUST_ADDR);
     expect(mockedBalances).not.toHaveBeenCalled();
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
   });
 
   it('falls back to Phantom without persisting when the scan fails', async () => {
     mockedBalances.mockRejectedValue(new Error('offline'));
     await expect(getSolanaAddress(WALLET)).resolves.toBe(PHANTOM_ADDR);
     // Not persisted and not cached — the next call retries the scan.
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
     mockedBalances.mockReset();
     mockedBalances.mockResolvedValueOnce([row('0')]).mockResolvedValueOnce([row('9')]);
     await expect(getSolanaAddress(WALLET)).resolves.toBe(TRUST_ADDR);
@@ -119,7 +125,7 @@ describe('getSolanaAddress derivation resolution', () => {
     mockedGetNetwork.mockReturnValue('testnet');
     await expect(getSolanaAddress(WALLET)).resolves.toBe(PHANTOM_ADDR);
     expect(mockedBalances).not.toHaveBeenCalled();
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
     // A stored preference is still honored on testnet.
     mockedGetItem.mockResolvedValue('trustwallet');
     await expect(getSolanaAddress(WALLET)).resolves.toBe(TRUST_ADDR);
@@ -131,14 +137,14 @@ describe('getSolanaAddress derivation resolution', () => {
     expect(a).toBe(PHANTOM_ADDR);
     expect(b).toBe(PHANTOM_ADDR);
     expect(mockedBalances).toHaveBeenCalledTimes(1);
-    expect(mockedSetItem).toHaveBeenCalledTimes(1);
+    expect(derivationWrites()).toHaveLength(1);
   });
 
   it('does not run a scan (which could overwrite a decision) when the pref read fails', async () => {
     mockedGetItem.mockRejectedValue(new Error('storage unavailable'));
     await expect(getSolanaAddress(WALLET)).resolves.toBe(PHANTOM_ADDR);
     expect(mockedBalances).not.toHaveBeenCalled();
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
   });
 
   it('forgetSolanaDerivation drops the persisted pref and cached decision', async () => {
@@ -180,7 +186,7 @@ describe('loadSolanaWallet path self-healing', () => {
     const second = await loadSolanaWallet(WALLET);
     expect(second?.address).toBe(PHANTOM_ADDR);
     expect(mockedBalances.mock.calls.length).toBe(callsAfterFirst + 1); // no second probe
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
   });
 
   it('does not follow, or remember, a probe answered after a switch to testnet', async () => {
@@ -196,7 +202,7 @@ describe('loadSolanaWallet path self-healing', () => {
     const result = await loadSolanaWallet(WALLET);
     expect(result?.address).toBe(PHANTOM_ADDR);
     expect(result?.otherPath).toBeNull();
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
     expect(mockedRegister).not.toHaveBeenCalledWith(WALLET, 'solana', TRUST_ADDR);
 
     // Back on mainnet the probe runs again instead of trusting the devnet read.
@@ -262,7 +268,7 @@ describe('getSolanaSigner', () => {
       return [row('5')];
     });
     await expect(getSolanaSigner(WALLET)).rejects.toThrow("Couldn't confirm your Solana address");
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
   });
 
   it('signs on testnet with the standard path, without a scan', async () => {
@@ -279,7 +285,7 @@ describe('seed derivation cost', () => {
     mockedBalances.mockResolvedValue([]);
     await loadSolanaWallet(WALLET);
     await loadSolanaWallet(WALLET);
-    expect(mockedDeriveBoth).toHaveBeenCalledTimes(1);
+    expect(mockedDeriveAll).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -327,7 +333,7 @@ describe('backend registration', () => {
     await forgetSolanaDerivation(WALLET);
     release([row('5')]);
     await pending;
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
   });
 });
 
@@ -341,7 +347,7 @@ describe('both paths funded', () => {
     expect(result?.address).toBe(PHANTOM_ADDR);
     expect(result?.otherPath).toMatchObject({ wallet: WALLET, derivation: 'trustwallet', address: TRUST_ADDR });
     expect(result?.otherPath?.balances[0]?.balance).toBe('0.00000002');
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
 
     // A reload in the same session keeps reporting it without probing again.
     mockedBalances.mockResolvedValueOnce([row('10')]);
@@ -376,7 +382,7 @@ describe('both paths funded', () => {
     await expect(switchSolanaDerivation(WALLET, 'trustwallet')).rejects.toThrow('network down');
     // The app keeps showing, signing for, and reporting the other path exactly as
     // before, so the "Switch failed" alert is true and the backend still agrees.
-    expect(mockedSetItem).not.toHaveBeenCalled();
+    expect(derivationWrites()).toEqual([]);
     await expect(getSolanaAddress(WALLET)).resolves.toBe(PHANTOM_ADDR);
     mockedBalances.mockResolvedValueOnce([row('10')]);
     const after = await loadSolanaWallet(WALLET);

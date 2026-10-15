@@ -59,3 +59,19 @@ export function combineSourceAssets<T>(
 export function allSourcesReported<T>(sources: SourceAssets<T>): boolean {
   return ASSET_SOURCES.every((source) => sources[source] !== null);
 }
+
+/** What the wallet screen last showed, kept so the next open paints at once. */
+export interface WalletSnapshot<T> {
+  sources: SourceAssets<T>;
+  extras: T[];
+}
+
+export function isWalletSnapshot<T>(value: unknown): value is WalletSnapshot<T> {
+  const v = value as WalletSnapshot<T> | null;
+  return (
+    !!v &&
+    Array.isArray(v.extras) &&
+    !!v.sources &&
+    ASSET_SOURCES.every((source) => v.sources[source] === null || Array.isArray(v.sources[source]))
+  );
+}

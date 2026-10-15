@@ -36,16 +36,27 @@ export type BtcNetwork = 'mainnet' | 'testnet';
 
 const b58check = base58check(sha256);
 
-function secpNode(mnemonic: string, path: string): HDKey {
-  const seed = mnemonicToSeedSync(mnemonic.trim());
+function seedOf(mnemonic: string): Uint8Array {
+  return mnemonicToSeedSync(mnemonic.trim());
+}
+
+function secpNodeFromSeed(seed: Uint8Array, path: string): HDKey {
   const node = HDKey.fromMasterSeed(seed).derive(path);
   if (!node.privateKey || !node.publicKey) throw new Error('derivation failed');
   return node;
 }
 
+function secpNode(mnemonic: string, path: string): HDKey {
+  return secpNodeFromSeed(seedOf(mnemonic), path);
+}
+
 // Tron: keccak256(uncompressed pubkey[1:])[12:] → prepend 0x41 → base58check.
 export function deriveTronAddress(mnemonic: string): string {
-  const node = secpNode(mnemonic, DERIVATION_PATHS.tron);
+  return tronAddressFromSeed(seedOf(mnemonic));
+}
+
+function tronAddressFromSeed(seed: Uint8Array): string {
+  const node = secpNodeFromSeed(seed, DERIVATION_PATHS.tron);
   const pub = secp256k1.getPublicKey(node.privateKey!, false); // 65 bytes, 0x04 prefix
   const hash = keccak_256(pub.slice(1));
   const body = new Uint8Array(21);
@@ -79,13 +90,18 @@ export function isValidTronAddress(addr: string): boolean {
 // Tron, the address is network-specific — testnet uses coin type 1' and the
 // 'tb' prefix, so the same seed yields different mainnet/testnet addresses
 // (matching Sparrow/Electrum behavior).
+const btcPath = (network: BtcNetwork) => (network === 'testnet' ? DERIVATION_PATHS.btcTestnet : DERIVATION_PATHS.btc);
+
 function btcNode(mnemonic: string, network: BtcNetwork): HDKey {
-  const path = network === 'testnet' ? DERIVATION_PATHS.btcTestnet : DERIVATION_PATHS.btc;
-  return secpNode(mnemonic, path);
+  return secpNode(mnemonic, btcPath(network));
 }
 
 export function deriveBtcAddress(mnemonic: string, network: BtcNetwork = 'mainnet'): string {
-  const node = btcNode(mnemonic, network);
+  return btcAddressFromSeed(seedOf(mnemonic), network);
+}
+
+function btcAddressFromSeed(seed: Uint8Array, network: BtcNetwork): string {
+  const node = secpNodeFromSeed(seed, btcPath(network));
   const h160 = ripemd160(sha256(node.publicKey!)); // publicKey is compressed (33 bytes)
   const words = bech32.toWords(h160);
   return bech32.encode(network === 'testnet' ? 'tb' : 'bc', [0x00, ...words]);
@@ -217,10 +233,34 @@ export function deriveSuiPublicKey(mnemonic: string): string {
 // ed25519 signature-scheme flag. 32-byte digest → 66-char address. Verified
 // against @mysten/sui.
 export function deriveSuiAddress(mnemonic: string): string {
-  const pub = ed25519.getPublicKey(deriveSuiPrivateKey(mnemonic));
+  return suiAddressFromSeed(seedOf(mnemonic));
+}
+
+function suiAddressFromSeed(seed: Uint8Array): string {
+  const pub = ed25519.getPublicKey(ed25519Slip10(seed, DERIVATION_PATHS.sui));
   const flagged = new Uint8Array(1 + pub.length); // flag 0x00 already set
   flagged.set(pub, 1);
   return '0x' + bytesToHex(blake2b(flagged, { dkLen: 32 }));
+}
+
+// Every non-EVM receive address from ONE seed. mnemonicToSeedSync is 2048
+// PBKDF2 rounds of pure-JS SHA-512 and blocks the JS thread for seconds on a
+// phone; deriving per chain paid that once per chain on every cold start.
+export type NonEvmAddresses = {
+  tron: string;
+  btc: Record<BtcNetwork, string>;
+  sui: string;
+  solana: Record<SolanaDerivation, string>;
+};
+
+export function deriveNonEvmAddresses(mnemonic: string): NonEvmAddresses {
+  const seed = seedOf(mnemonic);
+  return {
+    tron: tronAddressFromSeed(seed),
+    btc: { mainnet: btcAddressFromSeed(seed, 'mainnet'), testnet: btcAddressFromSeed(seed, 'testnet') },
+    sui: suiAddressFromSeed(seed),
+    solana: { phantom: solanaAddressFromSeed(seed, 'phantom'), trustwallet: solanaAddressFromSeed(seed, 'trustwallet') },
+  };
 }
 
 // Validate a Sui address: 0x + exactly 64 lowercase hex chars (32 bytes). Sui

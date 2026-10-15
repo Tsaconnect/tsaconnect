@@ -5,19 +5,14 @@
 // then registered with the backend so the reconciler tracks it. Balances come
 // from the dormant-safe /wallet/nonevm/* endpoints. Unlike Tron, the address
 // is network-specific (bc1… mainnet vs tb1… testnet), so caches key on both.
-import { getActiveWallet, getMnemonic } from '../wallet';
-import { deriveBtcAddress } from './derivation';
+import { getActiveWallet } from '../wallet';
+import { getNonEvmAddresses } from './nonEvmAddresses';
 import { toNonEvmBalanceRow } from './nonevmRows';
 import { getNonEVMBalances, registerNonEVMAddress } from './nonevmApi';
 import { getNetwork } from '../../hooks/useNetwork';
 import type { WalletBalanceWithChain } from '../walletApi';
 
 const BTC_KEY = 'btc';
-
-// Derived BTC address is a pure function of (mnemonic, network) — cache per
-// EVM wallet id + network to avoid re-deriving and re-reading SecureStore on
-// every balance refresh.
-const addressCache = new Map<string, string>();
 
 /**
  * Derive the BTC address for a wallet (defaults to the active wallet) on the
@@ -27,15 +22,7 @@ const addressCache = new Map<string, string>();
 export async function getBtcAddress(walletAddress?: string): Promise<string | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
-  const network = getNetwork();
-  const cacheKey = `${wallet}:${network}`;
-  const cached = addressCache.get(cacheKey);
-  if (cached) return cached;
-  const mnemonic = await getMnemonic(wallet);
-  if (!mnemonic) return null;
-  const btcAddress = deriveBtcAddress(mnemonic, network);
-  addressCache.set(cacheKey, btcAddress);
-  return btcAddress;
+  return (await getNonEvmAddresses(wallet))?.btc[getNetwork()] ?? null;
 }
 
 /** Fetch the BTC balance as a display row. */
@@ -52,7 +39,7 @@ export async function getBtcBalances(btcAddress: string): Promise<WalletBalanceW
  */
 export async function loadBtcWallet(
   walletAddress?: string
-): Promise<{ address: string; balances: WalletBalanceWithChain[] } | null> {
+): Promise<{ address: string; balances: WalletBalanceWithChain[]; failed?: boolean } | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
   const address = await getBtcAddress(wallet);
@@ -68,6 +55,6 @@ export async function loadBtcWallet(
   } catch {
     // Chain unavailable (dormant backend) or upstream error — surface the
     // address (receive still works) with no balance rows.
-    return { address, balances: [] };
+    return { address, balances: [], failed: true };
   }
 }

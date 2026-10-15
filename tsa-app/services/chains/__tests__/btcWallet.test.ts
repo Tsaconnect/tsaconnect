@@ -1,9 +1,15 @@
 import { getBtcBalances, loadBtcWallet, getBtcAddress } from '../btcWallet';
 import * as nonevmApi from '../nonevmApi';
 import * as wallet from '../../wallet';
+import { clearNonEvmAddressCache } from '../nonEvmAddresses';
 
 // Factory mocks so the real modules (which import AsyncStorage / SecureStore
 // native shims) never load under jest.
+jest.mock('@react-native-async-storage/async-storage', () => ({
+  getItem: jest.fn().mockResolvedValue(null),
+  setItem: jest.fn().mockResolvedValue(undefined),
+  removeItem: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../nonevmApi', () => ({
   registerNonEVMAddress: jest.fn(),
   getNonEVMBalances: jest.fn(),
@@ -26,6 +32,7 @@ const mockedWallet = wallet as jest.Mocked<typeof wallet>;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  clearNonEvmAddressCache();
   mockedWallet.getActiveWallet.mockResolvedValue(EVM);
   mockedWallet.getMnemonic.mockResolvedValue(M);
 });
@@ -90,6 +97,8 @@ describe('loadBtcWallet', () => {
 
     expect(res?.address).toBe(BTC_ADDR);
     expect(res?.balances).toEqual([]);
+    // Flagged, so the wallet screen keeps its last known rows instead of zero.
+    expect(res?.failed).toBe(true);
   });
 
   it('returns null when there is no wallet', async () => {

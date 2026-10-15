@@ -172,10 +172,26 @@ export const getMcgpQuote = (kind: QuoteKind, amount: string) =>
 export async function getPremiumMcgpAsset(): Promise<{ balance: number; usdValue: number }> {
   const res = await getMcgpBalance();
   if (!res.success || !res.data) return { balance: 0, usdValue: 0 };
-  const rawBase = res.data.premiumBalance || '0'; // 18dp base units, bought + credited
+  return premiumAssetFrom(res.data);
+}
+
+/**
+ * Like getPremiumMcgpAsset, but a failed read throws instead of reading as an
+ * empty balance — for callers that keep the last known value on failure.
+ */
+export async function readPremiumMcgpAsset(): Promise<{ balance: number; usdValue: number }> {
+  const res = await getMcgpBalance();
+  if (!res.success || !res.data) throw new Error('MCGP balance unavailable');
+  return premiumAssetFrom(res.data);
+}
+
+async function premiumAssetFrom(
+  data: NonNullable<Awaited<ReturnType<typeof getMcgpBalance>>['data']>,
+): Promise<{ balance: number; usdValue: number }> {
+  const rawBase = data.premiumBalance || '0'; // 18dp base units, bought + credited
   const balance = Number(ethers.formatUnits(rawBase, 18)) || 0;
   if (balance <= 0) return { balance: 0, usdValue: 0 };
-  const boughtRaw = boughtBase({ totalBase: rawBase, premiumBought: res.data.premiumBought });
+  const boughtRaw = boughtBase({ totalBase: rawBase, premiumBought: data.premiumBought });
   let usdValue = 0;
   if (BigInt(boughtRaw || '0') > 0n) {
     try {

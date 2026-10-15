@@ -24,6 +24,7 @@ import {
   TextInput,
   FlatList,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -52,7 +53,7 @@ import { loadTronWallet } from '../services/chains/tronWallet';
 import { loadBtcWallet } from '../services/chains/btcWallet';
 import { loadSolanaWallet, switchSolanaDerivation, type SolanaOtherPath } from '../services/chains/solanaWallet';
 import { loadSuiWallet } from '../services/chains/suiWallet';
-import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
+import { readPremiumMcgpAsset } from '../services/mcgpSwapApi';
 import { type SpotCategory } from '../services/spotApi';
 import { assetCategoryOf, categoryBySymbol, WALLET_CATEGORY_FILTERS } from '../utils/spotTabs';
 import {
@@ -62,6 +63,7 @@ import {
   type AssetSource,
   type SourceAssets,
 } from '../utils/walletAssets';
+import { walletSnapshot } from '../services/walletSnapshot';
 import { useSpotListings } from '../hooks/useSpotListings';
 import { useNetwork } from '../hooks/useNetwork';
 import { RAILS, RAIL_ROUTES, railLabel } from '../constants/rails';
@@ -132,42 +134,28 @@ function getManageTokenMeta(asset: WalletAsset): string {
 // chainKey+contract). Returns ONLY the additions, never the combined list: the
 // caller holds the per-source rows separately and a stale combined list would
 // shadow balances that had since been refreshed. Empty when there is nothing to
-// add or the indexer is offline.
+// add; null when the indexer could not be read, so the caller can keep what it
+// already shows instead of dropping it.
 async function mergeDiscoveredTokens(
   existing: WalletAsset[],
   address: string | undefined,
-): Promise<WalletAsset[]> {
+): Promise<WalletAsset[] | null> {
   try {
     const result = await getDiscoveredTokens(undefined, address);
     if (!result.success || !result.data || !result.data.providerAvailable) {
-      return [];
+      return null;
     }
     const discovered: DiscoveredToken[] = result.data.tokens || [];
     if (discovered.length === 0) return [];
 
-    // Index existing rows by chainKey+symbol AND chainKey+contract so we
-    // don't duplicate either USDC-on-base (matched by symbol) or a custom
-    // token previously imported (matched by address).
-    const seenSymbol = new Set(
-      existing
-        .filter((a) => a.details?.chainKey)
-        .map((a) => `${a.details!.chainKey}::${a.symbol.toUpperCase()}`),
-    );
-    const seenContract = new Set(
-      existing
-        .filter((a) => a.contractAddress && a.details?.chainKey)
-        .map((a) => `${a.details!.chainKey}::${a.contractAddress!.toLowerCase()}`),
-    );
-
+    const listed = listedIn(existing);
     let nextId = existing.length + 1;
     const additions: WalletAsset[] = [];
     for (const t of discovered) {
       const chainKey = t.chain as ChainKey;
       const chain = CHAINS[chainKey];
       if (!chain) continue;
-      const symbolKey = `${chainKey}::${t.symbol.toUpperCase()}`;
-      const contractKey = `${chainKey}::${t.contractAddress.toLowerCase()}`;
-      if (seenSymbol.has(symbolKey) || seenContract.has(contractKey)) continue;
+      if (listed(chainKey, t.symbol, t.contractAddress)) continue;
 
       const balance = formatTokenBalance(t.balance, t.decimals);
       const usdValue = Number.isFinite(t.usdValue) ? t.usdValue : 0;
@@ -189,8 +177,27 @@ async function mergeDiscoveredTokens(
     return additions;
   } catch (err) {
     console.warn('[wallet] discovery merge failed:', err);
-    return [];
+    return null;
   }
+}
+
+// Whether a token is already among `existing`, by chainKey+symbol OR
+// chainKey+contract — so neither USDC-on-base (matched by symbol) nor a custom
+// token previously imported (matched by address) is listed twice.
+function listedIn(existing: WalletAsset[]) {
+  const seenSymbol = new Set(
+    existing
+      .filter((a) => a.details?.chainKey)
+      .map((a) => `${a.details!.chainKey}::${a.symbol.toUpperCase()}`),
+  );
+  const seenContract = new Set(
+    existing
+      .filter((a) => a.contractAddress && a.details?.chainKey)
+      .map((a) => `${a.details!.chainKey}::${a.contractAddress!.toLowerCase()}`),
+  );
+  return (chainKey: string, symbol: string, contractAddress?: string) =>
+    seenSymbol.has(`${chainKey}::${symbol.toUpperCase()}`) ||
+    (!!contractAddress && seenContract.has(`${chainKey}::${contractAddress.toLowerCase()}`));
 }
 
 // mergeCustomTokens surfaces user-imported tokens in the asset list and tries
@@ -276,12 +283,14 @@ const WalletBalanceCard: React.FC<{
    * balance. Shimmer until the figure is real.
    */
   isTotalPending: boolean;
+  /** A shown total that is being refreshed (a saved one, or a revisit). */
+  isUpdating: boolean;
   isValuesHidden: boolean;
   activeLabel: string;
   onToggleVisibility: () => void;
   onQuickAction: (action: string) => void;
   onWalletPress: () => void;
-}> = ({ totalUsdValue, isTotalPending, isValuesHidden, activeLabel, onToggleVisibility, onQuickAction, onWalletPress }) => {
+}> = ({ totalUsdValue, isTotalPending, isUpdating, isValuesHidden, activeLabel, onToggleVisibility, onQuickAction, onWalletPress }) => {
   const { colors, spacing } = useTheme();
   return (
     <AccentCard padding="xl">
@@ -303,9 +312,19 @@ const WalletBalanceCard: React.FC<{
           marginTop: spacing.md,
         }}
       >
-        <Text variant="bodySm" color="textSecondary">
-          Wallet Balance
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+          <Text variant="bodySm" color="textSecondary">
+            Wallet Balance
+          </Text>
+          {isUpdating && !isTotalPending ? (
+            <>
+              <ActivityIndicator size="small" color={colors.textMuted} />
+              <Text variant="caption" color="textMuted">
+                Updating
+              </Text>
+            </>
+          ) : null}
+        </View>
         <IconButton
           icon={isValuesHidden ? 'lock' : 'wallet'}
           size={18}
@@ -752,8 +771,8 @@ const WalletScreen: React.FC = () => {
   // the sources so a merge computed against an earlier snapshot can never
   // shadow a balance that has since been refreshed.
   const [extraAssets, setExtraAssets] = useState<WalletAsset[]>([]);
-  // Which wallet the rows above belong to. A refetch for the SAME wallet keeps
-  // showing them while it revalidates; only a different wallet clears them.
+  // Which wallet+network the rows above belong to. A refetch for the SAME one
+  // keeps showing them while it revalidates; only a different one replaces them.
   const loadedForRef = useRef<string | null>(null);
 
   const assets = useMemo<WalletAsset[]>(
@@ -768,6 +787,7 @@ const WalletScreen: React.FC = () => {
   const [isValuesHidden, setIsValuesHidden] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
   const [showFundModal, setShowFundModal] = useState(false);
   const [showSendModal, setShowSendModal] = useState(false);
   const [walletList, setWalletList] = useState<WalletMeta[]>([]);
@@ -841,235 +861,203 @@ const WalletScreen: React.FC = () => {
 
   // ── Per-source loaders ────────────────────────────────────────────────────
   // Each returns only its own assets and touches no shared state, which is what
-  // lets them run concurrently. Every one swallows its own failure: a chain
-  // being unreachable must cost the user that chain's rows, not the whole
-  // wallet.
+  // lets them run concurrently. A failed read THROWS rather than answering
+  // empty: the orchestrator then keeps that source's last known rows, so an
+  // unreachable chain never shows (or saves) a real balance as zero.
 
   const loadEvmAssets = useCallback(async (): Promise<WalletAsset[]> => {
     const nativeAssets = buildNativeAssets();
     const result = await getWalletBalances();
-    let updated: WalletAsset[] = nativeAssets;
-    if (result.success && result.data) {
-      const normalized = normalizeWalletBalances(result.data);
-      const balanceMap = new Map(normalized.map(e => [`${e.symbol}-${e.chainKey}`, e] as const));
+    if (!result.success || !result.data) throw new Error(result.message || 'EVM balances unavailable');
+    const normalized = normalizeWalletBalances(result.data);
+    const balanceMap = new Map(normalized.map(e => [`${e.symbol}-${e.chainKey}`, e] as const));
 
-      // Overlay balances onto native tokens
-      let id = nativeAssets.length + 1;
-      updated = nativeAssets.map(asset => {
-        const entry = balanceMap.get(`${asset.symbol}-${asset.details!.chainKey}`);
-        if (!entry) return asset;
-        const balance = parseFloat(entry.balance) || 0;
-        const usdValue = parseFloat(entry.usdValue) || 0;
-        return { ...asset, balance, usdValue, usdPrice: entry.usdPrice || (balance > 0 ? usdValue / balance : 0) };
+    // Overlay balances onto native tokens
+    let id = nativeAssets.length + 1;
+    const updated: WalletAsset[] = nativeAssets.map(asset => {
+      const entry = balanceMap.get(`${asset.symbol}-${asset.details!.chainKey}`);
+      if (!entry) return asset;
+      const balance = parseFloat(entry.balance) || 0;
+      const usdValue = parseFloat(entry.usdValue) || 0;
+      return { ...asset, balance, usdValue, usdPrice: entry.usdPrice || (balance > 0 ? usdValue / balance : 0) };
+    });
+
+    // Add ERC-20s only if balance > 0
+    for (const entry of normalized) {
+      const bal = parseFloat(entry.balance);
+      if (!bal || bal <= 0) continue;
+      const isNative = nativeAssets.some(
+        a => a.symbol === entry.symbol && a.details?.chainKey === entry.chainKey
+      );
+      if (isNative) continue;
+
+      // EVM-only legacy view: balances come from the EVM fan-out, so
+      // chainKey is always an EVM ChainKey here.
+      const evmChainKey = entry.chainKey as ChainKey;
+      const tokenConfig = tokenList.find(
+        t => t.symbol === entry.symbol && t.chains.includes(evmChainKey)
+      );
+      const chain = CHAINS[evmChainKey];
+      if (!chain) continue;
+
+      updated.push({
+        id: String(id++),
+        symbol: entry.symbol,
+        name: tokenConfig?.name || entry.name || entry.symbol,
+        balance: bal,
+        usdValue: parseFloat(entry.usdValue) || 0,
+        usdPrice: entry.usdPrice || 0,
+        iconColor: tokenConfig?.iconColor || '#888',
+        iconUrl: tokenConfig?.iconUrl,
+        contractAddress: entry.contractAddress || undefined,
+        decimals: entry.decimals,
+        details: {
+          type: entry.symbol === 'MCGP' ? 'Gold-Backed Token' : 'Token',
+          chain: chain.name,
+          chainKey: evmChainKey,
+        },
       });
-
-      // Add ERC-20s only if balance > 0
-      for (const entry of normalized) {
-        const bal = parseFloat(entry.balance);
-        if (!bal || bal <= 0) continue;
-        const isNative = nativeAssets.some(
-          a => a.symbol === entry.symbol && a.details?.chainKey === entry.chainKey
-        );
-        if (isNative) continue;
-
-        // EVM-only legacy view: balances come from the EVM fan-out, so
-        // chainKey is always an EVM ChainKey here.
-        const evmChainKey = entry.chainKey as ChainKey;
-        const tokenConfig = tokenList.find(
-          t => t.symbol === entry.symbol && t.chains.includes(evmChainKey)
-        );
-        const chain = CHAINS[evmChainKey];
-        if (!chain) continue;
-
-        updated.push({
-          id: String(id++),
-          symbol: entry.symbol,
-          name: tokenConfig?.name || entry.name || entry.symbol,
-          balance: bal,
-          usdValue: parseFloat(entry.usdValue) || 0,
-          usdPrice: entry.usdPrice || 0,
-          iconColor: tokenConfig?.iconColor || '#888',
-          iconUrl: tokenConfig?.iconUrl,
-          contractAddress: entry.contractAddress || undefined,
-          decimals: entry.decimals,
-          details: {
-            type: entry.symbol === 'MCGP' ? 'Gold-Backed Token' : 'Token',
-            chain: chain.name,
-            chainKey: evmChainKey,
-          },
-        });
-      }
     }
     return updated;
   }, [buildNativeAssets, tokenList]);
 
   const loadTronAssets = useCallback(async (addr: string): Promise<WalletAsset[]> => {
-    const out: WalletAsset[] = [];
     // Non-EVM (Tron): derive the address from the same seed, self-register,
     // and append TRX + TRC-20 balances as assets. Dormant-safe — yields
     // nothing when the backend chain is unconfigured. TRX shows as a native
     // token (visible at 0 in the zero-balance section) so Tron always appears.
-    try {
-      const tron = await loadTronWallet(addr || undefined);
-      if (tron) {
-        const tronChain = getChainDisplay('tron');
-        let tId = 1;
-        for (const row of tron.balances) {
-          const bal = parseFloat(row.balance) || 0;
-          const isNative = row.symbol === 'TRX';
-          out.push({
-            id: `tron-${tId++}`,
-            symbol: row.symbol,
-            name: isNative ? 'Tron' : row.name,
-            balance: bal,
-            usdValue: parseFloat(row.usdValue) || 0,
-            usdPrice: row.usdPrice || 0,
-            iconColor: tronChain?.iconColor || '#EF0027',
-            // TRX gets the chain logo; TRC-20s (USDT) reuse the registry logo.
-            iconUrl: isNative ? tronChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
-            contractAddress: row.contractAddress || undefined,
-            decimals: row.decimals,
-            details: {
-              type: isNative ? 'Native Token' : 'Token',
-              chain: 'Tron',
-              chainKey: 'tron',
-            },
-          });
-        }
-      }
-    } catch { /* chain unavailable — skip Tron */ }
-    return out;
+    const tron = await loadTronWallet(addr || undefined);
+    if (tron?.failed) throw new Error('Tron balances unavailable');
+    if (!tron) return [];
+    const tronChain = getChainDisplay('tron');
+    return tron.balances.map((row, i) => {
+      const isNative = row.symbol === 'TRX';
+      return {
+        id: `tron-${i + 1}`,
+        symbol: row.symbol,
+        name: isNative ? 'Tron' : row.name,
+        balance: parseFloat(row.balance) || 0,
+        usdValue: parseFloat(row.usdValue) || 0,
+        usdPrice: row.usdPrice || 0,
+        iconColor: tronChain?.iconColor || '#EF0027',
+        // TRX gets the chain logo; TRC-20s (USDT) reuse the registry logo.
+        iconUrl: isNative ? tronChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
+        contractAddress: row.contractAddress || undefined,
+        decimals: row.decimals,
+        details: {
+          type: isNative ? 'Native Token' : 'Token',
+          chain: 'Tron',
+          chainKey: 'tron',
+        },
+      };
+    });
   }, [tokenList]);
 
   const loadBtcAssets = useCallback(async (addr: string): Promise<WalletAsset[]> => {
-    const out: WalletAsset[] = [];
     // Non-EVM (BTC): same pattern — the BIP-84 address derives from the same
     // seed, self-registers, and BTC shows as a native token (visible at 0 in
     // the zero-balance section) so Bitcoin always appears.
-    try {
-      const btc = await loadBtcWallet(addr || undefined);
-      if (btc) {
-        const btcChain = getChainDisplay('btc');
-        let bId = 1;
-        for (const row of btc.balances) {
-          out.push({
-            id: `btc-${bId++}`,
-            symbol: row.symbol,
-            name: row.symbol === 'BTC' ? 'Bitcoin' : row.name,
-            balance: parseFloat(row.balance) || 0,
-            usdValue: parseFloat(row.usdValue) || 0,
-            usdPrice: row.usdPrice || 0,
-            iconColor: btcChain?.iconColor || '#F7931A',
-            iconUrl: btcChain?.iconUrl,
-            decimals: row.decimals,
-            details: { type: 'Native Token', chain: 'Bitcoin', chainKey: 'btc' },
-          });
-        }
-      }
-    } catch { /* chain unavailable — skip BTC */ }
-    return out;
+    const btc = await loadBtcWallet(addr || undefined);
+    if (btc?.failed) throw new Error('BTC balances unavailable');
+    if (!btc) return [];
+    const btcChain = getChainDisplay('btc');
+    return btc.balances.map((row, i) => ({
+      id: `btc-${i + 1}`,
+      symbol: row.symbol,
+      name: row.symbol === 'BTC' ? 'Bitcoin' : row.name,
+      balance: parseFloat(row.balance) || 0,
+      usdValue: parseFloat(row.usdValue) || 0,
+      usdPrice: row.usdPrice || 0,
+      iconColor: btcChain?.iconColor || '#F7931A',
+      iconUrl: btcChain?.iconUrl,
+      decimals: row.decimals,
+      details: { type: 'Native Token', chain: 'Bitcoin', chainKey: 'btc' },
+    }));
   }, []);
 
   const loadSolanaAssets = useCallback(async (addr: string): Promise<WalletAsset[]> => {
-    const out: WalletAsset[] = [];
     // Non-EVM (Solana): the address derives from the same seed (Phantom or
     // Trust Wallet path, whichever holds the funds), self-registers, and SOL
     // shows as a native token (visible at 0 in the zero-balance section) so
     // Solana always appears; held SPL tokens (auto-discovered) ride alongside.
     setSolanaOtherPath(null);
-    try {
-      const sol = await loadSolanaWallet(addr || undefined);
-      setSolanaOtherPath(sol?.otherPath ?? null);
-      if (sol) {
-        const solChain = getChainDisplay('solana');
-        let sId = 1;
-        for (const row of sol.balances) {
-          const isNative = row.symbol === 'SOL';
-          out.push({
-            id: `solana-${sId++}`,
-            symbol: row.symbol,
-            name: isNative ? 'Solana' : row.name,
-            balance: parseFloat(row.balance) || 0,
-            usdValue: parseFloat(row.usdValue) || 0,
-            usdPrice: row.usdPrice || 0,
-            iconColor: solChain?.iconColor || '#14F195',
-            iconUrl: isNative ? solChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
-            contractAddress: row.contractAddress || undefined,
-            decimals: row.decimals,
-            details: {
-              type: isNative ? 'Native Token' : 'Token',
-              chain: 'Solana',
-              chainKey: 'solana',
-            },
-          });
-        }
-      }
-    } catch { /* chain unavailable — skip Solana */ }
-    return out;
+    const sol = await loadSolanaWallet(addr || undefined);
+    if (sol?.failed) throw new Error('Solana balances unavailable');
+    setSolanaOtherPath(sol?.otherPath ?? null);
+    if (!sol) return [];
+    const solChain = getChainDisplay('solana');
+    return sol.balances.map((row, i) => {
+      const isNative = row.symbol === 'SOL';
+      return {
+        id: `solana-${i + 1}`,
+        symbol: row.symbol,
+        name: isNative ? 'Solana' : row.name,
+        balance: parseFloat(row.balance) || 0,
+        usdValue: parseFloat(row.usdValue) || 0,
+        usdPrice: row.usdPrice || 0,
+        iconColor: solChain?.iconColor || '#14F195',
+        iconUrl: isNative ? solChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
+        contractAddress: row.contractAddress || undefined,
+        decimals: row.decimals,
+        details: {
+          type: isNative ? 'Native Token' : 'Token',
+          chain: 'Solana',
+          chainKey: 'solana',
+        },
+      };
+    });
   }, [tokenList]);
 
   const loadSuiAssets = useCallback(async (addr: string): Promise<WalletAsset[]> => {
-    const out: WalletAsset[] = [];
     // Non-EVM (Sui): same seed, self-registering, and SUI shows as a native
     // token (visible at 0 in the zero-balance section) so Sui always appears;
-    // held coin types ride alongside. loadSuiWallet already swallows a dormant
-    // backend and yields an address with no rows, so a chain that is switched
-    // off costs the user an empty section rather than an error.
-    try {
-      const sui = await loadSuiWallet(addr || undefined);
-      if (sui) {
-        const suiChain = getChainDisplay('sui');
-        let uId = 1;
-        for (const row of sui.balances) {
-          const isNative = row.symbol === 'SUI';
-          out.push({
-            id: `sui-${uId++}`,
-            symbol: row.symbol,
-            name: isNative ? 'Sui' : row.name,
-            balance: parseFloat(row.balance) || 0,
-            usdValue: parseFloat(row.usdValue) || 0,
-            usdPrice: row.usdPrice || 0,
-            iconColor: suiChain?.iconColor || '#4DA2FF',
-            iconUrl: isNative ? suiChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
-            contractAddress: row.contractAddress || undefined,
-            decimals: row.decimals,
-            details: {
-              type: isNative ? 'Native Token' : 'Token',
-              chain: 'Sui',
-              chainKey: 'sui',
-            },
-          });
-        }
-      }
-    } catch { /* chain unavailable — skip Sui */ }
-    return out;
+    // held coin types ride alongside.
+    const sui = await loadSuiWallet(addr || undefined);
+    if (sui?.failed) throw new Error('Sui balances unavailable');
+    if (!sui) return [];
+    const suiChain = getChainDisplay('sui');
+    return sui.balances.map((row, i) => {
+      const isNative = row.symbol === 'SUI';
+      return {
+        id: `sui-${i + 1}`,
+        symbol: row.symbol,
+        name: isNative ? 'Sui' : row.name,
+        balance: parseFloat(row.balance) || 0,
+        usdValue: parseFloat(row.usdValue) || 0,
+        usdPrice: row.usdPrice || 0,
+        iconColor: suiChain?.iconColor || '#4DA2FF',
+        iconUrl: isNative ? suiChain?.iconUrl : tokenList.find(t => t.symbol === row.symbol)?.iconUrl,
+        contractAddress: row.contractAddress || undefined,
+        decimals: row.decimals,
+        details: {
+          type: isNative ? 'Native Token' : 'Token',
+          chain: 'Sui',
+          chainKey: 'sui',
+        },
+      };
+    });
   }, [tokenList]);
 
   const loadPremiumAssets = useCallback(async (): Promise<WalletAsset[]> => {
-    const out: WalletAsset[] = [];
     // Spendable premium MCGP lives in Contract B (not as ERC-20 in the
     // wallet), so the standard balance read misses it. Show it as its OWN
     // tagged row — distinct from any ordinary (withdrawn) ERC-20 MCGP — so
     // the user can tell spendable from transferable.
-    try {
-      const { balance: premium, usdValue } = await getPremiumMcgpAsset();
-      if (premium > 0) {
-        const mcgpToken = tokenList.find(t => t.symbol === 'MCGP');
-        out.push({
-          id: 'mcgp-premium',
-          symbol: 'MCGP',
-          name: mcgpToken?.name || 'MCG Protocol',
-          balance: premium,
-          usdValue,
-          usdPrice: premium > 0 ? usdValue / premium : 0,
-          iconColor: mcgpToken?.iconColor || '#FFD700',
-          iconUrl: mcgpToken?.iconUrl,
-          tag: 'Spendable',
-          details: { type: 'Token', chain: 'Sonic', chainKey: 'sonic' },
-        });
-      }
-    } catch { /* MCGP swap unavailable — skip */ }
-    return out;
+    const { balance: premium, usdValue } = await readPremiumMcgpAsset();
+    if (premium <= 0) return [];
+    const mcgpToken = tokenList.find(t => t.symbol === 'MCGP');
+    return [{
+      id: 'mcgp-premium',
+      symbol: 'MCGP',
+      name: mcgpToken?.name || 'MCG Protocol',
+      balance: premium,
+      usdValue,
+      usdPrice: usdValue / premium,
+      iconColor: mcgpToken?.iconColor || '#FFD700',
+      iconUrl: mcgpToken?.iconUrl,
+      tag: 'Spendable',
+      details: { type: 'Token', chain: 'Sonic', chainKey: 'sonic' },
+    }];
   }, [tokenList]);
 
   // ── Orchestration ─────────────────────────────────────────────────────────
@@ -1077,11 +1065,13 @@ const WalletScreen: React.FC = () => {
   // Three phases, and the split is the whole point of this function:
   //
   //   0. Local reads (AsyncStorage). No network, so the shell — wallet label,
-  //      address, actions, section headers — renders essentially immediately.
+  //      address, actions, section headers — renders essentially immediately,
+  //      with the balances this device last saw for the wallet.
   //   1. The independent network sources, CONCURRENTLY. Each commits its rows
   //      the moment it returns, so the wait is the slowest chain rather than
   //      the sum of all of them.
   //   2. The merges that need the whole list (custom tokens, then discovery).
+  //      The finished list is saved for the next open.
   //
   // Previously all of this ran in one sequential chain with a single setAssets
   // at the end, so the screen showed nothing at all until every chain had
@@ -1095,6 +1085,8 @@ const WalletScreen: React.FC = () => {
     await migrateFromSingleWallet();
     const list = await getWalletList();
     const addr = await getActiveWallet();
+    const snapshot = addr ? walletSnapshot<WalletAsset>(addr, network) : null;
+    const saved = snapshot ? (await snapshot.read())?.value ?? null : null;
     if (!isCurrent()) return;
 
     setWalletList(list);
@@ -1121,6 +1113,7 @@ const WalletScreen: React.FC = () => {
       setSourceAssets(emptySourceAssets<WalletAsset>());
       setExtraAssets([]);
       setIsRefreshing(false);
+      setIsUpdating(false);
       return;
     }
 
@@ -1130,14 +1123,23 @@ const WalletScreen: React.FC = () => {
     // same wallet — which is every focus of this tab — revalidates in place, so
     // the list and total stay on screen instead of collapsing to a skeleton and
     // rebuilding each time the user navigates back.
-    const isDifferentWallet = loadedForRef.current !== addr;
-    loadedForRef.current = addr;
+    const loadKey = `${addr}|${network}`;
+    const isDifferentWallet = loadedForRef.current !== loadKey;
+    loadedForRef.current = loadKey;
     if (isDifferentWallet) {
-      setExtraAssets([]);
-      // Seed the EVM slot with the native rows so every supported chain is
-      // listed (at zero) from the first frame, then filled in as balances land.
-      setSourceAssets({ ...emptySourceAssets<WalletAsset>(), evm: buildNativeAssets() });
+      if (saved) {
+        // What this device last saw: the list and total show at once and are
+        // refreshed in place below.
+        setSourceAssets(saved.sources);
+        setExtraAssets(saved.extras);
+      } else {
+        setExtraAssets([]);
+        // Seed the EVM slot with the native rows so every supported chain is
+        // listed (at zero) from the first frame, then filled in as balances land.
+        setSourceAssets({ ...emptySourceAssets<WalletAsset>(), evm: buildNativeAssets() });
+      }
     }
+    setIsUpdating(true);
 
     // Collected locally as well as committed to state. Phase 2 needs the
     // complete list the instant the fan-out finishes, and React state is not
@@ -1150,7 +1152,9 @@ const WalletScreen: React.FC = () => {
       try {
         rows = await load();
       } catch (err) {
-        console.error(`Wallet: ${source} balances failed`, err);
+        // A failed read is not an empty wallet: keep the last known rows.
+        console.warn(`Wallet: ${source} balances failed`, err);
+        rows = saved?.sources[source] ?? (source === 'evm' ? buildNativeAssets() : []);
       }
       collected[source] = rows;
       if (isCurrent()) setSourceAssets(prev => ({ ...prev, [source]: rows }));
@@ -1165,6 +1169,7 @@ const WalletScreen: React.FC = () => {
       run('premium', loadPremiumAssets),
     ]);
     if (!isCurrent()) return;
+    setIsUpdating(false);
 
     // ── Phase 2: merges that need the complete list ──
     // Deliberately after the fan-out: both dedupe against everything already
@@ -1174,24 +1179,31 @@ const WalletScreen: React.FC = () => {
     const base = combineSourceAssets(collected);
     try {
       const custom = await mergeCustomTokens(base, addr, customTokens);
-      if (isCurrent()) setExtraAssets(custom);
+      if (!isCurrent()) return;
+      // Discovered rows last seen stay until discovery answers (it can take
+      // 25s), so the total does not dip and climb back on every open.
+      const listed = listedIn([...base, ...custom]);
+      const lastDiscovered = (saved?.extras ?? []).filter(
+        (a) => a.discovered && !listed(a.details?.chainKey ?? '', a.symbol, a.contractAddress),
+      );
+      setExtraAssets([...custom, ...lastDiscovered]);
+      void snapshot?.write({ sources: collected, extras: [...custom, ...lastDiscovered] });
 
       // Discovery is deliberately NOT awaited: it is the slowest merge and the
       // list is already complete without it, so blocking the refresh spinner on
       // it would make pull-to-refresh feel broken.
       void mergeDiscoveredTokens([...base, ...custom], addr).then((discovered) => {
-        if (discovered.length && isCurrent()) setExtraAssets([...custom, ...discovered]);
+        if (discovered === null || !isCurrent()) return;
+        setExtraAssets([...custom, ...discovered]);
+        void snapshot?.write({ sources: collected, extras: [...custom, ...discovered] });
       });
     } catch (err) {
       console.error('Wallet: token merge failed', err);
     } finally {
       if (isCurrent()) setIsRefreshing(false);
     }
-    // `network` is read inside the loaders at call time (getNetwork()), not in
-    // this closure, so the rule cannot see it. It must stay: useFocusEffect
-    // keys off this callback's identity, and a mainnet/testnet switch has to
-    // force a refetch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `network` keys the saved list and forces a refetch on a mainnet/testnet
+    // switch: useFocusEffect keys off this callback's identity.
   }, [
     buildNativeAssets, customTokens, network,
     loadEvmAssets, loadTronAssets, loadBtcAssets, loadSolanaAssets, loadSuiAssets,
@@ -1511,6 +1523,7 @@ const WalletScreen: React.FC = () => {
         <WalletBalanceCard
           totalUsdValue={totalUsdValue}
           isTotalPending={isTotalPending}
+          isUpdating={isUpdating}
           isValuesHidden={isValuesHidden}
           activeLabel={activeLabel}
           onToggleVisibility={() => setIsValuesHidden(v => !v)}

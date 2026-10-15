@@ -9,6 +9,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getActiveWallet, getMnemonic } from '../wallet';
 import { deriveSolanaAddresses, deriveSolanaPrivateKey, type SolanaDerivation } from './derivation';
+import { getNonEvmAddresses } from './nonEvmAddresses';
 import { getNonEVMBalances, registerNonEVMAddress, type NonEVMBalance } from './nonevmApi';
 import { toNonEvmBalanceRow } from './nonevmRows';
 import { getNetwork } from '../../hooks/useNetwork';
@@ -28,8 +29,6 @@ type Resolved = { derivation: SolanaDerivation; address: string; settled: boolea
 
 const otherPathOf = (d: SolanaDerivation): SolanaDerivation => (d === 'phantom' ? 'trustwallet' : 'phantom');
 
-// Public addresses only, one seed derivation per wallet per session.
-const addressCache = new Map<string, Record<SolanaDerivation, string>>();
 // Only persisted decisions, so a stand-in answer keeps retrying the scan.
 const resolvedCache = new Map<string, Resolved>();
 const inFlight = new Map<string, Promise<Resolved>>();
@@ -43,7 +42,6 @@ const epochOf = (wallet: string) => epochs.get(wallet) ?? 0;
 
 /** Test hook: forget all resolved derivations and probe findings. */
 export function clearSolanaCache(): void {
-  addressCache.clear();
   resolvedCache.clear();
   inFlight.clear();
   otherPathFindings.clear();
@@ -53,7 +51,6 @@ export function clearSolanaCache(): void {
 /** Drop a wallet's persisted path decision and caches (call on wallet removal). */
 export async function forgetSolanaDerivation(wallet: string): Promise<void> {
   epochs.set(wallet, epochOf(wallet) + 1);
-  addressCache.delete(wallet);
   resolvedCache.delete(wallet);
   inFlight.delete(wallet);
   otherPathFindings.delete(wallet);
@@ -82,12 +79,9 @@ function hasFunds(balances: NonEVMBalance[]): boolean {
   });
 }
 
-function addressesFor(wallet: string, mnemonic: string): Record<SolanaDerivation, string> {
-  const hit = addressCache.get(wallet);
-  if (hit) return hit;
-  const both = deriveSolanaAddresses(mnemonic);
-  addressCache.set(wallet, both);
-  return both;
+// Public addresses only, derived once per wallet and persisted.
+async function addressesFor(wallet: string, mnemonic: string): Promise<Record<SolanaDerivation, string>> {
+  return (await getNonEvmAddresses(wallet))?.solana ?? deriveSolanaAddresses(mnemonic);
 }
 
 function persist(wallet: string, out: Resolved): void {
@@ -117,7 +111,7 @@ function resolveDerivation(wallet: string, mnemonic: string): Promise<Resolved> 
 
 async function doResolve(wallet: string, mnemonic: string): Promise<Resolved> {
   const epoch = epochOf(wallet);
-  const addresses = addressesFor(wallet, mnemonic);
+  const addresses = await addressesFor(wallet, mnemonic);
   const standIn: Resolved = { derivation: 'phantom', address: addresses.phantom, settled: false };
 
   let stored: string | null;
@@ -221,7 +215,7 @@ async function probeOtherPath(
 ): Promise<{ derivation: SolanaDerivation; address: string; raw: NonEVMBalance[] } | null> {
   if (getNetwork() !== 'mainnet' || otherPathFindings.has(wallet)) return null;
   const derivation = otherPathOf(current.derivation);
-  const address = addressesFor(wallet, mnemonic)[derivation];
+  const address = (await addressesFor(wallet, mnemonic))[derivation];
   let raw: NonEVMBalance[];
   try {
     raw = await getNonEVMBalances(SOLANA_KEY, address);
@@ -249,7 +243,7 @@ async function probeOtherPath(
 export async function switchSolanaDerivation(wallet: string, derivation: SolanaDerivation): Promise<string | null> {
   const mnemonic = await getMnemonic(wallet);
   if (!mnemonic) return null;
-  const address = addressesFor(wallet, mnemonic)[derivation];
+  const address = (await addressesFor(wallet, mnemonic))[derivation];
   await registerNonEVMAddress(wallet, SOLANA_KEY, address);
   persist(wallet, { derivation, address, settled: true });
   otherPathFindings.delete(wallet);
@@ -266,7 +260,7 @@ export async function switchSolanaDerivation(wallet: string, derivation: SolanaD
  */
 export async function loadSolanaWallet(
   walletAddress?: string
-): Promise<{ address: string; balances: WalletBalanceWithChain[]; otherPath: SolanaOtherPath | null } | null> {
+): Promise<{ address: string; balances: WalletBalanceWithChain[]; otherPath: SolanaOtherPath | null; failed?: boolean } | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
   const mnemonic = await getMnemonic(wallet);
@@ -286,7 +280,7 @@ export async function loadSolanaWallet(
   } catch {
     // Chain unavailable (dormant backend) or upstream RPC error — surface the
     // address (receive still works) with no balance rows.
-    return { address, balances: [], otherPath: null };
+    return { address, balances: [], otherPath: null, failed: true };
   }
 
   // Probing on top of a stand-in answer would compare against a guess.

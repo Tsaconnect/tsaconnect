@@ -8,8 +8,9 @@ const PHANTOM_ADDR = 'HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk';
 // resolves without a balance scan (which would consume the fetch mocks).
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn((key: string) =>
-    Promise.resolve(key.startsWith('tsa-solana-derivation') ? 'phantom' : 'test-token')
+    Promise.resolve(key.startsWith('tsa-solana-derivation') ? 'phantom' : key.startsWith('tsa-nonevm-addresses') ? null : 'test-token')
   ),
+  setItem: jest.fn().mockResolvedValue(undefined),
 }));
 
 const M = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';

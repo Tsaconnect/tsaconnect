@@ -3,6 +3,7 @@ import {
   allSourcesReported,
   combineSourceAssets,
   emptySourceAssets,
+  isWalletSnapshot,
   type SourceAssets,
 } from '../walletAssets';
 
@@ -102,5 +103,27 @@ describe('allSourcesReported', () => {
     for (const source of ASSET_SOURCES) sources[source] = [];
 
     expect(allSourcesReported(sources)).toBe(true);
+  });
+});
+
+describe('isWalletSnapshot', () => {
+  const complete = () => {
+    const sources = emptySourceAssets<Row>();
+    for (const source of ASSET_SOURCES) sources[source] = [row(source)];
+    return { sources, extras: [row('x')] };
+  };
+
+  it('accepts a saved list, including a source that had not reported', () => {
+    expect(isWalletSnapshot(complete())).toBe(true);
+    expect(isWalletSnapshot({ ...complete(), sources: emptySourceAssets<Row>() })).toBe(true);
+  });
+
+  it('rejects anything a later app version or a corrupt write could leave', () => {
+    expect(isWalletSnapshot(null)).toBe(false);
+    expect(isWalletSnapshot({ sources: complete().sources })).toBe(false);
+    expect(isWalletSnapshot({ extras: [] })).toBe(false);
+    const { tron: _tron, ...missingTron } = complete().sources;
+    expect(isWalletSnapshot({ sources: missingTron, extras: [] })).toBe(false);
+    expect(isWalletSnapshot({ sources: { ...complete().sources, btc: 'oops' }, extras: [] })).toBe(false);
   });
 });

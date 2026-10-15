@@ -5,17 +5,13 @@
 // wallet), then registered with the backend so the reconciler tracks it.
 // Balances (SUI + all held coin types) come from the dormant-safe
 // /wallet/nonevm/* endpoints.
-import { getActiveWallet, getMnemonic } from '../wallet';
-import { deriveSuiAddress } from './derivation';
+import { getActiveWallet } from '../wallet';
+import { getNonEvmAddresses } from './nonEvmAddresses';
 import { getNonEVMBalances, registerNonEVMAddress } from './nonevmApi';
 import { toNonEvmBalanceRow } from './nonevmRows';
 import type { WalletBalanceWithChain } from '../walletApi';
 
 const SUI_KEY = 'sui';
-
-// Derived Sui address is a pure function of the mnemonic, so cache per EVM
-// wallet address to avoid re-deriving (and re-reading SecureStore) on refresh.
-const addressCache = new Map<string, string>();
 
 /**
  * Derive the Sui address for a wallet (defaults to the active wallet).
@@ -24,13 +20,7 @@ const addressCache = new Map<string, string>();
 export async function getSuiAddress(walletAddress?: string): Promise<string | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
-  const cached = addressCache.get(wallet);
-  if (cached) return cached;
-  const mnemonic = await getMnemonic(wallet);
-  if (!mnemonic) return null;
-  const suiAddress = deriveSuiAddress(mnemonic);
-  addressCache.set(wallet, suiAddress);
-  return suiAddress;
+  return (await getNonEvmAddresses(wallet))?.sui ?? null;
 }
 
 /** Fetch Sui balances (SUI + held coin types) as display rows. */
@@ -47,7 +37,7 @@ export async function getSuiBalances(suiAddress: string): Promise<WalletBalanceW
  */
 export async function loadSuiWallet(
   walletAddress?: string
-): Promise<{ address: string; balances: WalletBalanceWithChain[] } | null> {
+): Promise<{ address: string; balances: WalletBalanceWithChain[]; failed?: boolean } | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
   const address = await getSuiAddress(wallet);
@@ -63,6 +53,6 @@ export async function loadSuiWallet(
   } catch {
     // Chain unavailable (dormant backend) or upstream RPC error — surface the
     // address (receive still works) with no balance rows.
-    return { address, balances: [] };
+    return { address, balances: [], failed: true };
   }
 }

@@ -4,18 +4,13 @@
 // so an exported seed reproduces the same address in TronLink), then registered
 // with the backend so the reconciler tracks it. Balances come from the
 // dormant-safe /wallet/nonevm/* endpoints.
-import { getActiveWallet, getMnemonic } from '../wallet';
-import { deriveTronAddress } from './derivation';
+import { getActiveWallet } from '../wallet';
+import { getNonEvmAddresses } from './nonEvmAddresses';
 import { getNonEVMBalances, registerNonEVMAddress } from './nonevmApi';
 import { toNonEvmBalanceRow } from './nonevmRows';
 import type { WalletBalanceWithChain } from '../walletApi';
 
 const TRON_KEY = 'tron';
-
-// Derived Tron address is a pure function of the mnemonic, so cache per EVM
-// wallet address to avoid re-deriving (and re-reading SecureStore) on every
-// balance refresh.
-const addressCache = new Map<string, string>();
 
 /**
  * Derive the Tron address for a wallet (defaults to the active wallet). Returns
@@ -25,13 +20,7 @@ const addressCache = new Map<string, string>();
 export async function getTronAddress(walletAddress?: string): Promise<string | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
-  const cached = addressCache.get(wallet);
-  if (cached) return cached;
-  const mnemonic = await getMnemonic(wallet);
-  if (!mnemonic) return null;
-  const tronAddress = deriveTronAddress(mnemonic);
-  addressCache.set(wallet, tronAddress);
-  return tronAddress;
+  return (await getNonEvmAddresses(wallet))?.tron ?? null;
 }
 
 /** Fetch Tron balances (TRX + configured TRC-20s) as display rows. */
@@ -48,7 +37,7 @@ export async function getTronBalances(tronAddress: string): Promise<WalletBalanc
  */
 export async function loadTronWallet(
   walletAddress?: string
-): Promise<{ address: string; balances: WalletBalanceWithChain[] } | null> {
+): Promise<{ address: string; balances: WalletBalanceWithChain[]; failed?: boolean } | null> {
   const wallet = walletAddress || (await getActiveWallet());
   if (!wallet) return null;
   const address = await getTronAddress(wallet);
@@ -66,6 +55,6 @@ export async function loadTronWallet(
   } catch {
     // Chain unavailable (dormant backend) or upstream RPC error — surface the
     // address (receive still works) with no balance rows.
-    return { address, balances: [] };
+    return { address, balances: [], failed: true };
   }
 }

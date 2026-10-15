@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -156,8 +157,11 @@ func NewPriceService() *PriceService {
 // GetPrices fetches current prices for the given symbols from CoinGecko,
 // using a 60-second TTL cache.
 func (ps *PriceService) GetPrices(symbols []string) (map[string]PriceData, error) {
-	// Build cache key from sorted symbols
-	cacheKey := strings.Join(symbols, ",")
+	// Callers often build symbols from a map, so the order is random; without
+	// sorting, the same set misses the cache and calls CoinGecko every time.
+	sorted := append([]string(nil), symbols...)
+	sort.Strings(sorted)
+	cacheKey := strings.Join(sorted, ",")
 
 	// Check cache
 	if entry, ok := ps.cache.Load(cacheKey); ok {
