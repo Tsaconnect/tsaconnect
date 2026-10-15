@@ -501,10 +501,16 @@ func main() {
 	// Per-chain escrow registry (Sonic + any enabled BSC). Boot verification
 	// (eth_chainId + bytecode per chain) runs inside the constructor. The trade
 	// service resolves escrow + EIP-712 domain per entity-chain from this registry.
-	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg)
+	// A direct-audience escrow (BSC) is registered only if its boot gates pass,
+	// none of the hot keys below among its admins.
+	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg, directEscrowForbiddenAdmins(cfg))
 	if err := checkSliceLeftovers(config.DB); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 	}
+	if err := checkDirectUnconfigure(config.DB, cfg, p2pEscrowRegistry); err != nil {
+		fatalf("[config] REFUSING TO START: %v", err)
+	}
+	dropUngatedDirectFeeManagers(cfg, p2pEscrowRegistry)
 
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
@@ -1939,10 +1945,21 @@ func main() {
 	if sonicShared != nil {
 		scheduler.Register(jobs.NewGasFloatMonitorNamed("sonic_gas", sonicShared, 10*time.Minute))
 	}
+	// P2P gas: the Sonic lane above, plus one lane per other registered P2P
+	// chain (BSC direct) on the same gas_sponsor key, each in a sponsorship of
+	// its own and its float watched under p2p_<chain>_gas.
+	p2pGasLanes := buildP2PChainGasSponsorships(cfg, blockchainService, p2pEscrowRegistry.ChainIDs())
+	for id, l := range p2pGasLanes {
+		scheduler.Register(jobs.NewGasFloatMonitorNamed("p2p_"+l.ChainKey+"_gas", l.Sponsor, 10*time.Minute))
+		log.Printf("[p2p-gas] chain=%d lane registered", id)
+	}
+	if sonicShared != nil {
+		p2pGasLanes[cfg.SonicChainID] = services.P2PGasLane{ChainKey: "sonic", Sponsor: sonicShared}
+	}
 	// Only a live sponsor with a trade service to check needs against: a nil
 	// pointer in either interface would be non-nil.
 	if p2pTradeSvc != nil {
-		if p2pGas := services.NewP2PGasSponsor(sonicShared, p2pTradeSvc, cfg.P2PGasTopUpsPerDay, nil); p2pGas != nil {
+		if p2pGas := services.NewP2PGasSponsor(p2pGasLanes, p2pTradeSvc, cfg.P2PGasTopUpsPerDay, nil); p2pGas != nil {
 			p2pHandler.SetGasSponsor(p2pGas)
 		}
 	}

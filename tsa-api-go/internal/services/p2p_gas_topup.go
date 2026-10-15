@@ -56,12 +56,12 @@ func ParseP2PGasAction(s string) (P2PGasAction, bool) {
 }
 
 var (
-	// ErrP2PGasUnavailable: there is no live Sonic sponsor lane, it refused for
-	// reasons of ours (float, ceiling, budget), or a chain read or the send
-	// failed. She can still add S herself.
-	ErrP2PGasUnavailable = errors.New("we can't cover the network fee right now — add a little S to your wallet, or try again shortly")
+	// ErrP2PGasUnavailable: there is no live sponsor lane on the tx's chain,
+	// it refused for reasons of ours (float, ceiling, budget), or a chain read
+	// or the send failed. She can still add gas herself.
+	ErrP2PGasUnavailable = errors.New("we can't cover the network fee right now — add a little gas (S on Sonic, BNB on BNB Chain) to your wallet, or try again shortly")
 	// ErrP2PGasNotNeeded: the trade or ad named has no tx for her to sign now
-	// (not her turn, wrong state, not on Sonic).
+	// (not her turn, wrong state, a chain with no P2P escrow).
 	ErrP2PGasNotNeeded = errors.New("there's nothing for you to sign on that right now")
 	// ErrP2PGasUnused: the S we sent her last has not been spent yet.
 	ErrP2PGasUnused = errors.New("the network fee we sent you last hasn't been used yet — finish that step first")
@@ -89,43 +89,61 @@ func (e gasUnavailableError) Error() string {
 
 func (e gasUnavailableError) Unwrap() error { return ErrP2PGasUnavailable }
 
-// P2PGasRequest is one top-up request: the action, and the trade or ad it is
-// for (uuid.Nil when the action takes none).
+// P2PGasRequest is one top-up request: the action, the trade or ad it is for
+// (uuid.Nil when the action takes none), and the chain the app says the tx is
+// on (0 from older apps: the default chain, Sonic).
 type P2PGasRequest struct {
 	Action  P2PGasAction
 	TradeID uuid.UUID
 	AdID    uuid.UUID
+	ChainID int64
 }
 
-// P2PGasNeed answers whether the caller really has req's tx to sign now.
-// *P2PTradeService implements it (RequireP2PGasNeed).
+// P2PGasNeed answers whether the caller really has req's tx to sign now, and
+// on which chain. *P2PTradeService implements it (RequireP2PGasNeed).
 type P2PGasNeed interface {
-	RequireP2PGasNeed(ctx context.Context, user *models.User, wallet string, req P2PGasRequest) error
+	RequireP2PGasNeed(ctx context.Context, user *models.User, wallet string, req P2PGasRequest) (int64, error)
 }
 
-// P2PGasSponsor drips S to a P2P user's own wallet before a tx she signs on
-// Sonic. It sends through the shared Sonic sponsor lane (the same one the
-// marketplace funding uses, so one key never runs two nonce sequences) with
-// GasTopUp's send: only the shortfall, skipped when she already holds it, the
-// lane's ceiling, float floor and daily gas budget. Its own controls, on top
-// of the KYC the P2P routes require:
-//   - every drip is backed by real trade/ad state (P2PGasNeed);
-//   - a per-user daily count of sends (skips do not count);
-//   - no new drip while the last one sits unspent (GasTopUp's unused-cap idea);
+// P2PGasLane is one chain's sponsor lane for P2P drips: the sponsorship that
+// holds it and the chain key it is held under.
+type P2PGasLane struct {
+	ChainKey string
+	Sponsor  *RampSponsorship
+}
+
+// P2PGasSponsor drips native gas (S on Sonic, BNB on BSC) to a P2P user's own
+// wallet before a tx she signs there. Each chain sends through its own sponsor
+// lane on the gas_sponsor key (Sonic's is the one the marketplace funding
+// shares); every lane takes its KeyLane from the signer registry, so one key
+// never runs two nonce sequences on one chain. Sends use GasTopUp's send: only
+// the shortfall, skipped when she already holds it, the lane's ceiling, float
+// floor and daily gas budget. Its own controls, on top of the KYC the P2P
+// routes require:
+//   - every drip is backed by real trade/ad state on that chain (P2PGasNeed);
+//   - a per-user daily count of sends across every chain (skips do not count);
+//   - no new drip on a chain while her last one there sits unspent;
 //   - one request in flight per user.
 //
 // The counters are in memory, like every SponsorGuard: a restart resets them.
 type P2PGasSponsor struct {
-	sponsor *RampSponsorship
+	lanes   map[int64]P2PGasLane
 	need    P2PGasNeed
 	perUser *SponsorGuard
 	now     func() time.Time
 
 	mu       sync.Mutex
 	inFlight map[uuid.UUID]struct{}
-	// lastDrip is each user's most recent send: when, and the balance it
-	// brought her wallet to.
-	lastDrip map[uuid.UUID]p2pDrip
+	// lastDrip is each user's most recent send per chain: when, and the
+	// balance it brought her wallet to.
+	lastDrip map[p2pDripKey]p2pDrip
+}
+
+// p2pDripKey is one user's drips on one chain: balances are per chain, so a
+// BNB drip says nothing about her S.
+type p2pDripKey struct {
+	user    uuid.UUID
+	chainID int64
 }
 
 type p2pDrip struct {
@@ -135,11 +153,17 @@ type p2pDrip struct {
 	op          string
 }
 
-// NewP2PGasSponsor is nil when sponsor has no lane or there is no need
-// checker, so a dormant sponsor is a nil pointer whose TopUp refuses with
-// ErrP2PGasUnavailable.
-func NewP2PGasSponsor(sponsor *RampSponsorship, need P2PGasNeed, perDay int, now func() time.Time) *P2PGasSponsor {
-	if !sponsor.Enabled() || sponsor.topUp == nil || need == nil {
+// NewP2PGasSponsor keeps each chain's lane that is live (chain id → lane),
+// and is nil when none is or there is no need checker, so a dormant sponsor is
+// a nil pointer whose TopUp refuses with ErrP2PGasUnavailable.
+func NewP2PGasSponsor(lanes map[int64]P2PGasLane, need P2PGasNeed, perDay int, now func() time.Time) *P2PGasSponsor {
+	live := map[int64]P2PGasLane{}
+	for id, l := range lanes {
+		if l.Sponsor.Enabled() && l.Sponsor.topUp != nil {
+			live[id] = l
+		}
+	}
+	if len(live) == 0 || need == nil {
 		return nil
 	}
 	if perDay <= 0 {
@@ -149,17 +173,29 @@ func NewP2PGasSponsor(sponsor *RampSponsorship, need P2PGasNeed, perDay int, now
 		now = time.Now
 	}
 	return &P2PGasSponsor{
-		sponsor:  sponsor,
+		lanes:    live,
 		need:     need,
 		perUser:  NewSponsorGuard("p2p_gas_user", SponsorLimits{PerUserPerWindow: perDay, Window: 24 * time.Hour}, now),
 		now:      now,
 		inFlight: map[uuid.UUID]struct{}{},
-		lastDrip: map[uuid.UUID]p2pDrip{},
+		lastDrip: map[p2pDripKey]p2pDrip{},
 	}
 }
 
-// TopUp sends `wallet` the S req.Action needs at today's gas price, times
-// topUpGasBuffer, minus what it already holds. wallet must be the user's own
+// ChainIDs lists the chains this sponsor can drip on.
+func (p *P2PGasSponsor) ChainIDs() []int64 {
+	if p == nil {
+		return nil
+	}
+	out := make([]int64, 0, len(p.lanes))
+	for id := range p.lanes {
+		out = append(out, id)
+	}
+	return out
+}
+
+// TopUp sends `wallet` the native gas req.Action needs on its chain at today's
+// gas price, times topUpGasBuffer, minus what it already holds. wallet must be the user's own
 // linked wallet (the handler passes the proven one).
 //
 // Our own failures (no lane, float, ceiling, budget, a chain read, a send that
@@ -182,28 +218,36 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 	if !common.IsHexAddress(strings.TrimSpace(wallet)) || !sameAddress(wallet, user.WalletAddress) {
 		return GasTopUpResult{}, ErrSponsorWallet
 	}
-	if err := p.need.RequireP2PGasNeed(ctx, user, wallet, req); err != nil {
+	chainID, err := p.need.RequireP2PGasNeed(ctx, user, wallet, req)
+	if err != nil {
 		if errors.Is(err, ErrInvalidParams) || errors.Is(err, ErrP2PGasNotNeeded) || KYCRefusalCode(err) != "" {
 			return GasTopUpResult{}, err
 		}
 		return GasTopUpResult{}, gasUnavailable(fmt.Errorf("need check: %w", err))
+	}
+	chainLane, ok := p.lanes[chainID]
+	if !ok {
+		// A P2P chain with no sponsor lane here (no client, a testnet escrow):
+		// she has a tx to sign but we cannot pay for it.
+		return GasTopUpResult{}, gasUnavailable(fmt.Errorf("no sponsor lane on chain %d", chainID))
 	}
 	if !p.enter(user.ID) {
 		return GasTopUpResult{}, fmt.Errorf("%w: a gas top-up is already being sent", ErrSponsorshipInProgress)
 	}
 	defer p.leave(user.ID)
 
-	g := p.sponsor.topUp
-	lane := g.liveLane("sonic")
+	g := chainLane.Sponsor.topUp
+	lane := g.liveLane(chainLane.ChainKey)
 	if lane == nil {
 		return GasTopUpResult{}, ErrP2PGasUnavailable
 	}
+	dripKey := p2pDripKey{user: user.ID, chainID: chainID}
 	need, err := lane.gasCost(units)
 	if err != nil {
 		return GasTopUpResult{}, gasUnavailable(err)
 	}
 	need.Mul(need, big.NewInt(topUpGasBuffer))
-	if err := p.refuseUnusedDrip(ctx, lane, user.ID, wallet, need); err != nil {
+	if err := p.refuseUnusedDrip(ctx, lane, dripKey, wallet, need); err != nil {
 		return GasTopUpResult{}, err
 	}
 
@@ -211,7 +255,7 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 	dripOp := "p2p_drip:" + uuid.NewString() // one drip, one operation
 	res, err := g.sendTopUp(ctx, topUpSend{
 		lane: lane, wallet: wallet, need: need, op: dripOp,
-		ref: "p2p=" + string(req.Action) + " user=" + user.ID.String(),
+		ref: fmt.Sprintf("p2p=%s chain=%d user=%s", req.Action, chainID, user.ID),
 		admit: func() error {
 			s, err := p.perUser.ReserveUser("p2p:" + user.ID.String())
 			if errors.Is(err, ErrRateLimited) {
@@ -229,9 +273,12 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 		sent: func(txHash string) {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			p.lastDrip[user.ID] = p2pDrip{at: p.now(), postBalance: new(big.Int).Set(need), txHash: txHash, op: dripOp}
+			p.lastDrip[dripKey] = p2pDrip{at: p.now(), postBalance: new(big.Int).Set(need), txHash: txHash, op: dripOp}
 		},
 	})
+	// The chain the drip is for, so the app waits only for a drip on its own
+	// chain (additive: older apps ignore it).
+	res.ChainID = chainID
 	switch {
 	case err == nil, errors.Is(err, ErrTopUpDailyCap), errors.Is(err, ErrSponsorshipInProgress):
 		return res, err
@@ -243,11 +290,11 @@ func (p *P2PGasSponsor) TopUp(ctx context.Context, user *models.User, wallet str
 // and her balance has not dropped below what it brought her to: no tx has
 // been paid from the wallet since (every tx burns gas). Only asked when a
 // send would happen; a wallet that already holds `need` is a skip either way.
-func (p *P2PGasSponsor) refuseUnusedDrip(ctx context.Context, lane *SponsorLane, userID uuid.UUID, wallet string, need *big.Int) error {
+func (p *P2PGasSponsor) refuseUnusedDrip(ctx context.Context, lane *SponsorLane, key p2pDripKey, wallet string, need *big.Int) error {
 	p.mu.Lock()
-	last, ok := p.lastDrip[userID]
+	last, ok := p.lastDrip[key]
 	if ok && p.now().Sub(last.at) >= p2pGasUnusedWindow {
-		delete(p.lastDrip, userID)
+		delete(p.lastDrip, key)
 		ok = false
 	}
 	p.mu.Unlock()
@@ -258,7 +305,7 @@ func (p *P2PGasSponsor) refuseUnusedDrip(ctx context.Context, lane *SponsorLane,
 		// The last drip was cancelled at its nonce: it never arrived, so it
 		// is not an unused drip — a new one may go.
 		p.mu.Lock()
-		delete(p.lastDrip, userID)
+		delete(p.lastDrip, key)
 		p.mu.Unlock()
 		return nil
 	}

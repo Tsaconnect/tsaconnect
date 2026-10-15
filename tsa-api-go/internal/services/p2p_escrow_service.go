@@ -49,6 +49,8 @@ const p2pEscrowABI = `[
 	{"inputs":[{"name":"account","type":"address"}],"name":"isAdmin","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"systemWallet","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"trustedForwarder","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"token","type":"address"}],"name":"acceptedTokens","outputs":[{"type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"}],"name":"v","type":"tuple"}],"name":"hashVoucher","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"feeBps","outputs":[{"type":"uint16"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"paymentWindow","outputs":[{"type":"uint40"}],"stateMutability":"view","type":"function"},

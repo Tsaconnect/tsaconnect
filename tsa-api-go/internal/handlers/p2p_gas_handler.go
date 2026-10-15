@@ -28,23 +28,27 @@ const (
 	p2pGasUnusedCode      = "gas_topup_unused"
 )
 
-// SetGasSponsor wires the Sonic gas top-up, from main.go, only when the shared
-// sponsor lane is live.
+// SetGasSponsor wires the P2P gas top-up, from main.go, only when some
+// chain's sponsor lane is live.
 func (h *P2PHandler) SetGasSponsor(g P2PGasSponsor) { h.gas = g }
 
 // p2pGasTopUpRequest: tradeId for mark_paid / release / cancel_trade /
-// dispute; adId for open_trade / cancel_ad; neither for approve / deposit /
-// withdraw.
+// dispute; adId for open_trade / cancel_ad (and, optionally, an approve for
+// opening that ad); neither for approve / deposit / withdraw. chainId
+// (optional) is the chain the tx is on: absent is the default chain (Sonic);
+// for an ad or trade it must be the entity's own.
 type p2pGasTopUpRequest struct {
 	Action  string `json:"action" binding:"required"`
 	TradeID string `json:"tradeId"`
 	AdID    string `json:"adId"`
+	ChainID int64  `json:"chainId"`
 }
 
-// GasTopUp is POST /api/p2p/gas/top-up {action, tradeId?, adId?}: S for the
-// caller's next P2P tx, sent to her proven wallet only, and only when that tx
-// is really hers to sign now. {skipped: true} when she already holds enough;
-// otherwise the confirmed top-up's {txHash, amountWei}.
+// GasTopUp is POST /api/p2p/gas/top-up {action, tradeId?, adId?, chainId?}:
+// native gas (S on Sonic, BNB on BSC) for the caller's next P2P tx, sent to
+// her proven wallet only, and only when that tx is really hers to sign now.
+// {skipped: true} when she already holds enough; otherwise the confirmed
+// top-up's {txHash, amountWei}. Both carry the chainId the drip is for.
 func (h *P2PHandler) GasTopUp(c *gin.Context) {
 	user, ok := h.require(c)
 	if !ok {
@@ -74,7 +78,7 @@ func (h *P2PHandler) GasTopUp(c *gin.Context) {
 	if !ok {
 		return
 	}
-	res, err := h.gas.TopUp(c.Request.Context(), user, wallet, services.P2PGasRequest{Action: action, TradeID: tradeID, AdID: adID})
+	res, err := h.gas.TopUp(c.Request.Context(), user, wallet, services.P2PGasRequest{Action: action, TradeID: tradeID, AdID: adID, ChainID: req.ChainID})
 	if err != nil {
 		p2pGasError(c, res, err)
 		return

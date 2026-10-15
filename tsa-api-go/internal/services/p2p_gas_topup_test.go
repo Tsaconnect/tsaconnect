@@ -17,12 +17,22 @@ type fakeP2PGasNeed struct {
 	err   error
 	calls int
 	last  P2PGasRequest
+	chain int64 // 0 = Sonic (146)
 }
 
-func (f *fakeP2PGasNeed) RequireP2PGasNeed(_ context.Context, _ *models.User, _ string, req P2PGasRequest) error {
+func (f *fakeP2PGasNeed) RequireP2PGasNeed(_ context.Context, _ *models.User, _ string, req P2PGasRequest) (int64, error) {
 	f.calls++
 	f.last = req
-	return f.err
+	if f.chain != 0 {
+		return f.chain, f.err
+	}
+	return 146, f.err
+}
+
+// sonicGasLanes is a sponsorship's "sonic" lane as the P2P sponsor's Sonic
+// (146) lane.
+func sonicGasLanes(sp *RampSponsorship) map[int64]P2PGasLane {
+	return map[int64]P2PGasLane{146: {ChainKey: "sonic", Sponsor: sp}}
 }
 
 type p2pGasRig struct {
@@ -39,7 +49,7 @@ func newP2PGasRig(t *testing.T, perDay int) *p2pGasRig {
 	now := func() time.Time { return clock }
 	sp := NewRampSponsorship(nil, r.store, r.lanes(), 2, time.Second, now)
 	need := &fakeP2PGasNeed{}
-	return &p2pGasRig{sponsorRig: r, g: NewP2PGasSponsor(sp, need, perDay, now), need: need, clock: &clock}
+	return &p2pGasRig{sponsorRig: r, g: NewP2PGasSponsor(sonicGasLanes(sp), need, perDay, now), need: need, clock: &clock}
 }
 
 func (r *p2pGasRig) topUp(a P2PGasAction) (GasTopUpResult, error) {
@@ -139,7 +149,7 @@ func TestP2PGasTopUp_Refusals(t *testing.T) {
 	if _, err := none.TopUp(context.Background(), topUpUser(r.sponsorRig), sponsorTestUser, P2PGasRequest{Action: P2PGasMarkPaid}); !errors.Is(err, ErrP2PGasUnavailable) {
 		t.Fatalf("dormant: %v", err)
 	}
-	if NewP2PGasSponsor(NewRampSponsorship(nil, r.store, r.lanes(), 2, time.Second, nil), nil, 6, nil) != nil {
+	if NewP2PGasSponsor(sonicGasLanes(NewRampSponsorship(nil, r.store, r.lanes(), 2, time.Second, nil)), nil, 6, nil) != nil {
 		t.Fatal("no state check must leave the sponsor dormant, never sponsoring blind")
 	}
 	r.lane.Guard.SetKillSwitch(true)
@@ -309,5 +319,47 @@ func TestParseP2PGasAction(t *testing.T) {
 	}
 	if _, ok := ParseP2PGasAction("mint"); ok {
 		t.Fatal("unknown action accepted")
+	}
+}
+
+// Plan API-7: a BSC tx is dripped from the BSC lane only (the Sonic lane and
+// its float are untouched), the result names the chain, the per-user daily
+// cap is one across chains, and a chain with no lane is gas_unavailable.
+func TestP2PGasTopUp_PerChainLanes(t *testing.T) {
+	sonic, _ := newSponsorRig("sonic", "USDT")
+	bsc, _ := newSponsorRig("bsc", "USDT")
+	now := func() time.Time { return sponsorTestNow }
+	need := &fakeP2PGasNeed{chain: 56}
+	g := NewP2PGasSponsor(map[int64]P2PGasLane{
+		146: {ChainKey: "sonic", Sponsor: NewRampSponsorship(nil, sonic.store, sonic.lanes(), 2, time.Second, now)},
+		56:  {ChainKey: "bsc", Sponsor: NewRampSponsorship(nil, bsc.store, bsc.lanes(), 2, time.Second, now)},
+	}, need, 2, now)
+	user := topUpUser(sonic)
+	sonic.chain.balances[strings.ToLower(sponsorTestUser)] = big.NewInt(0)
+	bsc.chain.balances[strings.ToLower(sponsorTestUser)] = big.NewInt(0)
+
+	got, err := g.TopUp(context.Background(), user, sponsorTestUser, P2PGasRequest{Action: P2PGasRelease, ChainID: 56})
+	if err != nil || got.Skipped || got.ChainID != 56 {
+		t.Fatalf("BSC drip = %+v, %v", got, err)
+	}
+	if bsc.signer.broadcastCalls != 1 || sonic.signer.broadcastCalls != 0 {
+		t.Fatalf("broadcasts bsc=%d sonic=%d, want the BSC lane only", bsc.signer.broadcastCalls, sonic.signer.broadcastCalls)
+	}
+	// Her unspent BNB drip does not block an S drip on Sonic.
+	need.chain = 146
+	if got, err := g.TopUp(context.Background(), user, sponsorTestUser, P2PGasRequest{Action: P2PGasMarkPaid}); err != nil || got.ChainID != 146 {
+		t.Fatalf("Sonic drip = %+v, %v", got, err)
+	}
+	// One daily cap across both chains (2 sends).
+	need.chain = 56
+	if _, err := g.TopUp(context.Background(), user, sponsorTestUser, P2PGasRequest{Action: P2PGasDispute}); !errors.Is(err, ErrTopUpDailyCap) && !errors.Is(err, ErrP2PGasUnused) {
+		t.Fatalf("third drip: %v, want the shared daily cap (or the unused-drip rule)", err)
+	}
+	need.chain = 97
+	if _, err := g.TopUp(context.Background(), user, sponsorTestUser, P2PGasRequest{Action: P2PGasRelease}); !errors.Is(err, ErrP2PGasUnavailable) {
+		t.Fatalf("no lane on 97: %v, want gas_unavailable", err)
+	}
+	if g := NewP2PGasSponsor(map[int64]P2PGasLane{56: {ChainKey: "bsc"}}, need, 2, now); g != nil {
+		t.Fatal("a lane-less sponsorship must leave the sponsor dormant")
 	}
 }

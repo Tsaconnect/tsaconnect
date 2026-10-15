@@ -129,6 +129,9 @@ func (s *P2PTradeService) openTradePreflight(ctx context.Context, ad *models.P2P
 	if err := s.requireOpenable(ad.ChainID, ad.Token); err != nil {
 		return refuse(err)
 	}
+	if err := s.openAudience(ad); err != nil {
+		return err
+	}
 	return s.openerKYCTier(ctx, ad, userID)
 }
 

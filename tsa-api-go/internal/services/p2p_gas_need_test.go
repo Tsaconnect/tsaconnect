@@ -75,7 +75,8 @@ func (f *gasNeedFixture) seedTrade(t *testing.T, status string, expiresIn time.D
 }
 
 func (f *gasNeedFixture) check(caller uuid.UUID, req P2PGasRequest) error {
-	return f.svc.RequireP2PGasNeed(context.Background(), &models.User{ID: caller, WalletAddress: gasNeedWallet}, gasNeedWallet, req)
+	_, err := f.svc.RequireP2PGasNeed(context.Background(), &models.User{ID: caller, WalletAddress: gasNeedWallet}, gasNeedWallet, req)
+	return err
 }
 
 func wantGasNeed(t *testing.T, name string, err, want error) {

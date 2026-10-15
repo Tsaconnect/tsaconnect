@@ -12,11 +12,28 @@ import (
 
 const P2PPurposeP2P = "p2p"
 
-// bscPresets: ordinary P2P on BSC. Empty rows: dormant. (The shared
-// liquidity pool on BSC is its own preset, liquidity_pool.go.)
+// Audiences of a P2P escrow row: who may start NEW activity on it
+// (services/p2p_audience.go). all: anyone; pm: Payment Merchants only (direct
+// P2P has moved to BSC); direct: anyone but a PM (PM automation needs a release
+// key that must never be an admin on the direct escrow). Exits are never gated.
+const (
+	P2PAudienceAll    = "all"
+	P2PAudiencePM     = "pm"
+	P2PAudienceDirect = "direct"
+)
+
+// bscPresets: direct (user-to-user) P2P on BSC (decisions 2026-10-12): a
+// P2PEscrowV3 with its OWN FeeManager, whose admins are dispute arbiters only.
+// Empty rows: dormant. The mainnet row is filled at the switch (plan API-11),
+// with expectedOwner = the owner the deploy handed both contracts to; the
+// escrow is registered only if every direct gate passes at boot
+// (services/p2p_direct_gates.go). The shared liquidity pool on BSC is its own
+// preset (liquidity_pool.go) and is not a P2P escrow.
 var bscPresets = map[string]chainPreset{
-	"mainnet": {},
-	"testnet": {},
+	"mainnet": {p2pEscrow: "", eip712Version: "2", feeManager: "", expectedOwner: "",
+		audience: P2PAudienceDirect, assets: []string{"USDT", "USDC"}},
+	"testnet": {p2pEscrow: "", eip712Version: "2", feeManager: "", expectedOwner: "",
+		audience: P2PAudienceDirect, assets: []string{"USDT", "USDC"}},
 }
 
 // p2pPresets is every P2P chain, one row per network. A new chain is a new
@@ -41,12 +58,12 @@ func p2pNetwork(chainKey string, rows map[string]chainPreset) string {
 	return n
 }
 
-// retiredP2PEnv refuses the old BSC escrow aliases: the BSC row is now the
-// liquidity pool, and its addresses live in bscPresets (spec S36, plan P5).
+// retiredP2PEnv refuses the old BSC escrow aliases: BSC's escrow addresses
+// live in bscPresets, never in env (spec S36, plan P5, decision 17).
 func retiredP2PEnv() error {
 	for _, env := range []string{"P2P_ESCROW_ADDRESS_BSC", "P2P_ESCROW_EIP712_VERSION_BSC"} {
 		if strings.TrimSpace(os.Getenv(env)) != "" {
-			return fmt.Errorf("%s is retired: the BSC row is the liquidity pool and its addresses live in internal/config/p2p_presets.go — unset it", env)
+			return fmt.Errorf("%s is retired: the BSC escrow addresses live in internal/config/p2p_presets.go — unset it", env)
 		}
 	}
 	return nil
@@ -56,6 +73,7 @@ func retiredP2PEnv() error {
 // selected network.
 func assembleP2PChains(cfg *Config, presets map[string]map[string]chainPreset) error {
 	cfg.P2PChains = map[int64]P2PChainConfig{}
+	cfg.DormantP2PChains = nil
 	cfg.p2pNetworks = map[string]string{}
 	keys := make([]string, 0, len(presets))
 	for k := range presets {
@@ -83,12 +101,33 @@ func addP2PChain(cfg *Config, chainKey, network string, p chainPreset) error {
 	if p.versionEnv != "" {
 		version = getEnv(p.versionEnv, version)
 	}
+	audience := strings.TrimSpace(p.audience)
+	if audience == "" {
+		audience = P2PAudienceAll
+	}
+	switch audience {
+	case P2PAudienceAll, P2PAudiencePM, P2PAudienceDirect:
+	default:
+		return fmt.Errorf("P2P %s %s row has an unknown audience %q", chainKey, network, audience)
+	}
 	if escrow == "" {
 		log.Printf("[config] P2P %s dormant on %s: no escrow in its preset row", chainKey, network)
+		if chain, ok := cfg.Networks[network].Chains[chainKey]; ok {
+			cfg.DormantP2PChains = append(cfg.DormantP2PChains,
+				P2PChainConfig{ChainID: chain.ChainID, ChainKey: chainKey, Network: network, Audience: audience})
+		}
 		return nil
 	}
 	if err := validateContractAddress(chainKey+" "+network+" escrow", escrow); err != nil {
 		return err
+	}
+	for label, addr := range map[string]string{"FeeManager": p.feeManager, "expectedOwner": p.expectedOwner} {
+		if strings.TrimSpace(addr) == "" {
+			continue
+		}
+		if err := validateContractAddress(chainKey+" "+network+" "+label, strings.TrimSpace(addr)); err != nil {
+			return err
+		}
 	}
 	chain, ok := cfg.Networks[network].Chains[chainKey]
 	if !ok {
@@ -106,12 +145,13 @@ func addP2PChain(cfg *Config, chainKey, network string, p chainPreset) error {
 		purpose = P2PPurposeP2P
 	}
 	cc := P2PChainConfig{ChainID: chainID, ChainKey: chainKey, Network: network, EscrowAddress: escrow,
-		EIP712Version: version, Assets: append([]string(nil), p.assets...), Purpose: purpose}
+		EIP712Version: version, Assets: append([]string(nil), p.assets...), Purpose: purpose, Audience: audience,
+		FeeManager: strings.TrimSpace(p.feeManager), ExpectedOwner: strings.TrimSpace(p.expectedOwner)}
 	if prev, dup := cfg.P2PChains[chainID]; dup {
 		return fmt.Errorf("chain %d has two P2P rows (%s and %s): one escrow per chain (spec S5)", chainID, prev.ChainKey, chainKey)
 	}
 	cfg.P2PChains[chainID] = cc
-	log.Printf("[config] P2P %s(%d) network=%s purpose=%s escrow=%s", chainKey, chainID, network, purpose, escrow)
+	log.Printf("[config] P2P %s(%d) network=%s audience=%s escrow=%s", chainKey, chainID, network, audience, escrow)
 	return nil
 }
 
@@ -149,11 +189,12 @@ func assembleFeeManagerChains(cfg *Config) {
 		}
 		cfg.FeeManagerChains[cfg.SonicChainID] = FeeManagerChainConfig{ChainID: cfg.SonicChainID, ChainKey: "sonic", Address: fmSonic}
 	}
-	if fmBSC := strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_BSC", "")); fmBSC != "" {
-		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_BSC", fmBSC); err != nil {
-			log.Fatalf("[config] %v", err)
-		}
-		bscID := cfg.Networks[cfg.selectedP2PNetwork("bsc")].Chains["bsc"].ChainID
+	bscID := cfg.Networks[cfg.selectedP2PNetwork("bsc")].Chains["bsc"].ChainID
+	fmBSC, err := bscFeeManager(strings.TrimSpace(getEnv("FEE_MANAGER_ADDRESS_BSC", "")), cfg.P2PChains[bscID].FeeManager)
+	if err != nil {
+		log.Fatalf("[config] %v", err)
+	}
+	if fmBSC != "" {
 		cfg.FeeManagerChains[bscID] = FeeManagerChainConfig{ChainID: bscID, ChainKey: "bsc", Address: fmBSC}
 	}
 	if len(cfg.FeeManagerChains) == 0 {
@@ -161,6 +202,25 @@ func assembleFeeManagerChains(cfg *Config) {
 	} else {
 		log.Printf("[config] FeeManager chains configured: %d", len(cfg.FeeManagerChains))
 	}
+}
+
+// bscFeeManager is BSC's FeeManager: the direct preset row's when it names one
+// (decision 17: addresses live in code), else FEE_MANAGER_ADDRESS_BSC. Both
+// set and different is fatal — the admin fee flow would push rates to one
+// contract while the escrow reads another.
+func bscFeeManager(env, preset string) (string, error) {
+	if env != "" {
+		if err := validateFeeManagerAddress("FEE_MANAGER_ADDRESS_BSC", env); err != nil {
+			return "", err
+		}
+	}
+	switch {
+	case preset == "":
+		return env, nil
+	case env != "" && !strings.EqualFold(env, preset):
+		return "", fmt.Errorf("FEE_MANAGER_ADDRESS_BSC %s differs from the BSC direct preset FeeManager %s — unset it (the preset is the source of truth)", env, preset)
+	}
+	return preset, nil
 }
 
 // selectedP2PNetwork is the network assembleP2PChains chose for chainKey

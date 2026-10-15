@@ -427,12 +427,13 @@ func TestP2PGas_CancelledDripAllowsANewOne(t *testing.T) {
 		return h
 	})
 	user := uuid.New()
-	p := &P2PGasSponsor{now: time.Now, lastDrip: map[uuid.UUID]p2pDrip{user: {at: time.Now(), postBalance: big.NewInt(1), txHash: h, op: "p2p_drip:d1"}}}
+	key := p2pDripKey{user: user, chainID: 146}
+	p := &P2PGasSponsor{now: time.Now, lastDrip: map[p2pDripKey]p2pDrip{key: {at: time.Now(), postBalance: big.NewInt(1), txHash: h, op: "p2p_drip:d1"}}}
 	lane := &SponsorLane{KeyLane: kl, Signer: raw}
-	if err := p.refuseUnusedDrip(context.Background(), lane, user, sponsorTestUser, big.NewInt(10)); err != nil {
+	if err := p.refuseUnusedDrip(context.Background(), lane, key, sponsorTestUser, big.NewInt(10)); err != nil {
 		t.Fatalf("a cancelled drip: %v, want a new one allowed", err)
 	}
-	if _, ok := p.lastDrip[user]; ok {
+	if _, ok := p.lastDrip[key]; ok {
 		t.Fatal("the cancelled drip must be forgotten")
 	}
 }

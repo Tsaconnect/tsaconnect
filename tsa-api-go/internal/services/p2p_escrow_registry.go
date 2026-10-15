@@ -39,6 +39,9 @@ type chainEscrow struct {
 	// decimals holds each asset's decimals() as read on-chain at boot (S6);
 	// a symbol missing here falls back to tokenDecimalsFor.
 	decimals map[string]int
+	// audience is who may start new activity on this escrow
+	// (config.P2PAudience*; empty reads as all).
+	audience string
 }
 
 // P2PEscrowRegistry holds one escrow adapter per P2P-enabled chain, keyed by
@@ -104,6 +107,7 @@ type P2PRegistryEntry struct {
 	Purpose  string
 	Assets   []string
 	Decimals map[string]int
+	Audience string // empty = config.P2PAudienceAll
 }
 
 func NewP2PEscrowRegistryFromEntries(m map[int64]P2PRegistryEntry, version string) *P2PEscrowRegistry {
@@ -111,7 +115,7 @@ func NewP2PEscrowRegistryFromEntries(m map[int64]P2PRegistryEntry, version strin
 	for chainID, e := range m {
 		reg.byChain[chainID] = &chainEscrow{
 			service: e.Escrow, eip712Version: version, domainChainID: chainID, chainKey: e.ChainKey,
-			assets: e.Assets, purpose: e.Purpose, decimals: e.Decimals,
+			assets: e.Assets, purpose: e.Purpose, decimals: e.Decimals, audience: e.Audience,
 		}
 	}
 	return reg
@@ -151,6 +155,44 @@ type P2PChainInfo struct {
 	// FeeBps is each asset's live on-chain fee (platform + gas bps), keyed by
 	// symbol; an asset whose chain read failed is absent, never guessed.
 	FeeBps map[string]int `json:"feeBps,omitempty"`
+	// AdsOpen is per caller (P2PTradeService.ChainsFor): whether she may post
+	// an ad on this chain now (the audience gate). Absent means open, for
+	// older readers.
+	AdsOpen *bool `json:"adsOpen,omitempty"`
+}
+
+// Audience is who may start new activity on chainID's escrow
+// (config.P2PAudience*): all when unset, and all for an unconfigured chain
+// (new activity there fails on its own resolution).
+func (r *P2PEscrowRegistry) Audience(chainID int64) string {
+	if r != nil && r.byChain != nil {
+		if e, ok := r.byChain[chainID]; ok && e.audience != "" {
+			return e.audience
+		}
+	}
+	return config.P2PAudienceAll
+}
+
+// ChainsWithAudience lists the configured chains whose escrow has audience,
+// sorted.
+func (r *P2PEscrowRegistry) ChainsWithAudience(audience string) []int64 {
+	var out []int64
+	for _, id := range r.ChainIDs() {
+		if r.Audience(id) == audience {
+			out = append(out, id)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// HasChain reports whether chainID has a registered escrow.
+func (r *P2PEscrowRegistry) HasChain(chainID int64) bool {
+	if r == nil || r.byChain == nil {
+		return false
+	}
+	_, ok := r.byChain[chainID]
+	return ok
 }
 
 // Chains lists the chains open to ordinary P2P (chainID + tradeable assets),
@@ -282,8 +324,10 @@ func (r *P2PEscrowRegistry) AssetDelisted(chainID int64, symbol string) bool {
 // verification per chain (eth_chainId probe + escrow bytecode check) and logs
 // loudly on any mismatch so an operator can fix env before the first trade. A
 // chain whose client can't be resolved is skipped with a warning (For() will
-// then fail loud for it).
-func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config) *P2PEscrowRegistry {
+// then fail loud for it). A direct-audience escrow is registered only when
+// every direct gate passes (p2p_direct_gates.go); forbiddenAdmins (label →
+// address) are the hot keys the API knows, none of which may be its admin.
+func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config, forbiddenAdmins map[string]string) *P2PEscrowRegistry {
 	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{}}
 	if cfg == nil || bs == nil {
 		return reg
@@ -304,6 +348,10 @@ func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config) *P2PEscrowR
 			assets:        assets,
 			purpose:       cc.Purpose,
 			decimals:      decimals,
+			audience:      cc.Audience,
+		}
+		if cc.Audience == config.P2PAudienceDirect {
+			reg.gateDirectAtBoot(bs, cc, forbiddenAdmins)
 		}
 	}
 	log.Printf("[config] P2P escrow registry: %d chain(s) enabled: %v", len(reg.byChain), reg.ChainIDs())

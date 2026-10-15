@@ -218,7 +218,7 @@ func TestP2PGasTopUp_NamelessOpenTradeIsTheKYCRefusal(t *testing.T) {
 	r, _ := newSponsorRig("sonic", "USDT")
 	r.chain.balances[strings.ToLower(sponsorTestUser)] = big.NewInt(0)
 	now := func() time.Time { return sponsorTestNow }
-	g := NewP2PGasSponsor(NewRampSponsorship(nil, r.store, r.lanes(), 2, time.Second, now), f.svc, 6, now)
+	g := NewP2PGasSponsor(sonicGasLanes(NewRampSponsorship(nil, r.store, r.lanes(), 2, time.Second, now)), f.svc, 6, now)
 	user := &models.User{ID: nameless, WalletAddress: sponsorTestUser, VerificationStatus: models.VerificationStatusVerified}
 
 	_, err := g.TopUp(context.Background(), user, sponsorTestUser, P2PGasRequest{Action: P2PGasOpenTrade, AdID: f.adID})

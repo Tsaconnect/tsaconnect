@@ -138,22 +138,12 @@ func newIntentSponsorship(orders *services.PaycrestOrderService, lanes map[strin
 // SONIC_GAS_FLOOR_WEI / SONIC_GAS_TOPUP_MAX_WEI (the old MARKETPLACE_SONIC_GAS_*
 // names still read); guard and metrics are named sonic_gas.
 func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainService) *services.RampSponsorship {
-	keyHex, keyVar := roleKey(cfg, roleGasSponsor)
-	if keyHex == "" || chains == nil {
-		log.Printf("[sonic-gas] dormant: neither RAMP_SPONSOR_PRIVATE_KEY nor PM_RELEASE_PRIVATE_KEY set — a P2P user or buyer with no S is told to add some")
+	if chains == nil {
+		log.Printf("[sonic-gas] dormant: no chain registry")
 		return nil
 	}
-	if !rawSignerKeyAllowed(cfg) {
-		log.Printf("[sonic-gas] dormant: raw %s refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)", keyVar)
-		return nil
-	}
-	key, err := crypto.HexToECDSA(keyHex)
-	if err != nil {
-		log.Printf("[sonic-gas] dormant: invalid %s: %v", keyVar, err)
-		return nil
-	}
-	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_SPONSOR_PRIVATE_KEY")); err != nil {
-		fatalf("[config] REFUSING TO START: %v", err)
+	key, keyVar := gasSponsorKey(cfg, "[sonic-gas]")
+	if key == nil {
 		return nil
 	}
 	floor := bigFromDecimal(cfg.SonicGasFloorWei)
@@ -175,6 +165,87 @@ func buildSonicGasSponsorship(cfg *config.Config, chains *services.BlockchainSer
 	sponsor.SetChainRegistry(chains)
 	log.Printf("[sonic-gas] lane enabled sponsor=%s floor=%s max=%s", lane.Signer.Address(), floor, topUpMax)
 	return sponsor
+}
+
+// gasSponsorKey is the gas_sponsor role's key (RAMP_SPONSOR_PRIVATE_KEY, else
+// the OPERATOR's), or nil with a line under tag saying why. A key equal to a
+// signer of another class is fatal (assertDistinctKey). Every sponsor lane
+// built on it takes its KeyLane from the signer registry, so a second lane on
+// the same chain shares that key's one nonce sequence.
+func gasSponsorKey(cfg *config.Config, tag string) (*ecdsa.PrivateKey, string) {
+	keyHex, keyVar := roleKey(cfg, roleGasSponsor)
+	if keyHex == "" {
+		log.Printf("%s dormant: neither RAMP_SPONSOR_PRIVATE_KEY nor PM_RELEASE_PRIVATE_KEY set — a P2P user or buyer with no gas is told to add some", tag)
+		return nil, ""
+	}
+	if !rawSignerKeyAllowed(cfg) {
+		log.Printf("%s dormant: raw %s refused in production (set ALLOW_RAW_SIGNER_KEYS=true or use KMS)", tag, keyVar)
+		return nil, ""
+	}
+	key, err := crypto.HexToECDSA(keyHex)
+	if err != nil {
+		log.Printf("%s dormant: invalid %s: %v", tag, keyVar, err)
+		return nil, ""
+	}
+	if err := assertDistinctKey("RAMP_SPONSOR_PRIVATE_KEY", key, signerKeysExcept(cfg, "RAMP_SPONSOR_PRIVATE_KEY")); err != nil {
+		fatalf("[config] REFUSING TO START: %v", err)
+		return nil, ""
+	}
+	return key, keyVar
+}
+
+// buildP2PChainGasSponsorships is the P2P gas lane on every registered P2P
+// chain other than Sonic (whose lane is buildSonicGasSponsorship's, shared
+// with the marketplace funding): today the direct BSC escrow (plan API-7). No
+// new key or env var (signer consolidation): each lane is the gas_sponsor key
+// on that chain and network, with the ramp sponsor's existing limits for the
+// chain (RAMP_SPONSOR_BALANCE_FLOOR_WEI_<CHAIN> — alert-only —,
+// RAMP_SPONSOR_TOPUP_MAX_WEI_<CHAIN>, RAMP_SPONSOR_DAILY_GAS_BUDGET), under its
+// own guard p2p_<chain>_gas. Each sits in a sponsorship of its own holding
+// only that lane, so neither the ramp nor the marketplace funding ever sees
+// it; the nonce is the key's one KeyLane on that chain, shared with a ramp
+// lane there. Registered chain ids only: a dormant or gate-failed escrow gets
+// no lane.
+func buildP2PChainGasSponsorships(cfg *config.Config, chains *services.BlockchainService, registered []int64) map[int64]services.P2PGasLane {
+	out := map[int64]services.P2PGasLane{}
+	if cfg == nil || chains == nil {
+		return out
+	}
+	var todo []config.P2PChainConfig
+	for _, id := range registered {
+		if cc, ok := cfg.P2PChains[id]; ok && cc.ChainKey != "sonic" {
+			todo = append(todo, cc)
+		}
+	}
+	if len(todo) == 0 {
+		return out
+	}
+	key, keyVar := gasSponsorKey(cfg, "[p2p-gas]")
+	if key == nil {
+		return out
+	}
+	for _, cc := range todo {
+		tag := "[p2p-" + cc.ChainKey + "-gas]"
+		floor, topUpMax, budget, skip := rampSponsorLaneLimits(cfg, cc.ChainKey)
+		if skip != "" {
+			log.Printf("%s ALERT p2p_gas_lane_skipped_total=1 chain=%s(%d) reason=%s", tag, cc.ChainKey, cc.ChainID, skip)
+			continue
+		}
+		lane := buildSponsorLaneOn(chains, cc.Network, cc.ChainKey, roleGasSponsor, key, "p2p_"+cc.ChainKey+"_gas",
+			services.SponsorLimits{DailyGasBudget: budget, BalanceFloor: floor}, topUpMax)
+		if lane == nil {
+			log.Printf("%s dormant: no %s %s client", tag, cc.Network, cc.ChainKey)
+			continue
+		}
+		sponsor := newIntentSponsorship(nil, map[string]*services.SponsorLane{cc.ChainKey: lane}, cfg.RampSponsorTopUpUnusedDailyCap)
+		sponsor.SetChainRegistry(chains)
+		out[cc.ChainID] = services.P2PGasLane{ChainKey: cc.ChainKey, Sponsor: sponsor}
+		log.Printf("%s lane enabled chain=%d sponsor=%s floor=%s max=%s", tag, cc.ChainID, lane.Signer.Address(), floor, topUpMax)
+	}
+	if len(out) > 0 {
+		alertRawRoleKeyInProduction(cfg, roleGasSponsor, keyVar)
+	}
+	return out
 }
 
 // marketplaceSonicGas is the shared Sonic lane as the marketplace funding sees

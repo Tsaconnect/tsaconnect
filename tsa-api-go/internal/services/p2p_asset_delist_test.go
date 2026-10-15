@@ -301,6 +301,15 @@ func tradeStatus(t *testing.T, db *gorm.DB, id uuid.UUID) string {
 func TestDelistedAsset_ExistingPositionsStillExit(t *testing.T) {
 	svc, esc, db, delist := delistTestService(t)
 	delist()
+	exitPathsStillWork(t, svc, esc, db)
+}
+
+// exitPathsStillWork drives every exit of an existing MCGP position on Sonic
+// (confirm open, mark paid, release, timeout cancel, dispute, admin resolve,
+// withdraw, balance, late deposit confirm): whatever stops new activity — a
+// delist, the audience gate — must leave all of them working.
+func exitPathsStillWork(t *testing.T, svc *P2PTradeService, esc *mockEscrow, db *gorm.DB) {
+	t.Helper()
 	ctx := context.Background()
 	_, sellerAddr := newSellerKey(t)
 	later := time.Date(2026, 5, 23, 13, 0, 0, 0, time.UTC)    // after the fixed clock

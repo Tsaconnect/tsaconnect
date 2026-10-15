@@ -43,6 +43,9 @@ type GasTopUpResult struct {
 	TxHash    string `json:"txHash,omitempty"`
 	AmountWei string `json:"amountWei,omitempty"`
 	Skipped   bool   `json:"skipped"`
+	// ChainID is the chain the top-up is on. Set by the P2P sponsor only;
+	// omitted everywhere else.
+	ChainID int64 `json:"chainId,omitempty"`
 }
 
 // GasTopUp sends a user just enough native gas to make their own deposit

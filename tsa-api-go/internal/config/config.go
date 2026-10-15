@@ -33,6 +33,15 @@ type chainPreset struct {
 	// tradeable symbols.
 	purpose string
 	assets  []string
+	// audience is who may start NEW P2P activity on the row's escrow
+	// (P2PAudienceAll when empty, P2PAudiencePM, P2PAudienceDirect —
+	// services/p2p_audience.go). Exits are never gated by it.
+	audience string
+	// feeManager is the row's own FeeManager (the direct BSC row; Sonic's
+	// comes from FEE_MANAGER_ADDRESS_SONIC). expectedOwner is the owner() a
+	// direct-audience escrow must report at boot, or it stays unregistered
+	// (services/p2p_direct_gates.go). Both are filled with the escrow.
+	feeManager, expectedOwner string
 	// Legacy env aliases (Sonic only): an operator hot-fix override of the
 	// escrow, its EIP-712 version and the chain id, kept exactly as before.
 	escrowEnv, versionEnv, chainIDEnv string
@@ -61,7 +70,12 @@ var sonicPresets = map[string]chainPreset{
 		// must not be usable in P2P. Existing MCGP ads, pool balances and
 		// in-flight trades still settle and withdraw — those exit paths
 		// never consult this list.
-		assets:     []string{"USDT", "USDC"},
+		assets: []string{"USDT", "USDC"},
+		// audience: direct user-to-user P2P moves to BSC (decisions
+		// 2026-10-12). Sonic flips to P2PAudiencePM — Payment Merchants only —
+		// in the same change that fills the BSC mainnet direct row
+		// (p2p_presets.go), so there is never a window with no direct P2P.
+		audience:   P2PAudienceAll,
 		escrowEnv:  "P2P_ESCROW_ADDRESS",
 		versionEnv: "P2P_ESCROW_EIP712_VERSION",
 		chainIDEnv: "SONIC_CHAIN_ID",
@@ -77,6 +91,7 @@ var sonicPresets = map[string]chainPreset{
 		p2pEscrow:     "0x1B1ade6459623810Cf158Cd4F7D3FC8E126858f7",
 		eip712Version: "2",
 		assets:        []string{"USDT", "USDC"},
+		audience:      P2PAudienceAll,
 		escrowEnv:     "P2P_ESCROW_ADDRESS",
 		versionEnv:    "P2P_ESCROW_EIP712_VERSION",
 		chainIDEnv:    "SONIC_CHAIN_ID",
@@ -97,6 +112,12 @@ type P2PChainConfig struct {
 	// was taken from.
 	Purpose string
 	Network string
+	// Audience is who may start new activity on the escrow (P2PAudience*).
+	Audience string
+	// FeeManager and ExpectedOwner are the row's preset values (the direct
+	// BSC row); empty elsewhere.
+	FeeManager    string
+	ExpectedOwner string
 }
 
 // FeeManagerChainConfig is the per-chain FeeManager deployment the configurable-
@@ -621,6 +642,10 @@ type Config struct {
 	// its escrow address is configured (dormant-by-default). Later refactors
 	// resolve escrow/domain/version by trade.ChainID from this map.
 	P2PChains map[int64]P2PChainConfig
+	// DormantP2PChains are the selected network's preset rows with no escrow
+	// yet (ChainID, ChainKey, Network, Audience only). Boot refuses to empty
+	// a row while its trades or ads are live (cmd/server checkDirectUnconfigure).
+	DormantP2PChains []P2PChainConfig
 
 	// FeeManagerChains is the per-chain FeeManager registry keyed by chainID
 	// (configurable-FeeManager design §3/§5/§10), assembled in Load() from

@@ -97,3 +97,77 @@ func TestP2PPresets_BSCNetworkChosenOnce(t *testing.T) {
 		t.Fatalf("FeeManagerChains = %+v, want BSC on its selected (mainnet) id", cfg.FeeManagerChains)
 	}
 }
+
+const (
+	directFMAddr    = "0x00000000000000000000000000000000000FEE01"
+	directOwnerAddr = "0x62bA000000000000000000000000000000001b96"
+)
+
+// The BSC rows are the direct escrow: audience direct, USDT+USDC, dormant
+// until the switch fills the escrow (plan API-11). Sonic stays open to all
+// until then.
+func TestBSCPresets_DirectRowsDormant(t *testing.T) {
+	for _, n := range []string{"mainnet", "testnet"} {
+		r := bscPresets[n]
+		if r.audience != P2PAudienceDirect || r.p2pEscrow != "" || !reflect.DeepEqual(r.assets, []string{"USDT", "USDC"}) {
+			t.Fatalf("bsc %s row = %+v", n, r)
+		}
+		if sonicPresets[n].audience != P2PAudienceAll {
+			t.Fatalf("sonic %s audience = %q; it flips to pm only with the BSC switch", n, sonicPresets[n].audience)
+		}
+	}
+	cfg := &Config{Networks: netsWith(map[string]ChainConfig{"bsc": {ChainID: 56}}, map[string]string{"bsc:USDT": bscUSDT})}
+	if err := assembleP2PChains(cfg, map[string]map[string]chainPreset{"bsc": bscPresets}); err != nil {
+		t.Fatal(err)
+	}
+	want := []P2PChainConfig{{ChainID: 56, ChainKey: "bsc", Network: "mainnet", Audience: P2PAudienceDirect}}
+	if len(cfg.P2PChains) != 0 || !reflect.DeepEqual(cfg.DormantP2PChains, want) {
+		t.Fatalf("chains = %v dormant = %+v", cfg.P2PChains, cfg.DormantP2PChains)
+	}
+}
+
+// A filled direct row carries its FeeManager and expected owner, validated
+// like every preset address; an unknown audience refuses boot.
+func TestP2PPresets_DirectRowFields(t *testing.T) {
+	cfg := &Config{Networks: netsWith(map[string]ChainConfig{"bsc": {ChainID: 56}}, map[string]string{"bsc:USDT": bscUSDT})}
+	row := chainPreset{p2pEscrow: p2pEscrowAddr, eip712Version: "2", audience: P2PAudienceDirect,
+		feeManager: directFMAddr, expectedOwner: directOwnerAddr, assets: []string{"USDT"}}
+	if err := assembleP2PChains(cfg, map[string]map[string]chainPreset{"bsc": {"mainnet": row}}); err != nil {
+		t.Fatal(err)
+	}
+	if cc := cfg.P2PChains[56]; cc.Audience != P2PAudienceDirect || cc.FeeManager != directFMAddr || cc.ExpectedOwner != directOwnerAddr {
+		t.Fatalf("row = %+v", cc)
+	}
+	for _, bad := range []func(*chainPreset){
+		func(r *chainPreset) { r.expectedOwner = "0x123" },
+		func(r *chainPreset) { r.feeManager = "0x0000000000000000000000000000000000000000" },
+		func(r *chainPreset) { r.audience = "everyone" },
+	} {
+		r := row
+		bad(&r)
+		if err := assembleP2PChains(cfg, map[string]map[string]chainPreset{"bsc": {"mainnet": r}}); err == nil {
+			t.Fatalf("row %+v must refuse", r)
+		}
+	}
+}
+
+// Decision 17: the direct row's FeeManager is BSC's; FEE_MANAGER_ADDRESS_BSC
+// may only repeat it.
+func TestBSCFeeManager_PresetWins(t *testing.T) {
+	for _, tc := range []struct {
+		env, preset, want string
+		fatal             bool
+	}{
+		{"", "", "", false},
+		{poolFMAddr, "", poolFMAddr, false},
+		{"", directFMAddr, directFMAddr, false},
+		{strings.ToLower(directFMAddr), directFMAddr, directFMAddr, false},
+		{poolFMAddr, directFMAddr, "", true},
+		{"0x123", "", "", true},
+	} {
+		got, err := bscFeeManager(tc.env, tc.preset)
+		if (err != nil) != tc.fatal || (!tc.fatal && got != tc.want) {
+			t.Fatalf("bscFeeManager(%q, %q) = %q, %v", tc.env, tc.preset, got, err)
+		}
+	}
+}

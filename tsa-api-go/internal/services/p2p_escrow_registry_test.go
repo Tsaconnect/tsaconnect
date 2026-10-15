@@ -87,9 +87,9 @@ func TestP2PEscrowRegistry_NilSafety(t *testing.T) {
 		t.Errorf("nil registry ChainIDs = %v, want nil", ids)
 	}
 	// nil bs/cfg must not panic and yields an empty (usable) registry.
-	reg := NewP2PEscrowRegistry(nil, nil)
+	reg := NewP2PEscrowRegistry(nil, nil, nil)
 	if reg == nil {
-		t.Fatalf("NewP2PEscrowRegistry(nil,nil) returned nil")
+		t.Fatalf("NewP2PEscrowRegistry(nil, nil, nil) returned nil")
 	}
 	if _, err := reg.For(146); err == nil {
 		t.Errorf("empty registry For must fail loud")

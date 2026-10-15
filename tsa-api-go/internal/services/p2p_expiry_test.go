@@ -433,3 +433,23 @@ func TestExpiry_DoesNotResendWhileTheCancelIsUnmined(t *testing.T) {
 		t.Fatalf("sends = %d after the back-off, want a second try", len(sender.sendChains))
 	}
 }
+
+// Plan API-8 under the signer consolidation: an expired direct BSC trade is
+// cancelled by the same always-on canceller, with cancelByTimeout (permissionless
+// — the operator is never an admin on the direct escrow) sent on chain 56 to the
+// direct escrow, through the operator's BSC lane. No separate key.
+func TestExpiry_DirectBSCTradeCancelledOnItsOwnChain(t *testing.T) {
+	r := newPoolRig(t)
+	bsc := newMockEscrow()
+	r.svc.escrows.byChain[bscDirectChain] = &chainEscrow{service: bsc, eip712Version: "2", domainChainID: bscDirectChain,
+		chainKey: "bsc", audience: "direct"}
+	sender := releaseSender()
+	tr := legacyTrade(t, r, models.P2PTradeStatusPendingPayment, time.Now().Add(-31*time.Minute))
+	r.db.Model(tr).Update("chain_id", bscDirectChain)
+	bsc.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, CreatedAt: big.NewInt(time.Now().Add(-61 * time.Minute).Unix())}
+	e := NewExpiryCanceller(ExpiryCancellerConfig{Trades: r.svc, Signer: sender, Now: time.Now})
+	tick, err := e.RunOnce(context.Background())
+	if err != nil || tick.Legacy != 1 || len(sender.sendChains) != 1 || sender.sendChains[0] != bscDirectChain {
+		t.Fatalf("tick=%+v err=%v sends=%v, want one cancel on chain 56", tick, err, sender.sendChains)
+	}
+}

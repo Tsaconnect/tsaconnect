@@ -190,6 +190,8 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrNotApplicableForBuyAd):
 		status = http.StatusBadRequest
 	case errors.Is(err, services.ErrAdNotActive),
+		errors.Is(err, services.ErrP2PDirectMoved),
+		errors.Is(err, services.ErrPMNotOnDirect),
 		errors.Is(err, services.ErrInsufficientRemaining),
 		errors.Is(err, services.ErrInvalidTransition),
 		errors.Is(err, services.ErrAdHasOpenTrades),
@@ -225,6 +227,12 @@ func mapServiceError(c *gin.Context, err error) bool {
 	if errors.Is(err, services.ErrPoolClosed) {
 		body["code"] = "liquidity_pool_closed"
 	}
+	if errors.Is(err, services.ErrP2PDirectMoved) {
+		body["code"] = services.P2PDirectMovedCode
+	}
+	if errors.Is(err, services.ErrPMNotOnDirect) {
+		body["code"] = services.PMNotOnDirectCode
+	}
 	c.AbortWithStatusJSON(status, body)
 	return true
 }
@@ -251,12 +259,14 @@ func unsignedTxJSON(raw []byte) any {
 
 // GetChains returns the P2P-enabled chains + their tradeable assets.
 func (h *P2PHandler) GetChains(c *gin.Context) {
-	if _, ok := h.require(c); !ok {
+	user, ok := h.require(c)
+	if !ok {
 		return
 	}
 	chains := []services.P2PChainInfo{}
 	if h.trade != nil {
-		if cs := h.trade.LiveChains(c.Request.Context()); cs != nil {
+		// Each entry carries adsOpen for this caller (the audience gate).
+		if cs := h.trade.ChainsFor(c.Request.Context(), user.ID); cs != nil {
 			chains = cs
 		}
 	}
@@ -866,7 +876,9 @@ type expressQuoteRequest struct {
 	Side         string `json:"side" binding:"required"` // 'buy' = user buys crypto; 'sell' = user sells
 	Token        string `json:"token" binding:"required"`
 	FiatCurrency string `json:"fiatCurrency" binding:"required"`
-	Amount       string `json:"amount" binding:"required"` // token base units
+	Amount       string `json:"amount" binding:"required"` // token base units on chainId
+	// ChainID is the chain amount is denominated on (0 = Sonic); only its ads match.
+	ChainID int64 `json:"chainId"`
 }
 
 // ExpressQuote returns the best-matching active ad (+ up to 3 alternatives) for a
@@ -883,7 +895,7 @@ func (h *P2PHandler) ExpressQuote(c *gin.Context) {
 		return
 	}
 	matches, err := h.trade.ExpressMatch(c.Request.Context(), services.ExpressMatchParams{
-		Side: req.Side, Token: req.Token, FiatCurrency: req.FiatCurrency, Amount: req.Amount,
+		Side: req.Side, Token: req.Token, FiatCurrency: req.FiatCurrency, Amount: req.Amount, ChainID: req.ChainID,
 	})
 	if mapServiceError(c, err) {
 		return

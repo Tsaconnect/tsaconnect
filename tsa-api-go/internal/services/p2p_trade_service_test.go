@@ -1924,7 +1924,7 @@ func TestExpressMatch_RanksAndFilters(t *testing.T) {
 	lowCap := mk("1480", "500000", "0", "100000") // cheapest but only 0.5 USDT → excluded
 
 	matches, err := svc.ExpressMatch(context.Background(), ExpressMatchParams{
-		Side: "buy", Token: "USDT", FiatCurrency: "NGN", Amount: "1000000",
+		Side: "buy", Token: "USDT", FiatCurrency: "NGN", Amount: "1000000", ChainID: 14601, // the ads' chain
 	})
 	if err != nil {
 		t.Fatalf("ExpressMatch: %v", err)

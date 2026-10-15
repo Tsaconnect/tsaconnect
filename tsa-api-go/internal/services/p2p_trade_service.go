@@ -623,6 +623,16 @@ const defaultVoucherTTL = 30 * 24 * time.Hour
 // The seller must call SignAd next, presenting their signature over the
 // returned typed data. Until then the ad is invisible to buyers.
 func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sellerAddress string, params CreateAdParams) (*CreateAdResult, error) {
+	// Who may post on the ad's chain (sell- and buy-ads alike). An omitted
+	// chainId is the default chain (Sonic), never BSC: a client that sized
+	// its amount in Sonic's 6 dp must not land on BSC's 18.
+	adChain := params.ChainID
+	if adChain == 0 {
+		adChain = s.defaultChainID
+	}
+	if err := s.sellerAudience(ctx, sellerID, adChain); err != nil {
+		return nil, err
+	}
 	// Buy-ads (merchant offers to BUY crypto from users) take a wholly
 	// separate path: no on-chain pool, no voucher, no signature. The user
 	// deposits crypto JIT at trade-open instead. Branch before the sell-ad's
@@ -984,6 +994,9 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 	} else if pool {
 		return nil, refuse(ErrAdNotActive)
 	}
+	if err := s.sellerAudience(ctx, sellerID, ad.ChainID); err != nil {
+		return nil, err
+	}
 
 	voucher, err := s.adVoucher(&ad, sellerAddress)
 	if err != nil {
@@ -1217,7 +1230,7 @@ func (s *P2PTradeService) ResumeAd(ctx context.Context, adID, sellerID uuid.UUID
 			} else if pool {
 				return refuse(ErrAdNotActive)
 			}
-			return nil
+			return s.sellerAudience(ctx, sellerID, ad.ChainID)
 		})
 }
 
@@ -1991,6 +2004,9 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	}
 	if trade.IsPoolSlice() {
 		return nil, fmt.Errorf("%w: trade=%s is a retired pool slice; settled by an operator", ErrInvalidTransition, trade.ID)
+	}
+	if err := s.refuseDirectAutoRelease(&trade); err != nil {
+		return nil, err
 	}
 	escrow, _, _, err := s.resolve(trade.ChainID)
 	if err != nil {
@@ -3341,6 +3357,7 @@ func (s *P2PTradeService) ListAds(ctx context.Context, f AdFilter) ([]models.P2P
 		if q, err = s.excludePoolAds(ctx, q); err != nil {
 			return nil, err
 		}
+		q = s.hideMovedAds(q)
 	}
 	limit := f.Limit
 	if limit <= 0 || limit > 100 {
@@ -3359,7 +3376,11 @@ type ExpressMatchParams struct {
 	Side         string // 'buy' = user buys crypto (match sell-ads); 'sell' = user sells (match buy-ads)
 	Token        string
 	FiatCurrency string
-	Amount       string // token base units the user wants to trade
+	Amount       string // token base units the user wants to trade, on ChainID
+	// ChainID is the chain Amount is denominated on; 0 = the default (Sonic),
+	// never BSC. Only that chain's ads match: base units are per chain (6 dp
+	// on Sonic, 18 on BSC), so one amount cannot be compared across chains.
+	ChainID int64
 }
 
 // ExpressMatch returns active ads matching the request, ranked best-first: best
@@ -3383,8 +3404,12 @@ func (s *P2PTradeService) ExpressMatch(ctx context.Context, p ExpressMatchParams
 		return nil, fmt.Errorf("%w: amount must be a positive integer (base units)", ErrInvalidParams)
 	}
 
+	chainID := p.ChainID
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
 	cands, err := s.ListAds(ctx, AdFilter{
-		Side: adSide, Token: p.Token, FiatCurrency: p.FiatCurrency,
+		Side: adSide, Token: p.Token, FiatCurrency: p.FiatCurrency, ChainID: chainID,
 		Status: models.P2PAdStatusActive, Limit: 100, ExcludeDelisted: true, ExcludeSuspended: true,
 	})
 	if err != nil {
@@ -3934,8 +3959,12 @@ func (s *P2PTradeService) PrepareDeposit(ctx context.Context, sellerID uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	// New money into the escrow: refused for a delisted asset. Withdraw never is.
+	// New money into the escrow: refused for a delisted asset, and on a
+	// PM-only escrow for anyone but a PM. Withdraw never is.
 	if err := s.requireOpenable(chainID, tokenSymbol); err != nil {
+		return nil, err
+	}
+	if err := s.depositAudience(ctx, sellerID, chainID); err != nil {
 		return nil, err
 	}
 	s.audit(ctx, models.P2PAuditDepositPrepared, &sellerID, nil, nil, map[string]any{

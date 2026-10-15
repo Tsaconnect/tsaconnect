@@ -11,13 +11,20 @@ import (
 )
 
 // RequireP2PGasNeed is the P2PGasNeed the gas top-up asks before it sends: the
-// caller really has this tx to sign on the Sonic escrow, now. It runs the same
-// gate as the Prepare* call that builds that tx (p2p_preconditions.go), so a
-// drip is only ever backed by real trade or ad state.
+// caller really has this tx to sign on a P2P escrow, now — and on which chain.
+// It runs the same gate as the Prepare* call that builds that tx
+// (p2p_preconditions.go), so a drip is only ever backed by real trade or ad
+// state.
 //
-//   - approve / deposit: no state beyond the KYC every top-up already
-//     requires (any verified user may fund the pool to post ads or open a
-//     buy-ad trade); the per-user cap and the unused-drip rule bound it.
+// The chain is the entity's (ad or trade) for the actions that name one, and
+// req.ChainID for approve / deposit / withdraw — 0 (older apps) is the
+// default chain (Sonic), never BSC. A req.ChainID that differs from the
+// entity's, or a chain with no registered escrow, is gas_not_needed.
+//
+//   - approve / deposit: the KYC every top-up already requires; on a
+//     PM-only escrow only a PM (approve: or an opener of adId, a PM buy-ad's
+//     JIT deposit, whose chain is the ad's). The per-user cap and the
+//     unused-drip rule bound it.
 //   - withdraw: a non-zero available pool balance in some listed asset.
 //   - cancel_ad: adId of her own active/paused sell ad with no open trade.
 //   - open_trade: adId of an active, openable ad that is not hers, and she
@@ -30,35 +37,80 @@ import (
 //   - dispute: tradeId; she is a party, pending_payment or paid, open on
 //     chain, and no live counterparty prepare or on-chain dispute exists.
 //
-// Returns ErrInvalidParams for a missing or unknown id, ErrP2PGasNotNeeded
-// when it is not her turn (or not on Sonic), and any other error unwrapped
-// (a DB or chain read that failed).
-func (s *P2PTradeService) RequireP2PGasNeed(ctx context.Context, user *models.User, wallet string, req P2PGasRequest) error {
+// Returns the chain the tx is on, ErrInvalidParams for a missing or unknown
+// id, ErrP2PGasNotNeeded when it is not her turn (or not on that chain), and
+// any other error unwrapped (a DB or chain read that failed).
+func (s *P2PTradeService) RequireP2PGasNeed(ctx context.Context, user *models.User, wallet string, req P2PGasRequest) (int64, error) {
 	switch req.Action {
-	case P2PGasApprove, P2PGasDeposit:
-		return nil
-	case P2PGasWithdraw:
-		return s.gasNeedWithdraw(ctx, wallet)
-	case P2PGasCancelAd, P2PGasOpenTrade:
-		ad, err := s.gasNeedAd(ctx, req.AdID)
+	case P2PGasApprove, P2PGasDeposit, P2PGasWithdraw:
+		if req.Action == P2PGasApprove && req.AdID != uuid.Nil {
+			return s.gasNeedApproveForAd(ctx, user.ID, req)
+		}
+		chainID, err := s.gasNeedChain(req.ChainID)
 		if err != nil {
-			return err
+			return 0, err
+		}
+		switch req.Action {
+		case P2PGasWithdraw:
+			return chainID, s.gasNeedWithdraw(ctx, wallet, chainID)
+		default:
+			return chainID, gasNotNeeded(s.depositAudience(ctx, user.ID, chainID), fmt.Sprintf("%s on chain %d", req.Action, chainID))
+		}
+	case P2PGasCancelAd, P2PGasOpenTrade:
+		ad, err := s.gasNeedAd(ctx, req.AdID, req.ChainID)
+		if err != nil {
+			return 0, err
 		}
 		if req.Action == P2PGasCancelAd {
-			return s.gasNeedCancelAd(ctx, user.ID, ad)
+			return ad.ChainID, s.gasNeedCancelAd(ctx, user.ID, ad)
 		}
-		return s.gasNeedOpenTrade(ctx, user.ID, ad)
+		return ad.ChainID, s.gasNeedOpenTrade(ctx, user.ID, ad)
 	case P2PGasMarkPaid, P2PGasRelease, P2PGasCancelTrade, P2PGasDispute:
-		trade, err := s.gasNeedTrade(ctx, req.TradeID)
+		trade, err := s.gasNeedTrade(ctx, req.TradeID, req.ChainID)
 		if err != nil {
-			return err
+			return 0, err
 		}
-		return s.gasNeedTradeTurn(ctx, user.ID, req.Action, trade)
+		return trade.ChainID, s.gasNeedTradeTurn(ctx, user.ID, req.Action, trade)
 	}
-	return fmt.Errorf("%w: unknown gas action %q", ErrInvalidParams, req.Action)
+	return 0, fmt.Errorf("%w: unknown gas action %q", ErrInvalidParams, req.Action)
 }
 
-func (s *P2PTradeService) gasNeedAd(ctx context.Context, id uuid.UUID) (*models.P2PAd, error) {
+// gasNeedChain is the chain an approve / deposit / withdraw names: 0 is the
+// default chain; anything must have a registered escrow.
+func (s *P2PTradeService) gasNeedChain(chainID int64) (int64, error) {
+	if chainID == 0 {
+		chainID = s.defaultChainID
+	}
+	if !s.escrows.HasChain(chainID) {
+		return 0, fmt.Errorf("%w: chain %d has no P2P escrow", ErrP2PGasNotNeeded, chainID)
+	}
+	return chainID, nil
+}
+
+// gasNeedApproveForAd: an approve for opening adID (a buy-ad's JIT deposit)
+// is on the ad's chain and needs the open itself to pass — so a non-PM on a
+// PM-only escrow still gets one for a PM buy-ad she may open.
+func (s *P2PTradeService) gasNeedApproveForAd(ctx context.Context, userID uuid.UUID, req P2PGasRequest) (int64, error) {
+	ad, err := s.gasNeedAd(ctx, req.AdID, req.ChainID)
+	if err != nil {
+		return 0, err
+	}
+	return ad.ChainID, gasNotNeeded(s.openTradePreflight(ctx, ad, userID), fmt.Sprintf("approve for ad %s", ad.ID))
+}
+
+// gasNeedOnChain refuses an entity on a chain other than the one the request
+// named (0 names none), or on a chain with no registered escrow.
+func (s *P2PTradeService) gasNeedOnChain(what string, entityChain, requested int64) error {
+	if requested != 0 && requested != entityChain {
+		return fmt.Errorf("%w: %s is on chain %d, not %d", ErrP2PGasNotNeeded, what, entityChain, requested)
+	}
+	if !s.escrows.HasChain(entityChain) {
+		return fmt.Errorf("%w: %s is on chain %d, which has no P2P escrow", ErrP2PGasNotNeeded, what, entityChain)
+	}
+	return nil
+}
+
+func (s *P2PTradeService) gasNeedAd(ctx context.Context, id uuid.UUID, requested int64) (*models.P2PAd, error) {
 	if id == uuid.Nil {
 		return nil, fmt.Errorf("%w: adId is required", ErrInvalidParams)
 	}
@@ -69,13 +121,13 @@ func (s *P2PTradeService) gasNeedAd(ctx context.Context, id uuid.UUID) (*models.
 		}
 		return nil, err
 	}
-	if ad.ChainID != s.defaultChainID {
-		return nil, fmt.Errorf("%w: ad is not on the sponsored chain", ErrP2PGasNotNeeded)
+	if err := s.gasNeedOnChain("ad", ad.ChainID, requested); err != nil {
+		return nil, err
 	}
 	return &ad, nil
 }
 
-func (s *P2PTradeService) gasNeedTrade(ctx context.Context, id uuid.UUID) (*models.P2PTrade, error) {
+func (s *P2PTradeService) gasNeedTrade(ctx context.Context, id uuid.UUID, requested int64) (*models.P2PTrade, error) {
 	if id == uuid.Nil {
 		return nil, fmt.Errorf("%w: tradeId is required", ErrInvalidParams)
 	}
@@ -90,8 +142,8 @@ func (s *P2PTradeService) gasNeedTrade(ctx context.Context, id uuid.UUID) (*mode
 	if trade.IsPoolSlice() {
 		return nil, fmt.Errorf("%w: unknown tradeId", ErrInvalidParams)
 	}
-	if trade.ChainID != s.defaultChainID {
-		return nil, fmt.Errorf("%w: trade is not on the sponsored chain", ErrP2PGasNotNeeded)
+	if err := s.gasNeedOnChain("trade", trade.ChainID, requested); err != nil {
+		return nil, err
 	}
 	return &trade, nil
 }
@@ -179,10 +231,10 @@ func (s *P2PTradeService) gasNeedOpenTrade(ctx context.Context, userID uuid.UUID
 }
 
 // gasNeedWithdraw: something in her pool to withdraw, in any asset listed on
-// the sponsored chain (one balance read per asset, stopping at the first).
-func (s *P2PTradeService) gasNeedWithdraw(ctx context.Context, wallet string) error {
+// chainID (one balance read per asset, stopping at the first).
+func (s *P2PTradeService) gasNeedWithdraw(ctx context.Context, wallet string, chainID int64) error {
 	for _, c := range s.EnabledChains() {
-		if c.ChainID != s.defaultChainID {
+		if c.ChainID != chainID {
 			continue
 		}
 		for _, sym := range c.Assets {
