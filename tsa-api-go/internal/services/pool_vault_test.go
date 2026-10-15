@@ -73,6 +73,11 @@ func (v *fakeVault) FillCaps(context.Context) (*VaultFillCaps, error) {
 	return &c, nil
 }
 
+// Limits: the contract's deployed limits (1 / 5,000 / 50,000 USDT).
+func (v *fakeVault) Limits(context.Context) (*VaultLimits, error) {
+	return &VaultLimits{MinDeposit: usdt18(1), MaxPerLP: usdt18(5_000), TotalCap: usdt18(50_000)}, nil
+}
+
 func (v *fakeVault) Address() string { return testVaultAddr.Hex() }
 
 // totalPendingLocked is Σ pending (v.mu held).
@@ -736,6 +741,9 @@ func TestVaultAdmin_SummaryShowsReserve(t *testing.T) {
 	}
 	if sum.Utilisation != "20.00" { // 7 ÷ (25 + 10)
 		t.Fatalf("utilisation = %s, want outstanding ÷ (principal + pending) = 20.00", sum.Utilisation)
+	}
+	if sum.MinDeposit != "1" || sum.MaxPerLP != "5000" || sum.TotalCap != "50000" {
+		t.Fatalf("limits = %s / %s / %s, want the vault's 1 / 5000 / 50000", sum.MinDeposit, sum.MaxPerLP, sum.TotalCap)
 	}
 }
 

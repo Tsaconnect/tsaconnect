@@ -42,7 +42,7 @@ function liquidityPool() {
     recipient: process.env.LPOOL_RECIPIENT || DETERMINISTIC_ROLES.treasury,
     owner: process.env.LPOOL_OWNER || DETERMINISTIC_ROLES.owner,
     ownerConfirm: process.env.LPOOL_OWNER_CONFIRM || null,
-    minDeposit: 5,
+    minDeposit: 1, // PM 2026-10-15: $1 (what the live mainnet pool reads)
     maxPerLp: 5000,
     totalCap: Number(process.env.LPOOL_TOTAL_CAP || 50000),
     // Room for pool_order_max (2000) plus its spread: fill + spread is capped.

@@ -72,7 +72,7 @@ func TestPoolPricing_WorkedExample5k(t *testing.T) {
 		[3]string{FeeKindNetwork, "40000", "5446"})
 }
 
-// Network fee = pool_gas_per_slice (the one fill) + pool_gas_delivery; unset reads 0.
+// Network fee = pool_network_fee (the fill + the delivery); unset reads 0.
 func TestPoolNetworkFeeUnits(t *testing.T) {
 	if got := poolNetworkFeeUnits(specPoolSettings()); got.Int64() != 40_000 {
 		t.Errorf("network = %s, want 40000", got)

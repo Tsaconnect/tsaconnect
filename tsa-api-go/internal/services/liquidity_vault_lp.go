@@ -46,6 +46,11 @@ var (
 	// ErrLPClaimUnavailable: the vault refused a claim for want of liquid USDT
 	// ("Insufficient liquidity"). User copy stays neutral: no reason given.
 	ErrLPClaimUnavailable = errors.New("liquidity: claims are not available right now")
+	// ErrLPLimitsUnavailable: the vault's deposit limits (or its total
+	// principal) could not be read, so a deposit is not prepared.
+	ErrLPLimitsUnavailable = errors.New("liquidity: deposits are not available right now — try again in a minute")
+	// ErrLPPoolFull: this deposit would take the pool over its cap (totalCap).
+	ErrLPPoolFull = errors.New("liquidity: the pool is full")
 )
 
 // lpRevertError turns the vault's own refusal of an LP tx at estimate (its
@@ -72,6 +77,14 @@ func lpRevertError(err error) error {
 // lpPoolViewTTL: the pool card is one read for every caller this often.
 const lpPoolViewTTL = 5 * time.Second
 
+// lpLimitsTTL: the contract's deposit limits change only by the owner's
+// setLimits, so /liquidity/me reads them at most this often. A deposit
+// re-reads them fresh (vaultLimitsFresh).
+const (
+	lpLimitsTTL     = 60 * time.Second
+	lpLimitsFailTTL = 10 * time.Second
+)
+
 const (
 	LiquidityStatusNone   = "none"
 	LiquidityStatusActive = "active"
@@ -95,7 +108,9 @@ type LiquidityToken struct {
 	Decimals int    `json:"decimals"`
 }
 
-// LiquidityLimits are USD at the 1 USDT = $1 peg.
+// LiquidityLimits are the vault's own deposit limits (minDeposit, maxPerLp)
+// in whole tokens (USD at the 1 USDT = $1 peg). Both are "" when the chain
+// read failed (LiquidityVaultMe.LimitsReadable false): never a guess.
 type LiquidityLimits struct {
 	Min string `json:"min"`
 	Max string `json:"max"`
@@ -113,6 +128,7 @@ const lpClaimForEvery = 8 * time.Hour
 type VaultLPChain interface {
 	Address() string
 	State(ctx context.Context) (*VaultState, error)
+	Limits(ctx context.Context) (*VaultLimits, error)
 	Position(ctx context.Context, lp string) (*VaultPosition, error)
 	PrepareDeposit(lp string, amount *big.Int) ([]byte, error)
 	PrepareWithdraw(lp string, amount *big.Int) ([]byte, error)
@@ -147,8 +163,9 @@ type VaultLPConfig struct {
 }
 
 type VaultLPService struct {
-	c    VaultLPConfig
-	pool *cachedReader[*vaultPoolSnapshot]
+	c      VaultLPConfig
+	pool   *cachedReader[*vaultPoolSnapshot]
+	limits *cachedReader[*VaultLimits]
 }
 
 // vaultPoolSnapshot is one reading of the vault's state and the pool card.
@@ -164,7 +181,8 @@ func NewVaultLPService(c VaultLPConfig) (*VaultLPService, error) {
 	if c.Now == nil {
 		c.Now = time.Now
 	}
-	return &VaultLPService{c: c, pool: newCachedReader[*vaultPoolSnapshot](lpPoolViewTTL, lpPoolViewTTL/2)}, nil
+	return &VaultLPService{c: c, pool: newCachedReader[*vaultPoolSnapshot](lpPoolViewTTL, lpPoolViewTTL/2),
+		limits: newCachedReader[*VaultLimits](lpLimitsTTL, lpLimitsFailTTL)}, nil
 }
 
 // ─── Read model ─────────────────────────────────────────────────────────────
@@ -193,6 +211,7 @@ type LiquidityVaultMe struct {
 	Earned            string          `json:"earned,omitempty"` // claimed + claimable, all time
 	SharePercent      string          `json:"sharePercent,omitempty"`
 	Limits            LiquidityLimits `json:"limits"`
+	LimitsReadable    bool            `json:"limitsReadable"`
 	MinClaim          string          `json:"minClaim"`
 	Paused            bool            `json:"paused"`
 	// WalletChanged: the account's wallet is no longer the LP wallet. Deposits
@@ -211,13 +230,43 @@ type VaultPoolView struct {
 
 func (s *VaultLPService) units(n *big.Int) string { return BaseUnitsToDecimal(n, s.c.Token.Decimals) }
 
-func (s *VaultLPService) baseMe() *LiquidityVaultMe {
-	minUSD, maxUSD := PoolLPLimitsUSD()
-	return &LiquidityVaultMe{Mode: "vault", Status: LiquidityStatusNone, PoolOpen: s.c.Gate != nil && s.c.Gate.Open(),
-		Chain:  &LiquidityChain{ID: s.c.Token.ChainID, Key: s.c.Token.ChainKey, Name: s.c.ChainName},
-		Token:  &LiquidityToken{Symbol: s.c.Token.Symbol, Address: s.c.Token.Address, Decimals: s.c.Token.Decimals},
-		Vault:  s.c.Vault.Address(),
-		Limits: LiquidityLimits{Min: trimUSD(minUSD), Max: trimUSD(maxUSD)}, MinClaim: trimUSD(lpMinClaimUSD)}
+func (s *VaultLPService) baseMe(ctx context.Context) *LiquidityVaultMe {
+	out := &LiquidityVaultMe{Mode: "vault", Status: LiquidityStatusNone, PoolOpen: s.c.Gate != nil && s.c.Gate.Open(),
+		Chain:    &LiquidityChain{ID: s.c.Token.ChainID, Key: s.c.Token.ChainKey, Name: s.c.ChainName},
+		Token:    &LiquidityToken{Symbol: s.c.Token.Symbol, Address: s.c.Token.Address, Decimals: s.c.Token.Decimals},
+		Vault:    s.c.Vault.Address(),
+		MinClaim: trimUSD(lpMinClaimUSD)}
+	if l, err := s.vaultLimits(ctx); err == nil {
+		out.Limits, out.LimitsReadable = LiquidityLimits{Min: s.units(l.MinDeposit), Max: s.units(l.MaxPerLP)}, true
+	}
+	return out
+}
+
+// vaultLimits is the contract's deposit limits, read at most once per
+// lpLimitsTTL for every caller (a failure is kept lpLimitsFailTTL).
+func (s *VaultLPService) vaultLimits(ctx context.Context) (*VaultLimits, error) {
+	const key = "limits"
+	return s.limits.Get(key, s.c.Now(), func() (*VaultLimits, error) {
+		// Shared by every waiting caller: one caller's cancel must not fail them all.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		l, err := s.c.Vault.Limits(rctx)
+		if err != nil { // logged once per read, not per cached failure
+			log.Printf("[liquidity] vault deposit limits unreadable: %s", RedactAlertText(err.Error()))
+		}
+		s.limits.Put(key, s.c.Now(), l, err)
+		return l, err
+	})
+}
+
+// vaultLimitsFresh reads the limits uncached (a deposit about to be signed)
+// and refreshes the cache with what it read.
+func (s *VaultLPService) vaultLimitsFresh(ctx context.Context) (*VaultLimits, error) {
+	l, err := s.c.Vault.Limits(ctx)
+	if err == nil {
+		s.limits.Put("limits", s.c.Now(), l, nil)
+	}
+	return l, err
 }
 
 func (s *VaultLPService) lpRow(ctx context.Context, userID uuid.UUID) (*models.PaymentMerchant, error) {
@@ -244,7 +293,7 @@ func (s *VaultLPService) vaultLPRow(ctx context.Context, userID uuid.UUID) (*mod
 
 // Me is the caller's own position. No id is ever taken from the request.
 func (s *VaultLPService) Me(ctx context.Context, userID uuid.UUID) (*LiquidityVaultMe, error) {
-	out := s.baseMe()
+	out := s.baseMe(ctx)
 	snap, err := s.poolSnapshot(ctx)
 	if err == nil {
 		out.Pool = snap.view
@@ -988,12 +1037,27 @@ func (s *VaultLPService) PrepareDeposit(ctx context.Context, userID uuid.UUID, a
 		_ = s.setDepositor(ctx, lp.ID, lp.OperatorWalletAddress, true)
 		return nil, ErrLPNotAllowedYet
 	}
-	minU, maxU, err := PoolLPLimitUnits(s.c.Token.Decimals)
+	// The contract's own limits, read fresh: an unreadable limit refuses the
+	// deposit rather than let her sign one the contract may revert.
+	lim, err := s.vaultLimitsFresh(ctx)
 	if err != nil {
-		return nil, err
+		log.Printf("[liquidity] vault deposit limits unreadable: %s", RedactAlertText(err.Error()))
+		return nil, ErrLPLimitsUnavailable
 	}
-	if n.Cmp(minU) < 0 || new(big.Int).Add(pos.Principal, n).Cmp(maxU) > 0 {
-		return nil, fmt.Errorf("%w: deposit between %s and a total of %s %s", ErrLPAmount, s.units(minU), s.units(maxU), s.c.Token.Symbol)
+	st, err := s.c.Vault.State(ctx)
+	if err != nil {
+		log.Printf("[liquidity] vault state unreadable for a deposit: %s", RedactAlertText(err.Error()))
+		return nil, ErrLPLimitsUnavailable
+	}
+	if n.Cmp(lim.MinDeposit) < 0 || new(big.Int).Add(pos.Principal, n).Cmp(lim.MaxPerLP) > 0 {
+		return nil, fmt.Errorf("%w: deposit at least %s, up to a total of %s %s", ErrLPAmount, s.units(lim.MinDeposit), s.units(lim.MaxPerLP), s.c.Token.Symbol)
+	}
+	if new(big.Int).Add(st.TotalPrincipal, n).Cmp(lim.TotalCap) > 0 {
+		room := new(big.Int).Sub(lim.TotalCap, st.TotalPrincipal)
+		if room.Sign() < 0 {
+			room.SetInt64(0)
+		}
+		return nil, fmt.Errorf("%w: the pool is near its cap — you can add at most %s %s right now", ErrLPPoolFull, s.units(room), s.c.Token.Symbol)
 	}
 	allowance, err := s.c.Tokens.GetTokenAllowance(s.c.Token.Address, lp.OperatorWalletAddress, s.c.Vault.Address())
 	if err != nil {

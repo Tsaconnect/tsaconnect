@@ -15,9 +15,8 @@ import (
 type poolSettingUnit string
 
 const (
-	poolUnitUSD   poolSettingUnit = "usd"   // flat_amount_usd
-	poolUnitBps   poolSettingUnit = "bps"   // bps
-	poolUnitCount poolSettingUnit = "count" // a whole number in the bps column (S25)
+	poolUnitUSD poolSettingUnit = "usd" // flat_amount_usd
+	poolUnitBps poolSettingUnit = "bps" // bps
 )
 
 // poolSettingDefault is one TSA Liquidity fee_configs row (spec §16.1).
@@ -30,21 +29,30 @@ type poolSettingDefault struct {
 	minBps, maxBps   int
 }
 
-// poolSettingDefaults are the rows ensured at boot (Plan B's two, C1's seven,
-// then the two per-order gas costs the buy price passes on).
+// poolSettingDefaults are the rows ensured at boot. The LP deposit limits are
+// the vault's own (VaultLimits), never a row here.
 var poolSettingDefaults = []poolSettingDefault{
-	{feature: models.FeaturePoolLPMin, unit: poolUnitUSD, flatUSD: 5, minFlat: 1, maxFlat: 1000},
-	{feature: models.FeaturePoolLPMax, unit: poolUnitUSD, flatUSD: 5000, minFlat: 0, maxFlat: 100000},
 	{feature: models.FeaturePoolSpread, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 300},
 	{feature: models.FeaturePoolTake, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 300},
 	{feature: models.FeaturePoolBand, unit: poolUnitBps, bps: 50, minBps: 0, maxBps: 500},
-	{feature: models.FeaturePoolSliceCap, unit: poolUnitCount, bps: 3, minBps: 1, maxBps: 5},
 	{feature: models.FeaturePoolMinSlice, unit: poolUnitUSD, flatUSD: 2, minFlat: poolMinSliceFloorUSD, maxFlat: 100},
 	{feature: models.FeaturePoolOrderMax, unit: poolUnitUSD, flatUSD: 2000, minFlat: 0, maxFlat: 2000},
 	{feature: models.FeaturePoolUserDailyMax, unit: poolUnitUSD, flatUSD: 2000, minFlat: 1, maxFlat: 100000},
-	{feature: models.FeaturePoolGasPerSlice, unit: poolUnitUSD, flatUSD: 0.03, minFlat: 0, maxFlat: 5},
-	{feature: models.FeaturePoolGasDelivery, unit: poolUnitUSD, flatUSD: 0.01, minFlat: 0, maxFlat: 5},
+	{feature: models.FeaturePoolNetworkFee, unit: poolUnitUSD, flatUSD: poolNetworkFeeDefaultUSD, minFlat: 0, maxFlat: 5},
 }
+
+// poolNetworkFeeDefaultUSD is pool_network_fee's default: the two gas rows it
+// replaced (pool_gas_per_slice 0.03 + pool_gas_delivery 0.01).
+const poolNetworkFeeDefaultUSD = 0.04
+
+// retiredPoolSettings are the rows the 2026-10-15 cleanup removed, deleted
+// at boot once pool_network_fee holds the two gas rows' sum.
+var retiredPoolSettings = []string{models.RetiredPoolLPMin, models.RetiredPoolLPMax, models.RetiredPoolSliceCap,
+	models.RetiredPoolGasPerSlice, models.RetiredPoolGasDelivery}
+
+// retiredGasDefaultsUSD are what the gas rows priced at when missing or
+// inactive (the old poolSettingFlat fallback), so the fold keeps the price.
+var retiredGasDefaultsUSD = map[string]float64{models.RetiredPoolGasPerSlice: 0.03, models.RetiredPoolGasDelivery: 0.01}
 
 // atMostSixDecimals: v × 10^6 is a whole number of canonical units.
 func atMostSixDecimals(v float64) bool {
@@ -52,7 +60,7 @@ func atMostSixDecimals(v float64) bool {
 	return math.Abs(scaled-math.Round(scaled)) < 1e-6
 }
 
-// poolMinSliceFloorUSD is the lowest pool_min_slice an admin may set (owner,
+// poolMinSliceFloorUSD is the lowest minimum order (pool_min_slice) an admin may set (owner,
 // 2026-10-13: orders down to about ₦500). Every cost is a fee line, so a small
 // slice no longer loses money; an LP payout under the ₦100 transfer floor is
 // refused at quote time (poolQuoteAt).
@@ -67,19 +75,26 @@ func poolSettingDefaultFor(feature string) (poolSettingDefault, bool) {
 	return poolSettingDefault{}, false
 }
 
-// ensurePoolSettingRows inserts each missing pool row (seedIfEmpty seeds only an
-// empty table). A row an admin has edited is never touched. Matched on chain
-// and direction IS NULL: Postgres treats NULLs as distinct, so the unique index
+// poolSettingRow scopes a query to one pool row. Matched on chain and
+// direction IS NULL: Postgres treats NULLs as distinct, so the unique index
 // cannot be relied on here.
+func poolSettingRow(db *gorm.DB, feature string) *gorm.DB {
+	return db.Where("feature = ? AND token_symbol = ? AND chain_id IS NULL AND direction IS NULL", feature, models.FeeTokenAny)
+}
+
+// ensurePoolSettingRows retires the removed rows, then inserts each missing
+// pool row (seedIfEmpty seeds only an empty table). A row an admin has edited
+// is never touched.
 func (s *FeeConfigService) ensurePoolSettingRows() error {
 	if s.db == nil {
 		return nil
 	}
+	if err := s.retirePoolSettingRows(); err != nil {
+		return err
+	}
 	for _, d := range poolSettingDefaults {
 		var n int64
-		if err := s.db.Model(&models.FeeConfig{}).
-			Where("feature = ? AND token_symbol = ? AND chain_id IS NULL AND direction IS NULL", d.feature, models.FeeTokenAny).
-			Count(&n).Error; err != nil {
+		if err := poolSettingRow(s.db.Model(&models.FeeConfig{}), d.feature).Count(&n).Error; err != nil {
 			return err
 		}
 		if n > 0 {
@@ -95,10 +110,70 @@ func (s *FeeConfigService) ensurePoolSettingRows() error {
 	return nil
 }
 
-// PoolLPLimitsUSD is (pool_lp_min, pool_lp_max) in USD from the replica. A
-// missing row reads its default with an ALERT: never 0, never unbounded.
-func PoolLPLimitsUSD() (minUSD, maxUSD float64) {
-	return poolSettingFlat(models.FeaturePoolLPMin), poolSettingFlat(models.FeaturePoolLPMax)
+// retirePoolSettingRows (cleanup 2026-10-15, idempotent): seeds
+// pool_network_fee from what the two gas rows price at today — their sum —
+// when it does not exist yet, then deletes every retired row, in one
+// transaction. Open orders are unaffected: an order's network fee is the fee
+// line stored on its intent, never re-read from these rows.
+func (s *FeeConfigService) retirePoolSettingRows() error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var n int64
+		if err := poolSettingRow(tx.Model(&models.FeeConfig{}), models.FeaturePoolNetworkFee).Count(&n).Error; err != nil {
+			return err
+		}
+		if n == 0 {
+			var gas []models.FeeConfig
+			if err := tx.Where("feature IN ? AND token_symbol = ? AND chain_id IS NULL AND direction IS NULL",
+				[]string{models.RetiredPoolGasPerSlice, models.RetiredPoolGasDelivery}, models.FeeTokenAny).Find(&gas).Error; err != nil {
+				return err
+			}
+			if len(gas) > 0 {
+				sum := retiredGasSumUSD(gas)
+				row := models.FeeConfig{ID: uuid.New(), Feature: models.FeaturePoolNetworkFee, TokenSymbol: models.FeeTokenAny,
+					FlatAmountUSD: sum, Active: true}
+				if err := tx.Create(&row).Error; err != nil {
+					return fmt.Errorf("seed %s: %w", models.FeaturePoolNetworkFee, err)
+				}
+				log.Printf("[FeeConfig] TSA Liquidity setting %s = %v usd (sum of %s + %s)", models.FeaturePoolNetworkFee, sum,
+					models.RetiredPoolGasPerSlice, models.RetiredPoolGasDelivery)
+			}
+		}
+		res := tx.Where("feature IN ?", retiredPoolSettings).Delete(&models.FeeConfig{})
+		if res.Error != nil {
+			return fmt.Errorf("retire pool settings: %w", res.Error)
+		}
+		if res.RowsAffected > 0 {
+			log.Printf("[FeeConfig] retired %d TSA Liquidity setting rows (%v)", res.RowsAffected, retiredPoolSettings)
+		}
+		return nil
+	})
+}
+
+// retiredGasSumUSD is what the gas rows price an order at: an active row's
+// amount, else (inactive or absent) the old default — then rounded to 6 dp
+// (float sums) and held to pool_network_fee's range.
+func retiredGasSumUSD(rows []models.FeeConfig) float64 {
+	got := map[string]float64{}
+	for _, r := range rows {
+		if r.Active {
+			got[r.Feature] = r.FlatAmountUSD
+		}
+	}
+	sum := 0.0
+	for feature, def := range retiredGasDefaultsUSD {
+		if v, ok := got[feature]; ok {
+			sum += v
+		} else {
+			sum += def
+		}
+	}
+	sum = math.Round(sum*1e6) / 1e6
+	d, _ := poolSettingDefaultFor(models.FeaturePoolNetworkFee)
+	if sum > d.maxFlat {
+		log.Printf("[FeeConfig] ALERT liquidity_pool_network_fee_clamped sum=%v — stored %v", sum, d.maxFlat)
+		sum = d.maxFlat
+	}
+	return sum
 }
 
 func poolSettingFlat(feature string) float64 {
@@ -119,7 +194,7 @@ func poolDefaultValue(d poolSettingDefault) float64 {
 	return float64(d.bps)
 }
 
-// poolSettingBps reads a bps/count row from the replica; a missing row reads
+// poolSettingBps reads a bps row from the replica; a missing row reads
 // its default with an ALERT, never 0.
 func poolSettingBps(feature string) int64 {
 	if Fees != nil {
@@ -148,16 +223,16 @@ func SetPoolOrderMaxCeilingUSD(usd float64) {
 // call and snapshotted into pool_orders at open. Units are canonical 6 dp.
 type PoolSettings struct {
 	SpreadBps, TakeBps, BandBps int64
-	SliceCap                    int
-	MinSliceUnits               *big.Int
-	OrderMaxUnits               *big.Int
-	UserDailyMaxUnits           *big.Int
+	// MinSliceUnits is the minimum order (pool_min_slice).
+	MinSliceUnits     *big.Int
+	OrderMaxUnits     *big.Int
+	UserDailyMaxUnits *big.Int
 	// OrdersStopped: pool_order_max = 0, the incident stop (S46). Quotes and
 	// opens close; claims, expiry and (C2) settlement keep running.
 	OrdersStopped bool
-	// Per-order gas the buy price passes on as its "Network fee" line:
-	// slices × GasPerSliceUnits + GasDeliveryUnits. nil reads as zero.
-	GasPerSliceUnits, GasDeliveryUnits *big.Int
+	// NetworkFeeUnits is the per-order gas the buy price passes on as its
+	// "Network fee" line (pool_network_fee). nil reads as zero.
+	NetworkFeeUnits *big.Int
 }
 
 func usdToCanonical(usd float64) *big.Int {
@@ -179,13 +254,11 @@ func CurrentPoolSettings() PoolSettings {
 		SpreadBps:         poolSettingBps(models.FeaturePoolSpread),
 		TakeBps:           poolSettingBps(models.FeaturePoolTake),
 		BandBps:           poolSettingBps(models.FeaturePoolBand),
-		SliceCap:          int(poolSettingBps(models.FeaturePoolSliceCap)),
 		MinSliceUnits:     usdToCanonical(poolSettingFlat(models.FeaturePoolMinSlice)),
 		OrderMaxUnits:     usdToCanonical(orderMax),
 		UserDailyMaxUnits: usdToCanonical(poolSettingFlat(models.FeaturePoolUserDailyMax)),
 		OrdersStopped:     orderMax <= 0,
-		GasPerSliceUnits:  usdToCanonical(poolSettingFlat(models.FeaturePoolGasPerSlice)),
-		GasDeliveryUnits:  usdToCanonical(poolSettingFlat(models.FeaturePoolGasDelivery)),
+		NetworkFeeUnits:   usdToCanonical(poolSettingFlat(models.FeaturePoolNetworkFee)),
 	}
 }
 
@@ -199,22 +272,9 @@ func usdToChainUnits(usd float64, decimals int) (*big.Int, error) {
 	return CanonicalToChainUnits(new(big.Int).SetUint64(flatUSDToUnits(usd)), decimals)
 }
 
-// PoolLPLimitUnits is (pool_lp_min, pool_lp_max) in the pool token's own base
-// units. A token below 6 decimals is refused (S7).
-func PoolLPLimitUnits(decimals int) (min, max *big.Int, err error) {
-	minUSD, maxUSD := PoolLPLimitsUSD()
-	if min, err = usdToChainUnits(minUSD, decimals); err != nil {
-		return nil, nil, err
-	}
-	if max, err = usdToChainUnits(maxUSD, decimals); err != nil {
-		return nil, nil, err
-	}
-	return min, max, nil
-}
-
 // ValidatePoolSetting is the admin edit's range check (spec §16.1). Rows that
-// bound each other (LP min/max; min slice, order max, daily max) are checked
-// against the other row's CURRENT value.
+// bound each other (minimum order, order max, daily max) are checked against
+// the other row's CURRENT value.
 func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) error {
 	d, ok := poolSettingDefaultFor(feature)
 	if !ok {
@@ -222,15 +282,14 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 	}
 	current := func(f string) float64 {
 		var row models.FeeConfig
-		if err := db.Where("feature = ? AND token_symbol = ? AND chain_id IS NULL AND direction IS NULL", f, models.FeeTokenAny).
-			First(&row).Error; err != nil {
+		if err := poolSettingRow(db, f).First(&row).Error; err != nil {
 			dd, _ := poolSettingDefaultFor(f)
 			return dd.flatUSD
 		}
 		return row.FlatAmountUSD
 	}
 	switch d.unit {
-	case poolUnitBps, poolUnitCount:
+	case poolUnitBps:
 		if flatUSD != 0 {
 			return fmt.Errorf("%s is a rate; flatAmountUsd must be 0", feature)
 		}
@@ -248,26 +307,12 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 		return fmt.Errorf("%s takes at most 6 decimal places", feature)
 	}
 	switch feature {
-	case models.FeaturePoolLPMin:
-		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
-			return fmt.Errorf("pool_lp_min must be between 1 and 1000 USD")
-		}
-		if max := current(models.FeaturePoolLPMax); flatUSD > max {
-			return fmt.Errorf("pool_lp_min cannot exceed the maximum (%v USD)", max)
-		}
-	case models.FeaturePoolLPMax:
-		if min := current(models.FeaturePoolLPMin); flatUSD < min {
-			return fmt.Errorf("pool_lp_max must be at least the minimum (%v USD)", min)
-		}
-		if flatUSD > d.maxFlat {
-			return fmt.Errorf("pool_lp_max must be at most 100000 USD")
-		}
 	case models.FeaturePoolMinSlice:
 		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
-			return fmt.Errorf("pool_min_slice must be between %v and %v USD", d.minFlat, d.maxFlat)
+			return fmt.Errorf("the minimum order must be between %v and %v USD", d.minFlat, d.maxFlat)
 		}
 		if max := current(models.FeaturePoolOrderMax); max > 0 && flatUSD > max {
-			return fmt.Errorf("pool_min_slice cannot exceed the order maximum (%v USD)", max)
+			return fmt.Errorf("the minimum order cannot exceed the order maximum (%v USD)", max)
 		}
 	case models.FeaturePoolOrderMax:
 		if flatUSD == 0 {
@@ -277,12 +322,12 @@ func ValidatePoolSetting(db *gorm.DB, feature string, bps int, flatUSD float64) 
 			return fmt.Errorf("pool_order_max must be 0 (stop) or at most %v USD", poolOrderMaxCeilingUSD)
 		}
 		if min := current(models.FeaturePoolMinSlice); flatUSD < min {
-			return fmt.Errorf("pool_order_max must be at least the minimum slice (%v USD) or 0", min)
+			return fmt.Errorf("pool_order_max must be at least the minimum order (%v USD) or 0", min)
 		}
 		if daily := current(models.FeaturePoolUserDailyMax); flatUSD > daily {
 			return fmt.Errorf("pool_order_max cannot exceed the daily maximum (%v USD)", daily)
 		}
-	case models.FeaturePoolGasPerSlice, models.FeaturePoolGasDelivery:
+	case models.FeaturePoolNetworkFee:
 		if flatUSD < d.minFlat || flatUSD > d.maxFlat {
 			return fmt.Errorf("%s must be between %v and %v USD", feature, d.minFlat, d.maxFlat)
 		}

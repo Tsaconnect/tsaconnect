@@ -38,22 +38,30 @@ const (
 
 // TSA Liquidity settings (spec §16.1, S25): off-chain fee_configs rows
 // (token '*', chain and direction NULL), never authored on-chain and never in
-// OnChainFeeFeatures. Plan B owns the LP limits; Plan C1 adds the rest.
+// OnChainFeeFeatures. The LP deposit limits are not settings: the shared
+// pool contract enforces its own (minDeposit / maxPerLp / totalCap).
 const (
-	FeaturePoolLPMin = "pool_lp_min" // flat USD: minimum first deposit (decision 10)
-	FeaturePoolLPMax = "pool_lp_max" // flat USD: stake ceiling (decision 10)
-	// Plan C1 (spec §16.1, S31–S33, decision 19).
 	FeaturePoolSpread       = "pool_spread"         // bps: LP earning over mid
 	FeaturePoolTake         = "pool_take"           // bps: company take
 	FeaturePoolBand         = "pool_band"           // bps: IT preference band
-	FeaturePoolSliceCap     = "pool_slice_cap"      // count in the bps column: max LPs per order
-	FeaturePoolMinSlice     = "pool_min_slice"      // flat USD: minimum slice and minimum order
+	FeaturePoolMinSlice     = "pool_min_slice"      // flat USD: the minimum order (key kept from the slice pool)
 	FeaturePoolOrderMax     = "pool_order_max"      // flat USD: per order; 0 = the incident stop (S46)
 	FeaturePoolUserDailyMax = "pool_user_daily_max" // flat USD: rolling 24h per user
-	// Per-order costs the pool's buy price passes on as fee lines (owner,
-	// 2026-10-13: all actual costs + the take, like the Flutterwave route).
-	FeaturePoolGasPerSlice = "pool_gas_per_slice" // flat USD: treasury gas per slice (its open + adminRelease)
-	FeaturePoolGasDelivery = "pool_gas_delivery"  // flat USD: treasury gas for the delivery send
+	// FeaturePoolNetworkFee is the per-order gas the pool's buy price passes
+	// on as its "Network fee" line (owner, 2026-10-13: all actual costs + the
+	// take, like the Flutterwave route).
+	FeaturePoolNetworkFee = "pool_network_fee" // flat USD per order
+)
+
+// Retired TSA Liquidity rows (2026-10-15), deleted at boot by
+// ensurePoolSettingRows. The two gas rows are folded into
+// pool_network_fee first (their sum).
+const (
+	RetiredPoolLPMin       = "pool_lp_min"        // now the vault's minDeposit
+	RetiredPoolLPMax       = "pool_lp_max"        // now the vault's maxPerLp
+	RetiredPoolSliceCap    = "pool_slice_cap"     // the slice pool's LPs per order
+	RetiredPoolGasPerSlice = "pool_gas_per_slice" // → pool_network_fee
+	RetiredPoolGasDelivery = "pool_gas_delivery"  // → pool_network_fee
 )
 
 // IsPoolSetting reports whether feature is a TSA Liquidity setting row.

@@ -65,7 +65,12 @@ type VaultPoolSummary struct {
 	Utilisation             string                   `json:"utilisationPercent"` // outstanding ÷ (principal + pending)
 	ActiveLPs               int64                    `json:"activeLps"`
 	Spread30d               string                   `json:"spread30d"`
-	Ledger                  *VaultReconcileReport    `json:"ledger,omitempty"`
+	// The contract's deposit limits (read-only here: only the pool owner's
+	// setLimits changes them). Omitted when the read failed.
+	MinDeposit string                `json:"minDeposit,omitempty"`
+	MaxPerLP   string                `json:"maxPerLp,omitempty"`
+	TotalCap   string                `json:"totalCap,omitempty"`
+	Ledger     *VaultReconcileReport `json:"ledger,omitempty"`
 }
 
 // VaultPendingWithdrawal is one LP wallet's pending withdrawal. LP is the LP
@@ -112,6 +117,12 @@ func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, er
 		Where("kind = ? AND status = ? AND pool_chain_id = ?", models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, d.c.Token.ChainID).
 		Count(&out.ActiveLPs).Error; err != nil {
 		return nil, err
+	}
+	if lim, err := d.c.Vault.Limits(ctx); err == nil {
+		out.MinDeposit, out.MaxPerLP, out.TotalCap = BaseUnitsToDecimal(lim.MinDeposit, dec), BaseUnitsToDecimal(lim.MaxPerLP, dec),
+			BaseUnitsToDecimal(lim.TotalCap, dec)
+	} else {
+		log.Printf("[liquidity] vault deposit limits unreadable: %s", RedactAlertText(err.Error()))
 	}
 	if roles, err := d.c.Vault.Roles(ctx); err == nil {
 		out.CollateralProvider, out.Guardian = roles.CollateralProvider, roles.Guardian
