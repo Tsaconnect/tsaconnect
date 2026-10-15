@@ -1,9 +1,11 @@
-// TsaLiquidityPool — shared pool, 100% collateral (spec 2026-10-14).
+// TsaLiquidityPool — shared pool, no company collateral (spec 2026-10-14
+// "liquidity-no-collateral").
 //
 // The two properties everything else serves:
 //   1. pro-rata earnings: a fill's spread is split by principal (the PM's table);
-//   2. custody: the pool always holds every LP's principal + earnings, so
-//      withdraw/claim always succeed — paused, delisted, or never refilled.
+//   2. accounting: balance + outstanding always covers every LP's principal,
+//      earnings and pending withdrawals; a withdraw pays what is liquid and
+//      records the rest as pending, payable only to that LP after a refill.
 
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
@@ -48,13 +50,13 @@ async function deployPool(overrides = {}) {
   return { pool, token, owner, provider, operator, guardian, treasury, lps, poolAddr };
 }
 
-// balance − (principal + Σclaimable + collateral − outstanding): dust the
-// accumulator kept back, which must never go negative.
+// balance + outstanding − (principal + Σclaimable + pending withdrawals):
+// dust the accumulator kept back, which must never go negative.
 async function slack(pool, token, lps) {
   const bal = await token.balanceOf(await pool.getAddress());
-  let owed = (await pool.totalPrincipal()) + (await pool.collateral()) - (await pool.outstanding());
+  let owed = (await pool.totalPrincipal()) + (await pool.totalPendingWithdrawals());
   for (const lp of lps) owed += await pool.claimable(lp.address);
-  return bal - owed;
+  return bal + (await pool.outstanding()) - owed;
 }
 
 describe("TsaLiquidityPool", function () {
@@ -72,22 +74,22 @@ describe("TsaLiquidityPool", function () {
       // Per-LP minimum is $5; lower it so the $2.50 stakes of the table fit.
       await pool.setLimits(u(1), u(5000), u(50000));
       for (let i = 0; i < 5; i++) await pool.connect(lps[i]).deposit(u(stakes[i]));
-      await pool.connect(provider).postCollateral(u(200));
 
-      await pool.connect(operator).fill(treasury.address, u(100), u(1), refOf("order-1"));
+      // The fill sells the LPs' own money: $10 of the $25 leaves for the treasury.
+      await pool.connect(operator).fill(treasury.address, u(10), u(1), refOf("order-1"));
 
       const want = ["0.2", "0.4", "0.1", "0.1", "0.2"];
       for (let i = 0; i < 5; i++) expect(await pool.claimable(lps[i].address)).to.equal(u(want[i]));
-      expect(await pool.outstanding()).to.equal(u(101));
-      expect(await ctx.token.balanceOf(treasury.address)).to.equal(u(100));
+      expect(await pool.outstanding()).to.equal(u(11));
+      expect(await pool.liquid()).to.equal(u(15));
+      expect(await ctx.token.balanceOf(treasury.address)).to.equal(u(10));
     });
 
     it("a depositor arriving after a fill earns nothing from it", async function () {
       const { pool, provider, operator, treasury, lps } = ctx;
-      await pool.connect(lps[0]).deposit(u(10));
-      await pool.connect(provider).postCollateral(u(100));
+      await pool.connect(lps[0]).deposit(u(100));
       await pool.connect(operator).fill(treasury.address, u(10), u(1), refOf("a"));
-      await pool.connect(lps[1]).deposit(u(10));
+      await pool.connect(lps[1]).deposit(u(100));
       expect(await pool.claimable(lps[1].address)).to.equal(0);
       await pool.connect(operator).fill(treasury.address, u(20), u(2), refOf("b"));
       expect(await pool.claimable(lps[0].address)).to.equal(u(2));
@@ -97,8 +99,8 @@ describe("TsaLiquidityPool", function () {
     it("earnings survive a partial withdraw and are claimable to self, another address, or by anyone for the LP", async function () {
       const { pool, token, provider, operator, treasury, lps } = ctx;
       await pool.connect(lps[0]).deposit(u(100));
-      await pool.connect(provider).postCollateral(u(100));
       await pool.connect(operator).fill(treasury.address, u(50), u(3), refOf("a"));
+      await pool.connect(provider).refill(u(53), refOf("r"));
       await pool.connect(lps[0]).withdraw(u(60));
       expect(await pool.claimable(lps[0].address)).to.equal(u(3));
 
@@ -115,101 +117,215 @@ describe("TsaLiquidityPool", function () {
     });
   });
 
-  describe("custody (100% collateral)", function () {
-    it("refuses a fill that would leave outstanding above collateral", async function () {
-      const { pool, provider, operator, treasury, lps } = ctx;
-      await pool.connect(lps[0]).deposit(u(1000));
-      await pool.connect(provider).postCollateral(u(100));
-      await pool.connect(operator).fill(treasury.address, u(90), u(1), refOf("a"));
-      await expect(
-        pool.connect(operator).fill(treasury.address, u("9.5"), u("0.5"), refOf("b")),
-      ).to.be.revertedWith("Not covered by collateral");
-      await pool.connect(operator).fill(treasury.address, u("8.5"), u("0.5"), refOf("c")); // exactly 100
-      expect(await pool.freeCapacity()).to.equal(0);
-    });
-
-    it("every LP withdraws in full without any refill, after the provider's collateral is consumed", async function () {
-      const { pool, token, provider, operator, treasury, lps } = ctx;
+  describe("liquidity and pending withdrawals (no collateral)", function () {
+    it("a fill draws the LPs' money and records amount + spread as outstanding", async function () {
+      const { pool, token, operator, treasury, lps, poolAddr } = ctx;
       await pool.connect(lps[0]).deposit(u(300));
       await pool.connect(lps[1]).deposit(u(100));
-      await pool.connect(provider).postCollateral(u(400));
-      await pool.connect(operator).fill(treasury.address, u(392), u(8), refOf("a"));
-      // Provider never refills and cannot take collateral back.
-      await expect(pool.connect(provider).withdrawCollateral(1)).to.be.revertedWith("Collateral is backing fills");
-
-      for (const [lp, p, e] of [[lps[0], "300", "6"], [lps[1], "100", "2"]]) {
-        const before = await token.balanceOf(lp.address);
-        await pool.connect(lp).withdraw(u(p));
-        await pool.connect(lp).claim();
-        expect(await token.balanceOf(lp.address)).to.equal(before + u(p) + u(e));
-      }
-      expect(await token.balanceOf(await pool.getAddress())).to.equal(0);
+      await pool.connect(operator).fill(treasury.address, u(200), u(4), refOf("a"));
+      expect(await token.balanceOf(poolAddr)).to.equal(u(200));
+      expect(await token.balanceOf(treasury.address)).to.equal(u(200));
+      expect(await pool.outstanding()).to.equal(u(204));
+      expect(await pool.liquid()).to.equal(u(200));
+      expect(await pool.claimable(lps[0].address)).to.equal(u(3));
+      expect(await pool.claimable(lps[1].address)).to.equal(u(1));
+      expect(await slack(pool, token, lps.slice(0, 6))).to.equal(0);
     });
 
-    it("withdraw and claim work while paused and after the LP is delisted; deposit and fill do not", async function () {
+    it("refuses a fill larger than the liquid balance", async function () {
+      const { pool, operator, treasury, lps } = ctx;
+      await pool.connect(lps[0]).deposit(u(100));
+      await pool.connect(operator).fill(treasury.address, u(90), u(1), refOf("a"));
+      await expect(pool.connect(operator).fill(treasury.address, u("10.000000000000000001"), 0, refOf("b")))
+        .to.be.revertedWith("Insufficient liquidity");
+      // The spread is owed, not paid out, so it needs no backing.
+      await pool.connect(operator).fill(treasury.address, u(10), u(1), refOf("c"));
+      expect(await pool.liquid()).to.equal(0);
+      expect(await pool.outstanding()).to.equal(u(102));
+    });
+
+    it("a refill restores liquidity, only up to outstanding, with its own single-use refs", async function () {
+      const { pool, operator, provider, treasury, lps } = ctx;
+      await pool.connect(lps[0]).deposit(u(100));
+      await pool.connect(operator).fill(treasury.address, u(50), u(1), refOf("a"));
+      await expect(pool.connect(operator).refill(u(1), refOf("r1"))).to.be.revertedWith("Not collateral provider");
+      await pool.connect(provider).refill(u(31), refOf("r1"));
+      expect(await pool.liquid()).to.equal(u(81));
+      await expect(pool.connect(provider).refill(1, refOf("r1"))).to.be.revertedWith("Bad or used ref");
+      await expect(pool.connect(provider).refill(u(21), refOf("r2"))).to.be.revertedWith("Bad amount");
+      await pool.connect(provider).refill(u(20), refOf("r2"));
+      expect(await pool.outstanding()).to.equal(0);
+      expect(await pool.liquid()).to.equal(u(101));
+      // Every LP claims and withdraws in full; nothing is left over.
+      await pool.connect(lps[0]).claim();
+      await pool.connect(lps[0]).withdraw(u(100));
+      expect(await ctx.token.balanceOf(ctx.poolAddr)).to.equal(0);
+    });
+
+    it("a fully liquid withdraw pays everything now and records nothing pending", async function () {
+      const { pool, token, lps } = ctx;
+      await pool.connect(lps[0]).deposit(u(100));
+      const before = await token.balanceOf(lps[0].address);
+      await expect(pool.connect(lps[0]).withdraw(u(100)))
+        .to.emit(pool, "Withdrawn").withArgs(lps[0].address, u(100))
+        .and.not.to.emit(pool, "WithdrawalPending");
+      expect(await token.balanceOf(lps[0].address)).to.equal(before + u(100));
+      expect(await pool.pendingWithdrawal(lps[0].address)).to.equal(0);
+    });
+
+    it("a partly liquid withdraw pays what it can, records the rest pending, and the rest stops earning", async function () {
+      const { pool, token, operator, treasury, lps } = ctx;
+      await pool.connect(lps[0]).deposit(u(100));
+      await pool.connect(lps[1]).deposit(u(110));
+      await pool.connect(operator).fill(treasury.address, u(180), 0, refOf("a")); // 30 liquid left
+      const before = await token.balanceOf(lps[0].address);
+      await expect(pool.connect(lps[0]).withdraw(u(100)))
+        .to.emit(pool, "Withdrawn").withArgs(lps[0].address, u(30))
+        .and.to.emit(pool, "WithdrawalPending").withArgs(lps[0].address, u(70));
+      expect(await token.balanceOf(lps[0].address)).to.equal(before + u(30));
+      expect(await pool.principal(lps[0].address)).to.equal(0);
+      expect(await pool.totalPrincipal()).to.equal(u(110));
+      expect(await pool.pendingWithdrawal(lps[0].address)).to.equal(u(70));
+      expect(await pool.totalPendingWithdrawals()).to.equal(u(70));
+      expect(await pool.liquid()).to.equal(0);
+
+      // Nothing liquid: the next withdraw is all pending, with no Withdrawn event.
+      await expect(pool.connect(lps[1]).withdraw(u(10)))
+        .to.emit(pool, "WithdrawalPending").withArgs(lps[1].address, u(10))
+        .and.not.to.emit(pool, "Withdrawn");
+      expect(await pool.totalPendingWithdrawals()).to.equal(u(80));
+
+      // A spread now goes only to the principal still in: lps[0]'s pending earns nothing.
+      await pool.connect(ctx.provider).refill(u(180), refOf("r"));
+      await pool.connect(operator).fill(treasury.address, u(10), u(1), refOf("b"));
+      expect(await pool.claimable(lps[0].address)).to.equal(0);
+      expect(await pool.claimable(lps[1].address)).to.equal(u(1));
+      expect(await slack(pool, token, lps.slice(0, 6))).to.equal(0);
+    });
+
+    it("payPending pays exactly the pending amount, only to the LP, by operator, provider or owner", async function () {
+      const { pool, token, owner, provider, operator, treasury, lps } = ctx;
+      for (const lp of [lps[0], lps[1], lps[2]]) await pool.connect(lp).deposit(u(100));
+      await pool.connect(operator).fill(treasury.address, u(300), 0, refOf("a"));
+      for (const lp of [lps[0], lps[1], lps[2]]) await pool.connect(lp).withdraw(u(100));
+      expect(await pool.totalPendingWithdrawals()).to.equal(u(300));
+
+      await expect(pool.connect(lps[0]).payPending(lps[0].address)).to.be.revertedWith("Not operator, provider or owner");
+      // Nothing to pay yet: a harmless no-op.
+      await expect(pool.connect(operator).payPending(lps[0].address)).not.to.emit(pool, "WithdrawalPaid");
+
+      await pool.connect(provider).refill(u(150), refOf("r1"));
+      const treasuryBefore = await token.balanceOf(treasury.address);
+      const opBefore = await token.balanceOf(operator.address);
+      const b0 = await token.balanceOf(lps[0].address);
+      await expect(pool.connect(operator).payPending(lps[0].address))
+        .to.emit(pool, "WithdrawalPaid").withArgs(lps[0].address, u(100));
+      expect(await token.balanceOf(lps[0].address)).to.equal(b0 + u(100));
+      expect(await token.balanceOf(operator.address)).to.equal(opBefore);
+      expect(await token.balanceOf(treasury.address)).to.equal(treasuryBefore);
+      expect(await pool.pendingWithdrawal(lps[0].address)).to.equal(0);
+      // Idempotent: a retry pays nothing more.
+      await expect(pool.connect(operator).payPending(lps[0].address)).not.to.emit(pool, "WithdrawalPaid");
+      expect(await token.balanceOf(lps[0].address)).to.equal(b0 + u(100));
+
+      // Only 50 left in the pool: the provider pays lps[1] partly.
+      const b1 = await token.balanceOf(lps[1].address);
+      await pool.connect(provider).payPending(lps[1].address);
+      expect(await token.balanceOf(lps[1].address)).to.equal(b1 + u(50));
+      expect(await pool.pendingWithdrawal(lps[1].address)).to.equal(u(50));
+
+      await pool.connect(provider).refill(u(150), refOf("r2"));
+      await pool.connect(owner).payPending(lps[1].address);
+      await pool.connect(owner).payPending(lps[2].address);
+      expect(await pool.totalPendingWithdrawals()).to.equal(0);
+      expect(await token.balanceOf(ctx.poolAddr)).to.equal(0);
+    });
+
+    it("fills and claims cannot use liquidity reserved for pending withdrawals", async function () {
+      const { pool, provider, operator, treasury, lps } = ctx;
+      await pool.connect(lps[0]).deposit(u(100));
+      await pool.connect(lps[1]).deposit(u(100));
+      await pool.connect(operator).fill(treasury.address, u(190), u(10), refOf("a")); // 10 liquid
+      await pool.connect(lps[0]).withdraw(u(100)); // 10 now, 90 pending
+      await pool.connect(provider).refill(u(60), refOf("r1")); // balance 60, all reserved
+      expect(await pool.liquid()).to.equal(0);
+      await expect(pool.connect(operator).fill(treasury.address, u(1), 0, refOf("b")))
+        .to.be.revertedWith("Insufficient liquidity");
+      await expect(pool.connect(lps[1]).claim()).to.be.revertedWith("Insufficient liquidity");
+      await expect(pool.connect(lps[0]).claimTo(lps[5].address)).to.be.revertedWith("Insufficient liquidity");
+      await expect(pool.connect(lps[5]).claimFor(lps[0].address)).to.be.revertedWith("Insufficient liquidity");
+
+      await pool.connect(provider).refill(u(140), refOf("r2")); // balance 200, 90 reserved
+      expect(await pool.liquid()).to.equal(u(110));
+      await pool.connect(lps[1]).claim();
+      await pool.connect(lps[0]).claim();
+      await pool.connect(operator).payPending(lps[0].address);
+      await pool.connect(lps[1]).withdraw(u(100));
+      expect(await ctx.token.balanceOf(ctx.poolAddr)).to.equal(0);
+    });
+
+    it("withdraw, claim and payPending work while paused and after the LP is delisted; deposit and fill do not", async function () {
       const { pool, provider, operator, guardian, treasury, lps } = ctx;
       await pool.connect(lps[0]).deposit(u(100));
-      await pool.connect(provider).postCollateral(u(100));
-      await pool.connect(operator).fill(treasury.address, u(10), u(1), refOf("a"));
+      await pool.connect(operator).fill(treasury.address, u(50), u(1), refOf("a"));
       await pool.connect(guardian).pause();
       await pool.connect(operator).setDepositor(lps[0].address, false);
 
       await expect(pool.connect(lps[0]).deposit(u(10))).to.be.reverted;
       await expect(pool.connect(operator).fill(treasury.address, u(1), 0, refOf("b"))).to.be.reverted;
       await pool.connect(lps[0]).claim();
-      await pool.connect(lps[0]).withdraw(u(100));
+      await pool.connect(lps[0]).withdraw(u(100)); // 49 now, 51 pending
       expect(await pool.principal(lps[0].address)).to.equal(0);
+      await pool.connect(provider).refill(u(51), refOf("r"));
+      await pool.connect(operator).payPending(lps[0].address);
+      expect(await pool.pendingWithdrawal(lps[0].address)).to.equal(0);
     });
 
-    it("refill and settle-from-collateral close outstanding and free collateral", async function () {
-      const { pool, token, provider, operator, treasury, lps } = ctx;
-      await pool.connect(lps[0]).deposit(u(100));
-      await pool.connect(provider).postCollateral(u(100));
-      await pool.connect(operator).fill(treasury.address, u(50), u(1), refOf("a"));
-      await pool.connect(provider).refill(u(31), refOf("r1"));
-      await pool.connect(operator).settleFromCollateral(u(20), refOf("s1"));
-      expect(await pool.outstanding()).to.equal(0);
-      expect(await pool.collateral()).to.equal(u(80));
-      await expect(pool.connect(provider).refill(1, refOf("r2"))).to.be.revertedWith("Bad amount");
-      await expect(pool.connect(provider).refill(1, refOf("r1"))).to.be.revertedWith("Bad or used ref");
-
-      const before = await token.balanceOf(provider.address);
-      await pool.connect(provider).withdrawCollateral(u(80));
-      expect(await token.balanceOf(provider.address)).to.equal(before + u(80));
-      expect(await slack(pool, token, lps.slice(0, 6))).to.equal(0);
-    });
-
-    it("keeps the invariant over a random sequence of every operation", async function () {
-      const { pool, token, provider, operator, treasury, lps } = ctx;
+    it("keeps the invariant over a random sequence of every operation, and everyone exits after refills", async function () {
+      const { pool, token, provider, operator, treasury, lps, poolAddr } = ctx;
       const actors = lps.slice(0, 6);
       let seed = 0x5eed;
       const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
       let refs = 0;
+      // Each fill's accumulator step rounds down by under one wei per whole
+      // token of principal; each harvest by under one wei more.
+      let dustBound = 0n;
       for (let step = 0; step < 300; step++) {
         const lp = actors[rnd(actors.length)];
         const amt = u(1 + rnd(200));
-        const op = rnd(8);
+        // Weighted so the pool often runs short and withdrawals go pending.
+        const op = rnd(9);
         try {
-          if (op === 0) await pool.connect(lp).deposit(amt);
-          else if (op === 1) await pool.connect(lp).withdraw(amt);
-          else if (op === 2) await pool.connect(lp).claim();
-          else if (op === 3) await pool.connect(provider).postCollateral(amt);
-          else if (op === 4) await pool.connect(operator).fill(treasury.address, amt, amt / 100n, refOf(`f${refs++}`));
-          else if (op === 5) await pool.connect(provider).refill(amt, refOf(`r${refs++}`));
-          else if (op === 6) await pool.connect(operator).settleFromCollateral(amt, refOf(`s${refs++}`));
-          else await pool.connect(provider).withdrawCollateral(amt);
+          if (op <= 1) await pool.connect(lp).deposit(amt);
+          else if (op <= 3) await pool.connect(lp).withdraw(amt);
+          else if (op === 4) await pool.connect(lp).claim();
+          else if (op <= 6) {
+            const tp = await pool.totalPrincipal();
+            await pool.connect(operator).fill(treasury.address, amt * 3n, (amt * 3n) / 100n, refOf(`f${refs++}`));
+            dustBound += tp / 10n ** 18n + 1n;
+          }
+          else if (op === 7) await pool.connect(provider).refill(amt, refOf(`r${refs++}`));
+          else await pool.connect(operator).payPending(lp.address);
         } catch (_) { /* refused operations are part of the walk */ }
-        expect(await pool.outstanding()).to.be.lte(await pool.collateral());
+        dustBound += BigInt(actors.length);
         const s = await slack(pool, token, actors);
         expect(s).to.be.gte(0);
-        expect(s).to.be.lte(1000n); // rounding dust only
+        expect(s).to.be.lte(dustBound); // rounding dust only
       }
-      // Everyone exits in full at the end.
+      // The company refills everything it owes; then everyone exits in full.
+      const owed = await pool.outstanding();
+      if (owed > 0n) await pool.connect(provider).refill(owed, refOf("final"));
       for (const lp of actors) {
         const p = await pool.principal(lp.address);
         if (p > 0n) await pool.connect(lp).withdraw(p);
         if ((await pool.claimable(lp.address)) > 0n) await pool.connect(lp).claim();
+        if ((await pool.pendingWithdrawal(lp.address)) > 0n) await pool.connect(operator).payPending(lp.address);
       }
+      for (const lp of actors) expect(await pool.pendingWithdrawal(lp.address)).to.equal(0);
+      expect(await pool.totalPendingWithdrawals()).to.equal(0);
+      expect(await pool.totalPrincipal()).to.equal(0);
+      expect(await token.balanceOf(poolAddr)).to.be.lte(dustBound); // dust only
+      expect(await pool.outstanding()).to.equal(0);
     });
   });
 
@@ -224,7 +340,10 @@ describe("TsaLiquidityPool", function () {
       const { pool, token, provider, operator, treasury, lps } = c;
       const [A, B] = lps;
       for (const l of [A, B]) await pool.connect(operator).setDepositor(l.address, true);
-      await pool.connect(provider).postCollateral(1000n);
+      // Fills here are larger than the LPs' wei-sized stakes: seed the pool
+      // with a surplus the books do not owe anyone, and check it survives.
+      const seedAmt = 1000n;
+      await token.connect(provider).transfer(await pool.getAddress(), seedAmt);
       let n = 0;
       const fill = (s) => pool.connect(operator).fill(treasury.address, 100n, s, refOf(`f${n++}`));
       await pool.connect(B).deposit(5n); await fill(4n); await pool.connect(A).deposit(2n); await fill(2n); await fill(1n);
@@ -233,11 +352,15 @@ describe("TsaLiquidityPool", function () {
       const credited = 4n + 2n + 1n + 3n + 2n;
       expect((await pool.claimable(A.address)) + (await pool.claimable(B.address))).to.be.lte(credited);
       expect(await slack(pool, token, [A, B])).to.be.gte(0n);
-      await pool.connect(provider).withdrawCollateral(await pool.freeCapacity());
+      await pool.connect(provider).refill(await pool.outstanding(), refOf("r"));
       await pool.connect(A).withdraw(await pool.principal(A.address));
       await pool.connect(B).withdraw(await pool.principal(B.address));
       await pool.connect(A).claim();
       await pool.connect(B).claim();
+      // What is left is the seed plus the dust the accumulator kept back.
+      const left = await token.balanceOf(await pool.getAddress());
+      expect(left).to.be.gte(seedAmt);
+      expect(left - seedAmt).to.be.lte(credited);
     });
   });
 
@@ -250,20 +373,21 @@ describe("TsaLiquidityPool", function () {
     beforeEach(async function () {
       c = await deployPool({ params: { withdrawLock: DAY } });
       await c.pool.connect(c.operator).setDepositor(c.lps[0].address, true);
-      await c.pool.connect(c.provider).postCollateral(u(1000));
     });
 
     it("a fresh deposit earns at once but cannot be withdrawn until the lock ends; earnings can be claimed", async function () {
       const { pool, operator, treasury, lps } = c;
       await pool.connect(lps[0]).deposit(u(100));
-      await pool.connect(operator).fill(treasury.address, u(100), u(1), refOf("a"));
+      await pool.connect(operator).fill(treasury.address, u(50), u(1), refOf("a"));
       expect(await pool.claimable(lps[0].address)).to.equal(u(1)); // earning from the deposit on
       expect(await pool.withdrawable(lps[0].address)).to.equal(0);
       await expect(pool.connect(lps[0]).withdraw(u(1))).to.be.revertedWith("Deposit still locked");
       await pool.connect(lps[0]).claim(); // earnings are never locked
       await time.increase(DAY);
       expect(await pool.withdrawable(lps[0].address)).to.equal(u(100));
+      await pool.connect(c.provider).refill(u(51), refOf("r"));
       await pool.connect(lps[0]).withdraw(u(100));
+      expect(await pool.pendingWithdrawal(lps[0].address)).to.equal(0);
     });
 
     it("locks only the new money: older, unlocked principal stays withdrawable after a top-up", async function () {
@@ -302,7 +426,9 @@ describe("TsaLiquidityPool", function () {
   describe("operator bounds", function () {
     beforeEach(async function () {
       await ctx.pool.connect(ctx.lps[0]).deposit(u(1000));
-      await ctx.pool.connect(ctx.provider).postCollateral(u(20000));
+      // Liquidity for the cap tests beyond the one LP's 1000: a surplus the
+      // books owe no one (it stands in for refilled money).
+      await ctx.token.connect(ctx.provider).transfer(ctx.poolAddr, u(20000));
     });
 
     it("only pays approved recipients, never replays a ref, and respects per-tx and window caps", async function () {
@@ -322,7 +448,7 @@ describe("TsaLiquidityPool", function () {
     });
 
     // Review 2026-10-14 (HIGH): a leaked operator key that allow-lists itself
-    // could credit all free collateral to LPs as "spread" in one 1-wei fill.
+    // could credit the whole pool to LPs as "spread" in one 1-wei fill.
     it("caps the spread by the amount, and counts it against the per-tx and window caps", async function () {
       const { pool, operator, treasury } = ctx;
       await expect(pool.connect(operator).fill(treasury.address, 1n, u(500), refOf("drain")))
@@ -352,22 +478,20 @@ describe("TsaLiquidityPool", function () {
       const { pool, provider, treasury, lps } = ctx;
       const stranger = lps[5];
       await expect(pool.connect(stranger).fill(treasury.address, 1, 0, refOf("a"))).to.be.revertedWith("Not operator");
-      await expect(pool.connect(stranger).settleFromCollateral(1, refOf("a"))).to.be.revertedWith("Not operator or provider");
+      await expect(pool.connect(stranger).payPending(stranger.address)).to.be.revertedWith("Not operator, provider or owner");
       await expect(pool.connect(stranger).setDepositor(stranger.address, true)).to.be.revertedWith("Not operator or owner");
-      await expect(pool.connect(stranger).postCollateral(1)).to.be.revertedWith("Not collateral provider");
+      await expect(pool.connect(stranger).refill(1, refOf("a"))).to.be.revertedWith("Not collateral provider");
       await expect(pool.connect(stranger).pause()).to.be.revertedWith("Not owner or guardian");
       await expect(pool.connect(provider).setRecipient(stranger.address, true)).to.be.reverted;
       await expect(pool.connect(provider).upgradeToAndCall(stranger.address, "0x")).to.be.reverted;
     });
 
-    it("keeps refill refs apart from settle refs, so an operator cannot burn the provider's", async function () {
-      const { pool, provider, operator, treasury, lps } = ctx;
-      await pool.connect(lps[0]).deposit(u(100));
-      await pool.connect(provider).postCollateral(u(100));
-      await pool.connect(operator).fill(treasury.address, u(50), u(1), refOf("a"));
-      await pool.connect(operator).settleFromCollateral(u(1), refOf("planned"));
+    it("an operator cannot burn a refill ref: refill is the refill wallet's alone", async function () {
+      const { pool, provider, operator, treasury } = ctx;
+      await pool.connect(operator).fill(treasury.address, u(50), u(1), refOf("planned"));
+      await expect(pool.connect(operator).refill(u(10), refOf("planned"))).to.be.revertedWith("Not collateral provider");
       await pool.connect(provider).refill(u(10), refOf("planned"));
-      expect(await pool.outstanding()).to.equal(u(40));
+      expect(await pool.outstanding()).to.equal(u(41));
     });
 
     it("the collateral provider adds operators without the timelock; the guardian removes one at once", async function () {
@@ -385,11 +509,10 @@ describe("TsaLiquidityPool", function () {
       await expect(pool.connect(lps[5]).removeOperator(operator.address)).to.be.revertedWith("Not provider, owner or guardian");
     });
 
-    it("the collateral provider can only change once its collateral is gone", async function () {
-      const { pool, provider, operator, guardian, lps } = ctx;
-      await expect(pool.setRoles(lps[5].address, guardian.address))
-        .to.be.revertedWith("Collateral still posted");
-      await pool.connect(provider).withdrawCollateral(u(20000));
+    it("the owner moves the refill wallet; it must never be an operator", async function () {
+      const { pool, operator, guardian, lps } = ctx;
+      await expect(pool.connect(lps[5]).setRoles(lps[5].address, guardian.address)).to.be.reverted;
+      await expect(pool.setRoles(operator.address, guardian.address)).to.be.revertedWith("provider must not be an operator");
       await pool.setRoles(lps[5].address, guardian.address);
       expect(await pool.collateralProvider()).to.equal(lps[5].address);
     });
@@ -431,7 +554,6 @@ describe("TsaLiquidityPool", function () {
     it("an upgrade only lands after the delay, and balances survive it", async function () {
       const { pool, owner, provider, operator, treasury, lps } = ctx;
       await pool.connect(lps[0]).deposit(u(100));
-      await pool.connect(provider).postCollateral(u(100));
       await pool.connect(operator).fill(treasury.address, u(10), u(1), refOf("a"));
 
       const delay = 72 * HOUR;
@@ -455,6 +577,76 @@ describe("TsaLiquidityPool", function () {
       expect(await upgraded.principal(lps[0].address)).to.equal(u(100));
       expect(await upgraded.claimable(lps[0].address)).to.equal(u(1));
       expect(await upgraded.outstanding()).to.equal(u(11));
+    });
+  });
+
+  // In-place upgrade of the deployed collateral-model pool (BSC mainnet
+  // 0xA786…60f1, testnet 0x3Aa2…403C): storage is append-only.
+  describe("upgrade from V1 (collateral model)", function () {
+    it("validates the storage layout, keeps every balance, and runs the new rules on the old state", async function () {
+      const [owner, provider, operator, guardian, treasury, a, b] = await ethers.getSigners();
+      const token = await (await ethers.getContractFactory("MockERC20")).deploy("Tether USD", "USDT", 18);
+      const V1 = await ethers.getContractFactory("TsaLiquidityPoolV1");
+      const pool = await upgrades.deployProxy(V1, [{
+        token: await token.getAddress(), owner: owner.address, collateralProvider: provider.address,
+        operator: operator.address, guardian: guardian.address, recipient: treasury.address,
+        minDeposit: u(5), maxPerLp: u(5000), totalCap: u(50000), maxFillPerTx: u(1000),
+        fillWindow: 24 * HOUR, fillWindowCap: u(10000), maxSpreadBps: 1000, withdrawLock: 24 * HOUR,
+      }], { kind: "uups" });
+      const addr = await pool.getAddress();
+      for (const s of [provider, a, b]) {
+        await token.mint(s.address, u(10000));
+        await token.connect(s).approve(addr, ethers.MaxUint256);
+      }
+      for (const s of [a, b]) await pool.connect(operator).setDepositor(s.address, true);
+      await pool.connect(a).deposit(u(300));
+      await pool.connect(b).deposit(u(100));
+      await pool.connect(provider).postCollateral(u(500));
+      await pool.connect(operator).fill(treasury.address, u(200), u(4), refOf("v1-fill"));
+      await pool.connect(provider).refill(u(100), refOf("v1-refill"));
+      await pool.connect(operator).settleFromCollateral(u(4), refOf("v1-settle"));
+      await pool.connect(provider).withdrawCollateral(u(396)); // free collateral, as on mainnet: 100 still backing
+      const lockedUntilB = await pool.lockedUntil(b.address);
+      const balBefore = await token.balanceOf(addr);
+
+      const New = await ethers.getContractFactory("TsaLiquidityPool");
+      await upgrades.validateUpgrade(V1, New, { kind: "uups" });
+      await expect(upgrades.upgradeProxy(addr, New.connect(provider), { kind: "uups" })).to.be.reverted;
+      const up = await upgrades.upgradeProxy(addr, New, { kind: "uups" });
+
+      expect(await up.owner()).to.equal(owner.address);
+      expect(await up.token()).to.equal(await token.getAddress());
+      expect(await up.collateralProvider()).to.equal(provider.address);
+      expect(await up.operators(operator.address)).to.equal(true);
+      expect(await up.recipient(treasury.address)).to.equal(true);
+      expect(await up.depositor(a.address)).to.equal(true);
+      expect(await up.principal(a.address)).to.equal(u(300));
+      expect(await up.totalPrincipal()).to.equal(u(400));
+      expect(await up.claimable(a.address)).to.equal(u(3));
+      expect(await up.claimable(b.address)).to.equal(u(1));
+      expect(await up.outstanding()).to.equal(u(100));
+      expect(await up.collateral()).to.equal(u(100));
+      expect(await up.usedFillRef(refOf("v1-fill"))).to.equal(true);
+      expect(await up.usedRefillRef(refOf("v1-refill"))).to.equal(true);
+      expect(await up.usedSettleRef(refOf("v1-settle"))).to.equal(true);
+      expect(await up.lockedUntil(b.address)).to.equal(lockedUntilB);
+      expect(await up.withdrawLock()).to.equal(BigInt(24 * HOUR));
+      expect(await up.maxSpreadBps()).to.equal(1000n);
+      expect(await up.filledInWindow()).to.equal(u(204));
+      expect(await up.totalPendingWithdrawals()).to.equal(0);
+      expect(await up.liquid()).to.equal(balBefore);
+
+      // The old entry points are gone.
+      for (const sig of ["postCollateral(uint256)", "withdrawCollateral(uint256)", "settleFromCollateral(uint256,bytes32)", "freeCapacity()"]) {
+        const sel = ethers.id(sig).slice(0, 10);
+        await expect(provider.sendTransaction({ to: addr, data: sel + "00".repeat(64) })).to.be.reverted;
+      }
+      // A refill ref used before the upgrade stays used; the new rules run.
+      await expect(up.connect(provider).refill(1, refOf("v1-refill"))).to.be.revertedWith("Bad or used ref");
+      await time.increase(24 * HOUR);
+      await up.connect(a).withdraw(u(300));
+      await up.connect(a).claim();
+      expect(await up.principal(a.address)).to.equal(0);
     });
   });
 });

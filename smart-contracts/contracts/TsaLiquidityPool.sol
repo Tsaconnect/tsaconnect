@@ -12,21 +12,30 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 /**
  * @title TsaLiquidityPool  ("Provide liquidity & earn", shared pool)
  * @notice One pool of a single stablecoin. Liquidity providers (LPs) deposit
- *         principal; every buyer fill credits its spread to ALL LPs pro-rata to
- *         principal. The company (the collateral provider) posts its own tokens
- *         as collateral, and a fill is refused unless every unrefilled fill is
- *         covered by that collateral (spec 2026-10-14 D3, 100% coverage).
+ *         principal, and that principal is what the pool sells: each buyer
+ *         fill sends the pool's tokens to the treasury and credits the fill's
+ *         spread to ALL LPs pro-rata to principal. The company refills the
+ *         pool after it receives the buyer's fiat. No company collateral
+ *         (spec 2026-10-14 "no collateral", superseding D3): the company runs
+ *         both sides, so outstanding has no on-chain limit beyond the fill caps.
  *
- * @dev Invariant (spec §2.2):
- *        token.balanceOf(this) == totalPrincipal + unclaimed + collateral − outstanding
- *        outstanding <= collateral
- *      hence the pool always holds every LP's principal and earnings. The
- *      accumulator rounds every LP's credit DOWN (reward debt is set rounded
- *      up), so "==" is really ">=" by a few wei of dust: LPs are never credited
- *      more than the spread that was paid in.
+ * @dev Invariant (no-collateral model):
+ *        token.balanceOf(this) + outstanding
+ *            == totalPrincipal + Σclaimable + totalPendingWithdrawals
+ *      where outstanding = sold tokens + LP spread the company still owes.
+ *      The accumulator rounds every LP's credit DOWN (reward debt is set
+ *      rounded up), so "==" is really ">=" by a few wei of dust in the pool's
+ *      favour: LPs are never credited more than the spread that was paid in.
+ *      The pool can only pay out what it holds, so:
+ *        liquid() = balance − totalPendingWithdrawals (floored at 0)
+ *      is all a fill or a claim may use; pending withdrawals come first.
  *
- *   - withdraw / claim are never paused and never gated by the depositor
- *     allow-list. That is the custody promise; do not add a guard to them.
+ *   - withdraw / claim / payPending are never paused and never gated by the
+ *     depositor allow-list; do not add a guard to them. A withdraw pays what
+ *     is liquid now and records the rest as the LP's pending withdrawal,
+ *     which only ever goes to that LP (payPending). The principal leaves the
+ *     books at once, so the pending amount stops earning. A claim needs
+ *     liquid tokens and is refused while the pool is short.
  *     The one bound: principal deposited in the last withdrawLock seconds
  *     (24 h by default) cannot be withdrawn yet, so a depositor cannot
  *     deposit just before a fill and leave right after with its spread
@@ -34,15 +43,18 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  *   - Operators can only send tokens to owner-approved recipients (the
  *     treasury), capped per tx and per fixed window (amount + spread both
  *     count), with the spread at most maxSpreadBps of the amount, and only
- *     within free collateral. They cannot reach principal or earnings. A
- *     leaked operator key that also allow-lists itself as a depositor earns
- *     at most its pro-rata share of those capped spreads.
+ *     out of liquid(). A leaked operator key that also allow-lists itself as
+ *     a depositor earns at most its pro-rata share of those capped spreads.
+ *   - The `collateralProvider` role keeps its storage name but is the
+ *     company's refill wallet; `collateral`, `usedSettleRef` stay in storage
+ *     for the upgrade layout only (collateral is 0 on mainnet and never
+ *     changes again).
  *   - Privileged roles use raw msg.sender, never the ERC-2771 forwarder
- *     (same rule as McgpEntitlementSwapV2).
+ *     (same rule as McgpEntitlementSwapV2); LP paths use _msgSender().
  *   - UUPS while in development, owned by the owner's wallet (owner 2026-10-14:
  *     no timelock now; the market-ready contract will not be upgradeable). A
  *     TimelockController can own it unchanged, so LPs can
- *     exit before an upgrade lands.
+ *     exit before an upgrade lands. Storage is append-only.
  */
 contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradeable, UUPSUpgradeable {
     using SafeERC20 for IERC20;
@@ -63,6 +75,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
 
     IERC20 public token;
 
+    /// @notice The company's refill wallet (storage name kept for the layout).
     address public collateralProvider;
     mapping(address => bool) public operators;
     address public guardian;
@@ -72,6 +85,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     mapping(address => bool) public recipient;
 
     uint256 public totalPrincipal;
+    /// @notice Retired with the collateral model; kept for the storage layout.
     uint256 public collateral;
     uint256 public outstanding;
     uint256 public accEarningsPerShare;
@@ -91,6 +105,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     uint256 public filledInWindow;
 
     mapping(bytes32 => bool) public usedFillRef;
+    /// @notice Retired with settle-from-collateral; kept for the storage layout.
     mapping(bytes32 => bool) public usedSettleRef;
     /// @notice A fill's spread may be at most this share of its amount (bps).
     uint256 public maxSpreadBps;
@@ -104,7 +119,13 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     mapping(address => uint256) public lockedPrincipal;
     mapping(address => uint256) public lockedUntil;
 
-    uint256[25] private __gap;
+    /// @notice Withdrawn principal the pool could not pay at the time, per LP.
+    ///         It is no longer principal (earns nothing) and only ever goes
+    ///         to that LP, via payPending.
+    mapping(address => uint256) public pendingWithdrawal;
+    uint256 public totalPendingWithdrawals;
+
+    uint256[23] private __gap;
 
     /// @notice The longest withdrawLock may be set to.
     uint256 public constant MAX_WITHDRAW_LOCK = 7 days;
@@ -113,13 +134,13 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     uint256 public constant SPREAD_BPS_CEILING = 1_000;
 
     event Deposited(address indexed lp, uint256 amount);
+    /// @notice Paid now; emitted only when something was paid.
     event Withdrawn(address indexed lp, uint256 amount);
+    event WithdrawalPending(address indexed lp, uint256 amount);
+    event WithdrawalPaid(address indexed lp, uint256 amount);
     event Claimed(address indexed lp, address indexed to, uint256 amount);
     event Filled(bytes32 indexed ref, address indexed to, uint256 amount, uint256 spread);
     event Refilled(bytes32 indexed ref, uint256 amount);
-    event SettledFromCollateral(bytes32 indexed ref, uint256 amount);
-    event CollateralPosted(uint256 amount);
-    event CollateralWithdrawn(uint256 amount);
     event DepositorSet(address indexed account, bool allowed);
     event RecipientSet(address indexed account, bool allowed);
     event RolesUpdated(address collateralProvider, address guardian);
@@ -193,9 +214,11 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         emit Deposited(lp, amount);
     }
 
-    /// @notice Never paused, never allow-list gated: the custody promise.
-    ///         Only principal past its deposit lock can leave.
-    function withdraw(uint256 amount) external nonReentrant {
+    /// @notice Never paused, never allow-list gated. Only principal past its
+    ///         deposit lock can leave. Pays what is liquid now; the rest is
+    ///         recorded as this LP's pending withdrawal (paid by payPending).
+    ///         Either way the amount stops earning at once.
+    function withdraw(uint256 amount) external nonReentrant returns (uint256 paidNow) {
         address lp = _msgSender();
         require(amount > 0 && amount <= principal[lp], "Bad amount");
         require(amount <= withdrawable(lp), "Deposit still locked");
@@ -203,8 +226,17 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         principal[lp] -= amount;
         totalPrincipal -= amount;
         rewardDebt[lp] = _debt(principal[lp]);
-        token.safeTransfer(lp, amount);
-        emit Withdrawn(lp, amount);
+        paidNow = Math.min(amount, liquid());
+        uint256 rest = amount - paidNow;
+        if (rest > 0) {
+            pendingWithdrawal[lp] += rest;
+            totalPendingWithdrawals += rest;
+            emit WithdrawalPending(lp, rest);
+        }
+        if (paidNow > 0) {
+            token.safeTransfer(lp, paidNow);
+            emit Withdrawn(lp, paidNow);
+        }
     }
 
     function claim() external nonReentrant returns (uint256) {
@@ -233,11 +265,18 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         return pending[lp] + _unharvested(lp);
     }
 
+    /// @notice Tokens a fill or a claim may use: the balance less what is
+    ///         owed to pending withdrawals (which come first).
+    function liquid() public view returns (uint256) {
+        uint256 bal = token.balanceOf(address(this));
+        return bal > totalPendingWithdrawals ? bal - totalPendingWithdrawals : 0;
+    }
+
     // ─────────────────────────── Operator ───────────────────────────
 
-    /// @notice Pays `amount` to an approved recipient for a buyer's order and
-    ///         credits `spread` to every LP. Refused unless outstanding stays
-    ///         within collateral (D3).
+    /// @notice Pays `amount` of LP liquidity to an approved recipient for a
+    ///         buyer's order and credits `spread` to every LP. The company then
+    ///         owes the pool amount + spread (outstanding) until it refills.
     function fill(address to, uint256 amount, uint256 spread, bytes32 ref)
         external
         onlyOperator
@@ -248,7 +287,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         require(ref != bytes32(0) && !usedFillRef[ref], "Bad or used ref");
         require(amount > 0 && amount + spread <= maxFillPerTx, "Bad fill amount");
         require(spread * 10_000 <= amount * maxSpreadBps, "Spread over maximum");
-        require(outstanding + amount + spread <= collateral, "Not covered by collateral");
+        require(amount <= liquid(), "Insufficient liquidity");
         _rollFillWindow();
         require(filledInWindow + amount + spread <= fillWindowCap, "Over fill window cap");
         if (spread > 0) {
@@ -262,17 +301,6 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         emit Filled(ref, to, amount, spread);
     }
 
-    /// @notice Closes `amount` of outstanding against collateral: the company
-    ///         keeps the fiat instead of refilling. No tokens move.
-    function settleFromCollateral(uint256 amount, bytes32 ref) external nonReentrant {
-        require(operators[msg.sender] || msg.sender == collateralProvider, "Not operator or provider");
-        _useSettleRef(ref);
-        require(amount > 0 && amount <= outstanding, "Bad amount");
-        outstanding -= amount;
-        collateral -= amount;
-        emit SettledFromCollateral(ref, amount);
-    }
-
     function setDepositor(address account, bool allowed) external {
         require(operators[msg.sender] || msg.sender == owner(), "Not operator or owner");
         require(account != address(0), "account is zero");
@@ -280,15 +308,31 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         emit DepositorSet(account, allowed);
     }
 
-    // ─────────────────────── Collateral provider ───────────────────────
-
-    function postCollateral(uint256 amount) external onlyCollateralProvider nonReentrant {
-        require(amount > 0, "Bad amount");
-        collateral += amount;
-        _pullExact(msg.sender, amount);
-        emit CollateralPosted(amount);
+    /// @notice Pays an LP's pending withdrawal, as far as the balance allows,
+    ///         to that LP and nowhere else. Never paused. A no-op (returns 0)
+    ///         when nothing is pending or the pool holds nothing.
+    function payPending(address lp) external nonReentrant returns (uint256 amount) {
+        require(
+            operators[msg.sender] || msg.sender == collateralProvider || msg.sender == owner(),
+            "Not operator, provider or owner"
+        );
+        // Order is the caller's: while the pool cannot pay every pending
+        // withdrawal, whoever is paid first takes what is there. Only the
+        // operator, refill wallet or owner may call, and the API pays in the
+        // order withdrawals went pending (review 2026-10-15: accepted — the
+        // operator key is already trusted with fills).
+        amount = Math.min(pendingWithdrawal[lp], token.balanceOf(address(this)));
+        if (amount == 0) return 0;
+        pendingWithdrawal[lp] -= amount;
+        totalPendingWithdrawals -= amount;
+        token.safeTransfer(lp, amount);
+        emit WithdrawalPaid(lp, amount);
     }
 
+    // ─────────────────────── Refill wallet (collateralProvider) ───────────────────────
+
+    /// @notice The company pays back fills (sold amount + LP spread) once it
+    ///         has the buyer's fiat. Refs are the refill wallet's own.
     function refill(uint256 amount, bytes32 ref) external onlyCollateralProvider nonReentrant {
         require(ref != bytes32(0) && !usedRefillRef[ref], "Bad or used ref");
         usedRefillRef[ref] = true;
@@ -296,18 +340,6 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         outstanding -= amount;
         _pullExact(msg.sender, amount);
         emit Refilled(ref, amount);
-    }
-
-    /// @notice Only the part not backing outstanding fills.
-    function withdrawCollateral(uint256 amount) external onlyCollateralProvider nonReentrant {
-        require(amount > 0 && amount <= collateral - outstanding, "Collateral is backing fills");
-        collateral -= amount;
-        token.safeTransfer(msg.sender, amount);
-        emit CollateralWithdrawn(amount);
-    }
-
-    function freeCapacity() external view returns (uint256) {
-        return collateral - outstanding;
     }
 
     // ───────────────────────────── Admin ─────────────────────────────
@@ -321,17 +353,14 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _unpause();
     }
 
-    /// @dev A new collateral provider would own the old one's collateral, so the
-    ///      provider can only change once its collateral is fully withdrawn.
     function setRoles(address _collateralProvider, address _guardian) external onlyOwner {
-        if (_collateralProvider != collateralProvider) require(collateral == 0, "Collateral still posted");
         require(!operators[_collateralProvider], "provider must not be an operator");
         _setRoles(_collateralProvider, _guardian);
     }
 
-    /// @notice An operator can only ever spend collateral (fills to approved
-    ///         recipients, within the caps), never LP principal or earnings —
-    ///         so the collateral provider, whose money that is, manages them
+    /// @notice An operator can only send liquid tokens to approved recipients
+    ///         within the caps — a debt the company (the refill wallet) then
+    ///         owes the pool — so the refill wallet manages operators
     ///         directly, without going through the owner.
     function addOperator(address account) external {
         require(msg.sender == collateralProvider || msg.sender == owner(), "Not provider or owner");
@@ -397,6 +426,7 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         _harvest(lp);
         amount = pending[lp];
         require(amount > 0, "Nothing to claim");
+        require(amount <= liquid(), "Insufficient liquidity");
         pending[lp] = 0;
         token.safeTransfer(to, amount);
         emit Claimed(lp, to, amount);
@@ -407,11 +437,6 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
         uint256 before = token.balanceOf(address(this));
         token.safeTransferFrom(from, address(this), amount);
         require(token.balanceOf(address(this)) - before == amount, "Inexact transfer");
-    }
-
-    function _useSettleRef(bytes32 ref) internal {
-        require(ref != bytes32(0) && !usedSettleRef[ref], "Bad or used ref");
-        usedSettleRef[ref] = true;
     }
 
     /// @dev A fixed window (it restarts at the first fill after it ends), not a

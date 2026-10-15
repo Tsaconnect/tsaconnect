@@ -26,9 +26,10 @@ const DETERMINISTIC_ROLES = {
   treasury: process.env.DET_TREASURY || "0xA4123022c84E66A5E955fd96C5468A78bE84e205", // systemWallet
 };
 
-// Shared pool, 100% company collateral (deploy/liquidity-pool.js, spec
-// 2026-10-14). Amounts are whole tokens. Deploy-time inputs:
-// The owner's wallet is the collateral provider, the guardian and the
+// Shared pool, no company collateral (deploy/liquidity-pool.js, spec
+// 2026-10-14 + no-collateral amendment). Amounts are whole tokens. Deploy-time
+// inputs: the owner's wallet is the refill wallet ("collateralProvider" role,
+// name kept for the storage layout), the guardian and the
 // owner by default (owner, 2026-10-14); env overrides each. No timelock in
 // development; the market-ready contracts will not be upgradeable.
 //   LPOOL_OWNER_CONFIRM — the owner typed again.

@@ -1,8 +1,10 @@
 // Local rehearsal fixture for the Go vault adapter (tsa-api-go
 // internal/services/liquidity_vault_node_test.go, build tag vaultnode).
 // Deploys a mock 18-dp USDT and TsaLiquidityPool on a LOCAL hardhat node
-// (refuses any other chain), posts 200 collateral and one LP's 25 principal,
-// and prints the addresses as JSON. Hardhat's well-known dev keys only.
+// (refuses any other chain), allow-lists one LP and deposits its 25 principal
+// (no collateral: the LPs' deposits are the pool's liquidity), and prints the
+// addresses as JSON. Hardhat's well-known dev keys only. `provider` is the
+// company's refill wallet (funded and approved for refill/payPending runs).
 //
 //   npx hardhat node &   npx hardhat run scripts/rehearse-liquidity-pool-local.js --network localhost
 const hre = require("hardhat");
@@ -27,11 +29,10 @@ async function main() {
     await (await token.mint(s.address, u(1000))).wait();
     await (await token.connect(s).approve(poolAddr, ethers.MaxUint256)).wait();
   }
-  await (await pool.connect(provider).postCollateral(u(200))).wait();
   await (await pool.connect(operator).setDepositor(lp.address, true)).wait();
   await (await pool.connect(lp).deposit(u(25))).wait();
   console.log(JSON.stringify({ vault: poolAddr, token: await token.getAddress(), deployBlock,
-    operator: operator.address, treasury: treasury.address, lp: lp.address }));
+    operator: operator.address, treasury: treasury.address, lp: lp.address, refillWallet: provider.address }));
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
