@@ -32,6 +32,11 @@ type fakeLPVault struct {
 	positionErr error
 	// locked: principal still inside its deposit lock, per wallet.
 	locked map[string]*lpLock
+	// limits are the contract's deposit limits; limitsErr fails every read,
+	// limitsCalls counts them.
+	limits      VaultLimits
+	limitsErr   error
+	limitsCalls int
 }
 
 type lpLock struct {
@@ -41,7 +46,19 @@ type lpLock struct {
 
 func newFakeLPVault() *fakeLPVault {
 	return &fakeLPVault{principal: map[string]*big.Int{}, claimable: map[string]*big.Int{}, pending: map[string]*big.Int{}, allowed: map[string]bool{},
-		state: VaultState{Balance: big.NewInt(0), TotalPendingWithdrawals: big.NewInt(0), Outstanding: big.NewInt(0), TotalPrincipal: big.NewInt(0)}}
+		state:  VaultState{Balance: big.NewInt(0), TotalPendingWithdrawals: big.NewInt(0), Outstanding: big.NewInt(0), TotalPrincipal: big.NewInt(0)},
+		limits: VaultLimits{MinDeposit: usdt18(5), MaxPerLP: usdt18(5_000), TotalCap: usdt18(50_000)}}
+}
+
+func (v *fakeLPVault) Limits(context.Context) (*VaultLimits, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.limitsCalls++
+	if v.limitsErr != nil {
+		return nil, v.limitsErr
+	}
+	l := v.limits
+	return &l, nil
 }
 
 func (v *fakeLPVault) Address() string { return testVaultAddr.Hex() }
@@ -163,7 +180,7 @@ func newLPRig(t *testing.T) *lpRig {
 	}
 	prev := Fees
 	t.Cleanup(func() { Fees = prev })
-	Fees = nil // LP limits $5 / $5,000
+	Fees = nil
 	vault := newFakeLPVault()
 	r := &lpRig{db: db, vault: vault, tokens: &fakeAllowances{allowance: new(big.Int)}, sender: &lpSender{vault: vault}, now: time.Now()}
 	svc, err := NewVaultLPService(VaultLPConfig{DB: db, PM: NewPMService(db), Vault: vault, Tokens: r.tokens, Sender: r.sender,
@@ -268,6 +285,77 @@ func TestVaultLP_PrepareDepositSteps(t *testing.T) {
 	r.vault.principal[strings.ToLower(wallet)] = usdt18(4_995)
 	if _, err := r.svc.PrepareDeposit(context.Background(), user, "10"); !errors.Is(err, ErrLPAmount) {
 		t.Fatalf("over max: %v", err)
+	}
+}
+
+// The LP limits are the contract's (minDeposit / maxPerLp / totalCap), read
+// fresh for every deposit: a lowered limit applies at once, the pool cap
+// refuses before she signs, and an unreadable limit refuses rather than guess.
+func TestVaultLP_PrepareDepositUsesTheVaultLimits(t *testing.T) {
+	r := newLPRig(t)
+	user, wallet := r.activeLP(t)
+	r.vault.allowed[strings.ToLower(wallet)] = true
+	r.tokens.allowance = usdt18(1_000)
+	ctx := context.Background()
+	r.vault.limits = VaultLimits{MinDeposit: usdt18(1), MaxPerLP: usdt18(100), TotalCap: usdt18(1_000)}
+	if plan, err := r.svc.PrepareDeposit(ctx, user, "1"); err != nil || plan.Step != "deposit" {
+		t.Fatalf("deposit at the contract minimum = %+v %v", plan, err)
+	}
+	if _, err := r.svc.Me(ctx, user); err != nil { // caches the limits
+		t.Fatal(err)
+	}
+	calls := r.vault.limitsCalls
+	r.vault.limits.MaxPerLP = usdt18(50) // the owner lowers it
+	if _, err := r.svc.PrepareDeposit(ctx, user, "60"); !errors.Is(err, ErrLPAmount) {
+		t.Fatalf("over the lowered maxPerLp: %v, want ErrLPAmount", err)
+	}
+	if r.vault.limitsCalls != calls+1 {
+		t.Fatalf("limits reads = %d, want a fresh read per deposit (%d)", r.vault.limitsCalls, calls+1)
+	}
+	r.vault.state.TotalPrincipal = usdt18(980)
+	_, err := r.svc.PrepareDeposit(ctx, user, "30")
+	if !errors.Is(err, ErrLPPoolFull) || !strings.Contains(err.Error(), "at most 20 USDT") {
+		t.Fatalf("over totalCap: %v, want ErrLPPoolFull naming the 20 USDT left", err)
+	}
+	if plan, err := r.svc.PrepareDeposit(ctx, user, "20"); err != nil || plan.Step != "deposit" {
+		t.Fatalf("exactly to the cap = %+v %v", plan, err)
+	}
+	r.vault.limitsErr = errors.New("rpc down")
+	if _, err := r.svc.PrepareDeposit(ctx, user, "5"); !errors.Is(err, ErrLPLimitsUnavailable) {
+		t.Fatalf("limits unreadable: %v, want ErrLPLimitsUnavailable", err)
+	}
+}
+
+// /liquidity/me shows the contract's limits in the same {min, max} shape,
+// cached lpLimitsTTL; a failed read leaves them empty and flagged, never a
+// guess, and the page still renders.
+func TestVaultLP_MeLimitsFromTheVaultCached(t *testing.T) {
+	r := newLPRig(t)
+	r.vault.limits = VaultLimits{MinDeposit: usdt18(1), MaxPerLP: usdt18(5_000), TotalCap: usdt18(50_000)}
+	user, _ := r.activeLP(t)
+	ctx := context.Background()
+	me, err := r.svc.Me(ctx, user)
+	if err != nil || !me.LimitsReadable || me.Limits.Min != "1" || me.Limits.Max != "5000" {
+		t.Fatalf("me limits = %+v readable=%v %v", me.Limits, me.LimitsReadable, err)
+	}
+	b, _ := json.Marshal(me)
+	if !strings.Contains(string(b), `"limits":{"min":"1","max":"5000"}`) {
+		t.Fatalf("me JSON = %s, want limits {min, max}", b)
+	}
+	calls := r.vault.limitsCalls
+	r.vault.limits.MinDeposit = usdt18(2)
+	if me, _ = r.svc.Me(ctx, user); me.Limits.Min != "1" || r.vault.limitsCalls != calls {
+		t.Fatalf("within the TTL: min %s after %d reads, want the cached 1 and no read", me.Limits.Min, r.vault.limitsCalls-calls)
+	}
+	r.now = r.now.Add(lpLimitsTTL)
+	if me, _ = r.svc.Me(ctx, user); me.Limits.Min != "2" {
+		t.Fatalf("past the TTL: min %s, want 2", me.Limits.Min)
+	}
+	r.vault.limitsErr = errors.New("rpc down")
+	r.now = r.now.Add(lpLimitsTTL)
+	me, err = r.svc.Me(ctx, user)
+	if err != nil || me.LimitsReadable || me.Limits.Min != "" || me.Limits.Max != "" || me.Status != LiquidityStatusActive {
+		t.Fatalf("unreadable limits: %+v readable=%v status=%s %v", me.Limits, me.LimitsReadable, me.Status, err)
 	}
 }
 

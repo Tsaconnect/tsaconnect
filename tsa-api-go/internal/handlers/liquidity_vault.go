@@ -51,6 +51,10 @@ func vaultLPError(c *gin.Context, err error) bool {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "depositor_pending")
 	case errors.Is(err, services.ErrLPPoolPaused):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "pool_paused")
+	case errors.Is(err, services.ErrLPPoolFull):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "pool_full")
+	case errors.Is(err, services.ErrLPLimitsUnavailable):
+		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, err.Error(), "deposits_unavailable")
 	case errors.Is(err, services.ErrLPClaimUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, "Claims are not available right now. Try again later.", "claim_unavailable")
 	case errors.Is(err, services.ErrLPDepositLocked):

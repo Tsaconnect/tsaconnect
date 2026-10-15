@@ -49,6 +49,7 @@ type VaultChain interface {
 	Address() string
 	State(ctx context.Context) (*VaultState, error)
 	FillCaps(ctx context.Context) (*VaultFillCaps, error)
+	Limits(ctx context.Context) (*VaultLimits, error)
 	Roles(ctx context.Context) (*VaultRoles, error)
 	FillUsed(ctx context.Context, ref [32]byte) (bool, error)
 	PrepareFill(from, to string, amount, spread *big.Int, ref [32]byte) ([]byte, error)

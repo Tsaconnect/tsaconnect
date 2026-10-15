@@ -25,6 +25,8 @@ func TestVaultLPError_NewRefusals(t *testing.T) {
 		{services.ErrLPNothingToClaim, http.StatusBadRequest, ""},
 		{fmt.Errorf("wrapped: %w", services.ErrLPClaimUnavailable), http.StatusConflict, "claim_unavailable"},
 		{fmt.Errorf("%w: more than your deposited principal", services.ErrLPAmount), http.StatusBadRequest, ""},
+		{fmt.Errorf("%w: you can add at most 20 USDT", services.ErrLPPoolFull), http.StatusConflict, "pool_full"},
+		{services.ErrLPLimitsUnavailable, http.StatusServiceUnavailable, "deposits_unavailable"},
 	} {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)

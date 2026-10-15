@@ -103,9 +103,8 @@ func poolPriceOn(t poolTerms, asset, currency string, fiatMinor *big.Int, enforc
 	}, nil
 }
 
-// poolCosts are a pool order's costs: funding, then the network fee of its
-// one fill (pool_gas_per_slice, the operator's call) and the delivery
-// (pool_gas_delivery). LPs are paid their spread in the vault itself, so no
+// poolCosts are a pool order's costs: funding, then the network fee
+// (pool_network_fee: the gas of its one fill and of the delivery). LPs are paid their spread in the vault itself, so no
 // payout line. A zero line is left out by priceInHouseBuy.
 func poolCosts(funding passThroughCost, set PoolSettings) []passThroughCost {
 	return []passThroughCost{funding, {kind: FeeKindNetwork, label: "Network fee", flat: poolNetworkFeeUnits(set)}}
@@ -113,7 +112,7 @@ func poolCosts(funding passThroughCost, set PoolSettings) []passThroughCost {
 
 // poolNetworkFeeUnits is the gas an order costs, in canonical units.
 func poolNetworkFeeUnits(set PoolSettings) *big.Int {
-	return new(big.Int).Add(bigOrZeroInt(set.GasPerSliceUnits), bigOrZeroInt(set.GasDeliveryUnits))
+	return new(big.Int).Set(bigOrZeroInt(set.NetworkFeeUnits))
 }
 
 // FeeKindFees / PoolFeesLabel: the one line a pool buy's costs are shown as.

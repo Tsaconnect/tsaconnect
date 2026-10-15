@@ -238,6 +238,49 @@ func (v *LiquidityVault) FillCaps(ctx context.Context) (*VaultFillCaps, error) {
 	return c, nil
 }
 
+// VaultLimits are the contract's own deposit limits (TsaLiquidityPool
+// deposit(): amount ≥ MinDeposit, principal + amount ≤ MaxPerLP,
+// totalPrincipal + amount ≤ TotalCap), in token base units. Only the pool
+// owner changes them (setLimits); the API never keeps a copy of its own.
+type VaultLimits struct {
+	MinDeposit *big.Int
+	MaxPerLP   *big.Int
+	TotalCap   *big.Int
+}
+
+// Limits reads the deposit limits at the head block.
+func (v *LiquidityVault) Limits(ctx context.Context) (*VaultLimits, error) {
+	if v == nil {
+		return nil, ErrVaultUnavailable
+	}
+	ctx, cancel := context.WithTimeout(ctx, v.timeout)
+	defer cancel()
+	head, err := v.client.Client.BlockNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("liquidity vault: read head: %w", err)
+	}
+	at := new(big.Int).SetUint64(head)
+	l := &VaultLimits{}
+	g, gctx := errgroup.WithContext(ctx)
+	for _, r := range []struct {
+		method string
+		into   **big.Int
+	}{{"minDeposit", &l.MinDeposit}, {"maxPerLp", &l.MaxPerLP}, {"totalCap", &l.TotalCap}} {
+		g.Go(func() error {
+			out, err := v.callAt(gctx, at, r.method)
+			if err != nil {
+				return err
+			}
+			*r.into = out[0].(*big.Int)
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return l, nil
+}
+
 // VaultPosition is one LP's on-chain position.
 type VaultPosition struct {
 	Principal *big.Int

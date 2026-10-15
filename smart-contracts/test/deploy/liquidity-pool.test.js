@@ -17,7 +17,7 @@ async function fixture(over = {}) {
       recipient: treasury.address,
       owner: admin.address,
       ownerConfirm: admin.address,
-      minDeposit: 5, maxPerLp: 5000, totalCap: 50000,
+      minDeposit: 1, maxPerLp: 5000, totalCap: 50000,
       maxFillPerTx: 2000, fillWindowSec: 86400, fillWindowCap: 20000, maxSpreadBps: 300, withdrawLockSec: 86400,
       ...over,
     },
@@ -32,6 +32,7 @@ describe("deploy/liquidity-pool", () => {
     const pool = await ethers.getContractAt("TsaLiquidityPool", out.pool);
     expect(await pool.owner()).to.equal(admin.address);
     expect(await pool.recipient(treasury.address)).to.equal(true);
+    expect(await pool.minDeposit()).to.equal(ethers.parseUnits("1", 18));
     expect(await pool.maxPerLp()).to.equal(ethers.parseUnits("5000", 18));
     expect(await pool.withdrawLock()).to.equal(86400n);
   });

@@ -30,6 +30,7 @@ describe("deploy/chains config", () => {
   it("BSC entries carry a liquidityPool block defaulting to the owner's wallet", () => {
     for (const n of ["bscMainnet", "bscTestnet"]) {
       expect(chains[n].liquidityPool.token).to.equal("USDT");
+      expect(chains[n].liquidityPool.minDeposit).to.equal(1); // PM 2026-10-15: $1
     }
     expect(chains.sonicMainnet.liquidityPool).to.equal(undefined);
   });
