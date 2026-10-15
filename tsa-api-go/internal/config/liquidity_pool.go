@@ -39,9 +39,10 @@ type liquidityPoolPreset struct {
 // deploy/liquidity-pool.js has run and its address is entered here.
 var liquidityPoolPresets = map[string]map[string]liquidityPoolPreset{
 	"bsc": {
-		// Deployed 2026-10-14 by the owner: owner/collateral provider/guardian
-		// 0x62bA…1b96, operator 0x38cE…2c9, recipient the treasury 0xA412…E205.
-		"mainnet": {vault: "0xA786a7f70D99F1345aD2D4717B1ffE9DD08460f1", vaultDeployBlock: 127647177,
+		// Fresh no-collateral pool, deployed 2026-10-15 by its owner 0xB3D5…2834:
+		// refill wallet/guardian 0x62bA…1b96, operator 0x38cE…2c9, recipient the
+		// treasury 0xA412…E205. (The 2026-10-14 pool 0xA786…60f1 is retired, empty.)
+		"mainnet": {vault: "0xb825098854d8001FAD54C4267a833b4D182793D8", vaultDeployBlock: 127783089,
 			token: "USDT", releaseGasFloorWei: "10000000000000000", logChunkBlocks: 2000}, // 0.01 BNB
 		// BSC testnet rehearsal vault (2026-10-14): owner/provider/guardian are
 		// the throwaway LIQ_C2 deployer, operator the LIQ_C1 release key.
