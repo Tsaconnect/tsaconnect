@@ -69,3 +69,24 @@ export function poolBuyParams(p: {
     want: { token: (p.asset || 'USDT').toUpperCase(), chainId, chain: p.chain, address: p.tokenAddress },
   };
 }
+
+/**
+ * The buy screen's starting asset when the pool can fill: the pool's token on
+ * its chain (USDT on BSC), so the cheapest in-house route is what she sees
+ * first. Null — keep the screen's own default — when the pool is unavailable
+ * or empty, the currency is not the pool's, or she asked for another token.
+ */
+export function poolDefaultWant(
+  card: PoolCard | null | undefined,
+  p: { asset?: string; currency: string },
+): { token: string; chainId: number; chain: string; address: string } | null {
+  if (!card?.enabled || !card.available || !card.token || !card.chain) return null;
+  if (p.currency !== POOL_CURRENCY) return null;
+  if (p.asset && p.asset.toUpperCase() !== card.token.symbol.toUpperCase()) return null;
+  return {
+    token: card.token.symbol.toUpperCase(),
+    chainId: card.chain.id,
+    chain: card.chain.key,
+    address: card.token.address,
+  };
+}

@@ -1,4 +1,4 @@
-import { poolBuyParams, poolCardView } from '../poolCard';
+import { poolBuyParams, poolCardView, poolDefaultWant } from '../poolCard';
 import type { PoolCard } from '@/services/liquidityApi';
 
 const live: PoolCard = {
@@ -46,5 +46,25 @@ describe('poolBuyParams', () => {
   it('pins a pool buy to naira whatever currency the route or her saved ramp choice says (I-5)', () => {
     expect(poolBuyParams({ pool: '1', currency: 'GHS' }).currency).toBe('NGN');
     expect(poolBuyParams({ currency: 'GHS' }).currency).toBeUndefined();
+  });
+});
+
+describe('poolDefaultWant', () => {
+  const usdtBsc = { token: 'USDT', chainId: 56, chain: 'bsc', address: live.token!.address };
+
+  it('starts a naira buy on the pool token and chain while the pool can fill', () => {
+    expect(poolDefaultWant(live, { currency: 'NGN' })).toEqual(usdtBsc);
+    expect(poolDefaultWant(live, { asset: 'usdt', currency: 'NGN' })).toEqual(usdtBsc);
+  });
+
+  it('keeps the screen default when the pool is empty, dormant or unreadable', () => {
+    expect(poolDefaultWant({ ...live, available: false }, { currency: 'NGN' })).toBeNull();
+    expect(poolDefaultWant({ enabled: false, available: false }, { currency: 'NGN' })).toBeNull();
+    expect(poolDefaultWant(null, { currency: 'NGN' })).toBeNull();
+  });
+
+  it('never overrides another currency or a token she asked for', () => {
+    expect(poolDefaultWant(live, { currency: 'KES' })).toBeNull();
+    expect(poolDefaultWant(live, { asset: 'USDC', currency: 'NGN' })).toBeNull();
   });
 });

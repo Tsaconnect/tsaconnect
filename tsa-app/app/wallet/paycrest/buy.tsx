@@ -91,7 +91,8 @@ import {
   type RampVenue,
 } from '@/services/rampApi';
 import { itIntentRoute } from '@/utils/itBuyOrder';
-import { poolBuyParams } from '@/utils/poolCard';
+import { poolBuyParams, poolDefaultWant } from '@/utils/poolCard';
+import { liquidityApi } from '@/services/liquidityApi';
 import { IT_AGREEMENT_REQUIRED } from '@/services/itApi';
 import { FeeLines, fiatText } from '@/components/ramp/FeeLines';
 import { formatTokenAmount } from '@/services/p2p';
@@ -243,6 +244,33 @@ export default function PaycrestBuyScreen() {
       address: '',
     },
   );
+  // Once she picks a token herself, nothing below may replace it.
+  const wantChosenRef = useRef(false);
+
+  // With the pool able to fill, start on the pool's token and chain (USDT on
+  // BSC) rather than Base. Only when nothing upstream named a chain or opened
+  // the picker, and only until she chooses for herself; a normal quote lists
+  // the pool among its venues, so nothing else about the buy changes.
+  useEffect(() => {
+    if (poolBuy.pool || chainId || openPicker) return;
+    let active = true;
+    liquidityApi
+      .poolCard()
+      .then((res) => {
+        const next = res.success ? poolDefaultWant(res.data, { asset, currency: currencyCode }) : null;
+        if (!active || !next || wantChosenRef.current) return;
+        setWant(next);
+        setWantTokenMeta(null);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+    // Decided once per currency: a later currency switch to the pool's
+    // re-checks; the route params never change on a mounted screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currencyCode]);
+
   // Kept only for the picker's icon/name — every lookup that matters (the
   // quote, the order) goes through `want`, which survives even when this
   // hasn't resolved (e.g. the "use X instead" choice below, which has no
@@ -591,6 +619,7 @@ export default function PaycrestBuyScreen() {
     // value the backend ever sends is one of the keys this build knows about.
     const chainId = getChain(v.chain as ChainKey)?.chainId;
     if (chainId == null) return;
+    wantChosenRef.current = true;
     setWant({ token: v.token.toUpperCase(), chainId, chain: v.chain, address: '' });
     setWantTokenMeta(null);
   }, []);
@@ -1004,6 +1033,7 @@ export default function PaycrestBuyScreen() {
               return;
             }
           }
+          wantChosenRef.current = true;
           setWant({
             token: token.symbol.toUpperCase(),
             chainId,
