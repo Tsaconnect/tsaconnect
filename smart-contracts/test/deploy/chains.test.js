@@ -34,4 +34,14 @@ describe("deploy/chains config", () => {
     }
     expect(chains.sonicMainnet.liquidityPool).to.equal(undefined);
   });
+
+  it("BSC entries carry a direct block (USDT+USDC, 30-minute window)", () => {
+    for (const n of ["bscMainnet", "bscTestnet"]) {
+      expect(chains[n].direct.tokens).to.deep.equal(["USDT", "USDC"]);
+      expect(chains[n].direct.paymentWindowSec).to.equal(1800);
+      expect(chains[n].direct.arbiters).to.be.an("array");
+      expect(chains[n].direct.forbiddenAdmins).to.be.an("array");
+    }
+    expect(chains.sonicMainnet.direct).to.equal(undefined);
+  });
 });

@@ -37,6 +37,11 @@ describe("deploy/lib", () => {
       expect(() => validateAddresses(bad, "bscTestnet")).to.throw(/tokens\.USDT on bscTestnet/);
     });
 
+    it("validates the direct block's arbiters and forbidden admins", () => {
+      const bad = { ...base, direct: { arbiters: [VALID], forbiddenAdmins: ["0xbad"] } };
+      expect(() => validateAddresses(bad, "x")).to.throw(/direct\.forbiddenAdmins\[0\]/);
+    });
+
     it("validates each admin entry", () => {
       const bad = { ...base, admins: [VALID, "0xbad"] };
       expect(() => validateAddresses(bad, "x")).to.throw(/admins\[1\]/);

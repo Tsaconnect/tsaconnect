@@ -9,6 +9,14 @@
 //   proxy          = CREATE2(salt keccak("tsa:P2PEscrowV3:proxy:<DET_NAME>"),
 //                            ERC1967Proxy(impl, initialize(DEPLOYER, [OPERATOR])))
 //
+// An explicit admin list (opts.admins / DET_ADMINS) replaces [OPERATOR] in the
+// initialize() calldata — so it is part of the proxy address — and in the
+// read-back; it may never contain the operator, the treasury, the deployer or
+// any routine deploy key (deploy/p2p-direct.js: admins = dispute arbiters).
+// A `direct-p2p:*` name is the direct escrow's salt: it is refused here unless
+// an admin list is given, and a set-but-empty DET_ADMINS is refused outright —
+// either would otherwise mint that salt with the operator as admin.
+//
 // The proxy is initialised owned by the DEPLOYER so this run can do the
 // per-chain onlyOwner setup; ownership moves to the PM at the end of the SAME
 // run, after every value is read back. Anyone can front-run either CREATE2 (the
@@ -35,7 +43,9 @@ const create2 = require("./create2");
 
 const CONTRACT = "P2PEscrowV3";
 const IMPL_SALT_LABEL = `tsa:${CONTRACT}:impl:v1`;
-const DEFAULT_NAME = "direct-p2p:v1";
+// The operator-admin escrow. Never a direct-p2p:* name (deploy/p2p-direct.js owns those).
+const DEFAULT_NAME = "operator-p2p:v1";
+const DIRECT_NAME_PREFIX = "direct-p2p:";
 const proxySaltLabel = (name) => `tsa:${CONTRACT}:proxy:${name}`;
 const ENV_FILE = path.join(__dirname, "..", ".env");
 
@@ -55,6 +65,8 @@ function envOptions(env = process.env) {
     feeBps: env.DET_FEE_BPS || undefined,
     checkOnly: env.CHECK_ONLY === "1",
     deployer: env.DET_DEPLOYER || undefined,
+    // Set at all (even empty) means "an explicit list": an empty one is refused, never read as unset.
+    admins: env.DET_ADMINS !== undefined ? env.DET_ADMINS.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
     deployerKey: takeDeployKey(env),
   };
 }
@@ -134,14 +146,32 @@ function assertNotHotKey(deployer, roles) {
   }
 }
 
+// assertAdminList refuses an explicit admin list that is empty, malformed,
+// duplicated, or names a hot key: the operator, the treasury, the deployer or
+// any routine deploy key. Without a list the admins are [operator] (default).
+function assertAdminList(admins, { roles, deployer, routine }) {
+  if (!Array.isArray(admins) || admins.length === 0) throw new Error("deterministic: the admin list (DET_ADMINS) is empty — give at least one admin or leave it unset");
+  for (const a of admins) if (!isAddress(a)) throw new Error(`deterministic: admin is not a valid address: ${a}`);
+  if (new Set(admins.map(getAddress)).size !== admins.length) throw new Error("deterministic: the admin list (DET_ADMINS) has a duplicate");
+  const hot = [["operator", roles.operator], ["treasury", roles.treasury], ["deployer", deployer], ...routine.map((r) => ["a routine deploy key", r])];
+  for (const a of admins) {
+    for (const [role, addr] of hot) {
+      if (same(a, addr)) throw new Error(`deterministic: admin ${getAddress(a)} is the ${role} — an explicit admin list never holds a hot key`);
+    }
+  }
+  return admins.map(getAddress);
+}
+
 // plan computes both addresses from the init code alone — no RPC — so the
 // check-only path and the manifest guard see exactly what a deploy would send.
-async function plan(hre, { deployer, operator, name }) {
+// `admins` (explicit list) replaces the default [operator].
+async function plan(hre, { deployer, operator, admins, name }) {
   const Impl = await hre.ethers.getContractFactory(CONTRACT);
   const implSalt = create2.saltOf(IMPL_SALT_LABEL);
   const implInitCode = Impl.bytecode;
   const impl = create2.predict(implSalt, implInitCode);
-  const initData = Impl.interface.encodeFunctionData("initialize", [getAddress(deployer), [getAddress(operator)]]);
+  const adminList = admins ? admins.map(getAddress) : [getAddress(operator)];
+  const initData = Impl.interface.encodeFunctionData("initialize", [getAddress(deployer), adminList]);
   const proxySalt = create2.saltOf(proxySaltLabel(name));
   const proxyInitCode = concat([
     ERC1967Proxy.bytecode,
@@ -151,7 +181,7 @@ async function plan(hre, { deployer, operator, name }) {
     contract: CONTRACT,
     implSaltLabel: IMPL_SALT_LABEL, implSalt, implInitCodeHash: keccak256(implInitCode), impl,
     proxySaltLabel: proxySaltLabel(name), proxySalt, proxyInitCodeHash: keccak256(proxyInitCode), proxy: create2.predict(proxySalt, proxyInitCode),
-    initArgs: { owner: getAddress(deployer), admins: [getAddress(operator)] },
+    initArgs: { owner: getAddress(deployer), admins: adminList },
     _implInitCode: implInitCode, _proxyInitCode: proxyInitCode, _Impl: Impl,
   };
 }
@@ -244,11 +274,18 @@ async function validateParams(provider, cfg, opts) {
 }
 
 // assertEscrow reads back every per-chain value; used after setup and as the
-// whole of a run on a chain that is already handed over.
-async function assertEscrow(esc, { owner, operator, treasury, tokens, cfg, feeManager, paymentWindowSec, feeBps }) {
+// whole of a run on a chain that is already handed over. With an explicit
+// admin list every listed admin must be one and neither hot key may be.
+async function assertEscrow(esc, { owner, operator, treasury, admins, deployer, tokens, cfg, feeManager, paymentWindowSec, feeBps }) {
   const bad = [];
   if (owner && !same(await esc.owner(), owner)) bad.push(`owner is not ${owner}`);
-  if (!(await esc.isAdmin(operator))) bad.push(`operator ${operator} is not an admin`);
+  if (admins) {
+    for (const a of admins) if (!(await esc.isAdmin(a))) bad.push(`admin ${a} is not an admin`);
+    // admins() is the explicit mapping: isAdmin(deployer) is true while it owns the proxy.
+    for (const [role, addr] of [["operator", operator], ["treasury", treasury], ["deployer", deployer]]) {
+      if (addr && (await esc.admins(addr))) bad.push(`the ${role} ${addr} is an admin`);
+    }
+  } else if (!(await esc.isAdmin(operator))) bad.push(`operator ${operator} is not an admin`);
   if (!same(await esc.systemWallet(), treasury)) bad.push(`systemWallet is not the treasury ${treasury}`);
   for (const [sym, addr] of Object.entries(tokens)) {
     if (!(await esc.acceptedTokens(addr))) bad.push(`${sym} ${addr} is not accepted`);
@@ -264,12 +301,15 @@ async function assertEscrow(esc, { owner, operator, treasury, tokens, cfg, feeMa
 }
 
 // Options (tests pass them; the CLI reads DET_* env — see envOptions):
-//   chain, roles {owner, operator, treasury}, name, ownerConfirm, tokens (symbols),
+//   chain, roles {owner, operator, treasury}, admins (explicit initial admin
+//   list replacing [operator]; see assertAdminList), name, ownerConfirm, tokens (symbols),
 //   feeManager, paymentWindowSec, feeBps, checkOnly, deployerKey (the per-run
 //   deploy key), deployer (address: CHECK_ONLY / verify without a key),
 //   routineAddresses (extra addresses to refuse as deployer), networkClass
 //   (override), manifestPath (default deploy/deterministic.json; never written
-//   on hardhat unless given).
+//   on hardhat unless given), deferOwnership (stop after the read-back,
+//   deployer-owned, and return the signer-bound `esc` so the caller can wire
+//   more and hand over last — deploy/p2p-direct.js; no ledger write).
 async function deploy(hre, opts = {}) {
   const { ethers, upgrades, network } = hre;
   const provider = ethers.provider;
@@ -279,6 +319,9 @@ async function deploy(hre, opts = {}) {
     if (!v || !isAddress(v)) throw new Error(`deterministic: role ${k} is not a valid address: ${v}`);
   }
   const name = opts.name || DEFAULT_NAME;
+  if (name.startsWith(DIRECT_NAME_PREFIX) && opts.admins === undefined) {
+    throw new Error(`deterministic: ${name} is a direct P2P escrow salt — it needs its arbiter admin list (deploy/p2p-direct.js); without one the operator would be its admin`);
+  }
   const cls = opts.networkClass || networkClass(hre);
   const manifestFile = opts.manifestPath || (create2.isLocalNetwork(hre) ? null : create2.MANIFEST_PATH);
   const recorded = manifestEntry(manifestFile, cls, proxySaltLabel(name));
@@ -294,12 +337,15 @@ async function deploy(hre, opts = {}) {
   }
   if (!isAddress(deployer)) throw new Error(`deterministic: DET_DEPLOYER is not a valid address: ${deployer}`);
   assertNotHotKey(deployer, roles);
+  const admins = opts.admins === undefined
+    ? undefined
+    : assertAdminList(opts.admins, { roles, deployer, routine: [...routineDeployerAddresses(hre), ...(opts.routineAddresses || [])] });
 
   const chainId = (await provider.getNetwork()).chainId;
-  const p = await plan(hre, { deployer, operator: roles.operator, name });
+  const p = await plan(hre, { deployer, operator: roles.operator, admins, name });
   assertManifest(recorded, p);
   const v = await validateParams(provider, cfg, opts);
-  const params = { operator: roles.operator, treasury: roles.treasury, cfg, ...v };
+  const params = { operator: roles.operator, treasury: roles.treasury, cfg, ...v, ...(admins ? { admins, deployer } : {}) };
 
   const exists = { factory: await create2.hasCode(provider, create2.FACTORY), impl: await create2.hasCode(provider, p.impl), proxy: await create2.hasCode(provider, p.proxy) };
   const esc = new Contract(p.proxy, p._Impl.interface, signer || provider);
@@ -309,9 +355,9 @@ async function deploy(hre, opts = {}) {
     `  factory ${create2.FACTORY} ${exists.factory ? "present" : "MISSING"}\n` +
     `  impl    ${p.impl} [${IMPL_SALT_LABEL}] ${exists.impl ? "already deployed" : "not deployed"}\n` +
     `  proxy   ${p.proxy} [${p.proxySaltLabel}] ${exists.proxy ? `already deployed, owner ${currentOwner}` : "not deployed"}\n` +
-    `  initialize(${deployer}, [${roles.operator}]) → owner after handover ${roles.owner}, systemWallet ${roles.treasury}, tokens ${Object.keys(v.tokens).join(",")}`
+    `  initialize(${deployer}, [${admins ? admins.join(", ") : roles.operator}]) → owner after handover ${roles.owner}, systemWallet ${roles.treasury}, tokens ${Object.keys(v.tokens).join(",")}`
   );
-  const result = { impl: p.impl, proxy: p.proxy, implSaltLabel: IMPL_SALT_LABEL, proxySaltLabel: p.proxySaltLabel };
+  const result = { impl: p.impl, proxy: p.proxy, implSaltLabel: IMPL_SALT_LABEL, proxySaltLabel: p.proxySaltLabel, deployer: getAddress(deployer) };
 
   // Already handed over: verify and stop — the deployer can no longer change
   // anything, so this needs no key and sends nothing (CHECK_ONLY included).
@@ -352,6 +398,10 @@ async function deploy(hre, opts = {}) {
     console.error(`deterministic: NOT handed over — ${p.proxy} is still owned by the deployer ${deployer}; re-run to resume`);
     throw e;
   }
+  if (opts.deferOwnership) {
+    console.log(`deterministic: ${p.proxy} wired and read back; ownership stays with the deployer ${deployer} for the caller to hand over`);
+    return { ...result, esc, proxyReused: proxyOut.reused, deferred: true };
+  }
   console.log(`deterministic: transferring ${p.proxy} to ${roles.owner} (one-step Ownable — this address is final)`);
   await handOverOwnership("deterministic", [esc], roles.owner);
   if (!create2.isLocalNetwork(hre)) writeLedger(network.name, `${CONTRACT}:${name}`, { proxy: p.proxy, impl: p.impl });
@@ -378,6 +428,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  deploy, plan, envOptions, networkClass, recordedProxy, routineDeployerAddresses, assertManifest,
-  ESCROW_LIMITS, CONTRACT, IMPL_SALT_LABEL, DEFAULT_NAME, proxySaltLabel,
+  deploy, plan, envOptions, networkClass, recordedProxy, routineDeployerAddresses, assertManifest, assertAdminList,
+  pickTokens, ESCROW_LIMITS, CONTRACT, IMPL_SALT_LABEL, DEFAULT_NAME, DIRECT_NAME_PREFIX, proxySaltLabel,
+  deployerSigner, ERC1967Proxy,
 };

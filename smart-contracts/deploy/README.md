@@ -82,13 +82,14 @@ real factory from that same presigned tx.
 | | salt label (salt = keccak256 of it) | init code |
 |---|---|---|
 | implementation | `tsa:P2PEscrowV3:impl:v1` | `P2PEscrowV3` creation code |
-| proxy | `tsa:P2PEscrowV3:proxy:<DET_NAME>` (default `direct-p2p:v1`) | `ERC1967Proxy(impl, initialize(DEPLOYER, [OPERATOR]))` |
+| proxy | `tsa:P2PEscrowV3:proxy:<DET_NAME>` (default `operator-p2p:v1`) | `ERC1967Proxy(impl, initialize(DEPLOYER, [OPERATOR]))`, or `initialize(DEPLOYER, DET_ADMINS)` when an admin list is given |
 
 `ERC1967Proxy` is the OpenZeppelin v5 artifact bundled with
 `@openzeppelin/upgrades-core` (`artifacts/@openzeppelin/contracts-v5/…`, pinned
 by `package-lock.json`) — the same proxy `hardhat-upgrades` deploys for every
 other proxy here. So the proxy address depends on: the compiled `P2PEscrowV3`
-bytecode, the **deployer address**, the **operator address** and `DET_NAME`.
+bytecode, the **deployer address**, the **operator address** (or the explicit
+admin list, in order) and `DET_NAME`.
 Owner, treasury, tokens, FeeManager, window and fee are per-chain setup and do
 not move the address.
 
@@ -130,8 +131,9 @@ another chain is not ours until it is recorded for that chain (here in
 | `DET_OWNER` | `0x62bA…1b96` (PM) | final owner; ownership moves here last |
 | `DET_OWNER_CONFIRM` | — | must equal `DET_OWNER` (one-step Ownable is irreversible); required to deploy |
 | `DET_OPERATOR` | `0x38cE…c2c9` | sole initial admin (release admin) — part of the address |
+| `DET_ADMINS` | unset (= `[DET_OPERATOR]`) | comma list replacing `[DET_OPERATOR]` as the initial admins — part of the address. Set-but-empty (`DET_ADMINS=`) is refused, never read as unset. Refused when empty, duplicated, or naming the operator, the treasury, the deployer or a routine deploy key; the read-back then also asserts none of those is an admin |
 | `DET_TREASURY` | `0xA412…e205` | `systemWallet` |
-| `DET_NAME` | `direct-p2p:v1` | proxy salt suffix — a new escrow purpose gets a new name |
+| `DET_NAME` | `operator-p2p:v1` | proxy salt suffix — a new escrow purpose gets a new name. A `direct-p2p:*` name is refused without `DET_ADMINS` (it is the direct escrow's salt; use `deploy/p2p-direct.js`) |
 | `DET_TOKENS` | every non-null token in `chains.js` | comma list of symbols; each must have code |
 | `DET_FEE_MANAGER` | unset | per-chain FeeManager proxy to wire; must have code |
 | `DET_PAYMENT_WINDOW` | contract default (30 min) | integer seconds in [300, 86400] (the contract's bounds) |
@@ -171,3 +173,103 @@ at the end — the cold key never holds an escrow beyond that one run.
 
 FeeManager is not deterministic: it is per-chain wiring, not part of the escrow
 address, and keeps using `deploy/feemanager.js`.
+
+## Direct P2P escrow (BSC)
+
+`deploy/p2p-direct.js` deploys the direct (user-to-user) P2P escrow as a thin
+layer over the deterministic path above: the escrow lands at the same CREATE2
+address on every chain, owned by the PM, with `systemWallet` = the treasury
+(`DET_OWNER` / `DET_TREASURY`), and its **admins are the dispute arbiters only**
+(`ARBITER_ADDRESSES` is passed as the deterministic admin list — never the
+operator `0x38cE…`, the treasury or any hot key). It also deploys its **own**
+`FeeManager` (`deploy/feemanager.js`, never a shared one) with the same cold deploy
+key — no routine key ever owns a direct contract — and writes the live rates
+before anything is handed over. Its salt is `DET_NAME` (default `direct-p2p:v1`;
+any other name must also start with `direct-p2p:`).
+
+**The owner is always an admin.** `P2PEscrowV3.isAdmin(owner)` is true whatever
+the admin list says, so the PM owner can `adminRelease` / `adminResolve` (and
+add or remove admins) on its own. "Arbiters only" means the explicit admin set;
+the owner is the one more address with admin power. That is why the owner must
+never be a hot or deploy key: the run refuses an owner that is a forbidden admin
+(the operator / treasury roles, the canonical `0x38cE…c2c9` / `0xA412…e205`,
+`DIRECT_FORBIDDEN_ADMINS`), a routine deploy key (`.env`
+`DEPLOYER_PRIVATE_KEY`, any hardhat-config account), the routine hardhat signer
+or the cold deployer — before anything is sent, and again right before the
+handover.
+
+    read -r -s -p "Deploy key (hidden): " K; echo
+    DET_DEPLOYER_PRIVATE_KEY="$K" DET_OWNER_CONFIRM=0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96 \
+    ARBITER_ADDRESSES=0x…,0x… \
+    DIRECT_RATES_JSON='{"p2p_platform":{"bps":100},"p2p":{"bps":50}}' \
+      npx hardhat run deploy/p2p-direct.js --network bscMainnet
+    unset K
+
+| Env var | Meaning |
+|---|---|
+| `ARBITER_ADDRESSES` | Comma list of dispute arbiters: the escrow's **only** admins. In `initialize()`, so the list (and its order) is part of the address — use the same list on every chain. |
+| `DIRECT_RATES_JSON` | `{"p2p_platform":{"bps":…},"p2p":{"bps":…}}`; optional `flatUSD` (1e6 micro-USD) and `mcgpExempt`. Written active for USDT and USDC. Each leg ≤ 300 bps, total ≤ 500 bps (the escrow's snapshot caps). |
+| `DIRECT_FORBIDDEN_ADMINS` | Comma list that must never be an admin or the owner: **put the relayer (`RELAYER_PRIVATE_KEY`'s address) here**, plus any role key that ever differs from the operator. Always forbidden besides it: the `DET_OPERATOR` / `DET_TREASURY` roles, the canonical operator `0x38cE…c2c9` and treasury `0xA412…e205` (hard-coded, whatever the env says), the deployers and the routine deploy keys. |
+| `DIRECT_DEPLOY_BLOCK` | Only to resume a run whose escrow proxy already exists, or to re-run against one already handed over without the ledger: the block it was created in (the read-back's event scan starts there). |
+| `DIRECT_FEE_MANAGER_ADDRESS` | Only to re-run against an escrow already handed over without the ledger: its FeeManager, for the read-back. |
+| `DET_*` | As for the deterministic escrow: `DET_DEPLOYER_PRIVATE_KEY`, `DET_OWNER_CONFIRM`, `DET_OWNER`, `DET_TREASURY`, `DET_OPERATOR`, `DET_NAME`, `CHECK_ONLY`. `DET_ADMINS`, `DET_TOKENS`, `DET_FEE_MANAGER`, `DET_PAYMENT_WINDOW` and `DET_FEE_BPS` are set by the module, not read. |
+
+Order: (1) every refusal with nothing sent — the deterministic check-only pass
+(admin list, deploy key, manifest, tokens), the owner against every hot or
+deploy key, then `DET_OWNER_CONFIRM`; a chain whose escrow is already PM-owned
+runs the full read-back (below) and stops — a mismatch, or no FeeManager /
+deploy block to read back from (ledger or `DIRECT_FEE_MANAGER_ADDRESS` +
+`DIRECT_DEPLOY_BLOCK`), fails the run; (2) `FeeManager` deployed and owned by
+the cold deploy key (it is not deterministic) and `setRates`; (3) the escrow
+through `deterministic-escrow.js` with `admins = arbiters`, wired to that
+FeeManager, `paymentWindow` 1800 (the initializer's value, asserted), no
+forwarder, USDT + USDC only, read back — still deployer-owned (`deferOwnership`);
+(4) everything read back again (arbiters are admins; every forbidden address
+is not; rates; window; forwarder zero; no MCGP), then the full read-back below
+with the deployer as the expected owner of both — the event scan proves the
+admin set is exactly the arbiters **before** anything is handed over, and any
+mismatch refuses the handover; (5) the owner re-checked against freshly read
+hot keys, then ownership of **both** contracts to the PM, last; (6) the ledger
+written, and the full read-back again with the PM as owner. `feeBps` keeps the
+initializer's 50 (only used if a rate row is switched inactive).
+
+Never run `deterministic-escrow.js` directly for direct P2P: without an admin
+list it would make the operator the admin, so it refuses any `direct-p2p:*`
+name without `DET_ADMINS` (and its default name is `operator-p2p:v1`). Ledger
+keys are `DirectFeeManager` / `DirectP2PEscrowV3` (the latter also records
+`name` and `deployer`), each with the `deployBlock` the read-back scan starts
+from; both are written only after the handover, so a failed run never leaves a
+ledger entry pointing at a deployer-owned FeeManager (re-run with
+`DIRECT_DEPLOY_BLOCK`, as the log says). Never run
+`scripts/seed-feemanager-rates.js` against the direct FeeManager: it writes `*`
+wildcard rows the escrow never reads.
+
+A mismatch in the post-handover read-back fails the run, but ownership has
+already moved, so fix it from the owner.
+
+### Verifying the direct escrow
+
+`scripts/verify-direct-escrow.js` is read-only and exits non-zero on any
+mismatch. With the same env vars as the deploy (no key, no `DET_OWNER_CONFIRM`;
+the deployer comes from `DET_DEPLOYER=0x…` or the ledger, and without it the
+CREATE2 check fails) it checks the escrow is the predicted CREATE2 address for
+(deployer, arbiters, `DET_NAME`) and both contracts are the OpenZeppelin v5
+`ERC1967Proxy`; the FeeManager is not the main escrow's (ledger `FeeManager`);
+both `owner()`s are `DET_OWNER`, which is no forbidden or routine deploy key;
+both implementation slots (escrow: the ledger's, else the deterministic
+implementation); every wired value (the same checks the deploy asserts —
+`systemWallet` is `DET_TREASURY`; the forbidden set, the deployer and every
+routine deploy key are not admins); and scans `AdminAdded` / `AdminRemoved` /
+`OwnershipTransferred` / `TokenAcceptanceUpdated` from the deploy block in
+2,000-block chunks: the admin set must equal the arbiters exactly, every
+`AdminRemoved` must follow an `AdminAdded` of that address, the accepted tokens
+must be USDT + USDC exactly, and each contract's ownership chain must start at
+the zero address, be continuous (each transfer is from the previous new owner)
+and end at `owner()`. Finding no deploy-time events is itself a failure (wrong
+start block, or an RPC that silently returns empty logs).
+
+    npx hardhat run scripts/verify-direct-escrow.js --network bscMainnet
+
+Addresses and the start block come from the ledger, or `DIRECT_ESCROW_ADDRESS`,
+`DIRECT_FEE_MANAGER_ADDRESS`, `DIRECT_DEPLOY_BLOCK`. The RPC must serve
+2,000-block `eth_getLogs` (the public BSC dataseeds do not).

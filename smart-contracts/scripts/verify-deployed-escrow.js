@@ -1,4 +1,5 @@
 // Read-only sanity checks against a deployed ProductEscrow proxy.
+// (The direct P2P escrow has its own asserting verifier: scripts/verify-direct-escrow.js.)
 // Usage: PROXY=0x... npx hardhat run scripts/verify-deployed-escrow.js --network sonicTestnet
 const { ethers, network } = require("hardhat");
 

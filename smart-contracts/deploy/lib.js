@@ -34,6 +34,10 @@ function validateAddresses(cfg, network) {
       check(`liquidityPool.${k}`, cfg.liquidityPool[k]);
     }
   }
+  if (cfg.direct) {
+    (cfg.direct.arbiters || []).forEach((a, i) => check(`direct.arbiters[${i}]`, a));
+    (cfg.direct.forbiddenAdmins || []).forEach((a, i) => check(`direct.forbiddenAdmins[${i}]`, a));
+  }
 }
 
 function requireAddr(cfg, label, value) {

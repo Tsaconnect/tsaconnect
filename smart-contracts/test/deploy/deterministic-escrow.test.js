@@ -57,6 +57,9 @@ function hardhatKey(i = 0) {
   return HDNodeWallet.fromPhrase(acc.mnemonic, acc.passphrase, `${acc.path}/${i}`).privateKey;
 }
 
+// The default salt name (the operator-admin escrow; never a direct-p2p:* one).
+const NAME = det.DEFAULT_NAME;
+
 const tmpManifest = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "det-")), "deterministic.json");
 
 describe("deploy/deterministic-escrow", function () {
@@ -85,7 +88,7 @@ describe("deploy/deterministic-escrow", function () {
     expect(B.out.impl).to.equal(A.out.impl);
     expect(B.out.proxy).to.equal(A.out.proxy);
     const [deployer] = await hre.ethers.getSigners();
-    const p = await plan(hre, { deployer: deployer.address, operator: roles.operator, name: "direct-p2p:v1" });
+    const p = await plan(hre, { deployer: deployer.address, operator: roles.operator, name: NAME });
     expect(A.out.proxy).to.equal(p.proxy);
     expect(A.out.impl).to.equal(p.impl);
     for (const c of [A, B]) {
@@ -111,7 +114,7 @@ describe("deploy/deterministic-escrow", function () {
   });
 
   it("records the salt in the manifest with both chains", async () => {
-    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8")).local["tsa:P2PEscrowV3:proxy:direct-p2p:v1"];
+    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8")).local[det.proxySaltLabel(NAME)];
     expect(m.proxy).to.equal(A.out.proxy);
     expect(m.impl).to.equal(A.out.impl);
     expect(m.initArgs.admins).to.deep.equal([roles.operator]);
@@ -231,7 +234,7 @@ describe("deploy/deterministic-escrow", function () {
   it("keys the manifest by network class: a testnet rehearsal never pins mainnet", async () => {
     const file = tmpManifest();
     const [, , , , , , , rehearsal] = await hre.ethers.getSigners();
-    const p = await plan(hre, { deployer: rehearsal.address, operator: roles.operator, name: "direct-p2p:v1" });
+    const p = await plan(hre, { deployer: rehearsal.address, operator: roles.operator, name: NAME });
     const entry = { ...p, initArgs: p.initArgs, networks: { 97: { network: "bscTestnet" } } };
     for (const k of Object.keys(entry)) if (k.startsWith("_")) delete entry[k];
     create2.writeManifest({ testnet: { [p.proxySaltLabel]: entry } }, file);
@@ -249,7 +252,7 @@ describe("deploy/deterministic-escrow", function () {
 
   it("assertManifest refuses an entry with missing initArgs / owner / admins", async () => {
     const [deployer] = await hre.ethers.getSigners();
-    const p = await plan(hre, { deployer: deployer.address, operator: roles.operator, name: "direct-p2p:v1" });
+    const p = await plan(hre, { deployer: deployer.address, operator: roles.operator, name: NAME });
     const full = { ...p };
     for (const broken of [{ initArgs: undefined }, { initArgs: { admins: [roles.operator] } }, { initArgs: { owner: deployer.address } }]) {
       expect(() => det.assertManifest({ ...full, ...broken }, p)).to.throw(/refusing.*initArgs.owner \/ initArgs.admins/s);
@@ -281,10 +284,10 @@ describe("deploy/deterministic-escrow", function () {
     try {
       // The ledger's P2PEscrowV3 key is the MAIN escrow on this network.
       writeLedger("hardhat", "P2PEscrowV3", { proxy: mainAddr, impl: mainImpl });
-      await expect(upgrade(hre, { contract: "FeeManager", detName: "direct-p2p:v1", manifestPath })).to.be.rejectedWith(/only applies to P2PEscrowV3/);
+      await expect(upgrade(hre, { contract: "FeeManager", detName: NAME, manifestPath })).to.be.rejectedWith(/only applies to P2PEscrowV3/);
       await expect(upgrade(hre, { contract: "P2PEscrowV3", detName: "nope", manifestPath })).to.be.rejectedWith(/no recorded/);
       const V = await hre.ethers.getContractFactory("P2PEscrowV3UpgradeTest", pmSigner);
-      const out = await upgrade(hre, { contract: "P2PEscrowV3", detName: "direct-p2p:v1", manifestPath, factory: V });
+      const out = await upgrade(hre, { contract: "P2PEscrowV3", detName: NAME, manifestPath, factory: V });
       expect(out.proxy).to.equal(A.out.proxy);
       expect(out.impl).to.not.equal(A.out.impl);
       expect(await hre.upgrades.erc1967.getImplementationAddress(A.out.proxy)).to.equal(out.impl);
@@ -327,7 +330,7 @@ describe("deploy/deterministic-escrow", function () {
     const C = await newChain(31341);
     const chain = await chainFor(C);
     const [deployer, , , , , , stranger] = await C.ethers.getSigners();
-    const p = await plan(C, { deployer: deployer.address, operator: roles.operator, name: "direct-p2p:v1" });
+    const p = await plan(C, { deployer: deployer.address, operator: roles.operator, name: NAME });
     await create2.ensureFactory(C);
     await create2.deployCreate2(C, stranger, { salt: p.implSalt, initCode: p._implInitCode, label: "impl" });
     await create2.deployCreate2(C, stranger, { salt: p.proxySalt, initCode: p._proxyInitCode, label: "proxy" });
@@ -354,6 +357,117 @@ describe("deploy/deterministic-escrow", function () {
     expect(out.proxy).to.equal(A.out.proxy);
     expect(out.exists.factory).to.equal(false);
     expect(await C.ethers.provider.getTransactionCount(deployer.address)).to.equal(2); // the two mock tokens
+  });
+
+  describe("explicit admin list (DET_ADMINS)", () => {
+    it("leaves the default [operator] init code byte-identical and moves the address when set", async () => {
+      const [deployer, , , arbA, arbB] = await hre.ethers.getSigners();
+      const base = { deployer: deployer.address, operator: roles.operator, name: NAME };
+      const dflt = await plan(hre, base);
+      const asList = await plan(hre, { ...base, admins: [roles.operator] });
+      expect(asList.proxy).to.equal(dflt.proxy);
+      expect(asList.proxyInitCodeHash).to.equal(dflt.proxyInitCodeHash);
+      expect(dflt.proxy).to.equal(A.out.proxy);
+      const arb = await plan(hre, { ...base, admins: [arbA.address, arbB.address] });
+      expect(arb.impl).to.equal(dflt.impl);
+      expect(arb.proxy).to.not.equal(dflt.proxy);
+      expect(arb.initArgs.admins).to.deep.equal([arbA.address, arbB.address]);
+      expect((await plan(hre, { ...base, admins: [arbB.address, arbA.address] })).proxy).to.not.equal(arb.proxy);
+    });
+
+    it("envOptions reads DET_ADMINS, and leaves admins unset without it", () => {
+      expect(det.envOptions({}).admins).to.equal(undefined);
+      expect(det.envOptions({ DET_ADMINS: " 0xA, 0xB ,," }).admins).to.deep.equal(["0xA", "0xB"]);
+    });
+
+    it("a set-but-empty DET_ADMINS is an empty list, refused before anything is sent (never read as unset)", async () => {
+      for (const v of ["", " , ,"]) expect(det.envOptions({ DET_ADMINS: v }).admins, JSON.stringify(v)).to.deep.equal([]);
+      const C = await newChain(31363);
+      const chain = await chainFor(C);
+      const [deployer] = await C.ethers.getSigners();
+      const nonce = await C.ethers.provider.getTransactionCount(deployer.address);
+      const admins = det.envOptions({ DET_ADMINS: "" }).admins;
+      await expect(deploy(C, { ...opts, chain, manifestPath: tmpManifest(), admins })).to.be.rejectedWith(/DET_ADMINS\) is empty/);
+      expect(await C.ethers.provider.getTransactionCount(deployer.address)).to.equal(nonce);
+      expect(await create2.hasCode(C.ethers.provider, create2.FACTORY)).to.equal(false);
+    });
+
+    it("the default name is not a direct salt, and a direct-p2p:* name without an admin list is refused before anything is sent", async () => {
+      expect(det.DEFAULT_NAME.startsWith(det.DIRECT_NAME_PREFIX)).to.equal(false);
+      expect(det.envOptions({}).name).to.equal(det.DEFAULT_NAME);
+      const C = await newChain(31364);
+      const chain = await chainFor(C);
+      const [deployer, , , arbA] = await C.ethers.getSigners();
+      const nonce = await C.ethers.provider.getTransactionCount(deployer.address);
+      for (const extra of [{}, { checkOnly: true, deployerKey: undefined, deployer: deployer.address }]) {
+        await expect(deploy(C, { ...opts, chain, manifestPath: tmpManifest(), name: "direct-p2p:v1", ...extra }))
+          .to.be.rejectedWith(/direct-p2p:v1 is a direct P2P escrow salt — it needs its arbiter admin list/);
+      }
+      expect(await C.ethers.provider.getTransactionCount(deployer.address)).to.equal(nonce);
+      expect(await create2.hasCode(C.ethers.provider, create2.FACTORY)).to.equal(false);
+      // With the arbiter list it is allowed (deploy/p2p-direct.js passes one).
+      const out = await deploy(C, { ...opts, chain, manifestPath: tmpManifest(), name: "direct-p2p:v1", admins: [arbA.address], checkOnly: true });
+      expect(out.checkOnly).to.equal(true);
+    });
+
+    it("refuses an empty, malformed or duplicate list and every hot key", async () => {
+      const [deployer, , , arbA, , , , routine] = await hre.ethers.getSigners();
+      const ctx = { roles, deployer: deployer.address, routine: [routine.address] };
+      const cases = [
+        [[], /is empty/],
+        [["0x1234"], /not a valid address/],
+        [[arbA.address, arbA.address.toLowerCase()], /duplicate/],
+        [[arbA.address, roles.operator], /is the operator/],
+        [[roles.treasury], /is the treasury/],
+        [[deployer.address], /is the deployer/],
+        [[routine.address], /is the a routine deploy key/],
+      ];
+      for (const [admins, re] of cases) expect(() => det.assertAdminList(admins, ctx), String(admins)).to.throw(re);
+      expect(det.assertAdminList([arbA.address.toLowerCase()], ctx)).to.deep.equal([arbA.address]);
+    });
+
+    it("refuses a hot-key admin before sending anything", async () => {
+      const C = await newChain(31360);
+      const chain = await chainFor(C);
+      const [deployer] = await C.ethers.getSigners();
+      const nonce = await C.ethers.provider.getTransactionCount(deployer.address);
+      await expect(deploy(C, { ...opts, chain, manifestPath: tmpManifest(), admins: [roles.operator] })).to.be.rejectedWith(/is the operator/);
+      expect(await C.ethers.provider.getTransactionCount(deployer.address)).to.equal(nonce);
+      expect(await create2.hasCode(C.ethers.provider, create2.FACTORY)).to.equal(false);
+    });
+
+    it("deploys with the listed admins only, records them, and the keyless verify checks them", async () => {
+      const C = await newChain(31361);
+      const chain = await chainFor(C);
+      const [deployer, , , arbA, arbB] = await C.ethers.getSigners();
+      const file = tmpManifest();
+      const admins = [arbA.address, arbB.address];
+      const out = await deploy(C, { ...opts, chain, manifestPath: file, admins });
+      const esc = await C.ethers.getContractAt("P2PEscrowV3", out.proxy);
+      expect(out.proxy).to.equal((await plan(C, { deployer: deployer.address, admins, name: NAME })).proxy);
+      expect(out.proxy).to.not.equal(A.out.proxy);
+      expect(await esc.owner()).to.equal(roles.owner);
+      for (const a of admins) expect(await esc.isAdmin(a)).to.equal(true);
+      for (const a of [roles.operator, roles.treasury, deployer.address]) expect(await esc.isAdmin(a), a).to.equal(false);
+      const m = JSON.parse(fs.readFileSync(file, "utf8")).local[det.proxySaltLabel(NAME)];
+      expect(m.initArgs.admins).to.deep.equal(admins);
+      const again = await deploy(C, { ...opts, chain, manifestPath: file, admins, deployerKey: undefined });
+      expect(again.verified).to.equal(true);
+      // The same salt without the list would land elsewhere: the manifest refuses it.
+      await expect(deploy(C, { ...opts, chain, manifestPath: file, deployerKey: undefined, checkOnly: true }))
+        .to.be.rejectedWith(/initialize admins: recorded/);
+    });
+
+    it("deferOwnership stops deployer-owned and wired, for the caller to hand over", async () => {
+      const C = await newChain(31362);
+      const chain = await chainFor(C);
+      const [deployer, , , arbA] = await C.ethers.getSigners();
+      const out = await deploy(C, { ...opts, chain, manifestPath: tmpManifest(), admins: [arbA.address], deferOwnership: true });
+      expect(out.deferred).to.equal(true);
+      expect(await out.esc.owner()).to.equal(deployer.address);
+      expect(await out.esc.systemWallet()).to.equal(roles.treasury);
+      expect(await out.esc.admins(roles.operator)).to.equal(false);
+    });
   });
 
   it("upgrades through the OpenZeppelin plugin after forceImport", async () => {

@@ -20,11 +20,43 @@ const CANONICAL_PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 // escrow address everywhere. The operator (release admin) goes into the proxy's
 // initialize() calldata, so changing it changes the deterministic address.
 // Owner and treasury are per-chain setup, not part of the address.
+// The consolidated hot keys themselves (2026-10 signer consolidation), fixed
+// here so an env override of DET_OPERATOR / DET_TREASURY can never make them
+// admit-able: deploy/p2p-direct.js refuses both as admin or owner regardless.
+const CANONICAL_HOT_KEYS = {
+  operator: "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9",
+  treasury: "0xA4123022c84E66A5E955fd96C5468A78bE84e205",
+};
+
 const DETERMINISTIC_ROLES = {
   owner: process.env.DET_OWNER || "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",     // PM
-  operator: process.env.DET_OPERATOR || "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9", // release admin
-  treasury: process.env.DET_TREASURY || "0xA4123022c84E66A5E955fd96C5468A78bE84e205", // systemWallet
+  operator: process.env.DET_OPERATOR || CANONICAL_HOT_KEYS.operator, // release admin
+  treasury: process.env.DET_TREASURY || CANONICAL_HOT_KEYS.treasury, // systemWallet
 };
+
+const addressList = (v) => (v || "").split(",").map((s) => s.trim()).filter(Boolean);
+
+// Direct (user-to-user) P2P escrow on BSC (deploy/p2p-direct.js). Deployed
+// through deploy/deterministic-escrow.js with its own FeeManager; owner /
+// systemWallet are DETERMINISTIC_ROLES (DET_OWNER, DET_TREASURY) like every
+// deterministic escrow. Operator-supplied at deploy time:
+//   ARBITER_ADDRESSES       — comma list, the dispute arbiters: the escrow's
+//                             ONLY admins (in initialize(), so part of the address);
+//   DIRECT_FORBIDDEN_ADMINS — comma list that must never be an admin or the
+//                             owner: the relayer and any other hot key (the
+//                             operator, treasury — roles and CANONICAL_HOT_KEYS —,
+//                             deployer and routine deploy keys are always refused);
+//   DIRECT_RATES_JSON       — the live FeeManager rates, e.g.
+//                             {"p2p_platform":{"bps":100},"p2p":{"bps":50}}.
+function directBlock() {
+  return {
+    tokens: ["USDT", "USDC"],
+    paymentWindowSec: 1800,
+    arbiters: addressList(process.env.ARBITER_ADDRESSES),
+    forbiddenAdmins: addressList(process.env.DIRECT_FORBIDDEN_ADMINS),
+    rates: process.env.DIRECT_RATES_JSON || null,
+  };
+}
 
 // Shared pool, no company collateral (deploy/liquidity-pool.js, spec
 // 2026-10-14 + no-collateral amendment). Amounts are whole tokens. Deploy-time
@@ -98,6 +130,7 @@ const chains = {
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
     liquidityPool: liquidityPool(),
+    direct: directBlock(),
   },
   bscTestnet: {
     tokens: {
@@ -111,8 +144,9 @@ const chains = {
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
     liquidityPool: liquidityPool(),
+    direct: directBlock(),
   },
 };
 
 
-module.exports = { chains, CANONICAL_PERMIT2, DETERMINISTIC_ROLES };
+module.exports = { chains, CANONICAL_PERMIT2, CANONICAL_HOT_KEYS, DETERMINISTIC_ROLES };

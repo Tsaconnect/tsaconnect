@@ -27,4 +27,16 @@ describe("deploy/feemanager", () => {
     const fm = await hre.ethers.getContractAt("FeeManager", proxy);
     expect(await fm.owner()).to.equal(deployer.address);
   });
+
+  it("signer deploys and (with deferOwnership) owns it, sending nothing from the routine signer", async () => {
+    const [routine] = await hre.ethers.getSigners();
+    const cold = hre.ethers.Wallet.createRandom().connect(hre.ethers.provider);
+    await (await routine.sendTransaction({ to: cold.address, value: hre.ethers.parseEther("1") })).wait();
+    const chain = await testChain();
+    const nonce = await hre.ethers.provider.getTransactionCount(routine.address);
+    const { proxy } = await deploy(hre, { chain, deferOwnership: true, signer: cold, writeLedger: false });
+    const fm = await hre.ethers.getContractAt("FeeManager", proxy);
+    expect(await fm.owner()).to.equal(cold.address);
+    expect(await hre.ethers.provider.getTransactionCount(routine.address)).to.equal(nonce);
+  });
 });
