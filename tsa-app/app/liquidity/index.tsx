@@ -4,7 +4,7 @@
 // (services/liquidityTx.ts). Withdraw and claim are never disabled for a pause
 // or a closed pool: that is the custody promise. A withdrawal the pool cannot
 // pay in full pays part now and leaves the rest pending; the copy stays neutral.
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useFocusEffect } from 'expo-router';
@@ -28,16 +28,21 @@ import {
   type LiquidityMe,
 } from '@/services/liquidityApi';
 import { runLiquidityTx, type LiquidityTxKind, type LiquidityTxResult } from '@/services/liquidityTx';
-import { getSignableWallet } from '@/services/wallet';
+import { getSignableWallet, readErc20BalanceOf } from '@/services/wallet';
+import { formatTokenAmount } from '@/services/p2p';
+import type { ChainKey } from '@/constants/chains';
 import { getChainByChainId } from '@/constants/chains';
 import { promptKycRefusal } from '@/utils/kycRefusal';
+import { shortAddress } from '@/utils/sendForm';
 import {
   canClaimGasFree,
   claimRefusalMessage,
   formatLiquidityAmount,
   isZeroAmount,
   LIQUIDITY_OLD_WALLET_HAS_FUNDS,
+  limitsKnown,
   liquidityAmountError,
+  overBalanceError,
   liquidityMessage,
   oldWalletFundsMessage,
   oldWalletHasFunds,
@@ -74,6 +79,9 @@ export default function LiquidityScreen() {
   const [busy, setBusy] = useState<string | null>(null); // the stage label while acting
   const [sheet, setSheet] = useState<LiquidityAction | null>(null);
   const [amount, setAmount] = useState('');
+  // The LP wallet's own token balance for the Add sheet: undefined while
+  // loading, null when no RPC answered (unknown, not zero).
+  const [walletBalance, setWalletBalance] = useState<string | null | undefined>();
   const [claimedOut, setClaimedOut] = useState(false); // offer the bank cash-out after a claim
   // The claimable amount when a gas-free claim was sent: Claim stays off until
   // a refresh shows it changed, so the operator's tx is never asked for twice.
@@ -82,6 +90,19 @@ export default function LiquidityScreen() {
   // Set synchronously, so a double tap cannot start a second action before
   // the first one's busy state has rendered.
   const running = useRef(false);
+
+  const depositToken = sheet === 'deposit' ? me?.token : undefined;
+  const depositChain = me?.chain?.key;
+  const depositWallet = me?.wallet;
+  useEffect(() => {
+    if (!depositToken || !depositChain || !depositWallet) return;
+    let live = true;
+    setWalletBalance(undefined);
+    readErc20BalanceOf(depositToken.address, depositWallet, depositChain as ChainKey)
+      .then((raw) => live && setWalletBalance(formatTokenAmount(raw.toString(), depositToken.decimals, depositToken.decimals)))
+      .catch(() => live && setWalletBalance(null));
+    return () => { live = false; };
+  }, [depositToken, depositChain, depositWallet]);
 
   const applyMe = useCallback((next: LiquidityMe) => {
     const claimable = next.claimable ?? '';
@@ -283,7 +304,9 @@ export default function LiquidityScreen() {
     }
   };
 
-  const sheetError = sheet && amount ? liquidityAmountError(me, sheet, amount) : null;
+  const sheetError = sheet && amount
+    ? liquidityAmountError(me, sheet, amount) ?? (sheet === 'deposit' ? overBalanceError(amount, walletBalance, sym, me.token?.decimals) : null)
+    : null;
   const pool = me.pool;
 
   return (
@@ -308,7 +331,7 @@ export default function LiquidityScreen() {
           <Card padding="md" style={{ gap: spacing.sm }}>
             <Text variant="bodyMed" weight="700">Provide liquidity & earn</Text>
             <Text variant="bodySm" color="textSecondary">
-              Add {me.limits.min}–{me.limits.max} {sym}. Every time a buyer gets {sym} from the pool, the spread is shared
+              {limitsKnown(me) ? `Add ${me.limits.min}–${me.limits.max} ${sym}. ` : ''}Every time a buyer gets {sym} from the pool, the spread is shared
               between providers by their share. You can withdraw any time after a 24-hour lock on each deposit.
             </Text>
             <Text variant="caption" color="textMuted">Open to TSA Pay merchants and verified users.</Text>
@@ -354,7 +377,7 @@ export default function LiquidityScreen() {
                   <SummaryRow label="Share of the pool" value={`${me.sharePercent ?? '0'}%`} />
                   <SummaryRow label="Ready to claim" value={amt(me.claimable)} valueColor="success" />
                   <SummaryRow label="Earned all time" value={amt(me.earned)} />
-                  <SummaryRow label="Limits" value={`${me.limits.min}–${me.limits.max} ${sym}`} />
+                  <SummaryRow label="Limits" value={limitsKnown(me) ? `${me.limits.min}–${me.limits.max} ${sym}` : '—'} />
                 </>
               ) : (
                 <Text variant="bodySm" color="textSecondary">We can&apos;t read your balance right now. Pull to refresh.</Text>
@@ -416,18 +439,30 @@ export default function LiquidityScreen() {
             loading={acting} disabled={acting || !amount || !!sheetError} onPress={submitSheet} />
         }
       >
-        <View style={{ gap: spacing.sm }}>
+        <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.xs }}>
           <AmountInput value={amount} onChangeText={setAmount} symbol={sym} symbolPosition="suffix"
-            onMax={sheet === 'withdraw' ? () => setAmount(me.withdrawable ?? me.principal ?? '') : undefined} />
-          {sheetError ? (
-            <Text variant="caption" color="danger">{sheetError}</Text>
-          ) : (
-            <Text variant="caption" color="textSecondary">
-              {sheet === 'deposit'
-                ? `From your wallet ${me.wallet}. It earns from the start and can be withdrawn 24 hours after you add it. You need a little ${gasSymbol} for the network fee.`
-                : `Back to your wallet ${me.wallet}. Earnings stay claimable.`}
-            </Text>
-          )}
+            onMax={sheet === 'withdraw'
+              ? () => setAmount(me.withdrawable ?? me.principal ?? '')
+              : walletBalance && !isZeroAmount(walletBalance) ? () => setAmount(walletBalance) : undefined} />
+          {sheetError ? <Text variant="caption" color="danger">{sheetError}</Text> : null}
+          <View style={{ marginTop: spacing.xs }}>
+            {sheet === 'deposit' ? (
+              <>
+                <SummaryRow label="Your balance"
+                  value={walletBalance === undefined ? '…' : walletBalance === null ? 'Unavailable' : amt(walletBalance)} />
+                <SummaryRow label="From" value={me.wallet ? shortAddress(me.wallet) : '—'} />
+                <SummaryRow label="Earns" value="From the start" />
+                <SummaryRow label="Withdraw" value="After 24 hours" />
+                <SummaryRow label="Network fee" value={`Paid in ${gasSymbol}`} />
+              </>
+            ) : (
+              <>
+                <SummaryRow label="Available now" value={amt(me.withdrawable ?? me.principal)} />
+                <SummaryRow label="To" value={me.wallet ? shortAddress(me.wallet) : '—'} />
+                <SummaryRow label="Earnings" value="Stay claimable" />
+              </>
+            )}
+          </View>
         </View>
       </Sheet>
     </SafeAreaView>

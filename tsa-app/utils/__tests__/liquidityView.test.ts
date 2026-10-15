@@ -6,7 +6,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 /* eslint-disable import/first */
 import {
   canClaimGasFree, claimRefusalMessage, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage,
-  oldWalletFundsMessage, oldWalletHasFunds, withdrawalMessage,
+  limitsKnown, oldWalletFundsMessage, oldWalletHasFunds, overBalanceError, withdrawalMessage,
 } from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
 
@@ -135,5 +135,27 @@ describe('withdrawalMessage', () => {
   });
   it('is neutral without a decoded receipt', () => {
     expect(withdrawalMessage(me(), undefined)).toBe('Withdrawal submitted.');
+  });
+});
+
+describe('overBalanceError', () => {
+  it('refuses more than the wallet holds, at full precision', () => {
+    expect(overBalanceError('1.308402020000102049', '1.308402020000102048')).toBe('You have 1.3084 USDT in this wallet.');
+    expect(overBalanceError('1.308402020000102048', '1.308402020000102048')).toBeNull();
+  });
+  it('stays quiet while the balance is loading or unknown', () => {
+    expect(overBalanceError('10', undefined)).toBeNull();
+    expect(overBalanceError('10', null)).toBeNull();
+  });
+});
+
+describe('unreadable pool limits', () => {
+  it('refuses deposits and reports the limits unknown', () => {
+    const m = me({ limits: { min: '', max: '' }, limitsReadable: false });
+    expect(limitsKnown(m)).toBe(false);
+    expect(liquidityAmountError(m, 'deposit', '10')).toBe('Deposits are not available right now. Try again shortly.');
+  });
+  it('treats an API without the flag as readable', () => {
+    expect(limitsKnown(me())).toBe(true);
   });
 });
