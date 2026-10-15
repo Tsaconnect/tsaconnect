@@ -1,4 +1,4 @@
-// Primary action primitive. Variants × sizes, loading state (stable width),
+// Primary action primitive. Variants × sizes, loading state (spinner beside the label),
 // optional icons, spring press. AA-correct foreground per variant.
 import React from 'react';
 import { ActivityIndicator, View, ViewStyle } from 'react-native';
@@ -75,14 +75,21 @@ export const Button: React.FC<ButtonProps> = ({
           backgroundColor: p.bg,
           borderWidth: p.border ? 1 : 0,
           borderColor: p.border,
-          opacity: isDisabled ? 0.5 : 1,
+          // Busy is not disabled: fading it hid the spinner on the accent fill.
+          opacity: disabled && !loading ? 0.5 : 1,
           alignSelf: fullWidth ? 'stretch' : 'flex-start',
         },
         style,
       ]}
     >
       {loading ? (
-        <ActivityIndicator color={fg} />
+        // The title stays: callers use it for progress ("Approving…").
+        <>
+          <ActivityIndicator size="small" color={fg} />
+          <Text variant={fontVariant} weight="600" numberOfLines={1} style={{ color: fg, flexShrink: 1 }}>
+            {title}
+          </Text>
+        </>
       ) : (
         <>
           {leftIcon && <Icon name={leftIcon} size={size === 'sm' ? 16 : 18} color={fg} />}
