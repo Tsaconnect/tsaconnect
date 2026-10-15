@@ -1,27 +1,27 @@
 package services
 
 // tsaLiquidityPoolABI is the subset of smart-contracts/contracts/TsaLiquidityPool.sol
-// the backend reads, builds and decodes (spec 2026-10-14). Generated from the
-// Hardhat artifact; regenerate it when the contract's surface changes.
+// the backend reads, builds and decodes (spec 2026-10-14, amended by the
+// no-collateral upgrade the same day). Generated from the Hardhat artifact;
+// regenerate it when the contract's surface changes.
 const tsaLiquidityPoolABI = `[
+{"type":"event","name":"SettledFromCollateral","inputs":[{"name":"ref","type":"bytes32","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
 {"type":"error","name":"EnforcedPause","inputs":[]},
 {"type":"function","name":"withdrawable","stateMutability":"view","inputs":[{"name":"lp","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
 {"type":"function","name":"lockedUntil","stateMutability":"view","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
 {"type":"event","name":"Claimed","inputs":[{"name":"lp","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
-{"type":"event","name":"CollateralPosted","inputs":[{"name":"amount","type":"uint256","indexed":false}]},
-{"type":"event","name":"CollateralWithdrawn","inputs":[{"name":"amount","type":"uint256","indexed":false}]},
 {"type":"event","name":"Deposited","inputs":[{"name":"lp","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
 {"type":"event","name":"DepositorSet","inputs":[{"name":"account","type":"address","indexed":true},{"name":"allowed","type":"bool","indexed":false}]},
 {"type":"event","name":"Filled","inputs":[{"name":"ref","type":"bytes32","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false},{"name":"spread","type":"uint256","indexed":false}]},
 {"type":"event","name":"OperatorSet","inputs":[{"name":"account","type":"address","indexed":true},{"name":"allowed","type":"bool","indexed":false}]},
 {"type":"event","name":"Refilled","inputs":[{"name":"ref","type":"bytes32","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
-{"type":"event","name":"SettledFromCollateral","inputs":[{"name":"ref","type":"bytes32","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
 {"type":"event","name":"Withdrawn","inputs":[{"name":"lp","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
+{"type":"event","name":"WithdrawalPending","inputs":[{"name":"lp","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
+{"type":"event","name":"WithdrawalPaid","inputs":[{"name":"lp","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
 {"type":"function","name":"claim","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"nonpayable"},
 {"type":"function","name":"claimFor","inputs":[{"name":"lp","type":"address"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"nonpayable"},
 {"type":"function","name":"claimTo","inputs":[{"name":"to","type":"address"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"nonpayable"},
 {"type":"function","name":"claimable","inputs":[{"name":"lp","type":"address"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
-{"type":"function","name":"collateral","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"collateralProvider","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view"},
 {"type":"function","name":"deposit","inputs":[{"name":"amount","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
 {"type":"function","name":"depositor","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"bool"}],"stateMutability":"view"},
@@ -30,7 +30,7 @@ const tsaLiquidityPoolABI = `[
 {"type":"function","name":"fillWindowCap","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"fillWindowStart","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"filledInWindow","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
-{"type":"function","name":"freeCapacity","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+{"type":"function","name":"liquid","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"guardian","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view"},
 {"type":"function","name":"maxFillPerTx","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"maxPerLp","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
@@ -38,14 +38,16 @@ const tsaLiquidityPoolABI = `[
 {"type":"function","name":"minDeposit","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"operators","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"bool"}],"stateMutability":"view"},
 {"type":"function","name":"outstanding","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+{"type":"function","name":"payPending","inputs":[{"name":"lp","type":"address"}],"outputs":[{"name":"amount","type":"uint256"}],"stateMutability":"nonpayable"},
+{"type":"function","name":"pendingWithdrawal","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"paused","inputs":[],"outputs":[{"name":"","type":"bool"}],"stateMutability":"view"},
 {"type":"function","name":"principal","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"recipient","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"bool"}],"stateMutability":"view"},
 {"type":"function","name":"setDepositor","inputs":[{"name":"account","type":"address"},{"name":"allowed","type":"bool"}],"outputs":[],"stateMutability":"nonpayable"},
-{"type":"function","name":"settleFromCollateral","inputs":[{"name":"amount","type":"uint256"},{"name":"ref","type":"bytes32"}],"outputs":[],"stateMutability":"nonpayable"},
 {"type":"function","name":"token","inputs":[],"outputs":[{"name":"","type":"address"}],"stateMutability":"view"},
 {"type":"function","name":"totalCap","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+{"type":"function","name":"totalPendingWithdrawals","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"totalPrincipal","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
 {"type":"function","name":"usedFillRef","inputs":[{"name":"","type":"bytes32"}],"outputs":[{"name":"","type":"bool"}],"stateMutability":"view"},
-{"type":"function","name":"withdraw","inputs":[{"name":"amount","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"}
+{"type":"function","name":"withdraw","inputs":[{"name":"amount","type":"uint256"}],"outputs":[{"name":"paidNow","type":"uint256"}],"stateMutability":"nonpayable"}
 ]`

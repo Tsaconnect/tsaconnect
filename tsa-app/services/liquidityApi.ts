@@ -10,13 +10,9 @@ import { withWalletProof } from './walletApi';
 export type LiquidityStatus = 'none' | 'active' | 'paused';
 
 export interface LiquidityPoolView {
-  totalLiquidity: string;
-  collateral: string;
-  outstanding: string;
-  /** Collateral covers every unrefilled fill: always "100" by contract rule. */
-  coveragePercent: string;
+  totalLiquidity?: string;
   /** Trailing 30-day spread ÷ liquidity, annualised, percent. */
-  apr30d: string;
+  apr30d?: string;
 }
 
 export interface LiquidityMe {
@@ -35,6 +31,8 @@ export interface LiquidityMe {
   withdrawable?: string;
   /** When the rest of the principal unlocks; absent when nothing is locked. */
   lockedUntil?: string;
+  /** Withdrawn principal not yet paid out; omitted when zero. */
+  pendingWithdrawal?: string;
   claimable?: string;
   /** Claimed + claimable, all time. */
   earned?: string;
@@ -48,7 +46,8 @@ export interface LiquidityMe {
   pool?: LiquidityPoolView;
 }
 
-export type LiquidityActivityKind = 'deposit' | 'withdrawal' | 'claim' | 'earned';
+export type LiquidityActivityKind =
+  | 'deposit' | 'withdrawal' | 'claim' | 'earned' | 'withdrawal_pending' | 'withdrawal_paid';
 
 export interface LiquidityActivityItem {
   kind: LiquidityActivityKind;

@@ -3,7 +3,7 @@
 // activating are signed by that wallet, so they stay in the app. Field names
 // match tsa-api-go services/liquidity_vault_lp.go; token amounts are decimal
 // strings in whole tokens.
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 
 export type LiquidityMe = {
   status: 'none' | 'active' | 'paused';
@@ -17,6 +17,8 @@ export type LiquidityMe = {
   withdrawable?: string;
   /** When the rest unlocks; absent when nothing is locked. */
   lockedUntil?: string;
+  /** Withdrawn principal not yet paid out; omitted when zero. */
+  pendingWithdrawal?: string;
   claimable?: string;
   earned?: string;
   sharePercent?: string;
@@ -24,11 +26,11 @@ export type LiquidityMe = {
   minClaim: string;
   paused: boolean;
   walletChanged: boolean;
-  pool?: { totalLiquidity: string; coveragePercent: string; apr30d: string };
+  pool?: { totalLiquidity?: string; apr30d?: string };
 };
 
 export type LiquidityActivity = {
-  kind: 'deposit' | 'withdrawal' | 'claim' | 'earned';
+  kind: 'deposit' | 'withdrawal' | 'claim' | 'earned' | 'withdrawal_pending' | 'withdrawal_paid';
   amount: string;
   to?: string;
   txHash: string;
@@ -70,9 +72,31 @@ export function canClaim(me: LiquidityMe): boolean {
   return units(me.claimable, me.token.decimals) >= units(me.minClaim, me.token.decimals);
 }
 
-const isZero = (v?: string) => !v || /^0*(\.0*)?$/.test(v);
+export const isZero = (v?: string) => !v || /^0*(\.0*)?$/.test(v);
 
-/** The old LP wallet still holds a position: activating a new one first would strand it. */
+/** The old LP wallet still holds a position or a pending withdrawal: activating a new one first would strand it. */
 export function oldWalletHasFunds(me: LiquidityMe): boolean {
-  return me.walletChanged && (!isZero(me.principal) || !isZero(me.claimable));
+  return me.walletChanged && (!isZero(me.principal) || !isZero(me.claimable) || !isZero(me.pendingWithdrawal));
+}
+
+/** Only a pending withdrawal is left on the old wallet: nothing for the owner to do but wait. */
+export function oldWalletOnlyPending(me: LiquidityMe): boolean {
+  return me.walletChanged && isZero(me.principal) && isZero(me.claimable) && !isZero(me.pendingWithdrawal);
+}
+
+/** The API refuses a claim while the pool has no liquid USDT for it. */
+export const CLAIM_UNAVAILABLE = 'claim_unavailable';
+
+/** Why a gas-free claim was refused, as the owner sees it. */
+export function claimErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && err.code === CLAIM_UNAVAILABLE) return 'Claims are not available right now. Try again later.';
+  if (err instanceof ApiError && err.status === 429) return 'You can claim gas-free once every 8 hours. Claim from the app to do it now.';
+  return err instanceof Error ? err.message : 'Could not claim.';
+}
+
+/** Money leaving the position is −; a paid pending withdrawal was already counted when it went pending. */
+export function activitySign(kind: LiquidityActivity['kind']): string {
+  if (kind === 'withdrawal' || kind === 'claim' || kind === 'withdrawal_pending') return '−';
+  if (kind === 'withdrawal_paid') return '';
+  return '+';
 }

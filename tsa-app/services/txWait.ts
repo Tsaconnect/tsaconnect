@@ -19,14 +19,20 @@ export class TxRevertedError extends Error {
 /** Anything that can wait for a receipt — e.g. the ethers provider that
  *  accepted the broadcast (TransactionResponse.provider). */
 export interface ReceiptSource {
-  waitForTransaction(txHash: string): Promise<{ status?: number | null } | null>;
+  waitForTransaction(txHash: string): Promise<MinedReceipt | null>;
+}
+
+/** The parts of a mined receipt callers read: status, and the logs for event decoding. */
+export interface MinedReceipt {
+  status?: number | null;
+  logs?: readonly { address: string; topics: readonly string[]; data: string }[];
 }
 
 export async function waitMined(
   chainId: number,
   txHash: string,
   opts: { timeoutMs?: number; label?: string; provider?: ReceiptSource } = {},
-): Promise<void> {
+): Promise<MinedReceipt> {
   // Default: the chain's primary RPC. Pass the provider that took the
   // broadcast when it may have been a fallback (primary down).
   const provider = opts.provider ?? getProvider(p2pChainKey(chainId), undefined, p2pNetwork(chainId));
@@ -43,6 +49,7 @@ export async function waitMined(
       }),
     ]);
     if (!receipt || receipt.status !== 1) throw new TxRevertedError(txHash);
+    return receipt;
   } finally {
     if (timer) clearTimeout(timer);
   }

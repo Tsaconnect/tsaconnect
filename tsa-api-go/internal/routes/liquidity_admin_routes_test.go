@@ -26,8 +26,8 @@ func (routesPoolAdmin) ResendPoolBuy(context.Context, uuid.UUID, uuid.UUID, stri
 func (routesPoolAdmin) VaultPoolSummary(context.Context) (*services.VaultPoolSummary, error) {
 	return &services.VaultPoolSummary{}, nil
 }
-func (routesPoolAdmin) SettlePoolFromCollateral(context.Context, uuid.UUID, uuid.UUID, string, string) (string, error) {
-	return "0x1", nil
+func (routesPoolAdmin) PayPoolPending(context.Context, uuid.UUID, uuid.UUID, string, string) (*services.PayPendingResult, error) {
+	return &services.PayPendingResult{}, nil
 }
 func (routesPoolAdmin) RetryPoolFill(context.Context, uuid.UUID, uuid.UUID, string) (*models.ITIntent, error) {
 	return &models.ITIntent{}, nil
@@ -60,7 +60,7 @@ func liquidityRoutesRig(t *testing.T, wire func(*handlers.ITHandler)) (*gin.Engi
 }
 
 // P2P admins read a pool order and the pool's books; only super admins move
-// money (re-send, retry a fill, settle from collateral, forward recheck).
+// money (re-send, retry a fill, pay pending withdrawals, forward recheck).
 func TestLiquidityAdminRoutes_ActionsNeedSuperAdmin(t *testing.T) {
 	r, db, cfg := liquidityRoutesRig(t, func(h *handlers.ITHandler) {
 		h.SetPoolOrdersAdmin(routesPoolAdmin{})
@@ -71,7 +71,7 @@ func TestLiquidityAdminRoutes_ActionsNeedSuperAdmin(t *testing.T) {
 	actions := []string{
 		order + "/resend",
 		order + "/retry-fill",
-		"/api/admin/liquidity/pool/settle-from-collateral",
+		"/api/admin/liquidity/pool/pay-pending",
 		"/api/admin/p2p/forwards/" + uuid.NewString() + "/recheck",
 	}
 	for _, tc := range []struct {

@@ -268,7 +268,7 @@ func (g *PoolChainGates) alertFillCaps(set PoolSettings, maxFill, maxSpreadBps *
 		}
 		largest := new(big.Int).Add(fill, vaultSpreadUnits(fill, set.SpreadBps))
 		if largest.Cmp(maxFill) > 0 {
-			log.Printf("[liquidity] ALERT liquidity_pool_order_max_over_vault_cap chain=%s token=%s largest_fill=%s max_fill_per_tx=%s — the largest orders are refused at open: lower pool_order_max",
+			alertf("liquidity_pool_order_max_over_vault_cap", "[liquidity] ALERT liquidity_pool_order_max_over_vault_cap chain=%s token=%s largest_fill=%s max_fill_per_tx=%s — the largest orders are refused at open: lower pool_order_max",
 				g.c.ChainKey, sym, largest, maxFill)
 		}
 	}

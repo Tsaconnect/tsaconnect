@@ -140,7 +140,8 @@ func attachPoolSettle(w *poolWiring, it *services.ITService, itH *handlers.ITHan
 	itH.SetVaultPoolAdmin(it)
 }
 
-// registerPoolSettleJob runs pool settlement in its own job, alert-watched.
+// registerPoolSettleJob runs pool settlement in its own job, alert-watched,
+// and next to it the auto-retry of orders parked on a liquidity refusal.
 func registerPoolSettleJob(s *jobs.Scheduler, w *poolWiring, it *services.ITService, n jobs.WorkerFailureNotifier) {
 	if w == nil || w.desk == nil || it == nil {
 		return
@@ -150,6 +151,7 @@ func registerPoolSettleJob(s *jobs.Scheduler, w *poolWiring, it *services.ITServ
 		j.SetAlerter(n)
 	}
 	s.Register(j, jobs.AlertOnFailureStreak())
+	s.Register(jobs.NewPoolFillAutoRetryJob(it, 2*time.Minute), jobs.AlertOnFailureStreak())
 }
 
 // statementFreshness is the canceller's view of the central-account poll: the

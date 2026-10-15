@@ -1,6 +1,6 @@
 // smart-contracts/deploy/liquidity-pool.js
 //
-// TsaLiquidityPool (spec 2026-10-14) on any chain whose deploy/chains.js entry
+// TsaLiquidityPool (spec 2026-10-14, no-collateral amendment) on any chain whose deploy/chains.js entry
 // has a `liquidityPool` block: the UUPS proxy, every initialize() value read
 // back and asserted, then ownership handed to the owner's wallet — the
 // deployer never keeps ownership past a successful run. No timelock while
@@ -8,10 +8,13 @@
 // contracts will not be upgradeable at all.
 //
 //   LPOOL_OWNER_CONFIRM=0x…  (type the owner again)
-//   [LPOOL_COLLATERAL_PROVIDER, LPOOL_GUARDIAN, LPOOL_OWNER default to
+//   [LPOOL_COLLATERAL_PROVIDER (the company's refill wallet; the role keeps
+//    its storage name), LPOOL_GUARDIAN, LPOOL_OWNER default to
 //    the owner's wallet (owner, 2026-10-14: the owner does all three);
 //    LPOOL_OPERATOR, LPOOL_RECIPIENT to the consolidated operator/treasury.
-//    More operators: the collateral provider calls addOperator directly.]
+//    More operators: the refill wallet calls addOperator directly.]
+//   An already-deployed pool is upgraded in place by
+//   scripts/upgrade-liquidity-pool.js, never redeployed.
 //     npx hardhat run deploy/liquidity-pool.js --network bscMainnet
 const { getAddress } = require("ethers");
 const { resolveChain, assertOwnerConfirm, handOverOwnership, writeLedger } = require("./lib");
@@ -27,7 +30,7 @@ async function assertPool(pool, want) {
   for (const k of ["minDeposit", "maxPerLp", "totalCap", "maxFillPerTx", "fillWindow", "fillWindowCap", "maxSpreadBps", "withdrawLock"]) {
     if ((await pool[k]()) !== BigInt(want[k])) fail(`${k} is not ${want[k]}`);
   }
-  if ((await pool.totalPrincipal()) !== 0n || (await pool.collateral()) !== 0n) fail("fresh pool is not empty");
+  if ((await pool.totalPrincipal()) !== 0n || (await pool.totalPendingWithdrawals()) !== 0n) fail("fresh pool is not empty");
 }
 
 async function deploy(hre, { chain } = {}) {

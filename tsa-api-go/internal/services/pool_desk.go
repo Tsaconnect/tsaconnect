@@ -52,7 +52,8 @@ type VaultChain interface {
 	Roles(ctx context.Context) (*VaultRoles, error)
 	FillUsed(ctx context.Context, ref [32]byte) (bool, error)
 	PrepareFill(from, to string, amount, spread *big.Int, ref [32]byte) ([]byte, error)
-	PrepareSettleFromCollateral(from string, amount *big.Int, ref [32]byte) ([]byte, error)
+	PendingWithdrawal(ctx context.Context, lp string) (*big.Int, error)
+	PreparePayPending(from, lp string) ([]byte, error)
 	FilledIn(r *types.Receipt, ref [32]byte) *VaultEvent
 }
 
@@ -62,11 +63,11 @@ var _ VaultChain = (*LiquidityVault)(nil)
 // it like the company wallet.
 type PoolDesk struct {
 	c          PoolDeskConfig
-	vaultCache *cachedReader[*big.Int] // the vault's free collateral, public paths only
+	vaultCache *cachedReader[*big.Int] // the vault's free liquidity, public paths only
 }
 
 const (
-	poolTotalsTTL        = 5 * time.Second // public reads of the vault's free collateral
+	poolTotalsTTL        = 5 * time.Second // public reads of the vault's free liquidity
 	poolReadFailTTL      = 5 * time.Second
 	poolFreshReadTimeout = 3 * time.Second // a read under the pool lock
 )
@@ -109,8 +110,9 @@ func (d *PoolDesk) ChainKey() string    { return d.c.Token.ChainKey }
 func (d *PoolDesk) TokenSymbol() string { return d.c.Token.Symbol }
 func (d *PoolDesk) now() time.Time      { return d.c.Now().UTC() }
 
-// FreeUnits is the largest order (canonical units) the vault can take now:
-// the quote's feasibility and the card's maximum. Cached; an open re-reads.
+// FreeUnits is the largest order (canonical units) the vault can take now
+// (liquid less what open orders reserve): the quote's feasibility and the
+// card's maximum. Cached; an open re-reads.
 func (d *PoolDesk) FreeUnits(ctx context.Context, set PoolSettings) (*big.Int, error) {
 	return d.vaultDeliverable(ctx, set)
 }

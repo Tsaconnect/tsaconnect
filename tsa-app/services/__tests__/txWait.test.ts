@@ -9,7 +9,7 @@ beforeEach(() => mockWait.mockReset());
 
 it('resolves when the receipt succeeded', async () => {
   mockWait.mockResolvedValue({ status: 1 });
-  await expect(waitMined(146, '0xa')).resolves.toBeUndefined();
+  await expect(waitMined(146, '0xa')).resolves.toMatchObject({ status: 1 });
   expect(mockWait).toHaveBeenCalledWith('0xa');
 });
 

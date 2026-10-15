@@ -24,6 +24,7 @@ type fakeLPVault struct {
 	mu        sync.Mutex
 	principal map[string]*big.Int
 	claimable map[string]*big.Int
+	pending   map[string]*big.Int // withdrawal pending, per wallet
 	allowed   map[string]bool
 	state     VaultState
 	// stateCalls counts State reads; positionErr fails every Position read.
@@ -39,8 +40,8 @@ type lpLock struct {
 }
 
 func newFakeLPVault() *fakeLPVault {
-	return &fakeLPVault{principal: map[string]*big.Int{}, claimable: map[string]*big.Int{}, allowed: map[string]bool{},
-		state: VaultState{Collateral: big.NewInt(0), Outstanding: big.NewInt(0), TotalPrincipal: big.NewInt(0)}}
+	return &fakeLPVault{principal: map[string]*big.Int{}, claimable: map[string]*big.Int{}, pending: map[string]*big.Int{}, allowed: map[string]bool{},
+		state: VaultState{Balance: big.NewInt(0), TotalPendingWithdrawals: big.NewInt(0), Outstanding: big.NewInt(0), TotalPrincipal: big.NewInt(0)}}
 }
 
 func (v *fakeLPVault) Address() string { return testVaultAddr.Hex() }
@@ -65,7 +66,11 @@ func (v *fakeLPVault) Position(_ context.Context, lp string) (*VaultPosition, er
 	if c == nil {
 		c = new(big.Int)
 	}
-	pos := &VaultPosition{Principal: new(big.Int).Set(p), Claimable: new(big.Int).Set(c), Allowed: v.allowed[k], Withdrawable: new(big.Int).Set(p)}
+	pos := &VaultPosition{Principal: new(big.Int).Set(p), Claimable: new(big.Int).Set(c), Allowed: v.allowed[k], Withdrawable: new(big.Int).Set(p),
+		PendingWithdrawal: new(big.Int)}
+	if w := v.pending[k]; w != nil {
+		pos.PendingWithdrawal.Set(w)
+	}
 	if l := v.locked[k]; l != nil {
 		pos.Withdrawable = new(big.Int).Sub(p, l.amount)
 		pos.LockedUntil = l.until
@@ -318,7 +323,9 @@ func TestVaultLP_ClaimForNotSentKeepsTheWindow(t *testing.T) {
 }
 
 // History replays the ledger as the contract accounts: each fill's spread by
-// principal at that moment.
+// principal at that moment; a withdrawal's pending part leaves principal at
+// once (it stops earning) and shows as withdrawal_pending, then
+// withdrawal_paid when paid.
 func TestVaultLP_ActivityReplaysEarnings(t *testing.T) {
 	r := newLPRig(t)
 	user, wallet := r.activeLP(t)
@@ -330,6 +337,11 @@ func TestVaultLP_ActivityReplaysEarnings(t *testing.T) {
 		{Kind: VaultEventDeposited, Account: other, Amount: amt(30)},
 		{Kind: VaultEventFilled, To: "0xtreasury", Amount: amt(100), Spread: amt(4)},
 		{Kind: VaultEventClaimed, Account: wallet, To: wallet, Amount: amt(1)},
+		{Kind: VaultEventWithdrawn, Account: wallet, Amount: amt(2)},                 // withdraw 5: 2 now …
+		{Kind: VaultEventWithdrawalPending, Account: wallet, Amount: amt(3)},         // … 3 pending
+		{Kind: VaultEventFilled, To: "0xtreasury", Amount: amt(100), Spread: amt(7)}, // 7 × 5/35 = 1
+		{Kind: VaultEventWithdrawalPaid, Account: wallet, Amount: amt(3)},
+		{Kind: VaultEventWithdrawalPending, Account: other, Amount: amt(9)}, // never shown
 	} {
 		e.ID, e.ChainID, e.Vault, e.TxHash, e.LogIndex, e.Block, e.BlockTime = uuid.New(), poolTestChain,
 			strings.ToLower(testVaultAddr.Hex()), "0x"+strings.Repeat("0", 63)+string(rune('a'+i)), 0, uint64(100+i), at(i)
@@ -345,8 +357,11 @@ func TestVaultLP_ActivityReplaysEarnings(t *testing.T) {
 	for _, it := range page.Items {
 		kinds = append(kinds, it.Kind+"="+it.Amount)
 	}
-	// 4 × 10/40 = 1 earned; the other LP's deposit is never shown.
-	want := []string{"claim=" + BaseUnitsToDecimal(big.NewInt(1), 18), "earned=" + BaseUnitsToDecimal(big.NewInt(1), 18), "deposit=" + BaseUnitsToDecimal(big.NewInt(10), 18)}
+	// 4 × 10/40 = 1 earned; after the withdrawal 7 × 5/35 = 1; the other LP's
+	// rows are never shown.
+	u := func(n int64) string { return BaseUnitsToDecimal(big.NewInt(n), 18) }
+	want := []string{"withdrawal_paid=" + u(3), "earned=" + u(1), "withdrawal_pending=" + u(3), "withdrawal=" + u(2),
+		"claim=" + u(1), "earned=" + u(1), "deposit=" + u(10)}
 	if strings.Join(kinds, ",") != strings.Join(want, ",") {
 		t.Fatalf("activity = %v, want %v", kinds, want)
 	}
@@ -370,15 +385,25 @@ func TestVaultLP_MeShowsPositionShareAndEarned(t *testing.T) {
 	user, wallet := r.activeLP(t)
 	k := strings.ToLower(wallet)
 	r.vault.principal[k], r.vault.claimable[k] = usdt18(10), usdt18(1)
-	r.vault.state = VaultState{Collateral: usdt18(200), Outstanding: usdt18(50), TotalPrincipal: usdt18(40)}
+	r.vault.state = VaultState{Balance: usdt18(200), TotalPendingWithdrawals: new(big.Int), Outstanding: usdt18(50), TotalPrincipal: usdt18(40)}
 	r.now = r.now.Add(lpPoolViewTTL) // past the pool view cache
 	me, err := r.svc.Me(context.Background(), user)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if me.Mode != "vault" || me.Status != LiquidityStatusActive || !me.Allowed || me.SharePercent != "25.00" ||
-		me.Principal != "10" || me.Claimable != "1" || me.Earned != "1" || me.Pool == nil || me.Pool.Outstanding != "50" {
+		me.Principal != "10" || me.Claimable != "1" || me.Earned != "1" || me.Pool == nil || me.Pool.TotalLiquidity != "40" ||
+		me.PendingWithdrawal != "" {
 		t.Fatalf("me = %+v pool = %+v", me, me.Pool)
+	}
+	b, _ := json.Marshal(me)
+	if strings.Contains(string(b), "pendingWithdrawal") || strings.Contains(string(b), "collateral") || strings.Contains(string(b), "coverage") ||
+		strings.Contains(string(b), "outstanding") {
+		t.Fatalf("me JSON = %s, want no pendingWithdrawal while none, no collateral fields and no outstanding", b)
+	}
+	r.vault.pending[k] = usdt18(3)
+	if me, err = r.svc.Me(context.Background(), user); err != nil || me.PendingWithdrawal != "3" {
+		t.Fatalf("pending withdrawal = %q %v, want 3", me.PendingWithdrawal, err)
 	}
 }
 
@@ -553,6 +578,13 @@ func TestVaultLP_WithdrawAndClaimRefusalsAreTheLPs(t *testing.T) {
 	set(vaultRevert("Bad amount"))
 	if _, err := r.svc.PrepareWithdraw(ctx, user, "1"); !errors.Is(err, ErrLPAmount) {
 		t.Fatalf("withdraw over principal: %v, want ErrLPAmount", err)
+	}
+	set(vaultRevert("Insufficient liquidity"))
+	if _, err := r.svc.PrepareClaim(ctx, user, ""); !errors.Is(err, ErrLPClaimUnavailable) {
+		t.Fatalf("claim short of liquidity: %v, want ErrLPClaimUnavailable", err)
+	}
+	if _, err := r.svc.PrepareClaim(ctx, user, newLPWallet()); !errors.Is(err, ErrLPClaimUnavailable) {
+		t.Fatalf("claimTo short of liquidity: %v, want ErrLPClaimUnavailable", err)
 	}
 	set(vaultRevert("Nothing to claim"))
 	if _, err := r.svc.PrepareClaim(ctx, user, ""); !errors.Is(err, ErrLPNothingToClaim) {

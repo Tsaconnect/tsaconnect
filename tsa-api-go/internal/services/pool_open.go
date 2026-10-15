@@ -19,7 +19,7 @@ const PoolOpenCap = 5 * time.Second
 var (
 	// ErrPoolClosed: the pool cannot take an order now (gates, gas, nonce).
 	ErrPoolClosed = errors.New("liquidity pool: closed right now; try again later")
-	// ErrPoolCannotFill: the vault's free collateral does not cover the order.
+	// ErrPoolCannotFill: the vault's free liquidity does not cover the order.
 	ErrPoolCannotFill = errors.New("liquidity pool: that amount cannot be filled right now")
 	// ErrPoolDailyCapReached: pool_user_daily_max for this user; the router
 	// fails over to another venue.

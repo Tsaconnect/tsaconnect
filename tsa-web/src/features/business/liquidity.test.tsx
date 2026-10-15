@@ -1,7 +1,8 @@
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { fail, merchant, mountAt, ok, stubFetch } from '@/test/harness';
-import { canClaim, oldWalletHasFunds, tokenAmount, type LiquidityMe } from './liquidityApi';
+import { ApiError } from '@/lib/api';
+import { activitySign, canClaim, claimErrorMessage, oldWalletHasFunds, oldWalletOnlyPending, tokenAmount, type LiquidityMe } from './liquidityApi';
 
 const WALLET = '0x52908400098527886E0F7030069857D2E4169EE7';
 const base: LiquidityMe = {
@@ -9,7 +10,7 @@ const base: LiquidityMe = {
   chain: { id: 56, key: 'bsc', name: 'BNB Smart Chain' },
   token: { symbol: 'USDT', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18 },
   limits: { min: '5', max: '5000' }, minClaim: '0.5',
-  pool: { totalLiquidity: '12000', coveragePercent: '100', apr30d: '9.4' },
+  pool: { totalLiquidity: '12000', apr30d: '9.4' },
 };
 const lp: LiquidityMe = {
   ...base, status: 'active', balanceReadable: true, wallet: WALLET,
@@ -30,7 +31,8 @@ describe('liquidity earnings', () => {
     mountAt('/business/live/liquidity');
     expect(await screen.findByText('Spread earnings')).toBeInTheDocument();
     expect(screen.getAllByText('2.3456 USDT').length).toBeGreaterThan(0);
-    expect(screen.getByText('100%')).toBeInTheDocument();
+    expect(screen.getByText('12,000 USDT')).toBeInTheDocument();
+    expect(screen.queryByText(/collateral|backed/i)).not.toBeInTheDocument();
     expect(await screen.findByText('+0.2 USDT')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Claim 2.3456 USDT' }));
     await waitFor(() => expect(f.mock.calls.some(([u]) => String(u).endsWith('/api/liquidity/claim-for'))).toBe(true));
@@ -47,6 +49,43 @@ describe('liquidity earnings', () => {
     });
     mountAt('/business/live/liquidity');
     expect(await screen.findByText(/600 USDT can be withdrawn now/)).toBeInTheDocument();
+  });
+
+  it('shows a pending withdrawal without a reason', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/liquidity/me': ok({ ...lp, pendingWithdrawal: '40' }),
+      '/api/liquidity/me/activity': ok({ items: [
+        { kind: 'withdrawal_pending', amount: '40', txHash: '0x2', at: '2026-10-14T10:00:00Z' },
+        { kind: 'withdrawal_paid', amount: '10', txHash: '0x3', at: '2026-10-14T11:00:00Z' },
+      ] }),
+    });
+    mountAt('/business/live/liquidity');
+    expect(await screen.findByText('Pending withdrawal: 40 USDT')).toBeInTheDocument();
+    expect(screen.queryByText(/refill|short/i)).not.toBeInTheDocument();
+    expect(await screen.findByText('Withdrawal pending')).toBeInTheDocument();
+    expect(screen.getByText('−40 USDT')).toBeInTheDocument();
+    expect(screen.getByText('Withdrawal paid')).toBeInTheDocument();
+    expect(screen.getByText('10 USDT')).toBeInTheDocument();
+  });
+
+  it('hides the pending line when nothing is pending', async () => {
+    stubFetch({ '/api/pay/merchant': ok(merchant), '/api/liquidity/me': ok(lp), '/api/liquidity/me/activity': activity });
+    mountAt('/business/live/liquidity');
+    expect(await screen.findByText('Spread earnings')).toBeInTheDocument();
+    expect(screen.queryByText(/Pending withdrawal/)).not.toBeInTheDocument();
+  });
+
+  it('explains a claim refused for liquidity neutrally', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/liquidity/me': ok(lp),
+      '/api/liquidity/me/activity': activity,
+      '/api/liquidity/claim-for': fail(409, 'liquidity: insufficient liquidity', 'claim_unavailable'),
+    });
+    mountAt('/business/live/liquidity');
+    await userEvent.click(await screen.findByRole('button', { name: 'Claim 2.3456 USDT' }));
+    expect(await screen.findByText('Claims are not available right now. Try again later.')).toBeInTheDocument();
   });
 
   it('holds the claim below the minimum', async () => {
@@ -68,6 +107,18 @@ describe('liquidity earnings', () => {
     });
     mountAt('/business/live/liquidity');
     expect(await screen.findByText(/Withdraw and claim from 0x5290.* first \(switch to it in the TSA Connect app\)/)).toBeInTheDocument();
+  });
+
+  it('asks nothing of the owner when only a pending withdrawal is left on the old wallet', async () => {
+    stubFetch({
+      '/api/pay/merchant': ok(merchant),
+      '/api/liquidity/me': ok({ ...lp, walletChanged: true, principal: '0', claimable: '0', pendingWithdrawal: '20' }),
+      '/api/liquidity/me/activity': activity,
+    });
+    mountAt('/business/live/liquidity');
+    expect(await screen.findByText(/A withdrawal from your old wallet is still pending\. You can switch wallets once it completes\./)).toBeInTheDocument();
+    expect(screen.queryByText(/first \(switch to it/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Activate your new wallet/)).not.toBeInTheDocument();
   });
 
   it('sends a non-LP to the app to start', async () => {
@@ -99,5 +150,23 @@ describe('liquidity helpers', () => {
     expect(oldWalletHasFunds(lp)).toBe(false);
     expect(oldWalletHasFunds({ ...lp, walletChanged: true })).toBe(true);
     expect(oldWalletHasFunds({ ...lp, walletChanged: true, principal: '0', claimable: '0' })).toBe(false);
+    expect(oldWalletHasFunds({ ...lp, walletChanged: true, principal: '0', claimable: '0', pendingWithdrawal: '5' })).toBe(true);
+  });
+  it('tells a pending-only old wallet apart from one with a position', () => {
+    expect(oldWalletOnlyPending({ ...lp, walletChanged: true, principal: '0', claimable: '0', pendingWithdrawal: '5' })).toBe(true);
+    expect(oldWalletOnlyPending({ ...lp, walletChanged: true, pendingWithdrawal: '5' })).toBe(false);
+    expect(oldWalletOnlyPending({ ...lp, principal: '0', claimable: '0', pendingWithdrawal: '5' })).toBe(false);
+  });
+});
+
+describe('liquidity copy', () => {
+  it('maps claim refusals', () => {
+    expect(claimErrorMessage(new ApiError('x', 409, 'claim_unavailable'))).toBe('Claims are not available right now. Try again later.');
+    expect(claimErrorMessage(new ApiError('x', 429))).toBe('You can claim gas-free once every 8 hours. Claim from the app to do it now.');
+    expect(claimErrorMessage(new Error('boom'))).toBe('boom');
+  });
+  it('signs each activity kind', () => {
+    expect(['deposit', 'earned', 'withdrawal', 'claim', 'withdrawal_pending', 'withdrawal_paid'].map((k) => activitySign(k as never)))
+      .toEqual(['+', '+', '−', '−', '−', '']);
   });
 });

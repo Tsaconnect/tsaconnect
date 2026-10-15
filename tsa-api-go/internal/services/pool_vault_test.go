@@ -38,20 +38,26 @@ func vaultRevert(reason string) error {
 	return fmt.Errorf("estimate gas (would revert): %w", withRevertReason(revertDataErr{data: data}))
 }
 
-// fakeVault is TsaLiquidityPool's books in memory, with the contract's own
+// fakeVault is TsaLiquidityPool's books in memory (no collateral: the token
+// balance, pending withdrawals per LP, outstanding), with the contract's own
 // refusals at "estimate" time.
 type fakeVault struct {
-	mu                                 sync.Mutex
-	collateral, outstanding, principal *big.Int
-	paused                             bool
-	used                               map[[32]byte]bool
-	decoder                            *LiquidityVault
-	caps                               VaultFillCaps
-	capsErr                            error
+	mu                              sync.Mutex
+	balance, outstanding, principal *big.Int
+	pending                         map[string]*big.Int // lower-case LP → pending withdrawal
+	pendingErr                      error
+	paused                          bool
+	used                            map[[32]byte]bool
+	decoder                         *LiquidityVault
+	caps                            VaultFillCaps
+	capsErr                         error
+	stateCalls                      int
+	pendingDelay                    time.Duration // each PendingWithdrawal read takes this long
+	pendingInflight, pendingMaxPar  int
 }
 
-func newFakeVault(collateral, principal *big.Int) *fakeVault {
-	return &fakeVault{collateral: collateral, outstanding: new(big.Int), principal: principal,
+func newFakeVault(balance, principal *big.Int) *fakeVault {
+	return &fakeVault{balance: balance, outstanding: new(big.Int), principal: principal, pending: map[string]*big.Int{},
 		used: map[[32]byte]bool{}, decoder: &LiquidityVault{addr: testVaultAddr},
 		caps: VaultFillCaps{MaxFillPerTx: usdt18(10_000), MaxSpreadBps: big.NewInt(1_000), FillWindow: big.NewInt(86_400),
 			FillWindowStart: big.NewInt(time.Now().Unix()), FilledInWindow: new(big.Int), FillWindowCap: usdt18(100_000)}}
@@ -69,11 +75,74 @@ func (v *fakeVault) FillCaps(context.Context) (*VaultFillCaps, error) {
 
 func (v *fakeVault) Address() string { return testVaultAddr.Hex() }
 
+// totalPendingLocked is Σ pending (v.mu held).
+func (v *fakeVault) totalPendingLocked() *big.Int {
+	sum := new(big.Int)
+	for _, p := range v.pending {
+		sum.Add(sum, p)
+	}
+	return sum
+}
+
+func (v *fakeVault) liquidLocked() *big.Int {
+	return (&VaultState{Balance: v.balance, TotalPendingWithdrawals: v.totalPendingLocked()}).Liquid()
+}
+
+// setPending sets lp's pending withdrawal (the contract's books only: the
+// tokens are whatever balance holds).
+func (v *fakeVault) setPending(lp string, amount *big.Int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.pending[strings.ToLower(lp)] = new(big.Int).Set(amount)
+}
+
 func (v *fakeVault) State(context.Context) (*VaultState, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return &VaultState{Block: 1, Collateral: new(big.Int).Set(v.collateral), Outstanding: new(big.Int).Set(v.outstanding),
-		TotalPrincipal: new(big.Int).Set(v.principal), Paused: v.paused}, nil
+	v.stateCalls++
+	return &VaultState{Block: 1, Balance: new(big.Int).Set(v.balance), TotalPendingWithdrawals: v.totalPendingLocked(),
+		Outstanding: new(big.Int).Set(v.outstanding), TotalPrincipal: new(big.Int).Set(v.principal), Paused: v.paused}, nil
+}
+
+func (v *fakeVault) PendingWithdrawal(_ context.Context, lp string) (*big.Int, error) {
+	v.mu.Lock()
+	if v.pendingDelay > 0 {
+		v.pendingInflight++
+		v.pendingMaxPar = max(v.pendingMaxPar, v.pendingInflight)
+		delay := v.pendingDelay
+		v.mu.Unlock()
+		time.Sleep(delay)
+		v.mu.Lock()
+		v.pendingInflight--
+	}
+	defer v.mu.Unlock()
+	if v.pendingErr != nil {
+		return nil, v.pendingErr
+	}
+	if p, ok := v.pending[strings.ToLower(lp)]; ok {
+		return new(big.Int).Set(p), nil
+	}
+	return new(big.Int), nil
+}
+
+func (v *fakeVault) PreparePayPending(_, lp string) ([]byte, error) {
+	return json.Marshal(blockchain.UnsignedTx{To: testVaultAddr.Hex(), Value: "0", ChainID: "97", Data: "paypending:" + strings.ToLower(lp)})
+}
+
+// payPending is the contract's payPending(lp): min(pending, balance) to lp.
+func (v *fakeVault) payPending(lp string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	p, ok := v.pending[strings.ToLower(lp)]
+	if !ok {
+		return
+	}
+	amount := new(big.Int).Set(p)
+	if amount.Cmp(v.balance) > 0 {
+		amount.Set(v.balance)
+	}
+	p.Sub(p, amount)
+	v.balance.Sub(v.balance, amount)
 }
 
 func (v *fakeVault) Roles(context.Context) (*VaultRoles, error) {
@@ -94,8 +163,8 @@ func (v *fakeVault) PrepareFill(_, to string, amount, spread *big.Int, ref [32]b
 		return nil, vaultRevert("EnforcedPause()")
 	case v.used[ref]:
 		return nil, vaultRevert("Bad or used ref")
-	case new(big.Int).Add(new(big.Int).Add(v.outstanding, amount), spread).Cmp(v.collateral) > 0:
-		return nil, vaultRevert("Not covered by collateral")
+	case amount.Cmp(v.liquidLocked()) > 0:
+		return nil, vaultRevert("Insufficient liquidity")
 	case new(big.Int).Add(amount, spread).Cmp(v.caps.MaxFillPerTx) > 0:
 		return nil, vaultRevert("Bad fill amount")
 	case new(big.Int).Mul(spread, big.NewInt(10_000)).Cmp(new(big.Int).Mul(amount, v.caps.MaxSpreadBps)) > 0:
@@ -109,16 +178,6 @@ func (v *fakeVault) PrepareFill(_, to string, amount, spread *big.Int, ref [32]b
 
 func (v *fakeVault) FilledIn(r *types.Receipt, ref [32]byte) *VaultEvent {
 	return v.decoder.FilledIn(r, ref)
-}
-
-func (v *fakeVault) PrepareSettleFromCollateral(_ string, amount *big.Int, ref [32]byte) ([]byte, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if amount.Cmp(v.outstanding) > 0 {
-		return nil, vaultRevert("Bad amount")
-	}
-	return json.Marshal(blockchain.UnsignedTx{To: testVaultAddr.Hex(), Value: "0", ChainID: "97",
-		Data: fmt.Sprintf("settle:%s:%s", hex.EncodeToString(ref[:]), amount)})
 }
 
 // vaultSender is the release key: it builds inside Send, runs the caller's
@@ -165,6 +224,9 @@ func (s *vaultSender) Send(ctx context.Context, _ int64, build func() ([]byte, e
 	s.lastData = u.Data
 	noMine, revert := s.noMine, s.revert
 	s.mu.Unlock()
+	if !noMine && strings.HasPrefix(u.Data, "paypending:") {
+		s.vault.payPending(strings.TrimPrefix(u.Data, "paypending:"))
+	}
 	if noMine || !strings.HasPrefix(u.Data, "fill:") {
 		return hash.Hex(), nil
 	}
@@ -179,6 +241,7 @@ func (s *vaultSender) Send(ctx context.Context, _ int64, build func() ([]byte, e
 	if !revert {
 		s.vault.mu.Lock()
 		s.vault.used[ref] = true
+		s.vault.balance.Sub(s.vault.balance, amount)
 		s.vault.outstanding.Add(s.vault.outstanding, new(big.Int).Add(amount, spread))
 		s.vault.mu.Unlock()
 		ev := parsedLiquidityVaultABI.Events["Filled"]
@@ -234,16 +297,16 @@ type vaultRig struct {
 	saleVerifier *recordingSaleVerifier
 }
 
-// newVaultRig is a central-mode ITService with a vault desk: collateral and LP
-// principal in whole USDT (18 dp).
-func newVaultRig(t *testing.T, collateralWhole, principalWhole int64) *vaultRig {
+// newVaultRig is a central-mode ITService with a vault desk: the vault's
+// token balance (all liquid) and LP principal in whole USDT (18 dp).
+func newVaultRig(t *testing.T, balanceWhole, principalWhole int64) *vaultRig {
 	t.Helper()
-	return newVaultRigWith(t, collateralWhole, principalWhole, nil)
+	return newVaultRigWith(t, balanceWhole, principalWhole, nil)
 }
 
 // newVaultRigWith is newVaultRig with the desk's operator and vault swapped by
 // swap (nil keeps the lane-less fake sender and the fake vault).
-func newVaultRigWith(t *testing.T, collateralWhole, principalWhole int64,
+func newVaultRigWith(t *testing.T, balanceWhole, principalWhole int64,
 	swap func(*fakeVault) (ChainSender, VaultChain)) *vaultRig {
 	t.Helper()
 	base := newVaultBase(t)
@@ -251,7 +314,7 @@ func newVaultRigWith(t *testing.T, collateralWhole, principalWhole int64,
 		t.Fatalf("ledger table: %v", err)
 	}
 	sale, treasury, saleVerifier := newPoolSaleWallet(t, usdt18(1_000))
-	vault := newFakeVault(usdt18(collateralWhole), usdt18(principalWhole))
+	vault := newFakeVault(usdt18(balanceWhole), usdt18(principalWhole))
 	chain := &fakeTxProbe{head: 100}
 	probe := &vaultProbe{TreasuryTxProbe: chain, head: 100, receipts: map[common.Hash]*types.Receipt{}}
 	sender := &vaultSender{vault: vault, probe: probe}
@@ -341,21 +404,43 @@ func TestVaultOpen_ReservesWithoutAnOnChainStep(t *testing.T) {
 		t.Fatalf("spread units = %v, want 0.5%% of the fill", o.SpreadUnits)
 	}
 	reserved, err := r.desk.vaultReserved(context.Background(), r.db)
-	if err != nil || reserved.Cmp(new(big.Int).Add(f, vaultSpreadUnits(f, 50))) != 0 {
-		t.Fatalf("reserved = %v %v", reserved, err)
+	if err != nil || reserved.Fill.Cmp(f) != 0 || reserved.Spread.Cmp(vaultSpreadUnits(f, 50)) != 0 {
+		t.Fatalf("reserved = %+v %v, want the fill held back (its spread only counted for the window)", reserved, err)
 	}
 }
 
-// D3 off-chain: an order the free collateral cannot cover is refused at open
+// An order the vault's free liquidity cannot cover is refused at open
 // (re-read under the lock, whatever the quote saw).
-func TestVaultOpen_RefusedBeyondFreeCollateral(t *testing.T) {
+func TestVaultOpen_RefusedBeyondFreeLiquidity(t *testing.T) {
 	r := newVaultRig(t, 100, 25)
 	p := r.price(t, "5000") // ~3.6 USDT
 	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(3)
+	r.vault.balance = usdt18(3)
 	r.vault.mu.Unlock()
 	if _, _, err := r.it.OpenPoolBuy(context.Background(), r.userID, p, testRoutedEVM); !errors.Is(err, ErrPoolCannotFill) {
 		t.Fatalf("err = %v, want ErrPoolCannotFill", err)
+	}
+}
+
+// No collateral: what limits an open is liquid (balance − pending
+// withdrawals), and only the fill needs backing — never its spread.
+func TestVaultOpen_LimitedByLiquidNotTheSpread(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	p := r.price(t, "5000")
+	fill, err := CanonicalToChainUnits(p.Quote.AssetUnits, 18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Balance holds plenty, but pending withdrawals leave one unit short of
+	// the fill: refused (pending withdrawals are paid first).
+	r.vault.setPending("0x00000000000000000000000000000000000000c1", new(big.Int).Sub(usdt18(100), new(big.Int).Sub(fill, big.NewInt(1))))
+	if _, _, err := r.it.OpenPoolBuy(context.Background(), r.userID, p, testRoutedEVM); !errors.Is(err, ErrPoolCannotFill) {
+		t.Fatalf("err = %v, want ErrPoolCannotFill with liquid one unit short", err)
+	}
+	// Liquid exactly the fill (nothing for the spread): opens.
+	r.vault.setPending("0x00000000000000000000000000000000000000c1", new(big.Int).Sub(usdt18(100), fill))
+	if _, _, err := r.it.OpenPoolBuy(context.Background(), r.userID, p, testRoutedEVM); err != nil {
+		t.Fatalf("open with liquid = fill: %v", err)
 	}
 }
 
@@ -438,8 +523,12 @@ func TestVaultSettle_FillProveDeliverSettle(t *testing.T) {
 	if o.SettledAt == nil || o.LPTotalKobo == nil || *o.LPTotalKobo != "0" {
 		t.Fatalf("books = settled %v lp %v, want settled with no naira LP payout", o.SettledAt, o.LPTotalKobo)
 	}
-	if reserved, _ := r.desk.vaultReserved(context.Background(), r.db); reserved.Sign() != 0 {
-		t.Fatalf("reserved = %s after the fill is proven, want 0", reserved)
+	if reserved, _ := r.desk.vaultReserved(context.Background(), r.db); reserved.Fill.Sign() != 0 {
+		t.Fatalf("reserved = %s after the fill is proven, want 0", reserved.Fill)
+	}
+	if st, _ := r.vault.State(context.Background()); st.Outstanding.Cmp(new(big.Int).Add(want, bigFromDecimal(o.SpreadUnits))) != 0 ||
+		st.Balance.Cmp(new(big.Int).Sub(usdt18(100), want)) != 0 {
+		t.Fatalf("vault = balance %s outstanding %s, want the fill paid out and fill + spread owed", st.Balance, st.Outstanding)
 	}
 }
 
@@ -459,14 +548,14 @@ func TestVaultSettle_NoLPsFillsWithZeroSpread(t *testing.T) {
 	}
 }
 
-// The vault refuses the fill (collateral withdrawn under the reserve): park
-// pool_fill_refused, keep the reserve; refund is allowed (nothing recorded),
-// and retry after collateral is posted fills it.
+// The vault refuses the fill (liquid gone under the reserve — LPs withdrew):
+// park pool_fill_refused, keep the reserve; refund is allowed (nothing
+// recorded), and retry after a refill fills it.
 func TestVaultSettle_RefusedFillParksThenRetries(t *testing.T) {
 	r := newVaultRig(t, 100, 25)
 	intent := r.openPaid(t, "5000")
 	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(1)
+	r.vault.balance = usdt18(1)
 	r.vault.mu.Unlock()
 	if err := r.advance(t, intent.ID); err != nil {
 		t.Fatalf("advance: %v", err)
@@ -478,10 +567,13 @@ func TestVaultSettle_RefusedFillParksThenRetries(t *testing.T) {
 	if acts := r.it.poolOrderActions(context.Background(), &got); strings.Join(acts, ",") != "refund,retry-fill" {
 		t.Fatalf("actions = %v", acts)
 	}
+	if _, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "still short"); !errors.Is(err, ErrPoolCannotFill) {
+		t.Fatalf("retry while short = %v, want ErrPoolCannotFill", err)
+	}
 	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(100)
+	r.vault.balance = usdt18(100)
 	r.vault.mu.Unlock()
-	if _, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "collateral posted"); err != nil {
+	if _, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "pool refilled"); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	if err := r.advance(t, intent.ID); err != nil {
@@ -568,18 +660,16 @@ func TestVaultSettle_ProofNeedsThisOrdersFilledEvent(t *testing.T) {
 	}
 }
 
-// Claim: collateral withdrawn between open and payment parks the order
-// pool_fill_refused at the claim; its reserve (the snapshot) stays, so a retry
-// after collateral is posted fills what she is owed.
+// Claim: liquid gone between open and payment (LP withdrawals) parks the
+// order pool_fill_refused at the claim; its reserve (the snapshot) stays, so
+// a retry after a refill fills what she is owed.
 func TestVaultClaim_ParksWhenTheVaultShrankSinceOpen(t *testing.T) {
 	r := newVaultRig(t, 100, 25)
 	intent, err := r.openFor(t, r.userID, "5000")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(1)
-	r.vault.mu.Unlock()
+	r.vault.setPending("0x00000000000000000000000000000000000000c1", usdt18(99)) // liquid 1
 	ok, err := r.it.claimAndPriceStableBuy(context.Background(), intent, "sess_"+intent.ID.String()[:8], intent.AmountMinor, time.Now(), false, PayInCentral)
 	if !ok || err != nil {
 		t.Fatalf("claim: %v %v", ok, err)
@@ -591,7 +681,7 @@ func TestVaultClaim_ParksWhenTheVaultShrankSinceOpen(t *testing.T) {
 	if o := r.order(t, intent.ID); o.FillUnits == nil || *o.FillUnits != usdt18Units(t, intent.AssetAmount) {
 		t.Fatalf("fill units = %v, want her owed amount kept", o.FillUnits)
 	}
-	if reserved, _ := r.desk.vaultReserved(context.Background(), r.db); reserved.Sign() == 0 {
+	if reserved, _ := r.desk.vaultReserved(context.Background(), r.db); reserved.Fill.Sign() == 0 {
 		t.Fatal("the parked order's reserve was released")
 	}
 }
@@ -621,22 +711,31 @@ func TestVaultClaim_RepricedArrivalCreditsTheLiveSpread(t *testing.T) {
 	}
 }
 
-// The console: reserved is what open orders hold back, and free never counts it.
+// The console: reserved is what open orders' fills hold back of liquid, and
+// free = liquid − reserved (pending withdrawals are outside liquid).
 func TestVaultAdmin_SummaryShowsReserve(t *testing.T) {
 	r := newVaultRig(t, 100, 25)
 	intent, err := r.openFor(t, r.userID, "5000")
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.vault.setPending("0x00000000000000000000000000000000000000c1", usdt18(10))
+	r.vault.mu.Lock()
+	r.vault.outstanding = usdt18(7)
+	r.vault.mu.Unlock()
 	sum, err := r.it.VaultPoolSummary(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	o := r.order(t, intent.ID)
-	reserved := new(big.Int).Add(bigFromDecimal(o.FillUnits), bigFromDecimal(o.SpreadUnits))
-	free := new(big.Int).Sub(usdt18(100), reserved)
-	if sum.Reserved != BaseUnitsToDecimal(reserved, 18) || sum.Free != BaseUnitsToDecimal(free, 18) || sum.Collateral != "100" {
+	reserved := bigFromDecimal(o.FillUnits)
+	free := new(big.Int).Sub(usdt18(90), reserved)
+	if sum.Reserved != BaseUnitsToDecimal(reserved, 18) || sum.Free != BaseUnitsToDecimal(free, 18) || sum.Liquid != "90" ||
+		sum.TotalPendingWithdrawals != "10" || sum.Outstanding != "7" || sum.TotalPrincipal != "25" {
 		t.Fatalf("summary = %+v", sum)
+	}
+	if sum.Utilisation != "20.00" { // 7 ÷ (25 + 10)
+		t.Fatalf("utilisation = %s, want outstanding ÷ (principal + pending) = 20.00", sum.Utilisation)
 	}
 }
 
@@ -669,31 +768,6 @@ func TestVaultAdmin_SummaryNamesRolesAndOperators(t *testing.T) {
 	}
 }
 
-// Settle-from-collateral: a note, a positive amount, sent by the operator with
-// a fresh ref, audited.
-func TestVaultAdmin_SettleFromCollateral(t *testing.T) {
-	r := newVaultRig(t, 100, 25)
-	if err := r.db.AutoMigrate(&models.P2PAuditLog{}); err != nil {
-		t.Skip("p2p_audit_logs needs Postgres defaults:", err)
-	}
-	r.vault.mu.Lock()
-	r.vault.outstanding = usdt18(10)
-	r.vault.mu.Unlock()
-	admin := uuid.New()
-	if _, err := r.it.SettlePoolFromCollateral(context.Background(), admin, uuid.New(), "5", ""); !errors.Is(err, ErrITOperatorNoteRequired) {
-		t.Fatalf("no note: %v", err)
-	}
-	if _, err := r.it.SettlePoolFromCollateral(context.Background(), admin, uuid.New(), "0", "x"); !errors.Is(err, ErrLPAmount) {
-		t.Fatalf("zero: %v", err)
-	}
-	if _, err := r.it.SettlePoolFromCollateral(context.Background(), admin, uuid.New(), "5", "PM keeps the naira for this week's fills"); err != nil {
-		t.Fatalf("settle: %v", err)
-	}
-	if !strings.HasPrefix(r.sender.lastData, "settle:") {
-		t.Fatalf("sent %q", r.sender.lastData)
-	}
-}
-
 // ─── Review fixes (2026-10-14) ──────────────────────────────────────────────
 
 // laneVault is the fake vault building real calldata, so a real KeyLane can
@@ -716,21 +790,18 @@ func (v laneVault) PrepareFill(from, to string, amount, spread *big.Int, ref [32
 	return laneCall("fill", common.HexToAddress(to), amount, spread, ref)
 }
 
-func (v laneVault) PrepareSettleFromCollateral(from string, amount *big.Int, ref [32]byte) ([]byte, error) {
-	if _, err := v.fakeVault.PrepareSettleFromCollateral(from, amount, ref); err != nil {
-		return nil, err
-	}
-	return laneCall("settleFromCollateral", amount, ref)
+func (v laneVault) PreparePayPending(_, lp string) ([]byte, error) {
+	return laneCall("payPending", common.HexToAddress(lp))
 }
 
 // newLaneVaultRig is the vault rig whose operator is a real ChainReleaseSigner
 // (in-memory KeyLane store) broadcasting to node.
-func newLaneVaultRig(t *testing.T, collateralWhole, principalWhole int64) (*vaultRig, *chainNode, *KeyLane) {
+func newLaneVaultRig(t *testing.T, balanceWhole, principalWhole int64) (*vaultRig, *chainNode, *KeyLane) {
 	t.Helper()
 	node := newChainNode(poolTestChain)
 	node.head = 100
 	signer := NewChainReleaseSigner(NewSignerRegistry(), newEcdsaKey().k, map[int64]ReleaseBroadcaster{poolTestChain: node})
-	r := newVaultRigWith(t, collateralWhole, principalWhole, func(v *fakeVault) (ChainSender, VaultChain) {
+	r := newVaultRigWith(t, balanceWhole, principalWhole, func(v *fakeVault) (ChainSender, VaultChain) {
 		return signer, laneVault{v}
 	})
 	return r, node, signer.Lane(poolTestChain)
@@ -798,7 +869,7 @@ func TestVaultClaim_RepricedParkRetryFillsWhatIsDelivered(t *testing.T) {
 	}
 	opened := intent.AssetAmount
 	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(1)
+	r.vault.balance = usdt18(1)
 	r.vault.mu.Unlock()
 	expected, _ := new(big.Int).SetString(intent.AmountMinor, 10)
 	paid := new(big.Int).Quo(new(big.Int).Mul(expected, big.NewInt(6)), big.NewInt(5)) // paid 20% more: priced live
@@ -818,9 +889,9 @@ func TestVaultClaim_RepricedParkRetryFillsWhatIsDelivered(t *testing.T) {
 		t.Fatalf("parked snapshot fill = %s, intent owes %s: they must agree", *o.FillUnits, usdt18Units(t, got.AssetAmount))
 	}
 	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(100)
+	r.vault.balance = usdt18(100)
 	r.vault.mu.Unlock()
-	if _, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "collateral posted"); err != nil {
+	if _, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "pool refilled"); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	got = r.intent(t, intent.ID)
@@ -871,7 +942,7 @@ func TestVaultSettle_FillAmountMismatchParksUnsent(t *testing.T) {
 }
 
 // H3: an unpaid order past the claim window can never be claimed, so it stops
-// reserving collateral (and stops counting as owed gas); a paid one reserves
+// reserving liquidity (and stops counting as owed gas); a paid one reserves
 // whatever its age.
 func TestVaultReserve_AbandonedUnpaidOrderStopsReserving(t *testing.T) {
 	r := newVaultRig(t, 100, 25)
@@ -892,9 +963,9 @@ func TestVaultReserve_AbandonedUnpaidOrderStopsReserving(t *testing.T) {
 	old := time.Now().Add(-stableBuyClaimWindow - time.Hour)
 	r.db.Model(&models.ITIntent{}).Where("id IN ?", []uuid.UUID{unpaid.ID, paid.ID}).Update("created_at", old)
 	o := r.order(t, paid.ID)
-	want := new(big.Int).Add(bigFromDecimal(o.FillUnits), bigFromDecimal(o.SpreadUnits))
-	if reserved, err := r.desk.vaultReserved(ctx, r.db); err != nil || reserved.Cmp(want) != 0 {
-		t.Fatalf("reserved = %v %v, want only the paid order's %s", reserved, err, want)
+	want := bigFromDecimal(o.FillUnits)
+	if reserved, err := r.desk.vaultReserved(ctx, r.db); err != nil || reserved.Fill.Cmp(want) != 0 {
+		t.Fatalf("reserved = %v %v, want only the paid order's %s", reserved.Fill, err, want)
 	}
 	if n, err := NewPoolFillCommitments(r.db).UnitsFresh(ctx); err != nil || n != vaultFillGas {
 		t.Fatalf("fill commitments = %d %v, want one fill (the paid order)", n, err)
@@ -903,8 +974,8 @@ func TestVaultReserve_AbandonedUnpaidOrderStopsReserving(t *testing.T) {
 		t.Fatalf("treasury commitments = %d %v, want one delivery (the paid order)", n, err)
 	}
 	r.db.Model(&models.ITIntent{}).Where("id = ?", unpaid.ID).Update("created_at", time.Now())
-	if reserved, _ := r.desk.vaultReserved(ctx, r.db); reserved.Cmp(want) <= 0 {
-		t.Fatalf("reserved = %s, a claimable unpaid order must reserve too", reserved)
+	if reserved, _ := r.desk.vaultReserved(ctx, r.db); reserved.Fill.Cmp(want) <= 0 {
+		t.Fatalf("reserved = %s, a claimable unpaid order must reserve too", reserved.Fill)
 	}
 }
 
@@ -974,51 +1045,6 @@ func TestVaultSettle_UnprovenFillReportsStalled(t *testing.T) {
 	}
 }
 
-// M4: settle-from-collateral is one operation per operationId: a retry is
-// answered from the lane's allocation (or, once mined, the ledger), never a
-// second settle.
-func TestVaultAdmin_SettleFromCollateralIsIdempotent(t *testing.T) {
-	r, node, lane := newLaneVaultRig(t, 100, 25)
-	ctx := context.Background()
-	r.vault.mu.Lock()
-	r.vault.outstanding = usdt18(10)
-	r.vault.mu.Unlock()
-	admin, op := uuid.New(), uuid.New()
-	if _, err := r.it.SettlePoolFromCollateral(ctx, admin, uuid.Nil, "5", "n"); !errors.Is(err, ErrPoolSettleOperationID) {
-		t.Fatalf("no operation id: %v", err)
-	}
-	h1, err := r.it.SettlePoolFromCollateral(ctx, admin, op, "5", "PM keeps the naira")
-	if err != nil || h1 == "" {
-		t.Fatalf("settle: %q %v", h1, err)
-	}
-	h2, err := r.it.SettlePoolFromCollateral(ctx, admin, op, "5", "PM keeps the naira")
-	if err != nil || !strings.EqualFold(h1, h2) {
-		t.Fatalf("retry = %q %v, want %s", h2, err, h1)
-	}
-	// Mined: the lane frees the key; the ledger answers.
-	node.mu.Lock()
-	node.mined = 1
-	node.mu.Unlock()
-	node.mine(common.HexToHash(h1), 101, 110)
-	if err := lane.Watch(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.db.Create(&models.LiquidityLedgerEntry{ID: uuid.New(), ChainID: poolTestChain, Vault: strings.ToLower(testVaultAddr.Hex()),
-		TxHash: strings.ToLower(h1), Block: 101, Kind: VaultEventSettled, Ref: HashIDHex(op), BlockTime: time.Now()}).Error; err != nil {
-		t.Fatal(err)
-	}
-	h3, err := r.it.SettlePoolFromCollateral(ctx, admin, op, "5", "PM keeps the naira")
-	if err != nil || !strings.EqualFold(h1, h3) {
-		t.Fatalf("retry after mined = %q %v, want %s", h3, err, h1)
-	}
-	if n := len(node.atNonce(0)) + len(node.atNonce(1)); n != 1 {
-		t.Fatalf("settles broadcast = %d, want 1", n)
-	}
-	if _, err := r.it.SettlePoolFromCollateral(ctx, admin, uuid.New(), "5", "a second settle"); err != nil {
-		t.Fatalf("a new operation: %v", err)
-	}
-}
-
 // ─── Review fixes (2026-10-14, round 2) ─────────────────────────────────────
 
 // Money race: the fill is decided under the pool lock, which is released
@@ -1083,16 +1109,16 @@ func TestVaultRetry_RefusedOverTheContractsFillCaps(t *testing.T) {
 	r := newVaultRig(t, 100, 25)
 	intent := r.openPaid(t, "5000")
 	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(1)
+	r.vault.balance = usdt18(1)
 	r.vault.mu.Unlock()
 	if err := r.advance(t, intent.ID); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
 	r.vault.mu.Lock()
-	r.vault.collateral = usdt18(100)
+	r.vault.balance = usdt18(100)
 	r.vault.caps.MaxFillPerTx = usdt18(1)
 	r.vault.mu.Unlock()
-	_, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "collateral posted")
+	_, err := r.it.RetryPoolFill(context.Background(), uuid.New(), intent.ID, "pool refilled")
 	if !errors.Is(err, ErrPoolCannotFill) || !strings.Contains(err.Error(), fillRefusedPerTx) {
 		t.Fatalf("retry err = %v, want the per-fill-limit refusal", err)
 	}
@@ -1122,7 +1148,7 @@ func TestVaultAdmin_Spread30dIsThisVaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	books := &fakeBooks{LiquidityVault: &LiquidityVault{addr: testVaultAddr},
-		state: VaultState{Collateral: new(big.Int), Outstanding: new(big.Int), TotalPrincipal: new(big.Int)}}
+		state: VaultState{Balance: new(big.Int), TotalPendingWithdrawals: new(big.Int), Outstanding: new(big.Int), TotalPrincipal: new(big.Int)}}
 	x, err := NewVaultIndexer(VaultIndexerConfig{DB: r.db, ChainID: poolTestChain, Vault: books, Reader: &fakeLogReader{head: 1}, DeployBlock: 100})
 	if err != nil {
 		t.Fatal(err)
@@ -1142,5 +1168,18 @@ func TestVaultAdmin_Spread30dIsThisVaults(t *testing.T) {
 	}
 	if sum.Spread30d != "1" {
 		t.Fatalf("spread30d = %q, want this vault's 1", sum.Spread30d)
+	}
+}
+
+// Testnet rehearsal 2026-10-15: the free-liquidity read is cached for 5 s, so
+// a quote right after a pause was still served. A closed gate refuses at once.
+func TestVaultQuote_RefusedWhileGatesClosed(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	if _, err := r.it.QuotePoolBuy(context.Background(), "USDT", "5000", "NGN", poolMid, specPoolSettings()); err != nil {
+		t.Fatalf("open gates: %v", err)
+	}
+	r.gates.Close("vault: the vault is paused")
+	if _, err := r.it.QuotePoolBuy(context.Background(), "USDT", "5000", "NGN", poolMid, specPoolSettings()); !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("closed gates: %v, want ErrPoolClosed", err)
 	}
 }

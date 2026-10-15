@@ -49,7 +49,7 @@ describe("deploy/liquidity-pool", () => {
     await expect(deploy(hre, { chain })).to.be.rejectedWith(/same address/);
   });
 
-  it("refuses to run without the PM's collateral wallet", async () => {
+  it("refuses to run without the company's refill wallet (collateralProvider role)", async () => {
     const { chain } = await fixture({ collateralProvider: null });
     await expect(deploy(hre, { chain })).to.be.rejectedWith(/collateralProvider is required/);
   });

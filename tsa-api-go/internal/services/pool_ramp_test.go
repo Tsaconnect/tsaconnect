@@ -33,7 +33,7 @@ func TestPoolConverted_RecordLegDecimals18(t *testing.T) {
 // §15 pool-card: rate and limits without an amount; never a provider name or
 // a voucher signature.
 func TestPoolCard_RateAndLimits(t *testing.T) {
-	r := newVaultRig(t, 126, 25) // free 126 USDT of collateral: ~125.37 deliverable at a 0.5% spread
+	r := newVaultRig(t, 125, 25) // 125 USDT liquid: all deliverable (the spread needs no backing)
 	r.it.SetTreasuryMarketRate(&fixedTreasuryRate{rate: poolMid})
 	card, err := r.it.PoolCard(context.Background())
 	if err != nil || !card.Enabled || !card.Available || card.Rate != "1361.51" || card.FundingFeePercent != "1.4" ||
@@ -41,8 +41,8 @@ func TestPoolCard_RateAndLimits(t *testing.T) {
 		t.Fatalf("card = %+v %v", card, err)
 	}
 	maxNgn, _ := new(big.Rat).SetString(card.MaxNgn)
-	if maxNgn.Cmp(big.NewRat(172_500, 1)) < 0 || maxNgn.Cmp(big.NewRat(173_500, 1)) > 0 { // 125.37 ÷ 0.986 × ₦1,361.51 ≈ ₦173,116
-		t.Fatalf("maxNgn = %s, want ≈ the naira for 125.37 USDT net", card.MaxNgn)
+	if maxNgn.Cmp(big.NewRat(172_000, 1)) < 0 || maxNgn.Cmp(big.NewRat(173_000, 1)) > 0 { // 125 ÷ 0.986 × ₦1,361.51 ≈ ₦172,605
+		t.Fatalf("maxNgn = %s, want ≈ the naira for 125 USDT net", card.MaxNgn)
 	}
 	b, _ := json.Marshal(card)
 	if strings.Contains(strings.ToLower(string(b)), "voucher") {

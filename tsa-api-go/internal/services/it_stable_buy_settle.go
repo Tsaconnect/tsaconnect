@@ -486,7 +486,7 @@ func (s *ITService) RepriceParkedStableBuy(ctx context.Context, intentID uuid.UU
 }
 
 // claimPool claims a pool buy under the pool lock (claimVault, spec
-// 2026-10-14 §4): the amount owed must fit the vault's free collateral.
+// 2026-10-14 §4): the amount owed must fit the vault's free liquidity.
 func (s *ITService) claimPool(ctx context.Context, candidate *models.ITIntent, claim map[string]any, amountMinor string,
 	ch PayInChannel, arrival *routedArrival, write func(*gorm.DB) *gorm.DB) (*gorm.DB, string, error) {
 	if s.poolDesk == nil {

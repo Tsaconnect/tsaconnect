@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Coins, ShieldCheck, Smartphone, TriangleAlert } from 'lucide-react';
+import { Coins, Smartphone, TriangleAlert } from 'lucide-react';
 import { ApiError } from '@/lib/api';
 import { dateTime } from '@/lib/format';
 import { AccentCard, Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -12,7 +12,8 @@ import { toast } from '@/components/ui/toaster';
 import { BusinessPage } from './BusinessPage';
 import { useIdempotencyKey } from './useIdempotencyKey';
 import {
-  canClaim, claimLiquidity, oldWalletHasFunds, getLiquidity, LIQUIDITY_ACTIVITY_KEY, LIQUIDITY_KEY, listLiquidityActivity, tokenAmount,
+  activitySign, canClaim, claimErrorMessage, claimLiquidity, oldWalletHasFunds, oldWalletOnlyPending, getLiquidity, isZero,
+  LIQUIDITY_ACTIVITY_KEY, LIQUIDITY_KEY, listLiquidityActivity, tokenAmount,
   type LiquidityActivity, type LiquidityMe,
 } from './liquidityApi';
 
@@ -21,6 +22,8 @@ const KIND_LABEL: Record<LiquidityActivity['kind'], string> = {
   withdrawal: 'Withdrawn',
   claim: 'Claimed',
   earned: 'Earned',
+  withdrawal_pending: 'Withdrawal pending',
+  withdrawal_paid: 'Withdrawal paid',
 };
 
 function Figure({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
@@ -61,7 +64,7 @@ function Activity() {
                   <TD>{dateTime(it.at)}</TD>
                   <TD>{KIND_LABEL[it.kind]}</TD>
                   <TD className="text-right tabular-nums">
-                    {it.kind === 'withdrawal' || it.kind === 'claim' ? '−' : '+'}{tokenAmount(it.amount)} USDT
+                    {activitySign(it.kind)}{tokenAmount(it.amount)} USDT
                   </TD>
                 </TR>
               ))}
@@ -92,9 +95,7 @@ function Position({ me }: { me: LiquidityMe }) {
     },
     onError: (err) => {
       idem.forget();
-      toast.error(err instanceof ApiError && err.status === 429
-        ? 'You can claim gas-free once every 8 hours. Claim from the app to do it now.'
-        : err instanceof Error ? err.message : 'Could not claim.');
+      toast.error(claimErrorMessage(err));
     },
   });
   const claimable = canClaim(me);
@@ -107,7 +108,9 @@ function Position({ me }: { me: LiquidityMe }) {
       {me.walletChanged && (
         <Note tone="warning" icon={<TriangleAlert />}>
           Your account now uses a different wallet. Earnings are paid to {me.wallet}.{' '}
-          {oldWalletHasFunds(me)
+          {oldWalletOnlyPending(me)
+            ? <>A withdrawal from your old wallet is still pending. You can switch wallets once it completes.</>
+            : oldWalletHasFunds(me)
             ? <>Withdraw and claim from {me.wallet} first (switch to it in the TSA Connect app), then activate your new wallet there.</>
             : <>Activate your new wallet in the TSA Connect app to add liquidity from it.</>}
         </Note>
@@ -139,6 +142,9 @@ function Position({ me }: { me: LiquidityMe }) {
             {amt(me.withdrawable)} can be withdrawn now. New deposits unlock 24 hours after they are added; the rest unlocks {dateTime(me.lockedUntil)}. Earnings can always be claimed.
           </CardBody>
         )}
+        {me.balanceReadable && !isZero(me.pendingWithdrawal) && (
+          <CardBody className="pt-0 text-caption text-text-secondary">Pending withdrawal: {amt(me.pendingWithdrawal)}</CardBody>
+        )}
         {!claimable && !me.walletChanged && (
           <CardBody className="pt-0 text-caption text-text-secondary">Claims start from {me.minClaim} {sym} here; smaller amounts can be claimed from the app.</CardBody>
         )}
@@ -154,14 +160,12 @@ function PoolCard({ me }: { me: LiquidityMe }) {
     <Card>
       <CardHeader title="TSA Connect pool" description={me.chain?.name} />
       <CardBody className="grid grid-cols-2 gap-5 md:grid-cols-3">
-        <Figure label="Total liquidity" value={`${tokenAmount(me.pool.totalLiquidity)} ${sym}`} />
-        <Figure label="Backed by company collateral" value={`${me.pool.coveragePercent}%`} />
-        <Figure label="Earnings rate, last 30 days" value={`${me.pool.apr30d}% a year`} />
+        {me.pool.totalLiquidity != null && <Figure label="Total liquidity" value={`${tokenAmount(me.pool.totalLiquidity)} ${sym}`} />}
+        {me.pool.apr30d != null && <Figure label="Earnings rate, last 30 days" value={`${me.pool.apr30d}% a year`} />}
       </CardBody>
-      <CardBody className="flex items-center gap-2 pt-0 text-caption text-text-secondary">
-        <ShieldCheck className="size-4 shrink-0" aria-hidden />
-        Every sale the pool makes is backed by company collateral, so your liquidity is never at risk. Past earnings are not a promise.
-      </CardBody>
+      {me.pool.apr30d != null && (
+        <CardBody className="pt-0 text-caption text-text-secondary">Past earnings are not a promise.</CardBody>
+      )}
     </Card>
   );
 }
@@ -175,8 +179,8 @@ function NotProviding({ me }: { me: LiquidityMe }) {
         title="Provide liquidity and earn"
         body={
           <>
-            Add {me.limits.min}–{me.limits.max} {sym} to the TSA Connect pool and earn a share of the spread on every sale,
-            backed 100% by company collateral. Activate and add liquidity in the TSA Connect app (Profile → Provide liquidity &amp; earn);
+            Add {me.limits.min}–{me.limits.max} {sym} to the TSA Connect pool and earn a share of the spread on every sale.
+            Activate and add liquidity in the TSA Connect app (Profile → Provide liquidity &amp; earn);
             your earnings then show here.
           </>
         }

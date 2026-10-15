@@ -23,9 +23,12 @@ var ErrITOperatorNoteRequired = errors.New("a note is required — it is the onl
 // auditIntent appends an operator action to it_intent_audit_logs, on tx.
 func auditIntent(tx *gorm.DB, intentID, adminID uuid.UUID, action, note string, meta map[string]any) error {
 	raw, _ := json.Marshal(meta)
-	actor := adminID
+	var actor *uuid.UUID // uuid.Nil: the system acted (no admin)
+	if adminID != uuid.Nil {
+		actor = &adminID
+	}
 	return tx.Create(&models.ITIntentAuditLog{
-		IntentID: intentID, ActorID: &actor, Action: action,
+		IntentID: intentID, ActorID: actor, Action: action,
 		Note: truncateRunes(note, 512), Metadata: datatypes.JSON(raw),
 	}).Error
 }

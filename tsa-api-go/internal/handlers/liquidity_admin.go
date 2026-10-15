@@ -141,6 +141,10 @@ func poolAdminError(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusBadRequest, services.RedactAlertText(err.Error()), "bad_amount")
 		return
 	}
+	if errors.Is(err, services.ErrPoolOperationID) || errors.Is(err, services.ErrPoolPendingWallet) {
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, err.Error(), "bad_request")
+		return
+	}
 	if errors.Is(err, services.ErrLiquidityNotVault) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "pool_unavailable")
 		return
