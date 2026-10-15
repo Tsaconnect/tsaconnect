@@ -12,6 +12,8 @@
 //
 // On a mainnet chain the run is refused unless UPGRADE_CONFIRM equals PROXY.
 // CHECK_ONLY=1 validates the layout and the signer, then stops.
+// PREPARE_ONLY=1 (any funded key) deploys the new implementation only and
+// prints the BscScan steps for the owner to upgrade from a browser wallet.
 // Fork rehearsal (local only): FORK_RPC=<bsc rpc> PROXY=0xA786… npx hardhat run
 // scripts/upgrade-liquidity-pool.js — on the forked in-process network the
 // owner is impersonated, so no key is needed.
@@ -66,7 +68,11 @@ async function main() {
     if (!signer) throw new Error("no signer: set DEPLOYER_PRIVATE_KEY to the pool owner's key");
   }
   const signerAddr = ethers.getAddress(await signer.getAddress());
-  if (signerAddr !== owner) throw new Error(`signer ${signerAddr} is not the pool owner ${owner}`);
+  // PREPARE_ONLY=1 deploys the new implementation from ANY funded key and
+  // stops: the owner then upgrades from a wallet in the browser (BscScan
+  // "Write as Proxy" → upgradeToAndCall(newImplementation, 0x)).
+  const prepareOnly = process.env.PREPARE_ONLY === "1";
+  if (!prepareOnly && signerAddr !== owner) throw new Error(`signer ${signerAddr} is not the pool owner ${owner}`);
 
   const New = await ethers.getContractFactory("TsaLiquidityPool", signer);
   const oldImpl = await upgrades.erc1967.getImplementationAddress(proxyAddr);
@@ -80,6 +86,22 @@ async function main() {
   console.log("  storage layout compatible (validateUpgrade passed)");
   if (process.env.CHECK_ONLY === "1") {
     console.log("  CHECK_ONLY=1: nothing sent");
+    return;
+  }
+  if (prepareOnly) {
+    // Validates the layout again and deploys (or reuses) the implementation;
+    // the proxy is untouched. The manifest records it for the next run.
+    const impl = await upgrades.prepareUpgrade(proxyAddr, New, { kind: "uups" });
+    const implAddr = ethers.getAddress(typeof impl === "string" ? impl : await impl.getAddress());
+    const explorer = { 56n: "https://bscscan.com", 97n: "https://testnet.bscscan.com" }[chainId];
+    console.log(`  new impl       ${implAddr}  (deployed by ${signerAddr}; the proxy is NOT upgraded yet)`);
+    console.log("");
+    console.log(`  The owner (${owner}) upgrades from a browser wallet:`);
+    if (explorer) console.log(`    ${explorer}/address/${proxyAddr}#writeProxyContract`);
+    console.log("    Connect to Web3 with the owner wallet → upgradeToAndCall");
+    console.log(`      newImplementation: ${implAddr}`);
+    console.log("      data:              0x");
+    console.log(`  Then check: implementation slot = ${implAddr}, and run this script with CHECK_ONLY=1.`);
     return;
   }
 

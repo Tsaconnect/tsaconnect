@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"strings"
 
@@ -72,6 +73,15 @@ func (h *ITHandler) AdminPayPoolPending(c *gin.Context) {
 		return
 	}
 	res, err := h.vaultAdmin.PayPoolPending(c.Request.Context(), user.ID, opID, body.Wallet, body.Note)
+	if err != nil && res != nil && len(res.Paid)+len(res.Skipped) > 0 {
+		// Some wallets were already sent before the failure: the console must
+		// see them (a retry with the same operationId answers them again).
+		msg := services.RedactAlertText(err.Error())
+		log.Printf("[liquidity admin] pay-pending op=%s partial (%d sent): %s", opID, len(res.Paid), msg)
+		utils.ErrorResponseWithCodeData(c, http.StatusInternalServerError, msg, "pay_pending_partial",
+			gin.H{"paid": res.Paid, "skipped": res.Skipped})
+		return
+	}
 	if err != nil {
 		poolAdminError(c, err)
 		return

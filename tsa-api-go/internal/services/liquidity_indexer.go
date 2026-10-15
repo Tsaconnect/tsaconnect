@@ -298,11 +298,13 @@ func (x *VaultIndexer) Reconcile(ctx context.Context) (*VaultReconcileReport, er
 				st.Outstanding, st.TotalPrincipal, st.TotalPendingWithdrawals, rep.Utilisation*100)
 		}
 	}
-	// A pending withdrawal the pool can pay now (liquid > 0 means the balance
-	// covers every pending one): an admin should pay it (console: Pay pending).
-	if st.TotalPendingWithdrawals.Sign() > 0 && st.Liquid().Sign() > 0 {
-		alertf("liquidity_pending_withdrawals", "[liquidity] ALERT liquidity_pending_withdrawals pending=%s liquid=%s block=%d — pay pending withdrawals from the console",
-			st.TotalPendingWithdrawals, st.Liquid(), block)
+	// A pending withdrawal the pool can pay at least part of now: payPending
+	// pays min(pending, balance), so any token balance is worth sending (liquid
+	// stays 0 until every pending one is covered). An admin should pay it
+	// (console: Pay pending).
+	if st.TotalPendingWithdrawals.Sign() > 0 && st.Balance.Sign() > 0 {
+		alertf("liquidity_pending_withdrawals", "[liquidity] ALERT liquidity_pending_withdrawals pending=%s balance=%s block=%d — pay pending withdrawals from the console",
+			st.TotalPendingWithdrawals, st.Balance, block)
 	}
 	// Every fill must be one of our orders, exactly as that order sent it: an
 	// unknown ref, or a fill of ours with another amount, spread or

@@ -740,20 +740,26 @@ func (s *ITService) RetryPoolFill(ctx context.Context, adminID, intentID uuid.UU
 const (
 	vaultRefusesFill                 = "the vault refuses the fill: "
 	vaultRevertInsufficientLiquidity = "Insufficient liquidity"
+	// vaultRefusedCollateralLegacy is vaultRefusedLiquidity's text before the
+	// no-collateral rename: parks written before that deploy carry it.
+	vaultRefusedCollateralLegacy = "the pool's free collateral does not cover the amount owed"
 )
 
-// poolFillParkedOnLiquidity: the park is a liquidity refusal — the claim's
-// free-liquidity refusal (re-priced or not) or the contract's "Insufficient
-// liquidity" at fill estimate — which a refill can cure on its own. Not a
-// fill-limit park, an amount mismatch, a mined-and-reverted fill or any other
-// revert reason: those need an operator.
+// poolFillParkedOnLiquidity: the park is one the system may resume on its
+// own — a pure liquidity refusal (the claim's free-liquidity refusal, its
+// pre-rename "free collateral" text, or the contract's "Insufficient
+// liquidity" at fill estimate) that a refill cures. Not a fill-limit park, an
+// amount mismatch, a mined-and-reverted fill or any other revert reason: those
+// need an operator. Nor a park priced live at claim (poolFillRepriceMark):
+// money that arrived late or differed from the quote is re-priced at the
+// retry, and selling at a new rate is a super admin's decision, never the
+// system's.
 func poolFillParkedOnLiquidity(reason string) bool {
 	r, ok := strings.CutPrefix(reason, models.ITFailurePoolFillRefused+": ")
 	if !ok {
 		return false
 	}
-	r = strings.TrimSuffix(r, poolFillRepriceMark)
-	return r == vaultRefusedLiquidity || r == vaultRefusesFill+vaultRevertInsufficientLiquidity
+	return r == vaultRefusedLiquidity || r == vaultRefusedCollateralLegacy || r == vaultRefusesFill+vaultRevertInsufficientLiquidity
 }
 
 // poolFillAutoRetryNote is the audit note of a retry the system made.
@@ -764,14 +770,23 @@ const poolFillAutoRetryNote = "auto-retry after liquidity returned"
 const poolFillAutoRetryBatch = 50
 
 // AutoRetryPoolFills resumes paid pool orders parked on a liquidity refusal
-// once the vault has liquid again (an LP withdrew, the company refilled):
-// oldest first, each through RetryPoolFill itself — re-reserved from the
-// intent under the pool lock, a re-priced park priced again — with no actor
-// and the note "auto-retry after liquidity returned". One the vault still
-// cannot cover stays parked, silently (it was alerted when it parked); the
-// others keep their turn, so a large order never holds back smaller ones the
-// pool can fill. Returns how many it resumed; an error only for a failed
-// read or an unexpected retry failure (the job's failure streak pages).
+// (poolFillParkedOnLiquidity) once the vault has liquid again (an LP withdrew,
+// the company refilled): oldest first, each through RetryPoolFill itself —
+// re-reserved from the intent under the pool lock — with no actor and the
+// note "auto-retry after liquidity returned".
+//
+// The vault is read ONCE per tick: a park keeps its reservation, so it fits
+// when its fill less its own reservation is within slack = liquid − Σ every
+// reserving order's fill (signed: a park's own reservation may be what
+// overdraws it). One that does not fit is skipped without RetryPoolFill (no
+// lock, no RPC); each resumed one spends its share of the slack. One the
+// vault still refuses stays parked silently (it was alerted when it parked);
+// the others keep their turn.
+//
+// Only reading the vault, the parks or the reserves fails the tick (the job's
+// failure streak pages). A retry's own error — a rate, quote or limit, an
+// order that moved — is the order's, not the job's: it is logged at most once
+// per order per hour and the tick goes on.
 func (s *ITService) AutoRetryPoolFills(ctx context.Context) (int, error) {
 	d := s.poolDesk
 	if d == nil {
@@ -781,19 +796,18 @@ func (s *ITService) AutoRetryPoolFills(ctx context.Context) (int, error) {
 	if err := s.db.WithContext(ctx).Model(&models.ITIntent{}).
 		Where("provider IN ? AND direction = ? AND status = ? AND failure_reason LIKE ?", poolProviders(),
 			models.ITDirectionBuy, models.ITStatusBuyAwaitingRate, models.ITFailurePoolFillRefused+":%").
-		Order("created_at").Select("id", "failure_reason").Find(&parked).Error; err != nil {
+		Order("created_at").Select("id", "failure_reason", "asset_amount").Find(&parked).Error; err != nil {
 		return 0, err
 	}
-	var ids []uuid.UUID
+	var cands []models.ITIntent
 	for _, p := range parked {
-		if poolFillParkedOnLiquidity(p.FailureReason) && len(ids) < poolFillAutoRetryBatch {
-			ids = append(ids, p.ID)
+		if poolFillParkedOnLiquidity(p.FailureReason) && len(cands) < poolFillAutoRetryBatch {
+			cands = append(cands, p)
 		}
 	}
-	if len(ids) == 0 {
+	if len(cands) == 0 {
 		return 0, nil
 	}
-	// Nothing liquid (or paused): no order can fit, skip the per-order work.
 	st, err := d.c.Vault.State(ctx)
 	if err != nil {
 		return 0, err
@@ -801,24 +815,75 @@ func (s *ITService) AutoRetryPoolFills(ctx context.Context) (int, error) {
 	if st.Paused || st.Liquid().Sign() == 0 {
 		return 0, nil
 	}
+	reserved, err := d.vaultReserved(ctx, s.db)
+	if err != nil {
+		return 0, err
+	}
+	own, err := d.vaultOwnFills(ctx, cands)
+	if err != nil {
+		return 0, err
+	}
+	slack := new(big.Int).Sub(st.Liquid(), reserved.Fill)
 	resumed := 0
-	var firstErr error
-	for _, id := range ids {
-		_, err := s.RetryPoolFill(ctx, uuid.Nil, id, poolFillAutoRetryNote)
+	for _, p := range cands {
+		need, ok := d.autoRetryNeed(p, own[p.ID])
+		if !ok || need.Cmp(slack) > 0 {
+			continue // still short (or unpriceable: RetryPoolFill would refuse it too)
+		}
+		_, err := s.RetryPoolFill(ctx, uuid.Nil, p.ID, poolFillAutoRetryNote)
 		switch {
 		case err == nil:
 			resumed++
-			log.Printf("[liquidity] METRIC liquidity_pool_fill_auto_retried intent=%s", id)
+			slack.Sub(slack, need)
+			log.Printf("[liquidity] METRIC liquidity_pool_fill_auto_retried intent=%s", p.ID)
 		case errors.Is(err, ErrPoolCannotFill), errors.Is(err, ErrITBadState):
 			// Still short (or a fill limit now), or the order moved: it stays as it is.
 		default:
-			log.Printf("[liquidity] auto-retry intent=%s: %s", id, RedactAlertText(err.Error()))
-			if firstErr == nil {
-				firstErr = err
+			if ctx.Err() != nil {
+				return resumed, ctx.Err()
 			}
+			alertf("liquidity_pool_fill_auto_retry:"+p.ID.String(), "[liquidity] auto-retry intent=%s: %s — left parked", p.ID, RedactAlertText(err.Error()))
 		}
 	}
-	return resumed, firstErr
+	return resumed, nil
+}
+
+// vaultOwnFills is each candidate's own reserved fill (chain units; absent
+// when its order has none).
+func (d *PoolDesk) vaultOwnFills(ctx context.Context, cands []models.ITIntent) (map[uuid.UUID]*big.Int, error) {
+	ids := make([]uuid.UUID, len(cands))
+	for i, p := range cands {
+		ids[i] = p.ID
+	}
+	var rows []models.PoolOrder
+	if err := d.c.DB.WithContext(ctx).Model(&models.PoolOrder{}).
+		Where("intent_id IN ? AND generation = 1 AND filled_at IS NULL AND fill_units IS NOT NULL", ids).
+		Select("intent_id", "fill_units").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]*big.Int, len(rows))
+	for _, r := range rows {
+		out[r.IntentID] = bigFromDecimal(r.FillUnits)
+	}
+	return out, nil
+}
+
+// autoRetryNeed is what a park's retry needs beyond its own reservation: its
+// fill re-derived from asset_amount (as RetryPoolFill does for a park not
+// re-priced) less what it already reserves. false when it has no amount.
+func (d *PoolDesk) autoRetryNeed(p models.ITIntent, own *big.Int) (*big.Int, bool) {
+	owed, ok := new(big.Int).SetString(strings.TrimSpace(p.AssetAmount), 10)
+	if !ok || owed.Sign() <= 0 {
+		return nil, false
+	}
+	fill, err := CanonicalToChainUnits(owed, d.c.Token.Decimals)
+	if err != nil {
+		return nil, false
+	}
+	if own != nil {
+		fill.Sub(fill, own)
+	}
+	return fill, true
 }
 
 // vaultRefundable: a vault order may be refunded in naira only while no fill

@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -13,11 +15,12 @@ import (
 )
 
 type fakePoolAdmin struct {
-	err    error
-	last   string
-	note   string
-	op     uuid.UUID
-	wallet string
+	err     error
+	partial bool // PayPoolPending returns its result with err
+	last    string
+	note    string
+	op      uuid.UUID
+	wallet  string
 }
 
 func (f *fakePoolAdmin) PoolOrderDetail(context.Context, uuid.UUID) (*services.PoolOrderDetail, error) {
@@ -33,13 +36,13 @@ func (f *fakePoolAdmin) VaultPoolSummary(context.Context) (*services.VaultPoolSu
 }
 func (f *fakePoolAdmin) PayPoolPending(_ context.Context, _, op uuid.UUID, wallet, note string) (*services.PayPendingResult, error) {
 	f.last, f.note, f.op, f.wallet = "pay-pending", note, op, wallet
-	if f.err != nil {
+	if f.err != nil && !f.partial {
 		return nil, f.err
 	}
 	return &services.PayPendingResult{
 		Paid:    []services.PaidPending{{Wallet: "0x00000000000000000000000000000000000000A1", TxHash: "0xpaid", Amount: "20"}},
 		Skipped: []services.SkippedPending{{Wallet: "0x00000000000000000000000000000000000000B2", Pending: "80", Reason: "not enough liquid yet"}},
-	}, nil
+	}, f.err
 }
 func (f *fakePoolAdmin) RetryPoolFill(_ context.Context, _, _ uuid.UUID, n string) (*models.ITIntent, error) {
 	f.last, f.note = "retry-fill", n
@@ -113,6 +116,34 @@ func TestLiquidityAdmin_PoolSummaryAndPayPending(t *testing.T) {
 		if w := walletDo(r, http.MethodPost, "/pool/pay-pending", map[string]string{"operationId": op, "note": "n"}); w.Code != want {
 			t.Fatalf("%v = %d, want %d", err, w.Code, want)
 		}
+	}
+}
+
+// A pay-all that failed part-way still shows what it already sent: an error
+// status with code pay_pending_partial and data {paid, skipped}.
+func TestLiquidityAdmin_PayPendingPartialFailureShowsWhatWasSent(t *testing.T) {
+	f := &fakePoolAdmin{err: errors.New("rpc down"), partial: true}
+	r := poolAdminServer(f)
+	w := walletDo(r, http.MethodPost, "/pool/pay-pending", map[string]string{"operationId": uuid.NewString(), "note": "n"})
+	var body struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Paid    []services.PaidPending    `json:"paid"`
+			Skipped []services.SkippedPending `json:"skipped"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != http.StatusInternalServerError || body.Success ||
+		body.Code != "pay_pending_partial" || body.Message != "rpc down" || len(body.Data.Paid) != 1 || body.Data.Paid[0].TxHash != "0xpaid" ||
+		len(body.Data.Skipped) != 1 {
+		t.Fatalf("partial = %d %s", w.Code, w.Body.String())
+	}
+	// Nothing sent yet: the plain error mapping, no data.
+	f.partial = false
+	if w := walletDo(r, http.MethodPost, "/pool/pay-pending", map[string]string{"operationId": uuid.NewString(), "note": "n"}); w.Code != http.StatusInternalServerError ||
+		strings.Contains(w.Body.String(), "pay_pending_partial") {
+		t.Fatalf("plain failure = %d %s", w.Code, w.Body.String())
 	}
 }
 

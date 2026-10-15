@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // Pending withdrawals (no-collateral amendment, 2026-10-14): the console's
@@ -49,6 +50,71 @@ func payPendingAuditCount(t *testing.T, r *vaultRig) int64 {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// Review 2026-10-15: the summary reads each pending wallet's on-chain amount
+// concurrently (bounded) and names LP rows with at most two queries — one for
+// current wallets, one for previous wallets only when some are unresolved —
+// keeping the ledger's order and the same LP resolution.
+func TestVaultAdmin_SummaryPendingReadsInParallelAndLooksUpLPsOnce(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	if err := r.db.Exec("ALTER TABLE payment_merchants ADD COLUMN previous_operator_wallets TEXT").Error; err != nil {
+		t.Fatal(err)
+	}
+	insertLP := func(wallet, previous string) uuid.UUID {
+		id := uuid.New()
+		if err := r.db.Exec(`INSERT INTO payment_merchants (id, user_id, name, status, kind, pool_chain_id, operator_wallet_address, previous_operator_wallets)
+			VALUES (?, ?, 'LP', 'active', ?, ?, ?, ?)`, id.String(), uuid.NewString(), models.PaymentMerchantKindLP, poolTestChain,
+			wallet, previous).Error; err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	var wallets []string
+	for i := 1; i <= 12; i++ {
+		w := common.HexToAddress(fmt.Sprintf("0x%040x", 0xd00+i)).Hex()
+		wallets = append(wallets, w)
+		seedPendingLedger(t, r, w, int64(i%5+1)) // ≤ 9 tokens: SQLite keeps larger numerics as REAL
+		r.vault.setPending(w, usdt18(int64(i%5+1)))
+	}
+	current := insertLP(wallets[2], "")
+	moved := insertLP("0x00000000000000000000000000000000000000e1", strings.ToLower(wallets[5])+",0x00000000000000000000000000000000000000e2")
+	queries := 0
+	if err := r.db.Callback().Query().After("gorm:query").Register("count_lp_lookups", func(db *gorm.DB) {
+		if db.Statement.Table == "payment_merchants" && strings.Contains(db.Statement.SQL.String(), "operator_wallet") {
+			queries++
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.vault.mu.Lock()
+	r.vault.pendingDelay = 20 * time.Millisecond
+	r.vault.mu.Unlock()
+	sum, err := r.it.VaultPoolSummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.PendingWithdrawals) != len(wallets) {
+		t.Fatalf("pending = %+v", sum.PendingWithdrawals)
+	}
+	for i, p := range sum.PendingWithdrawals {
+		want := ""
+		switch i {
+		case 2:
+			want = current.String()
+		case 5:
+			want = moved.String()
+		}
+		if !SameEVMAddress(p.Wallet, wallets[i]) || p.Amount != fmt.Sprint((i+1)%5+1) || p.LP != want {
+			t.Fatalf("pending[%d] = %+v, want %s %d lp %q", i, p, wallets[i], (i+1)%5+1, want)
+		}
+	}
+	if queries > 2 {
+		t.Fatalf("LP lookups = %d, want at most 2", queries)
+	}
+	if r.vault.pendingMaxPar < 2 || r.vault.pendingMaxPar > pendingReadConcurrency {
+		t.Fatalf("parallel reads = %d, want 2..%d", r.vault.pendingMaxPar, pendingReadConcurrency)
+	}
 }
 
 // The console lists the wallets the ledger shows owed, in the order they
@@ -310,5 +376,33 @@ func TestVaultAdmin_PayPendingOneWalletPartial(t *testing.T) {
 	res, err = r.it.PayPoolPending(ctx, uuid.New(), uuid.New(), pendingLPA, "again")
 	if err != nil || len(res.Paid) != 0 || len(res.Skipped) != 1 || res.Skipped[0].Pending != "20" || r.sender.sends != 1 {
 		t.Fatalf("res = %+v %v sends=%d, want A skipped (20 pending)", res, err, r.sender.sends)
+	}
+}
+
+// Review 2026-10-15: the op key's "_" is matched literally and a row is op's
+// only when its metadata's op equals the key: a sibling row whose op differs
+// only where the key has "_" neither matches the audit lookup nor blocks the
+// pre-broadcast hook from recording the real op.
+func TestVaultAdmin_PayPendingAuditMatchesTheOpExactly(t *testing.T) {
+	r := newVaultRig(t, 100, 25)
+	op := poolPayPendingOp(uuid.New(), pendingLPA) // "pool_pay_pending:…"
+	sibling := strings.ReplaceAll(op, "_", "x")
+	raw, _ := json.Marshal(map[string]any{"op": sibling, "tx": "0xsibling", "pending": "1", "expected": "1"})
+	if err := r.db.Create(&models.P2PAuditLog{ID: uuid.New(), Action: poolAuditPayPending, Metadata: raw}).Error; err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	if err := payPendingAudits(r.db, op).Count(&n).Error; err != nil || n != 0 {
+		t.Fatalf("lookup of %s = %d %v, want no match on the sibling", op, n, err)
+	}
+	if err := recordPayPending(r.db, uuid.New(), op, "0xreal", map[string]any{"op": op}); err != nil {
+		t.Fatalf("record: %v, want the real op recorded", err)
+	}
+	if err := recordPayPending(r.db, uuid.New(), op, "0xagain", map[string]any{"op": op}); err == nil {
+		t.Fatal("a second record of the same op must be refused")
+	}
+	prior, err := r.it.payPendingSentBefore(context.Background(), r.desk, op)
+	if err != nil || prior.hash != "0xreal" {
+		t.Fatalf("sent before = %+v %v, want 0xreal", prior, err)
 	}
 }

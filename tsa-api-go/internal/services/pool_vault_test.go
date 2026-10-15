@@ -51,6 +51,9 @@ type fakeVault struct {
 	decoder                         *LiquidityVault
 	caps                            VaultFillCaps
 	capsErr                         error
+	stateCalls                      int
+	pendingDelay                    time.Duration // each PendingWithdrawal read takes this long
+	pendingInflight, pendingMaxPar  int
 }
 
 func newFakeVault(balance, principal *big.Int) *fakeVault {
@@ -96,12 +99,22 @@ func (v *fakeVault) setPending(lp string, amount *big.Int) {
 func (v *fakeVault) State(context.Context) (*VaultState, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.stateCalls++
 	return &VaultState{Block: 1, Balance: new(big.Int).Set(v.balance), TotalPendingWithdrawals: v.totalPendingLocked(),
 		Outstanding: new(big.Int).Set(v.outstanding), TotalPrincipal: new(big.Int).Set(v.principal), Paused: v.paused}, nil
 }
 
 func (v *fakeVault) PendingWithdrawal(_ context.Context, lp string) (*big.Int, error) {
 	v.mu.Lock()
+	if v.pendingDelay > 0 {
+		v.pendingInflight++
+		v.pendingMaxPar = max(v.pendingMaxPar, v.pendingInflight)
+		delay := v.pendingDelay
+		v.mu.Unlock()
+		time.Sleep(delay)
+		v.mu.Lock()
+		v.pendingInflight--
+	}
 	defer v.mu.Unlock()
 	if v.pendingErr != nil {
 		return nil, v.pendingErr

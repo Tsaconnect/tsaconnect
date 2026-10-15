@@ -30,12 +30,16 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
  *        liquid() = balance − totalPendingWithdrawals (floored at 0)
  *      is all a fill or a claim may use; pending withdrawals come first.
  *
- *   - withdraw / claim / payPending are never paused and never gated by the
- *     depositor allow-list; do not add a guard to them. A withdraw pays what
- *     is liquid now and records the rest as the LP's pending withdrawal,
- *     which only ever goes to that LP (payPending). The principal leaves the
- *     books at once, so the pending amount stops earning. A claim needs
- *     liquid tokens and is refused while the pool is short.
+ *   - withdraw / claim are never paused and never gated by the depositor
+ *     allow-list; do not add a guard to them. A withdraw pays what is liquid
+ *     now and records the rest as the LP's pending withdrawal, which only
+ *     ever goes to that LP: payPending, never paused but callable only by an
+ *     operator, the refill wallet or the owner (owner, 2026-10-14: an admin
+ *     resolves pending withdrawals; the API pays them in the order they went
+ *     pending, and payPending can only pay the LP's own wallet). The
+ *     principal leaves the books at once, so the pending amount stops
+ *     earning. A claim needs liquid tokens and is refused while the pool is
+ *     short.
  *     The one bound: principal deposited in the last withdrawLock seconds
  *     (24 h by default) cannot be withdrawn yet, so a depositor cannot
  *     deposit just before a fill and leave right after with its spread
@@ -309,8 +313,10 @@ contract TsaLiquidityPool is Initializable, OwnableUpgradeable, PausableUpgradea
     }
 
     /// @notice Pays an LP's pending withdrawal, as far as the balance allows,
-    ///         to that LP and nowhere else. Never paused. A no-op (returns 0)
-    ///         when nothing is pending or the pool holds nothing.
+    ///         to that LP and nowhere else. Never paused, but not open to
+    ///         anyone: only an operator, the refill wallet or the owner may
+    ///         call it (owner, 2026-10-14). A no-op (returns 0) when nothing is
+    ///         pending or the pool holds nothing.
     function payPending(address lp) external nonReentrant returns (uint256 amount) {
         require(
             operators[msg.sender] || msg.sender == collateralProvider || msg.sender == owner(),

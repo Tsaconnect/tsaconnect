@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"golang.org/x/sync/errgroup"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -221,48 +222,103 @@ func ledgerPendingWallets(ctx context.Context, db *gorm.DB, chainID int64, vault
 	return out, owed, nil
 }
 
+// pendingReadConcurrency bounds the console's parallel pendingWithdrawal reads.
+const pendingReadConcurrency = 8
+
 // pendingWithdrawals are the wallets the ledger shows owed, each amount read
 // from the contract (the contract wins: a payment the ledger has not indexed
-// yet drops the wallet); an unreadable wallet keeps the ledger's amount.
+// yet drops the wallet); an unreadable wallet keeps the ledger's amount. The
+// reads run concurrently (bounded); the order stays the ledger's.
 func (s *ITService) pendingWithdrawals(ctx context.Context, d *PoolDesk) ([]pendingWallet, error) {
 	wallets, owed, err := ledgerPendingWallets(ctx, s.db, d.c.Token.ChainID, d.c.Vault.Address())
 	if err != nil {
 		return nil, err
 	}
+	amounts := make([]*big.Int, len(wallets))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(pendingReadConcurrency)
+	for i, w := range wallets {
+		g.Go(func() error {
+			amounts[i] = owed[w]
+			if onChain, err := d.c.Vault.PendingWithdrawal(gctx, w); err == nil {
+				amounts[i] = onChain
+			} else {
+				log.Printf("[liquidity] pending withdrawal of %s unreadable, showing the ledger's: %s", w, RedactAlertText(err.Error()))
+			}
+			return nil
+		})
+	}
+	_ = g.Wait() // a read failure keeps the ledger's amount, never fails the list
+	var live []string
+	for i, w := range wallets {
+		if amounts[i].Sign() > 0 {
+			live = append(live, w)
+		}
+	}
+	lps := s.lpIDsForWallets(ctx, d, live)
 	out := []pendingWallet{}
-	for _, w := range wallets {
-		amount := owed[w]
-		if onChain, err := d.c.Vault.PendingWithdrawal(ctx, w); err == nil {
-			amount = onChain
-		} else {
-			log.Printf("[liquidity] pending withdrawal of %s unreadable, showing the ledger's: %s", w, RedactAlertText(err.Error()))
+	for i, w := range wallets {
+		if amounts[i].Sign() > 0 {
+			out = append(out, pendingWallet{lp: lps[strings.ToLower(w)], wallet: w, amount: amounts[i]})
 		}
-		if amount.Sign() <= 0 {
-			continue
-		}
-		out = append(out, pendingWallet{lp: s.lpIDForWallet(ctx, d, w), wallet: w, amount: amount})
 	}
 	return out, nil
 }
 
-// lpIDForWallet is the LP row whose current — or else a previous — wallet is
-// w ("" when none, or unreadable).
-func (s *ITService) lpIDForWallet(ctx context.Context, d *PoolDesk, w string) string {
-	var rows []models.PaymentMerchant
-	lw := strings.ToLower(w)
-	if err := s.db.WithContext(ctx).Where("kind = ? AND pool_chain_id = ? AND (LOWER(operator_wallet_address) = ? OR LOWER(COALESCE(previous_operator_wallets, '')) LIKE ?)",
-		models.PaymentMerchantKindLP, d.c.Token.ChainID, lw, "%"+lw+"%").Select("id", "operator_wallet_address").Find(&rows).Error; err != nil {
-		return ""
+// lpIDsForWallets maps each wallet (lower-case) to the LP row whose current —
+// or else a previous — wallet it is; absent when none (or unreadable). One
+// query for the current wallets, one more only for those still unresolved.
+func (s *ITService) lpIDsForWallets(ctx context.Context, d *PoolDesk, wallets []string) map[string]string {
+	out := map[string]string{}
+	if len(wallets) == 0 {
+		return out
 	}
-	for _, r := range rows {
-		if SameEVMAddress(r.OperatorWalletAddress, w) {
-			return r.ID.String()
+	lower := make([]string, len(wallets))
+	for i, w := range wallets {
+		lower[i] = strings.ToLower(w)
+	}
+	lps := func() *gorm.DB {
+		return s.db.WithContext(ctx).Model(&models.PaymentMerchant{}).
+			Where("kind = ? AND pool_chain_id = ?", models.PaymentMerchantKindLP, d.c.Token.ChainID)
+	}
+	var current []models.PaymentMerchant
+	if err := lps().Where("LOWER(operator_wallet_address) IN ?", lower).
+		Select("id", "operator_wallet_address").Order("created_at").Find(&current).Error; err != nil {
+		return out
+	}
+	for _, r := range current {
+		lw := strings.ToLower(r.OperatorWalletAddress)
+		if _, seen := out[lw]; !seen {
+			out[lw] = r.ID.String()
 		}
 	}
-	if len(rows) > 0 {
-		return rows[0].ID.String()
+	var unresolved []string
+	for _, lw := range lower {
+		if _, ok := out[lw]; !ok {
+			unresolved = append(unresolved, lw)
+		}
 	}
-	return ""
+	if len(unresolved) == 0 {
+		return out
+	}
+	q := lps()
+	conds := s.db.Where("1 = 0")
+	for _, lw := range unresolved {
+		conds = conds.Or("LOWER(COALESCE(previous_operator_wallets, '')) LIKE ?", "%"+lw+"%")
+	}
+	var previous []models.PaymentMerchant
+	if err := q.Where(conds).Select("id", "previous_operator_wallets").Order("created_at").Find(&previous).Error; err != nil {
+		return out
+	}
+	for _, lw := range unresolved {
+		for _, r := range previous {
+			if r.PreviousOperatorWallets != nil && strings.Contains(strings.ToLower(*r.PreviousOperatorWallets), lw) {
+				out[lw] = r.ID.String()
+				break
+			}
+		}
+	}
+	return out
 }
 
 // PaidPending is one payPending the console's operation sent (or had sent).
@@ -424,12 +480,14 @@ func (s *ITService) payPendingOne(ctx context.Context, d *PoolDesk, adminID, ope
 // allocation transaction: the audit row (one per operation; a second is a
 // refusal and rolls the allocation back).
 func recordPayPending(tx *gorm.DB, adminID uuid.UUID, op, hash string, meta map[string]any) error {
-	var n int64
-	if err := payPendingAudits(tx, op).Count(&n).Error; err != nil {
+	var rows []models.P2PAuditLog
+	if err := payPendingAudits(tx, op).Select("id", "metadata").Find(&rows).Error; err != nil {
 		return err
 	}
-	if n > 0 {
-		return fmt.Errorf("liquidity pool: %s is already recorded", op)
+	for _, r := range rows {
+		if payPendingAuditOp(r) == op {
+			return fmt.Errorf("liquidity pool: %s is already recorded", op)
+		}
 	}
 	m := map[string]any{"tx": hash}
 	for k, v := range meta {
@@ -439,10 +497,26 @@ func recordPayPending(tx *gorm.DB, adminID uuid.UUID, op, hash string, meta map[
 	return tx.Create(&models.P2PAuditLog{ID: uuid.New(), ActorID: &adminID, Action: poolAuditPayPending, Metadata: datatypes.JSON(raw)}).Error
 }
 
-// payPendingAudits scopes the audit rows of one payPending operation (the
-// operation key is a UUID plus an address: no LIKE wildcard can occur in it).
+// payPendingAudits narrows to the audit rows that may be op's: the indexed
+// action first, then op's text in the metadata matched literally (the key's
+// "_" is a LIKE wildcard, so it is escaped). The text match is only a
+// filter — a row is op's when its metadata's "op" equals op
+// (payPendingAuditOp), checked in Go by every reader.
 func payPendingAudits(db *gorm.DB, op string) *gorm.DB {
-	return db.Model(&models.P2PAuditLog{}).Where("action = ? AND CAST(metadata AS TEXT) LIKE ?", poolAuditPayPending, "%"+op+"%")
+	return db.Model(&models.P2PAuditLog{}).Where("action = ?", poolAuditPayPending).
+		Where(`CAST(metadata AS TEXT) LIKE ? ESCAPE '\'`, "%"+likeLiteral(op)+"%")
+}
+
+// payPendingAuditOp is the operation key an audit row records ("" when its
+// metadata does not parse).
+func payPendingAuditOp(r models.P2PAuditLog) string {
+	var m struct {
+		Op string `json:"op"`
+	}
+	if json.Unmarshal(r.Metadata, &m) != nil {
+		return ""
+	}
+	return m.Op
 }
 
 // payPendingSentBefore is a payPending already sent for op: its hash (its

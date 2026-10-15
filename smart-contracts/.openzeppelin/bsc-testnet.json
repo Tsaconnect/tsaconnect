@@ -2032,15 +2032,15 @@
             "slot": "0",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:65"
+            "src": "contracts/TsaLiquidityPool.sol:69"
           },
           {
             "label": "token",
             "offset": 0,
             "slot": "1",
-            "type": "t_contract(IERC20)4583",
+            "type": "t_contract(IERC20)1345",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:76"
+            "src": "contracts/TsaLiquidityPool.sol:80"
           },
           {
             "label": "collateralProvider",
@@ -2048,7 +2048,7 @@
             "slot": "2",
             "type": "t_address",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:79"
+            "src": "contracts/TsaLiquidityPool.sol:83"
           },
           {
             "label": "operators",
@@ -2056,7 +2056,7 @@
             "slot": "3",
             "type": "t_mapping(t_address,t_bool)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:80"
+            "src": "contracts/TsaLiquidityPool.sol:84"
           },
           {
             "label": "guardian",
@@ -2064,7 +2064,7 @@
             "slot": "4",
             "type": "t_address",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:81"
+            "src": "contracts/TsaLiquidityPool.sol:85"
           },
           {
             "label": "trustedForwarder",
@@ -2072,7 +2072,7 @@
             "slot": "5",
             "type": "t_address",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:82"
+            "src": "contracts/TsaLiquidityPool.sol:86"
           },
           {
             "label": "depositor",
@@ -2080,7 +2080,7 @@
             "slot": "6",
             "type": "t_mapping(t_address,t_bool)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:84"
+            "src": "contracts/TsaLiquidityPool.sol:88"
           },
           {
             "label": "recipient",
@@ -2088,7 +2088,7 @@
             "slot": "7",
             "type": "t_mapping(t_address,t_bool)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:85"
+            "src": "contracts/TsaLiquidityPool.sol:89"
           },
           {
             "label": "totalPrincipal",
@@ -2096,7 +2096,7 @@
             "slot": "8",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:87"
+            "src": "contracts/TsaLiquidityPool.sol:91"
           },
           {
             "label": "collateral",
@@ -2104,7 +2104,7 @@
             "slot": "9",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:89"
+            "src": "contracts/TsaLiquidityPool.sol:93"
           },
           {
             "label": "outstanding",
@@ -2112,7 +2112,7 @@
             "slot": "10",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:90"
+            "src": "contracts/TsaLiquidityPool.sol:94"
           },
           {
             "label": "accEarningsPerShare",
@@ -2120,7 +2120,7 @@
             "slot": "11",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:91"
+            "src": "contracts/TsaLiquidityPool.sol:95"
           },
           {
             "label": "principal",
@@ -2128,7 +2128,7 @@
             "slot": "12",
             "type": "t_mapping(t_address,t_uint256)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:93"
+            "src": "contracts/TsaLiquidityPool.sol:97"
           },
           {
             "label": "rewardDebt",
@@ -2136,7 +2136,7 @@
             "slot": "13",
             "type": "t_mapping(t_address,t_uint256)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:94"
+            "src": "contracts/TsaLiquidityPool.sol:98"
           },
           {
             "label": "pending",
@@ -2144,7 +2144,7 @@
             "slot": "14",
             "type": "t_mapping(t_address,t_uint256)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:95"
+            "src": "contracts/TsaLiquidityPool.sol:99"
           },
           {
             "label": "minDeposit",
@@ -2152,7 +2152,7 @@
             "slot": "15",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:97"
+            "src": "contracts/TsaLiquidityPool.sol:101"
           },
           {
             "label": "maxPerLp",
@@ -2160,7 +2160,7 @@
             "slot": "16",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:98"
+            "src": "contracts/TsaLiquidityPool.sol:102"
           },
           {
             "label": "totalCap",
@@ -2168,7 +2168,7 @@
             "slot": "17",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:99"
+            "src": "contracts/TsaLiquidityPool.sol:103"
           },
           {
             "label": "maxFillPerTx",
@@ -2176,7 +2176,7 @@
             "slot": "18",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:101"
+            "src": "contracts/TsaLiquidityPool.sol:105"
           },
           {
             "label": "fillWindow",
@@ -2184,7 +2184,7 @@
             "slot": "19",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:102"
+            "src": "contracts/TsaLiquidityPool.sol:106"
           },
           {
             "label": "fillWindowCap",
@@ -2192,7 +2192,7 @@
             "slot": "20",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:103"
+            "src": "contracts/TsaLiquidityPool.sol:107"
           },
           {
             "label": "fillWindowStart",
@@ -2200,7 +2200,7 @@
             "slot": "21",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:104"
+            "src": "contracts/TsaLiquidityPool.sol:108"
           },
           {
             "label": "filledInWindow",
@@ -2208,7 +2208,7 @@
             "slot": "22",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:105"
+            "src": "contracts/TsaLiquidityPool.sol:109"
           },
           {
             "label": "usedFillRef",
@@ -2216,7 +2216,7 @@
             "slot": "23",
             "type": "t_mapping(t_bytes32,t_bool)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:107"
+            "src": "contracts/TsaLiquidityPool.sol:111"
           },
           {
             "label": "usedSettleRef",
@@ -2224,7 +2224,7 @@
             "slot": "24",
             "type": "t_mapping(t_bytes32,t_bool)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:109"
+            "src": "contracts/TsaLiquidityPool.sol:113"
           },
           {
             "label": "maxSpreadBps",
@@ -2232,7 +2232,7 @@
             "slot": "25",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:111"
+            "src": "contracts/TsaLiquidityPool.sol:115"
           },
           {
             "label": "usedRefillRef",
@@ -2240,7 +2240,7 @@
             "slot": "26",
             "type": "t_mapping(t_bytes32,t_bool)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:113"
+            "src": "contracts/TsaLiquidityPool.sol:117"
           },
           {
             "label": "withdrawLock",
@@ -2248,7 +2248,7 @@
             "slot": "27",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:115"
+            "src": "contracts/TsaLiquidityPool.sol:119"
           },
           {
             "label": "lockedPrincipal",
@@ -2256,7 +2256,7 @@
             "slot": "28",
             "type": "t_mapping(t_address,t_uint256)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:119"
+            "src": "contracts/TsaLiquidityPool.sol:123"
           },
           {
             "label": "lockedUntil",
@@ -2264,7 +2264,7 @@
             "slot": "29",
             "type": "t_mapping(t_address,t_uint256)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:120"
+            "src": "contracts/TsaLiquidityPool.sol:124"
           },
           {
             "label": "pendingWithdrawal",
@@ -2272,7 +2272,7 @@
             "slot": "30",
             "type": "t_mapping(t_address,t_uint256)",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:125"
+            "src": "contracts/TsaLiquidityPool.sol:129"
           },
           {
             "label": "totalPendingWithdrawals",
@@ -2280,7 +2280,7 @@
             "slot": "31",
             "type": "t_uint256",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:126"
+            "src": "contracts/TsaLiquidityPool.sol:130"
           },
           {
             "label": "__gap",
@@ -2288,7 +2288,7 @@
             "slot": "32",
             "type": "t_array(t_uint256)23_storage",
             "contract": "TsaLiquidityPool",
-            "src": "contracts/TsaLiquidityPool.sol:128"
+            "src": "contracts/TsaLiquidityPool.sol:132"
           }
         ],
         "types": {
@@ -2300,7 +2300,7 @@
             "label": "bool",
             "numberOfBytes": "1"
           },
-          "t_struct(InitializableStorage)1192_storage": {
+          "t_struct(InitializableStorage)369_storage": {
             "label": "struct Initializable.InitializableStorage",
             "members": [
               {
@@ -2354,7 +2354,7 @@
             "label": "bytes32",
             "numberOfBytes": "32"
           },
-          "t_contract(IERC20)4583": {
+          "t_contract(IERC20)1345": {
             "label": "contract IERC20",
             "numberOfBytes": "20"
           },

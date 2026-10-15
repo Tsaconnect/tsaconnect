@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -272,5 +273,31 @@ func TestVaultIndexer_ReconcileWithPendingWithdrawals(t *testing.T) {
 	got := strings.Join(rep.Drift, "\n")
 	if len(rep.Drift) != 2 || !strings.Contains(got, "pending_withdrawals") || !strings.Contains(got, "invariant") {
 		t.Fatalf("drift = %v, want pending and invariant drift", rep.Drift)
+	}
+}
+
+// The pool holds less than is pending (liquid 0) but payPending pays
+// min(pending, balance): the admin is told as soon as any balance can go out,
+// and not while the pool holds nothing.
+func TestVaultIndexer_AlertsPendingWithdrawalsPayableInPart(t *testing.T) {
+	prev := reconcileAlerts
+	t.Cleanup(func() { reconcileAlerts = prev })
+	x, _, books := newIndexerRig(t)
+	if _, err := x.IndexOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		balance int64
+		want    bool
+	}{{0, false}, {5, true}} {
+		reconcileAlerts = &alertLimiter{last: map[string]time.Time{}}
+		logs := captureLog(t)
+		books.state = VaultState{Balance: big.NewInt(c.balance), TotalPendingWithdrawals: big.NewInt(20), Outstanding: new(big.Int), TotalPrincipal: new(big.Int)}
+		if _, err := x.Reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(logs.String(), "ALERT liquidity_pending_withdrawals"); got != c.want {
+			t.Fatalf("balance %d: alerted = %v, want %v\n%s", c.balance, got, c.want, logs.String())
+		}
 	}
 }
