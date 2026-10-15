@@ -38,6 +38,8 @@ export interface LiquidityMe {
   earned?: string;
   sharePercent?: string;
   limits: { min: string; max: string };
+  /** False when the API could not read the pool's limits: min/max are empty and deposits are refused. */
+  limitsReadable?: boolean;
   minClaim: string;
   paused: boolean;
   /** The account's wallet is no longer the LP wallet: deposits and gas-free

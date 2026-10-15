@@ -42,6 +42,7 @@ export function liquidityAmountError(me: LiquidityMe, action: LiquidityAction, i
       ? `You can withdraw ${formatLiquidityAmount(free)} ${sym} now. The rest of your deposit unlocks ${new Date(me.lockedUntil).toLocaleString()}.`
       : `You can withdraw at most ${formatLiquidityAmount(free)} ${sym}.`;
   }
+  if (!limitsKnown(me)) return 'Deposits are not available right now. Try again shortly.';
   if (amount < units(me.limits.min, d)) return `Add at least ${me.limits.min} ${sym}.`;
   const max = units(me.limits.max, d);
   if (principal + amount > max) {
@@ -50,6 +51,17 @@ export function liquidityAmountError(me: LiquidityMe, action: LiquidityAction, i
   }
   return null;
 }
+
+/** A deposit above the wallet's own balance, when that balance is known (decimal strings). */
+export function overBalanceError(input: string, balance: string | null | undefined, sym = 'USDT', decimals = 18): string | null {
+  if (balance == null || !/^\d+(?:\.\d+)?$/.test(input.trim())) return null;
+  return units(input.trim(), decimals) > units(balance, decimals)
+    ? `You have ${formatLiquidityAmount(balance)} ${sym} in this wallet.`
+    : null;
+}
+
+/** The pool's deposit limits were read (older APIs omit the flag). */
+export const limitsKnown = (me: LiquidityMe) => me.limitsReadable !== false && !!me.limits.min && !!me.limits.max;
 
 /** The gas-free claim pays the LP wallet; it needs the minimum and the account still on that wallet. */
 export function canClaimGasFree(me: LiquidityMe): boolean {
