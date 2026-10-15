@@ -16,6 +16,8 @@ export interface P2PErrorLike {
   data?: unknown;
 }
 
+const CODE_COPY_DIRECT_MOVED = 'Direct P2P has moved to BNB Chain. Choose BNB Chain as the network and try again.';
+
 const CODE_COPY: Record<string, string> = {
   app_update_required: 'Please update the app to continue this trade.',
   [KYC_VERIFICATION_REQUIRED]: 'Verify your identity to use P2P.',
@@ -26,6 +28,10 @@ const CODE_COPY: Record<string, string> = {
   sponsorship_in_progress: 'A gas top-up is already in progress. Give it a moment.',
   gas_unavailable: 'The gas top-up is unavailable right now. Try again in a minute.',
   WALLET_PROOF_REQUIRED: 'Prove ownership of your wallet before continuing.',
+  // 409 on new activity on Sonic (Sonic keeps Payment Merchant trades only).
+  p2p_direct_moved: CODE_COPY_DIRECT_MOVED,
+  // 409: a Payment Merchant posting on BNB Chain direct P2P (PMs stay on Sonic).
+  p2p_pm_not_on_direct: 'Payment Merchant ads stay on Sonic. Choose Sonic as the network and try again.',
 };
 
 // A client-side timeout says nothing about the outcome: the request may have
@@ -52,6 +58,7 @@ const RULES: [RegExp, string][] = [
   [/not authorized for this action/i, "You can't do that on this trade."],
   [/trade not found|ad not found/i, "We couldn't find that. It may have been removed."],
   [/payment method not found/i, 'Pick a payment method and try again.'],
+  [/direct p2p has moved/i, CODE_COPY_DIRECT_MOVED],
   [/token not supported on this chain/i, "This token isn't supported on that network."],
   [/ad has open trades/i, 'This ad has trades in progress. Wait for them to finish first.'],
   // ErrPoolStockAdExists (p2p_pool_ad.go): the LP's stock ad is live and not due.

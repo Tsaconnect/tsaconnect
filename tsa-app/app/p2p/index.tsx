@@ -20,6 +20,7 @@ import {
 import { KycRequiredState } from '@/components/p2p/KycRequiredState';
 import { marketLoadError, type MarketError } from '@/utils/p2pMarketError';
 import { getChainByChainId } from '../../constants/chains';
+import { sortP2PChains } from '../../utils/p2pChains';
 import { useIsPaymentMerchant } from '../../hooks/useIsPaymentMerchant';
 import { shouldShowPmCta, PM_MERCHANT_REQUEST_ROUTE } from '@/utils/pmCta';
 import { liquidityApi, type PoolCard } from '@/services/liquidityApi';
@@ -51,17 +52,6 @@ import {
 // asset, and the API hides MCGP ads from browse.
 const FALLBACK_TOKENS = ['USDT', 'USDC'];
 
-// Sonic chain IDs (mainnet + testnet) — used for the Sonic-first sort order.
-const SONIC_CHAIN_IDS = new Set([146, 14601]);
-
-function sortChainInfos(chains: P2PChainInfo[]): P2PChainInfo[] {
-  return [...chains].sort((a, b) => {
-    const aS = SONIC_CHAIN_IDS.has(a.chainId) ? 0 : 1;
-    const bS = SONIC_CHAIN_IDS.has(b.chainId) ? 0 : 1;
-    if (aS !== bS) return aS - bS;
-    return a.chainId - b.chainId;
-  });
-}
 
 const P2PMarketScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
@@ -105,7 +95,7 @@ const P2PMarketScreen: React.FC = () => {
   // chain filter dropdown.
   const chainsForToken: P2PChainInfo[] = React.useMemo(() => {
     if (enabledChains.length === 0) return [];
-    return sortChainInfos(enabledChains.filter((c) => c.assets.includes(token)));
+    return sortP2PChains(enabledChains.filter((c) => c.assets.includes(token)));
   }, [enabledChains, token]);
 
   // Fetch the enabled chains on mount; graceful fallback on failure.

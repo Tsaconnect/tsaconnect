@@ -31,6 +31,14 @@ import {
   type P2PPaymentMethod,
 } from '../../services/p2p';
 import { getActiveWallet } from '../../services/wallet';
+import {
+  adChainsFor,
+  adChainsView,
+  adPublishChain,
+  adTokenSymbols,
+  NO_OPEN_NETWORK_TITLE,
+  type ChainsLoad,
+} from '../../utils/p2pChains';
 import { useP2pCurrency } from '../../hooks/useP2pCurrency';
 import { useCurrency } from '../../contexts/CurrencyContext';
 import { feeBpsFor, formatFeePct } from '../../services/p2pFee';
@@ -47,6 +55,7 @@ import {
   Button,
   Card,
   Chip,
+  ErrorState,
   Icon,
   Input,
   PressableScale,
@@ -54,32 +63,11 @@ import {
   Text,
 } from '@/components/ui';
 
-// Static fallback token list — used when the backend's /p2p/chains endpoint
-// is unreachable so the screen never crashes with an empty token set. MCGP is
-// deliberately absent: wallet MCGP may not be used in P2P (owner decision
-// 2026-09-28), and the API refuses new MCGP ads.
-const FALLBACK_TOKENS = [
-  { symbol: 'USDT', decimals: 6 },
-  { symbol: 'USDC', decimals: 6 },
-];
-
-type TokenEntry = { symbol: string; decimals: number };
-
-// Sonic chain IDs (mainnet + testnet).
-const SONIC_CHAIN_IDS = new Set([146, 14601]);
-
-function isSonicChain(chainId: number): boolean {
-  return SONIC_CHAIN_IDS.has(chainId);
-}
-
-function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
-  return [...chains].sort((a, b) => {
-    const aS = isSonicChain(a.chainId) ? 0 : 1;
-    const bS = isSonicChain(b.chainId) ? 0 : 1;
-    if (aS !== bS) return aS - bS;
-    return a.chainId - b.chainId;
-  });
-}
+// Token chips shown until /p2p/chains lands (publish waits for it). Symbols
+// only: decimals depend on the chain (p2pTokenDecimals). MCGP is deliberately
+// absent: wallet MCGP may not be used in P2P (owner decision 2026-09-28), and
+// the API refuses new MCGP ads.
+const FALLBACK_TOKENS = ['USDT', 'USDC'];
 
 const CreateBuyAdScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
@@ -98,19 +86,20 @@ const CreateBuyAdScreen: React.FC = () => {
   const symbol = currencyConfig.symbol;
 
   // ── Chain / token data from the backend ─────────────────────────────────
+  // Publish waits for these (adPublishChain): a failed fetch shows Retry,
+  // never a chainId-less create that the API would default to Sonic.
   const [enabledChains, setEnabledChains] = useState<P2PChainInfo[]>([]);
-  const [chainsFetched, setChainsFetched] = useState(false);
+  const [chainsLoad, setChainsLoad] = useState<ChainsLoad>('loading');
 
-  const availableTokens: TokenEntry[] = useMemo(() => {
-    if (!chainsFetched || enabledChains.length === 0) return FALLBACK_TOKENS;
-    const symbols = new Set(enabledChains.flatMap((c) => c.assets));
-    return Array.from(symbols).map((sym) => {
-      const fallback = FALLBACK_TOKENS.find((t) => t.symbol === sym);
-      return fallback ?? { symbol: sym, decimals: 18 };
-    });
-  }, [enabledChains, chainsFetched]);
+  // Tokens on the chains open to this caller for new ads.
+  const availableTokens: string[] = useMemo(
+    () => (chainsLoad === 'ready' ? adTokenSymbols(enabledChains) : FALLBACK_TOKENS),
+    [enabledChains, chainsLoad],
+  );
+  const chainsView = adChainsView(chainsLoad, enabledChains);
 
-  const [token, setToken] = useState<TokenEntry>(FALLBACK_TOKENS[0]);
+  const [tokenSymbol, setTokenSymbol] = useState<string>(FALLBACK_TOKENS[0]);
+  const token = useMemo(() => ({ symbol: tokenSymbol }), [tokenSymbol]);
   const [amountInput, setAmountInput] = useState(''); // human decimal — total to buy
   const [rateInput, setRateInput] = useState('');
   const [minLimitInput, setMinLimitInput] = useState('');
@@ -123,10 +112,11 @@ const CreateBuyAdScreen: React.FC = () => {
   const [submitStage, setSubmitStage] = useState('');
 
   // ── Chain selector state ──────────────────────────────────────────────
-  const chainsForToken: P2PChainInfo[] = useMemo(() => {
-    if (enabledChains.length === 0) return [];
-    return sortChains(enabledChains.filter((c) => c.assets.includes(token.symbol)));
-  }, [enabledChains, token.symbol]);
+  // The open chains offering the token, BSC first.
+  const chainsForToken: P2PChainInfo[] = useMemo(
+    () => adChainsFor(enabledChains, token.symbol),
+    [enabledChains, token.symbol],
+  );
 
   const [selectedChainId, setSelectedChainId] = useState<number | undefined>(undefined);
 
@@ -138,7 +128,7 @@ const CreateBuyAdScreen: React.FC = () => {
     }
   }, [chainsForToken]);
 
-  const showChainChooser = chainsFetched && chainsForToken.length > 1;
+  const showChainChooser = chainsLoad === 'ready' && chainsForToken.length > 1;
 
   useEffect(() => {
     (async () => {
@@ -153,21 +143,29 @@ const CreateBuyAdScreen: React.FC = () => {
     })();
   }, []);
 
-  // Fetch enabled chains for asset-first, chain-follows selection.
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await chainsApi.list();
-        if (res.success && res.data && res.data.length > 0) {
-          setEnabledChains(res.data);
-        }
-      } catch (err) {
-        console.warn('[create-buy-ad] chainsApi.list failed, using fallback tokens', err);
-      } finally {
-        setChainsFetched(true);
+  // Fetch enabled chains for asset-first, chain-follows selection (and on Retry).
+  const loadChains = React.useCallback(async () => {
+    setChainsLoad('loading');
+    try {
+      const res = await chainsApi.list();
+      if (res.success && res.data && res.data.length > 0) {
+        setEnabledChains(res.data);
+        setChainsLoad('ready');
+        return;
       }
-    })();
+    } catch (err) {
+      console.warn('[create-buy-ad] chainsApi.list failed', err);
+    }
+    setChainsLoad('failed');
   }, []);
+  useEffect(() => {
+    loadChains();
+  }, [loadChains]);
+
+  // A token the open chains no longer offer moves to the first one they do.
+  useEffect(() => {
+    if (availableTokens.length > 0 && !availableTokens.includes(tokenSymbol)) setTokenSymbol(availableTokens[0]);
+  }, [availableTokens, tokenSymbol]);
 
   // Clear PM selection when currency changes.
   useEffect(() => {
@@ -201,6 +199,11 @@ const CreateBuyAdScreen: React.FC = () => {
     if (!valid || submitting) return;
     setSubmitting(true);
     try {
+      // Never create without chainId: the API would default it to Sonic, with
+      // this amount scaled by the selected chain's decimals.
+      const adChain = adPublishChain(chainsLoad, selectedChainId);
+      if (adChain.kind === 'block') throw new Error(adChain.message);
+
       setSubmitStage('Loading wallet…');
       const merchantWallet = await getActiveWallet();
       if (!merchantWallet) {
@@ -235,7 +238,7 @@ const CreateBuyAdScreen: React.FC = () => {
         sellerAddress: merchantWallet,
         side: 'buy',
         terms,
-        ...(selectedChainId != null ? { chainId: selectedChainId } : {}),
+        chainId: adChain.chainId,
       });
 
       if (!createRes.success || !createRes.data) {
@@ -282,18 +285,35 @@ const CreateBuyAdScreen: React.FC = () => {
           <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
             Token to buy
           </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-            {availableTokens.map((t) => (
-              <Chip
-                key={t.symbol}
-                label={t.symbol}
-                selected={token.symbol === t.symbol}
-                onPress={() => setToken(t)}
-              />
-            ))}
-          </View>
+          {chainsView === 'none_open' ? (
+            <ErrorState
+              title={NO_OPEN_NETWORK_TITLE}
+              subtitle="New ads are paused on every network for now. Check again in a little while."
+              onRetry={loadChains}
+              retryLabel="Retry"
+            />
+          ) : (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+              {availableTokens.map((sym) => (
+                <Chip
+                  key={sym}
+                  label={sym}
+                  selected={token.symbol === sym}
+                  onPress={() => setTokenSymbol(sym)}
+                />
+              ))}
+            </View>
+          )}
 
           {/* ── Chain ────────────────────────────────────────────────── */}
+          {chainsLoad === 'failed' && (
+            <ErrorState
+              title="Couldn't load networks"
+              subtitle="Publishing needs the ad's network. Check your connection and retry."
+              onRetry={loadChains}
+              retryLabel="Retry"
+            />
+          )}
           {showChainChooser && (
             <>
               <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>

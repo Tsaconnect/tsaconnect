@@ -25,7 +25,7 @@
 // so recovery is user-initiated.
 
 import { p2pErrorMessage, p2pKycCode, p2pRefusalError, type P2PErrorLike } from './p2pErrors';
-import { poolApi, p2pChainKey } from './p2p';
+import { poolApi, p2pChainKey, p2pNetwork } from './p2p';
 import { ensureGas } from './wallet';
 import { addPending } from './p2pPending';
 import { waitMined } from './txWait';
@@ -123,7 +123,7 @@ export async function ensureEscrowFunding(p: EnsureFundingParams): Promise<Ensur
     ensureP2PGas({ chainId, walletAddress, action, onStage, onAlert: alert });
   if (!gasAction) {
     onStage?.('Checking gas…');
-    if (!(await ensureGas(chainKey, walletAddress, alert))) return { status: 'aborted', reason: 'no gas' };
+    if (!(await ensureGas(chainKey, walletAddress, alert, p2pNetwork(chainId)))) return { status: 'aborted', reason: 'no gas' };
   }
 
   // Approve the escrow for the shortfall if the current allowance is short.

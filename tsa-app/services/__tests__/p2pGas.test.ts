@@ -2,8 +2,8 @@ const mockTopUp = jest.fn();
 jest.mock('../p2p', () => ({
   gasApi: { topUp: (...a: any[]) => mockTopUp(...a) },
   p2pChainKey: (id: number) => `chain-${id}`,
-  p2pNetwork: (id: number) => (id === 97 ? 'testnet' : 'mainnet'),
-  SONIC_GAS_SPONSOR_CHAIN_IDS: new Set([146]),
+  p2pNetwork: (id: number) => (id === 97 || id === 14601 ? 'testnet' : 'mainnet'),
+  P2P_GAS_SPONSOR_CHAIN_IDS: new Set([146, 56]),
 }));
 const mockEnsureGas = jest.fn();
 jest.mock('../wallet', () => ({ ensureGas: (...a: any[]) => mockEnsureGas(...a) }));
@@ -22,21 +22,57 @@ beforeEach(() => {
   mockEnsureGas.mockResolvedValue(true);
 });
 
-it('never asks the sponsor off Sonic mainnet (incl. testnet 14601)', async () => {
-  await expect(ensureP2PGas({ chainId: 56, walletAddress: W, action: 'release', tradeId: 't' })).resolves.toBe(true);
+it('never asks the sponsor on a testnet (BSC 97, Sonic 14601)', async () => {
+  await expect(ensureP2PGas({ chainId: 97, walletAddress: W, action: 'release', tradeId: 't' })).resolves.toBe(true);
   await ensureP2PGas({ chainId: 14601, walletAddress: W, action: 'release', tradeId: 't' });
   expect(mockTopUp).not.toHaveBeenCalled();
+  expect(mockEnsureGas).toHaveBeenCalledWith('chain-97', W, expect.any(Function), 'testnet');
+});
+
+it('BSC mainnet (56) asks the sponsor with its chainId, then checks BNB on BSC', async () => {
+  mockTopUp.mockResolvedValue({ success: true, data: { skipped: false, txHash: '0xbnb', chainId: 56 } });
+  await ensureP2PGas({ chainId: 56, walletAddress: W, action: 'deposit' });
+  expect(mockTopUp).toHaveBeenCalledWith({ action: 'deposit', chainId: 56 });
+  expect(mockWaitMined).toHaveBeenCalledWith(56, '0xbnb', expect.anything());
   expect(mockEnsureGas).toHaveBeenCalledWith('chain-56', W, expect.any(Function), 'mainnet');
 });
 
-it('sends the action with its tradeId / adId', async () => {
+it('never waits on BSC for a drip the API sent on another chain (no 60 s stall)', async () => {
+  // An API from before the chainId echo funded Sonic for a BSC request.
+  mockTopUp.mockResolvedValue({ success: true, data: { skipped: false, txHash: '0xsonic' } });
+  await expect(ensureP2PGas({ chainId: 56, walletAddress: W, action: 'deposit' })).resolves.toBe(true);
+  // An echo of another chain, on success or on an unconfirmed 503.
+  mockTopUp.mockResolvedValue({ success: true, data: { skipped: false, txHash: '0xsonic', chainId: 146 } });
+  await ensureP2PGas({ chainId: 56, walletAddress: W, action: 'deposit' });
+  mockTopUp.mockResolvedValue({ success: false, status: 503, code: 'gas_unavailable', data: { txHash: '0xsonic', chainId: 146 } });
+  await ensureP2PGas({ chainId: 56, walletAddress: W, action: 'deposit' });
+  expect(mockWaitMined).not.toHaveBeenCalled();
+  expect(mockEnsureGas).toHaveBeenLastCalledWith('chain-56', W, expect.any(Function), 'mainnet');
+});
+
+it('409 gas_not_needed for BSC proceeds straight to the BNB balance check', async () => {
+  const onAlert = jest.fn();
+  mockTopUp.mockResolvedValue({ success: false, status: 409, code: 'gas_not_needed', message: 'x' });
+  await expect(ensureP2PGas({ chainId: 56, walletAddress: W, action: 'approve', onAlert })).resolves.toBe(true);
+  expect(mockWaitMined).not.toHaveBeenCalled();
+  expect(mockEnsureGas).toHaveBeenCalledWith('chain-56', W, expect.any(Function), 'mainnet');
+  expect(onAlert).not.toHaveBeenCalled();
+});
+
+it('Sonic still waits on an echo-less drip from an older API (it only funded Sonic)', async () => {
+  mockTopUp.mockResolvedValue({ success: true, data: { skipped: false, txHash: '0xs' } });
+  await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'deposit' });
+  expect(mockWaitMined).toHaveBeenCalledWith(146, '0xs', expect.anything());
+});
+
+it('sends the action with its tradeId / adId (old fields) plus the chainId', async () => {
   mockTopUp.mockResolvedValue({ success: true, data: { skipped: true } });
   await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'mark_paid', tradeId: 't1' });
-  expect(mockTopUp).toHaveBeenCalledWith({ action: 'mark_paid', tradeId: 't1' });
-  await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'open_trade', adId: 'a1' });
-  expect(mockTopUp).toHaveBeenLastCalledWith({ action: 'open_trade', adId: 'a1' });
+  expect(mockTopUp).toHaveBeenCalledWith({ action: 'mark_paid', tradeId: 't1', chainId: 146 });
+  await ensureP2PGas({ chainId: 56, walletAddress: W, action: 'open_trade', adId: 'a1' });
+  expect(mockTopUp).toHaveBeenLastCalledWith({ action: 'open_trade', adId: 'a1', chainId: 56 });
   await ensureP2PGas({ chainId: 146, walletAddress: W, action: 'approve' });
-  expect(mockTopUp).toHaveBeenLastCalledWith({ action: 'approve' });
+  expect(mockTopUp).toHaveBeenLastCalledWith({ action: 'approve', chainId: 146 });
   expect(mockWaitMined).not.toHaveBeenCalled();
 });
 

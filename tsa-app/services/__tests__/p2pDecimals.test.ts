@@ -7,7 +7,7 @@ jest.mock('../walletApi', () => ({
 }));
 
 // eslint-disable-next-line import/first
-import { chainsApi, p2pTokenDecimals } from '../p2p';
+import { chainsApi, p2pTokenDecimals, p2pTokenKnown } from '../p2p';
 
 const fetchMock = jest.fn();
 (global as any).fetch = fetchMock;
@@ -40,5 +40,25 @@ describe('chain decimals from the API', () => {
     await chainsApi.listAll();
     expect(p2pTokenDecimals(999, 'USDC')).toBe(18); // the table would say 6
     expect(p2pTokenDecimals(14601, 'USDT')).toBe(6); // never reported: the table
+  });
+});
+
+describe('BSC mainnet stables (direct P2P)', () => {
+  it('are 18 dp on 56 even before /p2p/chains reports them', () => {
+    expect(p2pTokenDecimals(56, 'USDT')).toBe(18);
+    expect(p2pTokenDecimals(56, 'usdc')).toBe(18);
+    expect(p2pTokenDecimals(146, 'USDT')).toBe(6);
+  });
+});
+
+describe('p2pTokenKnown (ad detail fails closed on an unknown token)', () => {
+  it('knows the P2P stables on any chain and a token the API reported', async () => {
+    expect(p2pTokenKnown(56, 'USDT')).toBe(true);
+    expect(p2pTokenKnown(146, 'usdc')).toBe(true);
+    expect(p2pTokenKnown(56, 'WEIRD')).toBe(false);
+    respond([{ chainId: 56, assets: ['FDUSD'], decimals: { FDUSD: 18 } }]);
+    await chainsApi.list();
+    expect(p2pTokenKnown(56, 'FDUSD')).toBe(true);
+    expect(p2pTokenKnown(146, 'FDUSD')).toBe(false);
   });
 });

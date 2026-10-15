@@ -36,11 +36,11 @@ import {
   hasSufficientAllowance,
   maskedAccountLabel,
   p2pTokenDecimals,
+  p2pTokenKnown,
   parseTokenAmount,
   previewFiatFromToken,
   exceedsCapacity,
   withinFiatLimits,
-  TOKEN_DECIMALS as P2P_TOKEN_DECIMALS,
   type ApiResponse,
   type P2PAd,
   type P2PAdPaymentMethod,
@@ -95,8 +95,6 @@ import {
 import type { PickerItem } from '@/components/ui';
 import { PayerInstructionNotice } from '@/components/common/PayerInstructionNotice';
 import { payerInstructionOf } from '@/utils/payInto';
-
-// TOKEN_DECIMALS is imported from services/p2p as P2P_TOKEN_DECIMALS — single source of truth.
 
 const AdDetailScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
@@ -227,7 +225,7 @@ const AdDetailScreen: React.FC = () => {
   // On the sell/deposit path a wrong decimal count makes parseTokenAmount produce
   // the wrong on-chain amount — approve/deposit mismatch or massive over-deposit.
   // tokenSupported gates the sell flow; buy-side (user receives crypto) is unaffected.
-  const tokenSupported = ad ? P2P_TOKEN_DECIMALS[ad.token] !== undefined : false;
+  const tokenSupported = ad ? p2pTokenKnown(ad.chainId, ad.token) : false;
   // The sell/deposit path NEVER uses this fallback: it's gated by `tokenSupported`
   // (an unknown token blocks the sell flow entirely), so base-unit math always
   // uses a known decimals value. The 6 fallback is display-only for the sell-ad

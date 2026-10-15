@@ -30,10 +30,21 @@ import {
   paymentMethodsApi,
   poolApi,
   parseTokenAmount,
+  p2pNetwork,
   p2pTokenDecimals,
   type P2PChainInfo,
   type P2PPaymentMethod,
 } from '../../services/p2p';
+import {
+  adChainsFor,
+  adChainsView,
+  adPublishChain,
+  adTokenSymbols,
+  NO_OPEN_NETWORK_TITLE,
+  bscTopUpSwapParams,
+  walletShort,
+  type ChainsLoad,
+} from '../../utils/p2pChains';
 import { ensureEscrowFunding } from '../../services/escrowFunding';
 import { feeBpsFor, feeSplit, formatFeePct } from '../../services/p2pFee';
 import {
@@ -72,6 +83,7 @@ import {
   Card,
   Chip,
   Divider,
+  ErrorState,
   Icon,
   Input,
   PressableScale,
@@ -82,36 +94,13 @@ import {
   Text,
 } from '@/components/ui';
 
-// Static fallback token list — used when the backend's /p2p/chains endpoint
-// is unreachable so the screen never crashes with an empty token set. MCGP is
-// deliberately absent: wallet MCGP may not be used in P2P (owner decision
-// 2026-09-28), and the API refuses new MCGP ads.
-const FALLBACK_TOKENS = [
-  { symbol: 'USDT', decimals: 6 },
-  { symbol: 'USDC', decimals: 6 },
-];
+// Token chips shown until /p2p/chains lands (publish waits for it). Symbols
+// only: decimals depend on the chain (p2pTokenDecimals). MCGP is deliberately
+// absent: wallet MCGP may not be used in P2P (owner decision 2026-09-28), and
+// the API refuses new MCGP ads.
+const FALLBACK_TOKENS = ['USDT', 'USDC'];
 
-type TokenEntry = { symbol: string; decimals: number };
 type RateType = 'fixed' | 'float';
-
-// Sonic chain IDs (mainnet + testnet). Used for the "Sonic-first" chain sort
-// and the pool-balance caveat copy.
-const SONIC_CHAIN_IDS = new Set([146, 14601]);
-
-/** Return true if the given chainId is Sonic (either net). */
-function isSonicChain(chainId: number): boolean {
-  return SONIC_CHAIN_IDS.has(chainId);
-}
-
-/** Sort chains: Sonic first, then ascending chainId. Stable for equal positions. */
-function sortChains(chains: P2PChainInfo[]): P2PChainInfo[] {
-  return [...chains].sort((a, b) => {
-    const aS = isSonicChain(a.chainId) ? 0 : 1;
-    const bS = isSonicChain(b.chainId) ? 0 : 1;
-    if (aS !== bS) return aS - bS;
-    return a.chainId - b.chainId;
-  });
-}
 
 /**
  * Pre-flight integrity check: the stored private key must actually derive to
@@ -160,23 +149,21 @@ const CreateAdScreen: React.FC = () => {
   const symbol = currencyConfig.symbol;
 
   // ── Chain / token data from the backend ─────────────────────────────────
-  // enabledChains: the P2P-enabled chains returned by /p2p/chains. Empty
-  // until the fetch completes; falls back to FALLBACK_TOKENS on failure.
+  // enabledChains: the P2P-enabled chains returned by /p2p/chains. Publish
+  // waits for them (adPublishChain): a failed fetch shows Retry, never a
+  // chainId-less create that the API would default to Sonic.
   const [enabledChains, setEnabledChains] = useState<P2PChainInfo[]>([]);
-  const [chainsFetched, setChainsFetched] = useState(false);
+  const [chainsLoad, setChainsLoad] = useState<ChainsLoad>('loading');
 
-  // Derive the selectable token list from the union of assets across all
-  // enabled chains, preserving decimal metadata from FALLBACK_TOKENS.
-  const availableTokens: TokenEntry[] = useMemo(() => {
-    if (!chainsFetched || enabledChains.length === 0) return FALLBACK_TOKENS;
-    const symbols = new Set(enabledChains.flatMap((c) => c.assets));
-    return Array.from(symbols).map((sym) => {
-      const fallback = FALLBACK_TOKENS.find((t) => t.symbol === sym);
-      return fallback ?? { symbol: sym, decimals: 18 };
-    });
-  }, [enabledChains, chainsFetched]);
+  // Tokens on the chains open to this caller for new ads.
+  const availableTokens: string[] = useMemo(() => {
+    if (chainsLoad !== 'ready') return FALLBACK_TOKENS;
+    return adTokenSymbols(enabledChains);
+  }, [enabledChains, chainsLoad]);
+  const chainsView = adChainsView(chainsLoad, enabledChains);
 
-  const [token, setToken] = useState<TokenEntry>(FALLBACK_TOKENS[0]);
+  const [tokenSymbol, setTokenSymbol] = useState<string>(FALLBACK_TOKENS[0]);
+  const token = useMemo(() => ({ symbol: tokenSymbol }), [tokenSymbol]);
   const [amountInput, setAmountInput] = useState(''); // human decimal
   const [rateType, setRateType] = useState<RateType>('fixed');
   const [rateInput, setRateInput] = useState('');
@@ -216,13 +203,13 @@ const CreateAdScreen: React.FC = () => {
   const balReqRef = useRef(0);
 
   // ── Chain selector state ──────────────────────────────────────────────
-  // chainsForToken: sorted subset of enabledChains that offer the current token.
-  // selectedChainId: null when the chooser is hidden (single-chain token); the
-  // first chain in chainsForToken otherwise. undefined = not yet resolved.
-  const chainsForToken: P2PChainInfo[] = useMemo(() => {
-    if (enabledChains.length === 0) return [];
-    return sortChains(enabledChains.filter((c) => c.assets.includes(token.symbol)));
-  }, [enabledChains, token.symbol]);
+  // chainsForToken: the open chains offering the current token, BSC first.
+  // selectedChainId: the first of them (the chooser hides for a single-chain
+  // token, but the id is still sent). undefined = not yet resolved.
+  const chainsForToken: P2PChainInfo[] = useMemo(
+    () => adChainsFor(enabledChains, token.symbol),
+    [enabledChains, token.symbol],
+  );
 
   const [selectedChainId, setSelectedChainId] = useState<number | undefined>(undefined);
 
@@ -232,8 +219,8 @@ const CreateAdScreen: React.FC = () => {
     if (chainsForToken.length > 0) {
       setSelectedChainId(chainsForToken[0].chainId);
     } else {
-      // No chain data yet (before fetch or on fallback path) — leave undefined
-      // so we omit chainId from the create call and let the backend default.
+      // No chain data yet, or none open for this token: publish blocks
+      // (adPublishChain) rather than omitting chainId.
       setSelectedChainId(undefined);
     }
   }, [chainsForToken]);
@@ -251,7 +238,7 @@ const CreateAdScreen: React.FC = () => {
   // Show the chain chooser only when:
   //  (a) we have a valid backend response, AND
   //  (b) more than one chain offers the current token.
-  const showChainChooser = chainsFetched && chainsForToken.length > 1;
+  const showChainChooser = chainsLoad === 'ready' && chainsForToken.length > 1;
 
   // Load all payment methods once on mount; the visible subset is filtered by
   // the selected currency below. Always clears the loading flag — a network
@@ -271,25 +258,31 @@ const CreateAdScreen: React.FC = () => {
     })();
   }, []);
 
-  // Fetch the P2P-enabled chains + their assets on mount. On failure we
-  // degrade gracefully to the hardcoded FALLBACK_TOKENS — the screen stays
-  // functional, just without a chain chooser.
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await chainsApi.list();
-        if (res.success && res.data && res.data.length > 0) {
-          setEnabledChains(res.data);
-        }
-        // On failure or empty list, leave enabledChains empty — the useMemo
-        // above falls back to FALLBACK_TOKENS automatically.
-      } catch (err) {
-        console.warn('[create-ad] chainsApi.list failed, using fallback tokens', err);
-      } finally {
-        setChainsFetched(true);
+  // Fetch the P2P-enabled chains + their assets on mount (and on Retry). A
+  // failure or an empty list blocks publish behind a Retry card.
+  const loadChains = React.useCallback(async () => {
+    setChainsLoad('loading');
+    try {
+      const res = await chainsApi.list();
+      if (res.success && res.data && res.data.length > 0) {
+        setEnabledChains(res.data);
+        setChainsLoad('ready');
+        return;
       }
-    })();
+    } catch (err) {
+      console.warn('[create-ad] chainsApi.list failed', err);
+    }
+    setChainsLoad('failed');
   }, []);
+  useEffect(() => {
+    loadChains();
+  }, [loadChains]);
+
+  // A token the open chains no longer offer (e.g. the fallback chip) moves to
+  // the first one they do.
+  useEffect(() => {
+    if (availableTokens.length > 0 && !availableTokens.includes(tokenSymbol)) setTokenSymbol(availableTokens[0]);
+  }, [availableTokens, tokenSymbol]);
 
   // Suggested Bybit rate + float eligibility for the SELECTED currency.
   // Re-runs whenever the ad currency changes.
@@ -376,7 +369,9 @@ const CreateAdScreen: React.FC = () => {
       }
       const chainKey = getChainByChainId(selectedChainId)?.key;
       try {
-        const res = await getWalletBalances(selectedChainId, addr);
+        // The ad chain's own network, not the toggle's: the 'short on BSC'
+        // nudge must not read a mainnet balance for a testnet ad.
+        const res = await getWalletBalances(selectedChainId, addr, p2pNetwork(selectedChainId));
         if (walletBalReqRef.current !== reqId) return;
         if (res.success && res.data) {
           const entry = normalizeWalletBalances(res.data, chainKey).find(
@@ -455,10 +450,9 @@ const CreateAdScreen: React.FC = () => {
     return Math.abs(pct) <= MAX_FLOAT_OFFSET_PCT;
   }, [rateType, floatOffsetPctInput]);
 
-  // Per-chain decimals for the selected token+chain. Used for ALL funding math
-  // (shortfall parse, deposit amount, confirm amount, and display) — NEVER
-  // token.decimals, which is the chain-blind hardcoded-6 FALLBACK value and
-  // would under-fund an 18-dec BSC deposit by 1e12 (spec "Review fixes" §1).
+  // Per-chain decimals for the selected token+chain (18 on BSC, 6 on Sonic).
+  // Used for ALL funding math (shortfall parse, deposit amount, confirm amount,
+  // and display); a chain-blind 6 would under-fund an 18-dec BSC deposit by 1e12.
   const adDecimals = p2pTokenDecimals(selectedChainId, token.symbol);
 
   // The ad amount in base units, or null when the human input isn't a clean
@@ -571,10 +565,13 @@ const CreateAdScreen: React.FC = () => {
       // assertWalletKey) before the backend creates a pending ad row.
       await assertWalletKey(sellerAddress);
 
-      // 2. Convert human inputs to base units / canonical strings. Decimals
-      // MUST come from p2pTokenDecimals(selectedChainId, …) — NOT token.decimals
-      // (the chain-blind hardcoded-6 FALLBACK value), or an 18-dec BSC deposit
-      // would be under-funded by 1e12 (spec "Review fixes" §1).
+      // The ad's chain is required before anything moves: a create without
+      // chainId lands on Sonic with this screen's (possibly 18-dp) amount.
+      const adChain = adPublishChain(chainsLoad, selectedChainId);
+      if (adChain.kind === 'block') throw new P2PCopyError(adChain.message);
+
+      // 2. Convert human inputs to base units / canonical strings, with the
+      // ad chain's decimals (adDecimals = p2pTokenDecimals(selectedChainId, …)).
       const tokenAmount = parseTokenAmount(amountInput, adDecimals);
       const minLimit = minLimitInput.trim() ? minLimitInput.trim() : undefined;
       const maxLimit = maxLimitInput.trim() ? maxLimitInput.trim() : undefined;
@@ -603,8 +600,8 @@ const CreateAdScreen: React.FC = () => {
       const preflight = fundingPreflight({
         amountBaseUnits: tokenAmount,
         available: poolAvailable,
-        selectedChainId,
-        chainsFetched,
+        selectedChainId: adChain.chainId,
+        chainsFetched: true,
       });
       if (preflight.kind === 'block') {
         throw new P2PCopyError(preflight.message);
@@ -656,10 +653,7 @@ const CreateAdScreen: React.FC = () => {
         maxLimit,
         paymentMethodIds: selectedPmIds,
         sellerAddress,
-        // selectedChainId is undefined when the fetch hasn't landed or when
-        // only one chain exists (auto-selected). Omitting it lets the backend
-        // default to Sonic, which is the correct single-chain behaviour.
-        ...(selectedChainId != null ? { chainId: selectedChainId } : {}),
+        chainId: adChain.chainId,
       };
       await createAndSignAd({
         payload:
@@ -796,18 +790,35 @@ const CreateAdScreen: React.FC = () => {
             <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
               Token
             </Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-              {availableTokens.map((t) => (
-                <Chip
-                  key={t.symbol}
-                  label={t.symbol}
-                  selected={token.symbol === t.symbol}
-                  onPress={() => setToken(t)}
-                />
-              ))}
-            </View>
+            {chainsView === 'none_open' ? (
+              <ErrorState
+                title={NO_OPEN_NETWORK_TITLE}
+                subtitle="New ads are paused on every network for now. Check again in a little while."
+                onRetry={loadChains}
+                retryLabel="Retry"
+              />
+            ) : (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                {availableTokens.map((sym) => (
+                  <Chip
+                    key={sym}
+                    label={sym}
+                    selected={token.symbol === sym}
+                    onPress={() => setTokenSymbol(sym)}
+                  />
+                ))}
+              </View>
+            )}
 
             {/* ── Chain ────────────────────────────────────────────────── */}
+            {chainsLoad === 'failed' && (
+              <ErrorState
+                title="Couldn't load networks"
+                subtitle="Publishing needs the ad's network. Check your connection and retry."
+                onRetry={loadChains}
+                retryLabel="Retry"
+              />
+            )}
             {showChainChooser && (
               <>
                 <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
@@ -841,6 +852,8 @@ const CreateAdScreen: React.FC = () => {
                   confirm they hold the token (right chain + right wallet) and warns
                   when it can't cover the ad, instead of a post-publish revert. */}
               {(() => {
+                // No open network: there is no chain to read a balance on.
+                if (chainsView === 'none_open') return null;
                 if (walletBalanceHuman == null) {
                   return (
                     <Text variant="caption" color="textSecondary" style={{ marginTop: spacing.sm }}>
@@ -856,8 +869,7 @@ const CreateAdScreen: React.FC = () => {
                   );
                 }
                 const walNum = parseFloat(walletBalanceHuman) || 0;
-                const amtNum = parseFloat(amountInput || '0') || 0;
-                const low = amtNum > 0 && walNum < amtNum;
+                const low = walletShort(walletBalanceHuman, amountInput);
                 const short = activeWalletAddr
                   ? ` · ${activeWalletAddr.slice(0, 6)}…${activeWalletAddr.slice(-4)}`
                   : '';
@@ -870,6 +882,29 @@ const CreateAdScreen: React.FC = () => {
                       {low ? ` — not enough to back ${amountInput} ${token.symbol}` : ''}
                     </Text>
                   </View>
+                );
+              })()}
+              {/* Short on BSC: bring the token over with the existing All Swap. */}
+              {(() => {
+                const swap = bscTopUpSwapParams(selectedChainId, token.symbol);
+                if (!swap || !walletShort(walletBalanceHuman, amountInput)) return null;
+                return (
+                  <PressableScale
+                    onPress={() =>
+                      router.push(`/easyswap?tab=${swap.tab}&toSymbol=${encodeURIComponent(swap.toSymbol)}&toChain=${swap.toChain}` as any)
+                    }
+                    style={{ marginTop: spacing.sm }}
+                  >
+                    <AccentCard padding="md">
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+                        <Icon name="swap" size={18} color={colors.accent} />
+                        <Text variant="bodySm" weight="600" style={{ flex: 1 }}>
+                          Get {token.symbol} on BNB Chain with All Swap
+                        </Text>
+                        <Icon name="chevronRight" size={18} color={colors.textMuted} />
+                      </View>
+                    </AccentCard>
+                  </PressableScale>
                 );
               })()}
               {/* Allowance-aware funding summary: tells the seller exactly what

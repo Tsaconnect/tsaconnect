@@ -162,3 +162,21 @@ describe('errorMessage', () => {
     expect(errorMessage('s')).toBe('s');
   });
 });
+
+describe('p2p_direct_moved (Sonic closed to direct P2P)', () => {
+  it('maps the 409 code to the BNB Chain copy', () => {
+    expect(p2pErrorMessage({ status: 409, code: 'p2p_direct_moved', message: 'p2p: direct p2p has moved to bsc' })).toBe(
+      'Direct P2P has moved to BNB Chain. Choose BNB Chain as the network and try again.',
+    );
+  });
+  it('maps the message when the code is missing', () => {
+    expect(p2pErrorMessage({ status: 409, message: 'Direct P2P has moved to BNB Chain' })).toMatch(/^Direct P2P has moved to BNB Chain\./);
+  });
+});
+
+describe('direct BNB Chain PM refusal', () => {
+  it('maps p2p_pm_not_on_direct to the stay-on-Sonic copy', () => {
+    const msg = p2pErrorMessage({ status: 409, code: 'p2p_pm_not_on_direct', message: 'p2p: payment merchant ads are not available on this chain' });
+    expect(msg).toBe('Payment Merchant ads stay on Sonic. Choose Sonic as the network and try again.');
+  });
+});

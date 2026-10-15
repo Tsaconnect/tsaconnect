@@ -62,7 +62,7 @@ import {
 } from '../../services/wallet';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
-import { reclaimChainFor } from '@/utils/reclaimChain';
+import { hasEscrowBalance, reclaimChainFor } from '@/utils/reclaimChain';
 import {
   AccentCard,
   AmountInput,
@@ -130,6 +130,22 @@ const P2PPoolScreen: React.FC = () => {
   // Monotonic id for in-flight balance reads; see the guard in loadBalance.
   const balReqRef = useRef(0);
 
+  // A chain the user tapped; the balance probe below never overrides it.
+  const pickedChainRef = useRef<number | undefined>(undefined);
+  const pickChain = useCallback((chainId: number) => {
+    pickedChainRef.current = chainId;
+    setSelectedChainId(chainId);
+  }, []);
+  // Nor a chain she has typed an amount on: a late probe switching chains
+  // would re-read that amount at another chain's decimals and balance.
+  const selectedChainRef = useRef(selectedChainId);
+  selectedChainRef.current = selectedChainId;
+  const amountTypedRef = useRef(false);
+  const onAmountChange = useCallback((text: string) => {
+    if (text !== '') amountTypedRef.current = true;
+    setAmountInput(text);
+  }, []);
+
   // Fetch enabled chains once on mount. Graceful fallback: on failure we leave
   // `chains` empty (selector hidden) and keep the Sonic default — the screen
   // stays fully functional for the current single-chain behavior.
@@ -142,13 +158,35 @@ const P2PPoolScreen: React.FC = () => {
       if (cancelled || !res.success || !res.data || res.data.length === 0) return;
       const list = res.data;
       setChains(list);
-      // Keep the chain the screen was opened on (an LP's Withdraw); otherwise
-      // prefer Sonic, then the first enabled chain (reclaimChainFor).
-      setSelectedChainId((prev) => reclaimChainFor(list, prev, Number(chainParam) || undefined));
+      const requested = Number(chainParam) || undefined;
+      const choose = (funded?: number[]) =>
+        setSelectedChainId(
+          reclaimChainFor(list, {
+            requested,
+            picked: pickedChainRef.current,
+            funded,
+            current: selectedChainRef.current,
+            engaged: amountTypedRef.current,
+          }),
+        );
+      choose();
+      if (requested || list.length < 2) return;
+      // Land on the chain that actually holds this token's escrow balance (an
+      // old Sonic balance included), not just the BSC default.
+      const w = await getActiveWallet();
+      if (cancelled || !w) return;
+      const reads = await Promise.all(
+        list.map(async (c) => ({ chainId: c.chainId, res: await poolApi.balance(token, w, c.chainId) })),
+      );
+      if (cancelled) return;
+      choose(reads.filter((r) => r.res.success && hasEscrowBalance(r.res.data)).map((r) => r.chainId));
     })();
     return () => {
       cancelled = true;
     };
+    // The probe is for the token the screen opened on; switching tokens later
+    // keeps the chosen chain (the user can tap another).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chainParam]);
 
   // Label a chain for the selector — prefer the constants' shortName, else the
@@ -441,7 +479,7 @@ const P2PPoolScreen: React.FC = () => {
                     key={c.chainId}
                     label={chainLabel(c.chainId)}
                     selected={selectedChainId === c.chainId}
-                    onPress={() => setSelectedChainId(c.chainId)}
+                    onPress={() => pickChain(c.chainId)}
                   />
                 ))}
               </View>
@@ -500,7 +538,7 @@ const P2PPoolScreen: React.FC = () => {
             symbol={token}
             symbolPosition="suffix"
             value={amountInput}
-            onChangeText={setAmountInput}
+            onChangeText={onAmountChange}
             error={
               exceedsAvailable
                 ? `Exceeds available (${formatTokenAmount(available, decimals, 4)} ${token}).`

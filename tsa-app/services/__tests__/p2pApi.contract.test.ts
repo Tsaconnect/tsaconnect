@@ -4,7 +4,7 @@ jest.mock('../walletApi', () => ({ getAuthHeaders: jest.fn(async () => ({ 'Conte
 jest.mock('../../constants/api/config', () => ({ API_BASE_URL: 'https://api.test/api' }));
 
 // eslint-disable-next-line import/first -- jest.mock factories hoist above this import.
-import { adsApi, gasApi, maskedAccountLabel, SONIC_GAS_SPONSOR_CHAIN_IDS, tradesApi } from '../p2p';
+import { adsApi, gasApi, maskedAccountLabel, P2P_GAS_SPONSOR_CHAIN_IDS, p2pChainKey, p2pNetwork, tradesApi } from '../p2p';
 
 const fetchMock = jest.fn();
 beforeEach(() => {
@@ -59,10 +59,35 @@ describe('gas top-up (R3)', () => {
     await gasApi.topUp({ action: 'approve' });
     expect(lastCall().body).toEqual({ action: 'approve' });
   });
-  it('sponsors Sonic mainnet only', () => {
-    expect(SONIC_GAS_SPONSOR_CHAIN_IDS.has(146)).toBe(true);
-    expect(SONIC_GAS_SPONSOR_CHAIN_IDS.has(14601)).toBe(false);
-    expect(SONIC_GAS_SPONSOR_CHAIN_IDS.has(56)).toBe(false);
+  it('posts the chainId next to the old fields', async () => {
+    await gasApi.topUp({ action: 'release', tradeId: 't-1', chainId: 56 });
+    expect(lastCall().body).toEqual({ action: 'release', tradeId: 't-1', chainId: 56 });
+  });
+  it('sponsors Sonic and BSC mainnet only, never a testnet', () => {
+    expect(P2P_GAS_SPONSOR_CHAIN_IDS.has(146)).toBe(true);
+    expect(P2P_GAS_SPONSOR_CHAIN_IDS.has(56)).toBe(true);
+    expect(P2P_GAS_SPONSOR_CHAIN_IDS.has(14601)).toBe(false);
+    expect(P2P_GAS_SPONSOR_CHAIN_IDS.has(97)).toBe(false);
+  });
+  it('every sponsored chain is a mainnet one by p2pNetwork', () => {
+    for (const id of P2P_GAS_SPONSOR_CHAIN_IDS) expect(p2pNetwork(id)).toBe('mainnet');
+  });
+});
+
+// A P2P tx goes to p2pChainKey on p2pNetwork, whatever the wallet toggle says:
+// the key alone would send a chain-97 tx to a BSC mainnet node.
+describe('p2pChainKey + p2pNetwork', () => {
+  it('resolves BSC testnet (97) to the bsc key on the testnet network', () => {
+    expect(p2pChainKey(97)).toBe('bsc');
+    expect(p2pNetwork(97)).toBe('testnet');
+  });
+  it('resolves the mainnets and Sonic testnet', () => {
+    expect([p2pChainKey(56), p2pNetwork(56)]).toEqual(['bsc', 'mainnet']);
+    expect([p2pChainKey(146), p2pNetwork(146)]).toEqual(['sonic', 'mainnet']);
+    expect([p2pChainKey(14601), p2pNetwork(14601)]).toEqual(['sonic', 'testnet']);
+  });
+  it('leaves an unknown chain to the toggle', () => {
+    expect(p2pNetwork(undefined)).toBeUndefined();
   });
 });
 

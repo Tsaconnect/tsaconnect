@@ -384,6 +384,9 @@ export interface P2PChainInfo {
   decimals?: Record<string, number>;
   /** Live fee bps per token symbol; absent when unreadable. */
   feeBps?: Record<string, number>;
+  /** Whether the caller may post a NEW ad here (Sonic is closed to direct P2P
+   *  once it moves to BSC). Absent = open: older APIs don't send it. */
+  adsOpen?: boolean;
 }
 
 // Decimals the API reported, by `${chainId}:${SYMBOL}`. They win over the
@@ -814,18 +817,25 @@ export type P2PGasTarget =
 
 export type P2PGasAction = P2PGasTarget['action'];
 
-export type P2PGasTopUpRequest = P2PGasTarget;
+/** `chainId` names the chain the tx is on (BSC 56 or Sonic 146). It is
+ *  optional on the wire: the API defaults an absent one to Sonic, so older
+ *  builds keep working. */
+export type P2PGasTopUpRequest = P2PGasTarget & { chainId?: number };
 
 export interface P2PGasTopUp {
   txHash?: string;
   amountWei?: string;
   skipped: boolean;
+  /** The chain the drip is on, echoed from the request. Absent from an API
+   *  older than the echo, which only ever funded Sonic mainnet (146). */
+  chainId?: number;
 }
 
 export const gasApi = {
-  /** Sends S on Sonic mainnet to the account's PROVEN wallet when it can't
-   *  cover `action`. Callers gate on SONIC_GAS_SPONSOR_CHAIN_IDS and still finish with a
-   *  balance check on the signing wallet. */
+  /** Sends the chain's gas coin (S on Sonic, BNB on BSC) to the account's
+   *  PROVEN wallet when it can't cover `action`. Callers gate on
+   *  P2P_GAS_SPONSOR_CHAIN_IDS and still finish with a balance check on the
+   *  signing wallet. */
   topUp: (req: P2PGasTopUpRequest) => request<P2PGasTopUp>('POST', '/p2p/gas/top-up', req),
 };
 
@@ -1086,14 +1096,11 @@ export function previewFiatFromToken(
 // ─── Shared FE helpers (extracted to deduplicate across P2P screens) ────────
 
 /**
- * Token decimals lookup for the small whitelist of P2P-supported tokens.
- * Falls back to 18 (ERC-20 default) for anything unknown.
- *
- * @deprecated Use `p2pTokenDecimals(chainId, symbol)` for per-chain accuracy.
- *   This map is kept for the tokenSupported guard in ad/[adId].tsx (key-existence
- *   check) and for legacy code paths that have no chainId context.
+ * Chain-blind decimals of the P2P tokens off BSC (BSC USDT/USDC are 18 — see
+ * p2pTokenDecimals, the only reader). Callers use p2pTokenDecimals /
+ * p2pTokenKnown, never this map.
  */
-export const TOKEN_DECIMALS: Record<string, number> = {
+const TOKEN_DECIMALS: Record<string, number> = {
   USDT: 6,
   USDC: 6,
   MCGP: 18,
@@ -1108,13 +1115,20 @@ export function p2pTokenDecimals(chainId: number | undefined, symbol: string): n
   if (chainId === 56 || chainId === 97) {
     if (sym === 'USDT' || sym === 'USDC') return 18;
   }
-  if (sym === 'USDT' || sym === 'USDC') return 6;
-  return 18; // MCGP + default
+  return TOKEN_DECIMALS[sym] ?? 18;
 }
 
-/** The only chain the P2P gas sponsor serves: Sonic mainnet (146). Never testnet
- *  (14601) — a drip there would be useless mainnet S. */
-export const SONIC_GAS_SPONSOR_CHAIN_IDS: ReadonlySet<number> = new Set([146]);
+/** Whether the app knows `symbol`'s decimals on `chainId` — reported by
+ *  /p2p/chains, or one of TOKEN_DECIMALS. An unknown token must fail closed
+ *  wherever base-unit math moves funds (p2pTokenDecimals' 18 is a guess). */
+export function p2pTokenKnown(chainId: number | undefined, symbol: string): boolean {
+  const sym = (symbol || '').toUpperCase();
+  return apiDecimals.has(`${chainId}:${sym}`) || TOKEN_DECIMALS[sym] !== undefined;
+}
+
+/** Chains the P2P gas sponsor serves: Sonic (146) and BSC (56) mainnet. Never a
+ *  testnet (14601, 97) — the sponsor holds mainnet coin only. */
+export const P2P_GAS_SPONSOR_CHAIN_IDS: ReadonlySet<number> = new Set([146, 56]);
 
 /** "Name · ••••1234" for a payment-method row, from whatever the API sent:
  *  the public ad detail masks the number and drops the name. */

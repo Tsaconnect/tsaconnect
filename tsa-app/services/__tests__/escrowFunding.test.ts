@@ -163,6 +163,15 @@ describe('ensureEscrowFunding — gas guard', () => {
 
     expect(onGasAlert).toHaveBeenCalledWith('Need gas: Top up BNB');
   });
+
+  // An LP's testnet pool while the wallet toggle says mainnet: the gas check
+  // must read the testnet node, like the broadcast and receipt wait do.
+  it("checks gas on the chain's own network (testnet pool, mainnet toggle)", async () => {
+    mockBalance.mockResolvedValue({ success: true, data: { available: '0', locked: '0' } });
+    mockEnsureGas.mockResolvedValue(false);
+    await ensureEscrowFunding(params({ amountBaseUnits: '100', chainId: 97 }));
+    expect(mockEnsureGas).toHaveBeenCalledWith('chain-97', WALLET, undefined, 'testnet');
+  });
 });
 
 describe('ensureEscrowFunding — allowance handling', () => {
