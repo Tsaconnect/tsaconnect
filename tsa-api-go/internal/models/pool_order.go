@@ -39,8 +39,9 @@ type PoolOrder struct {
 	NetworkFeeKobo *string `gorm:"type:numeric(38,0)" json:"networkFeeKobo,omitempty"`
 	KeepKobo       *string `gorm:"type:numeric(38,0)" json:"keepKobo,omitempty"`
 	// Shared-pool vault orders (spec 2026-10-14), all in the token's chain
-	// units. FillUnits + SpreadUnits is what the open reserved against the
-	// vault's free collateral until the fill is proven (FilledAt). FillSpreadUnits is
+	// units. FillUnits is what the open reserved of the vault's liquid USDT
+	// until the fill is proven (FilledAt); SpreadUnits counts only in the fill
+	// window (the spread needs no backing). FillSpreadUnits is
 	// what the fill actually credited to LPs (0 when no LP held principal).
 	FillUnits       *string    `gorm:"type:numeric(78,0)" json:"fillUnits,omitempty"`
 	SpreadUnits     *string    `gorm:"type:numeric(78,0)" json:"spreadUnits,omitempty"`

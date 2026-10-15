@@ -12,13 +12,17 @@ package services
 // the FX/mid price and anything Flutterwave/Paycrest are faked. Every chain
 // call is real and every tx must mine with status 1.
 //
-// Steps: provider posts collateral → LP activates, is allow-listed by the
-// operator and deposits (locked 24 h) → a buyer's pool order is claimed,
-// filled by the operator, proven at depth and delivered by the treasury →
-// gas-free claimFor (and its 8 h rate limit) → a second small order (leaves
-// the LP something to claim) → ledger index + reconcile → provider refill and
-// settle-from-collateral (idempotent per operationId) → console summary →
-// pause (opens and deposits refused; withdraw/claim still build) → unpause.
+// Steps (no collateral: LP deposits are what the pool sells): gates open →
+// LP activates, is allow-listed by the operator and deposits (locked 24 h) →
+// a buyer's pool order is claimed, filled by the operator from LP liquidity,
+// proven at depth and delivered by the treasury → gas-free claimFor (and its
+// 8 h rate limit) → a second small order (leaves the LP something to claim) →
+// ledger index + reconcile → the owner lifts the deposit lock, the operator
+// drains liquid below the LP's principal and the LP withdraws it all (part
+// paid, part pending; a claim is then claim_unavailable) → the refill wallet
+// refills outstanding and the operator pays the pending withdrawal
+// (pay-pending, idempotent per operationId) → console summary → pause (opens
+// and deposits refused; withdraw/claim still build) → unpause.
 //
 // Run (a throwaway Postgres; keys only ever in env, never on a command line):
 //
@@ -30,11 +34,11 @@ package services
 //	export LP_PK=… OPERATOR_PK=… TREASURY_PK=… PROVIDER_PK=…   # read from the keys file, never echoed
 //	go test -tags vaultnet ./internal/services/ -run '^TestVaultNet_Rehearsal$' -count=1 -v -timeout 40m
 //
-// Roles: PROVIDER = owner = collateral provider = guardian (funds the others'
-// gas from its own tBNB when they run low); OPERATOR is a vault operator;
-// TREASURY is an approved fill recipient; LP is any wallet. Re-runnable: each
-// run posts fresh collateral and uses a fresh schema, so fills from earlier
-// runs show as unknown to this run's ledger and are only logged.
+// Roles: PROVIDER = owner = refill wallet (collateralProvider) = guardian
+// (funds the others' gas from its own tBNB when they run low); OPERATOR is a
+// vault operator; TREASURY is an approved fill recipient; LP is any wallet.
+// Re-runnable: each run uses a fresh schema, so fills from earlier runs show
+// as unknown to this run's ledger and are only logged.
 
 import (
 	"context"
@@ -48,6 +52,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -66,12 +71,13 @@ const (
 	vaultNetExplorer       = "https://testnet.bscscan.com/tx/"
 )
 
-// vaultNetDirectABI is what the test itself signs: the PM's console actions
-// and the mock token's open mint.
+// vaultNetDirectABI is what the test itself signs or reads: the console's
+// owner/refill-wallet actions and the mock token's open mint.
 const vaultNetDirectABI = `[
 {"type":"function","name":"mint","inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
 {"type":"function","name":"approve","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable"},
-{"type":"function","name":"postCollateral","inputs":[{"name":"amount","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
+{"type":"function","name":"withdrawLock","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
+{"type":"function","name":"setWithdrawLock","inputs":[{"name":"seconds_","type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"},
 {"type":"function","name":"refill","inputs":[{"name":"amount","type":"uint256"},{"name":"ref","type":"bytes32"}],"outputs":[],"stateMutability":"nonpayable"},
 {"type":"function","name":"pause","inputs":[],"outputs":[],"stateMutability":"nonpayable"},
 {"type":"function","name":"unpause","inputs":[],"outputs":[],"stateMutability":"nonpayable"}
@@ -194,6 +200,25 @@ func (n *vaultNet) call(k vaultNetKey, to, label, method string, args ...any) *t
 		n.t.Fatalf("%s: prepare: %v", label, err)
 	}
 	return n.signSend(k, unsigned, label)
+}
+
+// view reads a uint256 view of the direct ABI at the head block.
+func (n *vaultNet) view(to, method string) *big.Int {
+	n.t.Helper()
+	data, err := n.direct.Pack(method)
+	if err != nil {
+		n.t.Fatal(err)
+	}
+	addr := common.HexToAddress(to)
+	raw, err := n.client.Client.CallContract(n.ctx, ethereum.CallMsg{To: &addr, Data: data}, nil)
+	if err != nil {
+		n.t.Fatalf("%s: %v", method, err)
+	}
+	out, err := n.direct.Unpack(method, raw)
+	if err != nil || len(out) == 0 {
+		n.t.Fatalf("%s: decode %v", method, err)
+	}
+	return out[0].(*big.Int)
 }
 
 // topUp gives addr tBNB from the provider when it holds less than min.
@@ -491,23 +516,17 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 	n.topUp(n.tr.addr, gas(2), gas(3), "treasury")
 	n.topUp(n.lp.addr, big.NewInt(5e14), gas(2), "lp")
 
-	// 1. Provider posts collateral (the PM's own wallet, in the console).
-	t.Log("STEP 1: provider posts 300 USDT collateral")
-	st0 := n.state()
-	n.call(n.prov, n.f.Token, "mint(provider)", "mint", common.HexToAddress(n.prov.addr), whole(300))
-	n.call(n.prov, n.f.Token, "approve(vault)", "approve", common.HexToAddress(n.f.Vault), whole(300))
-	n.call(n.prov, n.f.Vault, "postCollateral", "postCollateral", whole(300))
+	// 1. The books read (no collateral) and the gates are open.
+	t.Log("STEP 1: vault state + gates")
 	st1 := n.state()
-	if new(big.Int).Sub(st1.Collateral, st0.Collateral).Cmp(whole(300)) != 0 {
-		t.Fatalf("collateral %s → %s, want +300", fmtUnits(st0.Collateral), fmtUnits(st1.Collateral))
-	}
 	if gs := n.gates.Check(ctx); !gs.Open {
 		t.Fatalf("pool gates closed: %v", gs.Failures)
 	}
-	t.Logf("STEP 1 PASS: collateral %s outstanding %s principal %s; gates open", fmtUnits(st1.Collateral), fmtUnits(st1.Outstanding), fmtUnits(st1.TotalPrincipal))
+	t.Logf("STEP 1 PASS: balance %s liquid %s pending %s outstanding %s principal %s; gates open", fmtUnits(st1.Balance),
+		fmtUnits(st1.Liquid()), fmtUnits(st1.TotalPendingWithdrawals), fmtUnits(st1.Outstanding), fmtUnits(st1.TotalPrincipal))
 
 	// 2. LP: activate, allow-listed by the operator, deposit 100 (locked).
-	t.Log("STEP 2: LP activates, is allow-listed, deposits 100 USDT")
+	t.Log("STEP 2: LP activates, is allow-listed, deposits 200 USDT")
 	lpUser := n.seedUser(n.lp.addr, "Lara Provider")
 	allowedBefore := n.position(n.lp.addr).Allowed
 	if _, err := n.lpSvc.Activate(ctx, lpUser, n.lp.addr); err != nil {
@@ -528,11 +547,11 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 	for _, r := range depRows {
 		t.Logf("  setDepositor op %s nonce %d tx %s%s", r.OpKey, r.Nonce, vaultNetExplorer, r.AcceptedHash)
 	}
-	n.call(n.prov, n.f.Token, "mint(lp)", "mint", common.HexToAddress(n.lp.addr), whole(100))
+	n.call(n.prov, n.f.Token, "mint(lp)", "mint", common.HexToAddress(n.lp.addr), whole(200))
 	lpBal0 := n.usdt(n.lp.addr)
 	pos0 := n.position(n.lp.addr)
 	for step := 0; step < 3; step++ {
-		plan, err := n.lpSvc.PrepareDeposit(ctx, lpUser, "100")
+		plan, err := n.lpSvc.PrepareDeposit(ctx, lpUser, "200")
 		if err != nil {
 			t.Fatalf("prepare deposit: %v", err)
 		}
@@ -542,8 +561,8 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 		}
 	}
 	pos1 := n.position(n.lp.addr)
-	if new(big.Int).Sub(pos1.Principal, pos0.Principal).Cmp(whole(100)) != 0 || new(big.Int).Sub(lpBal0, n.usdt(n.lp.addr)).Cmp(whole(100)) != 0 {
-		t.Fatalf("principal %s → %s, want +100", fmtUnits(pos0.Principal), fmtUnits(pos1.Principal))
+	if new(big.Int).Sub(pos1.Principal, pos0.Principal).Cmp(whole(200)) != 0 || new(big.Int).Sub(lpBal0, n.usdt(n.lp.addr)).Cmp(whole(200)) != 0 {
+		t.Fatalf("principal %s → %s, want +200", fmtUnits(pos0.Principal), fmtUnits(pos1.Principal))
 	}
 	me, err := n.lpSvc.Me(ctx, lpUser)
 	if err != nil {
@@ -557,13 +576,13 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 	if me.LockedUntil == nil || lockGap < 23*time.Hour+50*time.Minute || lockGap > 24*time.Hour+5*time.Minute {
 		t.Fatalf("lockedUntil = %v, want ≈ now+24h", me.LockedUntil)
 	}
-	if pos0.Principal.Sign() == 0 && (me.Principal != "100" || me.Withdrawable != "0") {
-		t.Fatalf("me principal %s withdrawable %s, want 100 / 0", me.Principal, me.Withdrawable)
+	if pos0.Principal.Sign() == 0 && (me.Principal != "200" || me.Withdrawable != "0") {
+		t.Fatalf("me principal %s withdrawable %s, want 200 / 0", me.Principal, me.Withdrawable)
 	}
 	if _, err := n.lpSvc.PrepareWithdraw(ctx, lpUser, "1"); !errors.Is(err, ErrLPDepositLocked) {
 		t.Fatalf("withdraw 1 err = %v, want ErrLPDepositLocked", err)
 	}
-	t.Log("STEP 2 PASS: allowed, deposited 100, locked ≈24h, withdraw refused deposit_locked")
+	t.Log("STEP 2 PASS: allowed, deposited 200 (enough for the ₦170k order even on an empty pool), locked ≈24h, withdraw refused deposit_locked")
 
 	// 3. A buyer's pool order: claimed, filled, proven, delivered, settled.
 	t.Log("STEP 3: buyer pool order ₦170,000")
@@ -628,42 +647,136 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 	n.db.Model(&models.LiquidityLedgerEntry{}).Distinct("kind").Order("kind").Pluck("kind", &kinds)
 	t.Logf("STEP 5 PASS: ledger kinds %v", kinds)
 
-	// 6. Close outstanding: part refilled by the PM, the rest settled from
-	// collateral by the operator (idempotent per operationId).
-	t.Log("STEP 6: refill + settle-from-collateral")
-	out := n.state().Outstanding
-	refill := new(big.Int).Quo(out, big.NewInt(2))
-	rest := new(big.Int).Sub(out, refill)
-	n.call(n.prov, n.f.Token, "mint(provider)", "mint", common.HexToAddress(n.prov.addr), refill)
-	n.call(n.prov, n.f.Token, "approve(vault)", "approve", common.HexToAddress(n.f.Vault), refill)
-	n.call(n.prov, n.f.Vault, "refill", "refill", refill, HashID(uuid.New()))
-	opID, admin := uuid.New(), uuid.New()
-	h1, err := n.it.SettlePoolFromCollateral(ctx, admin, opID, BaseUnitsToDecimal(rest, 18), "vaultnet rehearsal: company keeps the naira")
-	if err != nil {
-		t.Fatalf("settle: %v", err)
+	// 6. A withdrawal the pool cannot pay in full. The owner lifts the deposit
+	// lock (restored below); the operator drains liquid to half the LP's
+	// principal (a stray fill to the treasury, outside the order path — the
+	// ledger logs it as unknown); the LP withdraws everything.
+	t.Log("STEP 6: pending withdrawal")
+	lock0 := n.view(n.f.Vault, "withdrawLock")
+	n.call(n.prov, n.f.Vault, "setWithdrawLock(0)", "setWithdrawLock", big.NewInt(0))
+	t.Cleanup(func() {
+		if n.view(n.f.Vault, "withdrawLock").Cmp(lock0) != 0 {
+			n.call(n.prov, n.f.Vault, "setWithdrawLock(restore)", "setWithdrawLock", lock0)
+		}
+	})
+	// An existing lock keeps its end when the owner lowers withdrawLock; a
+	// top-up joins the lock and moves its end to now + withdrawLock (= now),
+	// so one small deposit makes the whole principal withdrawable.
+	n.call(n.prov, n.f.Token, "mint(lp, top-up)", "mint", common.HexToAddress(n.lp.addr), whole(5))
+	for step := 0; step < 3; step++ {
+		plan, err := n.lpSvc.PrepareDeposit(ctx, lpUser, "5")
+		if err != nil {
+			t.Fatalf("prepare top-up: %v", err)
+		}
+		n.signSend(n.lp, plan.Txs[0], "lp top-up "+plan.Step)
+		if plan.Step == "deposit" {
+			break
+		}
 	}
-	h2, err := n.it.SettlePoolFromCollateral(ctx, admin, opID, BaseUnitsToDecimal(rest, 18), "retry")
-	if err != nil || h2 != h1 {
-		t.Fatalf("retry before mining = %q %v, want %q", h2, err, h1)
+	if pos := n.position(n.lp.addr); pos.Withdrawable == nil || pos.Withdrawable.Cmp(pos.Principal) != 0 {
+		t.Fatalf("after the top-up with no lock: withdrawable %v of %s", pos.Withdrawable, fmtUnits(pos.Principal))
+	}
+	principal := n.position(n.lp.addr).Principal
+	target := new(big.Int).Quo(principal, big.NewInt(2))
+	for i := 0; i < 5 && n.state().Liquid().Cmp(target) > 0; i++ {
+		caps, err := n.vault.FillCaps(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		amount := new(big.Int).Sub(n.state().Liquid(), target)
+		if amount.Cmp(caps.MaxFillPerTx) > 0 {
+			amount = caps.MaxFillPerTx
+		}
+		ref := HashID(uuid.New())
+		hash, err := n.op.Send(WithOperationRef(ctx, "vaultnet_drain:"+uuid.NewString()), vaultNetChainID, func() ([]byte, error) {
+			return n.vault.PrepareFill(n.op.Address(), n.tr.addr, amount, new(big.Int), ref)
+		})
+		if err != nil && !errors.Is(err, ErrPendingBroadcast) {
+			t.Fatalf("drain fill: %v", err)
+		}
+		n.receipt(hash)
+		t.Logf("  drain fill %s tx %s%s", fmtUnits(amount), vaultNetExplorer, hash)
+	}
+	liquid := n.state().Liquid()
+	if liquid.Cmp(principal) >= 0 {
+		t.Fatalf("liquid %s still covers the LP's principal %s (fill caps?)", fmtUnits(liquid), fmtUnits(principal))
+	}
+	pending0 := n.position(n.lp.addr).PendingWithdrawal
+	plan, err := n.lpSvc.PrepareWithdraw(ctx, lpUser, BaseUnitsToDecimal(principal, 18))
+	if err != nil {
+		t.Fatalf("prepare withdraw: %v", err)
+	}
+	n.signSend(n.lp, plan.Txs[0], "lp withdraw all")
+	posW := n.position(n.lp.addr)
+	wantPending := new(big.Int).Add(pending0, new(big.Int).Sub(principal, liquid))
+	if posW.Principal.Sign() != 0 || posW.PendingWithdrawal.Cmp(wantPending) != 0 {
+		t.Fatalf("after withdraw: principal %s pending %s, want 0 and %s", fmtUnits(posW.Principal), fmtUnits(posW.PendingWithdrawal), fmtUnits(wantPending))
+	}
+	if me, err := n.lpSvc.Me(ctx, lpUser); err != nil || me.PendingWithdrawal != BaseUnitsToDecimal(wantPending, 18) {
+		t.Fatalf("me pendingWithdrawal = %+v %v", me, err)
+	}
+	if posW.Claimable.Sign() > 0 {
+		if _, err := n.lpSvc.PrepareClaim(ctx, lpUser, ""); !errors.Is(err, ErrLPClaimUnavailable) {
+			t.Fatalf("claim with nothing liquid: %v, want ErrLPClaimUnavailable", err)
+		}
+	}
+	n.reconcileClean("with pending")
+	page, err := n.lpSvc.Activity(ctx, lpUser, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawPending := false
+	for _, it := range page.Items {
+		sawPending = sawPending || it.Kind == "withdrawal_pending"
+	}
+	if !sawPending {
+		t.Fatalf("activity %+v, want a withdrawal_pending line", page.Items)
+	}
+	t.Logf("STEP 6 PASS: withdrew %s: %s paid now, %s pending; claim unavailable", fmtUnits(principal), fmtUnits(liquid), fmtUnits(wantPending))
+
+	// 7. The refill wallet refills outstanding; pay-pending pays the LP
+	// (idempotent per operationId: retries answer the same hash).
+	t.Log("STEP 7: refill + pay-pending")
+	out := n.state().Outstanding
+	n.call(n.prov, n.f.Token, "mint(provider)", "mint", common.HexToAddress(n.prov.addr), out)
+	n.call(n.prov, n.f.Token, "approve(vault)", "approve", common.HexToAddress(n.f.Vault), out)
+	n.call(n.prov, n.f.Vault, "refill", "refill", out, HashID(uuid.New()))
+	n.index()
+	opID, admin := uuid.New(), uuid.New()
+	lpPaid := func(res *PayPendingResult) string {
+		if res == nil {
+			return ""
+		}
+		for _, p := range res.Paid {
+			if SameEVMAddress(p.Wallet, n.lp.addr) {
+				return p.TxHash
+			}
+		}
+		return ""
+	}
+	lpBalP := n.usdt(n.lp.addr)
+	paid1, err := n.it.PayPoolPending(ctx, admin, opID, "", "vaultnet rehearsal: pool refilled")
+	h1 := lpPaid(paid1)
+	if err != nil || h1 == "" {
+		t.Fatalf("pay-pending = %+v %v, want the LP paid", paid1, err)
+	}
+	if paid2, err := n.it.PayPoolPending(ctx, admin, opID, "", "retry"); err != nil || lpPaid(paid2) != h1 {
+		t.Fatalf("retry before mining = %+v %v, want %s", paid2, err, h1)
 	}
 	n.receipt(h1)
 	n.tick()
-	n.index()
-	h3, err := n.it.SettlePoolFromCollateral(ctx, admin, opID, BaseUnitsToDecimal(rest, 18), "retry after mining")
-	if err != nil || h3 != h1 {
-		t.Fatalf("retry after mining = %q %v, want %q", h3, err, h1)
+	if paid3, err := n.it.PayPoolPending(ctx, admin, opID, n.lp.addr, "retry after mining"); err != nil || lpPaid(paid3) != h1 {
+		t.Fatalf("retry after mining = %+v %v, want %s", paid3, err, h1)
 	}
-	var settles int64
-	n.db.Model(&models.LiquidityLedgerEntry{}).Where("kind = ? AND LOWER(ref) = ?", VaultEventSettled, strings.ToLower(HashIDHex(opID))).Count(&settles)
-	if st := n.state(); st.Outstanding.Sign() != 0 || settles != 1 {
-		t.Fatalf("outstanding %s settles %d, want 0 and one settle", fmtUnits(st.Outstanding), settles)
+	if d := new(big.Int).Sub(n.usdt(n.lp.addr), lpBalP); d.Cmp(wantPending) != 0 || n.position(n.lp.addr).PendingWithdrawal.Sign() != 0 {
+		t.Fatalf("LP received %s, want the pending %s", fmtUnits(d), fmtUnits(wantPending))
 	}
-	n.reconcileClean("after settle")
-	t.Logf("STEP 6 PASS: outstanding %s → refill %s + settle %s (tx %s%s, retries answered the same hash) → 0",
-		fmtUnits(out), fmtUnits(refill), fmtUnits(rest), vaultNetExplorer, h1)
+	n.call(n.prov, n.f.Vault, "setWithdrawLock(restore)", "setWithdrawLock", lock0)
+	n.reconcileClean("after pay-pending")
+	t.Logf("STEP 7 PASS: refilled %s; paid pending %s (tx %s%s, retries answered the same hash)", fmtUnits(out), fmtUnits(wantPending), vaultNetExplorer, h1)
 
-	// 7. The console's summary.
-	t.Log("STEP 7: VaultPoolSummary")
+	// 8. The console's summary.
+	t.Log("STEP 8: VaultPoolSummary")
 	sum, err := n.it.VaultPoolSummary(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -671,15 +784,27 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 	sj, _ := json.Marshal(sum)
 	t.Logf("  summary %s", sj)
 	spread30 := bigFromDecimal(&sum.Spread30d)
-	if sum.Outstanding != "0" || sum.Reserved != "0" || sum.Free != sum.Collateral || !sum.ServerOperatorActive ||
+	if sum.Outstanding != "0" || sum.Reserved != "0" || sum.Free != sum.Liquid || sum.TotalPendingWithdrawals != "0" || !sum.ServerOperatorActive ||
 		spread30 == nil || sum.Spread30d == "" || sum.Spread30d == "0" {
 		t.Fatalf("summary = %s", sj)
 	}
-	t.Log("STEP 7 PASS")
+	t.Log("STEP 8 PASS")
 
-	// 8. Pause by the guardian: opens and deposits refused, withdraw and
+	// 9. Pause by the guardian: opens and deposits refused, withdraw and
 	// claim still build; unpause by the owner.
-	t.Log("STEP 8: pause / unpause")
+	t.Log("STEP 9: pause / unpause")
+	// Step 6 withdrew everything: put liquidity back so a quote is possible.
+	n.call(n.prov, n.f.Token, "mint(lp, re-deposit)", "mint", common.HexToAddress(n.lp.addr), whole(100))
+	for step := 0; step < 3; step++ {
+		plan, err := n.lpSvc.PrepareDeposit(ctx, lpUser, "100")
+		if err != nil {
+			t.Fatalf("prepare re-deposit: %v", err)
+		}
+		n.signSend(n.lp, plan.Txs[0], "lp re-deposit "+plan.Step)
+		if plan.Step == "deposit" {
+			break
+		}
+	}
 	prePause, err := n.it.QuotePoolBuy(ctx, "USDT", "10000", "NGN", poolMid, specPoolSettings()) // a quote she holds as the pause lands
 	if err != nil {
 		t.Fatalf("quote before pause: %v", err)
@@ -712,8 +837,10 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 	} else {
 		t.Logf("  deposit refused at estimate: %v (reason %q)", err, decodeRevertReason(err))
 	}
-	if _, err := n.lpSvc.PrepareWithdraw(ctx, lpUser, "1"); !errors.Is(err, ErrLPDepositLocked) {
-		t.Fatalf("withdraw while paused err = %v, want only the deposit lock (never the pause)", err)
+	// Her only principal is the step-9 re-deposit, still in its 24 h lock: the
+	// lock may refuse, the pause never may (withdraw is never paused).
+	if _, err := n.lpSvc.PrepareWithdraw(ctx, lpUser, "1"); err != nil && !errors.Is(err, ErrLPDepositLocked) && !errors.Is(err, ErrLPAmount) {
+		t.Fatalf("withdraw while paused err = %v, want it built or refused only by her lock/principal (never the pause)", err)
 	}
 	if plan, err := n.lpSvc.PrepareClaim(ctx, lpUser, ""); err != nil || plan.Step != "claim" {
 		t.Fatalf("claim while paused = %+v %v, want it built", plan, err)
@@ -725,7 +852,7 @@ func TestVaultNet_Rehearsal(t *testing.T) {
 		gs := n.gates.Check(ctx)
 		return gs.Open, fmt.Errorf("%v", gs.Failures)
 	})
-	t.Log("STEP 8 PASS: paused → open/deposit refused, withdraw refused only by its lock, claim built; unpaused → gates open")
+	t.Log("STEP 9 PASS: paused → open/deposit refused, withdraw refused only for want of principal, claim built; unpaused → gates open")
 
 	provBNB1, _ := n.client.GetBalance(n.prov.addr)
 	t.Logf("provider tBNB %s → %s wei (spent %s)", provBNB0, provBNB1, new(big.Int).Sub(provBNB0, provBNB1))

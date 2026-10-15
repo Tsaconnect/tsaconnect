@@ -186,7 +186,7 @@ func poolBaseRate(mid *big.Rat, set PoolSettings) *big.Rat {
 }
 
 // QuotePoolBuy prices fiatMajor naira of asset on pool terms at mid, if the
-// vault's free collateral covers what it delivers. The caller supplies the
+// vault's free liquidity covers what it delivers. The caller supplies the
 // settings snapshot (CurrentPoolSettings in production).
 func (s *ITService) QuotePoolBuy(ctx context.Context, asset, fiatMajor, currency string, mid *big.Rat, set PoolSettings) (*PoolPrice, error) {
 	asset = strings.ToUpper(strings.TrimSpace(asset))
@@ -207,6 +207,11 @@ func (s *ITService) QuotePoolBuy(ctx context.Context, asset, fiatMajor, currency
 		return nil, err
 	}
 	if s.HasPool() {
+		// The free-liquidity read is cached for 5 s; the gates are not, so a
+		// pause (or any closed gate) stops quotes at once, not 5 s later.
+		if g := s.poolDesk.c.Gates; g != nil && !g.Open() {
+			return nil, ErrPoolClosed
+		}
 		free, err := s.poolDesk.FreeUnits(ctx, set)
 		if err != nil {
 			return nil, err

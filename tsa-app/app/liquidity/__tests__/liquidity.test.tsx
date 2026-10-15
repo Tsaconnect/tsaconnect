@@ -46,7 +46,11 @@ jest.mock('@/services/p2p', () => ({
     const [i, f = ''] = v.split('.');
     return (BigInt(i || '0') * 10n ** BigInt(d) + BigInt((f + '0'.repeat(d)).slice(0, d) || '0')).toString();
   },
-  formatTokenAmount: (v: string) => v,
+  formatTokenAmount: (v: string, d: number) => {
+    const p = v.padStart(d + 1, '0');
+    const frac = p.slice(p.length - d).replace(/0+$/, '');
+    return `${p.slice(0, p.length - d)}${frac ? `.${frac}` : ''}`;
+  },
 }));
 
 import React from 'react';
@@ -66,7 +70,7 @@ const base: LiquidityMe = {
   token: { symbol: 'USDT', address: '0x55d398326f99059fF775485246999027B3197955', decimals: 18 },
   vault: '0x00000000000000000000000000000000000000f1',
   limits: { min: '5', max: '5000' }, minClaim: '0.5',
-  pool: { totalLiquidity: '12000', collateral: '3000', outstanding: '200', coveragePercent: '100', apr30d: '9.4' },
+  pool: { totalLiquidity: '12000', apr30d: '9.4' },
 };
 const lp: LiquidityMe = {
   ...base, status: 'active', allowed: true, balanceReadable: true, wallet: WALLET,
@@ -105,7 +109,8 @@ beforeEach(() => {
 
 it('offers Activate to a non-LP and shows the position once activated', async () => {
   const r = await mount(base);
-  expect(textOf(r)).toContain('100%');
+  expect(textOf(r)).not.toMatch(/collateral|backed/i);
+  expect(r.root.findAll((n) => n.props.label === 'Total liquidity')[0].props.value).toBe('12,000 USDT');
   api.activate.mockResolvedValue({ success: true, data: lp });
   await act(async () => { button(r, 'Activate').props.onPress(); });
   await flush();
@@ -179,6 +184,13 @@ it('does not offer Activate for a new wallet while the old one still holds a pos
   expect(textOf(r)).toContain(`Withdraw and claim from ${WALLET} first (switch to it on this device), then activate your new wallet.`);
 });
 
+it('asks nothing of the LP when only a pending withdrawal is left on the old wallet', async () => {
+  const r = await mount({ ...lp, walletChanged: true, principal: '0', claimable: '0', pendingWithdrawal: '20' });
+  expect(button(r, 'Activate new wallet')).toBeUndefined();
+  expect(textOf(r)).toContain('A withdrawal from your old wallet is still pending. You can switch wallets once it completes.');
+  expect(textOf(r)).not.toMatch(/first \(switch|refill/i);
+});
+
 it('offers Activate for a new wallet once the old one is empty', async () => {
   const r = await mount({ ...lp, walletChanged: true, principal: '0', claimable: '0' });
   expect(button(r, 'Activate new wallet')).toBeDefined();
@@ -238,4 +250,86 @@ it('signs nothing from a device that does not hold the LP wallet', async () => {
   await act(async () => { button(r, 'Claim earnings').props.onPress(); });
   await flush();
   expect(runLiquidityTx).not.toHaveBeenCalled();
+});
+
+it('shows the pool card without the fields the API leaves out', async () => {
+  const r = await mount({ ...base, pool: { totalLiquidity: '12000' } });
+  expect(r.root.findAll((n) => n.props.label === 'Total liquidity')).toHaveLength(1);
+  expect(r.root.findAll((n) => n.props.label === 'Earnings rate (last 30 days)')).toHaveLength(0);
+});
+
+it('shows a pending withdrawal without a reason', async () => {
+  const r = await mount({ ...lp, pendingWithdrawal: '40' });
+  expect(r.root.findAll((n) => n.props.label === 'Pending withdrawal')[0].props.value).toBe('40 USDT');
+  expect(textOf(r)).not.toMatch(/refill|short/i);
+  const none = await mount(lp);
+  expect(none.root.findAll((n) => n.props.label === 'Pending withdrawal')).toHaveLength(0);
+});
+
+async function withdraw(r: ReactTestRenderer, value: string) {
+  await act(async () => { button(r, 'Withdraw').props.onPress(); });
+  await act(async () => { r.root.findAll((n) => typeof n.props.onChangeText === 'function')[0].props.onChangeText(value); });
+  const sheet = r.root.findAll((n) => n.props.footer != null)[0];
+  await act(async () => { sheet.props.footer.props.onPress(); });
+  await flush();
+}
+
+const E18 = 10n ** 18n;
+
+it('says how much of a withdrawal was sent now and how much is pending, from the receipt', async () => {
+  const r = await mount(lp);
+  (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'done', txHash: '0xw', withdrawal: { paidNow: 30n * E18, pending: 20n * E18 } });
+  // A lagging re-read must not change what the toast says.
+  api.me.mockResolvedValue({ success: true, data: { ...lp, principal: '50' } });
+  await withdraw(r, '50');
+  expect(mockToast.success).toHaveBeenCalledWith('Withdrawal submitted. 30 USDT sent now, 20 USDT pending.');
+});
+
+it('says only the pending part when nothing was paid now', async () => {
+  const r = await mount(lp);
+  (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'done', txHash: '0xw', withdrawal: { paidNow: 0n, pending: 25n * E18 / 2n } });
+  await withdraw(r, '12.5');
+  expect(mockToast.success).toHaveBeenCalledWith('Withdrawal submitted. 12.5 USDT pending.');
+});
+
+it('keeps the plain success when a withdrawal was paid in full', async () => {
+  const r = await mount(lp);
+  (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'done', txHash: '0xw', withdrawal: { paidNow: 50n * E18, pending: 0n } });
+  await withdraw(r, '50');
+  expect(mockToast.success).toHaveBeenCalledWith('Withdrawal sent to your wallet');
+});
+
+it('stays neutral when the receipt could not be read', async () => {
+  const r = await mount(lp);
+  (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'done', txHash: '0xw' });
+  api.me.mockResolvedValue({ success: false, message: 'offline' });
+  await withdraw(r, '50');
+  expect(mockToast.success).toHaveBeenCalledWith('Withdrawal submitted.');
+});
+
+it('explains a gas-free claim refused for liquidity neutrally', async () => {
+  const r = await mount(lp);
+  api.claimFor.mockResolvedValue({ success: false, status: 409, code: 'claim_unavailable', message: 'liquidity: insufficient liquidity' });
+  await act(async () => { button(r, 'Claim earnings').props.onPress(); });
+  await flush();
+  expect(lastAlert()).toEqual(["Couldn't claim", 'Claims are not available right now. Try again later.']);
+});
+
+it('explains a signed claim refused for liquidity neutrally', async () => {
+  const r = await mount({ ...lp, claimable: '0.2' });
+  (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'refused', code: 'claim_unavailable', message: 'liquidity: insufficient liquidity' });
+  await act(async () => { button(r, 'Claim earnings').props.onPress(); });
+  await flush();
+  expect(lastAlert()[1]).toBe('Claims are not available right now. Try again later.');
+});
+
+it('labels pending and paid withdrawals in the activity', async () => {
+  api.activity.mockResolvedValue({ success: true, data: { items: [
+    { kind: 'withdrawal_pending', amount: '20', txHash: '0x1', at: '2026-10-14T10:00:00Z' },
+    { kind: 'withdrawal_paid', amount: '20', txHash: '0x2', at: '2026-10-14T11:00:00Z' },
+  ] } });
+  const r = await mount(lp);
+  const rows = r.root.findAll((n) => typeof n.props.label === 'string' && n.props.label.startsWith('Withdrawal '));
+  expect(rows.map((n) => n.props.label.split(' · ')[0])).toEqual(['Withdrawal pending', 'Withdrawal paid']);
+  expect(rows.map((n) => n.props.value)).toEqual(['−20 USDT', '20 USDT']);
 });

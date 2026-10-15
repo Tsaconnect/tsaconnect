@@ -186,11 +186,13 @@ func (x *VaultIndexer) rowsFor(ctx context.Context, logs []types.Log) ([]models.
 	return rows, nil
 }
 
-// LedgerTotals are the vault's books as the ledger rebuilds them.
+// LedgerTotals are the vault's books as the ledger rebuilds them. Unclaimed
+// is Σspread credited − Σclaimed (at least what LPs can still claim: the
+// contract's per-share accrual floors in the pool's favour).
 type LedgerTotals struct {
-	Principal, Collateral, Outstanding *big.Int
-	Fills                              map[string]bool // fill refs seen
-	FillRows                           []LedgerFill    // every Filled event, in ledger order
+	Principal, Outstanding, PendingWithdrawals, Unclaimed *big.Int
+	Fills                                                 map[string]bool // fill refs seen
+	FillRows                                              []LedgerFill    // every Filled event, in ledger order
 }
 
 // LedgerFill is one Filled event as the ledger holds it.
@@ -206,27 +208,29 @@ func (x *VaultIndexer) Totals(ctx context.Context, block uint64) (*LedgerTotals,
 		Order("block, log_index").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	t := &LedgerTotals{Principal: new(big.Int), Collateral: new(big.Int), Outstanding: new(big.Int), Fills: map[string]bool{}}
+	t := &LedgerTotals{Principal: new(big.Int), Outstanding: new(big.Int), PendingWithdrawals: new(big.Int), Unclaimed: new(big.Int),
+		Fills: map[string]bool{}}
 	for _, r := range rows {
 		amt, spread := bigFromDecimal(r.Amount), bigFromDecimal(r.Spread)
 		switch r.Kind {
 		case VaultEventDeposited:
 			t.Principal.Add(t.Principal, amt)
-		case VaultEventWithdrawn:
+		case VaultEventWithdrawn: // paid at once
 			t.Principal.Sub(t.Principal, amt)
-		case VaultEventCollateralPosted:
-			t.Collateral.Add(t.Collateral, amt)
-		case VaultEventCollateralWithdrawn:
-			t.Collateral.Sub(t.Collateral, amt)
+		case VaultEventWithdrawalPending: // withdrawn, owed later: no longer principal
+			t.Principal.Sub(t.Principal, amt)
+			t.PendingWithdrawals.Add(t.PendingWithdrawals, amt)
+		case VaultEventWithdrawalPaid:
+			t.PendingWithdrawals.Sub(t.PendingWithdrawals, amt)
+		case VaultEventClaimed:
+			t.Unclaimed.Sub(t.Unclaimed, amt)
 		case VaultEventFilled:
 			t.Outstanding.Add(t.Outstanding, amt).Add(t.Outstanding, spread)
+			t.Unclaimed.Add(t.Unclaimed, spread)
 			t.Fills[strings.ToLower(r.Ref)] = true
 			t.FillRows = append(t.FillRows, LedgerFill{Ref: strings.ToLower(r.Ref), To: r.To, TxHash: r.TxHash, Amount: amt, Spread: spread})
-		case VaultEventRefilled:
+		case VaultEventRefilled, vaultEventLegacySettled:
 			t.Outstanding.Sub(t.Outstanding, amt)
-		case VaultEventSettled:
-			t.Outstanding.Sub(t.Outstanding, amt)
-			t.Collateral.Sub(t.Collateral, amt)
 		}
 	}
 	return t, nil
@@ -240,11 +244,11 @@ type VaultReconcileReport struct {
 	// MismatchedFills: a fill under one of our refs whose amount, spread or
 	// destination is not that order's, or whose order never sent a fill.
 	MismatchedFills []string `json:"mismatchedFills"`
-	Utilisation     float64  `json:"utilisation"` // outstanding / collateral
+	Utilisation     float64  `json:"utilisation"` // outstanding / (principal + pending withdrawals)
 }
 
-// poolVaultHighUseBps: outstanding above this share of collateral alerts —
-// the PM should refill or post more before the pool stops selling (spec O5).
+// poolVaultHighUseBps: outstanding at this share of what the pool owes LPs
+// (principal + pending withdrawals) alerts — the company should refill.
 const poolVaultHighUseBps = 8_000
 
 // Reconcile compares the ledger with the vault's books at the last indexed
@@ -270,24 +274,40 @@ func (x *VaultIndexer) Reconcile(ctx context.Context) (*VaultReconcileReport, er
 	for _, c := range []struct {
 		name          string
 		chain, ledger *big.Int
-	}{{"outstanding", st.Outstanding, tot.Outstanding}, {"collateral", st.Collateral, tot.Collateral}, {"principal", st.TotalPrincipal, tot.Principal}} {
+	}{{"outstanding", st.Outstanding, tot.Outstanding}, {"principal", st.TotalPrincipal, tot.Principal},
+		{"pending_withdrawals", st.TotalPendingWithdrawals, tot.PendingWithdrawals}} {
 		if c.chain.Cmp(c.ledger) != 0 {
 			rep.Drift = append(rep.Drift, fmt.Sprintf("%s chain=%s ledger=%s", c.name, c.chain, c.ledger))
 		}
 	}
-	if st.Collateral.Sign() > 0 {
+	// The contract's invariant: balance + outstanding = principal + unclaimed
+	// + pending withdrawals (dust and stray transfers only ever in the pool's
+	// favour). Short of it, tokens left the vault outside its books.
+	held := new(big.Int).Add(st.Balance, st.Outstanding)
+	owed := new(big.Int).Add(st.TotalPrincipal, tot.Unclaimed)
+	owed.Add(owed, st.TotalPendingWithdrawals)
+	if held.Cmp(owed) < 0 {
+		rep.Drift = append(rep.Drift, fmt.Sprintf("invariant balance+outstanding=%s < principal+unclaimed+pending=%s", held, owed))
+	}
+	if toLPs := new(big.Int).Add(st.TotalPrincipal, st.TotalPendingWithdrawals); toLPs.Sign() > 0 {
 		use := new(big.Int).Mul(st.Outstanding, big.NewInt(10_000))
-		use.Quo(use, st.Collateral)
+		use.Quo(use, toLPs)
 		rep.Utilisation = float64(use.Int64()) / 10_000
 		if use.Int64() >= poolVaultHighUseBps {
-			alertf("liquidity_vault_high_use", "[liquidity] ALERT liquidity_vault_high_use outstanding=%s collateral=%s use=%.1f%% — refill or post collateral before the pool stops selling",
-				st.Outstanding, st.Collateral, rep.Utilisation*100)
+			alertf("liquidity_vault_high_use", "[liquidity] ALERT liquidity_vault_high_use outstanding=%s principal=%s pending=%s use=%.1f%% — refill the pool before it stops selling",
+				st.Outstanding, st.TotalPrincipal, st.TotalPendingWithdrawals, rep.Utilisation*100)
 		}
+	}
+	// A pending withdrawal the pool can pay now (liquid > 0 means the balance
+	// covers every pending one): an admin should pay it (console: Pay pending).
+	if st.TotalPendingWithdrawals.Sign() > 0 && st.Liquid().Sign() > 0 {
+		alertf("liquidity_pending_withdrawals", "[liquidity] ALERT liquidity_pending_withdrawals pending=%s liquid=%s block=%d — pay pending withdrawals from the console",
+			st.TotalPendingWithdrawals, st.Liquid(), block)
 	}
 	// Every fill must be one of our orders, exactly as that order sent it: an
 	// unknown ref, or a fill of ours with another amount, spread or
-	// destination, is the operator key spending collateral outside the order
-	// path. Only final blocks are in the ledger, so a reorg never reports.
+	// destination, is the operator key spending LP liquidity outside the
+	// order path. Only final blocks are in the ledger, so a reorg never reports.
 	ours, err := x.ourFills(ctx)
 	if err != nil {
 		return nil, err

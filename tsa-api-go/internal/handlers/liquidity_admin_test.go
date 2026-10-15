@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -12,10 +13,11 @@ import (
 )
 
 type fakePoolAdmin struct {
-	err  error
-	last string
-	note string
-	op   uuid.UUID
+	err    error
+	last   string
+	note   string
+	op     uuid.UUID
+	wallet string
 }
 
 func (f *fakePoolAdmin) PoolOrderDetail(context.Context, uuid.UUID) (*services.PoolOrderDetail, error) {
@@ -27,11 +29,17 @@ func (f *fakePoolAdmin) ResendPoolBuy(_ context.Context, _, _ uuid.UUID, n strin
 }
 func (f *fakePoolAdmin) VaultPoolSummary(context.Context) (*services.VaultPoolSummary, error) {
 	f.last = "summary"
-	return &services.VaultPoolSummary{Collateral: "100"}, f.err
+	return &services.VaultPoolSummary{Liquid: "100"}, f.err
 }
-func (f *fakePoolAdmin) SettlePoolFromCollateral(_ context.Context, _, op uuid.UUID, amount, note string) (string, error) {
-	f.last, f.note, f.op = "settle:"+amount, note, op
-	return "0xsettle", f.err
+func (f *fakePoolAdmin) PayPoolPending(_ context.Context, _, op uuid.UUID, wallet, note string) (*services.PayPendingResult, error) {
+	f.last, f.note, f.op, f.wallet = "pay-pending", note, op, wallet
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &services.PayPendingResult{
+		Paid:    []services.PaidPending{{Wallet: "0x00000000000000000000000000000000000000A1", TxHash: "0xpaid", Amount: "20"}},
+		Skipped: []services.SkippedPending{{Wallet: "0x00000000000000000000000000000000000000B2", Pending: "80", Reason: "not enough liquid yet"}},
+	}, nil
 }
 func (f *fakePoolAdmin) RetryPoolFill(_ context.Context, _, _ uuid.UUID, n string) (*models.ITIntent, error) {
 	f.last, f.note = "retry-fill", n
@@ -49,7 +57,7 @@ func poolAdminServer(f *fakePoolAdmin) *gin.Engine {
 	r.POST("/o/:id/resend", h.AdminResendPoolBuy)
 	r.POST("/o/:id/retry-fill", h.AdminRetryPoolFill)
 	r.GET("/pool", h.AdminVaultPool)
-	r.POST("/pool/settle", h.AdminSettlePoolFromCollateral)
+	r.POST("/pool/pay-pending", h.AdminPayPoolPending)
 	return r
 }
 
@@ -67,27 +75,44 @@ func TestLiquidityAdmin_OrderActionsNeedANote(t *testing.T) {
 	}
 }
 
-func TestLiquidityAdmin_PoolSummaryAndSettle(t *testing.T) {
+func TestLiquidityAdmin_PoolSummaryAndPayPending(t *testing.T) {
 	f := &fakePoolAdmin{}
 	r := poolAdminServer(f)
 	if w := walletDo(r, http.MethodGet, "/pool", nil); w.Code != http.StatusOK || f.last != "summary" {
 		t.Fatalf("summary = %d %s", w.Code, f.last)
 	}
-	op := uuid.NewString()
-	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": op, "note": "n"}); w.Code != http.StatusBadRequest {
-		t.Fatalf("settle without an amount = %d, want 400", w.Code)
-	}
 	for _, bad := range []string{"", "not-a-uuid", uuid.Nil.String()} {
-		if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": bad, "amount": "5", "note": "n"}); w.Code != http.StatusBadRequest || f.last == "settle:5" {
-			t.Fatalf("settle with operationId %q = %d (called %q), want 400 before the service", bad, w.Code, f.last)
+		if w := walletDo(r, http.MethodPost, "/pool/pay-pending", map[string]string{"operationId": bad, "note": "n"}); w.Code != http.StatusBadRequest || f.last == "pay-pending" {
+			t.Fatalf("pay-pending with operationId %q = %d (called %q), want 400 before the service", bad, w.Code, f.last)
 		}
 	}
-	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": op, "amount": "5", "note": "kept the naira"}); w.Code != http.StatusOK || f.last != "settle:5" || f.op.String() != op {
-		t.Fatalf("settle = %d %s op=%s", w.Code, f.last, f.op)
+	op := uuid.NewString()
+	w := walletDo(r, http.MethodPost, "/pool/pay-pending", map[string]string{"operationId": op, "wallet": "0xa1", "note": "refilled"})
+	if w.Code != http.StatusOK || f.last != "pay-pending" || f.op.String() != op || f.wallet != "0xa1" || f.note != "refilled" {
+		t.Fatalf("pay-pending = %d %s op=%s wallet=%s", w.Code, f.last, f.op, f.wallet)
 	}
-	f.err = services.ErrLPAmount
-	if w := walletDo(r, http.MethodPost, "/pool/settle", map[string]string{"operationId": op, "amount": "0", "note": "n"}); w.Code != http.StatusBadRequest {
-		t.Fatalf("a bad amount = %d, want 400", w.Code)
+	var body struct {
+		Message string `json:"message"`
+		Data    struct {
+			Paid    []services.PaidPending    `json:"paid"`
+			Skipped []services.SkippedPending `json:"skipped"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Data.Paid) != 1 || body.Data.Paid[0].TxHash != "0xpaid" ||
+		body.Data.Paid[0].Amount != "20" || len(body.Data.Skipped) != 1 || body.Data.Skipped[0].Pending != "80" ||
+		body.Data.Skipped[0].Reason != "not enough liquid yet" || body.Message != "Pending withdrawals sent" {
+		t.Fatalf("body = %s", w.Body.String())
+	}
+	for err, want := range map[error]int{
+		services.ErrITOperatorNoteRequired: http.StatusBadRequest,
+		services.ErrPoolPendingWallet:      http.StatusBadRequest,
+		services.ErrPoolOperationID:        http.StatusBadRequest,
+		services.ErrLiquidityNotVault:      http.StatusConflict,
+	} {
+		f.err = err
+		if w := walletDo(r, http.MethodPost, "/pool/pay-pending", map[string]string{"operationId": op, "note": "n"}); w.Code != want {
+			t.Fatalf("%v = %d, want %d", err, w.Code, want)
+		}
 	}
 }
 

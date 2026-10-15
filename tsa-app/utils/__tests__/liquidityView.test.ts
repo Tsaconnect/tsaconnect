@@ -5,7 +5,8 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 /* eslint-disable import/first */
 import {
-  canClaimGasFree, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage, oldWalletHasFunds,
+  canClaimGasFree, claimRefusalMessage, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage,
+  oldWalletFundsMessage, oldWalletHasFunds, withdrawalMessage,
 } from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
 
@@ -85,6 +86,21 @@ describe('oldWalletHasFunds', () => {
   it('is false once the old wallet is empty', () => {
     expect(oldWalletHasFunds(me({ walletChanged: true, principal: '0', claimable: '0.0' }))).toBe(false);
   });
+  it('is true while only a pending withdrawal is left', () => {
+    expect(oldWalletHasFunds(me({ walletChanged: true, principal: '0', claimable: '0', pendingWithdrawal: '5' }))).toBe(true);
+  });
+});
+
+describe('oldWalletFundsMessage', () => {
+  const old = { walletChanged: true, wallet: '0xold' };
+  it('asks for withdraw and claim while principal or earnings remain', () => {
+    expect(oldWalletFundsMessage(me({ ...old, pendingWithdrawal: '5' })))
+      .toBe('Withdraw and claim from 0xold first (switch to it on this device), then activate your new wallet.');
+  });
+  it('is neutral and asks nothing when only a pending withdrawal is left', () => {
+    expect(oldWalletFundsMessage(me({ ...old, principal: '0', claimable: '0', pendingWithdrawal: '5' })))
+      .toBe('A withdrawal from your old wallet is still pending. You can switch wallets once it completes.');
+  });
 });
 
 describe('liquidityMessage', () => {
@@ -97,5 +113,27 @@ describe('liquidityMessage', () => {
   });
   it('leaves an ordinary message alone', () => {
     expect(liquidityMessage('Your liquidity is paused', 'x')).toBe('Your liquidity is paused');
+  });
+});
+
+describe('claimRefusalMessage', () => {
+  it('maps the liquidity refusal to the neutral copy', () => {
+    expect(claimRefusalMessage('claim_unavailable', 'liquidity: insufficient liquidity'))
+      .toBe('Claims are not available right now. Try again later.');
+    expect(claimRefusalMessage(undefined, 'liquidity: nothing to claim')).toBe('Nothing to claim');
+    expect(claimRefusalMessage(undefined, '')).toBe('Try again in a moment.');
+  });
+});
+
+describe('withdrawalMessage', () => {
+  const E18 = 10n ** 18n;
+  it('splits paid-now and pending from the receipt', () => {
+    expect(withdrawalMessage(me(), { paidNow: 30n * E18, pending: 20n * E18 }))
+      .toBe('Withdrawal submitted. 30 USDT sent now, 20 USDT pending.');
+    expect(withdrawalMessage(me(), { paidNow: 0n, pending: E18 / 4n })).toBe('Withdrawal submitted. 0.25 USDT pending.');
+    expect(withdrawalMessage(me(), { paidNow: 50n * E18, pending: 0n })).toBe('Withdrawal sent to your wallet');
+  });
+  it('is neutral without a decoded receipt', () => {
+    expect(withdrawalMessage(me(), undefined)).toBe('Withdrawal submitted.');
   });
 });

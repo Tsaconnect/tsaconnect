@@ -68,15 +68,30 @@ func TestDecodeVaultLog_LPEvents(t *testing.T) {
 	if !ok || ds.Kind != VaultEventDepositorSet || ds.Account != lp.Hex() || !ds.Allowed {
 		t.Fatalf("DepositorSet = %+v, %v", ds, ok)
 	}
-	cp, ok := v.DecodeVaultLog(vaultLog(t, "CollateralPosted", nil, big.NewInt(9)))
-	if !ok || cp.Kind != VaultEventCollateralPosted || cp.Amount.Int64() != 9 {
-		t.Fatalf("CollateralPosted = %+v, %v", cp, ok)
+	wp, ok := v.DecodeVaultLog(vaultLog(t, "WithdrawalPending", []common.Hash{lpTopic}, big.NewInt(9)))
+	if !ok || wp.Kind != VaultEventWithdrawalPending || wp.Account != lp.Hex() || wp.Amount.Int64() != 9 {
+		t.Fatalf("WithdrawalPending = %+v, %v", wp, ok)
+	}
+	pd, ok := v.DecodeVaultLog(vaultLog(t, "WithdrawalPaid", []common.Hash{lpTopic}, big.NewInt(4)))
+	if !ok || pd.Kind != VaultEventWithdrawalPaid || pd.Account != lp.Hex() || pd.Amount.Int64() != 4 {
+		t.Fatalf("WithdrawalPaid = %+v, %v", pd, ok)
+	}
+}
+
+// A ledger rebuilt from the deploy block must still read the settles emitted
+// before the no-collateral upgrade (testnet history), or outstanding drifts.
+func TestDecodeVaultLog_LegacySettledFromCollateral(t *testing.T) {
+	v := &LiquidityVault{addr: testVaultAddr}
+	ref := HashID(uuid.New())
+	ev, ok := v.DecodeVaultLog(vaultLog(t, "SettledFromCollateral", []common.Hash{common.Hash(ref)}, big.NewInt(65)))
+	if !ok || ev.Kind != vaultEventLegacySettled || ev.Amount.Int64() != 65 || ev.Ref != "0x"+common.Bytes2Hex(ref[:]) {
+		t.Fatalf("legacy settle = %+v, %v", ev, ok)
 	}
 }
 
 func TestDecodeVaultLog_RefusesForeignLogs(t *testing.T) {
 	v := &LiquidityVault{addr: testVaultAddr}
-	l := vaultLog(t, "CollateralPosted", nil, big.NewInt(9))
+	l := vaultLog(t, "Refilled", []common.Hash{{}}, big.NewInt(9))
 	l.Address = common.HexToAddress("0x00000000000000000000000000000000000000ee")
 	if _, ok := v.DecodeVaultLog(l); ok {
 		t.Fatal("decoded a log from another contract")
@@ -93,14 +108,17 @@ func TestVaultEventTopics_CoverEveryKind(t *testing.T) {
 	}
 }
 
-func TestVaultState_FreeCapacityNeverNegative(t *testing.T) {
-	s := &VaultState{Collateral: big.NewInt(5), Outstanding: big.NewInt(7)}
-	if s.FreeCapacity().Sign() != 0 {
-		t.Fatalf("free = %s", s.FreeCapacity())
+func TestVaultState_LiquidNeverNegative(t *testing.T) {
+	s := &VaultState{Balance: big.NewInt(5), TotalPendingWithdrawals: big.NewInt(7)}
+	if s.Liquid().Sign() != 0 {
+		t.Fatalf("liquid = %s", s.Liquid())
 	}
-	s.Outstanding = big.NewInt(2)
-	if s.FreeCapacity().Int64() != 3 {
-		t.Fatalf("free = %s", s.FreeCapacity())
+	s.TotalPendingWithdrawals = big.NewInt(2)
+	if s.Liquid().Int64() != 3 {
+		t.Fatalf("liquid = %s", s.Liquid())
+	}
+	if (&VaultState{}).Liquid().Sign() != 0 {
+		t.Fatal("an unread state is not liquid")
 	}
 }
 
@@ -113,8 +131,8 @@ func (e nestedDataErr) ErrorData() any { return e.data }
 // Hardhat nests revert data ({"message", "data"}); geth sends the hex string.
 // Both must decode, or a vault refusal would read as a transient forever.
 func TestDecodeRevertReason_NestedRevertData(t *testing.T) {
-	str := vaultRevert("Not covered by collateral")
-	if got := decodeRevertReason(str); got != "Not covered by collateral" {
+	str := vaultRevert("Insufficient liquidity")
+	if got := decodeRevertReason(str); got != "Insufficient liquidity" {
 		t.Fatalf("hex string data: %q", got)
 	}
 	var de revertDataErr
@@ -122,7 +140,7 @@ func TestDecodeRevertReason_NestedRevertData(t *testing.T) {
 		t.Fatal("no data error")
 	}
 	nested := nestedDataErr{data: map[string]interface{}{"message": "reverted", "data": de.data}}
-	if got := decodeRevertReason(nested); got != "Not covered by collateral" {
+	if got := decodeRevertReason(nested); got != "Insufficient liquidity" {
 		t.Fatalf("nested data: %q", got)
 	}
 }

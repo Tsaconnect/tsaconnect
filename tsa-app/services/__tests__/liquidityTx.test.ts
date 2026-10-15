@@ -23,7 +23,8 @@ jest.mock('../walletApi', () => ({ getAuthHeaders: jest.fn().mockResolvedValue({
 jest.mock('@react-native-async-storage/async-storage', () => ({ getItem: jest.fn(), setItem: jest.fn() }));
 
 /* eslint-disable import/first */
-import { runLiquidityTx } from '../liquidityTx';
+import { Interface } from 'ethers';
+import { decodeWithdrawal, runLiquidityTx } from '../liquidityTx';
 import { TxRevertedError } from '../txWait';
 import type { LiquidityMe } from '../liquidityApi';
 /* eslint-enable import/first */
@@ -120,4 +121,41 @@ it('answers busy to a second tap while the first runs', async () => {
   expect(await runLiquidityTx({ me, kind: 'claim', wallet: '0xabc' })).toEqual({ status: 'busy' });
   release();
   expect((await first).status).toBe('done');
+});
+
+describe('withdraw split from the receipt', () => {
+  const VAULT = '0x00000000000000000000000000000000000000f1';
+  const LP = '0x00000000000000000000000000000000000000d1';
+  const iface = new Interface([
+    'event Withdrawn(address indexed lp, uint256 amount)',
+    'event WithdrawalPending(address indexed lp, uint256 amount)',
+    'event Transfer(address indexed from, address indexed to, uint256 value)',
+  ]);
+  const log = (name: string, args: unknown[], address = VAULT) => ({ address, ...iface.encodeEventLog(name, args) });
+  const vaultMe = { ...me, vault: VAULT } as LiquidityMe;
+
+  it('returns the paid-now and pending amounts from the vault events', async () => {
+    mockPrepareWithdraw.mockResolvedValue(plan('withdraw'));
+    mockWait.mockResolvedValue({ status: 1, logs: [
+      log('Transfer', [VAULT, LP, 30n]),
+      log('Withdrawn', [LP, 30n]),
+      log('WithdrawalPending', [LP, 20n]),
+    ] });
+    expect(await runLiquidityTx({ me: vaultMe, kind: 'withdraw', amount: '50', wallet: LP.toUpperCase().replace('0X', '0x') }))
+      .toEqual({ status: 'done', txHash: '0xwithdraw', withdrawal: { paidNow: 30n, pending: 20n } });
+  });
+
+  it('ignores events from another contract or for another LP', () => {
+    const other = '0x00000000000000000000000000000000000000e2';
+    expect(decodeWithdrawal({ status: 1, logs: [log('WithdrawalPending', [LP, 20n], other), log('Withdrawn', [other, 5n])] }, VAULT, LP))
+      .toBeUndefined();
+    expect(decodeWithdrawal({ status: 1, logs: [log('Withdrawn', [LP, 50n])] }, VAULT, LP)).toEqual({ paidNow: 50n, pending: 0n });
+  });
+
+  it('leaves the split out when the receipt has no vault event', async () => {
+    mockPrepareWithdraw.mockResolvedValue(plan('withdraw'));
+    mockWait.mockResolvedValue({ status: 1, logs: [] });
+    expect(await runLiquidityTx({ me: vaultMe, kind: 'withdraw', amount: '50', wallet: LP }))
+      .toEqual({ status: 'done', txHash: '0xwithdraw' });
+  });
 });

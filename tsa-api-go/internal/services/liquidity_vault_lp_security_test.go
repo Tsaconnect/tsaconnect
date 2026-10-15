@@ -28,7 +28,7 @@ func (r *lpRig) lpRowOf(t *testing.T, user uuid.UUID) *models.PaymentMerchant {
 }
 
 // Finding 1: re-activating from a new wallet while the old one still holds
-// principal or earnings is refused — the app could no longer build the
+// principal, earnings or a pending withdrawal is refused — the app could no longer build the
 // withdraw/claim for it, and the old wallet would stay a depositor.
 func TestVaultLP_ReactivateRefusedWhileOldWalletHasFunds(t *testing.T) {
 	for _, tc := range []struct {
@@ -37,6 +37,7 @@ func TestVaultLP_ReactivateRefusedWhileOldWalletHasFunds(t *testing.T) {
 	}{
 		{"principal", func(r *lpRig, k string) { r.vault.principal[k] = usdt18(10) }},
 		{"claimable", func(r *lpRig, k string) { r.vault.claimable[k] = big.NewInt(1) }},
+		{"pending withdrawal", func(r *lpRig, k string) { r.vault.pending[k] = big.NewInt(1) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newLPRig(t)

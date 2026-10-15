@@ -4,10 +4,14 @@ package services
 
 // The vault adapter and ledger against the REAL TsaLiquidityPool on a local
 // hardhat node — ABI, event decoding, StateAt and the indexer's log scan, none
-// of which a fake can prove. Run (node + fixture first):
+// of which a fake can prove. No collateral: a fill takes LP liquidity, a
+// withdraw the pool cannot pay in full goes partly pending, the refill
+// wallet refills and the operator pays the pending part (payPending). Run (node + fixture first):
 //
 //	cd smart-contracts && npx hardhat node &
 //	npx hardhat run scripts/rehearse-liquidity-pool-local.js --network localhost   # prints the JSON below
+// Run against a FRESH fixture (the amounts below assume its 25 principal).
+//
 //	VAULT_NODE='<that JSON>' go test -tags vaultnode ./internal/services/ -run '^TestVaultNode_' -count=1 -v
 //
 // Hardhat's public dev keys only; the fixture refuses any chain but 31337.
@@ -15,12 +19,14 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -29,12 +35,17 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// hardhat account #2 (the fixture's operator): a public test key.
-const vaultNodeOperatorKey = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+// Hardhat public dev keys: #2 the fixture's operator, #1 its refill wallet
+// (collateralProvider), #5 its LP.
+const (
+	vaultNodeOperatorKey = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+	vaultNodeRefillKey   = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	vaultNodeLPKey       = "8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba"
+)
 
 type vaultNodeFixture struct {
-	Vault, Token, Operator, Treasury, LP string
-	DeployBlock                          uint64
+	Vault, Token, Operator, Treasury, LP, RefillWallet string
+	DeployBlock                                        uint64
 }
 
 func vaultNode(t *testing.T) (*blockchain.EVMClient, *LiquidityVault, vaultNodeFixture) {
@@ -79,7 +90,18 @@ func sendAs(t *testing.T, client *blockchain.EVMClient, keyHex string, unsigned 
 	return r
 }
 
-func TestVaultNode_FillDecodeAndLedger(t *testing.T) {
+// eventsIn decodes the vault's events in a receipt.
+func eventsIn(vault *LiquidityVault, r *types.Receipt) map[string]*big.Int {
+	out := map[string]*big.Int{}
+	for _, l := range r.Logs {
+		if ev, ok := vault.DecodeVaultLog(*l); ok && ev.Amount != nil {
+			out[ev.Kind] = ev.Amount
+		}
+	}
+	return out
+}
+
+func TestVaultNode_FillPendingRefillPayPendingAndLedger(t *testing.T) {
 	client, vault, f := vaultNode(t)
 	ctx := context.Background()
 	u := func(n int64) *big.Int { return new(big.Int).Mul(big.NewInt(n), big.NewInt(1e18)) }
@@ -88,9 +110,9 @@ func TestVaultNode_FillDecodeAndLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := new(big.Int).Set(st.Outstanding)
-	if st.Collateral.Sign() == 0 || st.TotalPrincipal.Cmp(u(25)) < 0 || st.Paused {
-		t.Fatalf("fixture state = %+v", st)
+	if st.TotalPrincipal.Cmp(u(25)) != 0 || st.Balance.Cmp(u(25)) != 0 || st.TotalPendingWithdrawals.Sign() != 0 ||
+		st.Outstanding.Sign() != 0 || st.Paused {
+		t.Fatalf("fixture state = %+v, want a fresh fixture (25 principal, all liquid)", st)
 	}
 	w, err := vault.Wiring(ctx, f.Operator, f.Treasury)
 	if err != nil || !w.Operator || !strings.EqualFold(w.Token.Hex(), f.Token) || !w.Recipient {
@@ -102,33 +124,78 @@ func TestVaultNode_FillDecodeAndLedger(t *testing.T) {
 	if _, err := vault.PrepareFill(f.Operator, f.LP, u(1), big.NewInt(0), ref); err == nil || decodeRevertReason(err) == "" {
 		t.Fatalf("fill to a non-recipient: err = %v, want a decoded revert", err)
 	}
+	if _, err := vault.PrepareFill(f.Operator, f.Treasury, u(26), big.NewInt(0), ref); decodeRevertReason(err) != "Insufficient liquidity" {
+		t.Fatalf("fill over liquid: err = %v, want Insufficient liquidity", err)
+	}
 
-	unsigned, err := vault.PrepareFill(f.Operator, f.Treasury, u(100), u(1), ref) // spread within the 3% cap
+	// 1. Fill 20 (+0.2 spread): the pool pays 20, the company owes 20.2.
+	unsigned, err := vault.PrepareFill(f.Operator, f.Treasury, u(20), new(big.Int).Div(u(1), big.NewInt(5)), ref)
 	if err != nil {
 		t.Fatalf("prepare fill: %v", err)
 	}
 	r := sendAs(t, client, vaultNodeOperatorKey, unsigned)
 	ev := vault.FilledIn(r, ref)
-	if r.Status != 1 || ev == nil || ev.Amount.Cmp(u(100)) != 0 || ev.Spread.Cmp(u(1)) != 0 || !strings.EqualFold(ev.To, f.Treasury) {
+	if r.Status != 1 || ev == nil || ev.Amount.Cmp(u(20)) != 0 || !strings.EqualFold(ev.To, f.Treasury) {
 		t.Fatalf("receipt status=%d event=%+v", r.Status, ev)
 	}
 	if used, err := vault.FillUsed(ctx, ref); err != nil || !used {
 		t.Fatalf("FillUsed = %v %v", used, err)
 	}
+	owed := new(big.Int).Add(u(20), new(big.Int).Div(u(1), big.NewInt(5)))
 	st, _ = vault.State(ctx)
-	if new(big.Int).Sub(st.Outstanding, before).Cmp(u(101)) != 0 {
-		t.Fatalf("outstanding moved by %s, want 101", new(big.Int).Sub(st.Outstanding, before))
-	}
-	pos, err := vault.Position(ctx, f.LP)
-	if err != nil || !pos.Allowed || pos.Claimable.Sign() == 0 {
-		t.Fatalf("lp position = %+v %v", pos, err)
-	}
-	// The fixture runs with no deposit lock: all principal may leave.
-	if pos.Withdrawable == nil || pos.Withdrawable.Cmp(pos.Principal) != 0 || !pos.LockedUntil.IsZero() {
-		t.Fatalf("withdrawable = %v lockedUntil = %v, want all of %s", pos.Withdrawable, pos.LockedUntil, pos.Principal)
+	if st.Outstanding.Cmp(owed) != 0 || st.Liquid().Cmp(u(5)) != 0 {
+		t.Fatalf("after fill: outstanding %s liquid %s, want 20.2 and 5", st.Outstanding, st.Liquid())
 	}
 
-	// The indexer reads the real logs, and the rebuilt books match StateAt.
+	// 2. The LP withdraws all 25: 5 now, 20 pending (it stops earning at once).
+	unsigned, err = vault.PrepareWithdraw(f.LP, u(25))
+	if err != nil {
+		t.Fatalf("prepare withdraw: %v", err)
+	}
+	r = sendAs(t, client, vaultNodeLPKey, unsigned)
+	evs := eventsIn(vault, r)
+	if r.Status != 1 || evs[VaultEventWithdrawn].Cmp(u(5)) != 0 || evs[VaultEventWithdrawalPending].Cmp(u(20)) != 0 {
+		t.Fatalf("withdraw status=%d events=%v, want 5 paid and 20 pending", r.Status, evs)
+	}
+	pos, err := vault.Position(ctx, f.LP)
+	if err != nil || pos.Principal.Sign() != 0 || pos.PendingWithdrawal.Cmp(u(20)) != 0 || pos.Claimable.Sign() == 0 {
+		t.Fatalf("lp position = %+v %v, want no principal, 20 pending, the spread claimable", pos, err)
+	}
+	if p, err := vault.PendingWithdrawal(ctx, f.LP); err != nil || p.Cmp(u(20)) != 0 {
+		t.Fatalf("pendingWithdrawal = %v %v", p, err)
+	}
+
+	// 3. Nothing is liquid: a claim is refused at estimate → claim_unavailable.
+	if _, err := vault.PrepareClaim(f.LP); !errors.Is(lpRevertError(err), ErrLPClaimUnavailable) {
+		t.Fatalf("claim with nothing liquid: %v, want ErrLPClaimUnavailable", err)
+	}
+
+	// 4. The refill wallet refills what is owed (approved by the fixture).
+	refillABI, _ := abi.JSON(strings.NewReader(`[{"type":"function","name":"refill","inputs":[{"name":"amount","type":"uint256"},{"name":"ref","type":"bytes32"}],"outputs":[],"stateMutability":"nonpayable"}]`))
+	data, _ := refillABI.Pack("refill", owed, HashID(uuid.New()))
+	unsigned, err = client.PrepareContractCall(f.RefillWallet, f.Vault, data, nil, 0)
+	if err != nil {
+		t.Fatalf("prepare refill: %v", err)
+	}
+	if r = sendAs(t, client, vaultNodeRefillKey, unsigned); r.Status != 1 {
+		t.Fatal("refill reverted")
+	}
+
+	// 5. The operator pays the pending withdrawal, to the LP only.
+	unsigned, err = vault.PreparePayPending(f.Operator, f.LP)
+	if err != nil {
+		t.Fatalf("prepare payPending: %v", err)
+	}
+	r = sendAs(t, client, vaultNodeOperatorKey, unsigned)
+	if evs = eventsIn(vault, r); r.Status != 1 || evs[VaultEventWithdrawalPaid].Cmp(u(20)) != 0 {
+		t.Fatalf("payPending status=%d events=%v, want 20 paid", r.Status, evs)
+	}
+	st, _ = vault.State(ctx)
+	if st.Outstanding.Sign() != 0 || st.TotalPendingWithdrawals.Sign() != 0 || st.TotalPrincipal.Sign() != 0 {
+		t.Fatalf("after refill + payPending: %+v, want nothing owed", st)
+	}
+
+	// 6. The indexer reads the real logs, and the rebuilt books match StateAt.
 	db := setupTradeDB(t)
 	if err := db.AutoMigrate(&models.LiquidityLedgerEntry{}, &models.LiquidityIndexCursor{}, &models.PoolOrder{}); err != nil {
 		t.Fatal(err)
@@ -138,16 +205,15 @@ func TestVaultNode_FillDecodeAndLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Client.Client().Call(nil, "hardhat_mine", "0x2"); err != nil { // make the fill final
+	if err := client.Client.Client().Call(nil, "hardhat_mine", "0x2"); err != nil { // make the last tx final
 		t.Fatal(err)
 	}
-	n, err := x.IndexOnce(ctx)
-	if err != nil || n < 4 { // collateral posted, depositor set, deposited, filled (+ earlier runs' fills)
-		t.Fatalf("indexed %d %v, want the fixture's events and the fill", n, err)
+	if _, err := x.IndexOnce(ctx); err != nil {
+		t.Fatal(err)
 	}
 	var kinds []string
 	db.Model(&models.LiquidityLedgerEntry{}).Distinct("kind").Order("kind").Pluck("kind", &kinds)
-	if strings.Join(kinds, ",") != "collateral_posted,deposited,depositor_set,filled,operator_set" { // initialize sets the first operator
+	if strings.Join(kinds, ",") != "deposited,depositor_set,filled,operator_set,refilled,withdrawal_paid,withdrawal_pending,withdrawn" {
 		t.Fatalf("ledger kinds = %v", kinds)
 	}
 	rep, err := x.Reconcile(ctx)

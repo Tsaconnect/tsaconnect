@@ -2,6 +2,7 @@
 // string/BigInt over the token's own decimals (18 on BSC): no floats.
 import { formatTokenAmount, parseTokenAmount } from '@/services/p2p';
 import type { LiquidityMe } from '@/services/liquidityApi';
+import type { WithdrawalOutcome } from '@/services/liquidityTx';
 
 /** Group the integer part and cut the fraction to maxFrac digits, exactly. */
 export function formatLiquidityAmount(value: string | undefined, maxFrac = 4): string {
@@ -61,19 +62,48 @@ export function canClaimGasFree(me: LiquidityMe): boolean {
 export const LIQUIDITY_OLD_WALLET_HAS_FUNDS = 'liquidity_old_wallet_has_funds';
 
 /**
- * Activating a new wallet while the old one still holds principal or earnings
- * would strand them: the screen only signs as the current LP wallet.
+ * Activating a new wallet while the old one still holds principal, earnings
+ * or a pending withdrawal would strand them: the screen only signs as the
+ * current LP wallet.
  */
 export function oldWalletHasFunds(me: LiquidityMe): boolean {
-  return me.walletChanged && (!isZeroAmount(me.principal) || !isZeroAmount(me.claimable));
+  return me.walletChanged
+    && (!isZeroAmount(me.principal) || !isZeroAmount(me.claimable) || !isZeroAmount(me.pendingWithdrawal));
 }
 
-export function oldWalletFundsMessage(wallet?: string): string {
-  return `Withdraw and claim from ${wallet || 'your old wallet'} first (switch to it on this device), then activate your new wallet.`;
+/** Only a pending withdrawal is left: the LP cannot act on it, so the copy asks nothing of her. */
+export function oldWalletFundsMessage(me: LiquidityMe): string {
+  if (isZeroAmount(me.principal) && isZeroAmount(me.claimable) && !isZeroAmount(me.pendingWithdrawal)) {
+    return 'A withdrawal from your old wallet is still pending. You can switch wallets once it completes.';
+  }
+  return `Withdraw and claim from ${me.wallet || 'your old wallet'} first (switch to it on this device), then activate your new wallet.`;
 }
 
 /** Server refusals carry a "liquidity: " package prefix that is not for users. */
 export function liquidityMessage(message: string | undefined, fallback: string): string {
   const m = (message ?? '').replace(/^liquidity:\s*/i, '').trim();
   return m ? m.charAt(0).toUpperCase() + m.slice(1) : fallback;
+}
+
+/** The API refuses a claim (gas-free or signed) while the pool has no liquid USDT for it. */
+export const LIQUIDITY_CLAIM_UNAVAILABLE = 'claim_unavailable';
+export const CLAIM_UNAVAILABLE_MESSAGE = 'Claims are not available right now. Try again later.';
+
+/** A claim refusal as the LP sees it: the liquidity refusal always reads the same neutral way. */
+export function claimRefusalMessage(code: string | undefined, message: string | undefined): string {
+  return code === LIQUIDITY_CLAIM_UNAVAILABLE ? CLAIM_UNAVAILABLE_MESSAGE : liquidityMessage(message, 'Try again in a moment.');
+}
+
+/**
+ * The toast for a mined withdrawal, from the split decoded off its receipt.
+ * Without one (receipt unreadable) it stays neutral rather than guess.
+ */
+export function withdrawalMessage(me: LiquidityMe, w: WithdrawalOutcome | undefined): string {
+  if (!w || !me.token) return 'Withdrawal submitted.';
+  const d = me.token.decimals;
+  const sym = me.token.symbol;
+  const show = (u: bigint) => `${formatLiquidityAmount(formatTokenAmount(u.toString(), d, d))} ${sym}`;
+  if (w.pending === 0n) return 'Withdrawal sent to your wallet';
+  if (w.paidNow === 0n) return `Withdrawal submitted. ${show(w.pending)} pending.`;
+  return `Withdrawal submitted. ${show(w.paidNow)} sent now, ${show(w.pending)} pending.`;
 }

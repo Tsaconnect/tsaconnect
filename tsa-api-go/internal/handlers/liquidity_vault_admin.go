@@ -12,11 +12,11 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
-// VaultPoolAdmin is the collateral provider's console on the shared pool
-// (spec 2026-10-14 §7); *services.ITService satisfies it.
+// VaultPoolAdmin is the console on the shared pool (spec 2026-10-14 §7,
+// no-collateral amendment); *services.ITService satisfies it.
 type VaultPoolAdmin interface {
 	VaultPoolSummary(ctx context.Context) (*services.VaultPoolSummary, error)
-	SettlePoolFromCollateral(ctx context.Context, adminID, operationID uuid.UUID, amount, note string) (string, error)
+	PayPoolPending(ctx context.Context, adminID, operationID uuid.UUID, wallet, note string) (*services.PayPendingResult, error)
 	RetryPoolFill(ctx context.Context, adminID, intentID uuid.UUID, note string) (*models.ITIntent, error)
 }
 
@@ -44,17 +44,22 @@ func (h *ITHandler) AdminVaultPool(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Liquidity pool", gin.H{"pool": sum})
 }
 
-type settleFromCollateralBody struct {
+type payPendingBody struct {
 	OperationID string `json:"operationId"`
-	Amount      string `json:"amount"`
+	Wallet      string `json:"wallet"`
 	Note        string `json:"note"`
 }
 
-// POST /api/admin/liquidity/pool/settle-from-collateral {operationId, amount, note}
-// operationId is the console's UUID for this one settle: a retry with the same
-// id is answered with the first send's hash, never a second settle.
-func (h *ITHandler) AdminSettlePoolFromCollateral(c *gin.Context) {
-	var body settleFromCollateralBody
+// POST /api/admin/liquidity/pool/pay-pending {operationId, wallet?, note}
+// Sends payPending for one wallet's pending withdrawal, or every pending
+// wallet when wallet is omitted, budgeted against the vault's balance: a
+// wallet the balance cannot reach is skipped, not sent. operationId is the
+// console's UUID for this one action: a retry with the same id is answered
+// with the first sends' hashes, never a second send.
+// → {paid: [{wallet, txHash, amount}], skipped: [{wallet, pending, reason}]}
+// (amount: what the send expects to pay; sent, not yet proven paid).
+func (h *ITHandler) AdminPayPoolPending(c *gin.Context) {
+	var body payPendingBody
 	_ = c.ShouldBindJSON(&body)
 	user := getUserFromContext(c)
 	if user == nil {
@@ -66,16 +71,12 @@ func (h *ITHandler) AdminSettlePoolFromCollateral(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "operationId (a UUID) is required")
 		return
 	}
-	if strings.TrimSpace(body.Amount) == "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, "amount is required")
-		return
-	}
-	hash, err := h.vaultAdmin.SettlePoolFromCollateral(c.Request.Context(), user.ID, opID, body.Amount, body.Note)
+	res, err := h.vaultAdmin.PayPoolPending(c.Request.Context(), user.ID, opID, body.Wallet, body.Note)
 	if err != nil {
 		poolAdminError(c, err)
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Settle sent", gin.H{"txHash": hash})
+	utils.SuccessResponse(c, http.StatusOK, "Pending withdrawals sent", gin.H{"paid": res.Paid, "skipped": res.Skipped})
 }
 
 // POST /api/admin/liquidity/orders/:id/retry-fill {note}

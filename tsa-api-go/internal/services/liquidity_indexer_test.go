@@ -61,7 +61,7 @@ func newIndexerRig(t *testing.T, logs ...types.Log) (*VaultIndexer, *fakeLogRead
 	}
 	reader := &fakeLogReader{head: 1_000, logs: logs}
 	books := &fakeBooks{LiquidityVault: &LiquidityVault{addr: testVaultAddr},
-		state: VaultState{Collateral: new(big.Int), Outstanding: new(big.Int), TotalPrincipal: new(big.Int)}}
+		state: VaultState{Balance: new(big.Int), TotalPendingWithdrawals: new(big.Int), Outstanding: new(big.Int), TotalPrincipal: new(big.Int)}}
 	x, err := NewVaultIndexer(VaultIndexerConfig{DB: db, ChainID: 97, Vault: books, Reader: reader, DeployBlock: 100, Chunk: 200})
 	if err != nil {
 		t.Fatal(err)
@@ -80,8 +80,8 @@ const (
 func TestVaultIndexer_IndexesFinalBlocksOnceInChunks(t *testing.T) {
 	x, reader, _ := newIndexerRig(t,
 		ledgerLog(t, 150, 0, "Deposited", []common.Hash{lpTopic(ledgerLP)}, usdt18(25)),
-		ledgerLog(t, 640, 1, "CollateralPosted", nil, usdt18(200)),
-		ledgerLog(t, 997, 0, "CollateralPosted", nil, usdt18(1)), // inside the 5-block finality window
+		ledgerLog(t, 640, 1, "WithdrawalPending", []common.Hash{lpTopic(ledgerLP)}, usdt18(5)),
+		ledgerLog(t, 997, 0, "WithdrawalPaid", []common.Hash{lpTopic(ledgerLP)}, usdt18(5)), // inside the 5-block finality window
 	)
 	n, err := x.IndexOnce(context.Background())
 	if err != nil || n != 2 {
@@ -104,7 +104,8 @@ func TestVaultIndexer_IndexesFinalBlocksOnceInChunks(t *testing.T) {
 	}
 }
 
-// Rebuilt books equal the chain's: clean. A fill of ours is known; a fill
+// Rebuilt books equal the chain's: clean (the invariant balance + outstanding
+// = principal + unclaimed + pending holds). A fill of ours is known; a fill
 // matching no order is reported (the operator key spent outside the path).
 // Amounts are small integers: SQLite keeps numerics above int64 as REAL
 // (production Postgres is exact), and the ledger is unit-agnostic.
@@ -113,12 +114,10 @@ func TestVaultIndexer_ReconcileCleanAndUnknownFill(t *testing.T) {
 	ourRef, strayRef := HashID(ours), HashID(uuid.New())
 	tr := lpTopic(ledgerTreasury)
 	x, _, books := newIndexerRig(t,
-		ledgerLog(t, 150, 0, "Deposited", []common.Hash{lpTopic(ledgerLP)}, big.NewInt(25)),
-		ledgerLog(t, 160, 0, "CollateralPosted", nil, big.NewInt(200)),
+		ledgerLog(t, 150, 0, "Deposited", []common.Hash{lpTopic(ledgerLP)}, big.NewInt(225)),
 		ledgerLog(t, 170, 0, "Filled", []common.Hash{common.Hash(ourRef), tr}, big.NewInt(100), big.NewInt(1)),
 		ledgerLog(t, 180, 0, "Filled", []common.Hash{common.Hash(strayRef), tr}, big.NewInt(10), big.NewInt(0)),
 		ledgerLog(t, 190, 0, "Refilled", []common.Hash{common.Hash(ourRef)}, big.NewInt(50)),
-		ledgerLog(t, 200, 0, "SettledFromCollateral", []common.Hash{common.Hash(strayRef)}, big.NewInt(10)),
 	)
 	fill, spread := "100", "1"
 	x.c.DB.Create(&models.PoolOrder{IntentID: ours, Generation: 1, ChainID: 97, Token: "USDT", TokenDecimals: 18,
@@ -128,8 +127,9 @@ func TestVaultIndexer_ReconcileCleanAndUnknownFill(t *testing.T) {
 	if _, err := x.IndexOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// 101 + 10 − 50 − 10 = 51 outstanding; 200 − 10 = 190 collateral; 25 principal.
-	books.state = VaultState{Outstanding: big.NewInt(51), Collateral: big.NewInt(190), TotalPrincipal: big.NewInt(25)}
+	// 101 + 10 − 50 = 61 outstanding; balance 225 − 110 + 50 = 165; 225
+	// principal, 1 unclaimed: 165 + 61 = 225 + 1.
+	books.state = VaultState{Balance: big.NewInt(165), TotalPendingWithdrawals: new(big.Int), Outstanding: big.NewInt(61), TotalPrincipal: big.NewInt(225)}
 	rep, err := x.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestVaultIndexer_ReconcileReportsMismatchedFills(t *testing.T) {
 	ids := map[string]uuid.UUID{"amount": uuid.New(), "spread": uuid.New(), "to": uuid.New(), "unsent": uuid.New(), "good": uuid.New()}
 	ref := func(k string) common.Hash { return common.Hash(HashID(ids[k])) }
 	x, _, books := newIndexerRig(t,
-		ledgerLog(t, 160, 0, "CollateralPosted", nil, big.NewInt(1000)),
+		ledgerLog(t, 160, 0, "Deposited", []common.Hash{lpTopic(ledgerLP)}, big.NewInt(1000)),
 		ledgerLog(t, 170, 0, "Filled", []common.Hash{ref("amount"), tr}, big.NewInt(99), big.NewInt(1)),
 		ledgerLog(t, 171, 0, "Filled", []common.Hash{ref("spread"), tr}, big.NewInt(100), big.NewInt(7)),
 		ledgerLog(t, 172, 0, "Filled", []common.Hash{ref("to"), stranger}, big.NewInt(100), big.NewInt(1)),
@@ -174,7 +174,8 @@ func TestVaultIndexer_ReconcileReportsMismatchedFills(t *testing.T) {
 	if _, err := x.IndexOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	books.state = VaultState{Outstanding: big.NewInt(509), Collateral: big.NewInt(1000), TotalPrincipal: new(big.Int)}
+	// balance 1000 − 499 = 501; 501 + 509 = 1000 principal + 10 unclaimed.
+	books.state = VaultState{Balance: big.NewInt(501), TotalPendingWithdrawals: new(big.Int), Outstanding: big.NewInt(509), TotalPrincipal: big.NewInt(1000)}
 	rep, err := x.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +199,7 @@ func TestVaultIndexer_ReconcileReportsDrift(t *testing.T) {
 	if _, err := x.IndexOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	books.state = VaultState{Outstanding: new(big.Int), Collateral: new(big.Int), TotalPrincipal: usdt18(30)}
+	books.state = VaultState{Balance: usdt18(30), TotalPendingWithdrawals: new(big.Int), Outstanding: new(big.Int), TotalPrincipal: usdt18(30)}
 	rep, err := x.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -209,13 +210,67 @@ func TestVaultIndexer_ReconcileReportsDrift(t *testing.T) {
 }
 
 func TestVaultIndexer_NoUtilisationWithNothingOutstanding(t *testing.T) {
-	x, _, books := newIndexerRig(t, ledgerLog(t, 150, 0, "CollateralPosted", nil, usdt18(100)))
+	x, _, books := newIndexerRig(t, ledgerLog(t, 150, 0, "Deposited", []common.Hash{lpTopic(ledgerLP)}, big.NewInt(100)))
 	if _, err := x.IndexOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	books.state = VaultState{Outstanding: new(big.Int), Collateral: usdt18(100), TotalPrincipal: new(big.Int)}
+	books.state = VaultState{Balance: big.NewInt(100), TotalPendingWithdrawals: new(big.Int), Outstanding: new(big.Int), TotalPrincipal: big.NewInt(100)}
 	rep, _ := x.Reconcile(context.Background())
-	if rep.Utilisation != 0 {
-		t.Fatalf("use = %v", rep.Utilisation)
+	if rep.Utilisation != 0 || len(rep.Drift) != 0 {
+		t.Fatalf("use = %v drift = %v", rep.Utilisation, rep.Drift)
+	}
+}
+
+// A withdraw the pool could not pay in full: Withdrawn (paid now) and
+// WithdrawalPending both leave principal; WithdrawalPaid clears pending. The
+// books balance with pending outstanding, and utilisation counts it.
+func TestVaultIndexer_ReconcileWithPendingWithdrawals(t *testing.T) {
+	ours := uuid.New()
+	ref := HashID(ours)
+	lp := []common.Hash{lpTopic(ledgerLP)}
+	x, _, books := newIndexerRig(t,
+		ledgerLog(t, 150, 0, "Deposited", lp, big.NewInt(100)),
+		ledgerLog(t, 160, 0, "Filled", []common.Hash{common.Hash(ref), lpTopic(ledgerTreasury)}, big.NewInt(80), big.NewInt(2)),
+		ledgerLog(t, 170, 0, "WithdrawalPending", lp, big.NewInt(50)), // withdraw 70: 20 paid now, 50 pending
+		ledgerLog(t, 170, 1, "Withdrawn", lp, big.NewInt(20)),
+		ledgerLog(t, 180, 0, "Refilled", []common.Hash{common.Hash(ref)}, big.NewInt(40)),
+		ledgerLog(t, 190, 0, "WithdrawalPaid", lp, big.NewInt(30)),
+	)
+	fill, spread := "80", "2"
+	x.c.DB.Create(&models.PoolOrder{IntentID: ours, Generation: 1, ChainID: 97, Token: "USDT", TokenDecimals: 18,
+		MidMinor: "0", LPRateMinor: "0", DisplayRateMinor: "0", OpenedUnits: "0", SurplusUnits: "0", FillUnits: &fill,
+		SpreadUnits: &spread, FillSpreadUnits: &spread, FillTxHash: "0xfill"})
+	x.SetTreasury(ledgerTreasury)
+	if _, err := x.IndexOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	tot, err := x.Totals(context.Background(), 995)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tot.Principal.Int64() != 30 || tot.PendingWithdrawals.Int64() != 20 || tot.Outstanding.Int64() != 42 || tot.Unclaimed.Int64() != 2 {
+		t.Fatalf("totals = principal %s pending %s outstanding %s unclaimed %s, want 30/20/42/2",
+			tot.Principal, tot.PendingWithdrawals, tot.Outstanding, tot.Unclaimed)
+	}
+	// balance 100 − 80 − 20 + 40 − 30 = 10; 10 + 42 = 30 + 2 + 20.
+	books.state = VaultState{Balance: big.NewInt(10), TotalPendingWithdrawals: big.NewInt(20), Outstanding: big.NewInt(42), TotalPrincipal: big.NewInt(30)}
+	rep, err := x.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Drift) != 0 || len(rep.UnknownFills) != 0 || len(rep.MismatchedFills) != 0 {
+		t.Fatalf("report = %+v, want clean", rep)
+	}
+	if rep.Utilisation != 0.84 { // 42 ÷ (30 + 20)
+		t.Fatalf("utilisation = %v, want 0.84", rep.Utilisation)
+	}
+	// The chain's pending disagrees with the ledger, and tokens are missing:
+	// both are drift.
+	books.state.TotalPendingWithdrawals = big.NewInt(25)
+	books.state.Balance = big.NewInt(9)
+	rep, _ = x.Reconcile(context.Background())
+	got := strings.Join(rep.Drift, "\n")
+	if len(rep.Drift) != 2 || !strings.Contains(got, "pending_withdrawals") || !strings.Contains(got, "invariant") {
+		t.Fatalf("drift = %v, want pending and invariant drift", rep.Drift)
 	}
 }

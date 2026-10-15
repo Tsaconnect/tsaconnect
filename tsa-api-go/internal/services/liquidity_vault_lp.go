@@ -43,18 +43,24 @@ var (
 	ErrLPDepositLocked = errors.New("liquidity: part of your deposit is still in its 24-hour lock")
 	// ErrLPPoolPaused: the vault is paused — deposits wait; withdraw and claim never do.
 	ErrLPPoolPaused = errors.New("liquidity: the pool is paused, so deposits are on hold; you can still withdraw and claim")
+	// ErrLPClaimUnavailable: the vault refused a claim for want of liquid USDT
+	// ("Insufficient liquidity"). User copy stays neutral: no reason given.
+	ErrLPClaimUnavailable = errors.New("liquidity: claims are not available right now")
 )
 
 // lpRevertError turns the vault's own refusal of an LP tx at estimate (its
 // revert reason) into the LP's error: a withdraw over her principal is
-// ErrLPAmount, a claim with no earnings ErrLPNothingToClaim. Anything else —
-// an RPC failure included — is returned as is.
+// ErrLPAmount, a claim with no earnings ErrLPNothingToClaim, a claim the pool
+// has no liquid USDT for ErrLPClaimUnavailable. Anything else — an RPC
+// failure included — is returned as is.
 func lpRevertError(err error) error {
 	switch revertReasonOf(err) {
 	case "Bad amount":
 		return fmt.Errorf("%w: more than your deposited principal", ErrLPAmount)
 	case "Nothing to claim":
 		return ErrLPNothingToClaim
+	case "Insufficient liquidity":
+		return ErrLPClaimUnavailable
 	case "Deposit still locked":
 		return ErrLPDepositLocked
 	case "EnforcedPause()":
@@ -179,13 +185,16 @@ type LiquidityVaultMe struct {
 	Claimable       string          `json:"claimable,omitempty"`
 	// Withdrawable is the principal that may leave now; LockedUntil, set
 	// only while some is locked, is when the rest does.
-	Withdrawable string          `json:"withdrawable,omitempty"`
-	LockedUntil  *time.Time      `json:"lockedUntil,omitempty"`
-	Earned       string          `json:"earned,omitempty"` // claimed + claimable, all time
-	SharePercent string          `json:"sharePercent,omitempty"`
-	Limits       LiquidityLimits `json:"limits"`
-	MinClaim     string          `json:"minClaim"`
-	Paused       bool            `json:"paused"`
+	Withdrawable string     `json:"withdrawable,omitempty"`
+	LockedUntil  *time.Time `json:"lockedUntil,omitempty"`
+	// PendingWithdrawal is withdrawn principal the pool will pay to her wallet
+	// later (omitted when none). Shown neutrally: "Pending withdrawal".
+	PendingWithdrawal string          `json:"pendingWithdrawal,omitempty"`
+	Earned            string          `json:"earned,omitempty"` // claimed + claimable, all time
+	SharePercent      string          `json:"sharePercent,omitempty"`
+	Limits            LiquidityLimits `json:"limits"`
+	MinClaim          string          `json:"minClaim"`
+	Paused            bool            `json:"paused"`
 	// WalletChanged: the account's wallet is no longer the LP wallet. Deposits
 	// and gas-free claims wait for Activate from the current wallet;
 	// withdrawing and claiming (signed by the LP wallet itself) never do.
@@ -193,13 +202,11 @@ type LiquidityVaultMe struct {
 	Pool          *VaultPoolView `json:"pool,omitempty"`
 }
 
-// VaultPoolView is the pool card every LP sees.
+// VaultPoolView is the pool card every LP sees. What the company owes the
+// pool (outstanding) is the console's, never an LP's (review 2026-10-15).
 type VaultPoolView struct {
 	TotalLiquidity string `json:"totalLiquidity"`
-	Collateral     string `json:"collateral"`
-	Outstanding    string `json:"outstanding"`
-	CoveragePct    string `json:"coveragePercent"` // collateral ≥ outstanding always: "100"
-	APR30d         string `json:"apr30d"`          // trailing 30-day spread ÷ liquidity, annualised, percent
+	APR30d         string `json:"apr30d"` // trailing 30-day spread ÷ liquidity, annualised, percent
 }
 
 func (s *VaultLPService) units(n *big.Int) string { return BaseUnitsToDecimal(n, s.c.Token.Decimals) }
@@ -285,6 +292,9 @@ func (s *VaultLPService) Me(ctx context.Context, userID uuid.UUID) (*LiquidityVa
 			out.LockedUntil = &t
 		}
 	}
+	if pos.PendingWithdrawal != nil && pos.PendingWithdrawal.Sign() > 0 {
+		out.PendingWithdrawal = s.units(pos.PendingWithdrawal)
+	}
 	out.Earned = s.units(new(big.Int).Add(claimed, pos.Claimable))
 	if snap != nil && snap.state.TotalPrincipal.Sign() > 0 {
 		out.SharePercent = ratioPercent(pos.Principal, snap.state.TotalPrincipal)
@@ -332,8 +342,8 @@ func (s *VaultLPService) readPoolSnapshot(ctx context.Context) (*vaultPoolSnapsh
 		annual.Quo(annual, big.NewInt(30))
 		apr = ratioPercent(annual, st.TotalPrincipal)
 	}
-	return &vaultPoolSnapshot{state: st, view: &VaultPoolView{TotalLiquidity: s.units(st.TotalPrincipal), Collateral: s.units(st.Collateral),
-		Outstanding: s.units(st.Outstanding), CoveragePct: "100", APR30d: apr}}, nil
+	return &vaultPoolSnapshot{state: st, view: &VaultPoolView{TotalLiquidity: s.units(st.TotalPrincipal),
+		APR30d: apr}}, nil
 }
 
 func (s *VaultLPService) vaultScope(db *gorm.DB) *gorm.DB {
@@ -360,8 +370,9 @@ func (s *VaultLPService) claimedTotal(ctx context.Context, wallet string) (*big.
 // ─── Activity ───────────────────────────────────────────────────────────────
 
 // LiquidityVaultActivity is one line of an LP's history. Kind: deposit,
-// withdrawal, claim, earned (its share of one buyer's spread). Never names a
-// buyer or an order.
+// withdrawal (paid at once), withdrawal_pending (the part of a withdrawal the
+// pool pays later), withdrawal_paid (a pending one paid), claim, earned (its
+// share of one buyer's spread). Never names a buyer or an order.
 type LiquidityVaultActivity struct {
 	Kind   string    `json:"kind"`
 	Amount string    `json:"amount"`
@@ -422,6 +433,16 @@ func (s *VaultLPService) Activity(ctx context.Context, userID uuid.UUID, cursor 
 				mine.Sub(mine, amt)
 				items = append(items, LiquidityVaultActivity{Kind: "withdrawal", Amount: s.units(amt), TxHash: r.TxHash, At: r.BlockTime})
 			}
+		case VaultEventWithdrawalPending: // withdrawn, paid later: no longer principal
+			total.Sub(total, amt)
+			if who == me {
+				mine.Sub(mine, amt)
+				items = append(items, LiquidityVaultActivity{Kind: "withdrawal_pending", Amount: s.units(amt), TxHash: r.TxHash, At: r.BlockTime})
+			}
+		case VaultEventWithdrawalPaid:
+			if who == me {
+				items = append(items, LiquidityVaultActivity{Kind: "withdrawal_paid", Amount: s.units(amt), TxHash: r.TxHash, At: r.BlockTime})
+			}
 		case VaultEventClaimed:
 			if who == me {
 				items = append(items, LiquidityVaultActivity{Kind: "claim", Amount: s.units(amt), To: r.To, TxHash: r.TxHash, At: r.BlockTime})
@@ -458,8 +479,9 @@ func lpDeref(p *string) string {
 }
 
 // activityRows is what the replay needs for wallet, in chain order: the
-// wallet's claims, and every deposit, withdrawal and fill from its first
-// deposit on; plus the pool's total principal just before that deposit.
+// wallet's claims and paid pending withdrawals, and every deposit, withdrawal
+// (paid or pending) and fill from its first deposit on; plus the pool's total
+// principal just before that deposit.
 func (s *VaultLPService) activityRows(ctx context.Context, wallet string) ([]models.LiquidityLedgerEntry, *big.Int, error) {
 	me := strings.ToLower(wallet)
 	scope := func() *gorm.DB { return s.vaultScope(s.c.DB.WithContext(ctx)) }
@@ -469,8 +491,9 @@ func (s *VaultLPService) activityRows(ctx context.Context, wallet string) ([]mod
 		return nil, nil, err
 	}
 	var rows []models.LiquidityLedgerEntry
+	own := []string{VaultEventClaimed, VaultEventWithdrawalPaid}
 	if len(first) == 0 { // never deposited: nothing earned, only claims (if any) to show
-		err := scope().Where("kind = ? AND LOWER(account) = ?", VaultEventClaimed, me).
+		err := scope().Where("kind IN ? AND LOWER(account) = ?", own, me).
 			Order("block ASC").Order("log_index ASC").Find(&rows).Error
 		return rows, new(big.Int), err
 	}
@@ -478,7 +501,8 @@ func (s *VaultLPService) activityRows(ctx context.Context, wallet string) ([]mod
 	var before struct{ Total *string }
 	if err := scope().Model(&models.LiquidityLedgerEntry{}).
 		Select("CAST(COALESCE(SUM(CASE WHEN kind = ? THEN amount ELSE -amount END), 0) AS TEXT) AS total", VaultEventDeposited).
-		Where("kind IN ? AND (block < ? OR (block = ? AND log_index < ?))", []string{VaultEventDeposited, VaultEventWithdrawn}, b, b, li).
+		Where("kind IN ? AND (block < ? OR (block = ? AND log_index < ?))",
+			[]string{VaultEventDeposited, VaultEventWithdrawn, VaultEventWithdrawalPending}, b, b, li).
 		Scan(&before).Error; err != nil {
 		return nil, nil, err
 	}
@@ -487,8 +511,8 @@ func (s *VaultLPService) activityRows(ctx context.Context, wallet string) ([]mod
 		return nil, nil, fmt.Errorf("liquidity: pool principal before block %d unreadable: %q", b, lpDeref(before.Total))
 	}
 	if err := scope().
-		Where("((kind IN ? AND (block > ? OR (block = ? AND log_index >= ?))) OR (kind = ? AND LOWER(account) = ?))",
-			[]string{VaultEventDeposited, VaultEventWithdrawn, VaultEventFilled}, b, b, li, VaultEventClaimed, me).
+		Where("((kind IN ? AND (block > ? OR (block = ? AND log_index >= ?))) OR (kind IN ? AND LOWER(account) = ?))",
+			[]string{VaultEventDeposited, VaultEventWithdrawn, VaultEventWithdrawalPending, VaultEventFilled}, b, b, li, own, me).
 		Order("block ASC").Order("log_index ASC").Find(&rows).Error; err != nil {
 		return nil, nil, err
 	}
@@ -538,8 +562,9 @@ func (s *VaultLPService) Activate(ctx context.Context, userID uuid.UUID, wallet 
 }
 
 // repoint (re-)activates an existing LP row on wallet. Moving off a proven
-// wallet that still holds principal or earnings is refused: the app builds
-// withdraw and claim for the row's wallet only, so they would be stranded.
+// wallet that still holds principal, earnings or a pending withdrawal is
+// refused: the app builds withdraw and claim (and shows pending) for the
+// row's wallet only, so they would be stranded.
 // An empty old wallet is revoked as a depositor (best effort here, kept
 // revoked by SyncDepositors through previous_operator_wallets).
 func (s *VaultLPService) repoint(ctx context.Context, lp *models.PaymentMerchant, wallet string) error {
@@ -550,7 +575,7 @@ func (s *VaultLPService) repoint(ctx context.Context, lp *models.PaymentMerchant
 		if err != nil {
 			return fmt.Errorf("liquidity: old wallet position unreadable: %w", err)
 		}
-		if pos.Principal.Sign() > 0 || pos.Claimable.Sign() > 0 {
+		if pos.Principal.Sign() > 0 || pos.Claimable.Sign() > 0 || (pos.PendingWithdrawal != nil && pos.PendingWithdrawal.Sign() > 0) {
 			return ErrLPOldWalletHasFunds
 		}
 	}
@@ -1065,7 +1090,7 @@ func (s *VaultLPService) ClaimForMe(ctx context.Context, userID uuid.UUID) (stri
 	if errors.Is(err, ErrTxNotBroadcast) { // nothing sent: give the window back
 		s.c.DB.WithContext(context.WithoutCancel(ctx)).Model(&models.JobRunMarker{}).
 			Where("name = ? AND last_run_at = ?", marker, now).Update("last_run_at", now.Add(-lpClaimForEvery))
-		return "", err
+		return "", lpRevertError(err)
 	}
 	if err != nil && !errors.Is(err, ErrPendingBroadcast) {
 		return "", err

@@ -7,16 +7,24 @@
 //
 // Once a tx is broadcast the LP is never told it "failed" unless the chain
 // says so: a slow receipt may still land, and the screen re-reads the vault.
+import { Interface } from 'ethers';
 import { p2pChainKey, p2pNetwork, type ApiResponse } from './p2p';
 import { liquidityApi, type LiquidityMe, type LiquidityTxPlan } from './liquidityApi';
 import { signAndBroadcast } from './p2pTx';
-import { TxRevertedError, waitMined } from './txWait';
+import { TxRevertedError, waitMined, type MinedReceipt } from './txWait';
 import { ensureGas } from './wallet';
 
 export type LiquidityTxKind = 'deposit' | 'withdraw' | 'claim';
 
+/** What a mined withdraw did, in token base units, read from the vault's own events. */
+export interface WithdrawalOutcome {
+  paidNow: bigint;
+  pending: bigint;
+}
+
 export type LiquidityTxResult =
-  | { status: 'done'; txHash: string }
+  /** `withdrawal`: a withdraw's split, absent when the receipt carried no vault event for it. */
+  | { status: 'done'; txHash: string; withdrawal?: WithdrawalOutcome }
   /** Broadcast, but no receipt yet: it may still go through. Do not resend.
    *  `step` says which tx: an approve still needs the deposit after it. */
   | { status: 'pending'; txHash: string; step: LiquidityTxPlan['step'] }
@@ -41,6 +49,36 @@ const STAGE: Record<LiquidityTxPlan['step'], string> = {
   withdraw: 'Withdrawing…',
   claim: 'Claiming…',
 };
+
+const VAULT_EVENTS = new Interface([
+  'event Withdrawn(address indexed lp, uint256 amount)',
+  'event WithdrawalPending(address indexed lp, uint256 amount)',
+]);
+
+/**
+ * The paid-now / pending split of a mined withdraw, from the vault's logs in
+ * its receipt (never a later API read, which can lag). Only logs emitted by
+ * `vault` for `wallet` count. Undefined when neither event is there.
+ */
+export function decodeWithdrawal(receipt: MinedReceipt | undefined, vault: string, wallet: string): WithdrawalOutcome | undefined {
+  let paidNow = 0n;
+  let pending = 0n;
+  let seen = false;
+  for (const log of receipt?.logs ?? []) {
+    if (!vault || log.address.toLowerCase() !== vault.toLowerCase()) continue;
+    let parsed;
+    try {
+      parsed = VAULT_EVENTS.parseLog({ topics: [...log.topics], data: log.data });
+    } catch {
+      continue;
+    }
+    if (!parsed || String(parsed.args.lp).toLowerCase() !== wallet.toLowerCase()) continue;
+    seen = true;
+    if (parsed.name === 'Withdrawn') paidNow += parsed.args.amount as bigint;
+    else pending += parsed.args.amount as bigint;
+  }
+  return seen ? { paidNow, pending } : undefined;
+}
 
 function prepare(kind: LiquidityTxKind, amount: string): Promise<ApiResponse<LiquidityTxPlan>> {
   if (kind === 'deposit') return liquidityApi.prepareDeposit(amount);
@@ -71,6 +109,7 @@ export async function runLiquidityTx(p: {
       return { status: 'aborted' };
     }
     let last = '';
+    let receipt: MinedReceipt | undefined;
     // An approve, then the deposit: never more than two rounds.
     for (let round = 0; round < 2; round++) {
       p.onStage?.('Preparing…');
@@ -97,11 +136,15 @@ export async function runLiquidityTx(p: {
         last = sent.hash;
         p.onStage?.('Waiting for confirmation…');
         try {
-          await waitMined(chainId, sent.hash, { timeoutMs: MINE_WAIT_MS, provider: sent.provider, label: STAGE[plan.step] });
+          receipt = await waitMined(chainId, sent.hash, { timeoutMs: MINE_WAIT_MS, provider: sent.provider, label: STAGE[plan.step] });
         } catch (err) {
           if (err instanceof TxRevertedError) return { status: 'reverted', txHash: sent.hash };
           return { status: 'pending', txHash: sent.hash, step: plan.step };
         }
+      }
+      if (plan.step === 'withdraw') {
+        const withdrawal = decodeWithdrawal(receipt, p.me.vault, p.wallet);
+        return withdrawal ? { status: 'done', txHash: last, withdrawal } : { status: 'done', txHash: last };
       }
       if (plan.step !== 'approve') return { status: 'done', txHash: last };
     }

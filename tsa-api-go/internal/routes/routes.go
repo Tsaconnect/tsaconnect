@@ -1285,16 +1285,16 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				}
 			}
 		}
-		// Shared pool (spec 2026-10-14 §7): the books for P2P admins; the
-		// operator's settle-from-collateral for super admins.
+		// Shared pool (spec 2026-10-14 §7): the books for P2P admins; paying
+		// pending withdrawals (the operator's payPending) for super admins.
 		if ith.VaultPoolEnabled() {
 			vp := api.Group("/admin/liquidity/pool")
 			vp.Use(adminAuth, middleware.RequireP2PAdmin())
 			{
 				vp.GET("", ith.AdminVaultPool)
-				// operationId in the body makes the settle itself idempotent;
-				// the Idempotency-Key replay answers a retried request as before.
-				vp.POST("/settle-from-collateral", middleware.RequireSuperAdmin(), middleware.Idempotency(config.DB), ith.AdminSettlePoolFromCollateral)
+				// operationId in the body makes each payPending idempotent; the
+				// Idempotency-Key replay answers a retried request as before.
+				vp.POST("/pay-pending", middleware.RequireSuperAdmin(), middleware.Idempotency(config.DB), ith.AdminPayPoolPending)
 			}
 		}
 		// Any settlement forward, merchant or LP (re-review I-D).

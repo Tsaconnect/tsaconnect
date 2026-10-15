@@ -23,6 +23,7 @@ func TestVaultLPError_NewRefusals(t *testing.T) {
 		{fmt.Errorf("wrapped: %w", services.ErrLPOldWalletHasFunds), http.StatusConflict, "liquidity_old_wallet_has_funds"},
 		{services.ErrLPClaimTo, http.StatusBadRequest, ""},
 		{services.ErrLPNothingToClaim, http.StatusBadRequest, ""},
+		{fmt.Errorf("wrapped: %w", services.ErrLPClaimUnavailable), http.StatusConflict, "claim_unavailable"},
 		{fmt.Errorf("%w: more than your deposited principal", services.ErrLPAmount), http.StatusBadRequest, ""},
 	} {
 		w := httptest.NewRecorder()
@@ -37,6 +38,9 @@ func TestVaultLPError_NewRefusals(t *testing.T) {
 		_ = json.Unmarshal(w.Body.Bytes(), &body)
 		if w.Code != tc.status || body.Code != tc.code {
 			t.Fatalf("%v: status %d code %q, want %d %q", tc.err, w.Code, body.Code, tc.status, tc.code)
+		}
+		if tc.code == "claim_unavailable" && body.Message != "Claims are not available right now. Try again later." {
+			t.Fatalf("claim_unavailable message = %q, want the neutral copy", body.Message)
 		}
 	}
 }

@@ -1,9 +1,9 @@
 // app/liquidity/index.tsx — TSA Liquidity, shared pool (spec 2026-10-14 §6).
 // Everyone is in one pool: every buyer's spread is shared pro-rata to
-// principal, and the company's collateral backs every unrefilled sale 100%, so
-// principal is never at risk. Activate is instant; add, withdraw and claim are
-// the LP's own txs (services/liquidityTx.ts). Withdraw and claim are never
-// disabled for a pause or a closed pool: that is the custody promise.
+// principal. Activate is instant; add, withdraw and claim are the LP's own txs
+// (services/liquidityTx.ts). Withdraw and claim are never disabled for a pause
+// or a closed pool: that is the custody promise. A withdrawal the pool cannot
+// pay in full pays part now and leaves the rest pending; the copy stays neutral.
 import React, { useCallback, useRef, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -33,6 +33,7 @@ import { getChainByChainId } from '@/constants/chains';
 import { promptKycRefusal } from '@/utils/kycRefusal';
 import {
   canClaimGasFree,
+  claimRefusalMessage,
   formatLiquidityAmount,
   isZeroAmount,
   LIQUIDITY_OLD_WALLET_HAS_FUNDS,
@@ -40,6 +41,7 @@ import {
   liquidityMessage,
   oldWalletFundsMessage,
   oldWalletHasFunds,
+  withdrawalMessage,
   type LiquidityAction,
 } from '@/utils/liquidityView';
 
@@ -50,7 +52,16 @@ const ACTIVITY_LABEL: Record<LiquidityActivityItem['kind'], string> = {
   withdrawal: 'Withdrawn',
   claim: 'Claimed',
   earned: 'Earned',
+  withdrawal_pending: 'Withdrawal pending',
+  withdrawal_paid: 'Withdrawal paid',
 };
+
+/** Money leaving the LP's position is −; a paid pending withdrawal was already counted when it went pending. */
+function activitySign(kind: LiquidityActivityItem['kind']): string {
+  if (kind === 'withdrawal' || kind === 'claim' || kind === 'withdrawal_pending') return '−';
+  if (kind === 'withdrawal_paid') return '';
+  return '+';
+}
 
 export default function LiquidityScreen() {
   const { colors, spacing } = useTheme();
@@ -72,17 +83,17 @@ export default function LiquidityScreen() {
   // the first one's busy state has rendered.
   const running = useRef(false);
 
+  const applyMe = useCallback((next: LiquidityMe) => {
+    const claimable = next.claimable ?? '';
+    setMe(next);
+    setClaimSentAt((sent) => (sent != null && sent !== claimable ? null : sent));
+    setLoadFailed(false);
+  }, []);
   const load = useCallback(async () => {
     const res = await liquidityApi.me();
-    if (res.success && res.data) {
-      const claimable = res.data.claimable ?? '';
-      setMe(res.data);
-      setClaimSentAt((sent) => (sent != null && sent !== claimable ? null : sent));
-      setLoadFailed(false);
-    } else {
-      setLoadFailed(true);
-    }
-  }, []);
+    if (res.success && res.data) applyMe(res.data);
+    else setLoadFailed(true);
+  }, [applyMe]);
   const loadActivity = useCallback(async (cursor?: string) => {
     const req = ++activityReq.current;
     const res = await liquidityApi.activity(cursor);
@@ -140,7 +151,7 @@ export default function LiquidityScreen() {
 
   const activate = async () => {
     if (oldWalletFunded) {
-      Alert.alert('Old wallet still holds liquidity', oldWalletFundsMessage(me.wallet));
+      Alert.alert('Old wallet still holds liquidity', oldWalletFundsMessage(me));
       return;
     }
     if (!begin('Activating…')) return;
@@ -152,7 +163,7 @@ export default function LiquidityScreen() {
       } else if (promptKycRefusal(res.code, res.message)) {
         // The KYC prompt has been shown.
       } else if (res.code === LIQUIDITY_OLD_WALLET_HAS_FUNDS) {
-        Alert.alert('Old wallet still holds liquidity', oldWalletFundsMessage(me.wallet));
+        Alert.alert('Old wallet still holds liquidity', oldWalletFundsMessage(me));
       } else {
         Alert.alert("Couldn't activate", liquidityMessage(res.message, 'Try again in a moment.'));
       }
@@ -193,7 +204,9 @@ export default function LiquidityScreen() {
         Alert.alert('Not completed', 'The network rejected the transaction. Nothing changed; you can try again.');
         return false;
       case 'refused':
-        Alert.alert("Couldn't continue", liquidityMessage(r.message, 'Try again in a moment.'));
+        Alert.alert("Couldn't continue", kind === 'claim'
+          ? claimRefusalMessage(r.code, r.message)
+          : liquidityMessage(r.message, 'Try again in a moment.'));
         return false;
       default:
         return false;
@@ -210,6 +223,12 @@ export default function LiquidityScreen() {
         onStage: setBusy,
         onGasAlert: (title, message) => Alert.alert(title, message),
       });
+      if (kind === 'withdraw' && r.status === 'done') {
+        // The split comes from the mined receipt's vault events, not a re-read that can lag.
+        toast.success(withdrawalMessage(me, r.withdrawal));
+        await Promise.all([load(), loadActivity()]);
+        return true;
+      }
       const moved = report(kind, r);
       if (moved) await Promise.all([load(), loadActivity()]);
       return moved;
@@ -251,7 +270,7 @@ export default function LiquidityScreen() {
         return;
       }
       if (res.status === 429) rateLimited = true;
-      else Alert.alert("Couldn't claim", liquidityMessage(res.message, 'Try again in a moment.'));
+      else Alert.alert("Couldn't claim", claimRefusalMessage(res.code, res.message));
     } finally {
       end();
     }
@@ -277,10 +296,11 @@ export default function LiquidityScreen() {
         {pool && (
           <AccentCard padding="md">
             <Text variant="caption" color="textSecondary">TSA Connect pool · {me.chain?.name ?? 'Pool network'}</Text>
-            <SummaryRow label="Total liquidity" value={amt(pool.totalLiquidity)} />
-            <SummaryRow label="Backed by company collateral" value={`${pool.coveragePercent}%`} valueColor="success" />
-            <SummaryRow label="Earnings rate (last 30 days)" value={`${pool.apr30d}% a year`}
-              hint="Past earnings, not a promise. LPs share every buyer's spread by their share of the pool." />
+            {pool.totalLiquidity != null && <SummaryRow label="Total liquidity" value={amt(pool.totalLiquidity)} />}
+            {pool.apr30d != null && (
+              <SummaryRow label="Earnings rate (last 30 days)" value={`${pool.apr30d}% a year`}
+                hint="Past earnings, not a promise. LPs share every buyer's spread by their share of the pool." />
+            )}
           </AccentCard>
         )}
 
@@ -289,8 +309,7 @@ export default function LiquidityScreen() {
             <Text variant="bodyMed" weight="700">Provide liquidity & earn</Text>
             <Text variant="bodySm" color="textSecondary">
               Add {me.limits.min}–{me.limits.max} {sym}. Every time a buyer gets {sym} from the pool, the spread is shared
-              between providers by their share. Your {sym} is backed 100% by company collateral, and you can withdraw
-              any time.
+              between providers by their share. You can withdraw any time after a 24-hour lock on each deposit.
             </Text>
             <Text variant="caption" color="textMuted">Open to TSA Pay merchants and verified users.</Text>
             <Button title="Activate" variant="primary" loading={acting} disabled={acting} onPress={activate} />
@@ -313,7 +332,7 @@ export default function LiquidityScreen() {
               <Card padding="md" style={{ gap: spacing.sm }}>
                 <Text variant="bodySm">
                   Your account now uses a different wallet. Withdraw and claim still go to {me.wallet}.{' '}
-                  {oldWalletFunded ? oldWalletFundsMessage(me.wallet) : 'To add liquidity from your new wallet, activate it.'}
+                  {oldWalletFunded ? oldWalletFundsMessage(me) : 'To add liquidity from your new wallet, activate it.'}
                 </Text>
                 {!oldWalletFunded && (
                   <Button title="Activate new wallet" variant="secondary" loading={acting} disabled={acting} onPress={activate} />
@@ -328,6 +347,9 @@ export default function LiquidityScreen() {
                   {me.lockedUntil && (
                     <SummaryRow label="Withdrawable now" value={amt(me.withdrawable)}
                       hint={`New deposits unlock 24 hours after you add them. The rest unlocks ${new Date(me.lockedUntil).toLocaleString()}.`} />
+                  )}
+                  {!isZeroAmount(me.pendingWithdrawal) && (
+                    <SummaryRow label="Pending withdrawal" value={amt(me.pendingWithdrawal)} />
                   )}
                   <SummaryRow label="Share of the pool" value={`${me.sharePercent ?? '0'}%`} />
                   <SummaryRow label="Ready to claim" value={amt(me.claimable)} valueColor="success" />
@@ -373,7 +395,7 @@ export default function LiquidityScreen() {
                 {activity.map((it) => (
                   <SummaryRow key={`${it.kind}:${it.txHash}:${it.at}`}
                     label={`${ACTIVITY_LABEL[it.kind]} · ${new Date(it.at).toLocaleString()}`}
-                    value={`${it.kind === 'withdrawal' || it.kind === 'claim' ? '−' : '+'}${amt(it.amount)}`}
+                    value={`${activitySign(it.kind)}${amt(it.amount)}`}
                     valueColor={it.kind === 'earned' ? 'success' : undefined} />
                 ))}
                 {nextCursor && <Button title="Load more" variant="ghost" onPress={() => loadActivity(nextCursor)} />}
