@@ -86,6 +86,11 @@ jest.mock('@/services/payMerchantApi', () => ({
 }));
 jest.mock('../../services/ngBanks', () => ({ __esModule: true, getNigerianBanks: jest.fn(async () => []), resolveAccountName: jest.fn() }));
 jest.mock('../../services/p2p', () => ({ __esModule: true, getMyPmStatus: jest.fn(async () => ({ isPm: false })) }));
+// Profile reads the user's liquidity holdings for My Balance.
+jest.mock('../../services/liquidityApi', () => ({
+  __esModule: true,
+  liquidityApi: { me: jest.fn(async () => ({ success: false })) },
+}));
 jest.mock('@/hooks/useKeyboardHeight', () => ({ __esModule: true, useKeyboardHeight: () => 0 }));
 jest.mock('@/components/common/LocationPicker', () => {
   const react = jest.requireActual('react');

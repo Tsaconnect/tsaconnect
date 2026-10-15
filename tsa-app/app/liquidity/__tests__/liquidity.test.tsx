@@ -39,7 +39,12 @@ jest.mock('@/services/liquidityApi', () => ({
   liquidityApi: { me: jest.fn(), activity: jest.fn(), activate: jest.fn(), claimFor: jest.fn() },
 }));
 jest.mock('@/services/liquidityTx', () => ({ __esModule: true, runLiquidityTx: jest.fn() }));
-jest.mock('@/services/wallet', () => ({ __esModule: true, getSignableWallet: jest.fn() }));
+jest.mock('@/services/wallet', () => ({
+  __esModule: true,
+  getSignableWallet: jest.fn(),
+  // The Add sheet shows the wallet's own balance.
+  readErc20BalanceOf: jest.fn(async () => 0n),
+}));
 jest.mock('@/services/p2p', () => ({
   __esModule: true,
   parseTokenAmount: (v: string, d: number) => {
