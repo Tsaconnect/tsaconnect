@@ -4,7 +4,8 @@
 #   cd ~/Projects/tsaconnect/tsa-dev/smart-contracts   (any checkout of main)
 #   ./scripts/deploy-liquidity-pool-bsc.sh
 #
-# Asks for the private key without echoing it, shows the address and its BNB,
+# Takes the key from a Foundry keystore (password prompt) or a hidden paste,
+# shows the address and its BNB,
 # and deploys only after you type "deploy". The key lives only in this
 # process's environment. The DEPLOYER becomes the pool's owner (owner
 # 2026-10-15: whoever deploys can upgrade later without waiting on anyone);
@@ -22,7 +23,19 @@ if [ ! -e node_modules ]; then
   trap 'rm -f node_modules' EXIT
 fi
 
-read -rsp "Deployer private key (hidden): " PK; echo
+# The key comes from a Foundry keystore (~/.foundry/keystores: only its
+# password is typed, at cast's own prompt) or, with no keystore, is pasted
+# hidden. KEYSTORE=<name> skips the question.
+ACCOUNTS=$(ls "${FOUNDRY_KEYSTORES:-$HOME/.foundry/keystores}" 2>/dev/null | tr '\n' ' ' || true)
+if [ -z "${KEYSTORE:-}" ] && [ -n "$ACCOUNTS" ]; then
+  read -rp "Keystore account [${ACCOUNTS% }] (blank to paste a key instead): " KEYSTORE
+fi
+if [ -n "${KEYSTORE:-}" ]; then
+  PK=$(cast wallet decrypt-keystore ${FOUNDRY_KEYSTORES:+-k "$FOUNDRY_KEYSTORES"} "$KEYSTORE" | grep -oE '0x[0-9a-fA-F]{64}' | tail -1) || true
+  [ -n "$PK" ] || { echo "could not decrypt keystore '$KEYSTORE'"; exit 1; }
+else
+  read -rsp "Deployer private key (hidden): " PK; echo
+fi
 case "$PK" in 0x*) ;; *) PK="0x$PK" ;; esac
 # The key goes to child processes only through the environment, never argv
 # (argv is visible to every local process via ps).
