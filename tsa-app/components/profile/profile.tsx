@@ -22,8 +22,8 @@ import { NAME_CHANGE, TSA_PAY_APPLY } from "@/constants/routes";
 import { useNameChangeEntry } from "@/hooks/useNameChangeEntry";
 import { useIsPaymentMerchant } from "@/hooks/useIsPaymentMerchant";
 import { lpCta } from "@/utils/lpCta";
-import { liquidityApi } from "@/services/liquidityApi";
-import { formatLiquidityAmount, liquidityHoldings } from "@/utils/liquidityView";
+import { readPortfolioUsd } from "@/services/portfolioTotal";
+import { useCurrency } from "@/contexts/CurrencyContext";
 import {
   AccentCard,
   Avatar,
@@ -108,18 +108,17 @@ const ProfileScreen = () => {
     }, [token])
   );
 
-  // My Balance = what the liquidity pool holds for the user (staked principal
-  // + unclaimed earnings + pending withdrawal). undefined while loading, null
-  // when it could not be read.
-  const [poolBalance, setPoolBalance] = useState<string | null | undefined>(undefined);
+  // My Balance is the same total Home shows, in the same display currency.
+  // undefined while loading.
+  const { formatDualPrice } = useCurrency();
+  const [balanceUsd, setBalanceUsd] = useState<number | undefined>(undefined);
   useFocusEffect(
     useCallback(() => {
       if (!token) return;
       let live = true;
-      liquidityApi
-        .me()
-        .then((res) => live && setPoolBalance(res.success && res.data ? liquidityHoldings(res.data) : null))
-        .catch(() => live && setPoolBalance(null));
+      readPortfolioUsd()
+        .then((usd) => live && setBalanceUsd(usd))
+        .catch(() => live && setBalanceUsd(0));
       return () => {
         live = false;
       };
@@ -353,20 +352,17 @@ const ProfileScreen = () => {
               </Row>
             ))}
 
-            {/* Balance row: liquidity staked + earnings; opens the pool when the user is an LP */}
-            <Row
-              icon="wallet"
-              onPress={liquidity && pm.lpStatus ? () => router.push(liquidity.route as never) : undefined}
-            >
+            {/* Balance row: the same total as Home */}
+            <Row icon="wallet">
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
                 <Text variant="body" weight="500">
                   My Balance
                 </Text>
-                {poolBalance === undefined ? (
+                {balanceUsd === undefined ? (
                   <Spinner size="small" />
                 ) : (
                   <Text variant="bodyMed" weight="700" numeric>
-                    {poolBalance === null ? "—" : `${formatLiquidityAmount(poolBalance, 2)} USD`}
+                    {formatDualPrice(balanceUsd).primary}
                   </Text>
                 )}
               </View>

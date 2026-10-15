@@ -86,11 +86,8 @@ jest.mock('@/services/payMerchantApi', () => ({
 }));
 jest.mock('../../services/ngBanks', () => ({ __esModule: true, getNigerianBanks: jest.fn(async () => []), resolveAccountName: jest.fn() }));
 jest.mock('../../services/p2p', () => ({ __esModule: true, getMyPmStatus: jest.fn(async () => ({ isPm: false })) }));
-// Profile reads the user's liquidity holdings for My Balance.
-jest.mock('../../services/liquidityApi', () => ({
-  __esModule: true,
-  liquidityApi: { me: jest.fn(async () => ({ success: false })) },
-}));
+// Profile shows the Home total as My Balance.
+jest.mock('../../services/portfolioTotal', () => ({ __esModule: true, readPortfolioUsd: jest.fn(async () => 0) }));
 jest.mock('@/hooks/useKeyboardHeight', () => ({ __esModule: true, useKeyboardHeight: () => 0 }));
 jest.mock('@/components/common/LocationPicker', () => {
   const react = jest.requireActual('react');
@@ -103,7 +100,7 @@ jest.mock('@/components/common/LocationPicker', () => {
     }, 'location'),
   };
 });
-jest.mock('@/contexts/CurrencyContext', () => ({ __esModule: true, useCurrency: () => ({ formatPrice: (n: number) => String(n) }) }));
+jest.mock('@/contexts/CurrencyContext', () => ({ __esModule: true, useCurrency: () => ({ formatPrice: (n: number) => String(n), formatDualPrice: (n: number) => ({ primary: `$${n}`, secondary: '' }) }) }));
 const mockPmStatus = { isPm: false, status: null, loading: false, reload: () => {} };
 jest.mock('@/hooks/useIsPaymentMerchant', () => ({ __esModule: true, useIsPaymentMerchant: () => mockPmStatus }));
 

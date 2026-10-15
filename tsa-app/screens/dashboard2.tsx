@@ -12,12 +12,7 @@ import { View, ScrollView, RefreshControl } from 'react-native';
 import { api } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import {
-  getWalletBalances,
-  normalizeWalletBalances,
-} from '../services/walletApi';
-import { getPremiumMcgpAsset } from '../services/mcgpSwapApi';
-import { getSignableWallet } from '@/services/wallet';
+import { readPortfolioUsd } from '@/services/portfolioTotal';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
 import { RWMWidget } from '@/components/dashboard/RWMWidget';
@@ -42,10 +37,6 @@ import {
   SkeletonGroup,
   Text,
 } from '@/components/ui';
-
-// Symbols the portfolio total is summed over. Not a display list — the market
-// list below is driven entirely by the platform's spot listings.
-const BALANCE_SYMBOLS = ['MCGP', 'USDC', 'USDT'] as const;
 
 /** Tokens shown on Home before "View all" hands off to the Spot Trade tab. */
 const HOME_TOKEN_PREVIEW = 5;
@@ -109,31 +100,7 @@ const Dashboard: React.FC = () => {
       if (refreshing) setIsRefreshing(true); else setIsLoading(true);
       setError(null);
 
-      // Balances for the wallet this device holds a key for. Without one the
-      // backend would answer for the account's REGISTERED address, and the home
-      // total would show funds the user cannot touch on this device.
-      const signer = await getSignableWallet();
-      const balResult = signer
-        ? await getWalletBalances(undefined, signer)
-        : { success: false as const, data: undefined };
-      // Flatten all chains into symbol -> usdValue
-      const usdBySymbol: Record<string, number> = {};
-      if (balResult.success && balResult.data) {
-        for (const entry of normalizeWalletBalances(balResult.data)) {
-          const usd = Number.isFinite(parseFloat(entry.usdValue)) ? parseFloat(entry.usdValue) : 0;
-          usdBySymbol[entry.symbol] = (usdBySymbol[entry.symbol] || 0) + usd;
-        }
-      }
-
-      // MCGP in the wallet is the spendable premium entitlement (Contract B),
-      // not an ERC-20, so getWalletBalances reports 0. Overlay the premium
-      // value so the total reflects what the user actually holds.
-      try {
-        const { balance: premium, usdValue } = await getPremiumMcgpAsset();
-        if (premium > 0) usdBySymbol.MCGP = usdValue;
-      } catch { /* MCGP swap unavailable — leave at 0 */ }
-
-      setTotalUsdValue(BALANCE_SYMBOLS.reduce((s, sym) => s + (usdBySymbol[sym] || 0), 0));
+      setTotalUsdValue(await readPortfolioUsd());
 
       // Fetch TP and cashback balances
       try {
