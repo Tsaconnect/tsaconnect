@@ -15,6 +15,16 @@ func UserFacingITFailure(raw string) string {
 	}
 	lower := strings.ToLower(raw)
 	switch {
+	// Ending states first: a cancelled or expired order is not a fault, and
+	// sending her to support over one she cancelled herself is alarming.
+	case lower == "cancelled by user":
+		return "You cancelled this order."
+	case strings.HasPrefix(lower, "refunded in naira"):
+		return "This order was cancelled and your payment was refunded."
+	case strings.HasPrefix(lower, "expired"):
+		return "This order expired before a payment arrived."
+	case lower == models.ITFailurePoolOpenFailed:
+		return "This order couldn't be started. No money was taken — please try again."
 	case strings.Contains(lower, "not operator"):
 		return "We received your payment, but crediting is temporarily unavailable. Please check again shortly or contact support."
 	case strings.Contains(lower, "gas estimation") || strings.Contains(lower, "execution reverted"):

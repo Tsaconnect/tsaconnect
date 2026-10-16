@@ -18,6 +18,20 @@ func TestUserFacingITFailure_NotOperator(t *testing.T) {
 	}
 }
 
+func TestUserFacingITFailure_EndingStatesAreNotFaults(t *testing.T) {
+	for raw, want := range map[string]string{
+		"cancelled by user":                         "You cancelled this order.",
+		"expired before payment":                    "This order expired before a payment arrived.",
+		"expired unpaid — start a new order to buy": "This order expired before a payment arrived.",
+		"refunded in naira by an operator":          "This order was cancelled and your payment was refunded.",
+		models.ITFailurePoolOpenFailed:              "This order couldn't be started. No money was taken — please try again.",
+	} {
+		if got := UserFacingITFailure(raw); got != want {
+			t.Errorf("%q → %q, want %q", raw, got, want)
+		}
+	}
+}
+
 func TestUserFacingITFailure_Empty(t *testing.T) {
 	if UserFacingITFailure("") != "" {
 		t.Fatal("empty in → empty out")

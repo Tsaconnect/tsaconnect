@@ -519,6 +519,19 @@ export default function ITIntentDetail() {
       : `Transfer exactly ${exactNaira} into your Instant Transfer account. Sending less can hold your purchase for review.`;
 
   const awaitingTransfer = isBuy && intent.status === 'pending_payment';
+  // An order that ended without delivering never "receives" anything: it
+  // shows what was quoted, and the progress steps go unless money moved.
+  const ended = ['cancelled', 'failed', 'refunded', 'expired', 'reversed'].includes(intent.status);
+  const paidSomething = Number(buyPaidMinor ?? 0) > 0;
+  const receiveLabel = ended ? 'Quoted' : 'You receive';
+  // Until the API maps ending states itself, its catch-all would send her to
+  // support over an order she cancelled.
+  const note =
+    ended && intent.failureReason?.startsWith('Something went wrong')
+      ? intent.status === 'cancelled'
+        ? 'This order was cancelled.'
+        : intent.failureReason
+      : intent.failureReason;
   // A converted buy's intent.destAddress is the treasury leg, never hers.
   const walletShown = conversion ? conversion.destinationAddress || conversion.walletAddress : intent.destAddress;
   const getSymbol = conversion?.requestedToken ?? (isStableAsset ? intent.asset ?? '' : 'MCGP');
@@ -552,9 +565,12 @@ export default function ITIntentDetail() {
         <Divider spacing="xs" />
         {isStableAsset && isBuy ? (
           <>
-            <SummaryRow label={buyPaidMinor ? 'You paid' : 'You pay'} value={formatKobo(buyPaidMinor ?? intent.ngnKobo)} />
+            <SummaryRow
+              label={paidSomething ? 'You paid' : ended ? 'Order amount' : 'You pay'}
+              value={formatKobo(paidSomething ? buyPaidMinor : intent.ngnKobo)}
+            />
             <Divider spacing="xs" />
-            <SummaryRow label="You get" value={headline} />
+            <SummaryRow label={ended ? 'Quoted' : 'You get'} value={headline} />
           </>
         ) : isStableAsset ? (
           <>
@@ -563,7 +579,7 @@ export default function ITIntentDetail() {
             {/* NET, never ngnKobo (the gross valuation, never updated) — the
                 same net → netMinor → gross fallback the sell screens use. */}
             <SummaryRow
-              label={netIsEstimate ? 'You receive (estimate)' : 'You receive'}
+              label={ended ? receiveLabel : netIsEstimate ? 'You receive (estimate)' : 'You receive'}
               value={formatKobo(intent.netNgnKobo ?? intent.netMinor ?? intent.ngnKobo)}
             />
           </>
@@ -578,13 +594,13 @@ export default function ITIntentDetail() {
               </>
             ) : null}
             <Divider spacing="xs" />
-            <SummaryRow label="You receive" value={headline} />
+            <SummaryRow label={receiveLabel} value={headline} />
           </>
         ) : (
           <>
             <SummaryRow label="You sell" value={`${fmtMcgp(intent.mcgpAmount)} MCGP`} />
             <Divider spacing="xs" />
-            <SummaryRow label="You receive" value={`₦${fmtNaira(intent.ngnKobo)}`} />
+            <SummaryRow label={receiveLabel} value={`₦${fmtNaira(intent.ngnKobo)}`} />
           </>
         )}
         {getChainName ? (
@@ -642,7 +658,11 @@ export default function ITIntentDetail() {
         <TokenAvatar symbol={getSymbol} chainKey={(getChainKey || undefined) as never} size={36} />
         <View style={{ flex: 1 }}>
           <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
-            {isBuy ? `You ${awaitingTransfer ? 'get' : 'receive'} ${headline}` : `You receive ${headline}`}
+            {ended
+              ? `Quoted ${headline}`
+              : isBuy
+                ? `You ${awaitingTransfer ? 'get' : 'receive'} ${headline}`
+                : `You receive ${headline}`}
           </Text>
           <Text variant="caption" style={{ color: colors.textMuted }}>
             {[getChainName ? `on ${getChainName}` : '', rateLine].filter(Boolean).join(' · ')}
@@ -726,14 +746,18 @@ export default function ITIntentDetail() {
                   : 'wait'
             )}
             <Text variant="title1" weight="800" style={{ color: colors.textPrimary, marginTop: spacing.sm }}>
-              {headline}
+              {ended ? `Order ${displayStatus(intent.status).toLowerCase()}` : headline}
             </Text>
-            {getChainName ? (
+            {ended ? (
+              <Text variant="bodySm" style={{ color: colors.textMuted }}>
+                {`Was for ${headline}${isBuy && getChainName ? ` on ${getChainName}` : ''}`}
+              </Text>
+            ) : getChainName ? (
               <Text variant="bodySm" style={{ color: colors.textMuted }}>
                 {isBuy ? `to your wallet on ${getChainName}` : `from ${getChainName}`}
               </Text>
             ) : null}
-            {isStableAsset ? (
+            {isStableAsset && !(ended && isBuy && !paidSomething) ? (
               <View style={{ marginTop: spacing.lg }}>
                 <Stepper steps={hops} />
                 {conversion ? (
@@ -744,17 +768,17 @@ export default function ITIntentDetail() {
                 ) : null}
               </View>
             ) : null}
-            {intent.failureReason ? (
+            {note ? (
               <View style={{ marginTop: spacing.md }}>
                 <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
                   Note
                 </Text>
                 <Text variant="bodySm" style={{ color: colors.textPrimary }}>
-                  {intent.failureReason}
+                  {note}
                 </Text>
               </View>
             ) : null}
-            {isStableBuy ? (
+            {isStableBuy && !ended ? (
               <HonourNotice
                 honourUntil={honour.honourUntil}
                 pending={false}
