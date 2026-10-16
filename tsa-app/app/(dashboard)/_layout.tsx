@@ -32,6 +32,10 @@ import { useTheme, fontFamily } from "@/theme";
 import { Avatar, Divider, Text } from "@/components/ui";
 import { isHomeTab, showDrawerHeader, type NestedNavState } from "@/utils/navHeader";
 import CartIconBadge from "@/components/common/CartIconBadge";
+import { TSA_PAY_APPLY } from "@/constants/routes";
+import { useIsPaymentMerchant } from "@/hooks/useIsPaymentMerchant";
+import { lpCta } from "@/utils/lpCta";
+import { drawerSegments } from "@/utils/drawerSegments";
 
 interface UserProfile {
   _id: string;
@@ -48,6 +52,9 @@ const Layout = () => {
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
+  // Liquidity row: "Provide liquidity & earn", or "Your liquidity" once an LP —
+  // the same entry Profile shows, hidden while the pool is off.
+  const pm = useIsPaymentMerchant();
 
   // Check authentication and fetch user profile on mount
   useEffect(() => {
@@ -125,7 +132,7 @@ const Layout = () => {
     fontFamily: fontFamily['500'],
   } as const;
 
-  const merchantItems: { label: string; icon: string; route: string }[] = [
+  const merchantItems: DrawerLink[] = [
     { label: "Merchant Dashboard", icon: "view-dashboard-outline", route: "/merchants/dashboard" },
     { label: "Products & Services", icon: "shopping-outline", route: "/merchants/inventory" },
     { label: "Add Product", icon: "plus-circle-outline", route: "/merchants/inventory/add" },
@@ -133,6 +140,37 @@ const Layout = () => {
     { label: "Buy Crypto with Cash", icon: "cash-multiple", route: "/merchants/buy-usdt" },
     { label: "Digital Assets", icon: "wallet-outline", route: "/merchants/digital" },
   ];
+
+  type DrawerLink = { label: string; icon: string; route: string };
+  const liquidity = lpCta({ isPm: pm.isPm, kind: pm.kind, lpStatus: pm.lpStatus, liquidityAvailable: pm.liquidityAvailable, loading: pm.loading });
+  // Rows that live outside this drawer, each placed after the screen it is
+  // keyed by. A merchant already is one, so "Become Merchant" is for everyone else.
+  const linksAfter: Record<string, DrawerLink[]> = {
+    profile: [{ label: "Accept Payment with TSA Pay", icon: "credit-card-outline", route: TSA_PAY_APPLY }],
+    settings: isMerchant ? [] : [{ label: "Become Merchant", icon: "storefront-outline", route: "/merchants/merchant-request" }],
+    categories: liquidity ? [{ label: liquidity.title, icon: "cash-plus", route: liquidity.route }] : [],
+  };
+
+  // One row for every link (these and the MERCHANT section), so they can't drift.
+  const LinkItem = ({ item, navigation }: { item: DrawerLink; navigation: any }) => (
+    <DrawerItem
+      label={item.label}
+      icon={({ color }) => (
+        <Icon name={item.icon} size={25} color={color} style={drawerRowIconStyle} />
+      )}
+      activeTintColor={colors.accent}
+      // Custom DrawerItems don't inherit screenOptions — without this the
+      // icons fall back to react-navigation's dark default and vanish on
+      // the dark surface.
+      inactiveTintColor={colors.textPrimary}
+      labelStyle={drawerLabelStyle}
+      style={{ marginVertical: 0 }}
+      onPress={() => {
+        navigation.closeDrawer();
+        router.push(item.route as any);
+      }}
+    />
+  );
 
   const CustomDrawerContent = (props: any) => (
     <DrawerContentScrollView {...props}>
@@ -172,7 +210,14 @@ const Layout = () => {
       </Pressable>
       <Divider spacing="sm" inset={spacing.xl} />
 
-      <DrawerItemList {...props} />
+      {drawerSegments(props.state, Object.keys(linksAfter)).map((seg) => (
+        <React.Fragment key={seg.anchor ?? "rest"}>
+          <DrawerItemList {...props} state={seg.state} />
+          {(seg.anchor ? linksAfter[seg.anchor] : []).map((item) => (
+            <LinkItem key={item.route} item={item} navigation={props.navigation} />
+          ))}
+        </React.Fragment>
+      ))}
 
       {isMerchant && (
         <View style={{ marginTop: spacing.xs }}>
@@ -185,24 +230,7 @@ const Layout = () => {
             MERCHANT
           </Text>
           {merchantItems.map((item) => (
-            <DrawerItem
-              key={item.route}
-              label={item.label}
-              icon={({ color }) => (
-                <Icon name={item.icon} size={25} color={color} style={drawerRowIconStyle} />
-              )}
-              activeTintColor={colors.accent}
-              // Custom DrawerItems don't inherit screenOptions — without this the
-              // icons fall back to react-navigation's dark default and vanish on
-              // the dark surface.
-              inactiveTintColor={colors.textPrimary}
-              labelStyle={drawerLabelStyle}
-              style={{ marginVertical: 0 }}
-              onPress={() => {
-                props.navigation.closeDrawer();
-                router.push(item.route as any);
-              }}
-            />
+            <LinkItem key={item.route} item={item} navigation={props.navigation} />
           ))}
         </View>
       )}
@@ -445,7 +473,7 @@ const Layout = () => {
         <Drawer.Screen
           name="reward"
           options={{
-            title: "Reward",
+            title: "Rewards / Promotion Arena",
             drawerActiveTintColor: colors.accent,
           }}
         />
