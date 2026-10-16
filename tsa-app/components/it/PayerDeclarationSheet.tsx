@@ -76,12 +76,7 @@ export function PayerDeclarationSheet({ visible, orderId, onClose, onDeclared }:
       return;
     }
     if (r.code === 'payer_name_mismatch') {
-      const onRecord = (r.errorData as { bankAccountName?: string } | undefined)?.bankAccountName;
-      setNameError(
-        onRecord
-          ? `The bank has this account as "${onRecord}". Enter the name on the account that sent the money.`
-          : "That name doesn't match the bank's record for this account."
-      );
+      setNameError(r.message || "That name doesn't match the bank's record for this account.");
       return;
     }
     setFormError(r.message || 'Something went wrong. Try again.');

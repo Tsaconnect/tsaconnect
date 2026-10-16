@@ -89,6 +89,7 @@ var inboundCreditStatuses = map[string]struct{}{
 	models.InboundCreditHeld:      {},
 	models.InboundCreditRefunded:  {},
 	models.InboundCreditIgnored:   {},
+	models.InboundCreditBinding:   {},
 }
 
 // InboundManualBinder is the narrow slice of the matcher this surface needs:

@@ -80,6 +80,8 @@ type fakeClaimSource struct {
 	openErr   error
 	acceptErr error
 	accepted  []acceptCall
+	// onAccept runs inside Accept, for tests that act while a settle runs.
+	onAccept func()
 }
 
 func (f *fakeClaimSource) OpenClaims(_ context.Context, _ string) ([]InboundClaim, error) {
@@ -90,6 +92,9 @@ func (f *fakeClaimSource) OpenClaims(_ context.Context, _ string) ([]InboundClai
 }
 
 func (f *fakeClaimSource) Accept(_ context.Context, claimID uuid.UUID, credit *models.InboundCredit) error {
+	if f.onAccept != nil {
+		f.onAccept()
+	}
 	f.accepted = append(f.accepted, acceptCall{claimID: claimID, providerRef: credit.ProviderRef})
 	return f.acceptErr
 }

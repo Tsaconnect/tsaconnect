@@ -23,12 +23,14 @@ import (
 // so the number is only used for a name enquiry at the bank; a credit is
 // attributed on a declaration only when the typed name, the bank's name for
 // that account and the statement's sender name all agree, the sender bank is
-// the declared one, the amount is the claim's, and the money arrived after the
-// claim opened.
+// the declared one, the amount is the claim's, the money arrived after the
+// claim opened, and nobody else's claim could have been owed it.
 
-// DefaultPayerSelfResolveMaxKobo is the largest claim a declaration may settle
+// PayerSelfResolveMaxKobo is the largest claim a declaration may settle
 // without an operator: ₦500,000 (owner, 2026-10-16). Larger ones go to review.
-const DefaultPayerSelfResolveMaxKobo int64 = 500_000 * 100
+// One constant for both paths into a declared bind, so the limit never depends
+// on whether the money landed before or after the declaration.
+const PayerSelfResolveMaxKobo int64 = 500_000 * 100
 
 // NameMatchDeclared is the match strength recorded on a credit bound on a
 // payer declaration rather than on the claim owner's own legal name.
@@ -38,6 +40,14 @@ const NameMatchDeclared NameMatchStrength = "declared"
 // ours: a credit stamped a moment before the claim opened is still this claim's.
 const payerArrivalSkew = 2 * time.Minute
 
+// payerBindResumeAfter is how long a credit may sit in `binding` before the
+// matcher treats the bind as interrupted and finishes it.
+const payerBindResumeAfter = 2 * time.Minute
+
+// payerDeclarationTTL closes a waiting declaration whose claim can no longer be
+// paid: buy claims stop matching after a day.
+const payerDeclarationTTL = 48 * time.Hour
+
 var (
 	ErrPayerBadInput        = errors.New("payer declaration: invalid details")
 	ErrPayerClaimNotFound   = errors.New("payer declaration: no open payment for this order")
@@ -46,16 +56,11 @@ var (
 	ErrPayerUnknownBank     = errors.New("payer declaration: unknown bank")
 	ErrPayerUnavailable     = errors.New("payer declaration: not available right now")
 	ErrPayerLookupFailed    = errors.New("payer declaration: the bank could not be reached")
+	// ErrPayerNameMismatch: the typed name is not the bank's name for the
+	// account. The bank's name is deliberately NOT returned — that would make
+	// this endpoint a name-enquiry oracle for any account number.
+	ErrPayerNameMismatch = errors.New("payer declaration: the name does not match the bank's record")
 )
-
-// PayerNameMismatchError is returned when the typed name is not the bank's
-// name for the account. The bank's name is shown back: a name enquiry is what
-// every banking app does before a transfer.
-type PayerNameMismatchError struct{ ResolvedName string }
-
-func (e *PayerNameMismatchError) Error() string {
-	return fmt.Sprintf("payer declaration: the bank has this account as %q", e.ResolvedName)
-}
 
 // DeclarePayerResult is the declaration and what became of it.
 type DeclarePayerResult struct {
@@ -70,13 +75,12 @@ type InboundPayerService struct {
 	db      *gorm.DB
 	matcher *InboundMatcher
 	banks   BankDirectory
-	capKobo int64
 }
 
 // NewInboundPayerService wires the service. A nil matcher or bank directory
 // leaves it answering ErrPayerUnavailable rather than half-working.
 func NewInboundPayerService(db *gorm.DB, matcher *InboundMatcher, banks BankDirectory) *InboundPayerService {
-	return &InboundPayerService{db: db, matcher: matcher, banks: banks, capKobo: DefaultPayerSelfResolveMaxKobo}
+	return &InboundPayerService{db: db, matcher: matcher, banks: banks}
 }
 
 var payerAccountNumber = regexp.MustCompile(`^\d{10}$`)
@@ -132,7 +136,7 @@ func (s *InboundPayerService) Declare(ctx context.Context, userID, orderID uuid.
 		return nil, ErrPayerAccountNotFound
 	}
 	if !MatchAccountName(accountName, resolved).IsMatch() {
-		return nil, &PayerNameMismatchError{ResolvedName: resolved}
+		return nil, ErrPayerNameMismatch
 	}
 
 	decl := &models.InboundPayerDeclaration{
@@ -166,30 +170,36 @@ func (s *InboundPayerService) Declare(ctx context.Context, userID, orderID uuid.
 	}
 
 	if err := s.settleArrived(ctx, *claim, decl); err != nil {
-		return nil, err
+		// The declaration is saved: the money it describes is still found
+		// when it next lands or when the buyer resubmits. Reported as saved,
+		// with the failure logged where an engineer will see it.
+		log.Printf("[inbound-payer] WARNING declaration=%s saved but the settle attempt failed: %v", decl.ID, err)
+		_ = s.db.WithContext(ctx).First(decl, "id = ?", decl.ID).Error
 	}
 	return &DeclarePayerResult{Declaration: decl, Outcome: decl.Status}, nil
 }
 
-// settleArrived looks for a credit that already arrived for this declaration —
-// typically one the matcher held for want of a name match — and binds it when
-// exactly one fits and the claim is within the self-resolve cap.
+// settleArrived looks for a credit that already arrived for this declaration
+// and binds it when exactly one fits, nobody else could be owed it, and the
+// claim is within the self-resolve cap.
+//
+// Only credits the matcher ALREADY held because nobody's own name was on them.
+// An unmatched credit has not been through the matcher's rules yet — its
+// sender may be another buyer, whose own name would bind it — and is left to
+// the matcher, which consults this declaration only when no candidate's name
+// matches. Credits held for any other reason (two names matched, an owner with
+// no verified name, a currency or product refusal) are an operator's.
 func (s *InboundPayerService) settleArrived(ctx context.Context, claim InboundClaim, decl *models.InboundPayerDeclaration) error {
-	// Only credits the matcher ALREADY decided nobody's own name is on. An
-	// unmatched credit has not been through the matcher's rules yet — its
-	// sender may be another buyer, whose own name would bind it — and is left
-	// to the matcher, which consults this declaration only when no candidate's
-	// name matches. Credits held for any other reason (two names matched, an
-	// owner with no verified name, a currency or product refusal) are an
-	// operator's, never a declaration's.
-	//
-	// Held credits are a short list, so the amount and arrival rules run here
-	// rather than as SQL comparisons whose timestamp semantics differ between
-	// databases.
+	// Amount filtered in SQL (a whole-naira claim matches grosses that round
+	// to it); arrival time in Go, where timestamp semantics don't vary by
+	// database.
 	var credits []models.InboundCredit
 	if err := s.db.WithContext(ctx).
-		Where("status = ? AND hold_reason_code = ?", models.InboundCreditHeld, models.InboundHoldNoNameMatch).
+		Where("status = ? AND hold_reason_code = ? AND gross_kobo BETWEEN ? AND ?",
+			models.InboundCreditHeld, models.InboundHoldNoNameMatch,
+			claim.AmountKobo-50, claim.AmountKobo+49).
 		Order("transaction_date ASC").
+		Limit(50).
 		Find(&credits).Error; err != nil {
 		return fmt.Errorf("payer declaration: load credits: %w", err)
 	}
@@ -212,25 +222,18 @@ func (s *InboundPayerService) settleArrived(ctx context.Context, claim InboundCl
 	switch {
 	case len(fit) == 1 && len(unsure) == 0:
 		credit := fit[0]
-		if claim.AmountKobo > s.capKobo {
+		if claim.AmountKobo > PayerSelfResolveMaxKobo {
 			return s.markReview(ctx, decl, &credit.ID, "over the self-resolve limit — an admin confirms")
 		}
-		// Another buyer waiting on the same amount may be who this money is
-		// really for (paid from a relative's account, say): a declaration only
-		// settles a payment nobody else could be owed.
-		rivals, err := s.matcher.rivalClaimsAtAmount(ctx, claim)
-		if err != nil {
+		// Who the money could have been for is decided as of its arrival, not
+		// now: the real owner's order may have expired since. The matcher
+		// recorded the candidates when it held the credit; only a credit whose
+		// sole candidate was this claim is the declarer's to settle.
+		if credit.HeldClaimIDs != heldClaimKey(claim) {
+			return s.markReview(ctx, decl, &credit.ID, "other orders were waiting for this amount when the payment arrived — an admin confirms")
+		}
+		if _, _, err := s.matcher.bindDeclared(ctx, &credit, claim, decl, models.InboundCreditHeld); err != nil {
 			return err
-		}
-		if rivals > 0 {
-			return s.markReview(ctx, decl, &credit.ID, "another order is waiting for the same amount — an admin confirms")
-		}
-		_, matched, err := s.matcher.bindDeclared(ctx, &credit, claim, decl)
-		if err != nil {
-			return err
-		}
-		if !matched {
-			return s.markReview(ctx, decl, &credit.ID, "the payment could not be settled automatically — an admin confirms")
 		}
 		return s.db.WithContext(ctx).First(decl, "id = ?", decl.ID).Error
 	case len(fit)+len(unsure) > 1:
@@ -242,16 +245,24 @@ func (s *InboundPayerService) settleArrived(ctx context.Context, claim InboundCl
 }
 
 func (s *InboundPayerService) markReview(ctx context.Context, decl *models.InboundPayerDeclaration, creditID *uuid.UUID, reason string) error {
+	if err := markDeclarationReview(ctx, s.db, decl.ID, creditID, reason); err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).First(decl, "id = ?", decl.ID).Error
+}
+
+func markDeclarationReview(ctx context.Context, db *gorm.DB, declID uuid.UUID, creditID *uuid.UUID, reason string) error {
 	updates := map[string]any{"status": models.PayerDeclarationReview, "review_reason": truncate(reason, 255)}
 	if creditID != nil {
 		updates["credit_id"] = *creditID
 	}
-	if err := s.db.WithContext(ctx).Model(&models.InboundPayerDeclaration{}).
-		Where("id = ? AND status <> ?", decl.ID, models.PayerDeclarationMatched).
+	if err := db.WithContext(ctx).Model(&models.InboundPayerDeclaration{}).
+		Where("id = ? AND status IN ?", declID,
+			[]string{models.PayerDeclarationWaiting, models.PayerDeclarationReview}).
 		Updates(updates).Error; err != nil {
 		return fmt.Errorf("payer declaration: mark review: %w", err)
 	}
-	return s.db.WithContext(ctx).First(decl, "id = ?", decl.ID).Error
+	return nil
 }
 
 // bankName is the directory's name for code; an unknown code is refused rather
@@ -350,10 +361,18 @@ var payerBankAliases = map[string]string{
 	"fcmb":      "first city monument",
 	"fbn":       "first nigeria",
 	"firstbank": "first nigeria",
-	"fidelity":  "fidelity",
 	"stanbic":   "stanbic ibtc",
-	"wema":      "wema",
 	"alat":      "wema",
+}
+
+// payerBankAmbiguous are words several different banks' names share. A bank
+// reduced to one of these alone ("First Bank" → {first}) says nothing about
+// which bank it is: {first} is wholly inside both First Bank of Nigeria and
+// First City Monument Bank.
+var payerBankAmbiguous = map[string]bool{
+	"first": true, "union": true, "united": true, "standard": true,
+	"trust": true, "city": true, "global": true, "nigeria": true, "africa": true,
+	"digital": true, "services": true, "capital": true,
 }
 
 // payerBankTokens is the bank's identifying words, after noise and aliases.
@@ -372,14 +391,26 @@ func payerBankTokens(name string) map[string]bool {
 }
 
 // payerSameBank compares the declared bank with the statement's sender bank.
-// One name's identifying words wholly inside the other's is the same bank;
+// One name's identifying words wholly inside the other's is the same bank —
+// unless the smaller is a single word several banks share, which is unsure;
 // no shared word at all is a different bank; anything in between is unsure.
 func payerSameBank(declared, statement string) bankVerdict {
 	a, b := payerBankTokens(declared), payerBankTokens(statement)
 	if len(a) == 0 || len(b) == 0 {
 		return bankUnsure
 	}
-	if subset(a, b) || subset(b, a) {
+	small, big := a, b
+	if len(b) < len(a) {
+		small, big = b, a
+	}
+	if subset(small, big) {
+		if len(small) == 1 && len(big) > 1 {
+			for t := range small {
+				if payerBankAmbiguous[t] {
+					return bankUnsure
+				}
+			}
+		}
 		return bankSame
 	}
 	if jaccard(a, b) == 0 {
@@ -389,6 +420,18 @@ func payerSameBank(declared, statement string) bankVerdict {
 }
 
 // ─── matcher side ────────────────────────────────────────────────────────────
+
+// heldClaimKey is a claim's entry in InboundCredit.HeldClaimIDs.
+func heldClaimKey(c InboundClaim) string { return c.Type + ":" + c.ID.String() }
+
+// heldClaimIDs is the HeldClaimIDs value for a no-name hold over candidates.
+func heldClaimIDs(candidates []InboundClaim) string {
+	keys := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		keys = append(keys, heldClaimKey(c))
+	}
+	return truncate(strings.Join(keys, ","), 1024)
+}
 
 // openClaimByID finds the open claim with id across every registered source,
 // stamped with its type; nil when none is open.
@@ -405,49 +448,112 @@ func (m *InboundMatcher) openClaimByID(ctx context.Context, currency string, id 
 	return nil, nil
 }
 
-// rivalClaimsAtAmount counts OTHER open claims asking the same amount in the
-// same currency as claim.
-func (m *InboundMatcher) rivalClaimsAtAmount(ctx context.Context, claim InboundClaim) (int, error) {
-	claims, err := m.gatherClaims(ctx, claim.Currency)
-	if err != nil {
-		return 0, fmt.Errorf("%w: %v", ErrPayerUnavailable, err)
+// bindDeclared settles credit to claim on decl.
+//
+// The row is CLAIMED first — moved from `from` to `binding` with the claim
+// named — and only then does the product settle run. A held credit is exactly
+// what admins refund and assign; claiming it before any value moves means an
+// admin acting at the same moment is refused (the row is no longer held),
+// rather than both settling the same naira. An interrupted bind is finished by
+// resumeDeclaredBinds, never handed back.
+//
+// Never the operator path (withManualBind): the product's own review gates
+// apply, and a refusal holds the credit with the product's reason.
+//
+// decided reports that the credit left `from` (bound or held for review);
+// matched that it now belongs to this claim.
+func (m *InboundMatcher) bindDeclared(ctx context.Context, credit *models.InboundCredit, claim InboundClaim, decl *models.InboundPayerDeclaration, from string) (decided, matched bool, err error) {
+	src, ok := m.sourceFor(claim.Type)
+	if !ok {
+		return false, false, fmt.Errorf("inbound payer: no source registered for claim type %q", claim.Type)
 	}
-	n := 0
-	for _, c := range claims {
-		if c.ID != claim.ID && c.AmountKobo == claim.AmountKobo && inboundSameCurrency(c.Currency, claim.Currency) {
-			n++
-		}
+	claimQ := m.db.WithContext(ctx).Model(&models.InboundCredit{}).Where("id = ? AND status = ?", credit.ID, from)
+	if from == models.InboundCreditHeld {
+		claimQ = claimQ.Where("hold_reason_code = ?", models.InboundHoldNoNameMatch)
 	}
-	return n, nil
+	res := claimQ.Updates(map[string]any{
+		"status":             models.InboundCreditBinding,
+		"matched_claim_type": claim.Type,
+		"matched_claim_id":   claim.ID,
+		"matched_user_id":    claim.UserID,
+		"updated_at":         m.now().UTC(),
+	})
+	if res.Error != nil {
+		return false, false, fmt.Errorf("inbound payer: claim credit %s: %w", credit.ID, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		log.Printf("[inbound-payer] ref=%s was decided concurrently — leaving it alone", credit.ProviderRef)
+		return false, false, nil
+	}
+	return m.settleClaimedDeclared(ctx, src, credit, claim, decl, from)
 }
 
-// bindDeclared settles credit to claim on decl through the same Accept-then-
-// record path every automatic bind takes — never the operator path, so the
-// product's own review gates still apply — then marks the declaration matched
-// and writes the audit row.
-//
-// decided is the matcher's own verdict (bound, or held by the product's review
-// gate); matched is whether the credit now belongs to this claim. They differ
-// when the product refused: the credit is held for an operator and the
-// declaration must not read as settled.
-func (m *InboundMatcher) bindDeclared(ctx context.Context, credit *models.InboundCredit, claim InboundClaim, decl *models.InboundPayerDeclaration) (decided, matched bool, err error) {
-	decided, err = m.bindCredit(ctx, credit, inboundCandidate{claim: claim, strength: NameMatchDeclared}, nil)
-	if err != nil || !decided {
-		return decided, false, err
+// settleClaimedDeclared runs the product settle for a credit already claimed
+// into `binding`, then records the outcome. Shared by the first attempt and
+// the resume of an interrupted one.
+func (m *InboundMatcher) settleClaimedDeclared(ctx context.Context, src ClaimSource, credit *models.InboundCredit, claim InboundClaim, decl *models.InboundPayerDeclaration, from string) (decided, matched bool, err error) {
+	if aerr := src.Accept(ctx, claim.ID, credit); aerr != nil {
+		var review *ClaimNeedsReviewError
+		if errors.As(aerr, &review) {
+			// The product refused before moving value: hold it with the
+			// product's own reason, for an operator.
+			if uerr := m.db.WithContext(ctx).Model(&models.InboundCredit{}).
+				Where("id = ? AND status = ?", credit.ID, models.InboundCreditBinding).
+				Updates(map[string]any{
+					"status": models.InboundCreditHeld, "hold_reason_code": review.Code,
+					"hold_reason":        truncate(review.Reason, inboundHoldReasonMax),
+					"matched_claim_type": "", "matched_claim_id": nil, "matched_user_id": nil,
+				}).Error; uerr != nil {
+				return false, false, fmt.Errorf("inbound payer: hold %s after product review: %w", credit.ProviderRef, uerr)
+			}
+			if decl != nil {
+				if rerr := markDeclarationReview(ctx, m.db, decl.ID, &credit.ID,
+					"the product held this payment for review ("+review.Code+") — an admin confirms"); rerr != nil {
+					log.Printf("[inbound-payer] WARNING declaration=%s not moved to review: %v", decl.ID, rerr)
+				}
+			}
+			log.Printf("[inbound-payer] HELD ref=%s reason=%s (declared bind)", credit.ProviderRef, review.Code)
+			return true, false, nil
+		}
+		// Anything else is retryable. Only an unmatched credit goes back where
+		// it came from (the matcher retries it next tick). A row that came out
+		// of `held` stays claimed and the resume finishes it: handing it back
+		// would let an admin refund money the settle may have delivered.
+		if from == models.InboundCreditUnmatched {
+			_ = m.db.WithContext(ctx).Model(&models.InboundCredit{}).
+				Where("id = ? AND status = ?", credit.ID, models.InboundCreditBinding).
+				Updates(map[string]any{
+					"status": models.InboundCreditUnmatched, "matched_claim_type": "",
+					"matched_claim_id": nil, "matched_user_id": nil,
+				}).Error
+		}
+		return false, false, fmt.Errorf("inbound payer: settle %s claim %s for ref %s: %w",
+			claim.Type, claim.ID, credit.ProviderRef, aerr)
 	}
-	var now models.InboundCredit
-	if err := m.db.WithContext(ctx).Select("status", "matched_claim_id").First(&now, "id = ?", credit.ID).Error; err != nil {
-		return decided, false, fmt.Errorf("inbound match: re-read credit %s after declared bind: %w", credit.ID, err)
+
+	now := m.now().UTC()
+	res := m.db.WithContext(ctx).Model(&models.InboundCredit{}).
+		Where("id = ? AND status = ?", credit.ID, models.InboundCreditBinding).
+		Updates(map[string]any{
+			"status": models.InboundCreditMatched, "matched_at": now,
+			"match_strength": string(NameMatchDeclared),
+			"hold_reason":    "", "hold_reason_code": "",
+		})
+	if res.Error != nil {
+		// Settled, not recorded: the row stays `binding` and the resume
+		// re-runs the (idempotent) settle and records it.
+		return true, false, fmt.Errorf("inbound payer: settled ref %s but could not record the bind: %w", credit.ProviderRef, res.Error)
 	}
-	if now.Status != models.InboundCreditMatched || now.MatchedClaimID == nil || *now.MatchedClaimID != claim.ID {
-		return decided, false, nil
+	if decl != nil {
+		m.recordDeclaredBind(ctx, credit, claim, decl)
 	}
-	return decided, true, m.recordDeclaredBind(ctx, credit, claim, decl)
+	log.Printf("[inbound-payer] bound ref=%s %s claim=%s on a payer declaration", credit.ProviderRef, claim.Type, claim.ID)
+	return true, true, nil
 }
 
 // recordDeclaredBind marks the declaration matched and writes the audit row.
 // Neither failing un-settles anything, so both are logged rather than failed.
-func (m *InboundMatcher) recordDeclaredBind(ctx context.Context, credit *models.InboundCredit, claim InboundClaim, decl *models.InboundPayerDeclaration) error {
+func (m *InboundMatcher) recordDeclaredBind(ctx context.Context, credit *models.InboundCredit, claim InboundClaim, decl *models.InboundPayerDeclaration) {
 	now := m.now().UTC()
 	if err := m.db.WithContext(ctx).Model(&models.InboundPayerDeclaration{}).
 		Where("id = ?", decl.ID).
@@ -455,17 +561,14 @@ func (m *InboundMatcher) recordDeclaredBind(ctx context.Context, credit *models.
 			"status": models.PayerDeclarationMatched, "credit_id": credit.ID,
 			"matched_at": now, "review_reason": "",
 		}).Error; err != nil {
-		// The money is settled and recorded on the credit; only the
-		// declaration's own status lags. Logged, not failed: retrying the bind
-		// would be a no-op anyway.
 		log.Printf("[inbound-payer] WARNING credit=%s bound but declaration=%s not marked matched: %v",
 			credit.ID, decl.ID, err)
 	}
+	_, last4 := maskAccountNumber(decl.AccountNumber)
 	meta, _ := json.Marshal(map[string]any{
 		"claimType": claim.Type, "claimId": claim.ID, "declarationId": decl.ID,
-		"bankCode": decl.BankCode, "bankName": decl.BankName,
-		"accountLast4": last4(decl.AccountNumber),
-		"grossKobo":    credit.GrossKobo, "providerRef": credit.ProviderRef,
+		"bankCode": decl.BankCode, "bankName": decl.BankName, "accountLast4": last4,
+		"grossKobo": credit.GrossKobo, "providerRef": credit.ProviderRef,
 	})
 	actor := decl.UserID
 	if err := m.db.WithContext(ctx).Create(&models.InboundCreditAuditLog{
@@ -474,16 +577,55 @@ func (m *InboundMatcher) recordDeclaredBind(ctx context.Context, credit *models.
 	}).Error; err != nil {
 		log.Printf("[inbound-payer] WARNING credit=%s bound but audit row not written: %v", credit.ID, err)
 	}
-	log.Printf("[inbound-payer] bound ref=%s %s claim=%s on declaration=%s",
-		credit.ProviderRef, claim.Type, claim.ID, decl.ID)
-	return nil
+}
+
+// resumeDeclaredBinds finishes declared binds that were interrupted after the
+// credit was claimed (a crash, a failed settle or record). The settle is
+// idempotent on the provider ref, so re-running it is safe; handing the row
+// back to `held` would not be — an admin could then refund money the product
+// already delivered.
+func (m *InboundMatcher) resumeDeclaredBinds(ctx context.Context) error {
+	var stuck []models.InboundCredit
+	if err := m.db.WithContext(ctx).
+		Where("status = ? AND updated_at < ?", models.InboundCreditBinding, m.now().UTC().Add(-payerBindResumeAfter)).
+		Limit(20).Find(&stuck).Error; err != nil {
+		return fmt.Errorf("inbound payer: load interrupted binds: %w", err)
+	}
+	var errs []error
+	for i := range stuck {
+		c := &stuck[i]
+		if c.MatchedClaimID == nil {
+			log.Printf("[inbound-payer] WARNING ref=%s is binding with no claim named — needs an engineer", c.ProviderRef)
+			continue
+		}
+		src, ok := m.sourceFor(c.MatchedClaimType)
+		if !ok {
+			errs = append(errs, fmt.Errorf("inbound payer: resume ref %s: no source for %q", c.ProviderRef, c.MatchedClaimType))
+			continue
+		}
+		claim := InboundClaim{Type: c.MatchedClaimType, ID: *c.MatchedClaimID}
+		if c.MatchedUserID != nil {
+			claim.UserID = *c.MatchedUserID
+		}
+		var decl *models.InboundPayerDeclaration
+		var d models.InboundPayerDeclaration
+		if err := m.db.WithContext(ctx).Where("claim_type = ? AND claim_id = ?", claim.Type, claim.ID).
+			First(&d).Error; err == nil {
+			decl = &d
+		}
+		log.Printf("[inbound-payer] resuming interrupted declared bind ref=%s", c.ProviderRef)
+		if _, _, err := m.settleClaimedDeclared(ctx, src, c, claim, decl, models.InboundCreditBinding); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // bindOnDeclaration is the matcher's fallback when no candidate's own legal
 // name matches the sender: a waiting declaration that fits exactly one
-// candidate binds it (within the cap). handled=false leaves the caller to hold
-// the credit as it would have anyway; handled=true returns the matcher's
-// decided verdict for this credit.
+// candidate binds it (within the cap, and only when no other candidate asks
+// the same amount). handled=false leaves the caller to hold the credit as it
+// would have anyway; handled=true returns the matcher's decided verdict.
 func (m *InboundMatcher) bindOnDeclaration(ctx context.Context, credit *models.InboundCredit, candidates []InboundClaim) (handled, decided bool, err error) {
 	if len(candidates) == 0 {
 		return false, false, nil
@@ -522,13 +664,8 @@ func (m *InboundMatcher) bindOnDeclaration(ctx context.Context, credit *models.I
 
 	review := func(reason string) {
 		for _, f := range fits {
-			if uerr := m.db.WithContext(ctx).Model(&models.InboundPayerDeclaration{}).
-				Where("id = ? AND status = ?", f.decl.ID, models.PayerDeclarationWaiting).
-				Updates(map[string]any{
-					"status": models.PayerDeclarationReview, "credit_id": credit.ID,
-					"review_reason": truncate(reason, 255),
-				}).Error; uerr != nil {
-				log.Printf("[inbound-payer] WARNING declaration=%s not moved to review: %v", f.decl.ID, uerr)
+			if rerr := markDeclarationReview(ctx, m.db, f.decl.ID, &credit.ID, reason); rerr != nil {
+				log.Printf("[inbound-payer] WARNING declaration=%s not moved to review: %v", f.decl.ID, rerr)
 			}
 		}
 	}
@@ -539,7 +676,7 @@ func (m *InboundMatcher) bindOnDeclaration(ctx context.Context, credit *models.I
 	case fits[0].fit == payerFitBankUnsure:
 		review("the sender bank on the statement could not be compared — an admin confirms")
 		return false, false, nil
-	case fits[0].claim.AmountKobo > DefaultPayerSelfResolveMaxKobo:
+	case fits[0].claim.AmountKobo > PayerSelfResolveMaxKobo:
 		review("over the self-resolve limit — an admin confirms")
 		return false, false, nil
 	case len(candidates) > 1:
@@ -548,18 +685,29 @@ func (m *InboundMatcher) bindOnDeclaration(ctx context.Context, credit *models.I
 		return false, false, nil
 	}
 	f := fits[0]
-	decided, matched, err := m.bindDeclared(ctx, credit, f.claim, &f.decl)
-	if err == nil && decided && !matched {
-		review("the product held this payment for review — an admin confirms")
-	}
+	decided, _, err = m.bindDeclared(ctx, credit, f.claim, &f.decl, models.InboundCreditUnmatched)
 	return true, decided, err
 }
 
-func last4(s string) string {
-	if len(s) <= 4 {
-		return s
+// closeSettledDeclarations closes waiting or review declarations that no
+// longer describe money still owed: the claim's payment matched on the buyer's
+// own name (claimID set), or a waiting declaration outlived any claim it could
+// settle (claimID nil). Keeps the admin queue to declarations that still mean
+// something.
+func (m *InboundMatcher) closeSettledDeclarations(ctx context.Context, claimID *uuid.UUID) error {
+	q := m.db.WithContext(ctx).Model(&models.InboundPayerDeclaration{})
+	reason := "closed: the order can no longer be paid"
+	if claimID != nil {
+		q = q.Where("claim_id = ? AND status IN ?", *claimID,
+			[]string{models.PayerDeclarationWaiting, models.PayerDeclarationReview})
+		reason = "closed: the order's payment matched the buyer's own name"
+	} else {
+		q = q.Where("status = ? AND created_at < ?", models.PayerDeclarationWaiting, m.now().UTC().Add(-payerDeclarationTTL))
 	}
-	return s[len(s)-4:]
+	if err := q.Updates(map[string]any{"status": models.PayerDeclarationClosed, "review_reason": reason}).Error; err != nil {
+		return fmt.Errorf("payer declarations: close settled: %w", err)
+	}
+	return nil
 }
 
 // closeDeclarationsAfterAdmin brings declarations into line with an admin's

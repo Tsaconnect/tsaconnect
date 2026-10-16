@@ -104,11 +104,10 @@ describe('PayerDeclarationSheet', () => {
     expect(allText(tree)).toContain('Payment found and confirmed.');
   });
 
-  it("shows the bank's own name when the typed one disagrees", async () => {
+  it('shows the mismatch under the name, without the bank\'s record', async () => {
     mockedDeclare.mockResolvedValue({
       success: false, code: 'payer_name_mismatch', status: 422,
-      message: "That name doesn't match the bank's record for this account.",
-      errorData: { bankAccountName: 'JOYCLARE KOSARACHI ELEM' },
+      message: "That name doesn't match the bank's record for this account. Enter it exactly as your bank app shows it.",
     });
     const onDeclared = jest.fn();
     const tree = await render(onDeclared);
@@ -116,6 +115,6 @@ describe('PayerDeclarationSheet', () => {
     await TestRenderer.act(async () => tree.root.findByProps({ testID: 'btn:Confirm account' }).props.onPress());
 
     expect(onDeclared).not.toHaveBeenCalled();
-    expect(allText(tree).some((t: string) => t.includes('"JOYCLARE KOSARACHI ELEM"'))).toBe(true);
+    expect(allText(tree).some((t: string) => t.startsWith("error:That name doesn't match"))).toBe(true);
   });
 });

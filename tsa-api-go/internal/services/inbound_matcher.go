@@ -137,6 +137,16 @@ func (m *InboundMatcher) MatchPending(ctx context.Context, limit int) (int, erro
 		limit = inboundDefaultMatchBatch
 	}
 
+	// Payer-declaration housekeeping first: an interrupted declared bind holds
+	// its credit in `binding` until finished, and declarations that can no
+	// longer settle anything close. Neither stops the matching below.
+	if err := m.resumeDeclaredBinds(ctx); err != nil {
+		log.Printf("[inbound-payer] WARNING resume interrupted binds: %v", err)
+	}
+	if err := m.closeSettledDeclarations(ctx, nil); err != nil {
+		log.Printf("[inbound-payer] WARNING close stale declarations: %v", err)
+	}
+
 	var credits []models.InboundCredit
 	if err := m.db.WithContext(ctx).
 		Where("status = ?", models.InboundCreditUnmatched).
@@ -297,8 +307,20 @@ func (m *InboundMatcher) decide(ctx context.Context, credit *models.InboundCredi
 		if handled, decided, err := m.bindOnDeclaration(ctx, credit, candidates); handled || err != nil {
 			return decided, err
 		}
-		return m.holdCredit(ctx, credit, models.InboundHoldNoNameMatch,
+		decided, err := m.holdCredit(ctx, credit, models.InboundHoldNoNameMatch,
 			inboundNoNameMatchReason(credit, want, scored))
+		if decided && err == nil {
+			// Who the money could have been for, as of now: a later payer
+			// declaration may settle it only if its claim was the sole one.
+			// A failed write leaves it empty, which sends declarations to an
+			// admin — the safe direction.
+			if uerr := m.db.WithContext(ctx).Model(&models.InboundCredit{}).
+				Where("id = ? AND status = ?", credit.ID, models.InboundCreditHeld).
+				Update("held_claim_ids", heldClaimIDs(candidates)).Error; uerr != nil {
+				log.Printf("[inbound-match] WARNING ref=%s held without its candidate list: %v", credit.ProviderRef, uerr)
+			}
+		}
+		return decided, err
 	default:
 		return m.holdCredit(ctx, credit, models.InboundHoldContested,
 			inboundContestedReason(credit, want, matched))
@@ -436,6 +458,14 @@ func (m *InboundMatcher) bindCredit(ctx context.Context, credit *models.InboundC
 	log.Printf("[inbound-match] bound ref=%s %s claim=%s user=%s strength=%s manual=%t",
 		credit.ProviderRef, cand.claim.Type, cand.claim.ID, cand.claim.UserID,
 		cand.strength, resolvedBy != nil)
+	if resolvedBy == nil {
+		// Paid from the buyer's own account after all: any declaration for
+		// this order no longer describes money owed. (An admin assign closes
+		// declarations on its own path.)
+		if cerr := m.closeSettledDeclarations(ctx, &cand.claim.ID); cerr != nil {
+			log.Printf("[inbound-payer] WARNING ref=%s bound but declarations not closed: %v", credit.ProviderRef, cerr)
+		}
+	}
 	return true, nil
 }
 

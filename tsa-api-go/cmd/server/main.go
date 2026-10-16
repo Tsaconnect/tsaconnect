@@ -2013,7 +2013,7 @@ func main() {
 	if inboundMatcher != nil && bankDirectory != nil {
 		inboundAdminHandler.SetPayers(services.NewInboundPayerService(config.DB, inboundMatcher, bankDirectory))
 		log.Printf("[inbound] payer declarations ready (self-resolve up to NGN %d)",
-			services.DefaultPayerSelfResolveMaxKobo/100)
+			services.PayerSelfResolveMaxKobo/100)
 	}
 
 	// Name change by re-verification — see buildNameChanges.

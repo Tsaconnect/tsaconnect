@@ -379,7 +379,13 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
   the claim opened. Funding rows carry no sender account number, so the number is never compared.
   Declare settles only credits already held `sender_matches_no_candidate_name` (never unmatched
   ones — the matcher decides those, a candidate's own name first — nor any other hold), and only
-  when no other open order asks the same amount (security review 2026-10-16).
+  when the matcher recorded the declarer's claim as the SOLE candidate when it held the credit
+  (`held_claim_ids`, written on every no-name hold — candidates as of arrival, not of now; empty
+  means review). A declared bind first CLAIMS the row (`status = binding`, claim named) and only
+  then runs the product settle, so an admin refund/assign racing it gets 409; an interrupted bind
+  is finished by the matcher's next tick (`resumeDeclaredBinds`, Accept is idempotent), never handed
+  back to `held`. The 422 name mismatch never returns the bank's name (no name-lookup oracle).
+  Declarations close when the order matches on the buyer's own name, or after 48 h waiting.
   ≤ ₦500,000 binds through the normal `bindCredit` path (strength `declared`, audit
   `inbound.payer_declared`, product review gates still apply — never `withManualBind`); larger,
   ambiguous or product-refused ones go to `review` for a super admin. A declaration made before

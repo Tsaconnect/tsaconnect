@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -53,12 +54,13 @@ func (h *InboundAdminHandler) DeclarePayer(c *gin.Context) {
 
 	res, err := h.payers.Declare(c.Request.Context(), user.ID, orderID, req.BankCode, req.AccountNumber, req.AccountName)
 	if err != nil {
-		var mismatch *services.PayerNameMismatchError
 		switch {
-		case errors.As(err, &mismatch):
-			utils.ErrorResponseWithCodeData(c, http.StatusUnprocessableEntity,
-				"That name doesn't match the bank's record for this account.", "payer_name_mismatch",
-				gin.H{"bankAccountName": mismatch.ResolvedName})
+		case errors.Is(err, services.ErrPayerNameMismatch):
+			// Never the bank's name: that would turn this into a name lookup
+			// for any account number.
+			utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity,
+				"That name doesn't match the bank's record for this account. Enter it exactly as your bank app shows it.",
+				"payer_name_mismatch")
 		case errors.Is(err, services.ErrPayerBadInput):
 			utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Enter the bank, a 10-digit account number and the account name.", "payer_bad_input")
 		case errors.Is(err, services.ErrPayerUnknownBank):
@@ -71,10 +73,15 @@ func (h *InboundAdminHandler) DeclarePayer(c *gin.Context) {
 			utils.ErrorResponseWithCode(c, http.StatusConflict, "This order's payment is already confirmed.", "payer_already_matched")
 		case errors.Is(err, services.ErrKYCVerificationRequired), errors.Is(err, services.ErrKYCLegalNameMissing):
 			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity first.", "kyc_verification_required")
-		case errors.Is(err, services.ErrPayerLookupFailed), errors.Is(err, services.ErrPayerUnavailable):
+		case errors.Is(err, services.ErrPayerLookupFailed):
+			log.Printf("[inbound-payer] name enquiry failed: %v", err)
 			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "We couldn't reach the bank. Try again in a moment.", "payer_unavailable")
+		case errors.Is(err, services.ErrPayerUnavailable):
+			log.Printf("[inbound-payer] unavailable: %v", err)
+			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "This isn't available right now. Try again in a moment.", "payer_unavailable")
 		default:
-			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "We couldn't reach the bank. Try again in a moment.", "payer_unavailable")
+			log.Printf("[inbound-payer] declare failed: %v", err)
+			utils.ErrorResponseWithCode(c, http.StatusInternalServerError, "Something went wrong. Try again in a moment.", "payer_failed")
 		}
 		return
 	}
@@ -121,7 +128,7 @@ func payerDeclarationView(d *models.InboundPayerDeclaration, admin bool) gin.H {
 		"status":        d.Status,
 		"bankCode":      d.BankCode,
 		"bankName":      d.BankName,
-		"accountNumber": maskAccount(d.AccountNumber),
+		"accountNumber": payMaskAccount(d.AccountNumber),
 		"accountName":   d.ResolvedName,
 		"amountKobo":    d.AmountKobo,
 		"createdAt":     d.CreatedAt,
@@ -139,11 +146,4 @@ func payerDeclarationView(d *models.InboundPayerDeclaration, admin bool) gin.H {
 		}
 	}
 	return v
-}
-
-func maskAccount(n string) string {
-	if len(n) <= 4 {
-		return n
-	}
-	return "******" + n[len(n)-4:]
 }

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +132,16 @@ func newPayerRig(t *testing.T, kobo int64) *payerRig {
 		svc: NewInboundPayerService(db, m, banks)}
 }
 
+// soleCandidate records the rig's claim as the only candidate when the credit
+// was held — what the matcher writes on a no-name hold.
+func (r *payerRig) soleCandidate(t *testing.T, credit *models.InboundCredit) {
+	t.Helper()
+	if err := r.db.Model(&models.InboundCredit{}).Where("id = ?", credit.ID).
+		Update("held_claim_ids", InboundClaimTypeITStable+":"+r.claim.ID.String()).Error; err != nil {
+		t.Fatalf("held_claim_ids: %v", err)
+	}
+}
+
 func (r *payerRig) declare(t *testing.T, bank, number, name string) (*DeclarePayerResult, error) {
 	t.Helper()
 	return r.svc.Declare(context.Background(), r.buyer, r.claim.ID, bank, number, name)
@@ -140,6 +151,7 @@ func TestPayer_HeldCreditFromAnotherAccountBindsOnDeclaration(t *testing.T) {
 	r := newPayerRig(t, 150_000)
 	credit := seedSenderCredit(t, r.db, "sess-1", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	r.soleCandidate(t, credit)
 
 	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
 	if err != nil {
@@ -172,9 +184,13 @@ func TestPayer_HeldCreditFromAnotherAccountBindsOnDeclaration(t *testing.T) {
 func TestPayer_TypedNameMustMatchTheBanksName(t *testing.T) {
 	r := newPayerRig(t, 150_000)
 	_, err := r.declare(t, "999992", "8012345678", "Someone Else Entirely")
-	var mismatch *PayerNameMismatchError
-	if !errors.As(err, &mismatch) || mismatch.ResolvedName != "JOYCLARE KOSARACHI ELEM" {
-		t.Fatalf("err = %v, want a name mismatch naming the bank's record", err)
+	if !errors.Is(err, ErrPayerNameMismatch) {
+		t.Fatalf("err = %v, want ErrPayerNameMismatch", err)
+	}
+	// The bank's name must never come back: that would be a name lookup for
+	// any account number.
+	if strings.Contains(err.Error(), "JOYCLARE") {
+		t.Errorf("mismatch error leaks the bank's name: %v", err)
 	}
 	var n int64
 	r.db.Model(&models.InboundPayerDeclaration{}).Count(&n)
@@ -227,8 +243,8 @@ func TestPayer_CreditBeforeTheOrderOpenedIsIgnored(t *testing.T) {
 }
 
 func TestPayer_OverTheCapGoesToReview(t *testing.T) {
-	r := newPayerRig(t, DefaultPayerSelfResolveMaxKobo+100)
-	credit := seedSenderCredit(t, r.db, "sess-5", DefaultPayerSelfResolveMaxKobo+100, "OPAY",
+	r := newPayerRig(t, PayerSelfResolveMaxKobo+100)
+	credit := seedSenderCredit(t, r.db, "sess-5", PayerSelfResolveMaxKobo+100, "OPAY",
 		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
 	if err != nil {
@@ -328,6 +344,7 @@ func TestPayer_ProductReviewKeepsTheDeclarationOpen(t *testing.T) {
 	r.src.acceptErr = &ClaimNeedsReviewError{Code: "trade_not_within_merchant_cap", Reason: "over cap"}
 	credit := seedSenderCredit(t, r.db, "sess-9", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	r.soleCandidate(t, credit)
 	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
@@ -477,8 +494,8 @@ func TestPayer_AdminAssignMatchesTheDeclarationAndRefundClosesIt(t *testing.T) {
 	admin := uuid.New()
 
 	// Over the cap, so the declaration waits in review for the admin.
-	r := newPayerRig(t, DefaultPayerSelfResolveMaxKobo+100)
-	credit := seedSenderCredit(t, r.db, "sess-14", DefaultPayerSelfResolveMaxKobo+100, "OPAY",
+	r := newPayerRig(t, PayerSelfResolveMaxKobo+100)
+	credit := seedSenderCredit(t, r.db, "sess-14", PayerSelfResolveMaxKobo+100, "OPAY",
 		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
 	if err != nil || res.Outcome != models.PayerDeclarationReview {
@@ -497,8 +514,8 @@ func TestPayer_AdminAssignMatchesTheDeclarationAndRefundClosesIt(t *testing.T) {
 	}
 
 	// A refund closes a review declaration that pointed at the credit.
-	r2 := newPayerRig(t, DefaultPayerSelfResolveMaxKobo+100)
-	credit2 := seedSenderCredit(t, r2.db, "sess-15", DefaultPayerSelfResolveMaxKobo+100, "OPAY",
+	r2 := newPayerRig(t, PayerSelfResolveMaxKobo+100)
+	credit2 := seedSenderCredit(t, r2.db, "sess-15", PayerSelfResolveMaxKobo+100, "OPAY",
 		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	res2, err := r2.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
 	if err != nil || res2.Outcome != models.PayerDeclarationReview {
@@ -523,5 +540,146 @@ func TestInboundMatcher_BindManuallyRefusalIsTyped(t *testing.T) {
 	err := r.m.BindManually(context.Background(), credit.ID, InboundClaimTypeITStable, r.claim.ID, uuid.New())
 	if !errors.Is(err, ErrInboundBindRefused) {
 		t.Fatalf("err = %v, want ErrInboundBindRefused (amount differs)", err)
+	}
+}
+
+// ─── review 2026-10-16 ───────────────────────────────────────────────────────
+
+// #1: a declared bind claims the credit (binding) before the product settles,
+// so an admin refund racing it is refused instead of paying twice.
+func TestPayer_AdminRefundCannotRaceADeclaredBind(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	credit := seedSenderCredit(t, r.db, "sess-20", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	r.soleCandidate(t, credit)
+
+	admin := NewInboundAdminService(r.db)
+	var refundErr error
+	// The admin acts while the product settle runs.
+	r.src.onAccept = func() {
+		_, refundErr = admin.MarkRefunded(context.Background(), uuid.New(), credit.ID, "refunding")
+	}
+	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil || res.Outcome != models.PayerDeclarationMatched {
+		t.Fatalf("Declare: %v / %v, want matched", err, res)
+	}
+	if !errors.Is(refundErr, ErrInboundCreditNotHeld) {
+		t.Fatalf("racing refund err = %v, want ErrInboundCreditNotHeld", refundErr)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditMatched {
+		t.Errorf("credit = %q, want matched (and never refunded)", got.Status)
+	}
+}
+
+// #1: a bind interrupted after the claim is finished by the next tick, never
+// handed back to held where an admin could refund it.
+func TestPayer_InterruptedBindIsFinishedNotHandedBack(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	credit := seedSenderCredit(t, r.db, "sess-21", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	r.soleCandidate(t, credit)
+	r.src.acceptErr = errors.New("chain blip")
+	if _, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem"); err != nil {
+		t.Fatalf("Declare: %v (a settle failure is logged, the declaration saved)", err)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditBinding {
+		t.Fatalf("credit = %q, want binding until finished", got.Status)
+	}
+
+	r.src.acceptErr = nil
+	r.m.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	if _, err := r.m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	got := reloadCredit(t, r.db, credit.ID)
+	if got.Status != models.InboundCreditMatched || got.MatchStrength != string(NameMatchDeclared) {
+		t.Fatalf("credit = %s/%s, want matched on resume", got.Status, got.MatchStrength)
+	}
+}
+
+// #2: "First Bank" alone must not read as the same bank as FCMB.
+func TestPayerSameBank_AmbiguousSingleWordIsUnsure(t *testing.T) {
+	if got := payerSameBank("First City Monument Bank", "First Bank"); got != bankUnsure {
+		t.Errorf("FCMB vs First Bank = %v, want unsure", got)
+	}
+	if got := payerSameBank("FCMB", "FIRST CITY MONUMENT BANK"); got != bankSame {
+		t.Errorf("FCMB alias = %v, want same", got)
+	}
+}
+
+// #5: candidates are judged as of the money's arrival. A credit held while
+// another order also asked the amount stays an admin's even after that order
+// is gone.
+func TestPayer_OtherCandidateAtArrivalSendsToReviewEvenIfGoneNow(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	credit := seedSenderCredit(t, r.db, "sess-22", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	r.db.Model(&models.InboundCredit{}).Where("id = ?", credit.ID).Update("held_claim_ids",
+		InboundClaimTypeITStable+":"+uuid.New().String()+","+InboundClaimTypeITStable+":"+r.claim.ID.String())
+	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil || res.Outcome != models.PayerDeclarationReview {
+		t.Fatalf("Declare: %v / %v, want review", err, res)
+	}
+}
+
+// #5: the matcher records who the money could have been for when it holds it.
+func TestInboundMatcher_NoNameHoldRecordsItsCandidates(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	credit := seedSenderCredit(t, r.db, "sess-23", 150_000, "OPAY", "SOMEBODY ELSE",
+		time.Now(), models.InboundCreditUnmatched)
+	if _, err := r.m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	got := reloadCredit(t, r.db, credit.ID)
+	if got.Status != models.InboundCreditHeld || got.HeldClaimIDs != InboundClaimTypeITStable+":"+r.claim.ID.String() {
+		t.Fatalf("credit = %s held_claim_ids=%q", got.Status, got.HeldClaimIDs)
+	}
+}
+
+// #7: a product refusal keeps the product's own reason on the credit.
+func TestPayer_ProductRefusalKeepsTheProductsReason(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	r.src.acceptErr = &ClaimNeedsReviewError{Code: "trade_not_within_merchant_cap", Reason: "over the merchant's daily cap"}
+	credit := seedSenderCredit(t, r.db, "sess-24", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	r.soleCandidate(t, credit)
+	if _, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem"); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	got := reloadCredit(t, r.db, credit.ID)
+	if got.Status != models.InboundCreditHeld || got.HoldReasonCode != "trade_not_within_merchant_cap" {
+		t.Fatalf("credit = %s/%s, want held with the product's code", got.Status, got.HoldReasonCode)
+	}
+}
+
+// #10: a declaration closes when the order's payment matches the buyer's own
+// name, and a stale waiting one closes on its own.
+func TestPayer_DeclarationsCloseWhenNoLongerOwed(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	seedSenderCredit(t, r.db, "sess-25", 150_000, "OPAY", "CHIDI OKONKWO", time.Now(), models.InboundCreditUnmatched)
+	if _, err := r.m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	var d models.InboundPayerDeclaration
+	r.db.First(&d, "id = ?", res.Declaration.ID)
+	if d.Status != models.PayerDeclarationClosed {
+		t.Fatalf("after an own-name match: %s, want closed", d.Status)
+	}
+
+	r2 := newPayerRig(t, 150_000)
+	res2, _ := r2.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	r2.db.Model(&models.InboundPayerDeclaration{}).Where("id = ?", res2.Declaration.ID).
+		Update("created_at", time.Now().Add(-72*time.Hour))
+	if _, err := r2.m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	var d2 models.InboundPayerDeclaration
+	r2.db.First(&d2, "id = ?", res2.Declaration.ID)
+	if d2.Status != models.PayerDeclarationClosed {
+		t.Fatalf("stale waiting declaration: %s, want closed", d2.Status)
 	}
 }

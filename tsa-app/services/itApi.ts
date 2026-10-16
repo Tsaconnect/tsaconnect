@@ -251,7 +251,7 @@ export interface PayerDeclaration {
 /**
  * Names the account that paid for a naira buy. The server checks the name with
  * the bank, then matches the payment by that name, bank and amount. A
- * `payer_name_mismatch` refusal carries the bank's name in `errorData.bankAccountName`.
+ * `payer_name_mismatch` refusal never says what the bank's name is.
  */
 export const declarePayer = (orderId: string, bankCode: string, accountNumber: string, accountName: string) =>
   req<PayerDeclaration>('POST', '/inbound/payer', { orderId, bankCode, accountNumber, accountName });
