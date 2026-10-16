@@ -24,6 +24,12 @@ const (
 	InboundCreditRefunded = "refunded"
 	// InboundCreditIgnored — not customer money (own-float top-up, test credit).
 	InboundCreditIgnored = "ignored"
+	// InboundCreditBinding — claimed for a bind on a buyer's payer declaration,
+	// whose product settle is running. Nothing else may act on the row: an
+	// admin refund or assign racing the settle would pay the same naira twice.
+	// MatchedClaim* already name the claim, so a bind interrupted mid-way is
+	// finished (the settle is idempotent), never handed back.
+	InboundCreditBinding = "binding"
 
 	InboundCreditProviderFlutterwave = "flutterwave"
 
@@ -125,6 +131,12 @@ type InboundCredit struct {
 	// log and to email. Set together with HoldReason on every hold; both are
 	// cleared when the credit is finally bound.
 	HoldReasonCode string `gorm:"size:48;index" json:"holdReasonCode,omitempty"`
+
+	// HeldClaimIDs lists the claims ("type:id", comma-separated) that asked
+	// this amount when the matcher held it for want of a name match — who the
+	// money could have been for at the time. A payer declaration may settle the
+	// credit only when its own claim was the sole one.
+	HeldClaimIDs string `gorm:"size:1024" json:"heldClaimIds,omitempty"`
 
 	MatchedClaimType string     `gorm:"size:24" json:"matchedClaimType,omitempty"`
 	MatchedClaimID   *uuid.UUID `gorm:"type:uuid;index" json:"matchedClaimId,omitempty"`

@@ -23,6 +23,7 @@ import {
   type ITPayTo,
 } from '@/services/itApi';
 import { PayIntoCard } from '@/components/it/PayIntoCard';
+import { PayerDeclarationSheet } from '@/components/it/PayerDeclarationSheet';
 import { HonourNotice } from '@/components/it/HonourNotice';
 import { FeeLines } from '@/components/ramp/FeeLines';
 import { ConversionProgress } from '@/components/it/ConversionProgress';
@@ -150,6 +151,8 @@ export default function ITIntentDetail() {
   // "I've sent the transfer": a one-off lookup ahead of the scheduled poll.
   const [checkingPayment, setCheckingPayment] = useState(false);
   const [paymentCheckNote, setPaymentCheckNote] = useState('');
+  // "Paid from another account?" — the buyer names the account that paid.
+  const [payerSheetOpen, setPayerSheetOpen] = useState(false);
   // Manual recovery: a hash the user pastes in themselves. A bridged sell has
   // no other route back — sell-stable.tsx's history lookup only sees Polygon,
   // and the app told the user to report the transfer against this order.
@@ -706,6 +709,12 @@ export default function ITIntentDetail() {
                   {paymentCheckNote}
                 </Text>
               ) : null}
+              <Button
+                title="Paid from another account?"
+                variant="ghost"
+                style={{ marginTop: spacing.sm }}
+                onPress={() => setPayerSheetOpen(true)}
+              />
             </View>
           ) : null}
         </Card>
@@ -856,6 +865,22 @@ export default function ITIntentDetail() {
           }
         />
       </ScrollView>
+      <PayerDeclarationSheet
+        visible={payerSheetOpen}
+        orderId={intent.id}
+        onClose={() => setPayerSheetOpen(false)}
+        onDeclared={(d) => {
+          // A match settles the order: re-read it. Otherwise the screen keeps
+          // polling and settles on its own when the payment lands.
+          if (d.status === 'matched') void load();
+          else
+            setPaymentCheckNote(
+              d.status === 'waiting'
+                ? "Got it. We'll match the payment from that account as soon as it arrives."
+                : 'Got it. Our team will check the payment and confirm your order shortly.'
+            );
+        }}
+      />
     </SafeAreaView>
   );
 }

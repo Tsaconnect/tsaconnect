@@ -235,6 +235,27 @@ export const checkITBuyPayment = (intentId: string) =>
     `/it/buy/${intentId}/check-payment`
   );
 
+/** A buyer's declaration of the account that paid, when it is not in their name. */
+export interface PayerDeclaration {
+  id: string;
+  orderId: string;
+  /** matched: settled now · waiting: confirms when the money arrives · review: an admin confirms. */
+  status: 'matched' | 'waiting' | 'review';
+  bankName: string;
+  /** Masked: only the last 4 digits. */
+  accountNumber: string;
+  /** The bank's own name for the account. */
+  accountName: string;
+}
+
+/**
+ * Names the account that paid for a naira buy. The server checks the name with
+ * the bank, then matches the payment by that name, bank and amount. A
+ * `payer_name_mismatch` refusal never says what the bank's name is.
+ */
+export const declarePayer = (orderId: string, bankCode: string, accountNumber: string, accountName: string) =>
+  req<PayerDeclaration>('POST', '/inbound/payer', { orderId, bankCode, accountNumber, accountName });
+
 export interface ITVA {
   id: string;
   currency: string;

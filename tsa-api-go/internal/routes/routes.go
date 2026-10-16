@@ -1369,11 +1369,17 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	// a plain admin may read the queue and the evidence, only a super_admin may
 	// move the money.
 	if iah != nil {
+		// A buyer names the account that paid for their order (payer
+		// declarations). Each call is a bank name enquiry, so it is tightly
+		// limited per user.
+		api.POST("/inbound/payer", auth, middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey), iah.DeclarePayer)
+
 		adminInbound := api.Group("/admin/inbound")
 		adminInbound.Use(adminAuth, middleware.RequireP2PAdmin())
 		{
 			adminInbound.GET("/credits", iah.ListCredits)
 			adminInbound.GET("/credits/:id/candidates", iah.GetCandidates)
+			adminInbound.GET("/declarations", iah.ListPayerDeclarations)
 
 			superInbound := adminInbound.Group("", middleware.RequireSuperAdmin())
 			superInbound.POST("/credits/:id/assign", iah.AssignCredit)

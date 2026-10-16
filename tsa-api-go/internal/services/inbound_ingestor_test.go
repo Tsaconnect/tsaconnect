@@ -61,6 +61,7 @@ func createInboundCreditsTable(t *testing.T, db *gorm.DB) {
 		status TEXT NOT NULL DEFAULT 'unmatched',
 		hold_reason TEXT,
 		hold_reason_code TEXT,
+		held_claim_ids TEXT,
 		matched_claim_type TEXT,
 		matched_claim_id TEXT,
 		matched_user_id TEXT,

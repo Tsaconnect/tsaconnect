@@ -2007,6 +2007,14 @@ func main() {
 	disputeHandler := handlers.NewDisputeHandler(disputeService).WithRampAdmin(conversionOrch)
 
 	inboundAdminHandler := handlers.NewInboundAdminHandler(inboundAdminService)
+	// Payer declarations: a buyer names the account that paid when it is not in
+	// their own name. Needs the matcher (to bind through the same settle path)
+	// and the bank directory (the name enquiry); without either the route 503s.
+	if inboundMatcher != nil && bankDirectory != nil {
+		inboundAdminHandler.SetPayers(services.NewInboundPayerService(config.DB, inboundMatcher, bankDirectory))
+		log.Printf("[inbound] payer declarations ready (self-resolve up to NGN %d)",
+			services.PayerSelfResolveMaxKobo/100)
+	}
 
 	// Name change by re-verification — see buildNameChanges.
 	h.NameChanges = buildNameChanges(cfg, mcgpSwapService, rampTreasury, blockchainService, eventBus, scheduler)
