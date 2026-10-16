@@ -27,6 +27,10 @@ describe('routeForNotification', () => {
     expect(routeForNotification({ type: 'p2p.deposit.confirmed' })).toBe('/p2p/my-ads');
   });
 
+  it('routes the moved-to-BNB-Chain notice to my-ads, where her Sonic ads are', () => {
+    expect(routeForNotification({ type: 'p2p.direct_moved' })).toBe('/p2p/my-ads');
+  });
+
   it('routes withdraw confirmed to the pool (reclaim screen)', () => {
     expect(routeForNotification({ type: 'p2p.withdraw.confirmed' })).toBe('/p2p/pool');
   });

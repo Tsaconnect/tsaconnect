@@ -30,6 +30,10 @@ export function routeForNotification(data: NotificationData | null | undefined):
   if (type === 'p2p.withdraw.confirmed') {
     return '/p2p/pool';
   }
+  // Direct P2P moved to BNB Chain: her Sonic ads, to cancel them and withdraw.
+  if (type === 'p2p.direct_moved') {
+    return '/p2p/my-ads';
+  }
   // An LP's stock ad is due for renewal: the liquidity dashboard offers Renew.
   if (type === 'liquidity.voucher_expiring') {
     return LP_DASHBOARD_ROUTE;

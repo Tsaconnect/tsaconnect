@@ -2065,6 +2065,16 @@ func main() {
 	// Start scheduler (no-op if no workers registered yet — future steps add them).
 	scheduler.Start(workerCtx)
 
+	// Once per user: tell non-PM sellers with ads or deposits on Sonic that
+	// direct P2P moved to BNB Chain (a no-op until Sonic's audience is pm).
+	if p2pTradeSvc != nil {
+		go func() {
+			if _, err := p2pTradeSvc.NotifyDirectMoved(workerCtx); err != nil {
+				log.Printf("[p2p] ALERT p2p_direct_moved_notice_failed=1 err=%v", err)
+			}
+		}()
+	}
+
 	// Start server in a goroutine
 	go func() {
 		log.Printf("TSA API server starting on port %s", port)

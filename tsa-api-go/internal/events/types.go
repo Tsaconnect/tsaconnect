@@ -137,6 +137,9 @@ const (
 	// Pool-model capital movement.
 	P2PDepositConfirmed  = "p2p.deposit.confirmed"
 	P2PWithdrawConfirmed = "p2p.withdraw.confirmed"
+	// P2PDirectMoved: once per user, when their Sonic ads or balance sit on
+	// an escrow now kept for Payment Merchants (plan p2p-bsc OPS-5).
+	P2PDirectMoved = "p2p.direct_moved"
 	// LiquidityVoucherExpiring: an LP's stock-ad voucher needs renewing (TSA
 	// Liquidity spec §8.4 step 6, §19). Data: "adId".
 	LiquidityVoucherExpiring = "liquidity.voucher_expiring"

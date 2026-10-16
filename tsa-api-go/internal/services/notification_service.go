@@ -15,6 +15,8 @@ import (
 
 // emailEvents defines which event types also trigger an email.
 var emailEvents = map[string]bool{
+	// Direct P2P moved to BNB Chain: a one-time notice the seller must not miss.
+	events.P2PDirectMoved: true,
 	events.TransactionCompleted:         true,
 	events.TransactionFailed:            true,
 	events.TransactionReceived:          true,
@@ -150,6 +152,7 @@ var pushEvents = map[string]bool{
 	"p2p.message.new":                   true, // raw string in p2p_message_service.go (not a const)
 	events.P2PDepositConfirmed:          true,
 	events.P2PWithdrawConfirmed:         true,
+	events.P2PDirectMoved:               true,
 	events.LiquidityVoucherExpiring:     true,
 	events.LiquidityPausedByAdmin:       true,
 	events.LiquidityFill:                true,
