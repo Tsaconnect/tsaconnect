@@ -270,17 +270,26 @@ func (s *InboundPayerService) bankName(ctx context.Context, code string) (string
 }
 
 // Declarations lists declarations for the admin queue, newest first. An empty
-// status lists every one.
-func (s *InboundPayerService) Declarations(ctx context.Context, status string, limit int) ([]models.InboundPayerDeclaration, error) {
+// status lists every one; an unknown one is refused rather than answered with
+// an empty page that looks like an empty queue.
+func (s *InboundPayerService) Declarations(ctx context.Context, status string, limit, offset int) ([]models.InboundPayerDeclaration, error) {
 	if s == nil || s.db == nil {
 		return nil, ErrPayerUnavailable
 	}
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	q := s.db.WithContext(ctx).Order("created_at DESC").Limit(limit)
-	if status = strings.TrimSpace(status); status != "" {
+	if offset < 0 {
+		offset = 0
+	}
+	q := s.db.WithContext(ctx).Order("created_at DESC").Limit(limit).Offset(offset)
+	switch status = strings.TrimSpace(status); status {
+	case "":
+	case models.PayerDeclarationWaiting, models.PayerDeclarationMatched,
+		models.PayerDeclarationReview, models.PayerDeclarationClosed:
 		q = q.Where("status = ?", status)
+	default:
+		return nil, fmt.Errorf("%w: unknown declaration status %q", ErrInboundBadRequest, status)
 	}
 	var out []models.InboundPayerDeclaration
 	if err := q.Find(&out).Error; err != nil {
@@ -551,4 +560,36 @@ func last4(s string) string {
 		return s
 	}
 	return s[len(s)-4:]
+}
+
+// closeDeclarationsAfterAdmin brings declarations into line with an admin's
+// decision on a credit, so the review queue empties as admins work it: the
+// declaration for the order the credit was assigned to is matched, and any
+// other declaration that pointed at the credit is closed with the reason.
+// assignedClaim is nil for a refund or ignore.
+func closeDeclarationsAfterAdmin(ctx context.Context, db *gorm.DB, creditID uuid.UUID, assignedClaim *uuid.UUID, outcome string) error {
+	now := time.Now().UTC()
+	if assignedClaim != nil {
+		if err := db.WithContext(ctx).Model(&models.InboundPayerDeclaration{}).
+			Where("claim_id = ? AND status <> ?", *assignedClaim, models.PayerDeclarationMatched).
+			Updates(map[string]any{
+				"status": models.PayerDeclarationMatched, "credit_id": creditID,
+				"matched_at": now, "review_reason": "",
+			}).Error; err != nil {
+			return fmt.Errorf("payer declarations: match after assign: %w", err)
+		}
+	}
+	q := db.WithContext(ctx).Model(&models.InboundPayerDeclaration{}).
+		Where("credit_id = ? AND status IN ?", creditID,
+			[]string{models.PayerDeclarationReview, models.PayerDeclarationWaiting})
+	if assignedClaim != nil {
+		q = q.Where("claim_id <> ?", *assignedClaim)
+	}
+	if err := q.Updates(map[string]any{
+		"status":        models.PayerDeclarationClosed,
+		"review_reason": truncate("an admin "+outcome, 255),
+	}).Error; err != nil {
+		return fmt.Errorf("payer declarations: close after admin: %w", err)
+	}
+	return nil
 }

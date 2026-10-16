@@ -18,6 +18,9 @@ const (
 	// self-resolve cap, several candidates, or a sender bank that could not be
 	// compared. ReviewReason says which.
 	PayerDeclarationReview = "review"
+	// PayerDeclarationClosed — an admin decided the credit it pointed at
+	// otherwise (assigned it to another order, refunded or ignored it).
+	PayerDeclarationClosed = "closed"
 )
 
 // InboundAuditPayerDeclared — a credit was bound on the buyer's own verified

@@ -527,13 +527,13 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 	claimType = strings.TrimSpace(claimType)
 	src, ok := m.sourceFor(claimType)
 	if !ok {
-		return fmt.Errorf("inbound bind: no claim source registered for %q", claimType)
+		return fmt.Errorf("%w: inbound bind: no claim source registered for %q", ErrInboundBindRefused, claimType)
 	}
 
 	var credit models.InboundCredit
 	if err := m.db.WithContext(ctx).First(&credit, "id = ?", creditID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return fmt.Errorf("inbound bind: credit %s not found", creditID)
+			return fmt.Errorf("%w: inbound bind: credit %s not found", ErrInboundCreditNotFound, creditID)
 		}
 		return fmt.Errorf("inbound bind: load credit %s: %w", creditID, err)
 	}
@@ -549,10 +549,10 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 		if credit.MatchedClaimType == claimType && credit.MatchedClaimID != nil && *credit.MatchedClaimID == claimID {
 			return nil
 		}
-		return fmt.Errorf("inbound bind: credit %s is already matched to %s claim %v — reassigning would credit it twice",
+		return fmt.Errorf("%w: inbound bind: credit %s is already matched to %s claim %v — reassigning would credit it twice", ErrInboundBindRefused,
 			creditID, credit.MatchedClaimType, credit.MatchedClaimID)
 	default:
-		return fmt.Errorf("inbound bind: credit %s is %s and cannot be assigned", creditID, credit.Status)
+		return fmt.Errorf("%w: inbound bind: credit %s is %s and cannot be assigned", ErrInboundBindRefused, creditID, credit.Status)
 	}
 
 	// The claim's owner comes from the source, not from the caller: the admin
@@ -570,7 +570,7 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("inbound bind: %s claim %s is not open — it may already be settled or expired", claimType, claimID)
+		return fmt.Errorf("%w: inbound bind: %s claim %s is not open — it may already be settled or expired", ErrInboundBindRefused, claimType, claimID)
 	}
 	target.Type = claimType
 
@@ -579,13 +579,13 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 	// over a kobo of statement dust.
 	want := RoundKoboToNaira(credit.GrossKobo)
 	if want <= 0 {
-		return fmt.Errorf("inbound bind: credit %s is %s — there is no amount here to assign",
+		return fmt.Errorf("%w: inbound bind: credit %s is %s — there is no amount here to assign", ErrInboundBindRefused,
 			creditID, inboundMoney(credit.Currency, credit.GrossKobo))
 	}
 	if want != target.AmountKobo {
 		// Both figures, because the refusal has to tell the operator WHICH is
 		// wrong: the payer underpaid, or they picked the wrong row.
-		return fmt.Errorf("inbound bind: credit %s is %s but %s claim %s asks %s — a claim settles for its own amount, so this would pay out money nobody sent. Refund the sender, or find the claim that asks %s",
+		return fmt.Errorf("%w: inbound bind: credit %s is %s but %s claim %s asks %s — a claim settles for its own amount, so this would pay out money nobody sent. Refund the sender, or find the claim that asks %s", ErrInboundBindRefused,
 			creditID, inboundMoney(credit.Currency, want),
 			claimType, claimID, inboundMoney(credit.Currency, target.AmountKobo),
 			inboundMoney(credit.Currency, want))
@@ -596,7 +596,7 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 		return err
 	}
 	if !bound {
-		return fmt.Errorf("inbound bind: credit %s was decided by someone else while assigning", creditID)
+		return fmt.Errorf("%w: inbound bind: credit %s was decided by someone else while assigning", ErrInboundBindRefused, creditID)
 	}
 	return nil
 }

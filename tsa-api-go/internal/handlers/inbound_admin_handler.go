@@ -231,6 +231,10 @@ func inboundAdminFail(c *gin.Context, err error) {
 		// 409, not 400: the request is well-formed, the credit has simply
 		// already been resolved — usually by another operator a moment ago.
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
+	case errors.Is(err, services.ErrInboundBindRefused):
+		// The matcher's refusal is written for the operator (which claim, which
+		// amounts) and carries no SQL, so it is shown as is.
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrInboundBadRequest):
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, services.ErrInboundBinderUnavailable):

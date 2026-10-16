@@ -45,6 +45,10 @@ var (
 	// above exists to prevent.
 	ErrInboundBinderUnavailable = errors.New("manual assignment is unavailable")
 	ErrInboundBadRequest        = errors.New("invalid inbound credit request")
+	// ErrInboundBindRefused is a manual assignment the matcher refused for a
+	// reason the operator can act on (claim no longer open, amount differs,
+	// already matched); its message says which.
+	ErrInboundBindRefused = errors.New("assignment refused")
 )
 
 // inboundStatusAny is the ListCredits status that means "do not filter".
@@ -481,6 +485,11 @@ func (s *InboundAdminService) Assign(ctx context.Context, adminID, creditID uuid
 		return nil, err
 	}
 
+	// The money has moved; declarations only lag. Logged, never failed.
+	if err := closeDeclarationsAfterAdmin(ctx, s.db, creditID, &claimID, "assigned the payment to another order"); err != nil {
+		log.Printf("[inbound-admin] WARNING credit=%s assigned but declarations not updated: %v", creditID, err)
+	}
+
 	s.audit(ctx, creditID, adminID, models.InboundAuditAssigned, note, map[string]any{
 		"claimType":     claimType,
 		"claimId":       claimID,
@@ -555,6 +564,13 @@ func (s *InboundAdminService) resolve(ctx context.Context, adminID, creditID uui
 
 		var updated models.InboundCredit
 		if err := tx.First(&updated, "id = ?", creditID).Error; err != nil {
+			return err
+		}
+		outcome := map[string]string{
+			models.InboundCreditRefunded: "refunded the payment",
+			models.InboundCreditIgnored:  "ruled the payment was not customer money",
+		}[status]
+		if err := closeDeclarationsAfterAdmin(ctx, tx, creditID, nil, outcome); err != nil {
 			return err
 		}
 		if err := tx.Create(&models.InboundCreditAuditLog{

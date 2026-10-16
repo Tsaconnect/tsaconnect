@@ -87,15 +87,20 @@ func (h *InboundAdminHandler) DeclarePayer(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, msg, payerDeclarationView(res.Declaration, false))
 }
 
-// GET /api/admin/inbound/declarations?status=&limit=
+// GET /api/admin/inbound/declarations?status=&limit=&offset= (status: waiting|matched|review|closed)
 func (h *InboundAdminHandler) ListPayerDeclarations(c *gin.Context) {
 	if h.payers == nil {
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Payer declarations are not wired.", "payer_unavailable")
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
-	rows, err := h.payers.Declarations(c.Request.Context(), c.Query("status"), limit)
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	rows, err := h.payers.Declarations(c.Request.Context(), c.Query("status"), limit, offset)
 	if err != nil {
+		if errors.Is(err, services.ErrInboundBadRequest) {
+			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load declarations")
 		return
 	}

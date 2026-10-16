@@ -19,6 +19,7 @@ import (
 func setupInboundAdminDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := setupInboundDB(t)
+	createPayerDeclarationsTable(t, db)
 	if err := db.Exec(`CREATE TABLE users (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,

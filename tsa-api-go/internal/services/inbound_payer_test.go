@@ -469,3 +469,59 @@ func TestPayer_AnotherOrderAtTheSameAmountGoesToReview(t *testing.T) {
 		t.Errorf("credit = %q, want still held", got.Status)
 	}
 }
+
+// An admin deciding the credit a declaration points at settles the declaration
+// too, so the review queue empties as admins work it.
+func TestPayer_AdminAssignMatchesTheDeclarationAndRefundClosesIt(t *testing.T) {
+	ctx := context.Background()
+	admin := uuid.New()
+
+	// Over the cap, so the declaration waits in review for the admin.
+	r := newPayerRig(t, DefaultPayerSelfResolveMaxKobo+100)
+	credit := seedSenderCredit(t, r.db, "sess-14", DefaultPayerSelfResolveMaxKobo+100, "OPAY",
+		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil || res.Outcome != models.PayerDeclarationReview {
+		t.Fatalf("Declare: %v / %v, want review", err, res)
+	}
+	adminSvc := NewInboundAdminService(r.db)
+	adminSvc.SetBinder(r.m)
+	adminSvc.AddClaimSource(InboundClaimTypeITStable, r.src)
+	if _, err := adminSvc.Assign(ctx, admin, credit.ID, InboundClaimTypeITStable, r.claim.ID, "checked the receipt"); err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+	var d models.InboundPayerDeclaration
+	r.db.First(&d, "id = ?", res.Declaration.ID)
+	if d.Status != models.PayerDeclarationMatched || d.CreditID == nil || *d.CreditID != credit.ID {
+		t.Fatalf("after assign: %s/%v, want matched to the credit", d.Status, d.CreditID)
+	}
+
+	// A refund closes a review declaration that pointed at the credit.
+	r2 := newPayerRig(t, DefaultPayerSelfResolveMaxKobo+100)
+	credit2 := seedSenderCredit(t, r2.db, "sess-15", DefaultPayerSelfResolveMaxKobo+100, "OPAY",
+		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	res2, err := r2.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil || res2.Outcome != models.PayerDeclarationReview {
+		t.Fatalf("Declare: %v / %v, want review", err, res2)
+	}
+	if _, err := NewInboundAdminService(r2.db).MarkRefunded(ctx, admin, credit2.ID, "sent back to the sender"); err != nil {
+		t.Fatalf("MarkRefunded: %v", err)
+	}
+	var d2 models.InboundPayerDeclaration
+	r2.db.First(&d2, "id = ?", res2.Declaration.ID)
+	if d2.Status != models.PayerDeclarationClosed || d2.ReviewReason == "" {
+		t.Fatalf("after refund: %s %q, want closed with a reason", d2.Status, d2.ReviewReason)
+	}
+}
+
+// A manual assignment the matcher refuses carries a sentinel, so the console
+// gets a 409 with the real reason instead of a bare 500.
+func TestInboundMatcher_BindManuallyRefusalIsTyped(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	credit := seedSenderCredit(t, r.db, "sess-16", 200_000, "OPAY", "SOMEONE",
+		time.Now(), models.InboundCreditHeld)
+	err := r.m.BindManually(context.Background(), credit.ID, InboundClaimTypeITStable, r.claim.ID, uuid.New())
+	if !errors.Is(err, ErrInboundBindRefused) {
+		t.Fatalf("err = %v, want ErrInboundBindRefused (amount differs)", err)
+	}
+}
