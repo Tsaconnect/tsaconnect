@@ -248,7 +248,7 @@ export default function PaycrestBuyScreen() {
   const wantChosenRef = useRef(false);
 
   // With the pool able to fill, start on the pool's token and chain (USDT on
-  // BSC) rather than Base. Only when nothing upstream named a chain or opened
+  // BSC) rather than Base — even when the entry suggested another token. Only when nothing upstream named a chain or opened
   // the picker, and only until she chooses for herself; a normal quote lists
   // the pool among its venues, so nothing else about the buy changes.
   useEffect(() => {
@@ -257,7 +257,7 @@ export default function PaycrestBuyScreen() {
     liquidityApi
       .poolCard()
       .then((res) => {
-        const next = res.success ? poolDefaultWant(res.data, { asset, currency: currencyCode }) : null;
+        const next = res.success ? poolDefaultWant(res.data, { currency: currencyCode }) : null;
         if (!active || !next || wantChosenRef.current) return;
         setWant(next);
         setWantTokenMeta(null);

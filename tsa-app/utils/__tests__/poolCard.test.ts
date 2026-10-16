@@ -54,7 +54,6 @@ describe('poolDefaultWant', () => {
 
   it('starts a naira buy on the pool token and chain while the pool can fill', () => {
     expect(poolDefaultWant(live, { currency: 'NGN' })).toEqual(usdtBsc);
-    expect(poolDefaultWant(live, { asset: 'usdt', currency: 'NGN' })).toEqual(usdtBsc);
   });
 
   it('keeps the screen default when the pool is empty, dormant or unreadable', () => {
@@ -63,8 +62,7 @@ describe('poolDefaultWant', () => {
     expect(poolDefaultWant(null, { currency: 'NGN' })).toBeNull();
   });
 
-  it('never overrides another currency or a token she asked for', () => {
+  it('never overrides another currency', () => {
     expect(poolDefaultWant(live, { currency: 'KES' })).toBeNull();
-    expect(poolDefaultWant(live, { asset: 'USDC', currency: 'NGN' })).toBeNull();
   });
 });
