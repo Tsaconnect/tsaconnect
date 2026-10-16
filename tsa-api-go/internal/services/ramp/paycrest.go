@@ -64,6 +64,9 @@ func (p *PaycrestProvider) RampLegs(ctx context.Context) (map[string]services.Ra
 	out := make(map[string]services.RampLegs, len(legs))
 	for fiat, l := range legs {
 		if p.reg.RampProvider(strings.ToUpper(fiat)) == services.RampProviderPaycrest {
+			if services.PaycrestBuysOff {
+				l.Buy = false // see services.PaycrestBuysOff
+			}
 			out[fiat] = l
 		}
 	}
@@ -71,6 +74,11 @@ func (p *PaycrestProvider) RampLegs(ctx context.Context) (map[string]services.Ra
 }
 
 func (p *PaycrestProvider) Quote(ctx context.Context, r Request) (*ProviderQuote, error) {
+	// Never quote a buy we will not open (services.PaycrestBuysOff): the router
+	// would pick Paycrest's rate, fail the open, and only then fail over.
+	if r.Side == Buy && services.PaycrestBuysOff {
+		return nil, fmt.Errorf("%w: paycrest buys are off", ErrLegClosed)
+	}
 	if err := p.orders.RequirePaycrestEnabled(r.FiatCode); err != nil {
 		return nil, fmt.Errorf("paycrest disabled for %q: %w", r.FiatCode, err)
 	}

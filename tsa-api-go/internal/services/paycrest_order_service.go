@@ -592,9 +592,19 @@ func requestedAssetLabel(req PaycrestBuyRequest) string {
 // testing, so a venue chosen even a minute ago may no longer be fillable at
 // this size. Binding the order to a price we just confirmed is the only way to
 // avoid showing a rate the order will not carry.
+// PaycrestBuysOff: Paycrest on-ramp orders now require the customer's KYC
+// (full name, date of birth, BVN/NIN) in source.kyc, and the owner decided on
+// 2026-10-16 not to share users' identity data — BVN above all — with a third
+// party. Buys therefore never go to Paycrest; sells are unaffected. A var only
+// so the buy path's own tests can still exercise the code kept for later.
+var PaycrestBuysOff = true
+
 func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyRequest) (*models.PaycrestOrderRecord, error) {
 	if s == nil {
 		return nil, ErrPaycrestDisabled
+	}
+	if PaycrestBuysOff {
+		return nil, ErrPaycrestLegClosed
 	}
 	if strings.TrimSpace(req.WalletAddress) == "" {
 		return nil, ErrBuyNeedsWallet
