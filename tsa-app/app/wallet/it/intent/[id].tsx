@@ -10,7 +10,7 @@ import { ethers } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { useTheme } from '@/theme';
-import { Button, Card, Divider, Icon, Input, Spinner, Stepper, SummaryCard, SummaryRow, Text } from '@/components/ui';
+import { Button, Card, Divider, Icon, Input, PressableScale, Spinner, Stepper, SummaryCard, SummaryRow, Text } from '@/components/ui';
 import {
   getITIntent,
   reportStableDeposit,
@@ -23,6 +23,7 @@ import {
   type ITPayTo,
 } from '@/services/itApi';
 import { PayIntoCard } from '@/components/it/PayIntoCard';
+import TokenAvatar from '@/components/wallet/TokenAvatar';
 import { PayerDeclarationSheet } from '@/components/it/PayerDeclarationSheet';
 import { HonourNotice } from '@/components/it/HonourNotice';
 import { FeeLines } from '@/components/ramp/FeeLines';
@@ -127,6 +128,15 @@ function shortDate(iso?: string): string {
   }
 }
 
+// A tappable row: children laid out across, centred.
+function PressableRow({ onPress, children, style }: { onPress: () => void; children: React.ReactNode; style?: object }) {
+  return (
+    <PressableScale onPress={onPress} style={[{ flexDirection: 'row', alignItems: 'center', gap: 12 }, style]}>
+      {children}
+    </PressableScale>
+  );
+}
+
 export default function ITIntentDetail() {
   const { colors, spacing, radius } = useTheme();
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -153,6 +163,8 @@ export default function ITIntentDetail() {
   const [paymentCheckNote, setPaymentCheckNote] = useState('');
   // "Paid from another account?" — the buyer names the account that paid.
   const [payerSheetOpen, setPayerSheetOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [amountCopied, setAmountCopied] = useState(false);
   // Manual recovery: a hash the user pastes in themselves. A bridged sell has
   // no other route back — sell-stable.tsx's history lookup only sees Polygon,
   // and the app told the user to report the transfer against this order.
@@ -418,7 +430,6 @@ export default function ITIntentDetail() {
   if (!intent) return null;
 
   const isBuy = intent.direction === 'buy';
-  const title = isBuy ? 'Buy' : 'Sell';
 
   // statusLabel above is scoped to MCGP (both directions) + stablecoin SELL.
   // A stablecoin BUY's own statuses (payment_received, awaiting_funds,
@@ -507,240 +518,254 @@ export default function ITIntentDetail() {
       ? 'Transfer the exact amount of this purchase into your Instant Transfer account. Sending less can hold your purchase for review.'
       : `Transfer exactly ${exactNaira} into your Instant Transfer account. Sending less can hold your purchase for review.`;
 
+  const awaitingTransfer = isBuy && intent.status === 'pending_payment';
+  // A converted buy's intent.destAddress is the treasury leg, never hers.
+  const walletShown = conversion ? conversion.destinationAddress || conversion.walletAddress : intent.destAddress;
+  const getSymbol = conversion?.requestedToken ?? (isStableAsset ? intent.asset ?? '' : 'MCGP');
+  const getChainKey = (conversion?.requestedChain ?? intent.destChain ?? (isStableAsset ? '' : 'sonic')).toLowerCase();
+  const getChainName = conversionChain ?? (getChainKey ? getChainDisplay(getChainKey as ChainKey)?.name ?? getChainKey : '');
+  // The one line that says what this order is for.
+  const headline = isBuy
+    ? isStableAsset
+      ? conversionGet ?? `${buyIsEstimate ? '≈ ' : ''}${fmtAsset(intent.assetAmount)} ${intent.asset}`
+      : `${mcgpBuyFees?.hasFees ? mcgpBuyFees.netMcgp : fmtMcgp(intent.mcgpAmount)} MCGP`
+    : isStableAsset
+      ? formatKobo(intent.netNgnKobo ?? intent.netMinor ?? intent.ngnKobo)
+      : `₦${fmtNaira(intent.ngnKobo)}`;
+  const rateLine = isStableAsset
+    ? `${buyIsEstimate ? '≈ ' : ''}${formatKobo(isStableBuy ? intentDisplayRateMinor(intent) : intent.rateKobo)} per ${intent.asset}`
+    : `₦${fmtRate(intent.rateKobo)} per MCGP`;
+  const copyAmount = async () => {
+    const naira = (Number(intent.ngnKobo) / 100).toString();
+    if (!Number.isFinite(Number(naira))) return;
+    await Clipboard.setStringAsync(naira);
+    setAmountCopied(true);
+    setTimeout(() => setAmountCopied(false), 2000);
+  };
+
+  // Everything secondary, behind "Details": the full breakdown, the fee lines,
+  // the explorer link and the full wallet address.
+  const details = (
+    <View style={{ marginTop: spacing.md, gap: spacing.md }}>
+      <SummaryCard>
+        <SummaryRow label="Status" value={displayStatus(intent.status)} />
+        <Divider spacing="xs" />
+        {isStableAsset && isBuy ? (
+          <>
+            <SummaryRow label={buyPaidMinor ? 'You paid' : 'You pay'} value={formatKobo(buyPaidMinor ?? intent.ngnKobo)} />
+            <Divider spacing="xs" />
+            <SummaryRow label="You get" value={headline} />
+          </>
+        ) : isStableAsset ? (
+          <>
+            <SummaryRow label="You sell" value={`${fmtAsset(intent.assetAmount)} ${intent.asset}`} />
+            <Divider spacing="xs" />
+            {/* NET, never ngnKobo (the gross valuation, never updated) — the
+                same net → netMinor → gross fallback the sell screens use. */}
+            <SummaryRow
+              label={netIsEstimate ? 'You receive (estimate)' : 'You receive'}
+              value={formatKobo(intent.netNgnKobo ?? intent.netMinor ?? intent.ngnKobo)}
+            />
+          </>
+        ) : isBuy ? (
+          <>
+            <SummaryRow label="You pay" value={`₦${fmtNaira(intent.ngnKobo)}`} />
+            {mcgpBuyFees?.hasFees ? (
+              <>
+                <Divider spacing="xs" />
+                <SummaryRow label="You pay for" value={`${mcgpBuyFees.grossMcgp} MCGP`} />
+                <SummaryRow label="Fees" value={`−${mcgpBuyFees.feeMcgp} MCGP`} hint={`≈ ₦${mcgpBuyFees.feeNgn}`} />
+              </>
+            ) : null}
+            <Divider spacing="xs" />
+            <SummaryRow label="You receive" value={headline} />
+          </>
+        ) : (
+          <>
+            <SummaryRow label="You sell" value={`${fmtMcgp(intent.mcgpAmount)} MCGP`} />
+            <Divider spacing="xs" />
+            <SummaryRow label="You receive" value={`₦${fmtNaira(intent.ngnKobo)}`} />
+          </>
+        )}
+        {getChainName ? (
+          <>
+            <Divider spacing="xs" />
+            <SummaryRow label="On" value={getChainName} />
+          </>
+        ) : null}
+        <Divider spacing="xs" />
+        <SummaryRow label="Rate" value={rateLine.replace(' per ', ' / ')} />
+        <Divider spacing="xs" />
+        <SummaryRow label="Created" value={shortDate(intent.createdAt)} />
+        {intent.txHash ? (
+          <>
+            <Divider spacing="xs" />
+            <SummaryRow label="Tx" value={`${intent.txHash.slice(0, 10)}…${intent.txHash.slice(-6)}`} />
+          </>
+        ) : null}
+      </SummaryCard>
+      {buyFeeLines.length ? (
+        // "You get" above is already after every one of these.
+        <FeeLines fees={buyFeeLines} token={intent.asset ?? ''} symbol="₦" />
+      ) : null}
+      {isBuy && isStableAsset && walletShown ? (
+        <View>
+          {/* FULL address, never truncated, and never inside SummaryRow
+              (which ellipsises): a truncated address cannot be verified. */}
+          <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+            Sent to your wallet
+          </Text>
+          <Text
+            selectable
+            numberOfLines={0}
+            style={{
+              color: colors.textPrimary,
+              fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+              fontSize: 13,
+              lineHeight: 18,
+            }}
+          >
+            {walletShown}
+          </Text>
+        </View>
+      ) : null}
+      {explorerUrl ? (
+        <Button title="View on explorer" variant="secondary" onPress={() => { void Linking.openURL(explorerUrl); }} />
+      ) : null}
+    </View>
+  );
+
+  // "You get X on CHAIN · rate", with the breakdown one tap away.
+  const summaryCard = (
+    <Card>
+      <PressableRow onPress={() => setDetailsOpen((v) => !v)}>
+        <TokenAvatar symbol={getSymbol} chainKey={(getChainKey || undefined) as never} size={36} />
+        <View style={{ flex: 1 }}>
+          <Text variant="bodyMed" weight="700" style={{ color: colors.textPrimary }}>
+            {isBuy ? `You ${awaitingTransfer ? 'get' : 'receive'} ${headline}` : `You receive ${headline}`}
+          </Text>
+          <Text variant="caption" style={{ color: colors.textMuted }}>
+            {[getChainName ? `on ${getChainName}` : '', rateLine].filter(Boolean).join(' · ')}
+          </Text>
+        </View>
+        <Text variant="bodySm" weight="600" style={{ color: colors.accent }}>
+          {detailsOpen ? 'Hide' : 'Details'}
+        </Text>
+      </PressableRow>
+      {detailsOpen ? details : null}
+    </Card>
+  );
+
+  const statusChip = (label: string, tone: 'wait' | 'ok' | 'bad') => (
+    <View
+      style={{
+        alignSelf: 'flex-start',
+        paddingHorizontal: spacing.sm,
+        paddingVertical: 2,
+        borderRadius: radius.pill,
+        backgroundColor: tone === 'ok' ? colors.successBg : tone === 'bad' ? colors.dangerBg : colors.accentMuted,
+      }}
+    >
+      <Text variant="caption" weight="700" style={{ color: tone === 'ok' ? colors.success : tone === 'bad' ? colors.danger : colors.accent }}>
+        {label}
+      </Text>
+    </View>
+  );
+
   return (
     <SafeAreaView edges={['bottom']} style={{ flex: 1, backgroundColor: colors.background }}>
       <ScrollView
         contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}
         refreshControl={<RefreshControl refreshing={loading} onRefresh={load} tintColor={colors.accent} />}
       >
-        <Card>
-          <Text variant="title3" weight="700" style={{ color: colors.textPrimary, marginBottom: spacing.sm }}>
-            {title}
-          </Text>
-          <SummaryCard>
-            <SummaryRow label="Status" value={displayStatus(intent.status)} />
-            <Divider spacing="xs" />
-            {isStableAsset && isBuy ? (
-              <>
-                <SummaryRow
-                  label={buyPaidMinor ? 'You paid' : 'You pay'}
-                  value={formatKobo(buyPaidMinor ?? intent.ngnKobo)}
-                />
-                <Divider spacing="xs" />
-                <SummaryRow
-                  label="You get"
-                  value={conversionGet ?? `${buyIsEstimate ? '≈ ' : ''}${fmtAsset(intent.assetAmount)} ${intent.asset}`}
-                />
-                {conversionChain || intent.destChain ? (
-                  <>
-                    <Divider spacing="xs" />
-                    <SummaryRow label="On" value={conversionChain ?? intent.destChain ?? ''} />
-                  </>
-                ) : null}
-              </>
-            ) : isStableAsset ? (
-              <>
-                <SummaryRow label="You sell" value={`${fmtAsset(intent.assetAmount)} ${intent.asset}`} />
-                <Divider spacing="xs" />
-                {/* NET, never `ngnKobo`. `ngnKobo` is documented server-side as
-                    "the GROSS valuation" (it_models.go:114-126) — before spread
-                    and fee — and is NEVER updated afterwards, while
-                    net_ngn_kobo is rewritten on confirmation to the actual
-                    `quotedNet × received / quoted` payout (it_stable_sell.go:
-                    455-465). Reading the gross here would show a user who was
-                    paid ₦148,200 "You receive ₦155,000" beside a green "Paid to
-                    your bank" — on the screen they open to check they were paid.
-                    Fall back net → netMinor → gross so the figure degrades to
-                    the same order the sell screens use. */}
-                <SummaryRow
-                  label={netIsEstimate ? 'You receive (estimate)' : 'You receive'}
-                  value={formatKobo(intent.netNgnKobo ?? intent.netMinor ?? intent.ngnKobo)}
-                />
-              </>
-            ) : isBuy ? (
-              <>
-                <SummaryRow label="You pay" value={`₦${fmtNaira(intent.ngnKobo)}`} />
-                <Divider spacing="xs" />
-                {mcgpBuyFees?.hasFees ? (
-                  <>
-                    <SummaryRow label="You pay for" value={`${mcgpBuyFees.grossMcgp} MCGP`} />
-                    <SummaryRow
-                      label="Fees"
-                      value={`−${mcgpBuyFees.feeMcgp} MCGP`}
-                      hint={`≈ ₦${mcgpBuyFees.feeNgn}`}
-                    />
-                    <Divider spacing="xs" />
-                    <SummaryRow label="You receive" value={`${mcgpBuyFees.netMcgp} MCGP`} />
-                  </>
-                ) : (
-                  <SummaryRow label="You get" value={`${fmtMcgp(intent.mcgpAmount)} MCGP`} />
-                )}
-              </>
-            ) : (
-              <>
-                <SummaryRow label="You sell" value={`${fmtMcgp(intent.mcgpAmount)} MCGP`} />
-                <Divider spacing="xs" />
-                <SummaryRow label="You receive" value={`₦${fmtNaira(intent.ngnKobo)}`} />
-              </>
-            )}
-            <Divider spacing="xs" />
-            <SummaryRow
-              label="Rate"
-              value={
-                isStableAsset
-                  ? `${buyIsEstimate ? '≈ ' : ''}${formatKobo(isStableBuy ? intentDisplayRateMinor(intent) : intent.rateKobo)} / ${intent.asset}`
-                  : `₦${fmtRate(intent.rateKobo)} / MCGP`
-              }
-            />
-            <Divider spacing="xs" />
-            <SummaryRow label="Created" value={shortDate(intent.createdAt)} />
-            {intent.txHash ? (
-              <>
-                <Divider spacing="xs" />
-                <SummaryRow label="Tx" value={`${intent.txHash.slice(0, 10)}…${intent.txHash.slice(-6)}`} />
-              </>
-            ) : null}
-          </SummaryCard>
-          {buyFeeLines.length ? (
-            // "You get" above is already after every one of these.
-            <FeeLines fees={buyFeeLines} token={intent.asset ?? ''} symbol="₦" />
-          ) : null}
-          {explorerUrl ? (
-            <View style={{ marginTop: spacing.md }}>
-              <Button
-                title="View on explorer"
-                variant="secondary"
-                onPress={() => {
-                  void Linking.openURL(explorerUrl);
-                }}
-              />
-            </View>
-          ) : null}
-          {isStableAsset ? (
-            <View style={{ marginTop: spacing.md }}>
-              <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.sm }}>
-                Progress
-              </Text>
-              <Stepper steps={hops} />
-              {conversion ? (
-                <ConversionProgress
-                  conversion={conversion}
-                  paid={!isAwaitingPayment(intent.status) && intent.status !== 'cancelled'}
-                />
-              ) : null}
-            </View>
-          ) : null}
-          {isBuy && isStableAsset && (conversion ? conversion.destinationAddress || conversion.walletAddress : intent.destAddress) ? (
-            <View style={{ marginTop: spacing.md }}>
-              {/* FULL address, never truncated, and never inside SummaryRow
-                  (which ellipsises) — same reasoning as the confirm step
-                  (buy-stable.tsx): a truncated address cannot be verified
-                  against, which is the only thing displaying it achieves. */}
-              <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
-                Sent to your wallet
-              </Text>
-              <Text
-                selectable
-                numberOfLines={0}
-                style={{
-                  color: colors.textPrimary,
-                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-                  fontSize: 13,
-                  lineHeight: 18,
-                }}
-              >
-                {/* A converted buy's intent.destAddress is the treasury leg, never hers. */}
-                {conversion ? conversion.destinationAddress || conversion.walletAddress : intent.destAddress}
-              </Text>
-            </View>
-          ) : null}
-          {intent.failureReason ? (
-            <View style={{ marginTop: spacing.md }}>
-              <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
-                Note
-              </Text>
-              <Text variant="bodySm" style={{ color: colors.textPrimary }}>
-                {intent.failureReason}
-              </Text>
-            </View>
-          ) : null}
-          {isStableBuy ? (
-            <HonourNotice
-              honourUntil={honour.honourUntil}
-              pending={intent.status === 'pending_payment'}
-              rateUpdated={honour.rateUpdated}
-              receive={`${fmtAsset(intent.assetAmount)} ${intent.asset}`}
-            />
-          ) : null}
-          {isStableBuy && intent.status === 'pending_payment' ? (
-            <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
-              {stableBuyPayCopy}
+        {awaitingTransfer ? (
+          // Step 1 — pay. The amount and where to send it lead; the action
+          // bar is pinned below the scroll.
+          <Card>
+            <Text variant="overline" style={{ color: colors.textMuted }}>
+              Transfer exactly
             </Text>
-          ) : null}
-          {isStableBuy && intent.status === 'pending_payment' && payTo ? (
-            // Where to send it (D60): the API returns this card for a
-            // stablecoin buy too; only the MCGP branch below rendered it.
-            <View style={{ marginTop: spacing.md }}>
+            <PressableRow onPress={() => { void copyAmount(); }} style={{ marginTop: spacing.xs, marginBottom: spacing.md }}>
+              <Text variant="display" weight="800" style={{ color: colors.textPrimary }}>
+                {exactNaira}
+              </Text>
+              <Text variant="caption" weight="700" style={{ color: colors.accent }}>
+                {amountCopied ? 'Copied' : 'Copy'}
+              </Text>
+            </PressableRow>
+            {payTo ? (
               <PayIntoCard payTo={payTo} />
-            </View>
-          ) : null}
-          {isMcgpBuyAwaitingTransfer ? (
-            payTo ? (
-              <View style={{ marginTop: spacing.md }}>
-                <PayIntoCard payTo={payTo} />
-              </View>
             ) : (
-              <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.md }}>
+              <Text variant="bodySm" style={{ color: colors.textMuted }}>
                 This order updates on its own once your payment is confirmed.
               </Text>
-            )
-          ) : null}
-          {isBuy && intent.status === 'pending_payment' ? (
-            <View style={{ marginTop: spacing.lg }}>
-              <Button
-                title="I've sent the transfer"
-                loading={checkingPayment}
-                onPress={() => {
-                  void checkPayment();
-                }}
+            )}
+            {isStableBuy ? (
+              <HonourNotice
+                honourUntil={honour.honourUntil}
+                pending={intent.status === 'pending_payment'}
+                rateUpdated={honour.rateUpdated}
+                receive={`${fmtAsset(intent.assetAmount)} ${intent.asset}`}
               />
-              {paymentCheckNote ? (
-                <Text variant="bodySm" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
-                  {paymentCheckNote}
-                </Text>
-              ) : null}
-              <Button
-                title="Paid from another account?"
-                variant="ghost"
-                style={{ marginTop: spacing.sm }}
-                onPress={() => setPayerSheetOpen(true)}
-              />
-            </View>
-          ) : null}
-        </Card>
-
-        {isBuy && intent.status === 'pending_payment' ? (
-          <Card>
-            <Text variant="bodySm" weight="600" style={{ color: colors.textPrimary, marginBottom: spacing.xs }}>
-              Haven&apos;t paid yet?
-            </Text>
-            <Text variant="bodySm" style={{ color: colors.textMuted, marginBottom: spacing.md }}>
-              You can cancel this {isStableAsset ? 'purchase' : 'order'} before paying. If you have
-              already sent the transfer, do not cancel — wait for it to be matched instead.
-            </Text>
-            {cancelBuyError ? (
-              <Text variant="bodySm" style={{ color: colors.danger, marginBottom: spacing.md }}>
-                {cancelBuyError}
+            ) : null}
+            {isStableBuy ? (
+              <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
+                {stableBuyPayCopy}
               </Text>
             ) : null}
-            <Button
-              title={isStableAsset ? 'Cancel purchase' : 'Cancel order'}
-              variant="secondary"
-              loading={cancellingBuy}
-              onPress={handleCancelBuy}
-            />
           </Card>
-        ) : null}
+        ) : (
+          // Step 2 — track. Progress is the main thing once money has moved.
+          <Card>
+            {statusChip(
+              displayStatus(intent.status),
+              ['cancelled', 'failed', 'refunded', 'expired'].includes(intent.status)
+                ? 'bad'
+                : (isStableAsset ? (isBuy ? isTerminalBuyStatus(intent.status) : isTerminalStableStatus(intent.status)) : intent.status === 'completed')
+                  ? 'ok'
+                  : 'wait'
+            )}
+            <Text variant="title1" weight="800" style={{ color: colors.textPrimary, marginTop: spacing.sm }}>
+              {headline}
+            </Text>
+            {getChainName ? (
+              <Text variant="bodySm" style={{ color: colors.textMuted }}>
+                {isBuy ? `to your wallet on ${getChainName}` : `from ${getChainName}`}
+              </Text>
+            ) : null}
+            {isStableAsset ? (
+              <View style={{ marginTop: spacing.lg }}>
+                <Stepper steps={hops} />
+                {conversion ? (
+                  <ConversionProgress
+                    conversion={conversion}
+                    paid={!isAwaitingPayment(intent.status) && intent.status !== 'cancelled'}
+                  />
+                ) : null}
+              </View>
+            ) : null}
+            {intent.failureReason ? (
+              <View style={{ marginTop: spacing.md }}>
+                <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary, marginBottom: spacing.xs }}>
+                  Note
+                </Text>
+                <Text variant="bodySm" style={{ color: colors.textPrimary }}>
+                  {intent.failureReason}
+                </Text>
+              </View>
+            ) : null}
+            {isStableBuy ? (
+              <HonourNotice
+                honourUntil={honour.honourUntil}
+                pending={false}
+                rateUpdated={honour.rateUpdated}
+                receive={`${fmtAsset(intent.assetAmount)} ${intent.asset}`}
+              />
+            ) : null}
+          </Card>
+        )}
+
+        {summaryCard}
 
         {showResume ? (
           canResumeDirect ? (
@@ -865,6 +890,42 @@ export default function ITIntentDetail() {
           }
         />
       </ScrollView>
+      {awaitingTransfer ? (
+        <View
+          style={{
+            paddingHorizontal: spacing.lg,
+            paddingTop: spacing.md,
+            paddingBottom: spacing.sm,
+            gap: spacing.xs,
+            backgroundColor: colors.surface,
+            borderTopWidth: 1,
+            borderTopColor: colors.border,
+          }}
+        >
+          <Button title="I've sent the transfer" loading={checkingPayment} onPress={() => { void checkPayment(); }} />
+          {paymentCheckNote ? (
+            <Text variant="caption" style={{ color: colors.textMuted, textAlign: 'center' }}>
+              {paymentCheckNote}
+            </Text>
+          ) : null}
+          {cancelBuyError ? (
+            <Text variant="caption" style={{ color: colors.danger, textAlign: 'center' }}>
+              {cancelBuyError}
+            </Text>
+          ) : null}
+          <View style={{ flexDirection: 'row', justifyContent: 'center', gap: spacing.lg }}>
+            <Button title="Paid from another account?" variant="ghost" size="sm" fullWidth={false} onPress={() => setPayerSheetOpen(true)} />
+            <Button
+              title={isStableAsset ? 'Cancel purchase' : 'Cancel order'}
+              variant="ghost"
+              size="sm"
+              fullWidth={false}
+              loading={cancellingBuy}
+              onPress={handleCancelBuy}
+            />
+          </View>
+        </View>
+      ) : null}
       <PayerDeclarationSheet
         visible={payerSheetOpen}
         orderId={intent.id}
