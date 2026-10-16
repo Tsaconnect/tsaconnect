@@ -3,7 +3,7 @@
 // The account's headline balance in USD: what Home shows as the total and
 // Profile shows as "My Balance". One function so the two can never disagree.
 
-import { getWalletBalances, normalizeWalletBalances } from './walletApi';
+import { readWalletBalances } from './walletApi';
 import { getPremiumMcgpAsset } from './mcgpSwapApi';
 import { getSignableWallet } from './wallet';
 
@@ -11,30 +11,33 @@ import { getSignableWallet } from './wallet';
 // Home is driven entirely by the platform's spot listings.
 export const PORTFOLIO_SYMBOLS = ['MCGP', 'USDC', 'USDT'] as const;
 
-export async function readPortfolioUsd(): Promise<number> {
+/**
+ * The total in USD, or null when the wallet's balances could not be read —
+ * unknown, never zero: a failed read must not show a holder $0.00.
+ */
+export async function readPortfolioUsd(): Promise<number | null> {
   // Balances for the wallet this device holds a key for. Without one the
   // backend would answer for the account's REGISTERED address, and the total
-  // would show funds the user cannot touch on this device.
+  // would show funds the user cannot touch on this device — so no key means
+  // no wallet balances, not unknown ones.
   const signer = await getSignableWallet();
-  const balResult = signer
-    ? await getWalletBalances(undefined, signer)
-    : { success: false as const, data: undefined };
-  // Flatten all chains into symbol -> usdValue
-  const usdBySymbol: Record<string, number> = {};
-  if (balResult.success && balResult.data) {
-    for (const entry of normalizeWalletBalances(balResult.data)) {
-      const usd = Number.isFinite(parseFloat(entry.usdValue)) ? parseFloat(entry.usdValue) : 0;
-      usdBySymbol[entry.symbol] = (usdBySymbol[entry.symbol] || 0) + usd;
-    }
-  }
 
-  // MCGP in the wallet is the spendable premium entitlement (Contract B),
-  // not an ERC-20, so getWalletBalances reports 0. Overlay the premium
-  // value so the total reflects what the user actually holds.
-  try {
-    const { balance: premium, usdValue } = await getPremiumMcgpAsset();
-    if (premium > 0) usdBySymbol.MCGP = usdValue;
-  } catch { /* MCGP swap unavailable — leave at 0 */ }
+  // Independent reads, so neither waits on the other. MCGP in the wallet is
+  // the spendable premium entitlement (Contract B), not an ERC-20, so the
+  // wallet read reports 0 for it; the premium value is overlaid. A premium
+  // read that fails counts as none held, as Home always has.
+  const [rows, premium] = await Promise.all([
+    signer ? readWalletBalances(signer) : Promise.resolve([]),
+    getPremiumMcgpAsset().catch(() => ({ balance: 0, usdValue: 0 })),
+  ]);
+  if (rows === null) return null;
+
+  const usdBySymbol: Record<string, number> = {};
+  for (const entry of rows) {
+    const usd = parseFloat(entry.usdValue);
+    usdBySymbol[entry.symbol] = (usdBySymbol[entry.symbol] || 0) + (Number.isFinite(usd) ? usd : 0);
+  }
+  if (premium.balance > 0) usdBySymbol.MCGP = premium.usdValue;
 
   return PORTFOLIO_SYMBOLS.reduce((s, sym) => s + (usdBySymbol[sym] || 0), 0);
 }

@@ -100,7 +100,11 @@ const Dashboard: React.FC = () => {
       if (refreshing) setIsRefreshing(true); else setIsLoading(true);
       setError(null);
 
-      setTotalUsdValue(await readPortfolioUsd());
+      // Unknown keeps the last total on screen and says so, rather than
+      // showing a holder $0.00.
+      const total = await readPortfolioUsd();
+      if (total === null) setError("We couldn't load your balance.");
+      else setTotalUsdValue(total);
 
       // Fetch TP and cashback balances
       try {

@@ -109,16 +109,19 @@ const ProfileScreen = () => {
   );
 
   // My Balance is the same total Home shows, in the same display currency.
-  // undefined while loading.
+  // undefined while loading; null when it could not be read (shown as "—").
   const { formatDualPrice } = useCurrency();
-  const [balanceUsd, setBalanceUsd] = useState<number | undefined>(undefined);
+  const [balanceUsd, setBalanceUsd] = useState<number | null | undefined>(undefined);
   useFocusEffect(
     useCallback(() => {
-      if (!token) return;
+      if (!token) {
+        setBalanceUsd(null);
+        return;
+      }
       let live = true;
       readPortfolioUsd()
         .then((usd) => live && setBalanceUsd(usd))
-        .catch(() => live && setBalanceUsd(0));
+        .catch(() => live && setBalanceUsd(null));
       return () => {
         live = false;
       };
@@ -362,7 +365,7 @@ const ProfileScreen = () => {
                   <Spinner size="small" />
                 ) : (
                   <Text variant="bodyMed" weight="700" numeric>
-                    {formatDualPrice(balanceUsd).primary}
+                    {balanceUsd === null ? "—" : formatDualPrice(balanceUsd).primary}
                   </Text>
                 )}
               </View>
