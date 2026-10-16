@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -42,6 +43,19 @@ type chainEscrow struct {
 	// audience is who may start new activity on this escrow
 	// (config.P2PAudience*; empty reads as all).
 	audience string
+	// unverified: a direct escrow whose boot gates could not be read. Exits
+	// work; new activity is refused until a background re-check passes.
+	unverified atomic.Bool
+}
+
+// Unverified reports whether chainID's escrow is open for exits only while
+// its gates are re-checked (p2p_direct_gates.go).
+func (r *P2PEscrowRegistry) Unverified(chainID int64) bool {
+	if r == nil || r.byChain == nil {
+		return false
+	}
+	e, ok := r.byChain[chainID]
+	return ok && e.unverified.Load()
 }
 
 // P2PEscrowRegistry holds one escrow adapter per P2P-enabled chain, keyed by

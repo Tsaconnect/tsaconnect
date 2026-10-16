@@ -16,7 +16,7 @@ import (
 // emailEvents defines which event types also trigger an email.
 var emailEvents = map[string]bool{
 	// Direct P2P moved to BNB Chain: a one-time notice the seller must not miss.
-	events.P2PDirectMoved: true,
+	events.P2PDirectMoved:               true,
 	events.TransactionCompleted:         true,
 	events.TransactionFailed:            true,
 	events.TransactionReceived:          true,

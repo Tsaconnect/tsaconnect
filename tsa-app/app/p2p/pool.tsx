@@ -347,8 +347,8 @@ const P2PPoolScreen: React.FC = () => {
       // before we sign/broadcast — the withdraw tx pays gas on this chain. Bails
       // with a fund-your-wallet prompt rather than letting the tx fail mid-flow.
       setStage('Checking gas…');
-      // Only Sonic is sponsored; on any other chain (the LP pool chain
-      // included) ensureP2PGas is the plain signer balance check.
+      // Sponsored on the chains in P2P_GAS_SPONSOR_CHAIN_IDS (Sonic, BSC
+      // mainnet); elsewhere ensureP2PGas is the plain signer balance check.
       const hasGas = await ensureP2PGas({ chainId: selectedChainId, walletAddress: w, action: 'withdraw', onStage: setStage });
       if (!hasGas) return; // `finally` resets submitting/stage.
 
@@ -546,7 +546,7 @@ const P2PPoolScreen: React.FC = () => {
             }
             onMax={
               available !== '—'
-                ? () => setAmountInput(formatTokenAmount(available, decimals, decimals))
+                ? () => onAmountChange(formatTokenAmount(available, decimals, decimals))
                 : undefined
             }
             maxLabel="Use full balance"

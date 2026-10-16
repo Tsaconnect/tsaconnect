@@ -24,7 +24,15 @@
 //     deployer keeps both contracts — no handover — until the owner moves
 //     them with transferOwnership. DET_OWNER_CONFIRM must then be the
 //     deployer. isAdmin(owner) is always true on P2PEscrowV3, so the deployer
-//     is also an arbiter meanwhile; every other hot key stays refused.
+//     is also an arbiter meanwhile. The deployer itself must not be a
+//     forbidden admin, a routine deploy key or the routine signer; every other
+//     hot key stays refused. A re-run of a finished owner-is-deployer deploy
+//     only reads back (DIRECT_FEE_MANAGER_ADDRESS + DIRECT_DEPLOY_BLOCK or the
+//     ledger) and sends nothing.
+//   - A deployer-owned escrow that is already wired (feeManager() set) is
+//     never resumed: that would deploy a fresh FeeManager and re-point the
+//     live escrow. The run refuses with nothing sent; hand it over with
+//     transferOwnership. Only a proxy left unwired resumes.
 //
 // Refuses before anything is sent: an empty arbiter list or one naming a
 // forbidden address (DIRECT_FORBIDDEN_ADMINS, the canonical operator /
@@ -228,10 +236,12 @@ function envOptions(env = process.env) {
 // DEPLOYER_PRIVATE_KEY, hardhat-config accounts, `routineAddresses`), the
 // routine hardhat signer, and every forbidden admin (isAdmin(owner) is always
 // true on P2PEscrowV3). Read fresh on every call.
-async function hotKeys(hre, { plan, deployer, routineAddresses = [] }) {
+async function hotKeys(hre, { plan, deployer, routineAddresses = [], ownerIsDeployer = false }) {
   const [routineSigner] = await hre.ethers.getSigners();
   return [
-    [deployer, "the deployer (the cold deploy key)"],
+    // Owner-is-deployer drops ONLY this entry: the deployer is still checked
+    // against every routine key and forbidden admin below.
+    ...(ownerIsDeployer ? [] : [[deployer, "the deployer (the cold deploy key)"]]),
     ...det.routineDeployerAddresses(hre).map((a) => [a, "a routine deploy key (.env DEPLOYER_PRIVATE_KEY / hardhat-config account)"]),
     ...routineAddresses.map((a) => [a, "a routine deploy key"]),
     [routineSigner && routineSigner.address, "the routine hardhat signer"],
@@ -239,11 +249,16 @@ async function hotKeys(hre, { plan, deployer, routineAddresses = [] }) {
   ].filter(([a]) => a);
 }
 
-// ownerHotKeys is hotKeys minus the deployer when the deployer is the
-// chosen owner: the only hot key allowed to own, and so the only one allowed
-// to be an (implicit) admin.
-function ownerHotKeys(hot, { ownerIsDeployer, deployer }) {
-  return ownerIsDeployer ? hot.filter(([a]) => !same(a, deployer)) : hot;
+// ownerDeployer is the deployer address an owner-is-deployer run will own the
+// contracts with, resolved BEFORE the check-only pass so a re-run of a finished
+// deploy takes the read-back-only path. The deploy key is checked against the
+// routine keys exactly as deterministic-escrow.js does.
+function ownerDeployer(hre, opts, routineAddresses) {
+  const fromKey = opts.deployerKey ? det.deployerSigner(hre, opts.deployerKey, routineAddresses).address : null;
+  if (fromKey && opts.deployer && !same(fromKey, opts.deployer)) fail(`DET_DEPLOYER ${opts.deployer} is not the deploy key's address ${fromKey}`);
+  const addr = fromKey || opts.deployer;
+  if (!addr || !isAddress(addr)) fail("DIRECT_OWNER_IS_DEPLOYER needs the deploy key (DET_DEPLOYER_PRIVATE_KEY) or DET_DEPLOYER");
+  return getAddress(addr);
 }
 
 function assertOwnerNotHot(owner, hot) {
@@ -275,27 +290,29 @@ async function deploy(hre, opts = {}) {
   const { chain, afterWire, beforeHandover } = opts;
   const cfg = chain || resolveChain(hre);
   const roles = { ...DETERMINISTIC_ROLES, ...(opts.roles || {}) };
+  const ownerIsDeployer = !!opts.ownerIsDeployer;
+  const routineAddresses = opts.routineAddresses || [];
+  // Set first: checkConfig then refuses a deployer that is a forbidden admin.
+  if (ownerIsDeployer) roles.owner = ownerDeployer(hre, opts, routineAddresses);
   const plan = checkConfig(cfg, roles);
   const name = opts.name || DIRECT_NAME;
   if (!name.startsWith(det.DIRECT_NAME_PREFIX)) fail(`DET_NAME ${name} is not a ${det.DIRECT_NAME_PREFIX}* salt — the direct escrow never shares a salt with the operator-admin escrow`);
   const writeLedgers = !chain && !create2.isLocalNetwork(hre);
   const ledger = writeLedgers ? readLedger(network.name) : {};
   const foreignFMs = foreignFeeManagers(cfg, ledger);
-  const routineAddresses = opts.routineAddresses || [];
   const detOpts = {
     chain: cfg, roles, admins: plan.arbiters, name, ownerConfirm: opts.ownerConfirm,
     tokens: plan.tokenSymbols, paymentWindowSec: plan.paymentWindowSec,
     deployerKey: opts.deployerKey, deployer: opts.deployer, routineAddresses,
-    networkClass: opts.networkClass, manifestPath: opts.manifestPath, ownerIsDeployer: !!opts.ownerIsDeployer,
+    networkClass: opts.networkClass, manifestPath: opts.manifestPath, ownerIsDeployer,
   };
 
   // 1. Every refusal, sending nothing: the deterministic check-only pass
   //    (admin list, deploy key, manifest, tokens, window), then the owner
   //    against every hot or deploy key.
   const pre = await det.deploy(hre, { ...detOpts, checkOnly: true });
-  if (opts.ownerIsDeployer) roles.owner = pre.deployer;
-  const ownerMode = { ownerIsDeployer: !!opts.ownerIsDeployer, deployer: pre.deployer };
-  const hot = ownerHotKeys(await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses }), ownerMode);
+  if (ownerIsDeployer && !same(roles.owner, pre.deployer)) fail(`the checked deployer ${pre.deployer} is not the owner ${roles.owner}`);
+  const hot = await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses, ownerIsDeployer });
   assertOwnerNotHot(roles.owner, hot);
   // Every deploy / routine key is now a forbidden admin too (the owner is
   // already proven not to be one of them).
@@ -319,10 +336,19 @@ async function deploy(hre, opts = {}) {
     return { escrow: pre.proxy, feeManager: getAddress(fmAddr), owner: roles.owner, reused: true };
   }
   if (opts.checkOnly) return { escrow: pre.proxy, checkOnly: true, exists: pre.exists };
+  // A deployer-owned escrow that is already wired is a finished (or
+  // handed-over-FeeManager-only) run: resuming would deploy a fresh FeeManager
+  // and re-point the live escrow at it. Only a proxy still unwired resumes.
+  if (pre.exists.proxy) {
+    const existing = await ethers.getContractAt("P2PEscrowV3", pre.proxy);
+    if ((await existing.feeManager()) !== ZeroAddress) {
+      fail(`${pre.proxy} is already deployed and wired by ${pre.deployer}; hand it over with transferOwnership, or verify it with scripts/verify-direct-escrow.js — nothing sent`);
+    }
+  }
   if (!opts.deployerKey) fail("a deploy needs DET_DEPLOYER_PRIVATE_KEY (the cold deploy key, typed in for this run)");
   assertOwnerConfirm({
     label: TAG, owner: roles.owner, confirm: opts.ownerConfirm, deployerAddr: pre.deployer,
-    ownerVar: "DET_OWNER (the PM)", confirmVar: "DET_OWNER_CONFIRM", allowDeployerOwner: ownerMode.ownerIsDeployer,
+    ownerVar: "DET_OWNER (the PM)", confirmVar: "DET_OWNER_CONFIRM", allowDeployerOwner: ownerIsDeployer,
   });
   // The cold deploy key deploys and owns the FeeManager too: no routine key
   // ever owns a direct contract, even before the handover.
@@ -375,7 +401,7 @@ async function deploy(hre, opts = {}) {
     if (beforeHandover) await beforeHandover({ fm, esc: escOut.esc, roles });
     // The owner again, against freshly read hot keys, right before the
     // irreversible transfer.
-    assertOwnerNotHot(roles.owner, ownerHotKeys(await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses }), ownerMode));
+    assertOwnerNotHot(roles.owner, await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses, ownerIsDeployer }));
   } catch (e) {
     e.deployed = deployed;
     console.error(`${TAG}: NOT handed over — still owned by the deployer ${pre.deployer}. FeeManager=${fmOut.proxy} escrow=${pre.proxy}`);
@@ -383,7 +409,7 @@ async function deploy(hre, opts = {}) {
   }
 
   // 5. Ownership of both, last (a no-op when the deployer is the owner).
-  if (ownerMode.ownerIsDeployer) {
+  if (ownerIsDeployer) {
     console.log(`${TAG}: the deployer ${pre.deployer} keeps FeeManager + escrow (DIRECT_OWNER_IS_DEPLOYER) — hand over later with transferOwnership`);
   } else {
     console.log(`${TAG}: transferring FeeManager + escrow to ${roles.owner} (one-step Ownable — this address is final)`);

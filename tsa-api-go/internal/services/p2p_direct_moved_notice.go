@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -14,9 +15,13 @@ import (
 
 const (
 	directMovedTitle   = "P2P has moved to BNB Chain"
-	directMovedMessage = "Direct P2P trading now runs on BNB Chain. Your ads on Sonic are hidden and can no longer be opened. " +
-		"You can still cancel them and withdraw your Sonic balance, then post again on BNB Chain."
+	directMovedMessage = "Direct P2P trading now runs on BNB Chain. Your ads on Sonic are hidden from the marketplace. " +
+		"Cancel them and withdraw your Sonic balance, then post again on BNB Chain."
 )
+
+// directMovedNoticePace spaces the notices out: the event bus drops events
+// once its buffer is full, and a dropped notice is only retried next boot.
+var directMovedNoticePace = 25 * time.Millisecond
 
 // NotifyDirectMoved tells every non-PM user still holding something on a pm
 // escrow — an ad pending, active or paused there, or a deposit confirmed
@@ -59,7 +64,15 @@ func (s *P2PTradeService) NotifyDirectMoved(ctx context.Context) (int, error) {
 		var meta struct {
 			ChainID int64 `json:"chainId"`
 		}
-		if json.Unmarshal(d.Metadata, &meta) == nil && onChain[meta.ChainID] {
+		if json.Unmarshal(d.Metadata, &meta) != nil {
+			continue
+		}
+		// Deposit audit rows before 2026-10-08 carry no chainId: Sonic was
+		// the only P2P escrow then.
+		if meta.ChainID == 0 {
+			meta.ChainID = s.defaultChainID
+		}
+		if onChain[meta.ChainID] {
 			candidates[*d.ActorID] = true
 		}
 	}
@@ -84,6 +97,13 @@ func (s *P2PTradeService) NotifyDirectMoved(ctx context.Context) (int, error) {
 		}
 		if pm != nil {
 			continue // a PM keeps trading on Sonic
+		}
+		if sent > 0 && directMovedNoticePace > 0 {
+			select {
+			case <-ctx.Done():
+				return sent, ctx.Err()
+			case <-time.After(directMovedNoticePace):
+			}
 		}
 		// No actorId: a system notice, so it is pushed and emailed.
 		s.emit(events.P2PDirectMoved, userID, uuid.Nil, directMovedTitle, directMovedMessage,

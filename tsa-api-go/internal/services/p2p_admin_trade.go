@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -27,6 +28,10 @@ type AdminTradeView struct {
 	Seller  P2PParty           `json:"seller"`
 	Payee   *models.P2PPayee   `json:"payee"`
 	Dispute *models.P2PDispute `json:"dispute"`
+	// EscrowAddress is the escrow on the trade's chain (checksummed): the
+	// console refuses to sign a resolve built for any other contract.
+	// Omitted when the chain has no escrow registered.
+	EscrowAddress string `json:"escrowAddress,omitempty"`
 }
 
 // AdminTradeDetail loads a trade for operators: ungated payee (visible in any
@@ -80,5 +85,9 @@ func (s *P2PTradeService) AdminTradeDetail(ctx context.Context, tradeID uuid.UUI
 	if err != nil {
 		return nil, err
 	}
-	return &AdminTradeView{Trade: &t, Side: side, Buyer: party(t.BuyerID), Seller: party(t.SellerID), Payee: payee, Dispute: dispute}, nil
+	view := &AdminTradeView{Trade: &t, Side: side, Buyer: party(t.BuyerID), Seller: party(t.SellerID), Payee: payee, Dispute: dispute}
+	if esc, err := s.escrows.For(t.ChainID); err == nil && common.IsHexAddress(esc.ContractAddress()) {
+		view.EscrowAddress = common.HexToAddress(esc.ContractAddress()).Hex()
+	}
+	return view, nil
 }

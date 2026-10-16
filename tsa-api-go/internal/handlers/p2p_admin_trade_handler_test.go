@@ -20,7 +20,7 @@ func TestAdminGetTradeAndMessages(t *testing.T) {
 	var tr models.P2PTrade
 	r.db.First(&tr, "id = ?", tradeID)
 	paid := time.Now().Add(-time.Hour)
-	r.db.Model(&tr).Updates(map[string]any{"proof_image_url": "https://p/proof.png", "marked_paid_at": paid})
+	r.db.Model(&tr).Updates(map[string]any{"proof_image_url": "https://p/proof.png", "marked_paid_at": paid, "chain_id": 146})
 	r.db.Exec(`INSERT INTO users (id, name, username, verification_status, verified_legal_name) VALUES (?,?,?,?,?)`, tr.BuyerID, "Ada Buyer", "ada", "verified", "ADA BUYER")
 	r.db.Exec(`INSERT INTO users (id, name, username, verification_status) VALUES (?,?,?,?)`, tr.SellerID, "Sam Seller", "sam", "verified")
 	r.db.Create(&models.P2PDispute{ID: uuid.New(), TradeID: tradeID, RaisedBy: tr.BuyerID, RaisedRole: "buyer", Reason: "not released",
@@ -42,6 +42,10 @@ func TestAdminGetTradeAndMessages(t *testing.T) {
 		d["seller"].(map[string]any)["name"] != "Sam Seller" || payee["accountNumber"] != "1234567890" ||
 		disp["reason"] != "not released" || disp["evidenceUrls"].([]any)[0] != "https://res.cloudinary.com/tsa/image/upload/e1.jpg" {
 		t.Fatalf("data = %v", d)
+	}
+	// The console checks a resolve's `to` against this before signing.
+	if d["escrowAddress"] != "0xb5B073BF578fE24311ED50e540D9d632f1679261" {
+		t.Fatalf("escrowAddress = %v, want the trade chain's escrow", d["escrowAddress"])
 	}
 	for _, k := range []string{"email", "phone", "bvn"} {
 		if _, ok := buyer[k]; ok {

@@ -204,14 +204,15 @@ describe("scripts/verify-direct-escrow", () => {
 
     it("DIRECT_OWNER_IS_DEPLOYER: the CLI expects the deployer as owner and reads clean; without it the same escrow fails", async () => {
       const s = await ethers.getSigners();
-      const ctx = await directFixture({}, { deploy: { ownerIsDeployer: true, ownerConfirm: s[0].address } });
+      const cold = s[12].address; // account #0 is the routine signer, never an owner
+      const ctx = await directFixture({}, { deploy: { ownerIsDeployer: true, deployerKey: deployerKey(12), ownerConfirm: cold } });
       const ledger = {
-        DirectP2PEscrowV3: { proxy: ctx.out.escrow, impl: ctx.out.impls.escrow, name: ctx.deployOpts.name, deployer: ctx.deployer.address, deployBlock: ctx.out.deployBlock },
+        DirectP2PEscrowV3: { proxy: ctx.out.escrow, impl: ctx.out.impls.escrow, name: ctx.deployOpts.name, deployer: cold, deployBlock: ctx.out.deployBlock },
         DirectFeeManager: { proxy: ctx.out.feeManager, impl: ctx.out.impls.FeeManager },
       };
       const kept = cliInputs(hre, { cfg: ctx.chain, ledger, env: { DIRECT_OWNER_IS_DEPLOYER: "1" }, roles: ctx.roles });
-      expect(kept.expected.owner).to.equal(ctx.deployer.address);
-      expect(kept.expected.plan.forbidden).to.not.include(ctx.deployer.address);
+      expect(kept.expected.owner).to.equal(cold);
+      expect(kept.expected.plan.forbidden).to.not.include(cold);
       expect((await verifyDirectEscrow(hre, kept)).mismatches).to.deep.equal([]);
       const strict = cliInputs(hre, { cfg: ctx.chain, ledger, env: {}, roles: ctx.roles });
       expect((await verifyDirectEscrow(hre, strict)).mismatches.join("\n")).to.match(/escrow.owner\(\) is/);

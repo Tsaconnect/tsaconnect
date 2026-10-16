@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -41,6 +42,10 @@ type DirectEscrowGatesConfig struct {
 	Receipts        RawRPCCaller
 }
 
+// errPaymentWindowUnread: the window could not be read (an RPC failure, not
+// a wrong window).
+var errPaymentWindowUnread = errors.New("read the payment window")
+
 // CheckPaymentWindow: an escrow's paymentWindow() must equal want, the window
 // the API stamps on trades and the expiry canceller assumes. An escrow that
 // cannot say is refused too.
@@ -51,7 +56,7 @@ func CheckPaymentWindow(e P2PEscrowAdapter, want time.Duration) error {
 	}
 	w, err := r.ReadPaymentWindow()
 	if err != nil {
-		return fmt.Errorf("read the payment window: %w", err)
+		return fmt.Errorf("%w: %w", errPaymentWindowUnread, err)
 	}
 	if w != want {
 		return fmt.Errorf("escrow payment window %s, the API assumes %s", w, want)
@@ -59,13 +64,28 @@ func CheckPaymentWindow(e P2PEscrowAdapter, want time.Duration) error {
 	return nil
 }
 
+// DirectGateFailure is one failed gate. Unread means the chain could not be
+// read (RPC error, timeout, no client): the escrow's state is unknown, not
+// wrong, so it must not cut live trades off from their exits.
+type DirectGateFailure struct {
+	Gate, Reason string
+	Unread       bool
+}
+
+func (f DirectGateFailure) String() string { return f.Gate + ": " + f.Reason }
+
 // CheckDirectEscrowGates runs every direct-escrow gate and returns the
-// failures as "gate: reason"; none means the escrow may be registered.
-func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []string {
-	var fails []string
-	fail := func(gate, reason string) { fails = append(fails, gate+": "+RedactAlertText(reason)) }
+// failures; none means the escrow may be registered.
+func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []DirectGateFailure {
+	var fails []DirectGateFailure
+	fail := func(gate, reason string) {
+		fails = append(fails, DirectGateFailure{Gate: gate, Reason: RedactAlertText(reason)})
+	}
+	unread := func(gate, reason string) {
+		fails = append(fails, DirectGateFailure{Gate: gate, Reason: RedactAlertText(reason), Unread: true})
+	}
 	if c.Chain == nil {
-		fail("bytecode", "no chain client on "+c.ChainKey)
+		unread("bytecode", "no chain client on "+c.ChainKey)
 		return fails
 	}
 	addrView := func(method string, args ...any) (common.Address, error) {
@@ -99,26 +119,28 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []st
 		code, err := c.Chain.CodeAt(ctx, common.HexToAddress(a.addr), nil)
 		switch {
 		case err != nil:
-			fail("bytecode", a.label+" unreadable: "+err.Error())
+			unread("bytecode", a.label+" unreadable: "+err.Error())
 		case len(code) == 0:
 			fail("bytecode", a.label+" has no code at "+a.addr)
 		}
 	}
 	// eth_chainId is the configured chain (the EIP-712 domain uses it).
 	if id, err := c.Chain.ChainID(ctx); err != nil {
-		fail("chain_id", "eth_chainId unreadable: "+err.Error())
+		unread("chain_id", "eth_chainId unreadable: "+err.Error())
 	} else if id.Int64() != c.ChainID {
 		fail("chain_id", fmt.Sprintf("RPC reports %s, the preset is %d", id, c.ChainID))
 	}
 	// paymentWindow() is the 30 minutes every direct trade is stamped with.
-	if err := CheckPaymentWindow(c.Adapter, p2pPaymentWindow); err != nil {
+	if err := CheckPaymentWindow(c.Adapter, p2pPaymentWindow); errors.Is(err, errPaymentWindowUnread) {
+		unread("payment_window", err.Error())
+	} else if err != nil {
 		fail("payment_window", err.Error())
 	}
 	// feeManager() is the preset's own.
 	if c.FeeManager == "" {
 		fail("fee_manager", "the preset row names no FeeManager")
 	} else if fm, err := addrView("feeManager"); err != nil {
-		fail("fee_manager", "unreadable: "+err.Error())
+		unread("fee_manager", "unreadable: "+err.Error())
 	} else if !strings.EqualFold(fm.Hex(), c.FeeManager) {
 		fail("fee_manager", fmt.Sprintf("escrow.feeManager() is %s, not the preset %s", fm.Hex(), c.FeeManager))
 	}
@@ -131,13 +153,13 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []st
 		if !common.IsHexAddress(addr) {
 			fail("token_accepted", sym+" has no token address")
 		} else if ok, err := boolView("acceptedTokens", common.HexToAddress(addr)); err != nil {
-			fail("token_accepted", sym+" unreadable: "+err.Error())
+			unread("token_accepted", sym+" unreadable: "+err.Error())
 		} else if !ok {
 			fail("token_accepted", sym+" at "+addr+" is not accepted by the escrow")
 		}
 		want := tokenDecimalsFor(c.ChainID, sym)
 		if d, ok := c.Decimals[strings.ToUpper(sym)]; !ok {
-			fail("decimals", sym+" decimals were not readable on-chain")
+			unread("decimals", sym+" decimals were not readable on-chain")
 		} else if d != want {
 			fail("decimals", fmt.Sprintf("%s has %d decimals on-chain, the API assumes %d", sym, d, want))
 		}
@@ -146,20 +168,20 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []st
 	for _, label := range slices.Sorted(maps.Keys(c.ForbiddenAdmins)) {
 		addr := c.ForbiddenAdmins[label]
 		if ok, err := boolView("isAdmin", common.HexToAddress(addr)); err != nil {
-			fail("forbidden_admin", label+" unreadable: "+err.Error())
+			unread("forbidden_admin", label+" unreadable: "+err.Error())
 		} else if ok {
 			fail("forbidden_admin", label+" "+addr+" is an escrow admin; only dispute arbiters may be")
 		}
 	}
 	// systemWallet() is set: fees must have somewhere to go.
 	if sw, err := addrView("systemWallet"); err != nil {
-		fail("system_wallet", "unreadable: "+err.Error())
+		unread("system_wallet", "unreadable: "+err.Error())
 	} else if sw == (common.Address{}) {
 		fail("system_wallet", "systemWallet() is the zero address")
 	}
 	// No forwarder: a forwarder can act as any party.
 	if fw, err := addrView("trustedForwarder"); err != nil {
-		fail("trusted_forwarder", "unreadable: "+err.Error())
+		unread("trusted_forwarder", "unreadable: "+err.Error())
 	} else if fw != (common.Address{}) {
 		fail("trusted_forwarder", "trustedForwarder() is "+fw.Hex()+", want zero")
 	}
@@ -167,7 +189,7 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []st
 	if c.ExpectedOwner == "" {
 		fail("owner", "the preset row names no expectedOwner")
 	} else if o, err := addrView("owner"); err != nil {
-		fail("owner", "unreadable: "+err.Error())
+		unread("owner", "unreadable: "+err.Error())
 	} else if !strings.EqualFold(o.Hex(), c.ExpectedOwner) {
 		fail("owner", fmt.Sprintf("owner() is %s, the preset expects %s", o.Hex(), c.ExpectedOwner))
 	}
@@ -176,15 +198,24 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []st
 			fail("owner", "the expected owner is "+label+", a hot key")
 		}
 	}
+	// The FeeManager has the same owner: its owner sets the rates and can
+	// upgrade it. owner() has the same selector on both contracts.
+	if c.FeeManager != "" && c.ExpectedOwner != "" {
+		if vals, err := callP2PView(ctx, c.Chain, c.FeeManager, "owner"); err != nil {
+			unread("fee_manager_owner", "unreadable: "+err.Error())
+		} else if o, ok := vals[0].(common.Address); !ok || !strings.EqualFold(o.Hex(), c.ExpectedOwner) {
+			fail("fee_manager_owner", fmt.Sprintf("FeeManager.owner() is %v, the preset expects %s", vals[0], c.ExpectedOwner))
+		}
+	}
 	// The RPC serves receipts: every confirm reads one.
 	if c.Receipts == nil {
-		fail("receipts", "no RPC")
+		unread("receipts", "no RPC")
 	} else {
 		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err := ProbeReceipts(pctx, c.Receipts)
 		cancel()
 		if err != nil {
-			fail("receipts", err.Error())
+			unread("receipts", err.Error())
 		}
 	}
 	return fails
@@ -192,23 +223,56 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []st
 
 // directGatesBootBudget bounds the direct gates at boot. Well inside the
 // deploy's 60 s health gate, which also covers everything else boot does: a
-// slow BSC RPC must leave the direct escrow dormant, not roll back the deploy.
+// slow BSC RPC must not roll back the deploy.
 const directGatesBootBudget = 20 * time.Second
 
-// gateDirectAtBoot runs the direct gates against cc's live chain and keeps
-// the escrow registered only if they all pass.
+// directGatesRecheckEvery is how often an escrow whose gates could not be
+// read is checked again.
+const directGatesRecheckEvery = time.Minute
+
+// gateDirectAtBoot runs the direct gates against cc's live chain. All pass:
+// registered. A wrong value: unregistered (dormant). Only unreadable ones:
+// kept registered for exits but closed to new activity, and re-checked in
+// the background until they pass.
 func (r *P2PEscrowRegistry) gateDirectAtBoot(bs *BlockchainService, cc config.P2PChainConfig, forbiddenAdmins map[string]string) {
 	e := r.byChain[cc.ChainID]
 	if e == nil {
 		return
 	}
+	log.Printf("[config] P2P direct escrow gates chain=%s(%d) escrow=%s checking admins=%v",
+		cc.ChainKey, cc.ChainID, cc.EscrowAddress, slices.Sorted(maps.Keys(forbiddenAdmins)))
+	check := func(decimals map[string]int) []DirectGateFailure {
+		gc := directGatesConfig(bs, cc, e, decimals, forbiddenAdmins)
+		ctx, cancel := context.WithTimeout(context.Background(), directGatesBootBudget)
+		defer cancel()
+		return CheckDirectEscrowGates(ctx, gc)
+	}
+	if r.applyDirectGates(cc.ChainID, cc.ChainKey, check(e.decimals)) || !r.HasChain(cc.ChainID) {
+		return
+	}
+	go func() {
+		for range time.Tick(directGatesRecheckEvery) {
+			// Decimals are read again too: the boot read may be what failed.
+			decimals := e.decimals
+			if client, _ := bs.ClientForChainID(cc.ChainID); client != nil {
+				_, decimals = resolveAssetDecimals(cc.ChainID, cc.ChainKey, cc.Purpose, cc.Assets,
+					func(sym string) string { return bs.TokenAddressForChainID(cc.ChainID, sym) }, client)
+			}
+			if r.recheckDirectGates(cc.ChainID, cc.ChainKey, check(decimals)) {
+				return
+			}
+		}
+	}()
+}
+
+func directGatesConfig(bs *BlockchainService, cc config.P2PChainConfig, e *chainEscrow, decimals map[string]int, forbiddenAdmins map[string]string) DirectEscrowGatesConfig {
 	tokens := map[string]string{}
 	for _, sym := range cc.Assets {
 		tokens[sym] = bs.TokenAddressForChainID(cc.ChainID, sym)
 	}
 	gc := DirectEscrowGatesConfig{
 		ChainID: cc.ChainID, ChainKey: cc.ChainKey, Escrow: cc.EscrowAddress, FeeManager: cc.FeeManager,
-		ExpectedOwner: cc.ExpectedOwner, Tokens: tokens, Decimals: e.decimals,
+		ExpectedOwner: cc.ExpectedOwner, Tokens: tokens, Decimals: decimals,
 		ForbiddenAdmins: forbiddenAdmins, Adapter: e.service,
 	}
 	// Assigned only when non-nil: a nil *ethclient.Client in the reader
@@ -216,26 +280,56 @@ func (r *P2PEscrowRegistry) gateDirectAtBoot(bs *BlockchainService, cc config.P2
 	if client, _ := bs.ClientForChainID(cc.ChainID); client != nil && client.Client != nil {
 		gc.Chain, gc.Receipts = client.Client, client.Client.Client()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), directGatesBootBudget)
-	defer cancel()
-	log.Printf("[config] P2P direct escrow gates chain=%s(%d) escrow=%s checking admins=%v",
-		cc.ChainKey, cc.ChainID, cc.EscrowAddress, slices.Sorted(maps.Keys(forbiddenAdmins)))
-	r.applyDirectGates(cc.ChainID, cc.ChainKey, CheckDirectEscrowGates(ctx, gc))
+	return gc
 }
 
-// applyDirectGates keeps chainID's escrow only when fails is empty; on any
-// failure it unregisters it (dormant: new activity and exits alike fail loud
-// until fixed) with an ALERT per failed check.
-func (r *P2PEscrowRegistry) applyDirectGates(chainID int64, chainKey string, fails []string) bool {
+func logGateFailures(chainKey string, chainID int64, fails []DirectGateFailure) (wrong int) {
+	for _, f := range fails {
+		kind := "wrong"
+		if f.Unread {
+			kind = "unread"
+		} else {
+			wrong++
+		}
+		log.Printf("[config] ALERT p2p_direct_escrow_gate_failed chain=%s(%d) kind=%s %s", chainKey, chainID, kind, f)
+	}
+	return wrong
+}
+
+// applyDirectGates applies the boot gates' verdict and reports whether the
+// escrow is registered and open. Any wrong value unregisters it (dormant: new
+// activity and exits alike fail loud until fixed and restarted). Only unread
+// gates keep it registered but unverified: exits work, new activity is
+// refused until a re-check passes.
+func (r *P2PEscrowRegistry) applyDirectGates(chainID int64, chainKey string, fails []DirectGateFailure) bool {
 	if len(fails) == 0 {
 		log.Printf("[config] P2P direct escrow gates OK chain=%s(%d)", chainKey, chainID)
 		return true
 	}
-	for _, f := range fails {
-		log.Printf("[config] ALERT p2p_direct_escrow_gate_failed chain=%s(%d) %s", chainKey, chainID, f)
+	if logGateFailures(chainKey, chainID, fails) > 0 {
+		delete(r.byChain, chainID)
+		log.Printf("[config] ALERT p2p_direct_escrow_dormant chain=%s(%d) failures=%d — the direct escrow is NOT registered; fix it and restart",
+			chainKey, chainID, len(fails))
+		return false
 	}
-	delete(r.byChain, chainID)
-	log.Printf("[config] ALERT p2p_direct_escrow_dormant chain=%s(%d) failures=%d — the direct escrow is NOT registered; fix it and restart",
-		chainKey, chainID, len(fails))
+	r.byChain[chainID].unverified.Store(true)
+	log.Printf("[config] ALERT p2p_direct_escrow_unverified chain=%s(%d) failures=%d — exits only until the gates can be read; re-checking every %s",
+		chainKey, chainID, len(fails), directGatesRecheckEvery)
+	return false
+}
+
+// recheckDirectGates is the background re-check of an unverified escrow. It
+// opens the escrow only when every gate passes; a wrong value found now keeps
+// it exits-only (the registry is not changed after boot) and ALERTs each time.
+// Reports whether re-checking is done.
+func (r *P2PEscrowRegistry) recheckDirectGates(chainID int64, chainKey string, fails []DirectGateFailure) bool {
+	if len(fails) == 0 {
+		r.byChain[chainID].unverified.Store(false)
+		log.Printf("[config] P2P direct escrow gates OK on re-check chain=%s(%d) — open to new activity", chainKey, chainID)
+		return true
+	}
+	if logGateFailures(chainKey, chainID, fails) > 0 {
+		log.Printf("[config] ALERT p2p_direct_escrow_wrong_on_recheck chain=%s(%d) — staying exits-only; fix it and restart", chainKey, chainID)
+	}
 	return false
 }

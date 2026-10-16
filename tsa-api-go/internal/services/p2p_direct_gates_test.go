@@ -31,17 +31,23 @@ type fakeDirectChain struct {
 	system     common.Address
 	forwarder  common.Address
 	owner      common.Address
+	fmOwner    common.Address
 	noCode     bool
+	rpcDown    bool
 }
 
 func healthyDirectChain() *fakeDirectChain {
 	return &fakeDirectChain{chainID: 56, feeManager: common.HexToAddress(directFM),
 		accepted: map[common.Address]bool{common.HexToAddress(gateUSDT): true},
 		admins:   map[common.Address]bool{common.HexToAddress(directArbiter): true},
-		system:   common.HexToAddress(directSystem), owner: common.HexToAddress(directOwner)}
+		system:   common.HexToAddress(directSystem), owner: common.HexToAddress(directOwner),
+		fmOwner: common.HexToAddress(directOwner)}
 }
 
 func (f *fakeDirectChain) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
+	if f.rpcDown {
+		return nil, errors.New("503 Service Unavailable")
+	}
 	m := parsedP2PEscrowABI.Methods
 	sel := call.Data[:4]
 	arg := func(name string) common.Address {
@@ -60,6 +66,9 @@ func (f *fakeDirectChain) CallContract(_ context.Context, call ethereum.CallMsg,
 	case bytes.Equal(sel, m["trustedForwarder"].ID):
 		return m["trustedForwarder"].Outputs.Pack(f.forwarder)
 	case bytes.Equal(sel, m["owner"].ID):
+		if call.To != nil && *call.To == common.HexToAddress(directFM) {
+			return m["owner"].Outputs.Pack(f.fmOwner)
+		}
 		return m["owner"].Outputs.Pack(f.owner)
 	}
 	return nil, errors.New("fakeDirectChain: unexpected call")
@@ -124,6 +133,7 @@ func TestDirectEscrowGates_EachGate(t *testing.T) {
 			c.ExpectedOwner, f.owner = directOperator, common.HexToAddress(directOperator) // a hot key as owner
 		}},
 		{"receipts", func(c *DirectEscrowGatesConfig, _ *fakeDirectChain) { c.Receipts = nil }},
+		{"fee_manager_owner", func(_ *DirectEscrowGatesConfig, f *fakeDirectChain) { f.fmOwner = common.HexToAddress(directOperator) }},
 	} {
 		chain := healthyDirectChain()
 		c := healthyDirectGates(chain)
@@ -131,7 +141,7 @@ func TestDirectEscrowGates_EachGate(t *testing.T) {
 		fails := CheckDirectEscrowGates(context.Background(), c)
 		found := false
 		for _, f := range fails {
-			found = found || strings.HasPrefix(f, tc.gate+":")
+			found = found || strings.HasPrefix(f.String(), tc.gate+":")
 		}
 		if !found {
 			t.Errorf("%s: not caught, failures = %v", tc.gate, fails)
@@ -143,7 +153,7 @@ func TestDirectEscrowGates_EachGate(t *testing.T) {
 // there fail loud, every other chain is untouched.
 func TestDirectEscrowGates_FailureLeavesTheChainDormant(t *testing.T) {
 	reg := NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: newMockEscrow(), 56: newMockEscrow()}, "2")
-	if reg.applyDirectGates(56, "bsc", []string{"owner: wrong"}) {
+	if reg.applyDirectGates(56, "bsc", []DirectGateFailure{{Gate: "owner", Reason: "wrong"}}) {
 		t.Fatal("a failure must not pass")
 	}
 	if reg.HasChain(56) || !reg.HasChain(146) {
@@ -151,5 +161,51 @@ func TestDirectEscrowGates_FailureLeavesTheChainDormant(t *testing.T) {
 	}
 	if _, err := reg.For(56); err == nil {
 		t.Fatal("the dormant chain must fail loud")
+	}
+}
+
+// A chain that cannot be read is unknown, not wrong: every failure is Unread,
+// and a wrong value is never reported as Unread.
+func TestDirectEscrowGates_RPCDownIsUnreadOnly(t *testing.T) {
+	chain := healthyDirectChain()
+	chain.rpcDown = true
+	fails := CheckDirectEscrowGates(context.Background(), healthyDirectGates(chain))
+	if len(fails) == 0 {
+		t.Fatal("an unreadable escrow must not pass")
+	}
+	for _, f := range fails {
+		if !f.Unread {
+			t.Errorf("%s: an RPC failure reported as a wrong value", f)
+		}
+	}
+	wrong := healthyDirectChain()
+	wrong.owner = common.HexToAddress(directOperator)
+	for _, f := range CheckDirectEscrowGates(context.Background(), healthyDirectGates(wrong)) {
+		if f.Unread {
+			t.Errorf("%s: a wrong value reported as unread", f)
+		}
+	}
+}
+
+// Only unread gates: the escrow stays registered so live trades keep their
+// exits, closed to new activity until a re-check passes. A wrong value on
+// the re-check keeps it closed.
+func TestDirectEscrowGates_UnreadKeepsExitsAndRecheckOpens(t *testing.T) {
+	reg := NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: newMockEscrow(), 56: newMockEscrow()}, "2")
+	unread := []DirectGateFailure{{Gate: "receipts", Reason: "403", Unread: true}}
+	if reg.applyDirectGates(56, "bsc", unread) {
+		t.Fatal("an unread gate must not pass")
+	}
+	if _, err := reg.For(56); err != nil || !reg.Unverified(56) {
+		t.Fatalf("want registered and unverified, got err=%v unverified=%t", err, reg.Unverified(56))
+	}
+	if reg.recheckDirectGates(56, "bsc", []DirectGateFailure{{Gate: "owner", Reason: "wrong"}}) || !reg.Unverified(56) {
+		t.Fatal("a wrong value on re-check must keep the escrow exits-only")
+	}
+	if !reg.recheckDirectGates(56, "bsc", nil) || reg.Unverified(56) {
+		t.Fatal("a clean re-check must open the escrow")
+	}
+	if reg.Unverified(146) {
+		t.Fatal("other chains are untouched")
 	}
 }

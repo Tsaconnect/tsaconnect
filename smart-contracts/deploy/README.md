@@ -212,7 +212,7 @@ handover.
 | `DIRECT_FORBIDDEN_ADMINS` | Comma list that must never be an admin or the owner: **put the relayer (`RELAYER_PRIVATE_KEY`'s address) here**, plus any role key that ever differs from the operator. Always forbidden besides it: the `DET_OPERATOR` / `DET_TREASURY` roles, the canonical operator `0x38cE…c2c9` and treasury `0xA412…e205` (hard-coded, whatever the env says), the deployers and the routine deploy keys. |
 | `DIRECT_DEPLOY_BLOCK` | Only to resume a run whose escrow proxy already exists, or to re-run against one already handed over without the ledger: the block it was created in (the read-back's event scan starts there). |
 | `DIRECT_FEE_MANAGER_ADDRESS` | Only to re-run against an escrow already handed over without the ledger: its FeeManager, for the read-back. |
-| `DIRECT_OWNER_IS_DEPLOYER` | `1` = the cold deployer keeps both contracts — no handover (owner decision 2026-10-16) — until the owner moves them with `transferOwnership`. `DET_OWNER_CONFIRM` must then be the deployer's address. `isAdmin(owner)` is always true on P2PEscrowV3, so the deployer is an arbiter meanwhile; every other hot key stays refused. Pass it to `verify-direct-escrow.js` too, with `DET_DEPLOYER`. Set `expectedOwner` in the API's BSC row to the deployer. |
+| `DIRECT_OWNER_IS_DEPLOYER` | `1` = the cold deployer keeps both contracts — no handover (owner decision 2026-10-16) — until the owner moves them with `transferOwnership`. `DET_OWNER_CONFIRM` must then be the deployer's address. `isAdmin(owner)` is always true on P2PEscrowV3, so the deployer is an arbiter meanwhile. The deploy key itself must not be a forbidden admin (`DIRECT_FORBIDDEN_ADMINS`, the canonical operator/treasury, the role addresses), a routine deploy key or the routine hardhat signer; every other hot key stays refused. Re-running a finished deploy with the flag only reads back (set `DIRECT_FEE_MANAGER_ADDRESS` + `DIRECT_DEPLOY_BLOCK` or keep the ledger) and sends nothing. Pass it to `verify-direct-escrow.js` too, with `DET_DEPLOYER`. Set `expectedOwner` in the API's BSC row to the deployer. |
 | `DET_*` | As for the deterministic escrow: `DET_DEPLOYER_PRIVATE_KEY`, `DET_OWNER_CONFIRM`, `DET_OWNER`, `DET_TREASURY`, `DET_OPERATOR`, `DET_NAME`, `CHECK_ONLY`. `DET_ADMINS`, `DET_TOKENS`, `DET_FEE_MANAGER`, `DET_PAYMENT_WINDOW` and `DET_FEE_BPS` are set by the module, not read. |
 
 Order: (1) every refusal with nothing sent — the deterministic check-only pass
@@ -220,7 +220,11 @@ Order: (1) every refusal with nothing sent — the deterministic check-only pass
 deploy key, then `DET_OWNER_CONFIRM`; a chain whose escrow is already PM-owned
 runs the full read-back (below) and stops — a mismatch, or no FeeManager /
 deploy block to read back from (ledger or `DIRECT_FEE_MANAGER_ADDRESS` +
-`DIRECT_DEPLOY_BLOCK`), fails the run; (2) `FeeManager` deployed and owned by
+`DIRECT_DEPLOY_BLOCK`), fails the run; a deployer-owned escrow that is already
+wired (`feeManager()` set — a finished owner-is-deployer run, or one interrupted
+after the FeeManager handover) is refused with nothing sent rather than resumed,
+because resuming would deploy a new FeeManager and re-point the live escrow at it:
+hand it over with `transferOwnership` instead (only an unwired proxy resumes); (2) `FeeManager` deployed and owned by
 the cold deploy key (it is not deterministic) and `setRates`; (3) the escrow
 through `deterministic-escrow.js` with `admins = arbiters`, wired to that
 FeeManager, `paymentWindow` 1800 (the initializer's value, asserted), no

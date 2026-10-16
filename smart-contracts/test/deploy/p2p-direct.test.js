@@ -48,23 +48,73 @@ describe("deploy/p2p-direct", () => {
   });
 
   describe("owner = deployer (DIRECT_OWNER_IS_DEPLOYER, decision 2026-10-16)", () => {
+    // A dedicated cold key: account #0 is also the routine hardhat signer, which
+    // may never own the escrow.
+    const COLD = 12;
+    const coldOpts = async (extra = {}) => {
+      const s = await ethers.getSigners();
+      return { ownerIsDeployer: true, deployerKey: deployerKey(COLD), ownerConfirm: s[COLD].address, ...extra };
+    };
+    // refusedOwnerMode: refused before anything is sent — neither the routine
+    // signer (beyond directChain's three mock tokens) nor the deploy key sends.
+    async function refusedOwnerMode(opts, pattern, keyIndex) {
+      const s = await ethers.getSigners();
+      const before0 = await ethers.provider.getTransactionCount(s[0].address);
+      const beforeK = await ethers.provider.getTransactionCount(s[keyIndex].address);
+      const ctx = await directChain({}, {}, opts);
+      await expect(deploy(hre, ctx.deployOpts)).to.be.rejectedWith(pattern);
+      expect(await ethers.provider.getTransactionCount(s[0].address)).to.equal(before0 + 3);
+      // Key #0 is the routine signer itself: the line above already counts it.
+      if (keyIndex !== 0) expect(await ethers.provider.getTransactionCount(s[keyIndex].address)).to.equal(beforeK);
+    }
+
     it("the deployer keeps both contracts, is an implicit admin, and every other hot key stays out", async () => {
       const s = await ethers.getSigners();
-      const ctx = await directFixture({}, { deploy: { ownerIsDeployer: true, ownerConfirm: s[0].address } });
-      expect(ctx.out.owner).to.equal(ctx.deployer.address);
-      expect(await ctx.esc.owner()).to.equal(ctx.deployer.address);
-      expect(await ctx.fm.owner()).to.equal(ctx.deployer.address);
-      expect(await ctx.esc.isAdmin(ctx.deployer.address)).to.equal(true);
-      expect(await ctx.esc.admins(ctx.deployer.address)).to.equal(false);
+      const ctx = await directFixture({}, { deploy: await coldOpts() });
+      const cold = s[COLD].address;
+      expect(ctx.out.owner).to.equal(cold);
+      expect(await ctx.esc.owner()).to.equal(cold);
+      expect(await ctx.fm.owner()).to.equal(cold);
+      expect(await ctx.esc.isAdmin(cold)).to.equal(true);
+      expect(await ctx.esc.admins(cold)).to.equal(false);
       for (const a of [ctx.arbA, ctx.arbB]) expect(await ctx.esc.isAdmin(a.address)).to.equal(true);
-      for (const f of [ctx.releaseEoa, ctx.sysWallet, ctx.canceller, ctx.sponsor, ctx.ownerWallet]) {
+      for (const f of [ctx.deployer, ctx.releaseEoa, ctx.sysWallet, ctx.canceller, ctx.sponsor, ctx.ownerWallet]) {
         expect(await ctx.esc.isAdmin(f.address), f.address).to.equal(false);
       }
     });
     it("still needs DET_OWNER_CONFIRM, and it must name the deployer", async () => {
       const s = await ethers.getSigners();
-      await refuses({}, /DET_OWNER_CONFIRM/, { opts: { ownerIsDeployer: true, ownerConfirm: null } });
-      await refuses({}, /DET_OWNER_CONFIRM/, { opts: { ownerIsDeployer: true, ownerConfirm: s[5].address } });
+      await refusedOwnerMode(await coldOpts({ ownerConfirm: null }), /DET_OWNER_CONFIRM/, COLD);
+      await refusedOwnerMode(await coldOpts({ ownerConfirm: s[5].address }), /DET_OWNER_CONFIRM/, COLD);
+    });
+    it("a deploy key that is a forbidden admin, the operator or the routine signer is refused with nothing sent", async () => {
+      const s = await ethers.getSigners();
+      // #6 is in DIRECT_FORBIDDEN_ADMINS (the canceller), #4 is the operator role.
+      await refusedOwnerMode({ ownerIsDeployer: true, deployerKey: deployerKey(6), ownerConfirm: s[6].address }, /forbidden admin/, 6);
+      await refusedOwnerMode({ ownerIsDeployer: true, deployerKey: deployerKey(4), ownerConfirm: s[4].address }, /forbidden admin|is the operator/, 4);
+      await refusedOwnerMode({ ownerIsDeployer: true, deployerKey: deployerKey(0), ownerConfirm: s[0].address }, /routine hardhat signer/, 0);
+    });
+    it("a re-run of a finished deploy reads back, sends nothing and deploys no FeeManager", async () => {
+      const s = await ethers.getSigners();
+      const ctx = await directFixture({}, { deploy: await coldOpts() });
+      const before = await ethers.provider.getTransactionCount(s[COLD].address);
+      const out = await deploy(hre, { ...ctx.deployOpts, feeManager: ctx.out.feeManager, deployBlock: ctx.out.deployBlock });
+      expect(out.reused).to.equal(true);
+      expect(out.feeManager).to.equal(ctx.out.feeManager);
+      expect(await ethers.provider.getTransactionCount(s[COLD].address)).to.equal(before);
+      // Without the read-back inputs it refuses rather than redeploying.
+      await expect(deploy(hre, ctx.deployOpts)).to.be.rejectedWith(/set DIRECT_FEE_MANAGER_ADDRESS and DIRECT_DEPLOY_BLOCK/);
+      expect(await ethers.provider.getTransactionCount(s[COLD].address)).to.equal(before);
+    });
+    it("a normal-mode run on a deployer-owned, wired escrow is refused with nothing sent (no FeeManager re-point)", async () => {
+      const s = await ethers.getSigners();
+      const ctx = await directFixture({}, { deploy: await coldOpts() });
+      const before = await ethers.provider.getTransactionCount(s[COLD].address);
+      const handover = { ...ctx.deployOpts, ownerIsDeployer: false, ownerConfirm: ctx.ownerWallet.address };
+      await expect(deploy(hre, handover)).to.be.rejectedWith(/already deployed and wired by .* transferOwnership/);
+      expect(await ethers.provider.getTransactionCount(s[COLD].address)).to.equal(before);
+      expect(await ctx.esc.feeManager()).to.equal(ctx.out.feeManager);
+      expect(await ctx.esc.owner()).to.equal(s[COLD].address);
     });
   });
 

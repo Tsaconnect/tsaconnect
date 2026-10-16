@@ -43,6 +43,9 @@ var ErrPMNotOnDirect = errors.New("p2p: payment merchant ads are not available o
 // sellerAudience gates posting, signing and resuming an ad on chainID by its
 // escrow's audience.
 func (s *P2PTradeService) sellerAudience(ctx context.Context, sellerID uuid.UUID, chainID int64) error {
+	if err := s.unverifiedChain(chainID); err != nil {
+		return err
+	}
 	audience := s.escrows.Audience(chainID)
 	if audience == config.P2PAudienceAll {
 		return nil
@@ -63,6 +66,9 @@ func (s *P2PTradeService) sellerAudience(ctx context.Context, sellerID uuid.UUID
 // depositAudience gates funding a balance on chainID: a pm escrow takes
 // deposits from its PMs only; anyone may fund the others.
 func (s *P2PTradeService) depositAudience(ctx context.Context, userID uuid.UUID, chainID int64) error {
+	if err := s.unverifiedChain(chainID); err != nil {
+		return err
+	}
 	if s.escrows.Audience(chainID) != config.P2PAudiencePM {
 		return nil
 	}
@@ -79,8 +85,20 @@ func (s *P2PTradeService) depositAudience(ctx context.Context, userID uuid.UUID,
 // openAudience gates opening a trade on an ad: on a pm escrow only a PM ad
 // opens (an LP ad never reaches here: isPoolAd refuses it first).
 func (s *P2PTradeService) openAudience(ad *models.P2PAd) error {
+	if err := s.unverifiedChain(ad.ChainID); err != nil {
+		return err
+	}
 	if s.escrows.Audience(ad.ChainID) == config.P2PAudiencePM && ad.PMID == nil {
 		return refuse(ErrP2PDirectMoved)
+	}
+	return nil
+}
+
+// unverifiedChain refuses new activity on an escrow whose boot gates could
+// not be read yet (503: try again shortly). Exits never call it.
+func (s *P2PTradeService) unverifiedChain(chainID int64) error {
+	if s.escrows.Unverified(chainID) {
+		return refuse(fmt.Errorf("%w: P2P on chain %d is being verified", ErrChainUnavailable, chainID))
 	}
 	return nil
 }

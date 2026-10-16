@@ -15,6 +15,7 @@ import (
 // The notice reaches every non-PM with a live Sonic ad or a Sonic deposit,
 // once; PMs, BSC users, finished ads and users already told are skipped.
 func TestNotifyDirectMoved_OnceToEachSonicNonPM(t *testing.T) {
+	directMovedNoticePace = 0
 	r := newAudienceRig(t)
 	ctx := context.Background()
 	bus := &mockBus{}
@@ -24,7 +25,7 @@ func TestNotifyDirectMoved_OnceToEachSonicNonPM(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	withAd, paused, depositor := uuid.New(), uuid.New(), uuid.New()
+	withAd, paused, depositor, oldDepositor := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	pmUser, bscOnly, finished, told := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	seedActiveAd(t, r.db, withAd, 146, nil, "1500", "10")
 	pausedAd := seedActiveAd(t, r.db, paused, 146, nil, "1500", "10")
@@ -45,6 +46,11 @@ func TestNotifyDirectMoved_OnceToEachSonicNonPM(t *testing.T) {
 		r.db.Create(&models.P2PAuditLog{ID: uuid.New(), ActorID: &actor, Action: models.P2PAuditDepositConfirmed, Metadata: meta, CreatedAt: time.Now()})
 	}
 
+	// A deposit from before 2026-10-08 recorded no chainId: it was on Sonic.
+	oldActor := oldDepositor
+	oldMeta, _ := json.Marshal(map[string]any{"token": "USDT"})
+	r.db.Create(&models.P2PAuditLog{ID: uuid.New(), ActorID: &oldActor, Action: models.P2PAuditDepositConfirmed, Metadata: oldMeta, CreatedAt: time.Now()})
+
 	n, err := r.svc.NotifyDirectMoved(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +65,7 @@ func TestNotifyDirectMoved_OnceToEachSonicNonPM(t *testing.T) {
 		}
 		got[ev.UserID] = true
 	}
-	want := map[uuid.UUID]bool{withAd: true, paused: true, depositor: true}
+	want := map[uuid.UUID]bool{withAd: true, paused: true, depositor: true, oldDepositor: true}
 	if n != len(want) || len(got) != len(want) {
 		t.Fatalf("sent %d to %v, want exactly %v", n, got, want)
 	}
