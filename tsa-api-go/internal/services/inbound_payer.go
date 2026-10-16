@@ -175,12 +175,20 @@ func (s *InboundPayerService) Declare(ctx context.Context, userID, orderID uuid.
 // typically one the matcher held for want of a name match — and binds it when
 // exactly one fits and the claim is within the self-resolve cap.
 func (s *InboundPayerService) settleArrived(ctx context.Context, claim InboundClaim, decl *models.InboundPayerDeclaration) error {
-	// Undecided credits are a short list (held ones wait for a human), so the
-	// amount and arrival rules run here rather than as SQL comparisons whose
-	// timestamp semantics differ between databases.
+	// Only credits the matcher ALREADY decided nobody's own name is on. An
+	// unmatched credit has not been through the matcher's rules yet — its
+	// sender may be another buyer, whose own name would bind it — and is left
+	// to the matcher, which consults this declaration only when no candidate's
+	// name matches. Credits held for any other reason (two names matched, an
+	// owner with no verified name, a currency or product refusal) are an
+	// operator's, never a declaration's.
+	//
+	// Held credits are a short list, so the amount and arrival rules run here
+	// rather than as SQL comparisons whose timestamp semantics differ between
+	// databases.
 	var credits []models.InboundCredit
 	if err := s.db.WithContext(ctx).
-		Where("status IN ?", []string{models.InboundCreditHeld, models.InboundCreditUnmatched}).
+		Where("status = ? AND hold_reason_code = ?", models.InboundCreditHeld, models.InboundHoldNoNameMatch).
 		Order("transaction_date ASC").
 		Find(&credits).Error; err != nil {
 		return fmt.Errorf("payer declaration: load credits: %w", err)
@@ -206,6 +214,16 @@ func (s *InboundPayerService) settleArrived(ctx context.Context, claim InboundCl
 		credit := fit[0]
 		if claim.AmountKobo > s.capKobo {
 			return s.markReview(ctx, decl, &credit.ID, "over the self-resolve limit — an admin confirms")
+		}
+		// Another buyer waiting on the same amount may be who this money is
+		// really for (paid from a relative's account, say): a declaration only
+		// settles a payment nobody else could be owed.
+		rivals, err := s.matcher.rivalClaimsAtAmount(ctx, claim)
+		if err != nil {
+			return err
+		}
+		if rivals > 0 {
+			return s.markReview(ctx, decl, &credit.ID, "another order is waiting for the same amount — an admin confirms")
 		}
 		_, matched, err := s.matcher.bindDeclared(ctx, &credit, claim, decl)
 		if err != nil {
@@ -378,6 +396,22 @@ func (m *InboundMatcher) openClaimByID(ctx context.Context, currency string, id 
 	return nil, nil
 }
 
+// rivalClaimsAtAmount counts OTHER open claims asking the same amount in the
+// same currency as claim.
+func (m *InboundMatcher) rivalClaimsAtAmount(ctx context.Context, claim InboundClaim) (int, error) {
+	claims, err := m.gatherClaims(ctx, claim.Currency)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrPayerUnavailable, err)
+	}
+	n := 0
+	for _, c := range claims {
+		if c.ID != claim.ID && c.AmountKobo == claim.AmountKobo && inboundSameCurrency(c.Currency, claim.Currency) {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // bindDeclared settles credit to claim on decl through the same Accept-then-
 // record path every automatic bind takes — never the operator path, so the
 // product's own review gates still apply — then marks the declaration matched
@@ -498,6 +532,10 @@ func (m *InboundMatcher) bindOnDeclaration(ctx context.Context, credit *models.I
 		return false, false, nil
 	case fits[0].claim.AmountKobo > DefaultPayerSelfResolveMaxKobo:
 		review("over the self-resolve limit — an admin confirms")
+		return false, false, nil
+	case len(candidates) > 1:
+		// Another buyer waits on this same amount; the money may be theirs.
+		review("another order is waiting for the same amount — an admin confirms")
 		return false, false, nil
 	}
 	f := fits[0]

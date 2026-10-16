@@ -95,6 +95,10 @@ func seedSenderCredit(t *testing.T, db *gorm.DB, ref string, kobo int64, bank, n
 		SenderRaw: "Received Money from " + bank + "|" + name, SenderBank: bank, SenderName: name,
 		TransactionDate: at.UTC(), SeenAt: at.UTC(), Status: status,
 	}
+	if status == models.InboundCreditHeld {
+		c.HoldReasonCode = models.InboundHoldNoNameMatch
+		c.HoldReason = "test hold"
+	}
 	if err := db.Create(c).Error; err != nil {
 		t.Fatalf("insert credit: %v", err)
 	}
@@ -378,5 +382,90 @@ func TestPayer_RedeclaringReplacesAnUnmatchedDeclaration(t *testing.T) {
 	r.db.Model(&models.InboundPayerDeclaration{}).Count(&n)
 	if n != 1 {
 		t.Errorf("rows = %d, want 1", n)
+	}
+}
+
+// Security review 2026-10-16: a declaration must never take a credit the
+// matcher has not decided yet — its sender may be another buyer whose own
+// name would bind it on the next tick.
+func TestPayer_DeclarationNeverTakesAnUnmatchedCredit(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	credit := seedSenderCredit(t, r.db, "sess-10", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now().Add(-1*time.Minute), models.InboundCreditUnmatched)
+	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	if res.Outcome != models.PayerDeclarationWaiting {
+		t.Fatalf("outcome = %q, want waiting — the matcher decides unmatched credits", res.Outcome)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditUnmatched {
+		t.Errorf("credit = %q, want untouched", got.Status)
+	}
+}
+
+// The attack the review describes: the victim pays from their own account for
+// their own order; an attacker with a same-amount order declares the victim's
+// account first. The matcher must still give the money to the victim.
+func TestPayer_OwnersNameBeatsAnotherBuyersDeclaration(t *testing.T) {
+	r := newPayerRig(t, 150_000) // the attacker's order
+	victim := seedVerifiedBuyer(t, r.db, "Joyclare Kosarachi Elem")
+	victimClaim := claimFor(victim, 150_000)
+	victimClaim.OpenedAt = time.Now().Add(-10 * time.Minute)
+	r.src.claims = append(r.src.claims, victimClaim)
+
+	if _, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem"); err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	credit := seedSenderCredit(t, r.db, "sess-11", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now(), models.InboundCreditUnmatched)
+	if _, err := r.m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	got := reloadCredit(t, r.db, credit.ID)
+	if got.MatchedClaimID == nil || *got.MatchedClaimID != victimClaim.ID {
+		t.Fatalf("credit matched to %v, want the victim's own claim", got.MatchedClaimID)
+	}
+}
+
+// A credit held for any reason other than "nobody's name" belongs to an
+// operator: two names matched here, and a third buyer must not take it.
+func TestPayer_ContestedHoldIsNotForDeclarations(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	credit := seedSenderCredit(t, r.db, "sess-12", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+	r.db.Model(&models.InboundCredit{}).Where("id = ?", credit.ID).
+		Update("hold_reason_code", models.InboundHoldContested)
+
+	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	if res.Outcome == models.PayerDeclarationMatched {
+		t.Fatal("a contested credit was taken by a declaration")
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditHeld {
+		t.Errorf("credit = %q, want still held", got.Status)
+	}
+}
+
+// With another buyer waiting on the same amount, the money may be theirs: an
+// admin decides.
+func TestPayer_AnotherOrderAtTheSameAmountGoesToReview(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	other := seedVerifiedBuyer(t, r.db, "Ngozi Obi")
+	r.src.claims = append(r.src.claims, claimFor(other, 150_000))
+	credit := seedSenderCredit(t, r.db, "sess-13", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
+		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
+
+	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	if err != nil {
+		t.Fatalf("Declare: %v", err)
+	}
+	if res.Outcome != models.PayerDeclarationReview {
+		t.Fatalf("outcome = %q, want review", res.Outcome)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditHeld {
+		t.Errorf("credit = %q, want still held", got.Status)
 	}
 }

@@ -377,6 +377,9 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
   statement sender name matches BOTH, the sender bank is the declared one (`payerSameBank`; an
   uncomparable bank goes to review, never a bind), the amount is the claim's and it arrived after
   the claim opened. Funding rows carry no sender account number, so the number is never compared.
+  Declare settles only credits already held `sender_matches_no_candidate_name` (never unmatched
+  ones — the matcher decides those, a candidate's own name first — nor any other hold), and only
+  when no other open order asks the same amount (security review 2026-10-16).
   ≤ ₦500,000 binds through the normal `bindCredit` path (strength `declared`, audit
   `inbound.payer_declared`, product review gates still apply — never `withManualBind`); larger,
   ambiguous or product-refused ones go to `review` for a super admin. A declaration made before
