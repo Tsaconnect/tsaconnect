@@ -93,12 +93,14 @@ const Layout = () => {
   }, []);
 
   // Handle avatar press - navigate immediately, profile screen fetches its own data
-  const handleAvatarPress = () => {
+  // The avatar IS the menu: it opens the drawer, whose first row (you) opens
+  // Profile. One account control in the header instead of ☰ + avatar.
+  const handleAvatarPress = (navigation: { openDrawer: () => void }) => {
     if (!isAuthenticated) {
       router.push("/login");
       return;
     }
-    router.push("/profile");
+    navigation.openDrawer();
   };
 
   // Guard: redirect unauthenticated users to login
@@ -363,7 +365,10 @@ const Layout = () => {
                 )}
                 <NotificationBell />
                 <Pressable
-                  onPress={handleAvatarPress}
+                  onPress={() => handleAvatarPress(navigation)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open menu"
+                  hitSlop={6}
                   style={{ flexDirection: "row", alignItems: "center" }}
                 >
                   {loading ? (
@@ -394,19 +399,10 @@ const Layout = () => {
                       <Avatar name={currentUser.name} size={36} />
                     </View>
                   ) : (
-                    // No user data (guest or not logged in)
-                    <Pressable
-                      onPress={() => {
-                        if (!isAuthenticated) {
-                          router.push("/login");
-                        } else {
-                          router.push("/profile");
-                        }
-                      }}
-                      style={{ marginRight: spacing.sm }}
-                    >
+                    // No user data yet: the same button, a placeholder face.
+                    <View style={{ marginRight: spacing.sm }}>
                       <Avatar name="?" size={36} />
-                    </Pressable>
+                    </View>
                   )}
                 </Pressable>
               </View>
@@ -418,26 +414,14 @@ const Layout = () => {
               // React Navigation populates `state` on a route hosting a nested
               // navigator, but leaves it off the public RouteProp type.
               headerShown: showDrawerHeader((route as { state?: NestedNavState }).state),
-              // Our own menu button rather than the library's tinted image
-              // toggle, which stopped rendering on devices (an empty corner
-              // left no visible way into the drawer).
-              headerLeft: () => (
-                <Pressable
-                  onPress={() => navigation.openDrawer()}
-                  accessibilityRole="button"
-                  accessibilityLabel="Open menu"
-                  hitSlop={10}
-                  style={{ marginLeft: spacing.md, padding: spacing.xs }}
-                >
-                  <Icon name="menu" size={26} color={colors.textPrimary} />
-                </Pressable>
-              ),
+              // No ☰: the avatar on the right opens the drawer.
+              headerLeft: () => null,
               headerTitle: "TSA Connect",
               title: "Dashboard",
-              headerTitleAlign: "center",
-              // The default 16px either side of the centred title, plus Home's
-              // cart · bell · avatar, overlaps "TSA Connect" on a 360dp phone.
-              headerTitleContainerStyle: { marginHorizontal: spacing.xs },
+              headerTitleAlign: "left",
+              // Left-aligned with nothing before it, so the title takes the
+              // screen's own gutter; the right stays tight for cart · bell · avatar.
+              headerTitleContainerStyle: { marginLeft: spacing.lg, marginRight: spacing.xs },
               headerTitleStyle: {
                 fontSize: type.title3.fontSize,
                 fontFamily: fontFamily['600'],
