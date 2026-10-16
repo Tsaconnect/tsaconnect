@@ -72,17 +72,17 @@ export function poolBuyParams(p: {
 
 /**
  * The buy screen's starting asset when the pool can fill: the pool's token on
- * its chain (USDT on BSC), whatever token the entry point suggested — the pool
- * is the route that fills small naira buys (owner, 2026-10-16). Null — keep the
- * screen's own default — when the pool is unavailable or empty, or the
- * currency is not the pool's.
+ * its chain (USDT on BSC), so the cheapest in-house route is what she sees
+ * first. Null — keep the screen's own default — when the pool is unavailable
+ * or empty, the currency is not the pool's, or she asked for another token.
  */
 export function poolDefaultWant(
   card: PoolCard | null | undefined,
-  p: { currency: string },
+  p: { asset?: string; currency: string },
 ): { token: string; chainId: number; chain: string; address: string } | null {
   if (!card?.enabled || !card.available || !card.token || !card.chain) return null;
   if (p.currency !== POOL_CURRENCY) return null;
+  if (p.asset && p.asset.toUpperCase() !== card.token.symbol.toUpperCase()) return null;
   return {
     token: card.token.symbol.toUpperCase(),
     chainId: card.chain.id,
