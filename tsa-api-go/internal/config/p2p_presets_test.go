@@ -171,3 +171,26 @@ func TestBSCFeeManager_PresetWins(t *testing.T) {
 		}
 	}
 }
+
+// Plan API-10: a registered BSC direct row puts its own FeeManager into
+// FeeManagerChains beside Sonic's, so the admin fee flow and the drift
+// reconciler drive both.
+func TestFeeManagerChains_IncludesTheDirectBSCFeeManager(t *testing.T) {
+	t.Setenv("BSC_NETWORK", "mainnet")
+	t.Setenv("FEE_MANAGER_ADDRESS_SONIC", poolFMAddr)
+	t.Setenv("FEE_MANAGER_ADDRESS_BSC", "")
+	cfg := &Config{SonicChainID: 146, Networks: netsWith(map[string]ChainConfig{"bsc": {ChainID: 56}}, map[string]string{"bsc:USDT": bscUSDT})}
+	row := chainPreset{p2pEscrow: p2pEscrowAddr, eip712Version: "2", audience: P2PAudienceDirect,
+		feeManager: directFMAddr, expectedOwner: directOwnerAddr, assets: []string{"USDT"}}
+	if err := assembleP2PChains(cfg, map[string]map[string]chainPreset{"bsc": {"mainnet": row}}); err != nil {
+		t.Fatal(err)
+	}
+	assembleFeeManagerChains(cfg)
+	want := map[int64]FeeManagerChainConfig{
+		146: {ChainID: 146, ChainKey: "sonic", Address: poolFMAddr},
+		56:  {ChainID: 56, ChainKey: "bsc", Address: directFMAddr},
+	}
+	if !reflect.DeepEqual(cfg.FeeManagerChains, want) {
+		t.Fatalf("FeeManagerChains = %+v, want %+v", cfg.FeeManagerChains, want)
+	}
+}
