@@ -291,6 +291,12 @@ func (m *InboundMatcher) decide(ctx context.Context, credit *models.InboundCredi
 	case 1:
 		return m.bindCredit(ctx, credit, matched[0], nil)
 	case 0:
+		// Nobody's own name is on the transfer. A buyer may have declared the
+		// account that paid (payer declarations, inbound_payer.go); only when
+		// none fits is this the ordinary no-name hold.
+		if handled, decided, err := m.bindOnDeclaration(ctx, credit, candidates); handled || err != nil {
+			return decided, err
+		}
 		return m.holdCredit(ctx, credit, models.InboundHoldNoNameMatch,
 			inboundNoNameMatchReason(credit, want, scored))
 	default:

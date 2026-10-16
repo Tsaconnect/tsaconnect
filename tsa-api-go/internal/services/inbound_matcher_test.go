@@ -30,6 +30,7 @@ func setupMatcherDB(t *testing.T) *gorm.DB {
 	)`).Error; err != nil {
 		t.Fatalf("users ddl: %v", err)
 	}
+	createPayerDeclarationsTable(t, db)
 	return db
 }
 

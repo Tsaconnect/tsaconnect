@@ -34,6 +34,7 @@ type inboundAdminService interface {
 // to an audit row.
 type InboundAdminHandler struct {
 	inbound inboundAdminService
+	payers  *services.InboundPayerService
 }
 
 func NewInboundAdminHandler(inbound inboundAdminService) *InboundAdminHandler {

@@ -370,6 +370,17 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
   held credit automatically; unset is legitimate but means the admin queue is the only place
   it is ever seen. The same list also receives background-job failure alerts (below).
 - Per-variable rationale is in `.env.example`; read it before changing any of them.
+- **Payer declarations** (`services/inbound_payer.go`, owner 2026-10-16): a buyer whose naira
+  came from an account not in their name calls `POST /api/inbound/payer {orderId, bankCode,
+  accountNumber, accountName}` (KYC-verified, 10/15 min per user). The bank's name for the
+  number (name enquiry) must match the typed name, and a credit is attributed only when the
+  statement sender name matches BOTH, the sender bank is the declared one (`payerSameBank`; an
+  uncomparable bank goes to review, never a bind), the amount is the claim's and it arrived after
+  the claim opened. Funding rows carry no sender account number, so the number is never compared.
+  ≤ ₦500,000 binds through the normal `bindCredit` path (strength `declared`, audit
+  `inbound.payer_declared`, product review gates still apply — never `withManualBind`); larger,
+  ambiguous or product-refused ones go to `review` for a super admin. A declaration made before
+  the money lands is consulted by the matcher only when no candidate's own name matches.
 - Payment-merchant P2P under central routing (`p2pCentralRouting` in `cmd/server/main.go`):
   - A payment matched to a trade still has to pass `PMService.CheckAutoSettle`: the merchant
     is active, and the trade is within the per-trade and daily caps. The VA webhook uses the

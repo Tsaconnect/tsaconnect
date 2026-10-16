@@ -192,6 +192,7 @@ func AutoMigrate() error {
 		// credit into the company account, written by the statement poller
 		// before any matching runs.
 		&models.InboundCredit{},
+		&models.InboundPayerDeclaration{},
 		// Append-only record of every operator decision on a held credit.
 		// Separate from inbound_credits because that row only ever shows the
 		// current state — who acted, and on what, has to outlive it.
