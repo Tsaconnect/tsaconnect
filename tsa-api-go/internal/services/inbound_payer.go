@@ -41,8 +41,11 @@ const NameMatchDeclared NameMatchStrength = "declared"
 const payerArrivalSkew = 2 * time.Minute
 
 // payerBindResumeAfter is how long a credit may sit in `binding` before the
-// matcher treats the bind as interrupted and finishes it.
-const payerBindResumeAfter = 2 * time.Minute
+// matcher treats the bind as interrupted and finishes it. Far longer than any
+// settle takes (the slowest wait on a chain receipt for minutes): Accept is
+// idempotent once an earlier call has finished, not while one is still
+// running, so a live bind must never be resumed alongside itself.
+const payerBindResumeAfter = 30 * time.Minute
 
 // payerDeclarationTTL closes a waiting declaration whose claim can no longer be
 // paid: buy claims stop matching after a day.
@@ -544,6 +547,11 @@ func (m *InboundMatcher) settleClaimedDeclared(ctx context.Context, src ClaimSou
 		// re-runs the (idempotent) settle and records it.
 		return true, false, fmt.Errorf("inbound payer: settled ref %s but could not record the bind: %w", credit.ProviderRef, res.Error)
 	}
+	if res.RowsAffected == 0 {
+		// Another finisher recorded it first; its record stands, and one
+		// audit row is the right number.
+		return true, true, nil
+	}
 	if decl != nil {
 		m.recordDeclaredBind(ctx, credit, claim, decl)
 	}
@@ -585,15 +593,29 @@ func (m *InboundMatcher) recordDeclaredBind(ctx context.Context, credit *models.
 // back to `held` would not be — an admin could then refund money the product
 // already delivered.
 func (m *InboundMatcher) resumeDeclaredBinds(ctx context.Context) error {
+	cutoff := m.now().UTC().Add(-payerBindResumeAfter)
 	var stuck []models.InboundCredit
 	if err := m.db.WithContext(ctx).
-		Where("status = ? AND updated_at < ?", models.InboundCreditBinding, m.now().UTC().Add(-payerBindResumeAfter)).
+		Where("status = ? AND updated_at < ?", models.InboundCreditBinding, cutoff).
 		Limit(20).Find(&stuck).Error; err != nil {
 		return fmt.Errorf("inbound payer: load interrupted binds: %w", err)
 	}
 	var errs []error
 	for i := range stuck {
 		c := &stuck[i]
+		// Take the row before touching it: bumping updated_at past the cutoff
+		// is a conditional write only one resumer (another tick, another
+		// process) can win.
+		lease := m.db.WithContext(ctx).Model(&models.InboundCredit{}).
+			Where("id = ? AND status = ? AND updated_at < ?", c.ID, models.InboundCreditBinding, cutoff).
+			Update("updated_at", m.now().UTC())
+		if lease.Error != nil {
+			errs = append(errs, fmt.Errorf("inbound payer: lease ref %s: %w", c.ProviderRef, lease.Error))
+			continue
+		}
+		if lease.RowsAffected == 0 {
+			continue // someone else is finishing it
+		}
 		if c.MatchedClaimID == nil {
 			log.Printf("[inbound-payer] WARNING ref=%s is binding with no claim named — needs an engineer", c.ProviderRef)
 			continue

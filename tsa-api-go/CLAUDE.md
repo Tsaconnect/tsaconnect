@@ -383,8 +383,9 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
   (`held_claim_ids`, written on every no-name hold — candidates as of arrival, not of now; empty
   means review). A declared bind first CLAIMS the row (`status = binding`, claim named) and only
   then runs the product settle, so an admin refund/assign racing it gets 409; an interrupted bind
-  is finished by the matcher's next tick (`resumeDeclaredBinds`, Accept is idempotent), never handed
-  back to `held`. The 422 name mismatch never returns the bank's name (no name-lookup oracle).
+  is finished by the matcher once it has sat 30 min (`resumeDeclaredBinds`, under a conditional
+  lease — Accept is idempotent after a call finishes, not alongside a live one), never handed back
+  to `held`. Handler logs pass errors through `payerLogSafe` (account digits masked). The 422 name mismatch never returns the bank's name (no name-lookup oracle).
   Declarations close when the order matches on the buyer's own name, or after 48 h waiting.
   ≤ ₦500,000 binds through the normal `bindCredit` path (strength `declared`, audit
   `inbound.payer_declared`, product review gates still apply — never `withManualBind`); larger,

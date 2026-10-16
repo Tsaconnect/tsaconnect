@@ -587,7 +587,15 @@ func TestPayer_InterruptedBindIsFinishedNotHandedBack(t *testing.T) {
 	}
 
 	r.src.acceptErr = nil
-	r.m.now = func() time.Time { return time.Now().Add(10 * time.Minute) }
+	// Not resumed while the bind could still be running…
+	if _, err := r.m.MatchPending(context.Background(), 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditBinding {
+		t.Fatalf("credit = %q, want still binding — a live bind is never resumed alongside itself", got.Status)
+	}
+	// …only once it is clearly interrupted.
+	r.m.now = func() time.Time { return time.Now().Add(time.Hour) }
 	if _, err := r.m.MatchPending(context.Background(), 10); err != nil {
 		t.Fatalf("MatchPending: %v", err)
 	}
@@ -681,5 +689,12 @@ func TestPayer_DeclarationsCloseWhenNoLongerOwed(t *testing.T) {
 	r2.db.First(&d2, "id = ?", res2.Declaration.ID)
 	if d2.Status != models.PayerDeclarationClosed {
 		t.Fatalf("stale waiting declaration: %s, want closed", d2.Status)
+	}
+}
+
+// One cap for both paths into a declared bind.
+func TestPayerSelfResolveMaxIsOneConstant(t *testing.T) {
+	if PayerSelfResolveMaxKobo != 500_000*100 {
+		t.Fatalf("cap = %d kobo, want ₦500,000 (owner, 2026-10-16)", PayerSelfResolveMaxKobo)
 	}
 }

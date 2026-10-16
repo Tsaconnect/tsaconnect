@@ -4,7 +4,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -74,13 +76,13 @@ func (h *InboundAdminHandler) DeclarePayer(c *gin.Context) {
 		case errors.Is(err, services.ErrKYCVerificationRequired), errors.Is(err, services.ErrKYCLegalNameMissing):
 			utils.ErrorResponseWithCode(c, http.StatusForbidden, "Verify your identity first.", "kyc_verification_required")
 		case errors.Is(err, services.ErrPayerLookupFailed):
-			log.Printf("[inbound-payer] name enquiry failed: %v", err)
+			log.Printf("[inbound-payer] name enquiry failed: %s", payerLogSafe(err))
 			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "We couldn't reach the bank. Try again in a moment.", "payer_unavailable")
 		case errors.Is(err, services.ErrPayerUnavailable):
-			log.Printf("[inbound-payer] unavailable: %v", err)
+			log.Printf("[inbound-payer] unavailable: %s", payerLogSafe(err))
 			utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "This isn't available right now. Try again in a moment.", "payer_unavailable")
 		default:
-			log.Printf("[inbound-payer] declare failed: %v", err)
+			log.Printf("[inbound-payer] declare failed: %s", payerLogSafe(err))
 			utils.ErrorResponseWithCode(c, http.StatusInternalServerError, "Something went wrong. Try again in a moment.", "payer_failed")
 		}
 		return
@@ -146,4 +148,18 @@ func payerDeclarationView(d *models.InboundPayerDeclaration, admin bool) gin.H {
 		}
 	}
 	return v
+}
+
+// payerDigitRun is any run of six or more digits: account and phone numbers.
+var payerDigitRun = regexp.MustCompile(`\d{6,}`)
+
+// payerLogSafe is an error as it may appear in the log. A name-enquiry failure
+// wraps the bank provider's own text, which can carry the account number; the
+// shared redaction covers credentials and URLs, and long digit runs keep only
+// their last four.
+func payerLogSafe(err error) string {
+	out := services.RedactAlertText(err.Error())
+	return payerDigitRun.ReplaceAllStringFunc(out, func(d string) string {
+		return strings.Repeat("*", len(d)-4) + d[len(d)-4:]
+	})
 }
