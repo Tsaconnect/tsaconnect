@@ -231,10 +231,15 @@ function cliInputs(hre, { cfg, ledger, env = process.env, roles = DETERMINISTIC_
   const deployer = env.DET_DEPLOYER || ledgerEsc?.deployer;
   if (deployer && !isAddress(deployer)) throw new Error(`verify-direct: DET_DEPLOYER is not a valid address: ${deployer}`);
   const name = env.DET_NAME || ledgerEsc?.name || DIRECT_NAME;
+  // DIRECT_OWNER_IS_DEPLOYER=1: the deployer kept both contracts (decision
+  // 2026-10-16), so it is the expected owner and not a forbidden key.
+  const ownerIsDeployer = env.DIRECT_OWNER_IS_DEPLOYER === "1";
+  if (ownerIsDeployer && !deployer) throw new Error("verify-direct: DIRECT_OWNER_IS_DEPLOYER needs DET_DEPLOYER (or the ledger)");
   // Routine deploy keys (.env DEPLOYER_PRIVATE_KEY, hardhat-config accounts —
   // addresses only) are forbidden as admin and as owner, like the deployer.
-  const extra = [...(deployer ? [deployer] : []), ...det.routineDeployerAddresses(hre)];
-  const expected = expectedFromChain(cfg, roles, extra, { create2: deployer ? { deployer, name } : undefined, ledger });
+  const extra = [...(deployer && !ownerIsDeployer ? [deployer] : []), ...det.routineDeployerAddresses(hre)];
+  const expectedRoles = ownerIsDeployer ? { ...roles, owner: deployer } : roles;
+  const expected = expectedFromChain(cfg, expectedRoles, extra, { create2: deployer ? { deployer, name } : undefined, ledger });
   const impls = {};
   if (!env.DIRECT_ESCROW_ADDRESS && ledgerEsc?.impl) impls.escrow = ledgerEsc.impl;
   if (!env.DIRECT_FEE_MANAGER_ADDRESS && ledgerFm?.impl) impls.FeeManager = ledgerFm.impl;

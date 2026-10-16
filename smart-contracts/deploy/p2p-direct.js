@@ -20,6 +20,11 @@
 //     run while the deployer still owns both — any mismatch refuses the
 //     handover — then ownership of BOTH contracts handed to the PM LAST and
 //     the read-back run again. One-step Ownable: the owner address is final.
+//   - DIRECT_OWNER_IS_DEPLOYER=1 (owner decision 2026-10-16): the cold
+//     deployer keeps both contracts — no handover — until the owner moves
+//     them with transferOwnership. DET_OWNER_CONFIRM must then be the
+//     deployer. isAdmin(owner) is always true on P2PEscrowV3, so the deployer
+//     is also an arbiter meanwhile; every other hot key stays refused.
 //
 // Refuses before anything is sent: an empty arbiter list or one naming a
 // forbidden address (DIRECT_FORBIDDEN_ADMINS, the canonical operator /
@@ -32,6 +37,7 @@
 //   read -r -s -p "deploy key: " K; echo
 //   DET_DEPLOYER_PRIVATE_KEY="$K" DET_OWNER_CONFIRM=0x62bA… \
 //   ARBITER_ADDRESSES=0x…,0x… \
+//   [DIRECT_OWNER_IS_DEPLOYER=1 with DET_OWNER_CONFIRM=<the deployer>] \
 //   DIRECT_RATES_JSON='{"p2p_platform":{"bps":100},"p2p":{"bps":50}}' \
 //     npx hardhat run deploy/p2p-direct.js --network bscTestnet; unset K
 const { getAddress, isAddress, ZeroAddress } = require("ethers");
@@ -213,6 +219,7 @@ function envOptions(env = process.env) {
     name: env.DET_NAME || DIRECT_NAME, ownerConfirm: o.ownerConfirm, checkOnly: o.checkOnly, deployer: o.deployer, deployerKey: o.deployerKey,
     deployBlock: env.DIRECT_DEPLOY_BLOCK ? Number(env.DIRECT_DEPLOY_BLOCK) : undefined,
     feeManager: env.DIRECT_FEE_MANAGER_ADDRESS || undefined,
+    ownerIsDeployer: env.DIRECT_OWNER_IS_DEPLOYER === "1",
   };
 }
 
@@ -230,6 +237,13 @@ async function hotKeys(hre, { plan, deployer, routineAddresses = [] }) {
     [routineSigner && routineSigner.address, "the routine hardhat signer"],
     ...plan.forbidden.map((a) => [a, "a forbidden admin (isAdmin(owner) is always true on P2PEscrowV3)"]),
   ].filter(([a]) => a);
+}
+
+// ownerHotKeys is hotKeys minus the deployer when the deployer is the
+// chosen owner: the only hot key allowed to own, and so the only one allowed
+// to be an (implicit) admin.
+function ownerHotKeys(hot, { ownerIsDeployer, deployer }) {
+  return ownerIsDeployer ? hot.filter(([a]) => !same(a, deployer)) : hot;
 }
 
 function assertOwnerNotHot(owner, hot) {
@@ -254,7 +268,8 @@ async function readBack(hre, args) {
 // re-run), feeManager (the direct FeeManager, for an already-handed-over
 // re-run without a ledger), afterWire (test seam: runs after the wiring,
 // before the asserts), beforeHandover (test seam: runs after the pre-handover
-// read-back, before the owner re-check and the handover).
+// read-back, before the owner re-check and the handover), ownerIsDeployer
+// (the deployer keeps both contracts; see the header).
 async function deploy(hre, opts = {}) {
   const { ethers, network } = hre;
   const { chain, afterWire, beforeHandover } = opts;
@@ -271,14 +286,16 @@ async function deploy(hre, opts = {}) {
     chain: cfg, roles, admins: plan.arbiters, name, ownerConfirm: opts.ownerConfirm,
     tokens: plan.tokenSymbols, paymentWindowSec: plan.paymentWindowSec,
     deployerKey: opts.deployerKey, deployer: opts.deployer, routineAddresses,
-    networkClass: opts.networkClass, manifestPath: opts.manifestPath,
+    networkClass: opts.networkClass, manifestPath: opts.manifestPath, ownerIsDeployer: !!opts.ownerIsDeployer,
   };
 
   // 1. Every refusal, sending nothing: the deterministic check-only pass
   //    (admin list, deploy key, manifest, tokens, window), then the owner
   //    against every hot or deploy key.
   const pre = await det.deploy(hre, { ...detOpts, checkOnly: true });
-  const hot = await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses });
+  if (opts.ownerIsDeployer) roles.owner = pre.deployer;
+  const ownerMode = { ownerIsDeployer: !!opts.ownerIsDeployer, deployer: pre.deployer };
+  const hot = ownerHotKeys(await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses }), ownerMode);
   assertOwnerNotHot(roles.owner, hot);
   // Every deploy / routine key is now a forbidden admin too (the owner is
   // already proven not to be one of them).
@@ -305,7 +322,7 @@ async function deploy(hre, opts = {}) {
   if (!opts.deployerKey) fail("a deploy needs DET_DEPLOYER_PRIVATE_KEY (the cold deploy key, typed in for this run)");
   assertOwnerConfirm({
     label: TAG, owner: roles.owner, confirm: opts.ownerConfirm, deployerAddr: pre.deployer,
-    ownerVar: "DET_OWNER (the PM)", confirmVar: "DET_OWNER_CONFIRM",
+    ownerVar: "DET_OWNER (the PM)", confirmVar: "DET_OWNER_CONFIRM", allowDeployerOwner: ownerMode.ownerIsDeployer,
   });
   // The cold deploy key deploys and owns the FeeManager too: no routine key
   // ever owns a direct contract, even before the handover.
@@ -358,15 +375,19 @@ async function deploy(hre, opts = {}) {
     if (beforeHandover) await beforeHandover({ fm, esc: escOut.esc, roles });
     // The owner again, against freshly read hot keys, right before the
     // irreversible transfer.
-    assertOwnerNotHot(roles.owner, await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses }));
+    assertOwnerNotHot(roles.owner, ownerHotKeys(await hotKeys(hre, { plan, deployer: pre.deployer, routineAddresses }), ownerMode));
   } catch (e) {
     e.deployed = deployed;
     console.error(`${TAG}: NOT handed over — still owned by the deployer ${pre.deployer}. FeeManager=${fmOut.proxy} escrow=${pre.proxy}`);
     throw e;
   }
 
-  // 5. Ownership of both, last.
-  console.log(`${TAG}: transferring FeeManager + escrow to ${roles.owner} (one-step Ownable — this address is final)`);
+  // 5. Ownership of both, last (a no-op when the deployer is the owner).
+  if (ownerMode.ownerIsDeployer) {
+    console.log(`${TAG}: the deployer ${pre.deployer} keeps FeeManager + escrow (DIRECT_OWNER_IS_DEPLOYER) — hand over later with transferOwnership`);
+  } else {
+    console.log(`${TAG}: transferring FeeManager + escrow to ${roles.owner} (one-step Ownable — this address is final)`);
+  }
   await handOverOwnership(TAG, [fm, escOut.esc], roles.owner);
   // Recorded once the contracts are the PM's, so a failed run never leaves a
   // ledger entry pointing at a deployer-owned FeeManager.

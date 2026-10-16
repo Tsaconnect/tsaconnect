@@ -47,6 +47,27 @@ describe("deploy/p2p-direct", () => {
     expect(await esc.mcgpToken()).to.equal(ethers.ZeroAddress);
   });
 
+  describe("owner = deployer (DIRECT_OWNER_IS_DEPLOYER, decision 2026-10-16)", () => {
+    it("the deployer keeps both contracts, is an implicit admin, and every other hot key stays out", async () => {
+      const s = await ethers.getSigners();
+      const ctx = await directFixture({}, { deploy: { ownerIsDeployer: true, ownerConfirm: s[0].address } });
+      expect(ctx.out.owner).to.equal(ctx.deployer.address);
+      expect(await ctx.esc.owner()).to.equal(ctx.deployer.address);
+      expect(await ctx.fm.owner()).to.equal(ctx.deployer.address);
+      expect(await ctx.esc.isAdmin(ctx.deployer.address)).to.equal(true);
+      expect(await ctx.esc.admins(ctx.deployer.address)).to.equal(false);
+      for (const a of [ctx.arbA, ctx.arbB]) expect(await ctx.esc.isAdmin(a.address)).to.equal(true);
+      for (const f of [ctx.releaseEoa, ctx.sysWallet, ctx.canceller, ctx.sponsor, ctx.ownerWallet]) {
+        expect(await ctx.esc.isAdmin(f.address), f.address).to.equal(false);
+      }
+    });
+    it("still needs DET_OWNER_CONFIRM, and it must name the deployer", async () => {
+      const s = await ethers.getSigners();
+      await refuses({}, /DET_OWNER_CONFIRM/, { opts: { ownerIsDeployer: true, ownerConfirm: null } });
+      await refuses({}, /DET_OWNER_CONFIRM/, { opts: { ownerIsDeployer: true, ownerConfirm: s[5].address } });
+    });
+  });
+
   it("lands at the deterministic address with the arbiters in initialize(), never the operator", async () => {
     const ctx = await directFixture();
     const p = await det.plan(hre, { deployer: ctx.deployer.address, admins: [ctx.arbA.address, ctx.arbB.address], name: ctx.deployOpts.name });

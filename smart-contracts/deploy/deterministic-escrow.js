@@ -375,7 +375,7 @@ async function deploy(hre, opts = {}) {
   // Refuse before sending anything: the handover at the end is irreversible.
   assertOwnerConfirm({
     label: "deterministic", owner: roles.owner, confirm: opts.ownerConfirm, deployerAddr: deployer,
-    ownerVar: "DET_OWNER (the PM)", confirmVar: "DET_OWNER_CONFIRM",
+    ownerVar: "DET_OWNER (the PM)", confirmVar: "DET_OWNER_CONFIRM", allowDeployerOwner: !!opts.ownerIsDeployer,
   });
 
   await create2.ensureFactory(hre);

@@ -80,8 +80,11 @@ function reuseFromLedger(hre, key, chain) {
 // Ownable handover (review m1): the hot deployer key must never be the final
 // owner, and the owner address must be typed twice. Throws before anything is
 // sent, so a refused run deploys nothing.
-function assertOwnerConfirm({ label, owner, confirm, deployerAddr, ownerVar, confirmVar }) {
-  if (getAddress(owner) === getAddress(deployerAddr)) {
+// allowDeployerOwner is for a contract the deployer deliberately keeps (the
+// direct P2P escrow while the owner decides who takes it over); the confirm
+// is still required.
+function assertOwnerConfirm({ label, owner, confirm, deployerAddr, ownerVar, confirmVar, allowDeployerOwner = false }) {
+  if (!allowDeployerOwner && getAddress(owner) === getAddress(deployerAddr)) {
     throw new Error(`${label}: ${ownerVar} is the deployer — a hot key must never own this contract on this network`);
   }
   if (!confirm || getAddress(confirm) !== getAddress(owner)) {
