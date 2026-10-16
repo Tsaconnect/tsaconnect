@@ -385,6 +385,20 @@ const Layout = () => {
               // React Navigation populates `state` on a route hosting a nested
               // navigator, but leaves it off the public RouteProp type.
               headerShown: showDrawerHeader((route as { state?: NestedNavState }).state),
+              // Our own menu button rather than the library's tinted image
+              // toggle, which stopped rendering on devices (an empty corner
+              // left no visible way into the drawer).
+              headerLeft: () => (
+                <Pressable
+                  onPress={() => navigation.openDrawer()}
+                  accessibilityRole="button"
+                  accessibilityLabel="Open menu"
+                  hitSlop={10}
+                  style={{ marginLeft: spacing.md, padding: spacing.xs }}
+                >
+                  <Icon name="menu" size={26} color={colors.textPrimary} />
+                </Pressable>
+              ),
               headerTitle: "TSA Connect",
               title: "Dashboard",
               headerTitleAlign: "center",

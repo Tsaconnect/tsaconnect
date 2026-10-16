@@ -81,9 +81,9 @@ it('still hides balances from the eye toggle', () => {
 it('offers Pay (TSA Pay by code) in place of Wallet, which has its own tab', () => {
   const tree = render();
   const labels = hosts(tree, 'mock-text').map((t) => t.props.children);
-  expect(labels).toEqual(expect.arrayContaining(['Buy', 'Services', 'Trade', 'Pay']));
+  expect(labels).toEqual(expect.arrayContaining(['Buy', 'Services', 'Trade', 'TSA Pay']));
   expect(labels).not.toContain('Wallet');
-  const pay = hosts(tree, 'mock-pressable').find((p) => p.findAll((n) => (n as any).type === 'mock-text' && n.props.children === 'Pay').length > 0)!;
+  const pay = hosts(tree, 'mock-pressable').find((p) => p.findAll((n) => (n as any).type === 'mock-text' && n.props.children === 'TSA Pay').length > 0)!;
   act(() => pay.props.onPress());
   expect(router.push).toHaveBeenCalledWith('/pay-code');
 });

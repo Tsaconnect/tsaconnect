@@ -62,10 +62,14 @@ function AppStack() {
   const mayShowProtected = isAuthenticated || !isHydrated;
   return (
     <Stack screenOptions={{ ...headerOptions, headerShown: false }}>
-      <Stack.Screen name="pay" options={{ headerShown: true, title: "Pay" }} />
+      {/* The mapped list FIRST: when signing out removes the protected
+          screens, the stack falls back to its first remaining screen, which
+          must be the entry route (index → login). With "pay" first, logout
+          landed on an empty "This payment link isn't valid". */}
       {PUBLIC_ROUTES.filter((name) => !HEADERED_PUBLIC_SCREENS.includes(name)).map((name) => (
         <Stack.Screen key={name} name={name} />
       ))}
+      <Stack.Screen name="pay" options={{ headerShown: true, title: "Pay" }} />
       <Stack.Protected guard={mayShowProtected}>
         <Stack.Screen name="activity" options={{ headerShown: true, title: "Activity" }} />
         <Stack.Screen name="orderdetail" options={{ headerShown: true, title: "Order Detail" }} />

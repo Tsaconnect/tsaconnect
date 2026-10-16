@@ -31,7 +31,7 @@ const QUICK_ACTIONS: { key: string; label: string; icon: IconName; route: string
   { key: 'buy', label: 'Buy', icon: 'storefront', route: '/(dashboard)/(tabs)/(marketplace)' },
   { key: 'services', label: 'Services', icon: 'list', route: '/(dashboard)/(tabs)/(services)/serviceshome' },
   { key: 'trade', label: 'Trade', icon: 'trendingUp', route: '/easyswap' },
-  { key: 'pay', label: 'Pay', icon: 'card', route: PAY_CODE },
+  { key: 'pay', label: 'TSA Pay', icon: 'card', route: PAY_CODE },
 ];
 
 export const BalanceCard: React.FC<BalanceCardProps> = ({

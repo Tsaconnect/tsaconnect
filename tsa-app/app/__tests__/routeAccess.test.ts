@@ -67,6 +67,17 @@ describe('app/_layout.tsx', () => {
     expect([...hand].sort()).toEqual([...handList('HEADERED_PUBLIC_SCREENS')].sort());
   });
 
+  // Signing out removes the protected screens and the stack falls back to its
+  // first screen: it must be the entry route, never a hand-declared one like
+  // "pay" (which then showed "This payment link isn't valid" after logout).
+  it('declares the entry route first, so signing out lands on it', () => {
+    expect(PUBLIC_ROUTES[0]).toBe('index');
+    const mapped = publicPart.indexOf('PUBLIC_ROUTES.filter');
+    const firstHand = publicPart.search(/<Stack\.Screen\s+name="/);
+    expect(mapped).toBeGreaterThan(-1);
+    expect(firstHand === -1 || mapped < firstHand).toBe(true);
+  });
+
   it('hand-declares protected screens only from PROTECTED_ROUTES, and leaves them out of the mapped list', () => {
     const hand = declared(protectedPart);
     for (const name of hand) expect(PROTECTED_ROUTES as readonly string[]).toContain(name);
