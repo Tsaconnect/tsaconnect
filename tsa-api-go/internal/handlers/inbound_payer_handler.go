@@ -25,10 +25,10 @@ type declarePayerRequest struct {
 	OrderID       string `json:"orderId"`
 	BankCode      string `json:"bankCode"`
 	AccountNumber string `json:"accountNumber"`
-	AccountName   string `json:"accountName"`
 }
 
-// POST /api/inbound/payer {orderId, bankCode, accountNumber, accountName}
+// POST /api/inbound/payer {orderId, bankCode, accountNumber} — the account
+// name comes from the bank (an accountName in the body is ignored).
 //
 // The buyer says which account paid for their order when it was not one in
 // their own name. 200 with `status`: matched (settled now), waiting (nothing
@@ -45,7 +45,7 @@ func (h *InboundAdminHandler) DeclarePayer(c *gin.Context) {
 	}
 	var req declarePayerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Enter the bank, account number and account name.", "payer_bad_input")
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Enter the bank and account number.", "payer_bad_input")
 		return
 	}
 	orderID, err := uuid.Parse(req.OrderID)
@@ -54,17 +54,11 @@ func (h *InboundAdminHandler) DeclarePayer(c *gin.Context) {
 		return
 	}
 
-	res, err := h.payers.Declare(c.Request.Context(), user.ID, orderID, req.BankCode, req.AccountNumber, req.AccountName)
+	res, err := h.payers.Declare(c.Request.Context(), user.ID, orderID, req.BankCode, req.AccountNumber)
 	if err != nil {
 		switch {
-		case errors.Is(err, services.ErrPayerNameMismatch):
-			// Never the bank's name: that would turn this into a name lookup
-			// for any account number.
-			utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity,
-				"That name doesn't match the bank's record for this account. Enter it exactly as your bank app shows it.",
-				"payer_name_mismatch")
 		case errors.Is(err, services.ErrPayerBadInput):
-			utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Enter the bank, a 10-digit account number and the account name.", "payer_bad_input")
+			utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Enter the bank and a 10-digit account number.", "payer_bad_input")
 		case errors.Is(err, services.ErrPayerUnknownBank):
 			utils.ErrorResponseWithCode(c, http.StatusBadRequest, "Choose the bank from the list.", "payer_unknown_bank")
 		case errors.Is(err, services.ErrPayerAccountNotFound):

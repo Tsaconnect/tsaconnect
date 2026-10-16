@@ -21,8 +21,9 @@ import (
 // an account that is not in their own name resolves it themselves. The
 // statement carries the sender's name and bank but never their account number,
 // so the number is only used for a name enquiry at the bank; a credit is
-// attributed on a declaration only when the typed name, the bank's name for
-// that account and the statement's sender name all agree, the sender bank is
+// attributed on a declaration only when the bank's name for that account (the
+// buyer never types it — owner, 2026-10-16) agrees with the statement's sender
+// name, the sender bank is
 // the declared one, the amount is the claim's, the money arrived after the
 // claim opened, and nobody else's claim could have been owed it.
 
@@ -59,10 +60,6 @@ var (
 	ErrPayerUnknownBank     = errors.New("payer declaration: unknown bank")
 	ErrPayerUnavailable     = errors.New("payer declaration: not available right now")
 	ErrPayerLookupFailed    = errors.New("payer declaration: the bank could not be reached")
-	// ErrPayerNameMismatch: the typed name is not the bank's name for the
-	// account. The bank's name is deliberately NOT returned — that would make
-	// this endpoint a name-enquiry oracle for any account number.
-	ErrPayerNameMismatch = errors.New("payer declaration: the name does not match the bank's record")
 )
 
 // DeclarePayerResult is the declaration and what became of it.
@@ -92,14 +89,13 @@ var payerAccountNumber = regexp.MustCompile(`^\d{10}$`)
 // the bank confirms the account's name, and binds a matching credit that has
 // already arrived. orderID is the claim id: an IT intent (MCGP or stable/pool
 // buy) or a P2P trade.
-func (s *InboundPayerService) Declare(ctx context.Context, userID, orderID uuid.UUID, bankCode, accountNumber, accountName string) (*DeclarePayerResult, error) {
+func (s *InboundPayerService) Declare(ctx context.Context, userID, orderID uuid.UUID, bankCode, accountNumber string) (*DeclarePayerResult, error) {
 	if s == nil || s.db == nil || s.matcher == nil || s.banks == nil {
 		return nil, ErrPayerUnavailable
 	}
 	bankCode = strings.TrimSpace(bankCode)
 	accountNumber = strings.TrimSpace(accountNumber)
-	accountName = strings.Join(strings.Fields(accountName), " ")
-	if bankCode == "" || !payerAccountNumber.MatchString(accountNumber) || accountName == "" || len(accountName) > 128 {
+	if bankCode == "" || !payerAccountNumber.MatchString(accountNumber) {
 		return nil, ErrPayerBadInput
 	}
 
@@ -138,14 +134,13 @@ func (s *InboundPayerService) Declare(ctx context.Context, userID, orderID uuid.
 	if resolved == "" {
 		return nil, ErrPayerAccountNotFound
 	}
-	if !MatchAccountName(accountName, resolved).IsMatch() {
-		return nil, ErrPayerNameMismatch
-	}
 
 	decl := &models.InboundPayerDeclaration{
 		UserID: userID, ClaimType: claim.Type, ClaimID: claim.ID, AmountKobo: claim.AmountKobo,
 		BankCode: bankCode, BankName: bankName, AccountNumber: accountNumber,
-		TypedName: accountName, ResolvedName: resolved, Status: models.PayerDeclarationWaiting,
+		// The name comes from the bank, never the buyer; typed_name keeps it too
+		// so older rows and the console read the same.
+		TypedName: resolved, ResolvedName: resolved, Status: models.PayerDeclarationWaiting,
 	}
 	// A newer declaration replaces an unmatched one; a matched one is final.
 	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{
@@ -325,15 +320,13 @@ const (
 )
 
 // payerFits applies the declaration's sender rules to one credit (amount and
-// timing are the caller's): the statement's sender name must agree with BOTH
-// the typed name and the bank's name for the account, and its bank must be the
-// declared bank.
+// timing are the caller's): the statement's sender name must agree with the
+// bank's name for the declared account, and its bank must be the declared bank.
 func payerFits(decl *models.InboundPayerDeclaration, credit *models.InboundCredit) payerFit {
 	if strings.TrimSpace(credit.SenderName) == "" {
 		return payerFitNo
 	}
-	if !MatchAccountName(decl.ResolvedName, credit.SenderName).IsMatch() ||
-		!MatchAccountName(decl.TypedName, credit.SenderName).IsMatch() {
+	if !MatchAccountName(decl.ResolvedName, credit.SenderName).IsMatch() {
 		return payerFitNo
 	}
 	switch payerSameBank(decl.BankName, credit.SenderBank) {

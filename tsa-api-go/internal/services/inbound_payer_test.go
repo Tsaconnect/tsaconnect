@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -142,9 +141,9 @@ func (r *payerRig) soleCandidate(t *testing.T, credit *models.InboundCredit) {
 	}
 }
 
-func (r *payerRig) declare(t *testing.T, bank, number, name string) (*DeclarePayerResult, error) {
+func (r *payerRig) declare(t *testing.T, bank, number string) (*DeclarePayerResult, error) {
 	t.Helper()
-	return r.svc.Declare(context.Background(), r.buyer, r.claim.ID, bank, number, name)
+	return r.svc.Declare(context.Background(), r.buyer, r.claim.ID, bank, number)
 }
 
 func TestPayer_HeldCreditFromAnotherAccountBindsOnDeclaration(t *testing.T) {
@@ -153,7 +152,7 @@ func TestPayer_HeldCreditFromAnotherAccountBindsOnDeclaration(t *testing.T) {
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	r.soleCandidate(t, credit)
 
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -181,16 +180,23 @@ func TestPayer_HeldCreditFromAnotherAccountBindsOnDeclaration(t *testing.T) {
 	}
 }
 
-func TestPayer_TypedNameMustMatchTheBanksName(t *testing.T) {
+// The buyer never types the name: it is the bank's, from the name enquiry.
+func TestPayer_NameComesFromTheBank(t *testing.T) {
 	r := newPayerRig(t, 150_000)
-	_, err := r.declare(t, "999992", "8012345678", "Someone Else Entirely")
-	if !errors.Is(err, ErrPayerNameMismatch) {
-		t.Fatalf("err = %v, want ErrPayerNameMismatch", err)
+	res, err := r.declare(t, "999992", "8012345678")
+	if err != nil {
+		t.Fatalf("Declare: %v", err)
 	}
-	// The bank's name must never come back: that would be a name lookup for
-	// any account number.
-	if strings.Contains(err.Error(), "JOYCLARE") {
-		t.Errorf("mismatch error leaks the bank's name: %v", err)
+	if res.Declaration.ResolvedName != "JOYCLARE KOSARACHI ELEM" || r.banks.lookups != 1 {
+		t.Fatalf("declaration name = %q (lookups %d), want the bank's record", res.Declaration.ResolvedName, r.banks.lookups)
+	}
+}
+
+// An account number the bank doesn't know is refused, nothing saved.
+func TestPayer_UnknownAccountIsRefused(t *testing.T) {
+	r := newPayerRig(t, 150_000)
+	if _, err := r.declare(t, "999992", "0000000000"); !errors.Is(err, ErrPayerAccountNotFound) {
+		t.Fatalf("err = %v, want ErrPayerAccountNotFound", err)
 	}
 	var n int64
 	r.db.Model(&models.InboundPayerDeclaration{}).Count(&n)
@@ -204,7 +210,7 @@ func TestPayer_SenderNameMustMatchTheDeclaredAccount(t *testing.T) {
 	credit := seedSenderCredit(t, r.db, "sess-2", 150_000, "OPAY", "SOMEBODY ELSE",
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -220,7 +226,7 @@ func TestPayer_DifferentBankDoesNotBind(t *testing.T) {
 	r := newPayerRig(t, 150_000)
 	seedSenderCredit(t, r.db, "sess-3", 150_000, "PalmPay", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -233,7 +239,7 @@ func TestPayer_CreditBeforeTheOrderOpenedIsIgnored(t *testing.T) {
 	r := newPayerRig(t, 150_000)
 	seedSenderCredit(t, r.db, "sess-4", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-2*time.Hour), models.InboundCreditHeld)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -246,7 +252,7 @@ func TestPayer_OverTheCapGoesToReview(t *testing.T) {
 	r := newPayerRig(t, PayerSelfResolveMaxKobo+100)
 	credit := seedSenderCredit(t, r.db, "sess-5", PayerSelfResolveMaxKobo+100, "OPAY",
 		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -270,7 +276,7 @@ func TestPayer_TwoFittingCreditsGoToReview(t *testing.T) {
 		seedSenderCredit(t, r.db, ref, 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 			time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	}
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -282,7 +288,7 @@ func TestPayer_TwoFittingCreditsGoToReview(t *testing.T) {
 func TestPayer_SomeoneElsesOrderReadsAsNoOrder(t *testing.T) {
 	r := newPayerRig(t, 150_000)
 	stranger := seedVerifiedBuyer(t, r.db, "Mallam Stranger")
-	_, err := r.svc.Declare(context.Background(), stranger, r.claim.ID, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	_, err := r.svc.Declare(context.Background(), stranger, r.claim.ID, "999992", "8012345678")
 	if !errors.Is(err, ErrPayerClaimNotFound) {
 		t.Fatalf("err = %v, want ErrPayerClaimNotFound", err)
 	}
@@ -294,7 +300,7 @@ func TestPayer_SomeoneElsesOrderReadsAsNoOrder(t *testing.T) {
 func TestPayer_UnverifiedBuyerIsRefused(t *testing.T) {
 	r := newPayerRig(t, 150_000)
 	r.db.Exec(`UPDATE users SET verification_status = 'pending' WHERE id = ?`, r.buyer)
-	_, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	_, err := r.declare(t, "999992", "8012345678")
 	if !errors.Is(err, ErrKYCVerificationRequired) {
 		t.Fatalf("err = %v, want ErrKYCVerificationRequired", err)
 	}
@@ -304,7 +310,7 @@ func TestPayer_UnverifiedBuyerIsRefused(t *testing.T) {
 // when it lands, instead of holding it as no_name_match.
 func TestPayer_MatcherBindsALaterCreditOnTheDeclaration(t *testing.T) {
 	r := newPayerRig(t, 150_000)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil || res.Outcome != models.PayerDeclarationWaiting {
 		t.Fatalf("Declare: %v / %v, want waiting", err, res)
 	}
@@ -345,7 +351,7 @@ func TestPayer_ProductReviewKeepsTheDeclarationOpen(t *testing.T) {
 	credit := seedSenderCredit(t, r.db, "sess-9", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	r.soleCandidate(t, credit)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -381,11 +387,11 @@ func TestPayerSameBank(t *testing.T) {
 // replaced, never duplicated.
 func TestPayer_RedeclaringReplacesAnUnmatchedDeclaration(t *testing.T) {
 	r := newPayerRig(t, 150_000)
-	first, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	first, err := r.declare(t, "999992", "8012345678")
 	if err != nil || first.Outcome != models.PayerDeclarationWaiting {
 		t.Fatalf("first: %v / %v", err, first)
 	}
-	second, err := r.declare(t, "058", "0123456789", "Ada Lovelace")
+	second, err := r.declare(t, "058", "0123456789")
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -409,7 +415,7 @@ func TestPayer_DeclarationNeverTakesAnUnmatchedCredit(t *testing.T) {
 	r := newPayerRig(t, 150_000)
 	credit := seedSenderCredit(t, r.db, "sess-10", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-1*time.Minute), models.InboundCreditUnmatched)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -431,7 +437,7 @@ func TestPayer_OwnersNameBeatsAnotherBuyersDeclaration(t *testing.T) {
 	victimClaim.OpenedAt = time.Now().Add(-10 * time.Minute)
 	r.src.claims = append(r.src.claims, victimClaim)
 
-	if _, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem"); err != nil {
+	if _, err := r.declare(t, "999992", "8012345678"); err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
 	credit := seedSenderCredit(t, r.db, "sess-11", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
@@ -454,7 +460,7 @@ func TestPayer_ContestedHoldIsNotForDeclarations(t *testing.T) {
 	r.db.Model(&models.InboundCredit{}).Where("id = ?", credit.ID).
 		Update("hold_reason_code", models.InboundHoldContested)
 
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -475,7 +481,7 @@ func TestPayer_AnotherOrderAtTheSameAmountGoesToReview(t *testing.T) {
 	credit := seedSenderCredit(t, r.db, "sess-13", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -497,7 +503,7 @@ func TestPayer_AdminAssignMatchesTheDeclarationAndRefundClosesIt(t *testing.T) {
 	r := newPayerRig(t, PayerSelfResolveMaxKobo+100)
 	credit := seedSenderCredit(t, r.db, "sess-14", PayerSelfResolveMaxKobo+100, "OPAY",
 		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil || res.Outcome != models.PayerDeclarationReview {
 		t.Fatalf("Declare: %v / %v, want review", err, res)
 	}
@@ -517,7 +523,7 @@ func TestPayer_AdminAssignMatchesTheDeclarationAndRefundClosesIt(t *testing.T) {
 	r2 := newPayerRig(t, PayerSelfResolveMaxKobo+100)
 	credit2 := seedSenderCredit(t, r2.db, "sess-15", PayerSelfResolveMaxKobo+100, "OPAY",
 		"JOYCLARE KOSARACHI ELEM", time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
-	res2, err := r2.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res2, err := r2.declare(t, "999992", "8012345678")
 	if err != nil || res2.Outcome != models.PayerDeclarationReview {
 		t.Fatalf("Declare: %v / %v, want review", err, res2)
 	}
@@ -559,7 +565,7 @@ func TestPayer_AdminRefundCannotRaceADeclaredBind(t *testing.T) {
 	r.src.onAccept = func() {
 		_, refundErr = admin.MarkRefunded(context.Background(), uuid.New(), credit.ID, "refunding")
 	}
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil || res.Outcome != models.PayerDeclarationMatched {
 		t.Fatalf("Declare: %v / %v, want matched", err, res)
 	}
@@ -579,7 +585,7 @@ func TestPayer_InterruptedBindIsFinishedNotHandedBack(t *testing.T) {
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	r.soleCandidate(t, credit)
 	r.src.acceptErr = errors.New("chain blip")
-	if _, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem"); err != nil {
+	if _, err := r.declare(t, "999992", "8012345678"); err != nil {
 		t.Fatalf("Declare: %v (a settle failure is logged, the declaration saved)", err)
 	}
 	if got := reloadCredit(t, r.db, credit.ID); got.Status != models.InboundCreditBinding {
@@ -624,7 +630,7 @@ func TestPayer_OtherCandidateAtArrivalSendsToReviewEvenIfGoneNow(t *testing.T) {
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	r.db.Model(&models.InboundCredit{}).Where("id = ?", credit.ID).Update("held_claim_ids",
 		InboundClaimTypeITStable+":"+uuid.New().String()+","+InboundClaimTypeITStable+":"+r.claim.ID.String())
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil || res.Outcome != models.PayerDeclarationReview {
 		t.Fatalf("Declare: %v / %v, want review", err, res)
 	}
@@ -651,7 +657,7 @@ func TestPayer_ProductRefusalKeepsTheProductsReason(t *testing.T) {
 	credit := seedSenderCredit(t, r.db, "sess-24", 150_000, "OPAY", "JOYCLARE KOSARACHI ELEM",
 		time.Now().Add(-5*time.Minute), models.InboundCreditHeld)
 	r.soleCandidate(t, credit)
-	if _, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem"); err != nil {
+	if _, err := r.declare(t, "999992", "8012345678"); err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
 	got := reloadCredit(t, r.db, credit.ID)
@@ -664,7 +670,7 @@ func TestPayer_ProductRefusalKeepsTheProductsReason(t *testing.T) {
 // name, and a stale waiting one closes on its own.
 func TestPayer_DeclarationsCloseWhenNoLongerOwed(t *testing.T) {
 	r := newPayerRig(t, 150_000)
-	res, err := r.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res, err := r.declare(t, "999992", "8012345678")
 	if err != nil {
 		t.Fatalf("Declare: %v", err)
 	}
@@ -679,7 +685,7 @@ func TestPayer_DeclarationsCloseWhenNoLongerOwed(t *testing.T) {
 	}
 
 	r2 := newPayerRig(t, 150_000)
-	res2, _ := r2.declare(t, "999992", "8012345678", "Joyclare Kosarachi Elem")
+	res2, _ := r2.declare(t, "999992", "8012345678")
 	r2.db.Model(&models.InboundPayerDeclaration{}).Where("id = ?", res2.Declaration.ID).
 		Update("created_at", time.Now().Add(-72*time.Hour))
 	if _, err := r2.m.MatchPending(context.Background(), 10); err != nil {

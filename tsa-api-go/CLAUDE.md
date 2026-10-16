@@ -372,9 +372,9 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
 - Per-variable rationale is in `.env.example`; read it before changing any of them.
 - **Payer declarations** (`services/inbound_payer.go`, owner 2026-10-16): a buyer whose naira
   came from an account not in their name calls `POST /api/inbound/payer {orderId, bankCode,
-  accountNumber, accountName}` (KYC-verified, 10/15 min per user). The bank's name for the
-  number (name enquiry) must match the typed name, and a credit is attributed only when the
-  statement sender name matches BOTH, the sender bank is the declared one (`payerSameBank`; an
+  accountNumber}` (KYC-verified, 10/15 min per user). The account name is the bank's (name
+  enquiry) — the buyer never types it — and a credit is attributed only when the statement
+  sender name matches it, the sender bank is the declared one (`payerSameBank`; an
   uncomparable bank goes to review, never a bind), the amount is the claim's and it arrived after
   the claim opened. Funding rows carry no sender account number, so the number is never compared.
   Declare settles only credits already held `sender_matches_no_candidate_name` (never unmatched
@@ -385,7 +385,7 @@ Central-account inbound attribution (default `va` — a deploy that omits all of
   then runs the product settle, so an admin refund/assign racing it gets 409; an interrupted bind
   is finished by the matcher once it has sat 30 min (`resumeDeclaredBinds`, under a conditional
   lease — Accept is idempotent after a call finishes, not alongside a live one), never handed back
-  to `held`. Handler logs pass errors through `payerLogSafe` (account digits masked). The 422 name mismatch never returns the bank's name (no name-lookup oracle).
+  to `held`. Handler logs pass errors through `payerLogSafe` (account digits masked).
   Declarations close when the order matches on the buyer's own name, or after 48 h waiting.
   ≤ ₦500,000 binds through the normal `bindCredit` path (strength `declared`, audit
   `inbound.payer_declared`, product review gates still apply — never `withManualBind`); larger,

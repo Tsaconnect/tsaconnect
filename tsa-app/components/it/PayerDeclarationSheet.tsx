@@ -3,16 +3,15 @@
 // "Paid from another account?" on a naira buy. The automatic match pairs a
 // payment with an order by amount and the buyer's own verified name; money from
 // a spouse's, friend's or business account carries someone else's name and
-// waits. Here the buyer names the account that paid: the server asks the bank
-// for that account's name, requires it to agree with the name typed here, and
-// then matches the payment by that name, bank and amount. The name is typed,
-// never auto-filled, so the bank's record has something to confirm.
+// waits. Here the buyer names the account that paid — bank and number only. The
+// name is the bank's own (looked up as they type, shown read-only), and the
+// server matches the payment by that name, bank and amount.
 import React, { useEffect, useState } from 'react';
 import { View } from 'react-native';
-import { Button, Input, PickerSheet, SelectRow, Sheet, Text } from '@/components/ui';
+import { Button, Input, PickerSheet, SelectRow, Sheet, Spinner, Text } from '@/components/ui';
 import type { PickerItem } from '@/components/ui';
 import { useTheme } from '@/theme';
-import { getNigerianBanks, type NgBank } from '@/services/ngBanks';
+import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
 import { declarePayer, type PayerDeclaration } from '@/services/itApi';
 
 export interface PayerDeclarationSheetProps {
@@ -35,9 +34,11 @@ export function PayerDeclarationSheet({ visible, orderId, onClose, onDeclared }:
   const [bankPickerOpen, setBankPickerOpen] = useState(false);
   const [bank, setBank] = useState<NgBank | null>(null);
   const [accountNumber, setAccountNumber] = useState('');
-  const [accountName, setAccountName] = useState('');
+  // The bank's name for bank + number: null until looked up.
+  const [accountName, setAccountName] = useState<string | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [nameError, setNameError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [done, setDone] = useState<PayerDeclaration | null>(null);
 
@@ -55,28 +56,51 @@ export function PayerDeclarationSheet({ visible, orderId, onClose, onDeclared }:
   // Each opening starts clean: a previous attempt's errors are not this one's.
   useEffect(() => {
     if (visible) {
-      setNameError(null);
       setFormError(null);
       setDone(null);
     }
   }, [visible]);
 
-  const ready = !!bank && accountNumber.length === 10 && accountName.trim().length >= 3;
+  // Name enquiry once the bank and all ten digits are in, debounced; a later
+  // edit drops the earlier answer so a stale name is never shown.
+  useEffect(() => {
+    setAccountName(null);
+    setLookupError(null);
+    if (!bank || accountNumber.length !== 10) return;
+    let live = true;
+    setLookingUp(true);
+    const timer = setTimeout(() => {
+      resolveAccountName(bank.code, accountNumber)
+        .then((r) => {
+          if (!live) return;
+          if (r.ok) setAccountName(r.accountName);
+          else
+            setLookupError(
+              r.reason === 'not_found'
+                ? "The bank couldn't find this account. Check the number and the bank."
+                : "We couldn't reach the bank to check this account. Try again in a moment."
+            );
+        })
+        .finally(() => live && setLookingUp(false));
+    }, 400);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+      setLookingUp(false);
+    };
+  }, [bank, accountNumber]);
+
+  const ready = !!bank && accountNumber.length === 10 && !!accountName && !lookingUp;
 
   const submit = async () => {
     if (!bank || !ready) return;
     setSubmitting(true);
-    setNameError(null);
     setFormError(null);
-    const r = await declarePayer(orderId, bank.code, accountNumber, accountName.trim());
+    const r = await declarePayer(orderId, bank.code, accountNumber);
     setSubmitting(false);
     if (r.success && r.data) {
       setDone(r.data);
       onDeclared(r.data);
-      return;
-    }
-    if (r.code === 'payer_name_mismatch') {
-      setNameError(r.message || "That name doesn't match the bank's record for this account.");
       return;
     }
     setFormError(r.message || 'Something went wrong. Try again.');
@@ -107,8 +131,8 @@ export function PayerDeclarationSheet({ visible, orderId, onClose, onDeclared }:
           ) : (
             <>
               <Text variant="bodySm" style={{ color: colors.textMuted }}>
-                If the transfer came from an account that isn&apos;t in your name, tell us which one. We check
-                the name with the bank, then match the payment to your order.
+                If the transfer came from an account that isn&apos;t in your name, tell us which one. We get
+                the account name from the bank and match the payment to your order.
               </Text>
               <SelectRow
                 label="Bank that sent the money"
@@ -127,14 +151,12 @@ export function PayerDeclarationSheet({ visible, orderId, onClose, onDeclared }:
               />
               <Input
                 label="Account name"
-                placeholder="Name on the account, as the bank shows it"
-                autoCapitalize="words"
-                value={accountName}
-                onChangeText={(v) => {
-                  setAccountName(v);
-                  if (nameError) setNameError(null);
-                }}
-                error={nameError ?? undefined}
+                placeholder={bank && accountNumber.length === 10 ? 'Checking with the bank…' : 'Filled in by the bank'}
+                value={accountName ?? ''}
+                editable={false}
+                error={lookupError ?? undefined}
+                helper={accountName ? 'Verified with the bank' : undefined}
+                rightAdornment={lookingUp ? <Spinner size="small" /> : undefined}
               />
               {formError ? (
                 <Text variant="bodySm" style={{ color: colors.danger }}>
