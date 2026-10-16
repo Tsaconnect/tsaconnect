@@ -18,11 +18,8 @@
 import { Pressable, View } from "react-native";
 import React, { useEffect, useState } from "react";
 import { Drawer } from "expo-router/drawer";
-import {
-  DrawerContentScrollView,
-  DrawerItemList,
-  DrawerItem,
-} from "@react-navigation/drawer";
+import { DrawerContentScrollView, DrawerItem } from "@react-navigation/drawer";
+import { CommonActions, DrawerActions } from "@react-navigation/native";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
 import { router } from "expo-router";
 import api from "@/components/services/api";
@@ -172,6 +169,40 @@ const Layout = () => {
     />
   );
 
+  // One drawer screen row — what react-navigation's DrawerItemList renders per
+  // route, against the FULL drawer state (focus and colours come from the
+  // screen actually focused), so the rows can be interleaved with LinkItems.
+  const ScreenItem = ({ route, index, drawer }: { route: any; index: number; drawer: any }) => {
+    const { state, navigation, descriptors } = drawer;
+    const focused = index === state.index;
+    const focusedOptions = descriptors[state.routes[state.index].key].options;
+    const { title, drawerLabel, drawerIcon, drawerLabelStyle: labelStyle, drawerItemStyle } =
+      descriptors[route.key].options;
+    return (
+      <DrawerItem
+        route={route}
+        label={drawerLabel !== undefined ? drawerLabel : title !== undefined ? title : route.name}
+        icon={drawerIcon}
+        focused={focused}
+        activeTintColor={focusedOptions.drawerActiveTintColor}
+        inactiveTintColor={focusedOptions.drawerInactiveTintColor}
+        activeBackgroundColor={focusedOptions.drawerActiveBackgroundColor}
+        inactiveBackgroundColor={focusedOptions.drawerInactiveBackgroundColor}
+        labelStyle={labelStyle}
+        style={drawerItemStyle}
+        onPress={() => {
+          const event = navigation.emit({ type: "drawerItemPress", target: route.key, canPreventDefault: true });
+          if (!event.defaultPrevented) {
+            navigation.dispatch({
+              ...(focused ? DrawerActions.closeDrawer() : CommonActions.navigate(route)),
+              target: state.key,
+            });
+          }
+        }}
+      />
+    );
+  };
+
   const CustomDrawerContent = (props: any) => (
     <DrawerContentScrollView {...props}>
       {/* Identity header — who's signed in, tap to manage the account. */}
@@ -210,9 +241,11 @@ const Layout = () => {
       </Pressable>
       <Divider spacing="sm" inset={spacing.xl} />
 
-      {drawerSegments(props.state, Object.keys(linksAfter)).map((seg) => (
+      {drawerSegments(props.state.routes, Object.keys(linksAfter)).map((seg) => (
         <React.Fragment key={seg.anchor ?? "rest"}>
-          <DrawerItemList {...props} state={seg.state} />
+          {seg.routes.map(({ route, index }) => (
+            <ScreenItem key={route.key} route={route} index={index} drawer={props} />
+          ))}
           {(seg.anchor ? linksAfter[seg.anchor] : []).map((item) => (
             <LinkItem key={item.route} item={item} navigation={props.navigation} />
           ))}
