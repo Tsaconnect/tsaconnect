@@ -81,7 +81,7 @@ func TestLoad_RetiredBSCEscrowEnvRefused(t *testing.T) {
 func TestP2PPresets_BSCNetworkChosenOnce(t *testing.T) {
 	t.Setenv("BSC_NETWORK", "garbage")
 	t.Setenv("FEE_MANAGER_ADDRESS_SONIC", "")
-	t.Setenv("FEE_MANAGER_ADDRESS_BSC", poolFMAddr)
+	t.Setenv("FEE_MANAGER_ADDRESS_BSC", "") // the filled mainnet row names it
 	cfg := &Config{Networks: netsWith(map[string]ChainConfig{"bsc": {ChainID: 56}}, map[string]string{"bsc:USDT": bscUSDT})}
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
@@ -93,8 +93,8 @@ func TestP2PPresets_BSCNetworkChosenOnce(t *testing.T) {
 	if n := strings.Count(buf.String(), "p2p_network_unknown"); n != 1 {
 		t.Fatalf("p2p_network_unknown logged %d times, want once:\n%s", n, buf.String())
 	}
-	if fm, ok := cfg.FeeManagerChains[56]; !ok || fm.ChainKey != "bsc" {
-		t.Fatalf("FeeManagerChains = %+v, want BSC on its selected (mainnet) id", cfg.FeeManagerChains)
+	if fm, ok := cfg.FeeManagerChains[56]; !ok || fm.ChainKey != "bsc" || fm.Address != bscPresets["mainnet"].feeManager {
+		t.Fatalf("FeeManagerChains = %+v, want the BSC mainnet row's FeeManager on its selected id", cfg.FeeManagerChains)
 	}
 }
 
@@ -103,29 +103,32 @@ const (
 	directOwnerAddr = "0x62bA000000000000000000000000000000001b96"
 )
 
-// The BSC rows are the direct escrow: audience direct, USDT+USDC. Mainnet is
-// dormant until the switch fills the escrow (plan API-11); testnet carries
-// the OPS-2 rehearsal deploy. Sonic stays open to all until the switch.
-func TestBSCPresets_DirectRowsDormant(t *testing.T) {
+// The switch (plan API-11): both BSC rows are filled direct escrows with
+// USDT+USDC, and Sonic is Payment Merchants only on both networks.
+func TestBSCPresets_DirectRowsSwitched(t *testing.T) {
 	for _, n := range []string{"mainnet", "testnet"} {
 		r := bscPresets[n]
 		if r.audience != P2PAudienceDirect || !reflect.DeepEqual(r.assets, []string{"USDT", "USDC"}) {
 			t.Fatalf("bsc %s row = %+v", n, r)
 		}
-		if filled := r.p2pEscrow != "" && r.feeManager != "" && r.expectedOwner != ""; filled != (n == "testnet") {
-			t.Fatalf("bsc %s row filled = %t: %+v", n, filled, r)
+		if r.p2pEscrow == "" || r.feeManager == "" || r.expectedOwner == "" {
+			t.Fatalf("bsc %s row is not filled: %+v", n, r)
 		}
-		if sonicPresets[n].audience != P2PAudienceAll {
-			t.Fatalf("sonic %s audience = %q; it flips to pm only with the BSC switch", n, sonicPresets[n].audience)
+		if sonicPresets[n].audience != P2PAudiencePM {
+			t.Fatalf("sonic %s audience = %q, want pm (direct P2P is on BSC)", n, sonicPresets[n].audience)
 		}
 	}
 	cfg := &Config{Networks: netsWith(map[string]ChainConfig{"bsc": {ChainID: 56}}, map[string]string{"bsc:USDT": bscUSDT})}
 	if err := assembleP2PChains(cfg, map[string]map[string]chainPreset{"bsc": bscPresets}); err != nil {
 		t.Fatal(err)
 	}
-	want := []P2PChainConfig{{ChainID: 56, ChainKey: "bsc", Network: "mainnet", Audience: P2PAudienceDirect}}
-	if len(cfg.P2PChains) != 0 || !reflect.DeepEqual(cfg.DormantP2PChains, want) {
+	got, ok := cfg.P2PChains[56]
+	if !ok || len(cfg.DormantP2PChains) != 0 {
 		t.Fatalf("chains = %v dormant = %+v", cfg.P2PChains, cfg.DormantP2PChains)
+	}
+	if got.Audience != P2PAudienceDirect || got.EscrowAddress != bscPresets["mainnet"].p2pEscrow ||
+		got.FeeManager != bscPresets["mainnet"].feeManager || got.ExpectedOwner != bscPresets["mainnet"].expectedOwner {
+		t.Fatalf("bsc mainnet chain = %+v", got)
 	}
 }
 

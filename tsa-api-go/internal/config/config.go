@@ -71,11 +71,11 @@ var sonicPresets = map[string]chainPreset{
 		// in-flight trades still settle and withdraw — those exit paths
 		// never consult this list.
 		assets: []string{"USDT", "USDC"},
-		// audience: direct user-to-user P2P moves to BSC (decisions
-		// 2026-10-12). Sonic flips to P2PAudiencePM — Payment Merchants only —
-		// in the same change that fills the BSC mainnet direct row
-		// (p2p_presets.go), so there is never a window with no direct P2P.
-		audience:   P2PAudienceAll,
+		// audience: direct user-to-user P2P moved to BSC (decisions
+		// 2026-10-12). Sonic is Payment Merchants only, flipped in the same
+		// change that filled the BSC mainnet direct row (p2p_presets.go), so
+		// there is never a window with no direct P2P.
+		audience:   P2PAudiencePM,
 		escrowEnv:  "P2P_ESCROW_ADDRESS",
 		versionEnv: "P2P_ESCROW_EIP712_VERSION",
 		chainIDEnv: "SONIC_CHAIN_ID",
@@ -91,7 +91,7 @@ var sonicPresets = map[string]chainPreset{
 		p2pEscrow:     "0x1B1ade6459623810Cf158Cd4F7D3FC8E126858f7",
 		eip712Version: "2",
 		assets:        []string{"USDT", "USDC"},
-		audience:      P2PAudienceAll,
+		audience:      P2PAudiencePM,
 		escrowEnv:     "P2P_ESCROW_ADDRESS",
 		versionEnv:    "P2P_ESCROW_EIP712_VERSION",
 		chainIDEnv:    "SONIC_CHAIN_ID",

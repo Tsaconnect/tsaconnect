@@ -24,13 +24,17 @@ const (
 
 // bscPresets: direct (user-to-user) P2P on BSC (decisions 2026-10-12): a
 // P2PEscrowV3 with its OWN FeeManager, whose admins are dispute arbiters only.
-// Empty rows: dormant. The mainnet row is filled at the switch (plan API-11),
-// with expectedOwner = the owner the deploy handed both contracts to; the
+// Empty rows: dormant. The mainnet row was filled at the switch (plan API-11),
+// with expectedOwner = the owner of both contracts; the
 // escrow is registered only if every direct gate passes at boot
 // (services/p2p_direct_gates.go). The shared liquidity pool on BSC is its own
 // preset (liquidity_pool.go) and is not a P2P escrow.
 var bscPresets = map[string]chainPreset{
-	"mainnet": {p2pEscrow: "", eip712Version: "2", feeManager: "", expectedOwner: "",
+	// Mainnet (OPS-3) 2026-10-17, block 128178673: deployed by
+	// deploy/p2p-direct.js with owner = deployer (decision 2026-10-16),
+	// arbiter 0x2a88…0A0D, 1.9% p2p_platform.
+	"mainnet": {p2pEscrow: "0xD16c1597EA3be8D2017698CC5d6Bf53b595EEb03", eip712Version: "2",
+		feeManager: "0xe760018f5b3fE4E8EF52DC029898545ed03d74ac", expectedOwner: "0xB3D5B867453bC6aD5534C76Ab47655685AcF2834",
 		audience: P2PAudienceDirect, assets: []string{"USDT", "USDC"}},
 	// Testnet rehearsal (OPS-2) 2026-10-17: deployed by deploy/p2p-direct.js
 	// with owner = deployer, arbiter 0x2a88…0A0D, 1.9% p2p_platform.

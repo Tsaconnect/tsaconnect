@@ -93,7 +93,7 @@ func TestLoad_SonicRowByteIdentical(t *testing.T) {
 	t.Setenv("SONIC_NETWORK", "mainnet")
 	cfg := Load()
 	want := P2PChainConfig{ChainID: 146, ChainKey: "sonic", EscrowAddress: "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324",
-		EIP712Version: "2", Assets: []string{"USDT", "USDC"}, Purpose: P2PPurposeP2P, Network: "mainnet", Audience: P2PAudienceAll}
+		EIP712Version: "2", Assets: []string{"USDT", "USDC"}, Purpose: P2PPurposeP2P, Network: "mainnet", Audience: P2PAudiencePM}
 	if got := cfg.P2PChains[146]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sonic = %+v\nwant %+v", got, want)
 	}
