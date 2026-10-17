@@ -36,8 +36,11 @@
 //
 //   npx hardhat run scripts/verify-direct-escrow.js --network bscMainnet
 //
+// DIRECT_LOGS_RPC (optional) sends only the eth_getLogs scan to another RPC of
+// the same chain, for networks whose RPC refuses logs (see logsProviderFor).
+//
 // (scripts/verify-deployed-escrow.js is the ProductEscrow print-out.)
-const { getAddress, isAddress, ZeroAddress } = require("ethers");
+const { getAddress, isAddress, ZeroAddress, JsonRpcProvider } = require("ethers");
 const { resolveChain, readLedger } = require("../deploy/lib");
 const { DETERMINISTIC_ROLES } = require("../deploy/chains");
 const { directMismatches, planFrom, foreignFeeManagers, DIRECT_NAME, LEDGER_FM, LEDGER_ESC } = require("../deploy/p2p-direct");
@@ -55,6 +58,19 @@ async function scanLogs(provider, { address, topics, fromBlock, toBlock, chunk =
     logs.push(...(await provider.getLogs({ address, topics, fromBlock: from, toBlock: to })));
   }
   return logs.sort((a, b) => a.blockNumber - b.blockNumber || a.index - b.index);
+}
+
+// logsProviderFor: free BSC RPCs split the work — the BNB Chain nodes return
+// receipts but refuse eth_getLogs, publicnode answers logs but not receipts.
+// DIRECT_LOGS_RPC points only the event scan at a second RPC; it must report
+// the same chain id.
+async function logsProviderFor(provider, url = process.env.DIRECT_LOGS_RPC) {
+  if (!url) return provider;
+  const { chainId } = await provider.getNetwork();
+  const logs = new JsonRpcProvider(url, chainId, { staticNetwork: true });
+  const got = BigInt(await logs.send("eth_chainId", []));
+  if (got !== chainId) throw new Error(`DIRECT_LOGS_RPC reports chain ${got}, the network is ${chainId}`);
+  return logs;
 }
 
 async function implementationOf(provider, proxy) {
@@ -135,12 +151,13 @@ async function verifyDirectEscrow(hre, { escrow, feeManager, fromBlock, expected
 
   // Event history, chunked from the deploy block.
   const toBlock = await provider.getBlockNumber();
+  const logsProvider = await logsProviderFor(provider);
   const ev = (c, name) => c.interface.getEvent(name).topicHash;
-  const escLogs = await scanLogs(provider, {
+  const escLogs = await scanLogs(logsProvider, {
     address: escrow, fromBlock, toBlock, chunk,
     topics: [[ev(esc, "AdminAdded"), ev(esc, "AdminRemoved"), ev(esc, "OwnershipTransferred"), ev(esc, "TokenAcceptanceUpdated")]],
   });
-  const fmLogs = await scanLogs(provider, {
+  const fmLogs = await scanLogs(logsProvider, {
     address: feeManager, fromBlock, toBlock, chunk, topics: [[ev(fm, "OwnershipTransferred")]],
   });
   report.push(`scanned blocks ${fromBlock}..${toBlock} in ${chunk}-block chunks: escrow ${escLogs.length} logs, FeeManager ${fmLogs.length} logs`);
