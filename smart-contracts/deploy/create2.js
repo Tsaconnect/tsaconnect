@@ -35,6 +35,18 @@ async function hasCode(provider, address) {
   return (await provider.getCode(address)) !== "0x";
 }
 
+// Public RPCs are load-balanced: right after a mined deploy, getCode can be
+// answered by a node a block behind (seen on BSC testnet 2026-10-17). Poll
+// before calling a fresh deploy missing.
+const CODE_POLL = { attempts: 20, intervalMs: 1500 };
+async function hasCodeAfterDeploy(provider, address, poll = CODE_POLL) {
+  for (let i = 0; i < poll.attempts; i++) {
+    if (await hasCode(provider, address)) return true;
+    if (i + 1 < poll.attempts) await new Promise((r) => setTimeout(r, poll.intervalMs));
+  }
+  return false;
+}
+
 // ensureFactory fails clearly when the factory is missing on a live network. On
 // a local hardhat network it installs the REAL factory by broadcasting the same
 // presigned tx every live chain used, so tests exercise the genuine bytecode.
@@ -66,10 +78,10 @@ async function deployCreate2(hre, signer, { salt, initCode, label }) {
     const tx = await signer.sendTransaction({ to: FACTORY, data: concat([salt, initCode]) });
     await tx.wait();
   } catch (e) {
-    if (!(await hasCode(provider, address))) throw e;
+    if (!(await hasCodeAfterDeploy(provider, address))) throw e;
     return { address, reused: true };
   }
-  if (!(await hasCode(provider, address))) throw new Error(`create2: ${label} has no code at ${address} after deploy`);
+  if (!(await hasCodeAfterDeploy(provider, address))) throw new Error(`create2: ${label} has no code at ${address} after deploy`);
   return { address, reused: false };
 }
 
@@ -93,6 +105,8 @@ module.exports = {
   saltOf,
   predict,
   hasCode,
+  hasCodeAfterDeploy,
+  CODE_POLL,
   isLocalNetwork,
   ensureFactory,
   deployCreate2,

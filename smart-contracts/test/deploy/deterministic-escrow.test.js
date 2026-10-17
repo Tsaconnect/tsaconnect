@@ -349,6 +349,15 @@ describe("deploy/deterministic-escrow", function () {
     await expect(create2.ensureFactory(live)).to.be.rejectedWith(/has no code on bscTestnet/);
   });
 
+  it("waits out an RPC node that lags behind a mined deploy", async () => {
+    let reads = 0;
+    const lagging = { getCode: async () => (++reads < 3 ? "0x" : "0x60") };
+    expect(await create2.hasCodeAfterDeploy(lagging, create2.FACTORY, { attempts: 5, intervalMs: 1 })).to.equal(true);
+    expect(reads).to.equal(3);
+    const empty = { getCode: async () => "0x" };
+    expect(await create2.hasCodeAfterDeploy(empty, create2.FACTORY, { attempts: 3, intervalMs: 1 })).to.equal(false);
+  });
+
   it("CHECK_ONLY prints the addresses and sends nothing", async () => {
     const C = await newChain(31343);
     const [deployer] = await C.ethers.getSigners();
