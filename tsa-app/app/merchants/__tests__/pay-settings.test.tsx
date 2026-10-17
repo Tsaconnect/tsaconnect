@@ -217,17 +217,6 @@ it('asks for the password before anything else', async () => {
   expect(text(tree)).toContain('Enter your account password to confirm.');
 });
 
-it('a refused name says whose account the bank thinks it is', async () => {
-  jest.mocked(updateSettlement).mockRejectedValue(Object.assign(
-    new Error("That account isn't in your business name or your verified name."), { status: 422, code: 'name_mismatch' }));
-  const tree = await mount();
-  await fillBankChange(tree, 'correct-horse');
-  await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
-  await act(async () => { mockAuthorization.props.onAuthorized(); });
-  await flush();
-  expect(text(tree)).toContain('The bank says this account belongs to EMEKA NWOSU.');
-});
-
 it('starts her payment links: Request payment and the Payment links row', async () => {
   const tree = await mount();
   await act(async () => { byLabel(tree, 'button:Request payment').props.onPress(); });

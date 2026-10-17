@@ -60,7 +60,6 @@ export type SettlementAnswer = { merchant?: OwnMerchant; confirmation?: PendingC
 /** Machine codes the owner routes answer with — keyed on, never the words beside them. */
 export const OWNER_CODES = {
   NO_MERCHANT: 'no_merchant',
-  NAME_MISMATCH: 'name_mismatch',
   PASSWORD_INCORRECT: 'password_incorrect',
   ACCOUNT_LOCKED: 'account_locked',
   STALE: 'merchant_stale',

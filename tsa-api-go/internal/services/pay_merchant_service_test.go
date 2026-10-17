@@ -694,24 +694,25 @@ func TestPayMerchant_OwnerSettlementToAnAccountInTheirVerifiedName(t *testing.T)
 	}
 }
 
-func TestPayMerchant_OwnerSettlementRefusesAnAccountThatIsNotTheirs(t *testing.T) {
+// A store often has no account of its own (owner 2026-10-17): any account that
+// resolves is accepted, whoever's name the bank gives for it, and the name the
+// owner was shown is what is stored.
+func TestPayMerchant_OwnerSettlementAcceptsAnAccountInAnyName(t *testing.T) {
 	for name, tc := range map[string]struct{ status, legal, bank string }{
-		"someone else's name":                                 {models.VerificationStatusVerified, "Ada Chioma Obi", "EMEKA NWOSU"},
-		"a longer business name that contains theirs":         {"", "", "SKY AIR CARGO LIMITED"},
-		"their own name padded with another's":                {models.VerificationStatusVerified, "Ada Obi", "ADA OBI EMEKA"},
-		"a verification that was rejected keeps no authority": {"rejected", "Emeka Nwosu", "EMEKA NWOSU"},
-		"a legal name column that is NULL is simply no match": {models.VerificationStatusVerified, "NULL", "EMEKA NWOSU"},
+		"a verified owner, someone else's name":    {models.VerificationStatusVerified, "Ada Chioma Obi", "EMEKA NWOSU"},
+		"an unverified owner, someone else's name": {"", "", "SKY AIR CARGO LIMITED"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := ownedMerchant(t, tc.status, tc.legal)
 			f.banks.name = tc.bank
-			if _, err := f.s.UpdateSettlementByOwner(context.Background(), f.owner, bankChange("9876543210")); !errors.Is(err, ErrPaySettlementNameMismatch) {
-				t.Fatalf("err = %v, want a name mismatch", err)
+			res := f.request(t, bankChange("9876543210"))
+			m, err := f.s.ConfirmOwnerAction(context.Background(), f.owner, res.Pending.ID, f.mail.code(t))
+			if err != nil {
+				t.Fatalf("an account in another name was refused: %v", err)
 			}
-			if got := f.stored(t); got.AccountNumber == "9876543210" || got.Version != f.m.Version {
-				t.Fatalf("a refused change landed: %+v", got)
+			if got := f.stored(t); got.AccountNumber != "9876543210" || got.AccountName != tc.bank {
+				t.Fatalf("stored %+v (returned %+v)", got, m)
 			}
-			f.nothingWaiting(t)
 		})
 	}
 }

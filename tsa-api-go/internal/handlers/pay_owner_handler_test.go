@@ -238,14 +238,14 @@ func TestPayOwner_WrongPasswordsCountTowardTheLoginLockout(t *testing.T) {
 	}
 }
 
-func TestPayOwner_AnAccountInSomeoneElsesNameIsRefused(t *testing.T) {
+func TestPayOwner_AnAccountInSomeoneElsesNameAsksForTheCode(t *testing.T) {
 	o := newOwnerRig(t)
-	o.banks.name = "SKY AIR CARGO LIMITED" // contains the business's words, but is not the business
-	if res := o.bankChange("correct-horse", "9876543210"); res.status != http.StatusUnprocessableEntity || res.Code != "name_mismatch" {
-		t.Fatalf("status %d code %q", res.status, res.Code)
+	o.banks.name = "PRECIOUSGIFT ONYINYECHI OKO"
+	if res := o.bankChange("correct-horse", "9876543210"); res.status != http.StatusAccepted {
+		t.Fatalf("status %d code %q: an account in another name must still go to the emailed code", res.status, res.Code)
 	}
-	if got := o.stored(t); got.AccountNumber != "0123456789" || len(o.events()) != 0 || o.mail.message != "" {
-		t.Fatalf("stored %+v: a refused change landed, was announced or sent a code", got)
+	if got := o.stored(t); got.AccountNumber != "0123456789" || o.mail.message == "" {
+		t.Fatalf("stored %+v: the change must wait for the code, and the code must be sent", got)
 	}
 }
 

@@ -106,12 +106,7 @@ function BankForm({ merchant: m, banks, onSaved }: { merchant: OwnMerchant; bank
       try {
         onSaved(change, await updateSettlement(change, pw, m.version));
       } catch (err) {
-        let message = messageRefreshingIfStale(err, queryClient);
-        if (err instanceof ApiError && err.code === 'name_mismatch') {
-          const name = await queryClient.fetchQuery(resolveQuery(bankCode, accountNumber)).then((r) => r.accountName, () => undefined);
-          if (name) message += ` The bank says this account belongs to ${name}.`;
-        }
-        setProblem(message);
+        setProblem(messageRefreshingIfStale(err, queryClient));
       }
     });
   }
@@ -282,7 +277,7 @@ function PayoutsBody({ merchant: m }: { merchant: OwnMerchant }) {
               <CryptoForm key={`crypto-${round}`} merchant={m} options={options} onSaved={saved} />
             )}
             <p className="text-caption text-text-secondary">
-              The account must be in your business name or the name on your verified ID. Every payout change takes effect only after
+              Check the account name before you save. Every payout change takes effect only after
               you confirm a code we email you. We email you whenever this changes.
             </p>
           </CardBody>

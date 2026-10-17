@@ -18,9 +18,8 @@ import (
 )
 
 // A TSA Pay owner asking to rename their business. The business name is what
-// customers are shown at checkout, on links and receipts, and what a payout
-// account may be named — so a rename takes effect only when an admin approves
-// it. Until then the owner sees their request as pending and everything else
+// customers are shown at checkout, on links and receipts — so a rename takes
+// effect only when an admin approves it. Until then the owner sees their request as pending and everything else
 // keeps the current name. The request itself is a guarded owner action
 // (password, then an emailed code), so a stolen session cannot even file one.
 

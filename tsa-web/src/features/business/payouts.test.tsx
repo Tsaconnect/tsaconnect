@@ -104,21 +104,6 @@ describe('payouts', () => {
     expect(f.mock.calls.filter(([u]) => u === '/api/pay/merchant/settlement')).toHaveLength(1);
   });
 
-  it("a name that is not theirs is explained with the bank's name", async () => {
-    stubFetch({
-      '/api/pay/merchant': ok(merchant),
-      '/api/pay/merchant/banks': banks,
-      '/api/pay/merchant/banks/resolve': ok({ accountNumber: '1023456789', accountName: 'EMEKA NWOSU' }),
-      '/api/pay/merchant/settlement': fail(422, "That account isn't in your business name or your verified name. Use an account in your own name.", 'name_mismatch'),
-    });
-    mountAt('/business/live/payouts');
-    await chooseBank('zen', 'Zenith Bank');
-    await userEvent.type(screen.getByLabelText('Account number'), '1023456789');
-    await userEvent.type(screen.getByLabelText('Password'), 'correct-horse');
-    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent(/belongs to EMEKA NWOSU/);
-  });
-
   it('an account the bank cannot check can still be saved', async () => {
     stubFetch({
       '/api/pay/merchant': ok(merchant),

@@ -22,10 +22,10 @@ import (
 // paid, their keys, webhooks and return domains, read and changed by the user
 // who owns the merchant. These are the changes a stolen login would make to
 // redirect a merchant's money or impersonate them, so each asks for the account
-// password again (counted toward the login lockout), a bank account must be in
-// the owner's own name, and every change waits for a code emailed to the owner
-// (a guarded owner action — see services.ConfirmOwnerAction). Every
-// applied change is announced to the owner on every channel.
+// password again (counted toward the login lockout), and every change waits for
+// a code emailed to the owner (a guarded owner action — see
+// services.ConfirmOwnerAction). Every applied change is announced to the owner
+// on every channel.
 
 // WithEvents lets the owner routes tell the owner what changed. Nil leaves the
 // change silent, which only a test should ever do.
@@ -678,8 +678,6 @@ func payOwnerFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, "We couldn't tell which merchant account to change — contact support", "merchant_ambiguous")
 	case errors.Is(err, services.ErrPayMerchantSuspended):
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, "Your merchant account is suspended — contact support", "merchant_suspended")
-	case errors.Is(err, services.ErrPaySettlementNameMismatch):
-		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "That account isn't in your business name or your verified name. Use an account in your own name.", "name_mismatch")
 	case errors.Is(err, services.ErrPayAccountUnverifiable):
 		log.Printf("[tsa-pay] owner account lookup failed: %v", err)
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "We couldn't verify that account. Check the bank and account number and try again.", "account_unverifiable")

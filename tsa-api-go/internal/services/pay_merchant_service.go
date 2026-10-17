@@ -57,10 +57,6 @@ var (
 	// since the caller read it — an explicit expectedVersion mismatch, or a
 	// concurrent writer winning the compare-and-set.
 	ErrPayMerchantStale = errors.New("this merchant was changed by someone else — reload and try again")
-	// ErrPaySettlementNameMismatch is UpdateSettlementByOwner's refusal of a
-	// bank account whose name (as the bank resolved it) is neither the
-	// merchant's business name nor the owner's KYC-verified legal name.
-	ErrPaySettlementNameMismatch = errors.New("the account name doesn't match your business name or your verified name")
 	// ErrPayAccountUnverifiable wraps (inside ErrPayMerchantInvalid) a bank
 	// account the name enquiry could not resolve. The provider's own words are
 	// for the log and an admin, never for an owner.
@@ -568,12 +564,10 @@ func (s *PayMerchantService) GetByOwner(ctx context.Context, userID uuid.UUID) (
 // would take over to redirect a merchant's money:
 //   - only the settlement destination can change — never the merchant's name,
 //     status, limits, webhooks or return domains — and not while suspended;
-//   - a bank account must be in the merchant's own name: the name the bank
-//     resolves must be the business name, or the owner's KYC-verified legal
-//     name, or a shorter form of either (never a longer one — see
-//     AccountNameWithin). The account itself is the proof;
-//   - a crypto destination has no such proof, so it is only ever a listed
-//     stablecoin;
+//   - a bank account may be in any name (a store often has no account of its
+//     own — owner 2026-10-17), but it must resolve, and the owner sees the
+//     bank's name for it before saving;
+//   - a crypto destination is only ever a listed stablecoin;
 //   - either is applied only once the owner enters the code emailed to them (a
 //     guarded owner action — see ConfirmOwnerAction). Everything above is
 //     checked first, so a change that would be refused sends no code;
@@ -590,7 +584,7 @@ func (s *PayMerchantService) UpdateSettlementByOwner(ctx context.Context, ownerI
 	if err != nil {
 		return nil, err
 	}
-	edit, err := s.prepare(ctx, m, in, s.ownerSettlementCheck(ctx, ownerID))
+	edit, err := s.prepare(ctx, m, in, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -618,25 +612,13 @@ func (s *PayMerchantService) confirmSettlementByOwner(ctx context.Context, owner
 	if err != nil {
 		return nil, err
 	}
-	inOwnName := s.ownerSettlementCheck(ctx, ownerID)
 	updated, _, err := s.update(ctx, ownerID, m.ID, in, func(u *models.PayMerchant) error {
 		if u.SettlementMode == models.PaySettlementFiat && u.AccountName != p.AccountName {
 			return fmt.Errorf("%w: %w: the account no longer resolves to the name that was confirmed", ErrPayMerchantInvalid, ErrPayAccountUnverifiable)
 		}
-		return inOwnName(u)
+		return nil
 	})
 	return updated, err
-}
-
-// ownerSettlementCheck is the rule an owner's own payout change is held to on
-// top of Update's: a bank account in the owner's own name.
-func (s *PayMerchantService) ownerSettlementCheck(ctx context.Context, ownerID uuid.UUID) func(*models.PayMerchant) error {
-	return func(u *models.PayMerchant) error {
-		if u.SettlementMode != models.PaySettlementFiat {
-			return nil
-		}
-		return s.accountInOwnName(ctx, ownerID, u)
-	}
 }
 
 // ownerUpdate is the admin edit an owner's change amounts to: the settlement
@@ -737,24 +719,6 @@ func (s *PayMerchantService) ResolveBank(ctx context.Context, bankCode, accountN
 		return NombaLookupResult{}, ErrPayBanksUnavailable
 	}
 	return s.banks.Resolve(ctx, bankCode, accountNumber)
-}
-
-// accountInOwnName checks the resolved account name against the business name
-// and, only while the owner IS KYC-verified, their verified legal name — a
-// rejected or expired verification keeps its name on the row, and vouches for
-// nothing.
-func (s *PayMerchantService) accountInOwnName(ctx context.Context, ownerID uuid.UUID, m *models.PayMerchant) error {
-	if BusinessAccountNameWithin(m.BusinessName, m.AccountName) {
-		return nil
-	}
-	verified, legal, err := verifiedIdentity(ctx, s.db, ownerID)
-	if err != nil {
-		return err
-	}
-	if verified && AccountNameWithin(legal, m.AccountName) {
-		return nil
-	}
-	return ErrPaySettlementNameMismatch
 }
 
 // sameSettlement reports whether two merchants are paid to the same place.

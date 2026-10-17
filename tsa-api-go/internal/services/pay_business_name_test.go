@@ -52,16 +52,6 @@ func TestPayMerchant_RenameTakesEffectOnlyOnApproval(t *testing.T) {
 		t.Fatalf("pending = %+v", p)
 	}
 
-	// Payouts keep matching the current name until approval.
-	f.banks.name = "OBAINO4CHRIST VENTURES"
-	sent := f.mail.sent
-	if _, err := f.s.UpdateSettlementByOwner(ctx, f.owner, bankChange("9876543210")); !errors.Is(err, ErrPaySettlementNameMismatch) {
-		t.Fatalf("an account in the requested name before approval: err = %v", err)
-	}
-	if f.mail.sent != sent {
-		t.Fatal("a refused payout change sent a code")
-	}
-
 	if _, _, err := f.s.ReviewBusinessNameChange(ctx, f.owner, rows[0].ID, true, ""); !errors.Is(err, ErrPayBusinessNameSelfReview) {
 		t.Fatalf("the owner reviewing their own rename: err = %v", err)
 	}
