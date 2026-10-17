@@ -361,11 +361,19 @@ async function deploy(hre, opts = {}) {
 
   // Already handed over: verify and stop — the deployer can no longer change
   // anything, so this needs no key and sends nothing (CHECK_ONLY included).
+  // With owner = deployer that same owner is also an interrupted run's: a
+  // proxy that fails the read-back there is resumed below, not reported.
   if (currentOwner && same(currentOwner, roles.owner)) {
     await verifyProxyCode(hre, p);
-    await assertEscrow(esc, { ...params, owner: roles.owner });
-    console.log(`deterministic: ${p.proxy} already deployed, verified and owned by ${roles.owner}`);
-    return { ...result, owner: roles.owner, reused: true, verified: true, exists };
+    const resumable = !!opts.ownerIsDeployer && same(currentOwner, deployer);
+    try {
+      await assertEscrow(esc, { ...params, owner: roles.owner });
+      console.log(`deterministic: ${p.proxy} already deployed, verified and owned by ${roles.owner}`);
+      return { ...result, owner: roles.owner, reused: true, verified: true, exists };
+    } catch (e) {
+      if (!resumable) throw e;
+      console.log(`deterministic: ${p.proxy} is the deployer's and not fully wired — resuming`);
+    }
   }
   if (opts.checkOnly) return { ...result, checkOnly: true, exists };
   if (!signer) throw new Error("deterministic: a deploy needs DET_DEPLOYER_PRIVATE_KEY (the cold deploy key, typed in for this run)");

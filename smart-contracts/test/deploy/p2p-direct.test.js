@@ -106,6 +106,23 @@ describe("deploy/p2p-direct", () => {
       await expect(deploy(hre, ctx.deployOpts)).to.be.rejectedWith(/set DIRECT_FEE_MANAGER_ADDRESS and DIRECT_DEPLOY_BLOCK/);
       expect(await ethers.provider.getTransactionCount(s[COLD].address)).to.equal(before);
     });
+    it("resumes a run interrupted after the proxy landed but before it was wired", async () => {
+      const s = await ethers.getSigners();
+      const ctx = await directChain({}, {}, await coldOpts());
+      const cold = new ethers.Wallet(deployerKey(COLD), ethers.provider);
+      const p = await det.plan(hre, { deployer: cold.address, admins: ctx.chain.direct.arbiters, name: ctx.deployOpts.name });
+      const deployBlock = (await ethers.provider.getBlockNumber()) + 1;
+      await create2.deployCreate2(hre, cold, { salt: p.implSalt, initCode: p._implInitCode, label: "impl" });
+      await create2.deployCreate2(hre, cold, { salt: p.proxySalt, initCode: p._proxyInitCode, label: "proxy" });
+      const esc = await ethers.getContractAt("P2PEscrowV3", p.proxy);
+      expect(await esc.feeManager()).to.equal(ethers.ZeroAddress);
+
+      const out = await deploy(hre, { ...ctx.deployOpts, deployBlock });
+      expect(out.escrow).to.equal(p.proxy);
+      expect(await esc.feeManager()).to.equal(out.feeManager);
+      expect(await esc.owner()).to.equal(s[COLD].address);
+      expect(await esc.systemWallet()).to.not.equal(ethers.ZeroAddress);
+    });
     it("a normal-mode run on a deployer-owned, wired escrow is refused with nothing sent (no FeeManager re-point)", async () => {
       const s = await ethers.getSigners();
       const ctx = await directFixture({}, { deploy: await coldOpts() });
