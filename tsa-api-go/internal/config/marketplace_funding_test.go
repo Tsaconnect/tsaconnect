@@ -29,3 +29,21 @@ func TestLoad_MarketplaceFundingDefaultsOff(t *testing.T) {
 		t.Fatalf("gas per order = %d", cfg.MarketplaceEscrowGasPerOrder)
 	}
 }
+
+// The P2P BSC gas lane reads the BSC limits even when the ramp sponsors only
+// base (prod 2026-10-17: RAMP_SPONSOR_CHAINS=base left the BSC drip lane
+// skipped with no floor). The ramp's own chain list is unchanged.
+func TestLoad_SponsorLimitsCoverP2PChainsOutsideTheRampList(t *testing.T) {
+	for _, k := range []string{"RAMP_SPONSOR_BALANCE_FLOOR_WEI_BSC", "RAMP_SPONSOR_TOPUP_MAX_WEI_BSC"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	t.Setenv("RAMP_SPONSOR_CHAINS", "base")
+	cfg := Load()
+	if !slices.Equal(cfg.RampSponsorChains, []string{"base"}) {
+		t.Fatalf("RampSponsorChains = %v, want [base]", cfg.RampSponsorChains)
+	}
+	if cfg.RampSponsorBalanceFloorWei["bsc"] != "10000000000000000" || cfg.RampSponsorTopUpMaxWei["bsc"] != "500000000000000" {
+		t.Fatalf("bsc floor/max = %q/%q, want 0.01 / 0.0005 BNB", cfg.RampSponsorBalanceFloorWei["bsc"], cfg.RampSponsorTopUpMaxWei["bsc"])
+	}
+}

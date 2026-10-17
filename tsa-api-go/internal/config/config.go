@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1029,7 +1030,17 @@ func Load() *Config {
 	}
 	cfg.RampSponsorBalanceFloorWei = map[string]string{}
 	cfg.RampSponsorTopUpMaxWei = map[string]string{}
-	for _, chain := range cfg.RampSponsorChains {
+	// Limits for every chain with a default, not only RAMP_SPONSOR_CHAINS:
+	// the P2P gas lanes (buildP2PChainGasSponsorships) read them for each
+	// registered P2P chain, so BSC drips must not depend on the ramp's list.
+	// Which lanes run is still decided by those two lists, not by this map.
+	limitChains := slices.Clone(cfg.RampSponsorChains)
+	for chain := range rampFloorDefaults {
+		if !slices.Contains(limitChains, chain) {
+			limitChains = append(limitChains, chain)
+		}
+	}
+	for _, chain := range limitChains {
 		up := strings.ToUpper(chain)
 		cfg.RampSponsorBalanceFloorWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_BALANCE_FLOOR_WEI_"+up, rampFloorDefaults[chain]))
 		cfg.RampSponsorTopUpMaxWei[chain] = strings.TrimSpace(getEnv("RAMP_SPONSOR_TOPUP_MAX_WEI_"+up, rampTopUpMaxDefaults[chain]))
