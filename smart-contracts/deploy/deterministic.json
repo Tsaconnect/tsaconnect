@@ -1,1 +1,27 @@
-{}
+{
+  "testnet": {
+    "tsa:P2PEscrowV3:proxy:direct-p2p:v1": {
+      "contract": "P2PEscrowV3",
+      "implSaltLabel": "tsa:P2PEscrowV3:impl:v1",
+      "implSalt": "0x2afc9d2b97f48d9313d6e820dc95022687452b3f12385f03e7f913d337050782",
+      "implInitCodeHash": "0x65a04eafa7521c8c9656cb9ece74e9219e84dac1aefbfe06987985a73baf0d42",
+      "impl": "0x53b951C05486c0167187f0390bFbf7427742E475",
+      "proxySaltLabel": "tsa:P2PEscrowV3:proxy:direct-p2p:v1",
+      "proxySalt": "0xfe79f5e70167fba467bfd6ec48b989517337b1ee468412be9f5b013d9f312f96",
+      "proxyInitCodeHash": "0x7ce09cc1064188647f100018724fa7a1ca01bf31a0ea9d4c185078bf0211672c",
+      "proxy": "0xD16c1597EA3be8D2017698CC5d6Bf53b595EEb03",
+      "initArgs": {
+        "owner": "0xB3D5B867453bC6aD5534C76Ab47655685AcF2834",
+        "admins": [
+          "0x2a88C3e5328015Bd5A79574fB1683dda6bA60A0D"
+        ]
+      },
+      "networks": {
+        "97": {
+          "network": "bscTestnet",
+          "recordedAt": "2026-10-17T13:05:11.067Z"
+        }
+      }
+    }
+  }
+}

@@ -1527,7 +1527,7 @@ func Load() *Config {
 	if addr := getEnv("BSC_TESTNET_USDT_ADDRESS", getEnv("BSC_USDT_ADDRESS", "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7")); addr != "" {
 		testnetTokens["bsc:USDT"] = addr
 	}
-	if addr := getEnv("BSC_TESTNET_USDC_ADDRESS", getEnv("BSC_USDC_ADDRESS", "")); addr != "" {
+	if addr := getEnv("BSC_TESTNET_USDC_ADDRESS", getEnv("BSC_USDC_ADDRESS", "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d")); addr != "" {
 		testnetTokens["bsc:USDC"] = addr
 	}
 	// Optional testnet stablecoin overrides for the new chains. These are

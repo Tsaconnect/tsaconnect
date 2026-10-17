@@ -32,7 +32,10 @@ const (
 var bscPresets = map[string]chainPreset{
 	"mainnet": {p2pEscrow: "", eip712Version: "2", feeManager: "", expectedOwner: "",
 		audience: P2PAudienceDirect, assets: []string{"USDT", "USDC"}},
-	"testnet": {p2pEscrow: "", eip712Version: "2", feeManager: "", expectedOwner: "",
+	// Testnet rehearsal (OPS-2) 2026-10-17: deployed by deploy/p2p-direct.js
+	// with owner = deployer, arbiter 0x2a88…0A0D, 1.9% p2p_platform.
+	"testnet": {p2pEscrow: "0xD16c1597EA3be8D2017698CC5d6Bf53b595EEb03", eip712Version: "2",
+		feeManager: "0xB4B5E6F054b38f3D2E9193B1eD182A17135FE039", expectedOwner: "0xB3D5B867453bC6aD5534C76Ab47655685AcF2834",
 		audience: P2PAudienceDirect, assets: []string{"USDT", "USDC"}},
 }
 

@@ -103,14 +103,17 @@ const (
 	directOwnerAddr = "0x62bA000000000000000000000000000000001b96"
 )
 
-// The BSC rows are the direct escrow: audience direct, USDT+USDC, dormant
-// until the switch fills the escrow (plan API-11). Sonic stays open to all
-// until then.
+// The BSC rows are the direct escrow: audience direct, USDT+USDC. Mainnet is
+// dormant until the switch fills the escrow (plan API-11); testnet carries
+// the OPS-2 rehearsal deploy. Sonic stays open to all until the switch.
 func TestBSCPresets_DirectRowsDormant(t *testing.T) {
 	for _, n := range []string{"mainnet", "testnet"} {
 		r := bscPresets[n]
-		if r.audience != P2PAudienceDirect || r.p2pEscrow != "" || !reflect.DeepEqual(r.assets, []string{"USDT", "USDC"}) {
+		if r.audience != P2PAudienceDirect || !reflect.DeepEqual(r.assets, []string{"USDT", "USDC"}) {
 			t.Fatalf("bsc %s row = %+v", n, r)
+		}
+		if filled := r.p2pEscrow != "" && r.feeManager != "" && r.expectedOwner != ""; filled != (n == "testnet") {
+			t.Fatalf("bsc %s row filled = %t: %+v", n, filled, r)
 		}
 		if sonicPresets[n].audience != P2PAudienceAll {
 			t.Fatalf("sonic %s audience = %q; it flips to pm only with the BSC switch", n, sonicPresets[n].audience)
