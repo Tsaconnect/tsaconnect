@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -838,5 +839,240 @@ func TestAdminOverrideRefusesUserWithNoSession(t *testing.T) {
 
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "kyc_no_document") {
 		t.Fatalf("want 409 kyc_no_document, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// ---------- documents Didit could not read (the NIN slip) ----------
+
+// What Didit's scan returned for NIN slips in Oct 2026: the printed "Surname"
+// label as both names, every other field "none".
+func unreadableDecision(status string) string {
+	return fmt.Sprintf(`{"session_id":"s","status":%q,
+		"id_verifications":[{"node_id":"id_verification_1","status":%q,
+			"first_name":"Surnamen","last_name":"Surnamen","document_number":"none"}]}`, status, status)
+}
+
+func TestUsableLegalName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"Surnamen Surnamen":     false,
+		"SURNAME":               false,
+		"Surname: First Name":   false,
+		"none none":             false,
+		"":                      false,
+		"Ikechukwu Kingsley":    true,
+		"Iyara Nissi Ushie":     true,
+		"NAME ADEBAYO":          true, // one real word is enough
+		"Kelvin Akobi Ogilegwu": true,
+		"Surnamen Chukwuemeka":  true,
+	} {
+		if got := usableLegalName(name); got != want {
+			t.Errorf("usableLegalName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A label read off the document is no name: the webhook must not store it,
+// or every transfer the user sends fails the bank-name match.
+func TestKYCWebhookNeverStoresLabelAsName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusInReview)
+	didit := diditDecisionStub(t, map[string]string{"sess-1": unreadableDecision("Approved")})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	name, err := fetchDiditVerifiedName(context.Background(), h.Config.DiditBaseURL, "key", "sess-1")
+	if !errors.Is(err, errDiditNameUnresolved) || name != "" {
+		t.Fatalf("got name %q err %v, want errDiditNameUnresolved", name, err)
+	}
+	if updates := h.verifiedNameUpdates(context.Background(), user.ID, "sess-1"); updates != nil {
+		t.Fatalf("label stored as a name: %v", updates)
+	}
+}
+
+// The NIN slip case: a submitted document with no readable name needs the
+// admin to read the name off the image, and takes the typed one.
+func TestAdminOverrideUnreadableDocumentTakesTypedName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := rejectedUserWithSession(t, db, "sess-nin")
+	didit := diditDecisionStub(t, map[string]string{"sess-nin": unreadableDecision("In Review")})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	w := adminOverrideRequest(h, admin, user.ID, `{"notes":"ok"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "legal_name_unreadable") {
+		t.Fatalf("want 400 legal_name_unreadable, got %d %s", w.Code, w.Body.String())
+	}
+	if status, _ := storedIdentity(t, db, user.ID); status != models.VerificationStatusRejected {
+		t.Fatalf("refused override changed status to %q", status)
+	}
+
+	w = adminOverrideRequest(h, admin, user.ID, `{"notes":"read off NIN slip","legalName":"Adaeze  Okafor"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("override: %d %s", w.Code, w.Body.String())
+	}
+	status, name := storedIdentity(t, db, user.ID)
+	if status != models.VerificationStatusVerified || name != "Adaeze Okafor" {
+		t.Fatalf("got status %q name %q", status, name)
+	}
+	var entry models.VerificationLog
+	db.Where("user_id = ? AND action = ?", user.ID, models.VerificationActionAdminOverride).First(&entry)
+	if !strings.Contains(string(entry.Metadata), legalNameSourceAdminFromDocument) {
+		t.Fatalf("override log does not record the name source: %s", entry.Metadata)
+	}
+}
+
+func TestAdminOverrideRefusesLabelAsTypedName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := rejectedUserWithSession(t, db, "sess-nin")
+	didit := diditDecisionStub(t, map[string]string{"sess-nin": unreadableDecision("Declined")})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"Surname"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "legal_name_invalid") {
+		t.Fatalf("want 400 legal_name_invalid, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A user already verified with a label as their name ("contact support" at
+// every pay-in) is repaired by the same override.
+func TestAdminOverrideReplacesLabelOnlyStoredName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := verifiedUserWithSession(t, db, "sess-nin")
+	db.Model(user).Update("verified_legal_name", "Surnamen Surnamen")
+	didit := diditDecisionStub(t, map[string]string{"sess-nin": unreadableDecision("Approved")})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	if w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"Adaeze Okafor"}`); w.Code != http.StatusOK {
+		t.Fatalf("override: %d %s", w.Code, w.Body.String())
+	}
+	if _, name := storedIdentity(t, db, user.ID); name != "Adaeze Okafor" {
+		t.Fatalf("got name %q", name)
+	}
+}
+
+// ---------- the name declared before the Didit flow ----------
+
+func createKYCSessionWithBody(h *Handlers, user *models.User, body string) *httptest.ResponseRecorder {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", user)
+	c.Request, _ = http.NewRequest("POST", "/api/kyc/session", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.CreateKYCSession(c)
+	return w
+}
+
+// diditCreateStub answers POST /session/ and hands back the request body.
+func diditCreateStub(t *testing.T) (*httptest.Server, *map[string]interface{}) {
+	t.Helper()
+	got := map[string]interface{}{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("session request body: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"session_id":"sess-new","url":"https://verify.didit.me/new","status":"Not Started"}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &got
+}
+
+func TestCreateKYCSessionSendsDeclaredNameToDidit(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusPending)
+	didit, sent := diditCreateStub(t)
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditWorkflowID: "wf", DiditBaseURL: didit.URL}}
+
+	w := createKYCSessionWithBody(h, user, `{"givenNames":" Chinaza  Juliet ","surname":"Odah"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	expected, _ := (*sent)["expected_details"].(map[string]interface{})
+	if expected["first_name"] != "Chinaza Juliet" || expected["last_name"] != "Odah" {
+		t.Fatalf("expected_details sent to Didit: %v", (*sent)["expected_details"])
+	}
+	stored := reloadUser(t, db, user.ID)
+	if stored.DeclaredGivenNames != "Chinaza Juliet" || stored.DeclaredSurname != "Odah" {
+		t.Fatalf("declared name stored as %q / %q", stored.DeclaredGivenNames, stored.DeclaredSurname)
+	}
+	// A claim, never the verified name.
+	if _, name := storedIdentity(t, db, user.ID); name != "" {
+		t.Fatalf("declared name stored as the verified legal name: %q", name)
+	}
+}
+
+// App builds without the name step send no body and must keep working.
+func TestCreateKYCSessionWithoutDeclaredName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusPending)
+	didit, sent := diditCreateStub(t)
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditWorkflowID: "wf", DiditBaseURL: didit.URL}}
+
+	if w := createKYCSessionFor(h, user); w.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	if _, ok := (*sent)["expected_details"]; ok {
+		t.Fatalf("expected_details sent without a declared name: %v", *sent)
+	}
+}
+
+func TestCreateKYCSessionRefusesBadDeclaredName(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusPending)
+	didit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Didit was called for a refused name")
+	}))
+	t.Cleanup(didit.Close)
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditWorkflowID: "wf", DiditBaseURL: didit.URL}}
+
+	for body, code := range map[string]string{
+		`{"givenNames":"Chinaza","surname":""}`:         "legal_name_incomplete",
+		`{"givenNames":"Surname","surname":"Surname"}`:  "legal_name_invalid",
+		`{"givenNames":"Chinaza","surname":"Odah <b>"}`: "legal_name_invalid",
+		`{"givenNames":"Chinaza1","surname":"Odah"}`:    "legal_name_invalid",
+	} {
+		w := createKYCSessionWithBody(h, user, body)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), code) {
+			t.Errorf("%s: want 400 %s, got %d %s", body, code, w.Code, w.Body.String())
+		}
+	}
+}
+
+// When Didit cannot read the document, the admin is offered the declared name
+// to check against the image; confirming it is recorded as such.
+func TestAdminOverrideOffersDeclaredNameForUnreadableDocument(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	admin := overrideAdmin(t, db)
+	user := rejectedUserWithSession(t, db, "sess-nin")
+	db.Model(user).Updates(map[string]interface{}{"declared_given_names": "Chinaza Juliet", "declared_surname": "Odah"})
+	didit := diditDecisionStub(t, map[string]string{"sess-nin": unreadableDecision("In Review")})
+	h := &Handlers{Config: &config.Config{DiditAPIKey: "key", DiditBaseURL: didit.URL}}
+
+	w := adminOverrideRequest(h, admin, user.ID, `{}`)
+	var refusal struct {
+		Code string `json:"code"`
+		Data struct {
+			DeclaredLegalName string `json:"declaredLegalName"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &refusal)
+	if w.Code != http.StatusBadRequest || refusal.Code != "legal_name_unreadable" ||
+		refusal.Data.DeclaredLegalName != "Chinaza Juliet Odah" {
+		t.Fatalf("want 400 legal_name_unreadable offering the declared name, got %d %s", w.Code, w.Body.String())
+	}
+	// Offering it approves nothing.
+	if status, _ := storedIdentity(t, db, user.ID); status != models.VerificationStatusRejected {
+		t.Fatalf("refused override changed status to %q", status)
+	}
+
+	if w := adminOverrideRequest(h, admin, user.ID, `{"legalName":"chinaza juliet odah"}`); w.Code != http.StatusOK {
+		t.Fatalf("override: %d %s", w.Code, w.Body.String())
+	}
+	var entry models.VerificationLog
+	db.Where("user_id = ? AND action = ?", user.ID, models.VerificationActionAdminOverride).First(&entry)
+	if !strings.Contains(string(entry.Metadata), legalNameSourceAdminConfirmedDeclared) {
+		t.Fatalf("override log does not record the confirmed declared name: %s", entry.Metadata)
 	}
 }

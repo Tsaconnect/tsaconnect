@@ -50,6 +50,14 @@ type User struct {
 	// session can be told apart from one written live at approval, and so a row
 	// predating a re-verification can be spotted and re-pulled.
 	VerifiedLegalNameAt *time.Time `json:"-"`
+	// DeclaredGivenNames and DeclaredSurname are what the user typed as the
+	// name on their ID just before the Didit flow. They are a CLAIM, never a
+	// verified name: Didit is asked to compare them with the document
+	// (expected_details), and when the document cannot be read (the NIN slip)
+	// an admin confirms them against the image before anything is stored in
+	// VerifiedLegalName. Same `json:"-"` reasoning as VerifiedLegalName.
+	DeclaredGivenNames string `json:"-"`
+	DeclaredSurname    string `json:"-"`
 	// AccountStatus gates every authenticated request: the auth middleware
 	// re-reads the user per request and rejects anything but "active", so a
 	// change here takes effect immediately. Indexed because public product
