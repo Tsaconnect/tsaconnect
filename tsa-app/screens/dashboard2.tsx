@@ -11,7 +11,8 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { api } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router } from 'expo-router';
+import { router, useNavigation } from 'expo-router';
+import { DrawerActions } from '@react-navigation/native';
 import { readPortfolioUsd } from '@/services/portfolioTotal';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
@@ -43,6 +44,7 @@ const HOME_TOKEN_PREVIEW = 5;
 
 const Dashboard: React.FC = () => {
   const { colors, spacing } = useTheme();
+  const navigation = useNavigation();
   const { network } = useNetwork();
   const { formatDualPrice } = useCurrency();
   // Spot listings drive the token market list AND the pair/chain picker opened
@@ -188,6 +190,7 @@ const Dashboard: React.FC = () => {
           dailyChange={dailyChange}
           isValuesHidden={isValuesHidden}
           onToggleVisibility={() => setIsValuesHidden(v => !v)}
+          onMore={() => navigation.dispatch(DrawerActions.openDrawer())}
         />
 
         {/* TP & Cashback Summary */}

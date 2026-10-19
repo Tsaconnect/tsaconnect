@@ -1,7 +1,7 @@
 // components/dashboard/BalanceCard.tsx
 //
 // Total-portfolio hero with the display-currency picker, activity history, the
-// value-hide toggle and the four quick actions (Buy / Services / Trade / Pay).
+// value-hide toggle and the quick actions (Buy / Services / Trade / Pay / More).
 // Pay opens TSA Pay by code; the wallet already has its own tab, so it gave up its tile here.
 // The currency and history controls live here, not in a page header, because
 // they are about this balance. Migrated onto the TSA Signature design
@@ -25,20 +25,27 @@ interface BalanceCardProps {
   dailyChange: number;
   isValuesHidden: boolean;
   onToggleVisibility: () => void;
+  // "More" opens the sidebar drawer, which the card can't reach itself.
+  onMore: () => void;
 }
 
-const QUICK_ACTIONS: { key: string; label: string; icon: IconName; route: string }[] = [
+type QuickAction = { key: string; label: string; icon: IconName; route?: string };
+
+const QUICK_ACTIONS: QuickAction[] = [
   { key: 'buy', label: 'Buy', icon: 'storefront', route: '/(dashboard)/(tabs)/(marketplace)' },
   { key: 'services', label: 'Services', icon: 'list', route: '/(dashboard)/(tabs)/(services)/serviceshome' },
   { key: 'trade', label: 'Trade', icon: 'trendingUp', route: '/easyswap' },
   { key: 'pay', label: 'TSA Pay', icon: 'card', route: PAY_CODE },
 ];
 
+const MORE_ACTION: QuickAction = { key: 'more', label: 'More', icon: 'apps' };
+
 export const BalanceCard: React.FC<BalanceCardProps> = ({
   totalUsdValue,
   dailyChange,
   isValuesHidden,
   onToggleVisibility,
+  onMore,
 }) => {
   const { colors, spacing } = useTheme();
   const { formatDualPrice } = useCurrency();
@@ -106,10 +113,10 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
       <Divider spacing="lg" />
 
       <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
-        {QUICK_ACTIONS.map((action) => (
+        {[...QUICK_ACTIONS, MORE_ACTION].map((action) => (
           <PressableScale
             key={action.key}
-            onPress={() => router.push(action.route as any)}
+            onPress={() => (action.route ? router.push(action.route as any) : onMore())}
             style={{ alignItems: 'center', minWidth: 56, gap: spacing.xs }}
           >
             <View

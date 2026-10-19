@@ -48,7 +48,7 @@ const render = (over: Partial<React.ComponentProps<typeof BalanceCard>> = {}) =>
   let tree!: ReactTestRenderer;
   act(() => {
     tree = TestRenderer.create(
-      <BalanceCard totalUsdValue={9.46} dailyChange={0} isValuesHidden={false} onToggleVisibility={jest.fn()} {...over} />,
+      <BalanceCard totalUsdValue={9.46} dailyChange={0} isValuesHidden={false} onToggleVisibility={jest.fn()} onMore={jest.fn()} {...over} />,
     );
   });
   return tree;
@@ -86,4 +86,13 @@ it('offers Pay (TSA Pay by code) in place of Wallet, which has its own tab', () 
   const pay = hosts(tree, 'mock-pressable').find((p) => p.findAll((n) => (n as any).type === 'mock-text' && n.props.children === 'TSA Pay').length > 0)!;
   act(() => pay.props.onPress());
   expect(router.push).toHaveBeenCalledWith('/pay-code');
+});
+
+it('opens the sidebar from More', () => {
+  const onMore = jest.fn();
+  const tree = render({ onMore });
+  const more = hosts(tree, 'mock-pressable').find((p) => p.findAll((n) => (n as any).type === 'mock-text' && n.props.children === 'More').length > 0)!;
+  act(() => more.props.onPress());
+  expect(onMore).toHaveBeenCalled();
+  expect(router.push).not.toHaveBeenCalled();
 });
