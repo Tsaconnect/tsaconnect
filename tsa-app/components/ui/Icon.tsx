@@ -84,6 +84,7 @@ const REGISTRY = {
   keypad: { set: 'ion', glyph: 'keypad' },
   arrowLeft: { set: 'ion', glyph: 'arrow-back' },
   at: { set: 'ion', glyph: 'at' },
+  apps: { set: 'ion', glyph: 'apps' },
 } as const satisfies Record<string, IconEntry>;
 
 export type IconName = keyof typeof REGISTRY;
