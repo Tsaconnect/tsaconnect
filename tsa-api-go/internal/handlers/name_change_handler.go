@@ -200,7 +200,7 @@ func (h *Handlers) StartNameChangeVerification(c *gin.Context) {
 	defer cancel()
 	ch := attempt.Change
 	resp, serr := createDiditSession(ctx, strings.TrimRight(cfg.DiditBaseURL, "/"), cfg.DiditAPIKey, cfg.DiditWorkflowID,
-		nameChangeCallback(cfg.DiditCallbackURL), nameChangeVendorPrefix+ch.ID.String())
+		nameChangeCallback(cfg.DiditCallbackURL), nameChangeVendorPrefix+ch.ID.String(), nil)
 	if serr != nil {
 		svc.AbandonAttempt(ctx, attempt)
 		failKYCSession(c, serr.status, serr.detail)

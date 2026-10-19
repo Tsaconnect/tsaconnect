@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,7 +131,7 @@ func setupKYCTestDB(t *testing.T, withLogsTable bool) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME, declared_given_names TEXT, declared_surname TEXT
 		)`,
 	}
 	if withLogsTable {
@@ -453,11 +454,11 @@ func TestCreateKYCSessionResumesInFlightSession(t *testing.T) {
 	}
 }
 
-// "In Review" means Didit is deciding — there is nothing to resume, so a user
-// asking to verify again gets a fresh session.
+// An expired session cannot be resumed, so a user asking to verify again gets
+// a fresh session.
 func TestCreateKYCSessionStartsFreshWhenNotResumable(t *testing.T) {
 	db := setupKYCTestDB(t, true)
-	user := createKYCTestUser(t, db, models.VerificationStatusInReview)
+	user := createKYCTestUser(t, db, models.VerificationStatusRejected)
 	user.DiditSessionID = "sess-old"
 	db.Save(user)
 
@@ -465,7 +466,7 @@ func TestCreateKYCSessionStartsFreshWhenNotResumable(t *testing.T) {
 		"session_id": "sess-old", "session_url": "https://verify.didit.me/old",
 	})
 	logWithMetadata(t, db, user.ID, time.Now(), map[string]string{
-		"session_id": "sess-old", "status": "In Review",
+		"session_id": "sess-old", "status": "Expired",
 	})
 
 	didit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -484,6 +485,39 @@ func TestCreateKYCSessionStartsFreshWhenNotResumable(t *testing.T) {
 	}
 	if got := reloadUser(t, db, user.ID).DiditSessionID; got != "sess-new" {
 		t.Fatalf("expected a new session to be persisted, got %q", got)
+	}
+}
+
+// "In Review" is Didit's reviewer deciding: a second session would be billed,
+// land in the same queue, and be flagged as a duplicate face of the first.
+func TestCreateKYCSessionRefusedWhileInReview(t *testing.T) {
+	db := setupKYCTestDB(t, true)
+	user := createKYCTestUser(t, db, models.VerificationStatusInReview)
+	user.DiditSessionID = "sess-review"
+	db.Save(user)
+
+	logWithMetadata(t, db, user.ID, time.Now().Add(-time.Hour), map[string]string{
+		"session_id": "sess-review", "session_url": "https://verify.didit.me/review",
+	})
+	logWithMetadata(t, db, user.ID, time.Now(), map[string]string{
+		"session_id": "sess-review", "status": "In Review",
+	})
+
+	didit := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Didit was called; a session in review must not be replaced")
+	}))
+	defer didit.Close()
+
+	h := &Handlers{Config: &config.Config{
+		DiditAPIKey: "key", DiditWorkflowID: "wf", DiditBaseURL: didit.URL,
+	}}
+	w := createKYCSessionFor(h, user)
+
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), kycInReviewCode) {
+		t.Fatalf("want 409 %s, got %d: %s", kycInReviewCode, w.Code, w.Body.String())
+	}
+	if got := reloadUser(t, db, user.ID).DiditSessionID; got != "sess-review" {
+		t.Fatalf("session replaced with %q", got)
 	}
 }
 

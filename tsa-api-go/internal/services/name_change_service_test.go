@@ -26,7 +26,7 @@ import (
 var nameChangeTables = []string{
 	`CREATE TABLE users (
 		id TEXT PRIMARY KEY, name TEXT, username TEXT, email TEXT, wallet_address TEXT,
-		verification_status TEXT DEFAULT 'pending', verified_legal_name TEXT, verified_legal_name_at DATETIME,
+		verification_status TEXT DEFAULT 'pending', verified_legal_name TEXT, verified_legal_name_at DATETIME, declared_given_names TEXT, declared_surname TEXT,
 		didit_session_id TEXT, created_at DATETIME, last_login DATETIME, updated_at DATETIME
 	)`,
 	`CREATE TABLE bill_payments (

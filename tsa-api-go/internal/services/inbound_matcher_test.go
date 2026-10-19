@@ -26,7 +26,7 @@ func setupMatcherDB(t *testing.T) *gorm.DB {
 		id TEXT PRIMARY KEY,
 		name TEXT,
 		verified_legal_name TEXT,
-		verified_legal_name_at DATETIME
+		verified_legal_name_at DATETIME, declared_given_names TEXT, declared_surname TEXT
 	)`).Error; err != nil {
 		t.Fatalf("users ddl: %v", err)
 	}

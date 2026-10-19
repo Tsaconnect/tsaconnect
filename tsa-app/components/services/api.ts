@@ -538,8 +538,10 @@ class APIService {
 
   // ==================== SIGNUP FLOW ENDPOINTS ====================
 
-  // Create a KYC session via Didit
-  async createKYCSession(): Promise<ApiResponse<{
+  // Create a KYC session via Didit. `declared` is the name the user typed as
+  // printed on their ID: the API passes it to Didit to compare with the
+  // document, and an admin checks it against the image when Didit can't read it.
+  async createKYCSession(declared?: { givenNames: string; surname: string }): Promise<ApiResponse<{
     sessionId: string;
     sessionUrl: string;
     // True when the API handed back a session already in flight rather than
@@ -552,6 +554,7 @@ class APIService {
     const response = await fetch(`${API_BASE_URL}/kyc/session`, {
       method: 'POST',
       headers,
+      body: declared ? JSON.stringify(declared) : undefined,
     });
     return this.handleResponse<{
       sessionId: string;
@@ -570,6 +573,9 @@ class APIService {
     // Raw Didit status behind in_review — "In Review" means wait, "Resubmitted"
     // means the user has to redo a step.
     diditStatus: string;
+    // The name typed before the last Didit session, to pre-fill a retry.
+    declaredGivenNames?: string;
+    declaredSurname?: string;
     sessionUrl: string;
     actionRequired: boolean;
     lastAction: string;

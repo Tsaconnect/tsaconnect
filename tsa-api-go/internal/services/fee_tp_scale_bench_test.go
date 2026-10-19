@@ -94,7 +94,7 @@ func setupScaleBenchDB(b *testing.B) *gorm.DB {
 			suspension_reason TEXT,
 			suspended_at DATETIME,
 			suspended_by TEXT,
-			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME
+			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME, declared_given_names TEXT, declared_surname TEXT
 		)`,
 		`CREATE INDEX idx_users_deleted_at ON users(deleted_at)`,
 		`CREATE TABLE tp_earnings (

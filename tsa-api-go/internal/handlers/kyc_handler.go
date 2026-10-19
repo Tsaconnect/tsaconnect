@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -168,6 +169,11 @@ func approvedIdentity(decision *diditDecisionResponse) *diditIDVerification {
 // no name to read and nothing for an admin to approve.
 var errDiditNoDocument = errors.New("didit: session has no submitted document")
 
+// errDiditDocumentUnreadable means the user did submit a document but Didit
+// read no name off it — the NIN slip, mostly. The name is on the image in the
+// Didit console, so an admin can read it and type it in.
+var errDiditDocumentUnreadable = errors.New("didit: submitted document has no readable name")
+
 // fetchDiditDocumentName reads the document name for an admin who is approving
 // the session by override: a passed check first, else any check that read a
 // name — Declined or In Review is exactly what an override approves, so the
@@ -182,12 +188,17 @@ func fetchDiditDocumentName(ctx context.Context, baseURL, apiKey, sessionID stri
 	if item := approvedIdentity(decision); item != nil {
 		return item.name(), nil
 	}
+	submitted := false
 	for _, block := range [][]diditIDVerification{decision.IDVerifications, decision.NFCVerifications} {
 		for i := range block {
 			if name := block[i].name(); name != "" {
 				return name, nil
 			}
+			submitted = submitted || block[i].submitted()
 		}
+	}
+	if submitted {
+		return "", errDiditDocumentUnreadable
 	}
 	return "", errDiditNoDocument
 }
@@ -235,13 +246,46 @@ func firstApprovedItem(items []diditIDVerification) *diditIDVerification {
 	return nil
 }
 
-// name is the item's full name, or its first and last names joined.
+// name is the item's full name, or its first and last names joined — or ""
+// when what the scan read is not a name at all (see usableLegalName).
 func (item *diditIDVerification) name() string {
 	name := item.FullName
 	if strings.TrimSpace(name) == "" {
 		name = item.FirstName + " " + item.LastName
 	}
-	return strings.Join(strings.Fields(name), " ")
+	name = strings.Join(strings.Fields(name), " ")
+	if !usableLegalName(name) {
+		return ""
+	}
+	return name
+}
+
+// submitted reports whether the user got as far as handing Didit this
+// document: the check reached a verdict, whatever it was.
+func (item *diditIDVerification) submitted() bool {
+	switch strings.ToLower(strings.TrimSpace(item.Status)) {
+	case "approved", "declined", "in review":
+		return true
+	}
+	return false
+}
+
+// documentLabelWord matches the words printed on an ID as field labels, and
+// the placeholders a scan returns when a field is empty.
+var documentLabelWord = regexp.MustCompile(`^(surname\w*|first|middle|last|given|other|names?|none|null|unknown|n/?a)$`)
+
+// usableLegalName refuses a "name" made only of field labels or placeholders.
+// Didit's scan of the Nigerian NIN slip reads the printed "Surname" label as
+// the name ("Surnamen Surnamen") and every other field as "none"; storing that
+// would make every bank transfer the user sends fail the name match.
+func usableLegalName(name string) bool {
+	words := strings.Fields(strings.ToLower(name))
+	for _, w := range words {
+		if !documentLabelWord.MatchString(strings.Trim(w, ".,:;-")) {
+			return true
+		}
+	}
+	return false
 }
 
 // verifiedNameUpdates returns the column updates recording a user's Didit legal
@@ -291,6 +335,12 @@ const (
 // come back and redo a step (Didit also emails them).
 const diditStatusResubmitted = "Resubmitted"
 
+// diditStatusInReview is Didit's own reviewer looking at the session.
+const diditStatusInReview = "In Review"
+
+// kycInReviewCode is the refusal to start a session while one is in review.
+const kycInReviewCode = "kyc_in_review"
+
 // resumableDiditStatuses are the non-terminal states a user can still pick the
 // same hosted session back up from. "In Review" is excluded — Didit is looking
 // at it and there is nothing for the user to do.
@@ -331,6 +381,43 @@ func latestSessionState(userID uuid.UUID, sessionID string) (status, url string)
 	return status, url
 }
 
+// declaredName is the name the user says is on their ID: a claim to check,
+// never a verified name.
+type declaredName struct {
+	GivenNames string
+	Surname    string
+}
+
+func (d declaredName) full() string { return d.GivenNames + " " + d.Surname }
+
+// declaredNamePart allows letters (any script), marks, spaces and the
+// punctuation names carry: hyphen, apostrophe, full stop.
+var declaredNamePart = regexp.MustCompile(`^[\p{L}\p{M}' .-]{1,80}$`)
+
+// parseDeclaredName validates the name typed before the Didit flow. Both
+// parts empty is an app build without the name step (nil, no refusal).
+func parseDeclaredName(givenNames, surname string) (*declaredName, *overrideRefusal) {
+	givenNames = strings.Join(strings.Fields(givenNames), " ")
+	surname = strings.Join(strings.Fields(surname), " ")
+	if givenNames == "" && surname == "" {
+		return nil, nil
+	}
+	if givenNames == "" || surname == "" {
+		return nil, &overrideRefusal{http.StatusBadRequest, "legal_name_incomplete",
+			"Enter both your first name and your surname exactly as they appear on your ID.", nil}
+	}
+	if !declaredNamePart.MatchString(givenNames) || !declaredNamePart.MatchString(surname) {
+		return nil, &overrideRefusal{http.StatusBadRequest, "legal_name_invalid",
+			"Use only letters, spaces, hyphens and apostrophes — exactly as your name appears on your ID.", nil}
+	}
+	d := &declaredName{GivenNames: givenNames, Surname: surname}
+	if !usableLegalName(d.full()) {
+		return nil, &overrideRefusal{http.StatusBadRequest, "legal_name_invalid",
+			"Enter your actual name as printed on your ID, not the field labels.", nil}
+	}
+	return d, nil
+}
+
 // diditSessionError is why a Didit session could not be bought: the status to
 // answer with and the operator-facing detail for the log (see failKYCSession).
 type diditSessionError struct {
@@ -341,13 +428,22 @@ type diditSessionError struct {
 // createDiditSession buys one hosted verification session. vendorData is what
 // Didit echoes on every webhook for it: the user id for first-time KYC, a
 // name-change marker for a re-verification.
-func createDiditSession(ctx context.Context, baseURL, apiKey, workflowID, callback, vendorData string) (*diditSessionCreateResponse, *diditSessionError) {
+//
+// expected, when set, is the name the user declared: Didit fuzzy-matches it
+// against the document and raises a warning on the decision when they differ.
+func createDiditSession(ctx context.Context, baseURL, apiKey, workflowID, callback, vendorData string, expected *declaredName) (*diditSessionCreateResponse, *diditSessionError) {
 	payload := map[string]interface{}{
 		"workflow_id": workflowID,
 		"vendor_data": vendorData,
 	}
 	if callback != "" {
 		payload["callback"] = callback
+	}
+	if expected != nil {
+		payload["expected_details"] = map[string]string{
+			"first_name": expected.GivenNames,
+			"last_name":  expected.Surname,
+		}
 	}
 
 	body, err := json.Marshal(payload)
@@ -411,6 +507,19 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
+	// The name on the user's ID, typed before the Didit flow. Optional so app
+	// builds that predate the name step keep working.
+	var req struct {
+		GivenNames string `json:"givenNames"`
+		Surname    string `json:"surname"`
+	}
+	_ = c.ShouldBindJSON(&req) // an empty body is an older app
+	declared, refusal := parseDeclaredName(req.GivenNames, req.Surname)
+	if refusal != nil {
+		c.JSON(refusal.status, gin.H{"success": false, "code": refusal.code, "message": refusal.message})
+		return
+	}
+
 	apiKey := h.Config.DiditAPIKey
 	workflowID := h.Config.DiditWorkflowID
 	baseURL := strings.TrimRight(h.Config.DiditBaseURL, "/")
@@ -426,7 +535,20 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 	// and orphans the old session's events as stale (see the staleSession guard
 	// in KYCWebhook). Kept behind the config check so a dormant integration
 	// still reports itself as dormant.
-	if status, url := latestSessionState(user.ID, user.DiditSessionID); url != "" && resumableDiditStatuses[status] {
+	status, url := latestSessionState(user.ID, user.DiditSessionID)
+	// A session under review has nothing left for the user to do. A new one
+	// is billed again, lands in the same review queue, and Didit's face search
+	// flags it as a duplicate of the first — which is how one person ended up
+	// with three sessions in review. The reviewer's decision arrives by webhook.
+	if status == diditStatusInReview {
+		c.JSON(http.StatusConflict, gin.H{
+			"success": false,
+			"code":    kycInReviewCode,
+			"message": "Your verification is being reviewed. There is nothing more to submit — we'll update your status as soon as the review is done.",
+		})
+		return
+	}
+	if url != "" && resumableDiditStatuses[status] {
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "Resuming verification session",
@@ -441,16 +563,23 @@ func (h *Handlers) CreateKYCSession(c *gin.Context) {
 		return
 	}
 
-	diditResp, serr := createDiditSession(context.Background(), baseURL, apiKey, workflowID, h.Config.DiditCallbackURL, user.ID.String())
+	diditResp, serr := createDiditSession(context.Background(), baseURL, apiKey, workflowID, h.Config.DiditCallbackURL, user.ID.String(), declared)
 	if serr != nil {
 		failKYCSession(c, serr.status, serr.detail)
 		return
 	}
 
-	if err := config.DB.Model(&user).Updates(map[string]interface{}{
+	sessionUpdates := map[string]interface{}{
 		"didit_session_id":    diditResp.SessionID,
 		"verification_status": models.VerificationStatusInReview,
-	}).Error; err != nil {
+	}
+	// Recorded with the session it was sent to Didit with, so the claim on
+	// the row is always the one Didit compared the document against.
+	if declared != nil {
+		sessionUpdates["declared_given_names"] = declared.GivenNames
+		sessionUpdates["declared_surname"] = declared.Surname
+	}
+	if err := config.DB.Model(&user).Updates(sessionUpdates).Error; err != nil {
 		failKYCSession(c, http.StatusInternalServerError,
 			fmt.Sprintf("failed to persist session %s for user %s: %v", diditResp.SessionID, user.ID, err))
 		return
@@ -829,11 +958,14 @@ func (h *Handlers) GetKYCStatus(c *gin.Context) {
 			// account are attributed by matching the sender's account name
 			// against this exact string.
 			"verifiedLegalName": user.VerifiedLegalName,
-			"diditStatus":       diditStatus,
-			"sessionUrl":        sessionURL,
-			"actionRequired":    diditStatus == diditStatusResubmitted,
-			"lastAction":        latestLog.Action,
-			"lastActionAt":      latestLog.CreatedAt,
+			// What the user typed before the Didit flow, to pre-fill a retry.
+			"declaredGivenNames": user.DeclaredGivenNames,
+			"declaredSurname":    user.DeclaredSurname,
+			"diditStatus":        diditStatus,
+			"sessionUrl":         sessionURL,
+			"actionRequired":     diditStatus == diditStatusResubmitted,
+			"lastAction":         latestLog.Action,
+			"lastActionAt":       latestLog.CreatedAt,
 		},
 	})
 }
@@ -862,7 +994,11 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 
 	name, source, refusal := h.overrideLegalName(c.Request.Context(), &user, req.LegalName)
 	if refusal != nil {
-		c.JSON(refusal.status, gin.H{"success": false, "message": refusal.message, "code": refusal.code})
+		body := gin.H{"success": false, "message": refusal.message, "code": refusal.code}
+		if refusal.data != nil {
+			body["data"] = refusal.data
+		}
+		c.JSON(refusal.status, body)
 		return
 	}
 
@@ -876,9 +1012,11 @@ func (h *Handlers) AdminOverrideKYC(c *gin.Context) {
 	if source != legalNameSourceExisting {
 		updates["verified_legal_name"] = name
 		updates["verified_legal_name_at"] = now
-		// Fill the name only if it is still empty: a webhook or name change
-		// that stored one since we read the row must not be overwritten.
-		write = write.Where("verified_legal_name IS NULL OR verified_legal_name = ''")
+		// Fill the name only if it is still what we read: a webhook or name
+		// change that stored one since must not be overwritten. What we read is
+		// empty, or a label-only scan that overrideLegalName treats as empty.
+		write = write.Where("verified_legal_name IS NULL OR verified_legal_name = '' OR verified_legal_name = ?",
+			user.VerifiedLegalName)
 	}
 	res := write.Updates(updates)
 	if res.Error != nil {
@@ -919,16 +1057,23 @@ const (
 	legalNameSourceAdmin    = "admin"
 	legalNameSourceDidit    = "didit"
 	legalNameSourceExisting = "existing"
+	// The admin read the name off a document image Didit could not read.
+	legalNameSourceAdminFromDocument = "admin_document_unreadable"
+	// As above, and what the admin read matches what the user declared.
+	legalNameSourceAdminConfirmedDeclared = "admin_confirmed_declared"
 )
 
 // overrideRefusal is why an override was not applied, as the admin sees it.
 type overrideRefusal struct {
 	status        int
 	code, message string
+	// data goes back with the refusal: the user's declared name, for the
+	// console to offer as the admin's starting point.
+	data gin.H
 }
 
 var noDocumentRefusal = &overrideRefusal{http.StatusConflict, "kyc_no_document",
-	"this user never submitted an ID document in Didit — ask them to finish verification in the app first"}
+	"this user never submitted an ID document in Didit — ask them to finish verification in the app first", nil}
 
 // overrideLegalName settles the legal name an admin approval stores, or the
 // refusal to show the admin.
@@ -944,14 +1089,25 @@ var noDocumentRefusal = &overrideRefusal{http.StatusConflict, "kyc_no_document",
 // session Didit no longer holds (or no Didit at all) — never while Didit is unreachable, or an outage would skip the
 // document check. A stored name is kept, and is never replaced by a different
 // one: changing a verified name is the name-change review's job.
+//
+// A document Didit holds but could not read a name off (the NIN slip) takes
+// the admin's typed name, read off the document image in the Didit console. A
+// stored name that is only field labels ("Surnamen Surnamen") counts as none.
 func (h *Handlers) overrideLegalName(ctx context.Context, user *models.User, typed string) (string, string, *overrideRefusal) {
 	typed = strings.Join(strings.Fields(typed), " ")
+	if typed != "" && !usableLegalName(typed) {
+		return "", "", &overrideRefusal{http.StatusBadRequest, "legal_name_invalid",
+			"that is a field label, not a name — enter the person's name exactly as printed on their ID", nil}
+	}
 	stored := strings.TrimSpace(user.VerifiedLegalName)
+	if !usableLegalName(stored) {
+		stored = ""
+	}
 
 	if stored != "" {
 		if typed != "" && !strings.EqualFold(stored, typed) {
 			return "", "", &overrideRefusal{http.StatusBadRequest, "legal_name_conflict",
-				"this user already has a different verified legal name — change it through a name-change review"}
+				"this user already has a different verified legal name — change it through a name-change review", nil}
 		}
 		return stored, legalNameSourceExisting, nil
 	}
@@ -967,10 +1123,20 @@ func (h *Handlers) overrideLegalName(ctx context.Context, user *models.User, typ
 			return name, legalNameSourceDidit, nil
 		case errors.Is(err, errDiditNoDocument):
 			return "", "", noDocumentRefusal
+		case errors.Is(err, errDiditDocumentUnreadable):
+			if typed == "" {
+				return "", "", &overrideRefusal{http.StatusBadRequest, "legal_name_unreadable",
+					"Didit could not read the name on this user's ID — open their session in Didit, read the name off the document image and enter it exactly as printed",
+					declaredNameData(user)}
+			}
+			if declared := declaredFullName(user); declared != "" && strings.EqualFold(typed, declared) {
+				return typed, legalNameSourceAdminConfirmedDeclared, nil
+			}
+			return typed, legalNameSourceAdminFromDocument, nil
 		case !errors.Is(err, errDiditNameUnresolved):
 			log.Printf("[KYC] override document lookup failed for user %s: %v", user.ID, err)
 			return "", "", &overrideRefusal{http.StatusServiceUnavailable, "kyc_provider_unavailable",
-				"could not reach the verification provider to read the user's document — try again shortly"}
+				"could not reach the verification provider to read the user's document — try again shortly", nil}
 		}
 		// Didit no longer holds the session: only a typed name is left.
 	}
@@ -979,7 +1145,25 @@ func (h *Handlers) overrideLegalName(ctx context.Context, user *models.User, typ
 		return typed, legalNameSourceAdmin, nil
 	}
 	return "", "", &overrideRefusal{http.StatusBadRequest, "legal_name_required",
-		"Didit holds no document for this user — enter their legal name exactly as it appears on their ID"}
+		"Didit holds no document for this user — enter their legal name exactly as it appears on their ID",
+		declaredNameData(user)}
+}
+
+// declaredFullName is the name the user declared before the Didit flow, or "".
+func declaredFullName(user *models.User) string {
+	if user.DeclaredGivenNames == "" || user.DeclaredSurname == "" {
+		return ""
+	}
+	return declaredName{user.DeclaredGivenNames, user.DeclaredSurname}.full()
+}
+
+// declaredNameData offers the declared name to the admin who has to type one —
+// as a starting point to check against the document, never as the answer.
+func declaredNameData(user *models.User) gin.H {
+	if name := declaredFullName(user); name != "" {
+		return gin.H{"declaredLegalName": name}
+	}
+	return nil
 }
 
 // AdminRejectKYC allows an admin to reject a user's verification.
@@ -1175,10 +1359,11 @@ func backfillVerifiedNames(ctx context.Context, cfg *config.Config, users []mode
 			// is no name anywhere, and the user has to verify for real.
 			result.NoDocumentUserIDs = append(result.NoDocumentUserIDs, user.ID.String())
 			continue
-		case errors.Is(err, errDiditNameUnresolved):
-			// Sessions Didit no longer holds, and users verified by admin
-			// override who never had one. Reported so they can be chased by
-			// hand — a run must not stop on them.
+		case errors.Is(err, errDiditNameUnresolved), errors.Is(err, errDiditDocumentUnreadable):
+			// Sessions Didit no longer holds, documents it read no name off
+			// (an admin override with a typed name repairs those), and users
+			// verified by admin override who never had one. Reported so they
+			// can be chased by hand — a run must not stop on them.
 			result.UnresolvedUserIDs = append(result.UnresolvedUserIDs, user.ID.String())
 			continue
 		case err != nil:
@@ -1246,6 +1431,9 @@ func (u UserWithLog) MarshalJSON() ([]byte, error) {
 	extra := map[string]interface{}{
 		"lastAction":   u.LastAction,
 		"lastActionAt": u.LastActionAt,
+		// False for no name and for a label-only scan ("Surnamen Surnamen"):
+		// either way the user is refused at pay-in until an admin repairs it.
+		"legalNameUsable": usableLegalName(u.VerifiedLegalName),
 	}
 	if u.VerifiedLegalName != "" {
 		extra["verifiedLegalName"] = u.VerifiedLegalName
