@@ -1209,7 +1209,34 @@ func (s *BillService) GetOrder(ctx context.Context, userID, orderID uuid.UUID) (
 		}
 		return nil, err
 	}
+	s.refreshVending(ctx, &o)
 	return &o, nil
+}
+
+// vendRefreshAfter keeps a polling client from turning into a query per tick:
+// adopting a still-pending answer bumps updated_at, so one query per window.
+const vendRefreshAfter = 2 * time.Second
+
+// refreshVending asks ClubKonnect where a vending order stands when the user
+// looks at it. ClubKonnect usually answers a vend "received" (100) and delivers
+// seconds later; without this the order waits for the reconciler's grace
+// window, so a customer who already has their airtime keeps seeing Processing.
+// Best-effort: a failed query leaves the stored status, and adoptVendResult is
+// the same guarded path the reconciler uses, so a race with it is harmless.
+func (s *BillService) refreshVending(ctx context.Context, o *models.BillOrder) {
+	if o.Status != models.BillStatusVending || !s.IsEnabled() || time.Since(o.UpdatedAt) < vendRefreshAfter {
+		return
+	}
+	qctx, cancel := context.WithTimeout(ctx, ckReadTimeout)
+	defer cancel()
+	res, err := s.vendor.QueryOrder(qctx, o.ID.String())
+	if err != nil {
+		return
+	}
+	if aerr := s.adoptVendResult(qctx, o, res); aerr != nil {
+		log.Printf("[bills] order=%s refresh on read: %v", o.ID, aerr)
+	}
+	_ = s.db.WithContext(ctx).First(o, "id = ?", o.ID).Error
 }
 
 func (s *BillService) ListOrders(ctx context.Context, userID uuid.UUID, limit int) ([]models.BillOrder, error) {

@@ -3,7 +3,7 @@
 // Bill transaction detail — the receipt for one order, with Share (native
 // share sheet, plain-text receipt) and Report (one complaint per order,
 // reviewed by an admin; its status and resolution show here once filed).
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, Share, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
@@ -179,6 +179,16 @@ export default function BillOrderDetail() {
       load();
     }, [load]),
   );
+
+  // An in-flight bill resolves on the server a few seconds after the vendor
+  // delivers; keep asking while the screen is open instead of showing the
+  // status from the moment it was first loaded.
+  const inFlight = order?.status === 'paying' || order?.status === 'paid' || order?.status === 'vending';
+  useEffect(() => {
+    if (!inFlight) return;
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  }, [inFlight, load]);
 
   const toneColor = (tone: Tone) =>
     tone === 'success'

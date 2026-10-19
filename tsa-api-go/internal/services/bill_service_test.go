@@ -831,3 +831,28 @@ func TestBillServiceDisabledWithoutPayer(t *testing.T) {
 		t.Fatalf("want ErrBillsDisabled, got %v", err)
 	}
 }
+
+// A customer who already has their airtime must not wait out the reconciler's
+// grace window: opening the order asks the vendor and settles it.
+func TestGetOrderRefreshesVendingFromVendor(t *testing.T) {
+	r := newBillServiceRig(t)
+	r.vendor.vendResult = BillVendResult{OrderID: "905", StatusCode: 100, Status: "ORDER_RECEIVED"}
+	q := r.airtimeQuote(t)
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Inside the throttle window nothing is asked.
+	if o, _ := r.svc.GetOrder(context.Background(), r.userID, q.Order.ID); o.Status != models.BillStatusVending || r.vendor.queryCalls != 0 {
+		t.Fatalf("fresh order: status=%s queries=%d", o.Status, r.vendor.queryCalls)
+	}
+	backdate(t, r.db, q.Order.ID, models.BillStatusVending, time.Minute)
+
+	r.vendor.queryResult = BillVendResult{OrderID: "905", StatusCode: 200, Status: "ORDER_COMPLETED"}
+	o, err := r.svc.GetOrder(context.Background(), r.userID, q.Order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Status != models.BillStatusDelivered || r.payer.settles != 1 {
+		t.Fatalf("status=%s settles=%d, want delivered/1", o.Status, r.payer.settles)
+	}
+}
