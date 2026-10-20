@@ -18,7 +18,7 @@ import * as Clipboard from "expo-clipboard";
 import api from "../services/api";
 import { useAuth } from "@/AuthContext/AuthContext";
 import { useTheme } from "@/theme";
-import { NAME_CHANGE, TSA_PAY_APPLY } from "@/constants/routes";
+import { NAME_CHANGE } from "@/constants/routes";
 import { useNameChangeEntry } from "@/hooks/useNameChangeEntry";
 import { useIsPaymentMerchant } from "@/hooks/useIsPaymentMerchant";
 import { lpCta } from "@/utils/lpCta";
@@ -199,7 +199,6 @@ const ProfileScreen = () => {
   const lowerLinkRows: LinkRow[] = [
     { key: "trade", icon: "trendingUp", label: "Trade & Earn", onPress: () => router.push("/trade") },
     { key: "referrals", icon: "user", label: "My Referrals", onPress: () => router.push("/referrals") },
-    { key: "tsaPay", icon: "card", label: "Accept payments with TSA Pay", onPress: () => router.push(TSA_PAY_APPLY) },
     ...(liquidity
       ? [{ key: "liquidity", icon: "wallet" as IconName, label: liquidity.title, onPress: () => router.push(liquidity.route as never) }]
       : []),

@@ -361,13 +361,22 @@ describe('resolveMerchantGate', () => {
       .toEqual({ screen: 'approved', pm: false, payFlow: false });
   });
 
-  it('approved payment_acceptance (TSA Pay) request → approved screen with payFlow set, not the marketplace-merchant gate', () => {
-    // Finding 2 (whole-branch review): TSA Pay never grants RoleMerchant
-    // server-side, so this must not read as the ordinary "You're a Merchant!"
-    // gate — the caller uses payFlow to show a distinct message and skip the
-    // "Go to Merchant Dashboard" CTA.
+  it('an approved payment_acceptance (TSA Pay) request never hijacks the general merchant form', () => {
+    // One merchant role: TSA Pay says nothing about marketplace selling, so
+    // the general form stays a form instead of showing the TSA Pay status.
     const existingRequest = { status: 'approved', business_type: 'payment_acceptance' };
     expect(resolveMerchantGate({ existingRequest, formType: 'general_products', pmActive: false }))
+      .toEqual({ screen: 'form' });
+  });
+
+  it('a merchant never gets the general form she could only be refused', () => {
+    expect(resolveMerchantGate({ existingRequest: null, formType: 'general_products', pmActive: false, isMerchant: true }))
+      .toEqual({ screen: 'approved', pm: false, payFlow: false });
+  });
+
+  it('an approved payment_acceptance request still shows its own status on the TSA Pay form', () => {
+    const existingRequest = { status: 'approved', business_type: 'payment_acceptance' };
+    expect(resolveMerchantGate({ existingRequest, formType: 'payment_acceptance', pmActive: false }))
       .toEqual({ screen: 'approved', pm: false, payFlow: true });
   });
 

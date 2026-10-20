@@ -559,6 +559,62 @@ func (s *PayMerchantService) GetByOwner(ctx context.Context, userID uuid.UUID) (
 	}
 }
 
+// GetOrProvisionByOwner is GetByOwner for an approved merchant, who needs no
+// second application for TSA Pay: the merchant approval is the review, so a
+// merchant with a verified identity gets the TSA Pay account on first use,
+// provisioned from their approved merchant request (settlement unset until they
+// choose a destination in Payment Settings). Anyone else — not a merchant, not
+// verified, or no usable request — gets exactly what GetByOwner says.
+func (s *PayMerchantService) GetOrProvisionByOwner(ctx context.Context, userID uuid.UUID) (*models.PayMerchant, error) {
+	m, err := s.GetByOwner(ctx, userID)
+	if !errors.Is(err, ErrPayMerchantNotFound) {
+		return m, err
+	}
+	var user models.User
+	if err := s.db.WithContext(ctx).First(&user, "id = ?", userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrPayMerchantNotFound
+		}
+		return nil, err
+	}
+	if user.Role != models.RoleMerchant {
+		return nil, ErrPayMerchantNotFound
+	}
+	verified, err := IsKYCVerified(ctx, s.db, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !verified {
+		return nil, ErrPayMerchantNotFound
+	}
+	var req models.MerchantRequest
+	err = s.db.WithContext(ctx).
+		Where("user_id = ? AND status = ? AND business_type IN ?", userID, models.MerchantRequestStatusApproved,
+			[]string{models.BusinessTypeGeneralProducts, models.BusinessTypeDigitalProducts,
+				models.BusinessTypeServiceProvider, models.BusinessTypeP2PMerchant}).
+		// A marketplace business's name is the one she chose for selling; a
+		// payment-merchant row is the fallback.
+		Order("CASE WHEN business_type = 'p2p_merchant' THEN 1 ELSE 0 END, created_at DESC").First(&req).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrPayMerchantNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	// A marketplace request carries no TSA Pay website or settlement, which
+	// CreateFromRequest then leaves blank for the merchant to set.
+	req.Website = ""
+	req.SettlementBankCode, req.SettlementAccountNumber, req.SettlementAccountName = "", "", ""
+	created, err := s.CreateFromRequest(ctx, &req)
+	if err != nil {
+		// Not "no merchant": a name that breaks the TSA Pay rule maps to its own
+		// refusal in payOwnerFail, anything else to a server error.
+		log.Printf("[tsa-pay] provisioning merchant %s from request %s failed: %v", userID, req.ID, err)
+		return nil, err
+	}
+	return created, nil
+}
+
 // UpdateSettlementByOwner is a merchant changing where they are paid. It is the
 // admin Update with more rules, because the caller is the account an attacker
 // would take over to redirect a merchant's money:

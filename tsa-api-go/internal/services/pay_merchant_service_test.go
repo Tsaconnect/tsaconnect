@@ -1444,3 +1444,55 @@ func TestPaySharedEgress_CloudflareRangesMatchNginxRealIP(t *testing.T) {
 		t.Fatal("PaySharedEgress classifies wrongly")
 	}
 }
+
+func seedApprovedMarketplaceRequest(t *testing.T, s *PayMerchantService, userID uuid.UUID, role string) *models.MerchantRequest {
+	t.Helper()
+	// Raw DDL for just the columns the service reads: AutoMigrate carries
+	// PostgreSQL-only defaults SQLite cannot parse.
+	s.db.Exec(`CREATE TABLE IF NOT EXISTS merchant_requests (id TEXT PRIMARY KEY, user_id TEXT, business_type TEXT,
+		business_name TEXT, status TEXT, website TEXT, settlement_bank_code TEXT, settlement_account_number TEXT,
+		settlement_account_name TEXT, created_at DATETIME)`)
+	s.db.Exec(`ALTER TABLE users ADD COLUMN role TEXT`) // the shared fixture table has none; a second call is a harmless error
+	if err := s.db.Exec(`UPDATE users SET role = ? WHERE id = ?`, role, userID).Error; err != nil {
+		t.Fatal(err)
+	}
+	req := &models.MerchantRequest{ID: uuid.New(), UserID: userID, BusinessType: models.BusinessTypeGeneralProducts,
+		BusinessName: "Sky Air", Status: models.MerchantRequestStatusApproved}
+	if err := s.db.Exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, req.ID, req.UserID, req.BusinessType, req.BusinessName, req.Status, time.Now()).Error; err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func TestPayMerchant_AVerifiedMerchantGetsTSAPayWithNoSecondApplication(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	uid := seedVerifiedUser(t, s.db)
+	req := seedApprovedMarketplaceRequest(t, s, uid, models.RoleMerchant)
+
+	m, err := s.GetOrProvisionByOwner(context.Background(), uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.UserID != uid || m.MerchantRequestID != req.ID || m.Status != models.PayMerchantActive || m.SettlementMode != "" {
+		t.Fatalf("merchant = %+v", m)
+	}
+	again, err := s.GetOrProvisionByOwner(context.Background(), uid)
+	if err != nil || again.ID != m.ID {
+		t.Fatalf("second read: %v %+v", err, again)
+	}
+}
+
+func TestPayMerchant_TSAPayIsNotProvisionedForAnUnverifiedOrNonMerchant(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	unverified := seedUserAt(t, s.db, uuid.New(), models.VerificationStatusPending)
+	seedApprovedMarketplaceRequest(t, s, unverified, models.RoleMerchant)
+	plain := seedVerifiedUser(t, s.db)
+	seedApprovedMarketplaceRequest(t, s, plain, models.RoleUser)
+
+	for name, uid := range map[string]uuid.UUID{"unverified merchant": unverified, "verified non-merchant": plain} {
+		if _, err := s.GetOrProvisionByOwner(context.Background(), uid); !errors.Is(err, ErrPayMerchantNotFound) {
+			t.Fatalf("%s: err = %v, want ErrPayMerchantNotFound", name, err)
+		}
+	}
+}

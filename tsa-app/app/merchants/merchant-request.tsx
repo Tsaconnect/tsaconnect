@@ -200,7 +200,12 @@ export function resolveMerchantGate(args: {
   formType: string;
   pmActive: boolean;
   kycVerified?: boolean;
+  /** She already holds the merchant role: the general form could only be refused. */
+  isMerchant?: boolean;
 }): MerchantGate {
+  if (args.isMerchant && !ADD_ON_BUSINESS_TYPES.includes(args.formType)) {
+    return { screen: 'approved', pm: false, payFlow: false };
+  }
   const gate = resolveRequestGate(args);
   if (gate.screen === 'form' && args.formType === 'payment_acceptance' && args.kycVerified === false) {
     return { screen: 'verify' };
@@ -218,9 +223,8 @@ function resolveRequestGate(args: {
 
   const existingType = existingRequest.businessType ?? existingRequest.business_type;
   const existingIsPm = existingType === 'p2p_merchant';
-  // TSA Pay's payment_acceptance approval deliberately never grants
-  // RoleMerchant (Task 4) — the marketplace-merchant "Go to Merchant
-  // Dashboard" success screen is wrong for it and its API calls would 403.
+  // A legacy TSA Pay request: its status screen points at Payment Settings,
+  // not the marketplace "Go to Merchant Dashboard" gate.
   const existingIsPay = existingType === 'payment_acceptance';
 
   // Upgrade mode (?type=p2p_merchant or ?type=payment_acceptance): a prior
@@ -229,7 +233,10 @@ function resolveRequestGate(args: {
   // request of the SAME add-on type gates its own form (so re-visiting after
   // an approval, say, still shows her that status rather than a blank form).
   const formIsAddOn = ADD_ON_BUSINESS_TYPES.includes(formType);
-  const blockExisting = !formIsAddOn || existingType === formType;
+  // A TSA Pay request is never a reason to block the general form either:
+  // merchants get TSA Pay without it, so it says nothing about marketplace
+  // selling.
+  const blockExisting = formIsAddOn ? existingType === formType : !existingIsPay;
   if (!blockExisting) return { screen: 'form' };
 
   if (existingType === 'liquidity_provider' && (existingRequest.status === 'pending' || existingRequest.status === 'approved')) {
@@ -272,6 +279,7 @@ export default function MerchantRequestScreen() {
   // Actual Payment Merchant status (GET /p2p/pm/me) — distinct from an approved
   // PM *request*. Used to gate the "You're a Payment Merchant!" success screen.
   const [pmActive, setPmActive] = useState(false);
+  const [isMerchantRole, setIsMerchantRole] = useState(false);
   // The applicant's KYC status: AuthContext's copy, replaced by a fresh read
   // each time the screen gains focus (she may have just verified). If the read
   // fails, the cached copy stands. kycChecked holds the TSA Pay screen on its
@@ -441,6 +449,7 @@ export default function MerchantRequestScreen() {
       const filter = requestTypeFilter(businessType);
       const [res, pmStatus] = await Promise.all([getMyMerchantRequest(), getMyPmStatus()]);
       setPmActive(pmStatus.isPm);
+      setIsMerchantRole((await AsyncStorage.getItem('role'))?.toLowerCase() === 'merchant');
       if (filter && res.success) {
         const newestType = res.data?.businessType ?? res.data?.business_type;
         const typed = !res.data || newestType === filter ? res : await getMyMerchantRequest(filter);
@@ -459,6 +468,7 @@ export default function MerchantRequestScreen() {
         const approvedType = res.data.businessType ?? res.data.business_type;
         if (res.data.status === 'approved' && cachesMerchantRole(approvedType)) {
           await AsyncStorage.setItem('role', 'merchant');
+          setIsMerchantRole(true);
         }
         // Pre-fill the shared business fields from the existing request. This
         // matters on the PM-upgrade path (?type=p2p_merchant): an existing
@@ -564,6 +574,7 @@ export default function MerchantRequestScreen() {
     formType: businessType,
     pmActive,
     kycVerified: kycStatus === 'verified' && !kycRefused,
+    isMerchant: isMerchantRole,
   });
 
   if (gate.screen === 'verify') {

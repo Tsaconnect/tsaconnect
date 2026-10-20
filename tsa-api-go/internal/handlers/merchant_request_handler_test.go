@@ -1295,7 +1295,7 @@ func TestSubmitMerchantRequest_ApprovedPaymentAcceptanceDoesNotBlockGeneralProdu
 	}
 }
 
-func TestApproveMerchantRequest_PaymentAcceptanceProvisionsWithoutARoleFlip(t *testing.T) {
+func TestApproveMerchantRequest_PaymentAcceptanceGrantsTheMerchantRole(t *testing.T) {
 	db := setupMerchantTestDB(t)
 	prov := &fakePayProvisioner{db: db}
 	h := &MerchantRequestHandler{DB: db, PayMerchants: prov}
@@ -1308,8 +1308,8 @@ func TestApproveMerchantRequest_PaymentAcceptanceProvisionsWithoutARoleFlip(t *t
 	}
 	var u models.User
 	db.First(&u, "id = ?", user.ID)
-	if u.Role != "user" {
-		t.Fatalf("role = %q; TSA Pay approval must not grant the admin-console merchant role", u.Role)
+	if u.Role != models.RoleMerchant {
+		t.Fatalf("role = %q; one merchant role: a TSA Pay approval grants it like any other", u.Role)
 	}
 	if w := approvePay(h, admin, reqID); w.Code == http.StatusOK || prov.calls != 1 {
 		t.Fatalf("re-approving a provisioned request: %d calls %d", w.Code, prov.calls)

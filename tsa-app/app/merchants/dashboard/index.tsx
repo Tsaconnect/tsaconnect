@@ -21,7 +21,7 @@ import { useOwnPayMerchant } from '@/hooks/useOwnPayMerchant';
 import { merchantDashboardCta } from '@/utils/pmCta';
 import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { LpCtaCard } from '@/components/liquidity/LpCtaCard';
-import { TSA_PAY_APPLY } from '@/constants/routes';
+import { KYC_ROUTE } from '@/utils/kycRefusal';
 import {
   AccentCard,
   Badge,
@@ -271,12 +271,10 @@ export default function MerchantDashboard() {
             </PressableScale>
           )}
 
-          {/* TSA Pay — a merchant who has it gets her payment links and
-              payment settings; anyone else gets the CTA, and the
-              merchant-request gate itself routes to the form, or to the
-              verify-first/pending/approved/rejected screen, based on her
-              verification and any existing request. Nothing is drawn until
-              the read settles, so the card never swaps under her thumb. */}
+          {/* TSA Pay — every merchant has it, with no second application: the
+              server provisions it on first read once she is verified. Until
+              then the card asks her to verify. Nothing is drawn until the
+              read settles, so the card never swaps under her thumb. */}
           {payMerchant.kind === 'loading' ? null : payMerchant.kind === 'ready' ? (
             <AccentCard padding="md" railColor={colors.accent} style={{ marginBottom: spacing.lg }}>
               <View style={{ gap: spacing.md }}>
@@ -294,9 +292,9 @@ export default function MerchantDashboard() {
                 <PayLinkEntry canRequest={payMerchant.merchant.status !== 'suspended'} withSettings />
               </View>
             </AccentCard>
-          ) : (
+          ) : payMerchant.kind === 'none' ? (
             <PressableScale
-              onPress={() => router.push(TSA_PAY_APPLY)}
+              onPress={() => router.push(KYC_ROUTE as never)}
               style={{ marginBottom: spacing.lg }}
             >
               <AccentCard padding="md" railColor={colors.accent}>
@@ -307,14 +305,14 @@ export default function MerchantDashboard() {
                       Accept payments (TSA Pay)
                     </Text>
                     <Text variant="caption" color="textSecondary">
-                      Let customers pay you in any token, settled to naira or crypto.
+                      Verify your identity to let customers pay you in any token.
                     </Text>
                   </View>
                   <Icon name="chevronRight" size={20} color={colors.textMuted} />
                 </View>
               </AccentCard>
             </PressableScale>
-          )}
+          ) : null}
 
           <LpCtaCard isPm={isPm} kind={pmKind} lpStatus={lpStatus} liquidityAvailable={liquidityAvailable} loading={pmLoading} />
 

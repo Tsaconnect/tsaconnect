@@ -29,7 +29,6 @@ import { useTheme, fontFamily } from "@/theme";
 import { Avatar, Divider, Text } from "@/components/ui";
 import { isHomeTab, showDrawerHeader, type NestedNavState } from "@/utils/navHeader";
 import CartIconBadge from "@/components/common/CartIconBadge";
-import { TSA_PAY_APPLY } from "@/constants/routes";
 import { useIsPaymentMerchant } from "@/hooks/useIsPaymentMerchant";
 import { lpCta } from "@/utils/lpCta";
 import { drawerSegments } from "@/utils/drawerSegments";
@@ -67,6 +66,11 @@ const Layout = () => {
 
           if (profileResponse.success && profileResponse.data) {
             setCurrentUser(profileResponse.data);
+            // The server's role wins over the cached one: an approval (or a
+            // backfill) changes it while the app is already signed in.
+            if (profileResponse.data.role) {
+              await AsyncStorage.setItem("role", String(profileResponse.data.role).toLowerCase());
+            }
           } else {
             console.warn('Failed to fetch profile:', profileResponse.message);
           }
@@ -138,14 +142,16 @@ const Layout = () => {
     { label: "Sell USDT for Fiat", icon: "trending-up", route: "/merchants/sell-usdt" },
     { label: "Buy Crypto with Cash", icon: "cash-multiple", route: "/merchants/buy-usdt" },
     { label: "Digital Assets", icon: "wallet-outline", route: "/merchants/digital" },
+    { label: "Payment Links", icon: "link-variant", route: "/merchants/pay-links" },
+    { label: "Payment Settings", icon: "credit-card-outline", route: "/merchants/pay-settings" },
   ];
 
   type DrawerLink = { label: string; icon: string; route: string };
   const liquidity = lpCta({ isPm: pm.isPm, kind: pm.kind, lpStatus: pm.lpStatus, liquidityAvailable: pm.liquidityAvailable, loading: pm.loading });
   // Rows that live outside this drawer, each placed after the screen it is
-  // keyed by. A merchant already is one, so "Become Merchant" is for everyone else.
+  // keyed by. A merchant already is one — and accepts TSA Pay with no second
+  // application — so "Become Merchant" is for everyone else.
   const linksAfter: Record<string, DrawerLink[]> = {
-    profile: [{ label: "Accept Payment with TSA Pay", icon: "credit-card-outline", route: TSA_PAY_APPLY }],
     settings: isMerchant ? [] : [{ label: "Become Merchant", icon: "storefront-outline", route: "/merchants/merchant-request" }],
     categories: liquidity ? [{ label: liquidity.title, icon: "cash-plus", route: liquidity.route }] : [],
   };

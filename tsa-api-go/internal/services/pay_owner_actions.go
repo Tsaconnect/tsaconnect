@@ -134,7 +134,7 @@ func endpointsUpdate(ch PayEndpointsChange, version int) PayMerchantUpdate {
 
 // activeOwnedMerchant is the owner's merchant, refused while suspended.
 func (s *PayMerchantService) activeOwnedMerchant(ctx context.Context, ownerID uuid.UUID) (*models.PayMerchant, error) {
-	m, err := s.GetByOwner(ctx, ownerID)
+	m, err := s.GetOrProvisionByOwner(ctx, ownerID)
 	if err != nil {
 		return nil, err
 	}

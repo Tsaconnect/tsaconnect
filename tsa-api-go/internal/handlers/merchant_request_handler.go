@@ -187,9 +187,9 @@ func (h *MerchantRequestHandler) SubmitMerchantRequest(c *gin.Context) {
 			return
 		}
 	}
-	// payment_acceptance and liquidity_provider: no role guard — a marketplace
-	// merchant (or anyone else) may apply to accept payments or provide
-	// liquidity; neither is the admin-console merchant role.
+	// payment_acceptance: no role guard — a legacy applicant or an existing
+	// merchant may still submit one. Approved merchants get TSA Pay without it
+	// (PayMerchantService.GetOrProvisionByOwner).
 
 	// A TSA Pay application would sit unprovisionable while TSA Pay is
 	// dormant, so refuse it up front rather than take the applicant's details.
@@ -645,12 +645,15 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 				}
 			}
 			if isPMRetry || isPayRetry {
-				return nil // the status flip and role were done on attempt 1
+				// The status flip was done on attempt 1. A TSA Pay request approved
+				// before the one-role change never got the role; the grant is idempotent.
+				if isPayRetry {
+					return tx.Model(&models.User{}).Where("id = ?", req.UserID).
+						Update("role", models.RoleMerchant).Error
+				}
+				return nil
 			}
-			// First approval: flip status → approved. The role upgrade to
-			// "merchant" (the admin-console marketplace role) does NOT apply to
-			// TSA Pay — accepting payments is a separate capability, not a
-			// marketplace-merchant grant.
+			// First approval: flip status → approved, then grant the merchant role.
 			// Only a still-pending request moves (review M9): a concurrent
 			// approval that committed first keeps its reviewer and note, and
 			// this one rolls back and sends no second notification.
@@ -668,10 +671,11 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 				return errApprovalRaceLost
 			}
 
-			// Nor to a liquidity provider (plan B P2): the LP role never grants
-			// the console role. A user who is also an approved payment merchant
-			// holds it through that approval, as every merchant does.
-			if req.BusinessType != models.BusinessTypePaymentAcceptance {
+			// One merchant role for everything a merchant does: marketplace, TSA
+			// Pay and payment-merchant approvals all grant it (owner 2026-10-19).
+			// Only the retired liquidity-provider application does not: LPs are
+			// not console merchants.
+			if req.BusinessType != models.BusinessTypeLiquidityProvider {
 				if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
 					Update("role", models.RoleMerchant).Error; err != nil {
 					return err

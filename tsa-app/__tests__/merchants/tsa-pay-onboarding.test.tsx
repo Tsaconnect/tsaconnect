@@ -110,6 +110,7 @@ import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { router as mockRouter } from 'expo-router';
 import api, { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
 import { TSA_PAY_APPLY } from '@/constants/routes';
+import { KYC_ROUTE } from '@/utils/kycRefusal';
 import MerchantRequestScreen, { resolveMerchantGate } from '@/app/merchants/merchant-request';
 import ProfileScreen from '@/components/profile/profile';
 import MerchantDashboard from '@/app/merchants/dashboard/index';
@@ -150,16 +151,15 @@ describe('entry points', () => {
     expect(TSA_PAY_APPLY).toBe('/merchants/merchant-request?type=payment_acceptance');
   });
 
-  it('the Profile row opens the TSA Pay application', async () => {
+  it('the Profile no longer offers a separate TSA Pay application', async () => {
     const tree = await mount(<ProfileScreen />);
-    await act(async () => { pressableWith(tree, 'Accept payments with TSA Pay').props.onPress(); });
-    expect(mockRouter.push).toHaveBeenCalledWith(TSA_PAY_APPLY);
+    expect(text(tree)).not.toContain('Accept payments with TSA Pay');
   });
 
-  it('the Merchant dashboard card opens the TSA Pay application', async () => {
+  it('the Merchant dashboard card sends an unverified merchant to verification', async () => {
     const tree = await mount(<MerchantDashboard />);
     await act(async () => { pressableWith(tree, 'Accept payments (TSA Pay)').props.onPress(); });
-    expect(mockRouter.push).toHaveBeenCalledWith(TSA_PAY_APPLY);
+    expect(mockRouter.push).toHaveBeenCalledWith(KYC_ROUTE);
   });
 });
 

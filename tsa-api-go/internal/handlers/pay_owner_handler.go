@@ -143,7 +143,7 @@ func (h *PayHandler) payOwnerMerchant(c *gin.Context) (*models.User, *models.Pay
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return nil, nil, false
 	}
-	m, err := h.merchants.GetByOwner(c.Request.Context(), user.ID)
+	m, err := h.merchants.GetOrProvisionByOwner(c.Request.Context(), user.ID)
 	if err != nil {
 		payOwnerFail(c, err)
 		return nil, nil, false
