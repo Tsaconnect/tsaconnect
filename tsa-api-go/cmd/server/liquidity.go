@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"log"
+	"math/big"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -35,7 +37,7 @@ func poolToken(cfg *config.Config, bs *services.BlockchainService) (services.Poo
 // nil (dormant, reason logged) unless the chain client, the operator key and
 // the pool token all exist.
 func wireVaultLiquidity(cfg *config.Config, bs *services.BlockchainService, pm *services.PMService,
-	release services.ChainSender, gate services.PoolGate) *services.VaultLPService {
+	release services.ChainSender, gate services.PoolGate, it *services.ITService) *services.VaultLPService {
 	pool, ok := cfg.LiquidityPool()
 	if !ok || bs == nil || config.DB == nil || pm == nil {
 		return nil
@@ -52,7 +54,7 @@ func wireVaultLiquidity(cfg *config.Config, bs *services.BlockchainService, pm *
 	}
 	svc, err := services.NewVaultLPService(services.VaultLPConfig{DB: config.DB, PM: pm,
 		Vault: services.NewLiquidityVault(client, pool.Vault), Tokens: client, Sender: release,
-		Token: tok, ChainName: poolChainName(cfg), Gate: opener,
+		Token: tok, ChainName: poolChainName(cfg), Gate: opener, FiatRate: liquidityFiatRate(it),
 		CompanyUser: func(ctx context.Context) (uuid.UUID, error) {
 			return services.CompanyPMUserID(ctx, config.DB, cfg.ITPMID)
 		}})
@@ -87,4 +89,16 @@ func poolChainName(cfg *config.Config) string {
 		return c.Name
 	}
 	return pool.ChainKey
+}
+
+// liquidityFiatRate prices a fiat LP's USDT in its currency with the same mid
+// the company wallet uses (USDT trades at par with the USDC the desk quotes).
+// Nil when there is no IT service, so naira positions stay off.
+func liquidityFiatRate(it *services.ITService) services.FiatRateFunc {
+	if it == nil {
+		return nil
+	}
+	return func(ctx context.Context, currency string) (*big.Rat, error) {
+		return it.StableMidFiatPerUnit(ctx, currency, models.ITAssetUSDC)
+	}
 }

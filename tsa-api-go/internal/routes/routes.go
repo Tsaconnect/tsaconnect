@@ -895,6 +895,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			liq.GET("/me", p2p.VaultLiquidityMe)
 			liq.GET("/me/activity", p2p.VaultLiquidityActivity)
 			liq.POST("/activate", idem, p2p.ActivateLiquidity)
+			liq.POST("/fiat", idem, p2p.SetLiquidityFiat)
 			liq.POST("/deposit/prepare", p2p.PrepareLiquidityDeposit)
 			liq.POST("/withdraw/prepare", p2p.PrepareLiquidityWithdraw)
 			liq.POST("/claim/prepare", p2p.PrepareLiquidityClaim)

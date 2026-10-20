@@ -24,6 +24,7 @@ type VaultLiquidity interface {
 	PrepareWithdraw(ctx context.Context, userID uuid.UUID, amount string) (*services.LPTxPlan, error)
 	PrepareClaim(ctx context.Context, userID uuid.UUID, to string) (*services.LPTxPlan, error)
 	ClaimForMe(ctx context.Context, userID uuid.UUID) (string, error)
+	SetFiatMode(ctx context.Context, userID uuid.UUID, currency string) (*services.LiquidityVaultMe, error)
 }
 
 // SetVaultLiquidity wires the shared-pool LP side. Pass only a non-nil service.
@@ -39,6 +40,10 @@ func vaultLPError(c *gin.Context, err error) bool {
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), "kyc_verification_required")
 	case errors.Is(err, services.ErrCompanyUserCannotBeLP):
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, "The company account cannot provide liquidity", services.CompanyAccountNotEligibleCode)
+	case errors.Is(err, services.ErrLPFiatUnavailable):
+		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, err.Error(), "fiat_unavailable")
+	case errors.Is(err, services.ErrLPFiatCurrency):
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, services.ErrLPPausedByAdmin):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "liquidity_paused")
 	case errors.Is(err, services.ErrLPWalletInUse):
@@ -205,4 +210,30 @@ func (h *P2PHandler) ClaimLiquidityForMe(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Claim sent", gin.H{"txHash": hash})
+}
+
+type liquidityFiatRequest struct {
+	Currency *string `json:"currency"` // "NGN", or "" to go back to USDT; required
+}
+
+// SetLiquidityFiat handles POST /api/liquidity/fiat {currency}: keep new
+// deposits as naira ("NGN") or back as USDT (""). Deposits already made keep
+// the mode they were indexed in.
+func (h *P2PHandler) SetLiquidityFiat(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+	var req liquidityFiatRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Currency == nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "currency is required")
+		return
+	}
+	me, err := h.vaultLP.SetFiatMode(c.Request.Context(), user.ID, *req.Currency)
+	if err != nil {
+		h.vaultLPFail(c, "change your currency", user.ID, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Liquidity", me)
 }

@@ -5,6 +5,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 
 /* eslint-disable import/first */
 import {
+  fiatRows,
   canClaimGasFree, claimRefusalMessage, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage,
   limitsKnown, oldWalletFundsMessage, oldWalletHasFunds, overBalanceError, withdrawalMessage,
 } from '@/utils/liquidityView';
@@ -157,5 +158,19 @@ describe('unreadable pool limits', () => {
   });
   it('treats an API without the flag as readable', () => {
     expect(limitsKnown(me())).toBe(true);
+  });
+});
+
+describe('fiatRows', () => {
+  const base = { mode: 'vault', status: 'active', token: { symbol: 'USDT', address: '0x', decimals: 18 } } as never as LiquidityMe;
+  it('is empty unless the LP keeps naira', () => {
+    expect(fiatRows(base)).toEqual([]);
+  });
+  it('keeps showing naira still held after switching back to USDT, and shows $10 as ₦13,650 with the locked and current rate', () => {
+    const me = { ...base, fiatCurrency: undefined,
+      fiat: { currency: 'NGN', principal: '13650.00', units: '10', avgRate: '1365.00', currentRate: '1500.00' } } as LiquidityMe;
+    const rows = fiatRows(me);
+    expect(rows[0]).toMatchObject({ label: 'Held as naira', value: '₦13,650' });
+    expect(rows.map((r) => r.value)).toEqual(['₦13,650', '₦1,365 / $1', '₦1,500 / $1']);
   });
 });
