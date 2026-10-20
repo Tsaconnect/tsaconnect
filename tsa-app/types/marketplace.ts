@@ -24,6 +24,12 @@ export interface Product {
   isFeatured?: boolean;
   tags?: string[];
   createdAt?: string;
+  // Promotion (price stays the original; see Product in components/services/api.ts)
+  promoEnabled?: boolean;
+  promoPrice?: number;
+  promoDiscountPercent?: number;
+  promoRequiredReferrals?: number;
+  promoCountdownSeconds?: number;
 }
 
 export interface Subcategory {

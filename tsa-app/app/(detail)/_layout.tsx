@@ -63,6 +63,9 @@ export default function DetailLayout() {
       <Stack.Screen name="trade" options={{ title: 'Trade & Earn' }} />
       <Stack.Screen name="rewards" options={{ title: 'Rewards & TP Levels' }} />
       <Stack.Screen name="cashback" options={{ title: 'Cashback' }} />
+
+      {/* Promotions Arena — linked from the drawer and the marketplace tab strip. */}
+      <Stack.Screen name="promotions" options={{ title: 'Promotions Arena' }} />
     </Stack>
   );
 }

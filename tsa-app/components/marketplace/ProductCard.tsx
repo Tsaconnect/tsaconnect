@@ -12,6 +12,7 @@ import { Product } from '@/components/services/api';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice, formatPriceDual } from '@/utils/formatPrice';
 import { useTheme } from '@/theme';
+import { PromoPrice } from '@/components/promotion/PromoPrice';
 import {
     Badge,
     Card,
@@ -32,7 +33,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
     const { colors, spacing, radius } = useTheme();
 
     const primaryImage = product.images?.[0]?.url;
-    const formattedPrice = formatPrice(product.price, { currency, rate });
+    const formatLocal = (usd: number) => formatPrice(usd, { currency, rate });
     const dualPrice = formatPriceDual(product.price, rate, currency);
     const rating = product.rating?.average || 0;
     const ratingCount = product.rating?.count || 0;
@@ -98,15 +99,9 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
                             {product.name}
                         </Text>
 
-                        <Text
-                            variant="bodyMed"
-                            weight="700"
-                            color="accent"
-                            numeric
-                            style={{ marginBottom: spacing.xs }}
-                        >
-                            {formattedPrice}
-                        </Text>
+                        <View style={{ marginBottom: spacing.xs }}>
+                            <PromoPrice product={product} format={formatLocal} />
+                        </View>
 
                         {rating > 0 && (
                             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -208,9 +203,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
                             )}
                         </View>
 
-                        <Text variant="title3" weight="700" color="accent" numeric>
-                            {formattedPrice}
-                        </Text>
+                        <PromoPrice product={product} format={formatLocal} />
                     </View>
 
                     <Text variant="bodySm" color="textSecondary" numberOfLines={2} style={{ marginBottom: spacing.sm }}>

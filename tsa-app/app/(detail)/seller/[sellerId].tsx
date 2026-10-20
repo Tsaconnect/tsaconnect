@@ -21,6 +21,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSellerData } from '@/hooks/useSellerData';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
+import { PromoPrice } from '@/components/promotion/PromoPrice';
 import { useTheme } from '@/theme';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import {
@@ -185,9 +186,7 @@ export default function SellerCatalogueScreen() {
               marginTop: spacing.sm,
             }}
           >
-            <Text variant="bodyMed" weight="700" color="accent" numeric>
-              {fmtPrice(item.price || 0)}
-            </Text>
+            <PromoPrice product={{ ...item, price: item.price || 0 }} format={fmtPrice} />
             {item.stock !== undefined && (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                 <Icon name="pool" size={12} color={item.stock > 0 ? colors.success : colors.danger} />

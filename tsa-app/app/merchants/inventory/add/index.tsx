@@ -40,6 +40,8 @@ import {
   useToast,
 } from '@/components/ui';
 import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
+import PromotionFields from '@/components/promotion/PromotionFields';
+import { usePromotion } from '@/components/promotion/promoForm';
 import {
   appendUsdAmounts,
   PriceInput,
@@ -69,6 +71,7 @@ const AddProduct = () => {
   const [loading, setLoading] = useState(false);
 
   const pricing = useMerchantPricing();
+  const promotion = usePromotion(pricing);
 
   const [productName, setProductName] = useState('');
   const [description, setDescription] = useState('');
@@ -200,6 +203,8 @@ const AddProduct = () => {
     if (!pricing.ready) newErrors.price = 'Exchange rates are still loading. Try again in a moment.';
     else if (!price.trim()) newErrors.price = 'Price is required';
     else if (isNaN(parseAmount(price)) || parseAmount(price) <= 0) newErrors.price = 'Price must be a positive number';
+    const promoError = promotion.validate(price);
+    if (promoError) newErrors.promotion = promoError;
     if (!stock.trim()) newErrors.stock = 'Stock is required';
     if (isNaN(parseInt(stock)) || parseInt(stock) < 0) newErrors.stock = 'Stock must be a non-negative number';
     if (!categoryId) newErrors.category = 'Category is required';
@@ -251,6 +256,7 @@ const AddProduct = () => {
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
       appendUsdAmounts(formData, pricing);
+      promotion.append(formData);
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
       }
@@ -280,6 +286,7 @@ const AddProduct = () => {
     setProductName('');
     setDescription('');
     pricing.reset();
+    promotion.reset();
     setStock('0');
     setCategoryId('');
     setCategoryName('');
@@ -536,6 +543,17 @@ const AddProduct = () => {
               />
             </View>
           </View>
+
+          <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
+            Promotion
+          </Text>
+          <PromotionFields
+            promotion={promotion}
+            originalPrice={pricing.amount('price')}
+            currencySymbol={pricing.selectedCurrency.symbol}
+            priceDisabled={!pricing.ready}
+            error={errors.promotion}
+          />
 
           {/* Shipping Rates */}
           <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>

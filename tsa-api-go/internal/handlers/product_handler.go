@@ -217,29 +217,39 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	shippingSameCountry, _ := strconv.ParseFloat(c.PostForm("shippingSameCountry"), 64)
 	shippingInternational, _ := strconv.ParseFloat(c.PostForm("shippingInternational"), 64)
 
+	promo, _, promoErr := promoFormTerms(c, price)
+	if promoErr != "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, promoErr)
+		return
+	}
+
 	now := time.Now()
 	product := models.Product{
-		ID:                    uuid.New(),
-		UserID:                user.ID,
-		Name:                  name,
-		Description:           description,
-		Price:                 price,
-		Stock:                 stock,
-		CategoryID:            categoryID,
-		CategoryName:          categoryName,
-		Location:              location,
-		PhoneNumber:           phoneNumber,
-		Email:                 strings.ToLower(strings.TrimSpace(email)),
-		CompanyName:           companyName,
-		ShippingResidential:   shippingResidential,
-		ShippingSameCity:      shippingSameCity,
-		ShippingSameState:     shippingSameState,
-		ShippingSameCountry:   shippingSameCountry,
-		ShippingInternational: shippingInternational,
-		Status:                models.ProductStatusActive,
-		Type:                  productType,
-		CreatedAt:             now,
-		UpdatedAt:             now,
+		PromoEnabled:           promo.Enabled,
+		PromoRequiredReferrals: promo.RequiredReferrals,
+		PromoCountdownSeconds:  promo.CountdownSeconds,
+		PromoPrice:             promo.Price,
+		ID:                     uuid.New(),
+		UserID:                 user.ID,
+		Name:                   name,
+		Description:            description,
+		Price:                  price,
+		Stock:                  stock,
+		CategoryID:             categoryID,
+		CategoryName:           categoryName,
+		Location:               location,
+		PhoneNumber:            phoneNumber,
+		Email:                  strings.ToLower(strings.TrimSpace(email)),
+		CompanyName:            companyName,
+		ShippingResidential:    shippingResidential,
+		ShippingSameCity:       shippingSameCity,
+		ShippingSameState:      shippingSameState,
+		ShippingSameCountry:    shippingSameCountry,
+		ShippingInternational:  shippingInternational,
+		Status:                 models.ProductStatusActive,
+		Type:                   productType,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 
 	log.Printf("[CreateProduct] uploadedImages count: %d", len(uploadedImages))
@@ -271,6 +281,7 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		},
 	})
 
+	product.PromoDiscountPercent = product.DiscountPercent()
 	utils.SuccessResponse(c, http.StatusCreated, "Product created successfully", product)
 }
 
@@ -578,6 +589,29 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 
 		imagesJSON, _ := json.Marshal(keptImages)
 		updates["images"] = imagesJSON
+	}
+
+	// Promotion terms are validated against the price the listing will have
+	// after this edit, and any change to them bumps the version so claims made
+	// under the old terms stop applying.
+	effectivePrice := product.Price
+	if v, ok := updates["price"].(float64); ok {
+		effectivePrice = v
+	}
+	if promo, present, msg := promoFormTerms(c, effectivePrice); msg != "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, msg)
+		return
+	} else if present {
+		updates["promo_enabled"] = promo.Enabled
+		updates["promo_required_referrals"] = promo.RequiredReferrals
+		updates["promo_countdown_seconds"] = promo.CountdownSeconds
+		updates["promo_price"] = promo.Price
+		if !promo.Equal(product.PromoTerms()) {
+			updates["promo_version"] = product.PromoVersion + 1
+		}
+	} else if product.PromoEnabled && effectivePrice <= product.PromoPrice {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Price must stay above the promotion price")
+		return
 	}
 
 	if len(updates) == 0 {

@@ -51,6 +51,8 @@ import {
   Text,
 } from '@/components/ui';
 import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
+import PromotionFields from '@/components/promotion/PromotionFields';
+import { usePromotion } from '@/components/promotion/promoForm';
 import {
   appendUsdAmounts,
   PriceInput,
@@ -73,6 +75,7 @@ const EditProduct = () => {
   const [modalType, setModalType] = useState<'success' | 'error' | 'info'>('success');
 
   const pricing = useMerchantPricing();
+  const promotion = usePromotion(pricing);
 
   const [productName, setProductName] = useState('');
   const [description, setDescription] = useState('');
@@ -146,6 +149,8 @@ const EditProduct = () => {
           shippingSameCountry: product.shippingSameCountry,
           shippingInternational: product.shippingInternational,
         });
+
+        promotion.load(product);
 
         // Category
         const catId =
@@ -272,6 +277,8 @@ const EditProduct = () => {
     if (!pricing.ready) newErrors.price = 'Exchange rates are still loading. Try again in a moment.';
     else if (!price.trim()) newErrors.price = 'Price is required';
     else if (isNaN(parseAmount(price)) || parseAmount(price) <= 0) newErrors.price = 'Price must be positive';
+    const promoError = promotion.validate(price);
+    if (promoError) newErrors.promotion = promoError;
     if (!stock.trim()) newErrors.stock = 'Stock is required';
     if (isNaN(parseInt(stock)) || parseInt(stock) < 0) newErrors.stock = 'Stock must be non-negative';
     if (!categoryId) newErrors.category = 'Category is required';
@@ -324,6 +331,7 @@ const EditProduct = () => {
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
       appendUsdAmounts(formData, pricing);
+      promotion.append(formData);
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
       }
@@ -489,6 +497,18 @@ const EditProduct = () => {
                 />
               </View>
             </View>
+
+            {/* Promotion */}
+            <Text variant="bodySm" weight="700" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>
+              Promotion
+            </Text>
+            <PromotionFields
+              promotion={promotion}
+              originalPrice={pricing.amount('price')}
+              currencySymbol={pricing.selectedCurrency.symbol}
+              priceDisabled={!pricing.ready}
+              error={errors.promotion}
+            />
 
             {/* Shipping Rates */}
             <Text variant="bodySm" weight="700" style={{ marginTop: spacing.lg, marginBottom: spacing.xs }}>

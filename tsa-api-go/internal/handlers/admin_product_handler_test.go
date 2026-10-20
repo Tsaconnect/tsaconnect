@@ -60,6 +60,7 @@ func setupProductModerationDB(t *testing.T) *gorm.DB {
 			suspended_at DATETIME,
 			suspended_by TEXT,
 			suspended_from_status TEXT, verified_legal_name TEXT, verified_legal_name_at DATETIME, declared_given_names TEXT, declared_surname TEXT,
+			promo_enabled INTEGER DEFAULT 0, promo_required_referrals INTEGER DEFAULT 0, promo_countdown_seconds INTEGER, promo_price REAL DEFAULT 0, promo_version INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			created_at DATETIME,
 			updated_at DATETIME

@@ -397,6 +397,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		adminSpotGroup.POST("/reorder", h.ReorderSpotListings)
 	}
 
+	api.GET("/promotions", h.ListPromotions)
+
 	// Product routes (public + auth + admin)
 	productGroup := api.Group("/products")
 	{
@@ -406,6 +408,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		productGroup.GET("/non-featured", adminAuth, h.GetNonFeaturedProducts)
 		productGroup.GET("/user", auth, h.GetUserProducts)
 		productGroup.GET("/:id", h.GetProductByID)
+		productGroup.POST("/:id/promo/claim", auth, h.ClaimPromo)
+		productGroup.GET("/:id/promo/status", auth, h.GetPromoStatus)
 		productGroup.POST("", adminAuth, h.CreateProduct)
 		productGroup.PUT("/:id", adminAuth, h.UpdateProduct)
 		productGroup.DELETE("/:id", adminAuth, h.DeleteProduct)
