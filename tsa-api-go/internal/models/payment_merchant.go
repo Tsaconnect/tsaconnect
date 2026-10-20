@@ -75,6 +75,11 @@ type PaymentMerchant struct {
 	// test schemas without it keep working; the activation sets it in the
 	// creating transaction.
 	VaultActivatedAt *time.Time `gorm:"<-:update" json:"vaultActivatedAt,omitempty"`
+	// FiatCurrency is the currency an LP keeps new deposits in ("NGN"), or ""
+	// for plain USDT. Deposits indexed while it is set are stamped with the
+	// rate of the day (liquidity_ledger.fiat_*); the pool itself stays USDT.
+	// Written on update only, like VaultActivatedAt.
+	FiatCurrency string `gorm:"size:8;not null;default:'';<-:update" json:"fiatCurrency,omitempty"`
 	// PreviousOperatorWallets lists (comma-separated) the LP wallets a
 	// re-activation moved away from; the depositor sync keeps them revoked.
 	PreviousOperatorWallets *string `gorm:"type:text;<-:update" json:"-"`

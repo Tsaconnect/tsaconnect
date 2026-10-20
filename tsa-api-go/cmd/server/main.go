@@ -1924,7 +1924,7 @@ func main() {
 	// BSC mainnet row is filled). bankDirectory is an interface value (nil when
 	// dormant, never a typed nil); pmOnboarding is its final value here — the
 	// central-inbound block above may have built it.
-	attachVaultLiquidity(wireVaultLiquidity(cfg, blockchainService, pmSvc, releaseSigner, poolGates), p2pHandler, pmh, scheduler)
+	attachVaultLiquidity(wireVaultLiquidity(cfg, blockchainService, pmSvc, releaseSigner, poolGates, itService), p2pHandler, pmh, scheduler)
 
 	if treasuryRates == nil { // Paycrest off: Flutterwave mid against the FX feed
 		treasuryRates = wireTreasuryMarketRate(itService, nil, cfg.RampTreasuryRateTolBps)

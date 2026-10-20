@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 type fakeLogReader struct {
@@ -56,7 +57,12 @@ func ledgerLog(t *testing.T, block uint64, idx uint, name string, topics []commo
 
 func newIndexerRig(t *testing.T, logs ...types.Log) (*VaultIndexer, *fakeLogReader, *fakeBooks) {
 	t.Helper()
-	db := setupTradeDB(t)
+	return newIndexerRigOn(t, setupTradeDB(t), logs...)
+}
+
+// newIndexerRigOn is the indexer over an existing test database.
+func newIndexerRigOn(t *testing.T, db *gorm.DB, logs ...types.Log) (*VaultIndexer, *fakeLogReader, *fakeBooks) {
+	t.Helper()
 	if err := db.AutoMigrate(&models.LiquidityLedgerEntry{}, &models.LiquidityIndexCursor{}, &models.PoolOrder{}); err != nil {
 		t.Fatal(err)
 	}

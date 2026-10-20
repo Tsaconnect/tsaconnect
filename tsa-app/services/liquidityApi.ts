@@ -15,6 +15,20 @@ export interface LiquidityPoolView {
   apr30d?: string;
 }
 
+/** The LP's naira position (ledger-only: the pool itself stays USDT). */
+export interface LiquidityFiat {
+  currency: string;
+  /** Naira the fiat deposits were worth when made, less withdrawals at the average rate. */
+  principal: string;
+  /** The USDT the pool holds for it. */
+  units: string;
+  avgRate?: string;
+  currentRate?: string;
+  currentUsdt?: string;
+  /** currentUsdt − units; omitted when the rate is unreadable. */
+  gapUsdt?: string;
+}
+
 export interface LiquidityMe {
   mode: 'vault';
   status: LiquidityStatus;
@@ -46,6 +60,9 @@ export interface LiquidityMe {
    *  claims wait for Activate from it; withdraw and signed claims never do. */
   walletChanged: boolean;
   pool?: LiquidityPoolView;
+  /** "NGN" while new deposits are kept as naira; absent for USDT. */
+  fiatCurrency?: string;
+  fiat?: LiquidityFiat;
 }
 
 export type LiquidityActivityKind =
@@ -90,6 +107,8 @@ export const liquidityApi = {
     request<LiquidityActivityPage>('GET', '/liquidity/me/activity', undefined, { query: { cursor } }),
   /** Instant, on the proven wallet: proves it first when the API asks. */
   activate: () => withWalletProof(() => request<LiquidityMe>('POST', '/liquidity/activate', {})),
+  /** Keep new deposits as naira ("NGN") or go back to USDT (""). */
+  setFiat: (currency: 'NGN' | '') => request<LiquidityMe>('POST', '/liquidity/fiat', { currency }),
   prepareDeposit: (amount: string) => request<LiquidityTxPlan>('POST', '/liquidity/deposit/prepare', { amount }),
   prepareWithdraw: (amount: string) => request<LiquidityTxPlan>('POST', '/liquidity/withdraw/prepare', { amount }),
   prepareClaim: () => request<LiquidityTxPlan>('POST', '/liquidity/claim/prepare', {}),
