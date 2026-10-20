@@ -51,3 +51,27 @@ it('prepares the LP txs with the amount, and the gas-free claim with none', asyn
   expect(call(2).url).toMatch(/\/liquidity\/claim\/prepare$/);
   expect(call(3).url).toMatch(/\/liquidity\/claim-for$/);
 });
+
+describe('fiat liquidity', () => {
+  const body = (i = 0) => JSON.parse(call(i).init.body as string);
+
+  it('reads the multi-currency position', async () => {
+    await liquidityApi.fiat();
+    expect(call().url).toMatch(/\/liquidity\/fiat$/);
+  });
+
+  it('records a deposit with its currency', async () => {
+    await liquidityApi.fiatDeposit('0xabc', 'KES');
+    expect(call().url).toMatch(/\/liquidity\/fiat\/deposits$/);
+    expect(call().init.method).toBe('POST');
+    expect(body()).toEqual({ txHash: '0xabc', currency: 'KES' });
+  });
+
+  it('requests a principal exit in a currency and an earnings exit without one', async () => {
+    await liquidityApi.fiatWithdraw({ kind: 'principal', currency: 'GHS', amount: '250.50' });
+    await liquidityApi.fiatWithdraw({ kind: 'earnings', amount: '1.25' });
+    expect(call(0).url).toMatch(/\/liquidity\/fiat\/withdrawals$/);
+    expect(body(0)).toEqual({ kind: 'principal', currency: 'GHS', amount: '250.50' });
+    expect(body(1)).toEqual({ kind: 'earnings', amount: '1.25' });
+  });
+});

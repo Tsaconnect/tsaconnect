@@ -27,6 +27,7 @@ import {
   type LiquidityActivityItem,
   type LiquidityMe,
 } from '@/services/liquidityApi';
+import { FiatEntryCard } from '@/components/liquidity/FiatParts';
 import { runLiquidityTx, type LiquidityTxKind, type LiquidityTxResult } from '@/services/liquidityTx';
 import { getSignableWallet, readErc20BalanceOf } from '@/services/wallet';
 import { formatTokenAmount } from '@/services/p2p';
@@ -339,7 +340,7 @@ export default function LiquidityScreen() {
           </Card>
         )}
 
-        <Button title="Naira liquidity" variant="ghost" onPress={() => router.push('/liquidity/naira' as never)} />
+        <FiatEntryCard onPress={() => router.push('/liquidity/fiat' as never)} />
 
         {isLp && (
           <>

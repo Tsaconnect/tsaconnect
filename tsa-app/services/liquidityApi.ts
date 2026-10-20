@@ -15,13 +15,17 @@ export interface LiquidityPoolView {
   apr30d?: string;
 }
 
-/** One exit request of a naira LP. Principal is naira; earnings are USDT. */
+/** One exit request of a fiat LP. Principal is in that fiat; earnings are USDT. */
 export interface FiatWithdrawal {
   id: string;
   kind: 'principal' | 'earnings';
+  /** Principal exits only. */
+  currency?: string;
   status: 'requested' | 'paid' | 'rejected';
   fiat?: string;
+  /** Earnings USDT, in token BASE units (18 dp on BSC) — convert before display. */
   units?: string;
+  /** USDT actually paid, in token BASE units. */
   paidUnits?: string;
   txHash?: string;
   requestedAt: string;
@@ -30,36 +34,54 @@ export interface FiatWithdrawal {
 
 export interface FiatDeposit {
   id: string;
+  currency: string;
   txHash: string;
+  /** USDT sent, in token base units (like withdrawals); not shown today. */
   units: string;
   rate: string;
   fiat: string;
   createdAt: string;
 }
 
-/** A naira LP: USDT sent to the company desk, locked in naira at that day's rate. */
-export interface FiatPosition {
-  /** May add USDT (verified, not the company account). Exits are never gated on it. */
-  eligible: boolean;
-  /** The account's proven wallet: the only one the USDT may be sent from. */
-  wallet?: string;
-  currency: 'NGN';
-  /** Where the USDT is sent. */
-  desk: string;
-  chain?: { id: number; key: string };
-  token?: { symbol: string; address: string; decimals: number };
-  /** Naira owed; the USDT behind it; the average rate it was locked at. */
+/** A currency the desk supports and currently prices. rate = fiat per $1 today. */
+export interface FiatCurrency {
+  code: string;
+  name: string;
+  symbol: string;
+  rate: string;
+}
+
+/** The balance held in one currency (only currencies with a balance are listed). */
+export interface FiatHolding {
+  currency: string;
+  /** Fiat owed, locked at the rates it was added at. */
   principal: string;
+  /** The USDT behind it. */
   units: string;
   avgRate?: string;
   currentRate?: string;
   /** What an exit would pay today, in USDT. */
   todayUsdt?: string;
-  earned: string;
-  earningsAvailable: string;
-  earningsNaira?: string;
+}
+
+/** A fiat LP: USDT sent to the company desk, locked in a currency at that day's rate. */
+export interface FiatPosition {
+  /** May add USDT (verified, not the company account). Exits are never gated on it. */
+  eligible: boolean;
+  /** The account's proven wallet: the only one the USDT may be sent from. */
+  wallet?: string;
+  /** Where the USDT is sent. */
+  desk: string;
+  chain?: { id: number; key: string };
+  token?: { symbol: string; address: string; decimals: number };
   minDeposit: string;
   minEarnings: string;
+  currencies: FiatCurrency[];
+  positions: FiatHolding[];
+  earned: string;
+  earningsAvailable: string;
+  /** earningsAvailable priced in each listed currency today. */
+  earningsValue?: Record<string, string>;
   deposits: FiatDeposit[];
   withdrawals: FiatWithdrawal[];
 }
@@ -141,10 +163,11 @@ export const liquidityApi = {
   activate: () => withWalletProof(() => request<LiquidityMe>('POST', '/liquidity/activate', {})),
   fiat: () => request<FiatPosition>('GET', '/liquidity/fiat'),
   /** After the USDT transfer to the desk is sent: the API proves it on-chain and locks the rate. */
-  fiatDeposit: (txHash: string) => request<FiatDeposit>('POST', '/liquidity/fiat/deposits', { txHash }),
-  /** principal: amount in naira; earnings: amount in USDT. An admin pays it. */
-  fiatWithdraw: (kind: 'principal' | 'earnings', amount: string) =>
-    request<FiatWithdrawal>('POST', '/liquidity/fiat/withdrawals', { kind, amount }),
+  fiatDeposit: (txHash: string, currency: string) =>
+    request<FiatDeposit>('POST', '/liquidity/fiat/deposits', { txHash, currency }),
+  /** principal: amount in `currency`; earnings: amount in USDT (no currency). An admin pays it. */
+  fiatWithdraw: (req: { kind: 'principal'; currency: string; amount: string } | { kind: 'earnings'; amount: string }) =>
+    request<FiatWithdrawal>('POST', '/liquidity/fiat/withdrawals', req),
   prepareDeposit: (amount: string) => request<LiquidityTxPlan>('POST', '/liquidity/deposit/prepare', { amount }),
   prepareWithdraw: (amount: string) => request<LiquidityTxPlan>('POST', '/liquidity/withdraw/prepare', { amount }),
   prepareClaim: () => request<LiquidityTxPlan>('POST', '/liquidity/claim/prepare', {}),
