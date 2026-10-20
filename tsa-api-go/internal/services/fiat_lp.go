@@ -350,7 +350,7 @@ func (s *FiatLPService) book(ctx context.Context, db *gorm.DB, userID uuid.UUID)
 		}
 		switch w.Kind {
 		case models.FiatLPKindPrincipal:
-			l := b.line(w.Currency)
+			l := b.line(withdrawalCurrency(&w))
 			if w.Fiat != nil {
 				f, _ := new(big.Rat).SetString(*w.Fiat)
 				l.naira.Sub(l.naira, f)
@@ -644,6 +644,22 @@ type FiatLPSummary struct {
 	Currencies []FiatLPCurrencySummary `json:"currencies"`
 }
 
+// legacyFiatCurrency is the currency of rows written before positions were
+// per currency: the naira-only version stored none.
+const legacyFiatCurrency = "NGN"
+
+// withdrawalCurrency is the currency a principal exit is in (NGN for a row the
+// naira-only version wrote), "" for an earnings exit.
+func withdrawalCurrency(w *models.FiatLPWithdrawal) string {
+	if w.Kind != models.FiatLPKindPrincipal {
+		return ""
+	}
+	if w.Currency == "" {
+		return legacyFiatCurrency
+	}
+	return strings.ToUpper(w.Currency)
+}
+
 func (s *FiatLPService) quote(w *models.FiatLPWithdrawal, rate *big.Rat) *big.Int {
 	if w.Kind == models.FiatLPKindEarnings {
 		return bigFromDecimal(w.Units)
@@ -694,7 +710,7 @@ func (s *FiatLPService) AdminOverview(ctx context.Context, status string) (*Fiat
 		}
 		if w.Kind == models.FiatLPKindPrincipal && w.Fiat != nil {
 			f, _ := new(big.Rat).SetString(*w.Fiat)
-			t := get(w.Currency)
+			t := get(withdrawalCurrency(&w))
 			t.fiat.Sub(t.fiat, f)
 			t.units.Sub(t.units, new(big.Rat).SetInt(bigFromDecimal(w.UnitsReleased)))
 		}
@@ -750,7 +766,7 @@ func (s *FiatLPService) AdminOverview(ctx context.Context, status string) (*Fiat
 	for i := range list {
 		r := FiatLPRequest{FiatLPWithdrawal: list[i], UserName: names[list[i].UserID]}
 		if list[i].Status == models.FiatLPRequested {
-			switch rate := rates[list[i].Currency]; {
+			switch rate := rates[withdrawalCurrency(&list[i])]; {
 			case list[i].Kind == models.FiatLPKindEarnings:
 				qu := s.quote(&list[i], nil)
 				r.QuoteUnits, r.QuoteUSDT = qu.String(), s.units(qu)
@@ -794,7 +810,7 @@ func (s *FiatLPService) MarkPaid(ctx context.Context, adminID, id uuid.UUID, txH
 	var rate *big.Rat
 	var rateS any
 	if w.Kind == models.FiatLPKindPrincipal {
-		if rate, err = s.rateFor(ctx, w.Currency); err != nil {
+		if rate, err = s.rateFor(ctx, withdrawalCurrency(w)); err != nil {
 			return nil, err
 		}
 		rateS = rate.FloatString(8)

@@ -359,3 +359,22 @@ func TestFiatLP_PositionsPerCurrency(t *testing.T) {
 		t.Fatalf("KES summary = %+v", sum.Currencies[0])
 	}
 }
+
+// An exit written by the naira-only version has no currency: it still counts
+// against the NGN balance, so the same naira cannot be withdrawn twice.
+func TestFiatLP_LegacyExitWithoutCurrencyNetsAgainstNGN(t *testing.T) {
+	r := newFiatRig(t)
+	ctx := context.Background()
+	user := uuid.New()
+	r.deposit(t, user, fiatTxA, 10) // ₦13,650
+	fiat, rel := "13650.00", usdt6(10).String()
+	r.db.Create(&models.FiatLPWithdrawal{ID: uuid.New(), UserID: user, Wallet: fiatLPAddr, Kind: models.FiatLPKindPrincipal,
+		Status: models.FiatLPRequested, Fiat: &fiat, UnitsReleased: &rel, RequestedAt: r.now}) // no Currency
+	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "NGN", "1"); !errors.Is(err, ErrFiatLPAmount) {
+		t.Fatalf("a second exit of money already reserved: %v, want ErrFiatLPAmount", err)
+	}
+	sum, list, err := r.svc.AdminOverview(ctx, models.FiatLPRequested)
+	if err != nil || len(sum.Currencies) != 1 || sum.Currencies[0].Fiat != "0.00" || len(list) != 1 || list[0].QuoteUSDT != "10" {
+		t.Fatalf("overview = %+v %+v %v, want NGN owed 0 and the legacy exit quoted at the NGN rate", sum, list, err)
+	}
+}
