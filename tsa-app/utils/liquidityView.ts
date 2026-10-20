@@ -1,7 +1,7 @@
 // utils/liquidityView.ts — pure helpers for the LP screen. All token math is
 // string/BigInt over the token's own decimals (18 on BSC): no floats.
 import { formatTokenAmount, parseTokenAmount } from '@/services/p2p';
-import type { LiquidityMe } from '@/services/liquidityApi';
+import type { FiatCurrency, FiatHolding, FiatPosition, FiatWithdrawal, LiquidityMe } from '@/services/liquidityApi';
 import type { WithdrawalOutcome } from '@/services/liquidityTx';
 
 /** Group the integer part and cut the fraction to maxFrac digits, exactly. */
@@ -120,7 +120,61 @@ export function withdrawalMessage(me: LiquidityMe, w: WithdrawalOutcome | undefi
   return `Withdrawal submitted. ${show(w.paidNow)} sent now, ${show(w.pending)} pending.`;
 }
 
-/** ₦13,650 / ₦1,365.5 — grouped, up to 2 decimals. */
-export function formatNaira(value: string | undefined): string {
-  return `₦${formatLiquidityAmount(value, 2)}`;
+/** Symbol for a currency code from the desk's list; falls back to the code itself. */
+export function currencySymbol(code: string, currencies: FiatCurrency[] = []): string {
+  return currencies.find((c) => c.code === code)?.symbol || '';
 }
+
+/** ₦13,650 / KES 1,200 — grouped, up to 2 decimals; the code stands in for an unknown symbol. */
+export function formatCurrency(value: string | undefined, code: string, currencies: FiatCurrency[] = []): string {
+  const sym = currencySymbol(code, currencies);
+  const amt = formatLiquidityAmount(value, 2);
+  return sym ? `${sym}${amt}` : `${code} ${amt}`;
+}
+
+/** USDT base units (decimal string) -> whole-token decimal string, exact. */
+export function baseUnitsToAmount(base: string | undefined, decimals: number): string {
+  if (!base) return '0';
+  return formatLiquidityAmount(formatTokenAmount(base, decimals, decimals), decimals);
+}
+
+/** a × b as an exact decimal string, truncated (not rounded) to `dp` places. No floats. */
+export function multiplyDecimal(a: string, b: string, dp = 2): string | null {
+  const re = /^\d+(?:\.\d+)?$/;
+  if (!re.test(a.trim()) || !re.test(b.trim())) return null;
+  const [ai, af = ''] = a.trim().split('.');
+  const [bi, bf = ''] = b.trim().split('.');
+  const scale = af.length + bf.length;
+  const prod = (BigInt(ai + af) * BigInt(bi + bf)).toString().padStart(scale + 1, '0');
+  const int = prod.slice(0, prod.length - scale) || '0';
+  const frac = prod.slice(prod.length - scale).padEnd(dp, '0').slice(0, dp);
+  return dp > 0 ? `${int}.${frac}` : int;
+}
+
+/** `input` is a valid non-zero amount with at most `dp` decimals. */
+export function isValidAmount(input: string, dp: number): boolean {
+  const m = /^\d+(?:\.(\d+))?$/.exec(input.trim());
+  return !!m && (m[1]?.length ?? 0) <= dp && !isZeroAmount(input.trim());
+}
+
+/** a > b for non-negative decimal strings. */
+export function exceedsAmount(a: string, b: string | undefined, dp = 18): boolean {
+  return units(a.trim(), dp) > units(b || '0', dp);
+}
+
+export type FiatActivityItem =
+  | { type: 'deposit'; id: string; at: string; currency: string; fiat: string; usdt: string }
+  | { type: 'withdrawal'; id: string; at: string; w: FiatWithdrawal };
+
+/** Deposits and exits as one newest-first list. */
+export function fiatActivity(p: Pick<FiatPosition, 'deposits' | 'withdrawals'>): FiatActivityItem[] {
+  const items: FiatActivityItem[] = [
+    ...p.deposits.map((d): FiatActivityItem => ({ type: 'deposit', id: `d-${d.id}`, at: d.createdAt, currency: d.currency, fiat: d.fiat, usdt: d.units })),
+    ...p.withdrawals.map((w): FiatActivityItem => ({ type: 'withdrawal', id: `w-${w.id}`, at: w.requestedAt, w })),
+  ];
+  return items.sort((x, y) => Date.parse(y.at) - Date.parse(x.at));
+}
+
+/** Currencies with a balance, in API order. */
+export const heldPositions = (p: Pick<FiatPosition, 'positions'>): FiatHolding[] =>
+  p.positions.filter((h) => !isZeroAmount(h.principal));

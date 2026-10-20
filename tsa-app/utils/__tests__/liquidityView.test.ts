@@ -6,7 +6,8 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 /* eslint-disable import/first */
 import {
   canClaimGasFree, claimRefusalMessage, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage,
-  formatNaira, limitsKnown, oldWalletFundsMessage, oldWalletHasFunds, overBalanceError, withdrawalMessage,
+  baseUnitsToAmount, currencySymbol, exceedsAmount, fiatActivity, formatCurrency, heldPositions, isValidAmount, multiplyDecimal,
+  limitsKnown, oldWalletFundsMessage, oldWalletHasFunds, overBalanceError, withdrawalMessage,
 } from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
 
@@ -160,10 +161,71 @@ describe('unreadable pool limits', () => {
   });
 });
 
-describe('formatNaira', () => {
-  it('groups thousands and keeps kobo', () => {
-    expect(formatNaira('13650.00')).toBe('₦13,650');
-    expect(formatNaira('1365.50')).toBe('₦1,365.5');
-    expect(formatNaira(undefined)).toBe('₦0');
+const CUR = [
+  { code: 'NGN', name: 'Nigerian naira', symbol: '₦', rate: '1365.00' },
+  { code: 'KES', name: 'Kenyan shilling', symbol: '', rate: '129' },
+];
+
+describe('formatCurrency', () => {
+  it('uses the listed symbol and groups thousands', () => {
+    expect(formatCurrency('13650.00', 'NGN', CUR)).toBe('₦13,650');
+    expect(formatCurrency('1365.50', 'NGN', CUR)).toBe('₦1,365.5');
+    expect(formatCurrency(undefined, 'NGN', CUR)).toBe('₦0');
+  });
+  it('falls back to the code when the symbol is missing or the currency unknown', () => {
+    expect(formatCurrency('1200', 'KES', CUR)).toBe('KES 1,200');
+    expect(formatCurrency('5', 'GHS')).toBe('GHS 5');
+    expect(currencySymbol('NGN', CUR)).toBe('₦');
+  });
+});
+
+describe('baseUnitsToAmount', () => {
+  it('converts 18-dp base units exactly', () => {
+    expect(baseUnitsToAmount('10000000000000000000', 18)).toBe('10');
+    expect(baseUnitsToAmount('1500000000000000', 18)).toBe('0.0015');
+    expect(baseUnitsToAmount('1000000', 6)).toBe('1');
+    expect(baseUnitsToAmount(undefined, 18)).toBe('0');
+  });
+});
+
+describe('multiplyDecimal', () => {
+  it('multiplies without floats and truncates', () => {
+    expect(multiplyDecimal('10', '1365.00')).toBe('13650.00');
+    expect(multiplyDecimal('0.1', '0.1', 2)).toBe('0.01');
+    expect(multiplyDecimal('1.005', '1', 2)).toBe('1.00');
+    expect(multiplyDecimal('0.000000000000000001', '1365', 2)).toBe('0.00');
+  });
+  it('returns null on bad input', () => {
+    expect(multiplyDecimal('', '1')).toBeNull();
+    expect(multiplyDecimal('1e3', '1')).toBeNull();
+  });
+});
+
+describe('isValidAmount / exceedsAmount', () => {
+  it('checks shape, decimals and zero', () => {
+    expect(isValidAmount('10.25', 2)).toBe(true);
+    expect(isValidAmount('10.255', 2)).toBe(false);
+    expect(isValidAmount('0', 2)).toBe(false);
+    expect(isValidAmount('abc', 2)).toBe(false);
+  });
+  it('compares decimals exactly', () => {
+    expect(exceedsAmount('13650.01', '13650.00')).toBe(true);
+    expect(exceedsAmount('13650', '13650.00')).toBe(false);
+    expect(exceedsAmount('1', undefined)).toBe(true);
+  });
+});
+
+describe('fiatActivity / heldPositions', () => {
+  it('merges deposits and exits newest first', () => {
+    const items = fiatActivity({
+      deposits: [{ id: '1', currency: 'NGN', txHash: '0x', units: '10', rate: '1365', fiat: '13650', createdAt: '2026-10-01T10:00:00Z' }],
+      withdrawals: [{ id: '2', kind: 'earnings', status: 'requested', requestedAt: '2026-10-02T10:00:00Z' }],
+    });
+    expect(items.map((i) => i.id)).toEqual(['w-2', 'd-1']);
+  });
+  it('drops empty positions', () => {
+    expect(heldPositions({ positions: [
+      { currency: 'NGN', principal: '0.00', units: '0' }, { currency: 'KES', principal: '100', units: '1' },
+    ] }).map((p) => p.currency)).toEqual(['KES']);
   });
 });
