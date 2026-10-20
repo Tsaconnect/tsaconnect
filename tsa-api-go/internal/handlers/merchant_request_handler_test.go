@@ -1321,13 +1321,21 @@ func TestApproveMerchantRequest_PaymentAcceptanceRetriesAFailedProvisioning(t *t
 	prov := &fakePayProvisioner{db: db, err: errors.New("boom")}
 	h := &MerchantRequestHandler{DB: db, PayMerchants: prov}
 	admin := createMerchantTestUser(t, db, "admin")
-	reqID := submitPay(t, h, createMerchantTestUser(t, db, "user"))
+	owner := createMerchantTestUser(t, db, "user")
+	reqID := submitPay(t, h, owner)
 	if w := approvePay(h, admin, reqID); w.Code != http.StatusInternalServerError {
 		t.Fatalf("first approve: %d", w.Code)
 	}
+	// An approval from before the one-role change never granted the role.
+	db.Exec(`UPDATE users SET role = 'user' WHERE id = ?`, owner.ID)
 	prov.err = nil
 	if w := approvePay(h, admin, reqID); w.Code != http.StatusOK || prov.calls != 2 {
 		t.Fatalf("retry: %d calls %d", w.Code, prov.calls)
+	}
+	var u models.User
+	db.First(&u, "id = ?", owner.ID)
+	if u.Role != models.RoleMerchant {
+		t.Fatalf("role after the retried approval = %q, want merchant", u.Role)
 	}
 }
 

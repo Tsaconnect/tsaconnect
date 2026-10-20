@@ -1496,3 +1496,17 @@ func TestPayMerchant_TSAPayIsNotProvisionedForAnUnverifiedOrNonMerchant(t *testi
 		}
 	}
 }
+
+func TestPayMerchant_ARejectedOrPendingTSAPayApplicationIsNotBypassedByAutoProvisioning(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	uid := seedVerifiedUser(t, s.db)
+	seedApprovedMarketplaceRequest(t, s, uid, models.RoleMerchant)
+	if err := s.db.Exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, uuid.New(), uid, models.BusinessTypePaymentAcceptance, "Sky Air",
+		models.MerchantRequestStatusRejected, time.Now()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetOrProvisionByOwner(context.Background(), uid); !errors.Is(err, ErrPayMerchantNotFound) {
+		t.Fatalf("err = %v; a TSA Pay application's own approval decides, auto-provisioning must not", err)
+	}
+}

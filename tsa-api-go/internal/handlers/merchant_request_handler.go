@@ -645,13 +645,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 				}
 			}
 			if isPMRetry || isPayRetry {
-				// The status flip was done on attempt 1. A TSA Pay request approved
-				// before the one-role change never got the role; the grant is idempotent.
-				if isPayRetry {
-					return tx.Model(&models.User{}).Where("id = ?", req.UserID).
-						Update("role", models.RoleMerchant).Error
-				}
-				return nil
+				return nil // the status flip and role were done on attempt 1
 			}
 			// First approval: flip status → approved, then grant the merchant role.
 			// Only a still-pending request moves (review M9): a concurrent
@@ -715,6 +709,17 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 		case txErr != nil:
 			log.Printf("ApproveMerchantRequest: transaction error: %v", txErr)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve merchant request")
+			return
+		}
+	}
+
+	// A TSA Pay request approved before the one-role change never got the role,
+	// and its retry skips the transaction above. The grant is idempotent.
+	if isPayRetry {
+		if err := h.DB.Model(&models.User{}).Where("id = ?", req.UserID).
+			Update("role", models.RoleMerchant).Error; err != nil {
+			log.Printf("ApproveMerchantRequest: merchant role grant on pay retry failed for %s: %v", req.UserID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to grant the merchant role — retry the approval to resume")
 			return
 		}
 	}

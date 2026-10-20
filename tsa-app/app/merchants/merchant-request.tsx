@@ -119,9 +119,9 @@ export function isPickerLocked(type: string | undefined): boolean {
   return !!type && LOCKABLE_TYPES.includes(type);
 }
 
-/** Approved request types that grant the marketplace merchant role server-side. */
+/** Approved request types that grant the merchant role server-side (all but the retired LP kind). */
 export function cachesMerchantRole(businessType?: string): boolean {
-  return businessType !== 'payment_acceptance' && businessType !== 'liquidity_provider';
+  return businessType !== 'liquidity_provider';
 }
 
 // ─── Existing-request gate (exported for tests) ──────────────────────────────
@@ -449,7 +449,10 @@ export default function MerchantRequestScreen() {
       const filter = requestTypeFilter(businessType);
       const [res, pmStatus] = await Promise.all([getMyMerchantRequest(), getMyPmStatus()]);
       setPmActive(pmStatus.isPm);
-      setIsMerchantRole((await AsyncStorage.getItem('role'))?.toLowerCase() === 'merchant');
+      setIsMerchantRole(
+        currentUser?.role?.toLowerCase() === 'merchant' ||
+          (await AsyncStorage.getItem('role'))?.toLowerCase() === 'merchant',
+      );
       if (filter && res.success) {
         const newestType = res.data?.businessType ?? res.data?.business_type;
         const typed = !res.data || newestType === filter ? res : await getMyMerchantRequest(filter);
@@ -461,10 +464,7 @@ export default function MerchantRequestScreen() {
       }
       if (res.success && res.data) {
         if (!filter) setExistingRequest(res.data);
-        // TSA Pay (payment_acceptance) approvals never grant the marketplace
-        // RoleMerchant server-side (Task 4's deliberate design) — caching
-        // role='merchant' here would show the "Go to Merchant Dashboard" gate
-        // for a capability the user doesn't have, whose API calls would 403.
+        // Every approval but the retired LP kind grants the merchant role.
         const approvedType = res.data.businessType ?? res.data.business_type;
         if (res.data.status === 'approved' && cachesMerchantRole(approvedType)) {
           await AsyncStorage.setItem('role', 'merchant');

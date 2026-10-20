@@ -533,7 +533,7 @@ describe('requestTypeFilter', () => {
 describe('cachesMerchantRole', () => {
   it('caches the merchant role only for marketplace types', () => {
     expect(cachesMerchantRole('liquidity_provider')).toBe(false);
-    expect(cachesMerchantRole('payment_acceptance')).toBe(false);
+    expect(cachesMerchantRole('payment_acceptance')).toBe(true);
     expect(cachesMerchantRole('general_products')).toBe(true);
     expect(cachesMerchantRole('p2p_merchant')).toBe(true);
   });

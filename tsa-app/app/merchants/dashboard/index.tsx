@@ -305,7 +305,7 @@ export default function MerchantDashboard() {
                       Accept payments (TSA Pay)
                     </Text>
                     <Text variant="caption" color="textSecondary">
-                      Verify your identity to let customers pay you in any token.
+                      Finish identity verification to start accepting payments.
                     </Text>
                   </View>
                   <Icon name="chevronRight" size={20} color={colors.textMuted} />

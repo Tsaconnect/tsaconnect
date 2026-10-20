@@ -587,6 +587,18 @@ func (s *PayMerchantService) GetOrProvisionByOwner(ctx context.Context, userID u
 	if !verified {
 		return nil, ErrPayMerchantNotFound
 	}
+	// A TSA Pay application of her own, in any state, is decided by its own
+	// approval: provisioning here would bypass a rejection or leave a second
+	// merchant row beside the one that approval creates.
+	var applied int64
+	if err := s.db.WithContext(ctx).Model(&models.MerchantRequest{}).
+		Where("user_id = ? AND business_type = ?", userID, models.BusinessTypePaymentAcceptance).
+		Count(&applied).Error; err != nil {
+		return nil, err
+	}
+	if applied > 0 {
+		return nil, ErrPayMerchantNotFound
+	}
 	var req models.MerchantRequest
 	err = s.db.WithContext(ctx).
 		Where("user_id = ? AND status = ? AND business_type IN ?", userID, models.MerchantRequestStatusApproved,
