@@ -27,7 +27,7 @@ import {
   type LiquidityActivityItem,
   type LiquidityMe,
 } from '@/services/liquidityApi';
-import { FiatEntryCard } from '@/components/liquidity/FiatParts';
+import { FiatEntryCard, HoldTypeSheet, type HoldAction } from '@/components/liquidity/FiatParts';
 import { runLiquidityTx, type LiquidityTxKind, type LiquidityTxResult } from '@/services/liquidityTx';
 import { getSignableWallet, readErc20BalanceOf } from '@/services/wallet';
 import { formatTokenAmount } from '@/services/p2p';
@@ -79,6 +79,7 @@ export default function LiquidityScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState<string | null>(null); // the stage label while acting
   const [sheet, setSheet] = useState<LiquidityAction | null>(null);
+  const [chooser, setChooser] = useState<HoldAction | null>(null); // Add / Withdraw: pool USDT or a fixed value
   const [amount, setAmount] = useState('');
   // The LP wallet's own token balance for the Add sheet: undefined while
   // loading, null when no RPC answered (unknown, not zero).
@@ -159,6 +160,13 @@ export default function LiquidityScreen() {
   const acting = busy != null;
   const oldWalletFunded = oldWalletHasFunds(me);
   const claimLocked = claimSentAt != null && claimSentAt === (me.claimable ?? '');
+  // Why adding pool USDT is unavailable right now (the fixed-value route is not affected).
+  const addBlocked = !isLp ? 'Activate liquidity first.'
+    : me.paused ? 'Your liquidity is paused.'
+    : !me.poolOpen ? 'The pool is closed to new deposits right now.'
+    : me.walletChanged ? 'Activate your new wallet first.'
+    : !me.allowed ? 'Setting up your wallet in the pool — this takes a couple of minutes.'
+    : null;
 
   const begin = (label: string): boolean => {
     if (running.current) return false;
@@ -340,7 +348,7 @@ export default function LiquidityScreen() {
           </Card>
         )}
 
-        <FiatEntryCard onPress={() => router.push('/liquidity/fiat' as never)} />
+        {!isLp && <FiatEntryCard onPress={() => router.push('/liquidity/fiat' as never)} />}
 
         {isLp && (
           <>
@@ -390,13 +398,10 @@ export default function LiquidityScreen() {
             {acting && <Text variant="caption" color="textSecondary">{busy}</Text>}
             <View style={{ flexDirection: 'row', gap: spacing.md }}>
               <View style={{ flex: 1 }}>
-                <Button title="Add" variant="primary"
-                  disabled={acting || me.paused || !me.poolOpen || me.walletChanged || !me.allowed}
-                  onPress={() => setSheet('deposit')} />
+                <Button title="Add" variant="primary" disabled={acting} onPress={() => setChooser('add')} />
               </View>
               <View style={{ flex: 1 }}>
-                <Button title="Withdraw" variant="secondary" disabled={acting || isZeroAmount(me.withdrawable ?? me.principal)}
-                  onPress={() => setSheet('withdraw')} />
+                <Button title="Withdraw" variant="secondary" disabled={acting} onPress={() => setChooser('withdraw')} />
               </View>
             </View>
             {!me.allowed && !me.paused && !me.walletChanged && (
@@ -432,6 +437,16 @@ export default function LiquidityScreen() {
           </>
         )}
       </ScrollView>
+
+      <HoldTypeSheet
+        visible={chooser != null}
+        action={chooser ?? 'add'}
+        onClose={() => setChooser(null)}
+        usdtDisabled={chooser === 'add' ? addBlocked != null : isZeroAmount(me.withdrawable ?? me.principal)}
+        usdtNote={chooser === 'add' ? addBlocked ?? undefined : 'You have no pool liquidity to withdraw.'}
+        onUsdt={() => { const c = chooser; setChooser(null); setSheet(c === 'withdraw' ? 'withdraw' : 'deposit'); }}
+        onFixed={() => { const c = chooser; setChooser(null); router.push(`/liquidity/fiat?action=${c === 'withdraw' ? 'withdraw' : 'add'}` as never); }}
+      />
 
       <Sheet
         visible={sheet != null}

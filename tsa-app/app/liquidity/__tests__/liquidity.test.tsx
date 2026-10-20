@@ -82,7 +82,10 @@ const lp: LiquidityMe = {
   principal: '100', claimable: '2', earned: '3', sharePercent: '0.83',
 };
 
+// Add and Withdraw first ask how the liquidity is held; this takes the pool-USDT route.
 const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve(); });
+const chooser = (r: ReactTestRenderer) => r.root.findAll((n) => typeof n.props.onFixed === 'function' && typeof n.props.onUsdt === 'function')[0];
+const chooseUsdt = async (r: ReactTestRenderer) => { await act(async () => { chooser(r).props.onUsdt(); }); };
 const button = (r: ReactTestRenderer, title: string) => r.root.findAll((n) => n.props.title === title)[0];
 function textOf(r: ReactTestRenderer): string {
   const out: string[] = [];
@@ -123,11 +126,32 @@ it('offers Activate to a non-LP and shows the position once activated', async ()
   expect(r.root.findAll((n) => n.props.label === 'Your liquidity')).toHaveLength(1);
 });
 
-it('keeps withdraw and claim open while paused; only Add closes', async () => {
+it('keeps withdraw and claim open while paused; only the USDT Add route closes', async () => {
   const r = await mount({ ...lp, status: 'paused', paused: true });
-  expect(button(r, 'Add').props.disabled).toBe(true);
   expect(button(r, 'Withdraw').props.disabled).toBe(false);
   expect(button(r, 'Claim earnings').props.disabled).toBe(false);
+  await act(async () => { button(r, 'Add').props.onPress(); });
+  expect(chooser(r).props.visible).toBe(true);
+  expect(chooser(r).props.usdtDisabled).toBe(true);
+  expect(chooser(r).props.usdtNote).toMatch(/paused/i);
+});
+
+it('offers a fixed-value route from Add and Withdraw even when the pool is closed', async () => {
+  const r = await mount({ ...lp, poolOpen: false });
+  await act(async () => { button(r, 'Add').props.onPress(); });
+  expect(chooser(r).props.usdtDisabled).toBe(true);
+  await act(async () => { chooser(r).props.onFixed(); });
+  expect(router.push).toHaveBeenLastCalledWith('/liquidity/fiat?action=add');
+  await act(async () => { button(r, 'Withdraw').props.onPress(); });
+  await act(async () => { chooser(r).props.onFixed(); });
+  expect(router.push).toHaveBeenLastCalledWith('/liquidity/fiat?action=withdraw');
+});
+
+it('shows the fixed-value entry card only to someone who is not yet an LP', async () => {
+  const none = await mount(base);
+  expect(none.root.findAll((n) => n.props.accessibilityLabel === 'Fixed-value liquidity. Open.').length).toBeGreaterThan(0);
+  const active = await mount(lp);
+  expect(active.root.findAll((n) => n.props.accessibilityLabel === 'Fixed-value liquidity. Open.')).toHaveLength(0);
 });
 
 it('claims gas-free above the minimum, then offers the bank cash-out', async () => {
@@ -229,6 +253,7 @@ it('tells the LP to tap Add again when the approval is still confirming', async 
   const r = await mount(lp);
   (runLiquidityTx as jest.Mock).mockResolvedValue({ status: 'pending', txHash: '0xa', step: 'approve' });
   await act(async () => { button(r, 'Add').props.onPress(); });
+  await chooseUsdt(r);
   await act(async () => { r.root.findAll((n) => typeof n.props.onChangeText === 'function')[0].props.onChangeText('10'); });
   const sheet = r.root.findAll((n) => n.props.footer != null)[0];
   await act(async () => { sheet.props.footer.props.onPress(); });
@@ -273,6 +298,7 @@ it('shows a pending withdrawal without a reason', async () => {
 
 async function withdraw(r: ReactTestRenderer, value: string) {
   await act(async () => { button(r, 'Withdraw').props.onPress(); });
+  await chooseUsdt(r);
   await act(async () => { r.root.findAll((n) => typeof n.props.onChangeText === 'function')[0].props.onChangeText(value); });
   const sheet = r.root.findAll((n) => n.props.footer != null)[0];
   await act(async () => { sheet.props.footer.props.onPress(); });

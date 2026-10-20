@@ -4,7 +4,7 @@ import React from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
 import {
-  AccentCard, Badge, Button, Card, Divider, Icon, PressableScale, Skeleton, SummaryRow, Text, useToneColors,
+  AccentCard, Badge, Button, Card, Divider, Icon, PressableScale, Sheet, Skeleton, SummaryRow, Text, useToneColors,
   type StatusTone,
 } from '@/components/ui';
 import type { FiatCurrency, FiatHolding, FiatPosition } from '@/services/liquidityApi';
@@ -46,6 +46,64 @@ export function FiatEntryCard({ onPress }: { onPress: () => void }) {
         </View>
       </AccentCard>
     </PressableScale>
+  );
+}
+
+export type HoldAction = 'add' | 'withdraw';
+
+const HOLD_COPY: Record<HoldAction, { title: string; usdt: string; fixed: string }> = {
+  add: {
+    title: 'How do you want to add?',
+    usdt: 'Earns the pool share. Your balance moves with the dollar. Withdraw yourself after a 24-hour lock.',
+    fixed: "Locked at today's rate, so you carry no exchange-rate risk. Exits are paid by the TSA team, not instantly.",
+  },
+  withdraw: {
+    title: 'What are you withdrawing?',
+    usdt: 'Pool liquidity, sent straight to your wallet.',
+    fixed: "A fixed-value balance. Request it and the TSA team pays it in USDT at the day's rate.",
+  },
+};
+
+function HoldOption({ icon, label, sublabel, note, disabled, onPress }: {
+  icon: 'pool' | 'lock'; label: string; sublabel: string; note?: string; disabled?: boolean; onPress: () => void;
+}) {
+  const { colors, radius, spacing } = useTheme();
+  return (
+    <View style={{ gap: spacing.xs }}>
+      <PressableScale onPress={onPress} disabled={disabled} accessibilityRole="button" accessibilityLabel={`${label}. ${sublabel}`}
+        style={{
+          flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md, borderRadius: radius.md,
+          borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.surface, opacity: disabled ? 0.5 : 1,
+        }}>
+        <Icon name={icon} size={22} color={disabled ? colors.textMuted : colors.accent} />
+        <View style={{ flex: 1 }}>
+          <Text variant="bodyMed" weight="600">{label}</Text>
+          <Text variant="caption" color="textSecondary">{sublabel}</Text>
+        </View>
+        <Icon name="chevronRight" size={18} color={colors.textMuted} />
+      </PressableScale>
+      {note ? <Text variant="caption" color="textMuted" style={{ paddingHorizontal: spacing.xs }}>{note}</Text> : null}
+    </View>
+  );
+}
+
+/**
+ * The first step of Add and Withdraw: hold it as pool USDT, or as a fixed value
+ * in a currency. `usdtNote` says why the USDT route is unavailable right now.
+ */
+export function HoldTypeSheet({ visible, action, usdtDisabled, usdtNote, onClose, onUsdt, onFixed }: {
+  visible: boolean; action: HoldAction; usdtDisabled?: boolean; usdtNote?: string;
+  onClose: () => void; onUsdt: () => void; onFixed: () => void;
+}) {
+  const { spacing } = useTheme();
+  const copy = HOLD_COPY[action];
+  return (
+    <Sheet visible={visible} onClose={onClose} title={copy.title}>
+      <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.lg, gap: spacing.md }}>
+        <HoldOption icon="pool" label="USDT" sublabel={copy.usdt} disabled={usdtDisabled} note={usdtDisabled ? usdtNote : undefined} onPress={onUsdt} />
+        <HoldOption icon="lock" label="Fixed in your currency" sublabel={copy.fixed} onPress={onFixed} />
+      </View>
+    </Sheet>
   );
 }
 

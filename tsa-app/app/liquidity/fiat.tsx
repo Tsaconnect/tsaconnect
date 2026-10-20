@@ -3,10 +3,10 @@
 // currency, locked at that day's rate: the company carries the FX. The USDT
 // still earns the pool share, shown in each currency at today's rate. An exit is
 // a request the team pays in USDT at the day's rate.
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
   AmountInput, BottomActionBar, Button, Card, Chip, ErrorState, ScreenHeader, Sheet, SummaryRow, Text, useToast,
@@ -41,6 +41,9 @@ export default function FiatLiquidityScreen() {
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const running = useRef(false);
+  // Arriving from Add / Withdraw on the liquidity screen opens that sheet once.
+  const { action } = useLocalSearchParams<{ action?: string }>();
+  const autoOpened = useRef(false);
   // A transfer that was sent but not yet recorded. Never sent again; only recorded.
   const [pending, setPending] = useState<{ hash: string; currency: string } | null>(null);
 
@@ -50,6 +53,22 @@ export default function FiatLiquidityScreen() {
   }, []);
   useFocusEffect(useCallback(() => { void load(); }, [load]));
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
+
+  useEffect(() => {
+    if (!pos || autoOpened.current || (action !== 'add' && action !== 'withdraw')) return;
+    autoOpened.current = true;
+    const held = heldPositions(pos);
+    if (action === 'add') {
+      if (pos.currencies.length === 0) return; // nothing is priced right now: the screen explains
+      setCurrency(pos.currencies[0].code);
+      setAmount('');
+      setMode('deposit');
+    } else if (held.length > 0) {
+      setCurrency(held[0].currency);
+      setAmount('');
+      setMode('principal');
+    }
+  }, [pos, action]);
 
   const header = <ScreenHeader title="Fixed-value liquidity" fallbackRoute="/liquidity" />;
   if (!pos) {
