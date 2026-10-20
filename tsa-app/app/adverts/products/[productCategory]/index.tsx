@@ -12,6 +12,8 @@ import { Stack, router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState, useCallback } from 'react';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice as formatPriceUtil } from '@/utils/formatPrice';
+import { PromoPrice } from '@/components/promotion/PromoPrice';
+import { isPromoted } from '@/utils/promo';
 import {
     View,
     FlatList,
@@ -269,7 +271,9 @@ const CategoryProductsScreen = () => {
                                 marginTop: spacing.sm,
                             }}
                         >
-                            {item.discountedPrice ? (
+                            {isPromoted(item) ? (
+                                <PromoPrice product={item} format={formatPrice} />
+                            ) : item.discountedPrice ? (
                                 <>
                                     <Text variant="bodyMed" weight="700" color="danger" numeric>
                                         {formatPrice(item.discountedPrice)}

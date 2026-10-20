@@ -92,6 +92,7 @@ func AutoMigrate() error {
 		&models.PMBalance{},
 		&models.User{},
 		&models.Product{},
+		&models.PromoClaim{},
 		&models.Cart{},
 		&models.DeliveryAddress{},
 		&models.Category{},

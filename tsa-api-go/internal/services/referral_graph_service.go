@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -247,4 +248,19 @@ LIMIT ? OFFSET ?`
 		})
 	}
 	return out, nil
+}
+
+// CountVerifiedDirectReferralsSince counts userID's direct referrals who signed
+// up after `since` and are KYC-verified, active and not deleted. It backs the
+// promotion unlock rule, which only credits referrals made inside the window.
+func (s *ReferralGraphService) CountVerifiedDirectReferralsSince(ctx context.Context, userID uuid.UUID, since time.Time) (int, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&models.User{}).
+		Where("referred_by = ? AND id <> ? AND created_at > ? AND deleted_at IS NULL", userID, userID, since).
+		Where("verification_status = ? AND account_status = ?", models.VerificationStatusVerified, models.AccountStatusActive).
+		Count(&n).Error
+	if err != nil {
+		return 0, fmt.Errorf("count verified referrals for %s: %w", userID, err)
+	}
+	return int(n), nil
 }

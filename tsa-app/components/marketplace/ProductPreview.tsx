@@ -11,8 +11,8 @@ import { View, Image, ScrollView, Dimensions } from 'react-native';
 import { Product } from '@/types/marketplace';
 import { useRouter } from 'expo-router';
 import { useTheme } from '@/theme';
+import { PromoPrice } from '@/components/promotion/PromoPrice';
 import {
-  AmountText,
   Badge,
   Card,
   EmptyState,
@@ -21,6 +21,9 @@ import {
   Surface,
   Text,
 } from '@/components/ui';
+
+const formatUsd = (usd: number) =>
+  `$${usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 interface ProductPreviewProps {
   products: Product[];
@@ -134,7 +137,11 @@ export const ProductPreview = memo(function ProductPreview({ products, searchQue
                     marginTop: spacing.xs,
                   }}
                 >
-                  <AmountText value={product.price} currency="USD" variant="bodySm" color="accent" minimumFractionDigits={2} maximumFractionDigits={2} />
+                  <PromoPrice
+                    product={product}
+                    size="card"
+                    format={formatUsd}
+                  />
                   {product.stock && (
                     <Text variant="overline" color="textMuted">
                       {product.stock} left

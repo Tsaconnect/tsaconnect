@@ -9,7 +9,8 @@
 // referral-code resolution, clipboard copy, and native Share flow are preserved
 // verbatim.
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, FlatList, Alert, RefreshControl, Share } from 'react-native';
+import { View, FlatList, Alert, RefreshControl } from 'react-native';
+import { referralCodeOf, shareReferralCode } from '@/utils/referralShare';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
 import api from '../../components/services/api';
@@ -91,14 +92,11 @@ const ReferralsScreen: React.FC = () => {
     Alert.alert('Copied!', 'Referral code copied to clipboard');
   };
 
-  const shareReferralCode = async () => {
-    const code = userProfile?.referralCode || userProfile?.username;
+  const handleShare = async () => {
+    const code = referralCodeOf(userProfile);
     if (!code) return;
     try {
-      await Share.share({
-        message: `Join TSA Connect using my referral code: ${code}`,
-        title: 'TSA Connect Referral',
-      });
+      await shareReferralCode(code);
     } catch (error) {
       Alert.alert('Error', 'Failed to share referral code');
     }
@@ -245,7 +243,7 @@ const ReferralsScreen: React.FC = () => {
                   leftIcon="send"
                   variant="secondary"
                   size="sm"
-                  onPress={shareReferralCode}
+                  onPress={handleShare}
                   style={{ flex: 1 }}
                 />
               </View>

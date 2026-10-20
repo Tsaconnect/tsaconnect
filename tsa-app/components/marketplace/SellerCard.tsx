@@ -12,6 +12,7 @@
 import React from 'react';
 import { View, Image, Dimensions } from 'react-native';
 import { useTheme } from '@/theme';
+import { PromoPrice } from '@/components/promotion/PromoPrice';
 import {
   Avatar,
   Badge,
@@ -162,9 +163,7 @@ export const SellerCard: React.FC<SellerCardProps> = ({
                   <Badge label={product.condition} size="sm" style={{ marginBottom: spacing.xs }} />
                 )}
                 <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: spacing.xs }}>
-                  <Text variant="bodyMed" weight="700" color="accent" numeric>
-                    {formatPrice(product.price)}
-                  </Text>
+                  <PromoPrice product={product} format={formatPrice} />
                   {product.type === 'Service' && (
                     <Text variant="caption" weight="500" color="danger">
                       0.1$ contact fee

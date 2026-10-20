@@ -234,6 +234,7 @@ const MarketplaceScreen: React.FC = () => {
     { key: 'products', label: 'Products' },
     { key: 'services', label: 'Services' },
     { key: 'trade', label: 'Trade & Earn', route: '/trade' },
+    { key: 'promotion', label: 'Promotion', route: '/promotions' },
     { key: 'p2p', label: railLabel('p2p'), route: RAIL_ROUTES.p2pBuy },
     // PM has no screen of its own — it is the P2P feed filtered to merchant ads.
     { key: 'pm', label: railLabel('pm'), route: RAIL_ROUTES.pm },

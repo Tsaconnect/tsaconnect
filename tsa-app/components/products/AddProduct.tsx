@@ -20,6 +20,8 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import { useTheme } from "@/theme";
+import PromotionFields from "@/components/promotion/PromotionFields";
+import { usePromotion } from "@/components/promotion/promoForm";
 import {
   Button,
   Card,
@@ -48,6 +50,8 @@ const AddProduct = () => {
   const [companyName, setCompanyName] = useState("");
   const [price, setPrice] = useState("");
   const [stock, setStock] = useState("");
+  const promotion = usePromotion();
+  const [promoError, setPromoError] = useState<string | null>(null);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
   const { setLoading, loading } = useAuth();
   const [categories, setCategories] = useState<{ id: string; title: string }[]>([]);
@@ -102,6 +106,12 @@ const AddProduct = () => {
       Alert.alert("Missing Fields", "Please fill all required fields and upload at least one image.");
       return;
     }
+    const invalidPromo = promotion.validate(price);
+    setPromoError(invalidPromo);
+    if (invalidPromo) {
+      Alert.alert("Promotion", invalidPromo);
+      return;
+    }
     setLoading(true);
     const formData = new FormData();
     productImages.forEach((uri, index) => {
@@ -125,6 +135,7 @@ const AddProduct = () => {
     formData.append("price", parseInt(price));
     //@ts-ignore
     formData.append("stock", parseInt(stock || "0"));
+    promotion.append(formData);
     attributes.forEach((attribute, index) => {
       formData.append(`attributes[${index}].name`, attribute.name);
       formData.append(`attributes[${index}].value`, attribute.value);
@@ -159,6 +170,8 @@ const AddProduct = () => {
     setStock("");
     setAttributes([]);
     setCompanyName("");
+    promotion.reset();
+    setPromoError(null);
   };
 
   const handleAddAttribute = () => {
@@ -364,6 +377,16 @@ const AddProduct = () => {
             placeholder="you@example.com"
             leftAdornment={<Icon name="send" size={20} color={colors.textSecondary} />}
             containerStyle={{ marginBottom: spacing.lg }}
+          />
+
+          <Text variant="title3" weight="600" style={{ marginTop: spacing.lg, marginBottom: spacing.md }}>
+            Promotion
+          </Text>
+          <PromotionFields
+            promotion={promotion}
+            originalPrice={price}
+            currencySymbol="$"
+            error={promoError}
           />
 
           {/* Attributes */}

@@ -619,6 +619,14 @@ func (ch *CheckoutHandler) resolveServicePricing(
 		}
 	}
 
+	// A buyer who unlocked the listing's promotion pays the promo price on the
+	// item price; the call-out/shipping part stays as quoted.
+	factor, ferr := services.NewPromoService(tx).PriceFactor(context.Background(), product, buyerID)
+	if ferr != nil {
+		return 0, 0, zone, nil, nil, "Failed to resolve promotion"
+	}
+	priceUSD *= factor
+
 	if priceUSD+calloutUSD <= 0 {
 		return 0, 0, zone, nil, nil, fmt.Sprintf("%s has no payable amount for your selection", product.Name)
 	}
@@ -1056,7 +1064,11 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 				}
 				priceUSD, calloutUSD, line.zone, line.menuSelections, line.booking = p, co, z, sel, booking
 			} else {
-				priceUSD = product.Price * float64(item.Quantity)
+				factor, ferr := services.NewPromoService(tx).PriceFactor(context.Background(), &product, user.ID)
+				if ferr != nil {
+					return nil, &cartPricingError{http.StatusInternalServerError, "Failed to resolve promotion"}
+				}
+				priceUSD = product.Price * factor * float64(item.Quantity)
 				calloutUSD = GetShippingRate(&product, line.zone) * float64(item.Quantity)
 			}
 

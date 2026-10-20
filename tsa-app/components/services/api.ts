@@ -224,6 +224,15 @@ export interface NotificationPreferences {
   muteEmail: boolean;
 }
 
+export interface PromoStatus {
+  required: number;
+  current: number;
+  claimed: boolean;
+  expired: boolean;
+  unlocked: boolean;
+  expiresAt?: string;
+}
+
 export interface Product {
   id: string;
   _id?: string;
@@ -256,6 +265,13 @@ export interface Product {
   status: 'active' | 'inactive' | 'sold_out' | 'pending_review';
   type: 'Product' | 'Service';
   isFeatured?: boolean;
+  // Promotion: `price` stays the original; promoPrice is what a buyer pays once
+  // they bring promoRequiredReferrals new verified referrals (see PromoStatus).
+  promoEnabled?: boolean;
+  promoRequiredReferrals?: number;
+  promoCountdownSeconds?: number; // absent = no countdown
+  promoPrice?: number;
+  promoDiscountPercent?: number; // derived server-side, 0 when not on promotion
   views: number;
   sales: number;
   rating: {
@@ -1024,6 +1040,57 @@ class APIService {
         success: false,
         message: error.message || 'Failed to fetch products',
       };
+    }
+  }
+
+  // Promotions Arena feed: every active promoted listing.
+  async getPromotions(params: {
+    page?: number;
+    limit?: number;
+    type?: string;
+    category?: string;
+  } = {}): Promise<ApiResponse<{ products: Product[]; pagination: any }>> {
+    try {
+      const qs = new URLSearchParams();
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== '') qs.append(k, String(v));
+      });
+      const response = await fetch(`${API_BASE_URL}/promotions?${qs}`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+      return this.handleResponse<{ products: Product[]; pagination: any }>(response);
+    } catch (error: any) {
+      console.error('Get promotions error:', error);
+      return { success: false, message: error.message || 'Failed to fetch promotions' };
+    }
+  }
+
+  // Starts the buyer's promotion window for a listing (idempotent: a second
+  // tap returns the original claim, it never restarts the clock).
+  async claimPromo(productId: string): Promise<ApiResponse<PromoStatus>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/products/${productId}/promo/claim`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+      });
+      return this.handleResponse<PromoStatus>(response);
+    } catch (error: any) {
+      console.error('Claim promo error:', error);
+      return { success: false, message: error.message || 'Failed to start promotion' };
+    }
+  }
+
+  async getPromoStatus(productId: string): Promise<ApiResponse<PromoStatus>> {
+    try {
+      const response = await fetch(`${API_BASE_URL}/products/${productId}/promo/status`, {
+        method: 'GET',
+        headers: this.getHeaders(),
+      });
+      return this.handleResponse<PromoStatus>(response);
+    } catch (error: any) {
+      console.error('Promo status error:', error);
+      return { success: false, message: error.message || 'Failed to load promotion' };
     }
   }
 

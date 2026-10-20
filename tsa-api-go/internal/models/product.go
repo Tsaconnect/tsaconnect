@@ -88,6 +88,17 @@ type Product struct {
 	// suspension on a listing the merchant had paused does not silently publish it.
 	SuspendedFromStatus string `json:"-"`
 
+	// Promotion: a discounted price the buyer unlocks by bringing
+	// PromoRequiredReferrals new verified referrals inside their claim window.
+	// Price stays the original; the discount percent is derived (see promo.go).
+	PromoEnabled           bool    `gorm:"default:false;index" json:"promoEnabled"`
+	PromoRequiredReferrals int     `gorm:"default:0" json:"promoRequiredReferrals,omitempty"`
+	PromoCountdownSeconds  *int    `json:"promoCountdownSeconds,omitempty"`
+	PromoPrice             float64 `gorm:"default:0" json:"promoPrice,omitempty"`
+	// PromoVersion is bumped whenever the terms change so earlier claims stop applying.
+	PromoVersion         int `gorm:"default:0" json:"-"`
+	PromoDiscountPercent int `gorm:"-" json:"promoDiscountPercent,omitempty"`
+
 	// DeletedAt makes admin deletion reversible and keeps order history intact.
 	// GORM excludes soft-deleted rows from every query automatically; admin
 	// queries opt back in with .Unscoped().

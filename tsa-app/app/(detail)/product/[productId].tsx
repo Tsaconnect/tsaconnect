@@ -22,7 +22,9 @@ import {
 import { useLocalSearchParams, useRouter, Stack, useFocusEffect } from 'expo-router';
 import { goBack } from '@/utils/back';
 import { MARKETPLACE_TAB } from '@/constants/routes';
-import api, { Product } from '@/components/services/api';
+import api, { Product, PromoStatus } from '@/components/services/api';
+import { PromoPrice } from '@/components/promotion/PromoPrice';
+import { PromoUnlockCard } from '@/components/promotion/PromoUnlockCard';
 import { cartService, AddToCartRequest, CartItem } from '@/components/services/cart';
 import { isServiceNote } from '@/components/services/serviceCart';
 import { useCartCount } from '@/contexts/CartContext';
@@ -93,6 +95,7 @@ export default function ProductDetailsScreen() {
   const { width: windowWidth } = useWindowDimensions();
   const imageHeight = windowWidth * IMAGE_ASPECT;
   const [quantity, setQuantity] = useState(1);
+  const [promoStatus, setPromoStatus] = useState<PromoStatus | null>(null);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [inCartQty, setInCartQty] = useState(0);
   const [pendingAction, setPendingAction] = useState<CartAction | null>(null);
@@ -607,9 +610,12 @@ export default function ProductDetailsScreen() {
               marginTop: spacing.xs,
             }}
           >
-            <Text variant="title1" weight="800" color="accent" numeric>
-              {formatPrice(product.price)}
-            </Text>
+            <PromoPrice
+              product={product}
+              format={formatPrice}
+              size="detail"
+              fullPrice={!!promoStatus?.expired && !promoStatus.unlocked}
+            />
             <View
               style={{
                 paddingHorizontal: spacing.sm,
@@ -637,6 +643,10 @@ export default function ProductDetailsScreen() {
             </Text>
           </View>
         </Card>
+
+        <View style={{ marginHorizontal: spacing.lg }}>
+          <PromoUnlockCard product={product} format={formatPrice} onStatusChange={setPromoStatus} />
+        </View>
 
         {/* ===== The buyer's choices: options, quantity, note ===== */}
         {isInStock && (
@@ -877,7 +887,7 @@ export default function ProductDetailsScreen() {
               />
               <Button
                 title="Buy now"
-                subtitle={formatPrice(product.price * quantity)}
+                subtitle={formatPrice((promoStatus?.unlocked && product.promoPrice ? product.promoPrice : product.price) * quantity)}
                 onPress={handleBuyNow}
                 loading={pendingAction === 'buy'}
                 disabled={pendingAction !== null}
