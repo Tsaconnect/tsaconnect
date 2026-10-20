@@ -42,6 +42,8 @@ type P2PHandler struct {
 	// vaultLP is the shared-pool LP side (spec 2026-10-14); nil while the
 	// pool has no vault (the /liquidity routes are then not registered).
 	vaultLP VaultLiquidity
+	// fiatLP is the fiat LP side (plan 2026-10-20); nil while unwired.
+	fiatLP FiatLiquidity
 	// gas drips S for the caller's next P2P tx; nil while the Sonic sponsor
 	// lane is dormant (GasTopUp then answers 503 gas_unavailable).
 	gas P2PGasSponsor

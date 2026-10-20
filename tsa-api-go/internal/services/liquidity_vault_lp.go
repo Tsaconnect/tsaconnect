@@ -160,8 +160,6 @@ type VaultLPConfig struct {
 	// no company account configured).
 	CompanyUser func(ctx context.Context) (uuid.UUID, error)
 	Now         func() time.Time
-	// FiatRate prices a fiat LP's position (nil: naira positions unavailable).
-	FiatRate FiatRateFunc
 }
 
 type VaultLPService struct {
@@ -221,9 +219,6 @@ type LiquidityVaultMe struct {
 	// withdrawing and claiming (signed by the LP wallet itself) never do.
 	WalletChanged bool           `json:"walletChanged"`
 	Pool          *VaultPoolView `json:"pool,omitempty"`
-	// FiatCurrency is the LP's chosen mode ("" = USDT); Fiat is its position.
-	FiatCurrency string         `json:"fiatCurrency,omitempty"`
-	Fiat         *LiquidityFiat `json:"fiat,omitempty"`
 }
 
 // VaultPoolView is the pool card every LP sees. What the company owes the
@@ -350,12 +345,6 @@ func (s *VaultLPService) Me(ctx context.Context, userID uuid.UUID) (*LiquidityVa
 		out.PendingWithdrawal = s.units(pos.PendingWithdrawal)
 	}
 	out.Earned = s.units(new(big.Int).Add(claimed, pos.Claimable))
-	out.FiatCurrency = lp.FiatCurrency
-	if f, err := s.fiatView(ctx, lp.OperatorWalletAddress, pos.Principal); err != nil {
-		log.Printf("[liquidity] LP %s fiat view: %s", lp.ID, RedactAlertText(err.Error()))
-	} else if lp.FiatCurrency != "" || f.Units != "0" {
-		out.Fiat = f // naira still held shows even after switching back to USDT
-	}
 	if snap != nil && snap.state.TotalPrincipal.Sign() > 0 {
 		out.SharePercent = ratioPercent(pos.Principal, snap.state.TotalPrincipal)
 	}
@@ -801,6 +790,13 @@ func (s *VaultLPService) eligible(ctx context.Context, userID uuid.UUID) error {
 		return err
 	}
 	return nil
+}
+
+// CanProvide reports whether the user may provide liquidity at all (the
+// same gate as Activate): a KYC-verified user or an active TSA Pay merchant,
+// never the company account. The fiat LP side uses it.
+func (s *VaultLPService) CanProvide(ctx context.Context, userID uuid.UUID) error {
+	return s.eligible(ctx, userID)
 }
 
 func (s *VaultLPService) createLP(ctx context.Context, userID uuid.UUID, wallet string) (*models.PaymentMerchant, error) {

@@ -65,9 +65,6 @@ type VaultPoolSummary struct {
 	Utilisation             string                   `json:"utilisationPercent"` // outstanding ÷ (principal + pending)
 	ActiveLPs               int64                    `json:"activeLps"`
 	Spread30d               string                   `json:"spread30d"`
-	// Fiat is the naira the company owes fiat LPs against the USDT held for
-	// them; omitted while no LP keeps a naira position.
-	Fiat *VaultFiatExposure `json:"fiat,omitempty"`
 	// The contract's deposit limits (read-only here: only the pool owner's
 	// setLimits changes them). Omitted when the read failed.
 	MinDeposit string                `json:"minDeposit,omitempty"`
@@ -120,11 +117,6 @@ func (s *ITService) VaultPoolSummary(ctx context.Context) (*VaultPoolSummary, er
 		Where("kind = ? AND status = ? AND pool_chain_id = ?", models.PaymentMerchantKindLP, models.PaymentMerchantStatusActive, d.c.Token.ChainID).
 		Count(&out.ActiveLPs).Error; err != nil {
 		return nil, err
-	}
-	if fx, err := s.fiatExposure(ctx, d.c.Token.ChainID, d.c.Vault.Address(), dec); err != nil {
-		log.Printf("[liquidity] fiat exposure: %s", RedactAlertText(err.Error()))
-	} else {
-		out.Fiat = fx
 	}
 	if lim, err := d.c.Vault.Limits(ctx); err == nil {
 		out.MinDeposit, out.MaxPerLP, out.TotalCap = BaseUnitsToDecimal(lim.MinDeposit, dec), BaseUnitsToDecimal(lim.MaxPerLP, dec),

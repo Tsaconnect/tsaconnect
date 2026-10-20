@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -55,10 +54,7 @@ type VaultIndexerConfig struct {
 }
 
 type VaultIndexer struct {
-	c        VaultIndexerConfig
-	fiatRate FiatRateFunc
-	now      func() time.Time // tests
-	decimals int
+	c VaultIndexerConfig
 }
 
 // SetTreasury names the address every one of our fills must pay. Boot-time
@@ -66,17 +62,6 @@ type VaultIndexer struct {
 func (x *VaultIndexer) SetTreasury(addr string) {
 	if x != nil {
 		x.c.Treasury = addr
-	}
-}
-
-// FiatRateFunc is the fiat per 1 USD of the pool token (USDT = $1).
-type FiatRateFunc func(ctx context.Context, currency string) (*big.Rat, error)
-
-// SetFiat lets the indexer lock a fiat LP's deposits at the rate of the day.
-// Boot-time only. Without it fiat LPs' deposits are indexed unstamped.
-func (x *VaultIndexer) SetFiat(rate FiatRateFunc, tokenDecimals int) {
-	if x != nil {
-		x.fiatRate, x.decimals = rate, tokenDecimals
 	}
 }
 
@@ -164,7 +149,6 @@ func (x *VaultIndexer) IndexOnce(ctx context.Context) (int, error) {
 
 func (x *VaultIndexer) rowsFor(ctx context.Context, logs []types.Log) ([]models.LiquidityLedgerEntry, error) {
 	times := map[uint64]time.Time{}
-	rates := map[string]*big.Rat{}
 	var rows []models.LiquidityLedgerEntry
 	for _, l := range logs {
 		if l.Removed {
@@ -197,65 +181,9 @@ func (x *VaultIndexer) rowsFor(ctx context.Context, logs []types.Log) ([]models.
 			allowed := ev.Allowed
 			row.Allowed = &allowed
 		}
-		if ev.Kind == VaultEventDeposited && ev.Amount != nil {
-			if err := x.stampFiat(ctx, &row, ev.Amount, rates); err != nil {
-				return nil, err
-			}
-		}
 		rows = append(rows, row)
 	}
 	return rows, nil
-}
-
-// fiatStampMaxLag bounds how stale a deposit may be and still be locked at
-// the current rate. Past it the deposit is indexed unstamped (ALERT) rather
-// than priced at a rate it never had; inside it, an unreadable rate fails the
-// tick so the next one retries (a stall of at most this long).
-const fiatStampMaxLag = 30 * time.Minute
-
-// stampFiat locks a deposit by a fiat LP at the current rate; rates holds the
-// rate read earlier in the same batch.
-func (x *VaultIndexer) stampFiat(ctx context.Context, row *models.LiquidityLedgerEntry, amount *big.Int, rates map[string]*big.Rat) error {
-	if x.fiatRate == nil || row.Account == "" {
-		return nil
-	}
-	var cur string
-	err := x.c.DB.WithContext(ctx).Model(&models.PaymentMerchant{}).
-		Where("kind = ? AND LOWER(operator_wallet_address) = ? AND fiat_currency <> ''", models.PaymentMerchantKindLP, strings.ToLower(row.Account)).
-		Limit(1).Pluck("fiat_currency", &cur).Error
-	if err != nil {
-		return fmt.Errorf("liquidity indexer: fiat mode of %s: %w", row.Account, err)
-	}
-	if cur == "" {
-		return nil
-	}
-	now := time.Now
-	if x.now != nil {
-		now = x.now
-	}
-	if lag := now().Sub(row.BlockTime); lag > fiatStampMaxLag {
-		log.Printf("[liquidity] ALERT liquidity_fiat_stamp_missed=1 account=%s tx=%s lag=%s — deposit indexed unstamped; set its rate by hand",
-			row.Account, row.TxHash, lag.Round(time.Minute))
-		return nil
-	}
-	rate := rates[cur]
-	if rate == nil {
-		r, err := x.fiatRate(ctx, cur)
-		if err != nil || r == nil || r.Sign() <= 0 {
-			return fmt.Errorf("liquidity indexer: %s rate for a fiat LP deposit: %v", cur, err)
-		}
-		rate, rates[cur] = r, r
-	}
-	row.FiatCurrency = cur
-	rs, as := rate.FloatString(8), FiatOf(amount, x.decimals, rate)
-	row.FiatRate, row.FiatAmount = &rs, &as
-	return nil
-}
-
-// FiatOf is amount (token units) in fiat at rate, rounded to 2 dp.
-func FiatOf(amount *big.Int, decimals int, rate *big.Rat) string {
-	v := new(big.Rat).SetFrac(amount, pow10(decimals))
-	return v.Mul(v, rate).FloatString(2)
 }
 
 // LedgerTotals are the vault's books as the ledger rebuilds them. Unclaimed

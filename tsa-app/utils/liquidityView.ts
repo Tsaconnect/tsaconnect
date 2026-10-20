@@ -120,19 +120,7 @@ export function withdrawalMessage(me: LiquidityMe, w: WithdrawalOutcome | undefi
   return `Withdrawal submitted. ${show(w.paidNow)} sent now, ${show(w.pending)} pending.`;
 }
 
-/** ₦13,650 / ₦1,365.50 — whole naira unless there are kobo. */
+/** ₦13,650 / ₦1,365.5 — grouped, up to 2 decimals. */
 export function formatNaira(value: string | undefined): string {
-  const f = formatLiquidityAmount(value, 2);
-  return `₦${f}`;
-}
-
-/** The naira rows of the position card; empty unless the LP keeps naira. */
-export function fiatRows(me: LiquidityMe): { label: string; value: string; hint?: string }[] {
-  const f = me.fiat;
-  if (!f) return [];
-  const rows: { label: string; value: string; hint?: string }[] = [{ label: 'Held as naira', value: formatNaira(f.principal),
-    hint: `${formatLiquidityAmount(f.units)} ${me.token?.symbol ?? 'USDT'} of your liquidity, recorded at the rate when you added it.` }];
-  if (f.avgRate) rows.push({ label: 'Rate when added', value: `${formatNaira(f.avgRate)} / $1` });
-  if (f.currentRate) rows.push({ label: "Today's rate", value: `${formatNaira(f.currentRate)} / $1` });
-  return rows;
+  return `₦${formatLiquidityAmount(value, 2)}`;
 }

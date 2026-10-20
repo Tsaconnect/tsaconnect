@@ -34,9 +34,6 @@ func wirePoolOrders(cfg *config.Config, bs *services.BlockchainService, release 
 	w.gates = buildPoolChain(cfg, bs, release, w.treasury)
 	w.desk, w.nonces = buildPoolDesk(cfg, bs, release, w.treasury, w.gates)
 	w.ledger = buildVaultLedger(cfg, bs)
-	if tok, ok := poolToken(cfg, bs); ok && it != nil {
-		w.ledger.SetFiat(liquidityFiatRate(it), tok.Decimals)
-	}
 	if w.desk != nil && it != nil {
 		it.SetPoolDesk(w.desk)
 		it.SetVaultLedger(w.ledger)

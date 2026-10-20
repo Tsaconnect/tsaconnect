@@ -30,7 +30,7 @@ func TestPoolChainName(t *testing.T) {
 }
 
 func TestWireVaultLiquidity_DormantWithoutAVault(t *testing.T) {
-	if got := wireVaultLiquidity(testConfig(t), nil, services.NewPMService(nil), fakeSender{}, nil, nil); got != nil {
+	if got := wireVaultLiquidity(testConfig(t), nil, services.NewPMService(nil), fakeSender{}, nil); got != nil {
 		t.Fatal("no vault: nothing to wire")
 	}
 }
@@ -95,7 +95,7 @@ func TestBootLiquidity_DormantWithoutAVault(t *testing.T) {
 // allow-list sync job runs alert-watched.
 func TestBootLiquidity_WiredWithAVault(t *testing.T) {
 	cfg, bs, _ := poolDeskWorld(t)
-	lp := wireVaultLiquidity(cfg, bs, services.NewPMService(config.DB), fakeSender{}, nil, nil)
+	lp := wireVaultLiquidity(cfg, bs, services.NewPMService(config.DB), fakeSender{}, nil)
 	if lp == nil {
 		t.Fatal("a vault row with a client and an operator key wires the LP side")
 	}

@@ -37,7 +37,6 @@ import { shortAddress } from '@/utils/sendForm';
 import {
   canClaimGasFree,
   claimRefusalMessage,
-  fiatRows,
   formatLiquidityAmount,
   isZeroAmount,
   LIQUIDITY_OLD_WALLET_HAS_FUNDS,
@@ -169,21 +168,6 @@ export default function LiquidityScreen() {
   const end = () => {
     running.current = false;
     setBusy(null);
-  };
-
-  const toggleFiat = async () => {
-    if (!begin('Saving…')) return;
-    try {
-      const res = await liquidityApi.setFiat(me.fiatCurrency === 'NGN' ? '' : 'NGN');
-      if (res.success && res.data) {
-        setMe(res.data);
-        toast.success(res.data.fiatCurrency === 'NGN' ? 'New deposits will be kept as naira' : 'New deposits will be kept as USDT');
-      } else {
-        Alert.alert("Couldn't change this", liquidityMessage(res.message, 'Try again in a moment.'));
-      }
-    } finally {
-      end();
-    }
   };
 
   const activate = async () => {
@@ -355,6 +339,8 @@ export default function LiquidityScreen() {
           </Card>
         )}
 
+        <Button title="Naira liquidity" variant="ghost" onPress={() => router.push('/liquidity/naira' as never)} />
+
         {isLp && (
           <>
             {me.paused && (
@@ -390,9 +376,6 @@ export default function LiquidityScreen() {
                   {!isZeroAmount(me.pendingWithdrawal) && (
                     <SummaryRow label="Pending withdrawal" value={amt(me.pendingWithdrawal)} />
                   )}
-                  {fiatRows(me).map((r) => (
-                    <SummaryRow key={r.label} label={r.label} value={r.value} hint={r.hint} />
-                  ))}
                   <SummaryRow label="Share of the pool" value={`${me.sharePercent ?? '0'}%`} />
                   <SummaryRow label="Ready to claim" value={amt(me.claimable)} valueColor="success" />
                   <SummaryRow label="Earned all time" value={amt(me.earned)} />
@@ -403,13 +386,6 @@ export default function LiquidityScreen() {
               )}
             </Card>
 
-            <Button title={me.fiatCurrency === 'NGN' ? 'Keep new deposits as USDT' : 'Keep new deposits as naira'} variant="ghost"
-              disabled={acting} onPress={toggleFiat} />
-            {me.fiatCurrency === 'NGN' && (
-              <Text variant="caption" color="textMuted">
-                Your naira balance is a record at the rate when you add. Withdrawals are still paid in {sym} to your wallet.
-              </Text>
-            )}
             {acting && <Text variant="caption" color="textSecondary">{busy}</Text>}
             <View style={{ flexDirection: 'row', gap: spacing.md }}>
               <View style={{ flex: 1 }}>

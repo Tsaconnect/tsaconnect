@@ -895,11 +895,22 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			liq.GET("/me", p2p.VaultLiquidityMe)
 			liq.GET("/me/activity", p2p.VaultLiquidityActivity)
 			liq.POST("/activate", idem, p2p.ActivateLiquidity)
-			liq.POST("/fiat", idem, p2p.SetLiquidityFiat)
 			liq.POST("/deposit/prepare", p2p.PrepareLiquidityDeposit)
 			liq.POST("/withdraw/prepare", p2p.PrepareLiquidityWithdraw)
 			liq.POST("/claim/prepare", p2p.PrepareLiquidityClaim)
 			liq.POST("/claim-for", idem, p2p.ClaimLiquidityForMe)
+			if p2p.HasFiatLiquidity() {
+				// Naira LP (plan 2026-10-20): USDT to the desk wallet, locked in
+				// naira; exits are paid by an admin.
+				liq.GET("/fiat", p2p.FiatLiquidityPosition)
+				liq.POST("/fiat/deposits", idem, p2p.FiatLiquidityDeposit)
+				liq.POST("/fiat/withdrawals", idem, p2p.FiatLiquidityWithdraw)
+				fa := api.Group("/admin/liquidity/fiat")
+				fa.Use(adminAuth, middleware.RequireP2PAdmin())
+				fa.GET("", p2p.AdminFiatLiquidity)
+				fa.POST("/withdrawals/:id/paid", middleware.RequireSuperAdmin(), middleware.Idempotency(config.DB), p2p.AdminFiatLiquidityPaid)
+				fa.POST("/withdrawals/:id/reject", middleware.RequireSuperAdmin(), middleware.Idempotency(config.DB), p2p.AdminFiatLiquidityReject)
+			}
 		}
 
 		// Admin dispute resolution — funds-moving, audit-writing. AdminAuth

@@ -15,18 +15,53 @@ export interface LiquidityPoolView {
   apr30d?: string;
 }
 
-/** The LP's naira position (ledger-only: the pool itself stays USDT). */
-export interface LiquidityFiat {
-  currency: string;
-  /** Naira the fiat deposits were worth when made, less withdrawals at the average rate. */
+/** One exit request of a naira LP. Principal is naira; earnings are USDT. */
+export interface FiatWithdrawal {
+  id: string;
+  kind: 'principal' | 'earnings';
+  status: 'requested' | 'paid' | 'rejected';
+  fiat?: string;
+  units?: string;
+  paidUnits?: string;
+  txHash?: string;
+  requestedAt: string;
+  resolvedAt?: string;
+}
+
+export interface FiatDeposit {
+  id: string;
+  txHash: string;
+  units: string;
+  rate: string;
+  fiat: string;
+  createdAt: string;
+}
+
+/** A naira LP: USDT sent to the company desk, locked in naira at that day's rate. */
+export interface FiatPosition {
+  /** May add USDT (verified, not the company account). Exits are never gated on it. */
+  eligible: boolean;
+  /** The account's proven wallet: the only one the USDT may be sent from. */
+  wallet?: string;
+  currency: 'NGN';
+  /** Where the USDT is sent. */
+  desk: string;
+  chain?: { id: number; key: string };
+  token?: { symbol: string; address: string; decimals: number };
+  /** Naira owed; the USDT behind it; the average rate it was locked at. */
   principal: string;
-  /** The USDT the pool holds for it. */
   units: string;
   avgRate?: string;
   currentRate?: string;
-  currentUsdt?: string;
-  /** currentUsdt − units; omitted when the rate is unreadable. */
-  gapUsdt?: string;
+  /** What an exit would pay today, in USDT. */
+  todayUsdt?: string;
+  earned: string;
+  earningsAvailable: string;
+  earningsNaira?: string;
+  minDeposit: string;
+  minEarnings: string;
+  deposits: FiatDeposit[];
+  withdrawals: FiatWithdrawal[];
 }
 
 export interface LiquidityMe {
@@ -60,9 +95,6 @@ export interface LiquidityMe {
    *  claims wait for Activate from it; withdraw and signed claims never do. */
   walletChanged: boolean;
   pool?: LiquidityPoolView;
-  /** "NGN" while new deposits are kept as naira; absent for USDT. */
-  fiatCurrency?: string;
-  fiat?: LiquidityFiat;
 }
 
 export type LiquidityActivityKind =
@@ -107,8 +139,12 @@ export const liquidityApi = {
     request<LiquidityActivityPage>('GET', '/liquidity/me/activity', undefined, { query: { cursor } }),
   /** Instant, on the proven wallet: proves it first when the API asks. */
   activate: () => withWalletProof(() => request<LiquidityMe>('POST', '/liquidity/activate', {})),
-  /** Keep new deposits as naira ("NGN") or go back to USDT (""). */
-  setFiat: (currency: 'NGN' | '') => request<LiquidityMe>('POST', '/liquidity/fiat', { currency }),
+  fiat: () => request<FiatPosition>('GET', '/liquidity/fiat'),
+  /** After the USDT transfer to the desk is sent: the API proves it on-chain and locks the rate. */
+  fiatDeposit: (txHash: string) => request<FiatDeposit>('POST', '/liquidity/fiat/deposits', { txHash }),
+  /** principal: amount in naira; earnings: amount in USDT. An admin pays it. */
+  fiatWithdraw: (kind: 'principal' | 'earnings', amount: string) =>
+    request<FiatWithdrawal>('POST', '/liquidity/fiat/withdrawals', { kind, amount }),
   prepareDeposit: (amount: string) => request<LiquidityTxPlan>('POST', '/liquidity/deposit/prepare', { amount }),
   prepareWithdraw: (amount: string) => request<LiquidityTxPlan>('POST', '/liquidity/withdraw/prepare', { amount }),
   prepareClaim: () => request<LiquidityTxPlan>('POST', '/liquidity/claim/prepare', {}),

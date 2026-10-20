@@ -25,11 +25,6 @@ type LiquidityLedgerEntry struct {
 	Spread  *string `gorm:"type:numeric(78,0)" json:"spread,omitempty"`
 	Ref     string  `gorm:"size:66;index" json:"ref,omitempty"`
 	Allowed *bool   `json:"allowed,omitempty"`
-	// Fiat* lock a fiat LP's deposit at the rate of the day: FiatAmount is
-	// Amount (whole tokens) × FiatRate, rounded to 2 dp. Nil for every other row.
-	FiatCurrency string  `gorm:"size:8;not null;default:''" json:"fiatCurrency,omitempty"`
-	FiatRate     *string `gorm:"type:numeric(30,8)" json:"fiatRate,omitempty"`
-	FiatAmount   *string `gorm:"type:numeric(30,2)" json:"fiatAmount,omitempty"`
 	// BlockTime is the block's timestamp: earnings history and APR windows.
 	BlockTime time.Time `gorm:"not null;index" json:"blockTime"`
 	CreatedAt time.Time `json:"createdAt"`

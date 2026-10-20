@@ -173,7 +173,7 @@ func newLPRig(t *testing.T) *lpRig {
 	if err := db.AutoMigrate(&models.LiquidityLedgerEntry{}, &models.JobRunMarker{}, &models.PayMerchant{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, col := range []string{"vault_activated_at DATETIME", "previous_operator_wallets TEXT", "fiat_currency TEXT NOT NULL DEFAULT ''"} {
+	for _, col := range []string{"vault_activated_at DATETIME", "previous_operator_wallets TEXT"} {
 		if err := db.Exec("ALTER TABLE payment_merchants ADD COLUMN " + col).Error; err != nil {
 			t.Fatal(err)
 		}

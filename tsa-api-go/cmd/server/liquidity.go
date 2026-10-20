@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
@@ -37,7 +38,7 @@ func poolToken(cfg *config.Config, bs *services.BlockchainService) (services.Poo
 // nil (dormant, reason logged) unless the chain client, the operator key and
 // the pool token all exist.
 func wireVaultLiquidity(cfg *config.Config, bs *services.BlockchainService, pm *services.PMService,
-	release services.ChainSender, gate services.PoolGate, it *services.ITService) *services.VaultLPService {
+	release services.ChainSender, gate services.PoolGate) *services.VaultLPService {
 	pool, ok := cfg.LiquidityPool()
 	if !ok || bs == nil || config.DB == nil || pm == nil {
 		return nil
@@ -54,7 +55,7 @@ func wireVaultLiquidity(cfg *config.Config, bs *services.BlockchainService, pm *
 	}
 	svc, err := services.NewVaultLPService(services.VaultLPConfig{DB: config.DB, PM: pm,
 		Vault: services.NewLiquidityVault(client, pool.Vault), Tokens: client, Sender: release,
-		Token: tok, ChainName: poolChainName(cfg), Gate: opener, FiatRate: liquidityFiatRate(it),
+		Token: tok, ChainName: poolChainName(cfg), Gate: opener,
 		CompanyUser: func(ctx context.Context) (uuid.UUID, error) {
 			return services.CompanyPMUserID(ctx, config.DB, cfg.ITPMID)
 		}})
@@ -91,8 +92,59 @@ func poolChainName(cfg *config.Config) string {
 	return pool.ChainKey
 }
 
-// liquidityFiatRate prices a fiat LP's USDT in its currency with the same mid
-// the company wallet uses (USDT trades at par with the USDC the desk quotes).
+// wireFiatLiquidity is the fiat LP side (plan 2026-10-20): fiat LPs send USDT
+// to the pool's refill wallet, read from the vault. Nil (dormant, reason
+// logged) without the LP side, the chain client or a rate source.
+func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *services.VaultLPService, it *services.ITService) *services.FiatLPService {
+	pool, ok := cfg.LiquidityPool()
+	rate := liquidityFiatRate(it)
+	if !ok || lp == nil || bs == nil || rate == nil || config.DB == nil {
+		return nil
+	}
+	client, _ := bs.ClientForChainID(pool.ChainID)
+	tok, okTok := poolToken(cfg, bs)
+	if client == nil || client.Client == nil || !okTok {
+		return nil
+	}
+	vault := services.NewLiquidityVault(client, pool.Vault)
+	svc, err := services.NewFiatLPService(services.FiatLPConfig{DB: config.DB, Token: tok, Vault: pool.Vault,
+		Desk: func(ctx context.Context) (string, error) {
+			r, err := vault.Roles(ctx)
+			if err != nil {
+				return "", err
+			}
+			return r.CollateralProvider, nil
+		},
+		Verifier: services.NewLogTransferVerifier(client.Client), Rate: rate, CanLP: lp.CanProvide,
+		TxTime: func(ctx context.Context, txHash string) (time.Time, error) {
+			rc, err := client.Client.TransactionReceipt(ctx, common.HexToHash(txHash))
+			if err != nil {
+				return time.Time{}, err
+			}
+			h, err := client.Client.HeaderByNumber(ctx, rc.BlockNumber)
+			if err != nil {
+				return time.Time{}, err
+			}
+			return time.Unix(int64(h.Time), 0), nil
+		}})
+	if err != nil {
+		log.Printf("[fiat-lp] ALERT fiat_lp_dormant reason=%s", services.RedactAlertText(err.Error()))
+		return nil
+	}
+	log.Printf("[fiat-lp] ready chain=%s(%d) vault=%s", pool.ChainKey, pool.ChainID, pool.Vault)
+	return svc
+}
+
+// attachFiatLiquidity serves /liquidity/fiat. Nil attaches nothing.
+func attachFiatLiquidity(f *services.FiatLPService, p2p *handlers.P2PHandler) {
+	if f == nil || p2p == nil {
+		return
+	}
+	p2p.SetFiatLiquidity(f)
+}
+
+// liquidityFiatRate prices USDT in a fiat currency with the same mid the
+// company wallet uses (USDT trades at par with the USDC the desk quotes).
 // Nil when there is no IT service, so naira positions stay off.
 func liquidityFiatRate(it *services.ITService) services.FiatRateFunc {
 	if it == nil {
