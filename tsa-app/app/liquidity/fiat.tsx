@@ -26,7 +26,7 @@ import {
 
 type Mode = 'deposit' | 'principal' | 'earnings';
 const TITLE: Record<Mode, string> = { deposit: 'Add USDT', principal: 'Withdraw', earnings: 'Withdraw earnings' };
-const RECORD_RETRIES = 4;
+const RECORD_RETRIES = 10; // ~36 s: the API credits a transfer only once it is ~20 s old
 const RECORD_DELAY_MS = 4_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 

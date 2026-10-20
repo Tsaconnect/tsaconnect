@@ -35,7 +35,10 @@ const (
 	// The rate locks when the transfer is confirmed, so confirming must follow
 	// the transfer closely: otherwise an LP could send, wait for a better rate
 	// and confirm then. Later than this goes to support.
-	fiatConfirmWithin = 15 * time.Minute
+	fiatConfirmWithin = 3 * time.Minute
+	// A transfer is recorded only once its block is this old: deep enough that a
+	// reorg cannot take it back after the claim is credited.
+	fiatConfirmAfter = 20 * time.Second
 )
 
 var (
@@ -177,7 +180,10 @@ func (s *FiatLPService) ConfirmDeposit(ctx context.Context, userID uuid.UUID, wa
 	if err != nil {
 		return nil, ErrFiatLPUnproven
 	}
-	if s.c.Now().Sub(at) > fiatConfirmWithin {
+	switch age := s.c.Now().Sub(at); {
+	case age < fiatConfirmAfter:
+		return nil, ErrFiatLPUnproven // mined, but not deep enough to credit yet
+	case age > fiatConfirmWithin:
 		return nil, ErrFiatLPStale
 	}
 	rate, err := s.rateFor(ctx, currency)

@@ -70,7 +70,7 @@ func newFiatRig(t *testing.T) *fiatRig {
 			}
 			return nil, errors.New("no rate") // XXX is listed but unpriced
 		},
-		TxTime: func(context.Context, string) (time.Time, error) { return r.now, nil },
+		TxTime: func(context.Context, string) (time.Time, error) { return r.now.Add(-time.Minute), nil },
 		Now:    func() time.Time { return r.now }})
 	if err != nil {
 		t.Fatal(err)
@@ -266,13 +266,17 @@ func TestFiatLP_StaleTransferIsNotRecordedAtTodaysRate(t *testing.T) {
 	var minted time.Time
 	r.svc.c.TxTime = func(context.Context, string) (time.Time, error) { return minted, nil }
 	r.v.amount[fiatTxA] = usdt6(10)
-	minted = r.now.Add(-time.Hour)
+	minted = r.now.Add(-10 * time.Minute)
 	if _, err := r.svc.ConfirmDeposit(context.Background(), uuid.New(), fiatLPAddr, fiatTxA, "NGN"); !errors.Is(err, ErrFiatLPStale) {
 		t.Fatalf("an hour-old transfer: %v, want ErrFiatLPStale", err)
 	}
-	minted = r.now.Add(-2 * time.Minute)
+	minted = r.now.Add(-5 * time.Second) // mined a moment ago: not deep enough yet
+	if _, err := r.svc.ConfirmDeposit(context.Background(), uuid.New(), fiatLPAddr, fiatTxA, "NGN"); !errors.Is(err, ErrFiatLPUnproven) {
+		t.Fatalf("a just-mined transfer: %v, want ErrFiatLPUnproven (retry shortly)", err)
+	}
+	minted = r.now.Add(-time.Minute)
 	if _, err := r.svc.ConfirmDeposit(context.Background(), uuid.New(), fiatLPAddr, fiatTxA, "NGN"); err != nil {
-		t.Fatalf("a fresh transfer: %v", err)
+		t.Fatalf("a settled transfer: %v", err)
 	}
 }
 
