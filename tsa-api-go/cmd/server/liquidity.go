@@ -97,7 +97,7 @@ func poolChainName(cfg *config.Config) string {
 // logged) without the LP side, the chain client or a rate source.
 func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *services.VaultLPService, it *services.ITService, currencies *services.CurrencyRegistry) *services.FiatLPService {
 	pool, ok := cfg.LiquidityPool()
-	rate := liquidityFiatRate(it)
+	rate := liquidityFiatRate(it, currencies)
 	if !ok || lp == nil || bs == nil || rate == nil || currencies == nil || config.DB == nil {
 		return nil
 	}
@@ -150,16 +150,26 @@ func attachFiatLiquidity(f *services.FiatLPService, p2p *handlers.P2PHandler) {
 	p2p.SetFiatLiquidity(f)
 }
 
-// liquidityFiatRate is fiat per $1 from the independent FX feed (market-anchored
-// for currencies with a parallel market, and refused when stale), the same
-// source the sell paths check rates against. USDT trades at par with $1. Nil
-// when there is no IT service, so fiat positions stay off.
-func liquidityFiatRate(it *services.ITService) services.FiatRateFunc {
-	if it == nil {
+// liquidityFiatRate is fiat per $1 for a fiat position. A currency the registry
+// says has a live market is priced from that market only (and refused when
+// stale): it never falls back to an official rate that may be far from where
+// it trades. A currency with no market (USD, EUR, GBP, ...) is priced from the
+// official feed, refused when stale. USDT trades at par with $1. Nil when
+// there is no IT service, so fiat positions stay off.
+func liquidityFiatRate(it *services.ITService, currencies *services.CurrencyRegistry) services.FiatRateFunc {
+	if it == nil || currencies == nil {
 		return nil
 	}
 	return func(ctx context.Context, currency string) (*big.Rat, error) {
-		r, ok := it.StableFxReference(ctx, currency)
+		row, err := currencies.Get(currency)
+		if err != nil {
+			return nil, err
+		}
+		get := it.OfficialFxReference
+		if row.HasMarketAnchor {
+			get = it.StableFxReference
+		}
+		r, ok := get(ctx, currency)
 		if !ok {
 			return nil, errors.New("no fresh rate for " + currency)
 		}

@@ -31,6 +31,15 @@ type FxRateProvider interface {
 	RatePerUsd(ctx context.Context, currency string) (rate float64, stale bool, err error)
 }
 
+// OfficialFxRater serves a currency's rate WITHOUT requiring a live P2P market
+// behind it: the official feed's mid, for currencies that have no parallel
+// market (USD, EUR, GBP, ...). Callers must decide per currency whether an
+// official rate is acceptable (the registry's HasMarketAnchor says it is not);
+// RatePerUsd stays the refusing path for everything that trades.
+type OfficialFxRater interface {
+	OfficialRatePerUsd(ctx context.Context, currency string) (rate float64, stale bool, err error)
+}
+
 // NewP2PFxProvider adapts the P2P exchange-rate service to the IT FxProvider so
 // Instant Transfer prices MCGP against the same NGN/USD value other P2P assets
 // quote against. It uses the display mid rate and propagates staleness; when the
@@ -82,5 +91,23 @@ func (a p2pFxProvider) RatePerUsd(ctx context.Context, currency string) (float64
 	// from the stale rescue path (markAllStale). snap.IsStale() is an
 	// aggregate — true when ANY row is stale — so it would refuse a fresh NGN
 	// rate just because an unrelated currency (e.g. GHS) had a Bybit failure.
+	return row.MidRate, row.Stale, nil
+}
+
+// OfficialRatePerUsd is the snapshot's mid for currency, market or official,
+// with its per-row staleness. USD is 1 by definition.
+func (a p2pFxProvider) OfficialRatePerUsd(ctx context.Context, currency string) (float64, bool, error) {
+	code := strings.ToUpper(strings.TrimSpace(currency))
+	if code == "USD" {
+		return 1, false, nil
+	}
+	snap, err := a.p2p.GetSnapshot()
+	if err != nil {
+		return 0, false, err
+	}
+	row, ok := snap.Rates[code]
+	if !ok || row.MidRate <= 0 {
+		return 0, false, fmt.Errorf("%s rate unavailable", code)
+	}
 	return row.MidRate, row.Stale, nil
 }

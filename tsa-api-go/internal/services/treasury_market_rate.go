@@ -52,6 +52,26 @@ func (s *ITService) StableFxReference(ctx context.Context, currency string) (*bi
 	return r, ok
 }
 
+// OfficialFxReference is the official feed's fiat per USD for a currency with
+// no parallel market, or false when the feed has none, it is stale or the
+// provider cannot serve official rates. Only for callers whose product is
+// priced the same way on both legs (fiat liquidity); trades use StableFxReference.
+func (s *ITService) OfficialFxReference(ctx context.Context, currency string) (*big.Rat, bool) {
+	if s == nil || s.fx == nil {
+		return nil, false
+	}
+	o, ok := s.fx.(OfficialFxRater)
+	if !ok {
+		return nil, false
+	}
+	rate, stale, err := o.OfficialRatePerUsd(ctx, strings.ToUpper(strings.TrimSpace(currency)))
+	if err != nil || stale || rate <= 0 {
+		return nil, false
+	}
+	r, ok := new(big.Rat).SetString(strconv.FormatFloat(rate, 'f', -1, 64))
+	return r, ok
+}
+
 // StableMidFiatPerUnit is the mid of Flutterwave's buy and sell rate for one
 // token — the company wallet's second rate source (§13 Q4). It needs only the
 // rate quoter, not the whole Flutterwave buy rail. The adapter asks for USDC
