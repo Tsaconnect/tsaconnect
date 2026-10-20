@@ -26,7 +26,6 @@ import (
 // USDT at the day's rate when an admin pays the request.
 
 const (
-	FiatCurrencyNGN = "NGN"
 	// An admin may pay up to 1% under the quote (the rate moves between quote
 	// and signing); never less.
 	fiatPayNum, fiatPayDen = 99, 100
@@ -51,6 +50,7 @@ var (
 	ErrFiatLPShort       = errors.New("fiat liquidity: the transfer is less than the quote")
 	ErrFiatLPNotFound    = errors.New("fiat liquidity: not found")
 	ErrFiatLPStale       = errors.New("fiat liquidity: that transfer is too old to record automatically — contact support")
+	ErrFiatLPCurrency    = errors.New("fiat liquidity: that currency is not supported")
 )
 
 var (
@@ -90,6 +90,9 @@ type FiatLPConfig struct {
 	Desk     func(ctx context.Context) (string, error) // the pool's refill wallet
 	Verifier ERC20SourcedTransferVerifier
 	Rate     FiatRateFunc
+	// Currencies lists the currency codes a position may be held in (the
+	// registry); only those with a live rate are offered.
+	Currencies func(ctx context.Context) []string
 	// TxTime is the block time of a mined transaction (required: it bounds how
 	// long after a transfer its rate may still be locked).
 	TxTime func(ctx context.Context, txHash string) (time.Time, error)
@@ -105,7 +108,7 @@ type FiatLPService struct {
 }
 
 func NewFiatLPService(c FiatLPConfig) (*FiatLPService, error) {
-	if c.DB == nil || c.Desk == nil || c.Verifier == nil || c.Rate == nil || c.TxTime == nil || c.Token.Address == "" || c.Vault == "" {
+	if c.DB == nil || c.Desk == nil || c.Verifier == nil || c.Rate == nil || c.Currencies == nil || c.TxTime == nil || c.Token.Address == "" || c.Vault == "" {
 		return nil, errors.New("fiat liquidity: missing a part")
 	}
 	if c.Now == nil {
@@ -140,7 +143,7 @@ func (s *FiatLPService) DeskWallet(ctx context.Context) (string, error) {
 
 // ConfirmDeposit proves wallet sent txHash's USDT to the desk and records the
 // naira claim at the rate of this moment. Idempotent per transaction.
-func (s *FiatLPService) ConfirmDeposit(ctx context.Context, userID uuid.UUID, wallet, txHash string) (*models.FiatLPDeposit, error) {
+func (s *FiatLPService) ConfirmDeposit(ctx context.Context, userID uuid.UUID, wallet, txHash, currency string) (*models.FiatLPDeposit, error) {
 	txHash = strings.ToLower(strings.TrimSpace(txHash))
 	if !txHashRe.MatchString(txHash) {
 		return nil, ErrFiatLPTxHash
@@ -177,12 +180,13 @@ func (s *FiatLPService) ConfirmDeposit(ctx context.Context, userID uuid.UUID, wa
 	if s.c.Now().Sub(at) > fiatConfirmWithin {
 		return nil, ErrFiatLPStale
 	}
-	rate, err := s.c.Rate(ctx, FiatCurrencyNGN)
-	if err != nil || rate == nil || rate.Sign() <= 0 {
-		return nil, ErrFiatLPUnavailable
+	rate, err := s.rateFor(ctx, currency)
+	if err != nil {
+		return nil, err
 	}
+	currency = strings.ToUpper(strings.TrimSpace(currency))
 	d := &models.FiatLPDeposit{ID: uuid.New(), UserID: userID, Wallet: common.HexToAddress(wallet).Hex(), TxHash: txHash,
-		ChainID: s.c.Token.ChainID, Units: got.String(), Currency: FiatCurrencyNGN, Rate: rate.FloatString(8),
+		ChainID: s.c.Token.ChainID, Units: got.String(), Currency: currency, Rate: rate.FloatString(8),
 		Fiat: FiatOf(got, s.c.Token.Decimals, rate), CreatedAt: s.c.Now().UTC()}
 	if err := s.c.DB.WithContext(ctx).Create(d).Error; err != nil {
 		if isDuplicateKeyErr(err) { // a concurrent confirm of the same transfer won
@@ -212,46 +216,120 @@ func (s *FiatLPService) depositByTx(ctx context.Context, userID uuid.UUID, txHas
 	}
 }
 
+// ─── Currencies ─────────────────────────────────────────────────────────────
+
+// FiatCurrencyInfo is a currency a position may be held in, with today's rate.
+type FiatCurrencyInfo struct {
+	Code   string `json:"code"`
+	Name   string `json:"name"`
+	Symbol string `json:"symbol"`
+	Rate   string `json:"rate"` // fiat per $1 today
+}
+
+var fiatCurrencyMeta = map[string]struct{ name, symbol string }{
+	"NGN": {"Nigerian naira", "₦"}, "GHS": {"Ghanaian cedi", "GH₵"}, "KES": {"Kenyan shilling", "KSh"},
+	"UGX": {"Ugandan shilling", "USh"}, "TZS": {"Tanzanian shilling", "TSh"},
+	"USD": {"US dollar", "$"}, "EUR": {"Euro", "€"}, "GBP": {"British pound", "£"},
+}
+
+// priced is every supported currency that has a live rate right now.
+func (s *FiatLPService) priced(ctx context.Context) (map[string]*big.Rat, []FiatCurrencyInfo) {
+	rates := map[string]*big.Rat{}
+	var infos []FiatCurrencyInfo
+	for _, code := range s.c.Currencies(ctx) {
+		code = strings.ToUpper(strings.TrimSpace(code))
+		if _, dup := rates[code]; dup || code == "" {
+			continue
+		}
+		r, err := s.c.Rate(ctx, code)
+		if err != nil || r == nil || r.Sign() <= 0 {
+			continue
+		}
+		rates[code] = r
+		name, sym := code, code
+		if m, ok := fiatCurrencyMeta[code]; ok {
+			name, sym = m.name, m.symbol
+		}
+		infos = append(infos, FiatCurrencyInfo{Code: code, Name: name, Symbol: sym, Rate: signedMoney(r)})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Code < infos[j].Code })
+	return rates, infos
+}
+
+// rateFor is today's rate for a supported currency: ErrFiatLPCurrency when it
+// is not one, ErrFiatLPUnavailable when it is but has no live rate.
+func (s *FiatLPService) rateFor(ctx context.Context, currency string) (*big.Rat, error) {
+	code := strings.ToUpper(strings.TrimSpace(currency))
+	for _, c := range s.c.Currencies(ctx) {
+		if strings.EqualFold(c, code) && code != "" {
+			r, err := s.c.Rate(ctx, code)
+			if err != nil || r == nil || r.Sign() <= 0 {
+				return nil, ErrFiatLPUnavailable
+			}
+			return r, nil
+		}
+	}
+	return nil, ErrFiatLPCurrency
+}
+
 // ─── Position ───────────────────────────────────────────────────────────────
 
-// FiatLPPosition is GET /api/liquidity/fiat.
-type FiatLPPosition struct {
-	// Eligible: the caller may add USDT (KYC, not the company account). Exits
-	// are never gated on it. Wallet is the caller's proven wallet, filled by
-	// the handler: the app sends from it only.
-	Eligible bool            `json:"eligible"`
-	Wallet   string          `json:"wallet,omitempty"`
-	Currency string          `json:"currency"`
-	Desk     string          `json:"desk"`
-	Chain    *LiquidityChain `json:"chain,omitempty"`
-	Token    *LiquidityToken `json:"token,omitempty"`
-	// Principal is the naira owed; Units the USDT behind it; AvgRate the locked rate.
+// FiatPositionLine is one currency the caller holds a locked balance in.
+type FiatPositionLine struct {
+	Currency string `json:"currency"`
+	// Principal is owed in Currency; Units is the USDT behind it; AvgRate the
+	// rate it was locked at.
 	Principal string `json:"principal"`
 	Units     string `json:"units"`
 	AvgRate   string `json:"avgRate,omitempty"`
 	// CurrentRate prices the claim today; TodayUSDT is what an exit would pay.
 	CurrentRate string `json:"currentRate,omitempty"`
 	TodayUSDT   string `json:"todayUsdt,omitempty"`
+}
+
+// FiatLPPosition is GET /api/liquidity/fiat.
+type FiatLPPosition struct {
+	// Eligible: the caller may add USDT (KYC, not the company account). Exits
+	// are never gated on it. Wallet is the caller's proven wallet, filled by
+	// the handler: the app sends from it only.
+	Eligible    bool               `json:"eligible"`
+	Wallet      string             `json:"wallet,omitempty"`
+	Desk        string             `json:"desk"`
+	Chain       *LiquidityChain    `json:"chain,omitempty"`
+	Token       *LiquidityToken    `json:"token,omitempty"`
+	MinDeposit  string             `json:"minDeposit"`
+	MinEarnings string             `json:"minEarnings"`
+	Currencies  []FiatCurrencyInfo `json:"currencies"`
+	Positions   []FiatPositionLine `json:"positions"`
 	// Earned is the pool share accrued so far (USDT); EarningsAvailable what is
-	// not yet requested or paid; EarningsNaira that at today's rate.
+	// not yet requested or paid; EarningsValue that priced in each currency.
 	Earned            string                    `json:"earned"`
 	EarningsAvailable string                    `json:"earningsAvailable"`
-	EarningsNaira     string                    `json:"earningsNaira,omitempty"`
-	MinDeposit        string                    `json:"minDeposit"`
-	MinEarnings       string                    `json:"minEarnings"`
+	EarningsValue     map[string]string         `json:"earningsValue"`
 	Deposits          []models.FiatLPDeposit    `json:"deposits"`
 	Withdrawals       []models.FiatLPWithdrawal `json:"withdrawals"`
 }
 
+type fiatLine struct{ naira, units *big.Rat } // owed in one currency, and the USDT units behind it
+
 type fiatBook struct {
-	naira, units *big.Rat // principal still owed: naira, and the USDT chain units behind it
+	by           map[string]*fiatLine
 	dep          []models.FiatLPDeposit
 	wd           []models.FiatLPWithdrawal
 	earnReserved *big.Int // earnings requested or paid
 }
 
+func (b *fiatBook) line(cur string) *fiatLine {
+	l := b.by[cur]
+	if l == nil {
+		l = &fiatLine{naira: new(big.Rat), units: new(big.Rat)}
+		b.by[cur] = l
+	}
+	return l
+}
+
 func (s *FiatLPService) book(ctx context.Context, db *gorm.DB, userID uuid.UUID) (*fiatBook, error) {
-	b := &fiatBook{naira: new(big.Rat), units: new(big.Rat), earnReserved: new(big.Int)}
+	b := &fiatBook{by: map[string]*fiatLine{}, earnReserved: new(big.Int)}
 	db = db.WithContext(ctx)
 	if err := db.Where("user_id = ?", userID).Order("created_at ASC").Find(&b.dep).Error; err != nil {
 		return nil, err
@@ -262,8 +340,9 @@ func (s *FiatLPService) book(ctx context.Context, db *gorm.DB, userID uuid.UUID)
 	for _, d := range b.dep {
 		f, _ := new(big.Rat).SetString(d.Fiat)
 		u, _ := new(big.Int).SetString(d.Units, 10)
-		b.naira.Add(b.naira, f)
-		b.units.Add(b.units, new(big.Rat).SetInt(u))
+		l := b.line(d.Currency)
+		l.naira.Add(l.naira, f)
+		l.units.Add(l.units, new(big.Rat).SetInt(u))
 	}
 	for _, w := range b.wd {
 		if w.Status == models.FiatLPRejected {
@@ -271,11 +350,12 @@ func (s *FiatLPService) book(ctx context.Context, db *gorm.DB, userID uuid.UUID)
 		}
 		switch w.Kind {
 		case models.FiatLPKindPrincipal:
+			l := b.line(w.Currency)
 			if w.Fiat != nil {
 				f, _ := new(big.Rat).SetString(*w.Fiat)
-				b.naira.Sub(b.naira, f)
+				l.naira.Sub(l.naira, f)
 			}
-			b.units.Sub(b.units, new(big.Rat).SetInt(bigFromDecimal(w.UnitsReleased)))
+			l.units.Sub(l.units, new(big.Rat).SetInt(bigFromDecimal(w.UnitsReleased)))
 		case models.FiatLPKindEarnings:
 			b.earnReserved.Add(b.earnReserved, bigFromDecimal(w.Units))
 		}
@@ -301,18 +381,35 @@ func (s *FiatLPService) Position(ctx context.Context, userID uuid.UUID) (*FiatLP
 		avail.SetInt64(0)
 	}
 	dec := s.c.Token.Decimals
-	out := &FiatLPPosition{Eligible: s.c.CanLP == nil || s.c.CanLP(ctx, userID) == nil, Currency: FiatCurrencyNGN, Desk: common.HexToAddress(desk).Hex(),
-		Chain:     &LiquidityChain{ID: s.c.Token.ChainID, Key: s.c.Token.ChainKey},
-		Token:     &LiquidityToken{Symbol: s.c.Token.Symbol, Address: s.c.Token.Address, Decimals: dec},
-		Principal: signedMoney(b.naira), Units: s.units(ratFloor(b.units)), Earned: s.units(gross), EarningsAvailable: s.units(avail),
-		MinDeposit: fmt.Sprint(fiatMinDepositUSD), MinEarnings: "0.5", Deposits: b.dep, Withdrawals: b.wd}
-	if b.units.Sign() > 0 {
-		out.AvgRate = signedMoney(new(big.Rat).Quo(b.naira, new(big.Rat).Quo(b.units, new(big.Rat).SetInt(pow10(dec)))))
+	rates, infos := s.priced(ctx)
+	out := &FiatLPPosition{Eligible: s.c.CanLP == nil || s.c.CanLP(ctx, userID) == nil, Desk: common.HexToAddress(desk).Hex(),
+		Chain:      &LiquidityChain{ID: s.c.Token.ChainID, Key: s.c.Token.ChainKey},
+		Token:      &LiquidityToken{Symbol: s.c.Token.Symbol, Address: s.c.Token.Address, Decimals: dec},
+		MinDeposit: fmt.Sprint(fiatMinDepositUSD), MinEarnings: "0.5", Currencies: infos, Positions: []FiatPositionLine{},
+		Earned: s.units(gross), EarningsAvailable: s.units(avail), EarningsValue: map[string]string{},
+		Deposits: b.dep, Withdrawals: b.wd}
+	for _, ci := range infos {
+		out.EarningsValue[ci.Code] = FiatOf(avail, dec, rates[ci.Code])
 	}
-	if rate, err := s.c.Rate(ctx, FiatCurrencyNGN); err == nil && rate != nil && rate.Sign() > 0 {
-		out.CurrentRate = signedMoney(rate)
-		out.TodayUSDT = signedMoney(new(big.Rat).Quo(b.naira, rate))
-		out.EarningsNaira = FiatOf(avail, dec, rate)
+	codes := make([]string, 0, len(b.by))
+	for c := range b.by {
+		codes = append(codes, c)
+	}
+	sort.Strings(codes)
+	for _, c := range codes {
+		l := b.by[c]
+		if l.units.Sign() <= 0 && l.naira.Sign() <= 0 {
+			continue
+		}
+		line := FiatPositionLine{Currency: c, Principal: signedMoney(l.naira), Units: s.units(ratFloor(l.units))}
+		if l.units.Sign() > 0 {
+			line.AvgRate = signedMoney(new(big.Rat).Quo(l.naira, new(big.Rat).Quo(l.units, new(big.Rat).SetInt(pow10(dec)))))
+		}
+		if r := rates[c]; r != nil {
+			line.CurrentRate = signedMoney(r)
+			line.TodayUSDT = signedMoney(new(big.Rat).Quo(l.naira, r))
+		}
+		out.Positions = append(out.Positions, line)
 	}
 	return out, nil
 }
@@ -442,13 +539,12 @@ func (s *FiatLPService) replayEarnings(ctx context.Context) (map[uuid.UUID]*big.
 
 // ─── Withdrawals ────────────────────────────────────────────────────────────
 
-// RequestWithdrawal reserves an exit. Principal: amount is naira, at most what
-// the LP is owed. Earnings: amount is USDT, at most what has accrued and not
-// been asked for, and at least the minimum. Money moves only when an admin
-// pays the request, and only to the wallet recorded here.
-func (s *FiatLPService) RequestWithdrawal(ctx context.Context, userID uuid.UUID, wallet, kind, amount string) (*models.FiatLPWithdrawal, error) {
-	// No eligibility check: an LP's exit is never gated on KYC or merchant
-	// status (the vault's custody promise holds here too).
+// RequestWithdrawal reserves an exit. Principal: amount is in currency, at most
+// what the LP is owed in it. Earnings: amount is USDT (currency ignored), at
+// most what has accrued and not been asked for, and at least the minimum. Money
+// moves only when an admin pays the request, and only to the wallet recorded
+// here. An exit is never gated on eligibility (the vault's custody promise).
+func (s *FiatLPService) RequestWithdrawal(ctx context.Context, userID uuid.UUID, wallet, kind, currency, amount string) (*models.FiatLPWithdrawal, error) {
 	if !common.IsHexAddress(wallet) {
 		return nil, ErrFiatLPUnavailable
 	}
@@ -457,16 +553,17 @@ func (s *FiatLPService) RequestWithdrawal(ctx context.Context, userID uuid.UUID,
 	if !moneyRe.MatchString(amount) || !ok || amt.Sign() <= 0 {
 		return nil, ErrFiatLPAmount
 	}
+	currency = strings.ToUpper(strings.TrimSpace(currency))
 	var gross *big.Int
 	if kind == models.FiatLPKindEarnings {
 		g, err := s.earnedBy(ctx, userID)
 		if err != nil {
 			return nil, err
 		}
-		gross = g
+		gross, currency = g, ""
 	}
 	w := &models.FiatLPWithdrawal{ID: uuid.New(), UserID: userID, Wallet: common.HexToAddress(wallet).Hex(), Kind: kind,
-		Status: models.FiatLPRequested, RequestedAt: s.c.Now().UTC()}
+		Currency: currency, Status: models.FiatLPRequested, RequestedAt: s.c.Now().UTC()}
 	// One request at a time per user, across API instances: the check against
 	// what is owed and the insert happen under the same advisory lock.
 	err := withAdvisoryLock(ctx, s.c.DB, "fiat_lp:"+userID.String(), "fiat liquidity", func(tx *gorm.DB) error {
@@ -476,14 +573,18 @@ func (s *FiatLPService) RequestWithdrawal(ctx context.Context, userID uuid.UUID,
 		}
 		switch kind {
 		case models.FiatLPKindPrincipal:
+			l := b.by[currency]
+			if currency == "" || l == nil || l.naira.Sign() <= 0 {
+				return fmt.Errorf("%w: nothing held in %q", ErrFiatLPAmount, currency)
+			}
 			fiat := new(big.Rat).SetInt(ratFloor(new(big.Rat).Mul(amt, big.NewRat(100, 1))))
-			fiat.Quo(fiat, big.NewRat(100, 1)) // whole kobo
-			if fiat.Sign() <= 0 || fiat.Cmp(b.naira) > 0 {
+			fiat.Quo(fiat, big.NewRat(100, 1)) // whole minor units
+			if fiat.Sign() <= 0 || fiat.Cmp(l.naira) > 0 {
 				return fmt.Errorf("%w: more than you are owed", ErrFiatLPAmount)
 			}
-			rel := new(big.Rat).Mul(b.units, new(big.Rat).Quo(fiat, b.naira))
-			if fiat.Cmp(b.naira) == 0 {
-				rel.Set(b.units)
+			rel := new(big.Rat).Mul(l.units, new(big.Rat).Quo(fiat, l.naira))
+			if fiat.Cmp(l.naira) == 0 {
+				rel.Set(l.units)
 			}
 			fiatS, relS := fiat.FloatString(2), ratFloor(rel).String()
 			w.Fiat, w.UnitsReleased = &fiatS, &relS
@@ -515,22 +616,32 @@ type FiatLPRequest struct {
 	models.FiatLPWithdrawal
 	UserName string `json:"userName,omitempty"`
 	// QuoteUnits is the USDT (chain units) to send now; QuoteUSDT the same in
-	// whole tokens; Rate the naira per $1 it was priced at (principal only).
+	// whole tokens; Rate the fiat per $1 it was priced at (principal only).
 	QuoteUnits string `json:"quoteUnits,omitempty"`
 	QuoteUSDT  string `json:"quoteUsdt,omitempty"`
 	Rate       string `json:"rate,omitempty"`
 }
 
-// FiatLPSummary is the company's side: what it owes fiat LPs.
-type FiatLPSummary struct {
-	Desk        string `json:"desk"`
+// FiatLPCurrencySummary is what the company owes in one currency.
+type FiatLPCurrencySummary struct {
+	Currency    string `json:"currency"`
 	LPs         int    `json:"lps"`
-	Naira       string `json:"naira"`
-	Units       string `json:"units"` // USDT behind the naira owed
+	Fiat        string `json:"fiat"`  // owed at the locked rates
+	Units       string `json:"units"` // USDT behind it
 	CurrentRate string `json:"currentRate,omitempty"`
 	TodayUSDT   string `json:"todayUsdt,omitempty"`
 	GapUSDT     string `json:"gapUsdt,omitempty"` // todayUsdt − units: > 0 the company tops up
-	Open        int    `json:"open"`              // requested exits
+}
+
+// FiatLPSummary is the company's side: what it owes fiat LPs, per currency.
+type FiatLPSummary struct {
+	Desk  string `json:"desk"`
+	LPs   int    `json:"lps"`
+	Units string `json:"units"` // all USDT behind fiat balances
+	Open  int    `json:"open"`  // requested exits
+	// GapUSDT sums every currency's gap; omitted while any held currency has no rate.
+	GapUSDT    string                  `json:"gapUsdt,omitempty"`
+	Currencies []FiatLPCurrencySummary `json:"currencies"`
 }
 
 func (s *FiatLPService) quote(w *models.FiatLPWithdrawal, rate *big.Rat) *big.Int {
@@ -555,13 +666,26 @@ func (s *FiatLPService) AdminOverview(ctx context.Context, status string) (*Fiat
 	if err := s.c.DB.WithContext(ctx).Where("status <> ?", models.FiatLPRejected).Find(&wds).Error; err != nil {
 		return nil, nil, err
 	}
-	naira, units, users := new(big.Rat), new(big.Rat), map[uuid.UUID]bool{}
+	type tot struct {
+		fiat, units *big.Rat
+		users       map[uuid.UUID]bool
+	}
+	by, allUsers := map[string]*tot{}, map[uuid.UUID]bool{}
+	get := func(c string) *tot {
+		t := by[c]
+		if t == nil {
+			t = &tot{fiat: new(big.Rat), units: new(big.Rat), users: map[uuid.UUID]bool{}}
+			by[c] = t
+		}
+		return t
+	}
 	for _, d := range deps {
 		f, _ := new(big.Rat).SetString(d.Fiat)
 		u, _ := new(big.Int).SetString(d.Units, 10)
-		naira.Add(naira, f)
-		units.Add(units, new(big.Rat).SetInt(u))
-		users[d.UserID] = true
+		t := get(d.Currency)
+		t.fiat.Add(t.fiat, f)
+		t.units.Add(t.units, new(big.Rat).SetInt(u))
+		t.users[d.UserID], allUsers[d.UserID] = true, true
 	}
 	open := 0
 	for _, w := range wds {
@@ -570,18 +694,36 @@ func (s *FiatLPService) AdminOverview(ctx context.Context, status string) (*Fiat
 		}
 		if w.Kind == models.FiatLPKindPrincipal && w.Fiat != nil {
 			f, _ := new(big.Rat).SetString(*w.Fiat)
-			naira.Sub(naira, f)
-			units.Sub(units, new(big.Rat).SetInt(bigFromDecimal(w.UnitsReleased)))
+			t := get(w.Currency)
+			t.fiat.Sub(t.fiat, f)
+			t.units.Sub(t.units, new(big.Rat).SetInt(bigFromDecimal(w.UnitsReleased)))
 		}
 	}
-	sum := &FiatLPSummary{Desk: common.HexToAddress(desk).Hex(), LPs: len(users), Naira: signedMoney(naira),
-		Units: s.units(ratFloor(units)), Open: open}
-	rate, rerr := s.c.Rate(ctx, FiatCurrencyNGN)
-	haveRate := rerr == nil && rate != nil && rate.Sign() > 0
-	if haveRate {
-		today := new(big.Rat).Quo(naira, rate)
-		sum.CurrentRate, sum.TodayUSDT = signedMoney(rate), signedMoney(today)
-		sum.GapUSDT = signedMoney(new(big.Rat).Sub(today, new(big.Rat).Quo(units, new(big.Rat).SetInt(pow10(s.c.Token.Decimals)))))
+	rates, _ := s.priced(ctx)
+	sum := &FiatLPSummary{Desk: common.HexToAddress(desk).Hex(), LPs: len(allUsers), Open: open, Currencies: []FiatLPCurrencySummary{}}
+	codes := make([]string, 0, len(by))
+	for c := range by {
+		codes = append(codes, c)
+	}
+	sort.Strings(codes)
+	allUnits, gapSum, allRated := new(big.Rat), new(big.Rat), true
+	for _, c := range codes {
+		t := by[c]
+		line := FiatLPCurrencySummary{Currency: c, LPs: len(t.users), Fiat: signedMoney(t.fiat), Units: s.units(ratFloor(t.units))}
+		allUnits.Add(allUnits, t.units)
+		if r := rates[c]; r != nil {
+			today := new(big.Rat).Quo(t.fiat, r)
+			gap := new(big.Rat).Sub(today, new(big.Rat).Quo(t.units, new(big.Rat).SetInt(pow10(s.c.Token.Decimals))))
+			line.CurrentRate, line.TodayUSDT, line.GapUSDT = signedMoney(r), signedMoney(today), signedMoney(gap)
+			gapSum.Add(gapSum, gap)
+		} else if t.fiat.Sign() > 0 {
+			allRated = false
+		}
+		sum.Currencies = append(sum.Currencies, line)
+	}
+	sum.Units = s.units(ratFloor(allUnits))
+	if allRated && len(codes) > 0 {
+		sum.GapUSDT = signedMoney(gapSum)
 	}
 	q := s.c.DB.WithContext(ctx).Order("requested_at ASC")
 	if status != "" {
@@ -607,11 +749,14 @@ func (s *FiatLPService) AdminOverview(ctx context.Context, status string) (*Fiat
 	out := make([]FiatLPRequest, 0, len(list))
 	for i := range list {
 		r := FiatLPRequest{FiatLPWithdrawal: list[i], UserName: names[list[i].UserID]}
-		if list[i].Status == models.FiatLPRequested && (haveRate || list[i].Kind == models.FiatLPKindEarnings) {
-			qu := s.quote(&list[i], rate)
-			r.QuoteUnits, r.QuoteUSDT = qu.String(), s.units(qu)
-			if list[i].Kind == models.FiatLPKindPrincipal {
-				r.Rate = signedMoney(rate)
+		if list[i].Status == models.FiatLPRequested {
+			switch rate := rates[list[i].Currency]; {
+			case list[i].Kind == models.FiatLPKindEarnings:
+				qu := s.quote(&list[i], nil)
+				r.QuoteUnits, r.QuoteUSDT = qu.String(), s.units(qu)
+			case rate != nil:
+				qu := s.quote(&list[i], rate)
+				r.QuoteUnits, r.QuoteUSDT, r.Rate = qu.String(), s.units(qu), signedMoney(rate)
 			}
 		}
 		out = append(out, r)
@@ -649,8 +794,8 @@ func (s *FiatLPService) MarkPaid(ctx context.Context, adminID, id uuid.UUID, txH
 	var rate *big.Rat
 	var rateS any
 	if w.Kind == models.FiatLPKindPrincipal {
-		if rate, err = s.c.Rate(ctx, FiatCurrencyNGN); err != nil || rate == nil || rate.Sign() <= 0 {
-			return nil, ErrFiatLPUnavailable
+		if rate, err = s.rateFor(ctx, w.Currency); err != nil {
+			return nil, err
 		}
 		rateS = rate.FloatString(8)
 	}

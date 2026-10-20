@@ -19,8 +19,8 @@ import (
 // *services.FiatLPService satisfies it.
 type FiatLiquidity interface {
 	Position(ctx context.Context, userID uuid.UUID) (*services.FiatLPPosition, error)
-	ConfirmDeposit(ctx context.Context, userID uuid.UUID, wallet, txHash string) (*models.FiatLPDeposit, error)
-	RequestWithdrawal(ctx context.Context, userID uuid.UUID, wallet, kind, amount string) (*models.FiatLPWithdrawal, error)
+	ConfirmDeposit(ctx context.Context, userID uuid.UUID, wallet, txHash, currency string) (*models.FiatLPDeposit, error)
+	RequestWithdrawal(ctx context.Context, userID uuid.UUID, wallet, kind, currency, amount string) (*models.FiatLPWithdrawal, error)
 	AdminOverview(ctx context.Context, status string) (*services.FiatLPSummary, []services.FiatLPRequest, error)
 	MarkPaid(ctx context.Context, adminID, id uuid.UUID, txHash string) (*models.FiatLPWithdrawal, error)
 	Reject(ctx context.Context, adminID, id uuid.UUID, note string) (*models.FiatLPWithdrawal, error)
@@ -51,7 +51,7 @@ func fiatLPError(c *gin.Context, err error) bool {
 	case errors.Is(err, services.ErrFiatLPTaken), errors.Is(err, services.ErrFiatLPState):
 		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrFiatLPTxHash), errors.Is(err, services.ErrFiatLPRefuted), errors.Is(err, services.ErrFiatLPTooSmall),
-		errors.Is(err, services.ErrFiatLPAmount), errors.Is(err, services.ErrFiatLPShort), errors.Is(err, services.ErrFiatLPStale):
+		errors.Is(err, services.ErrFiatLPAmount), errors.Is(err, services.ErrFiatLPShort), errors.Is(err, services.ErrFiatLPStale), errors.Is(err, services.ErrFiatLPCurrency):
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, services.ErrFiatLPNotFound):
 		utils.ErrorResponse(c, http.StatusNotFound, "Not found")
@@ -88,11 +88,12 @@ func (h *P2PHandler) FiatLiquidityPosition(c *gin.Context) {
 }
 
 type fiatDepositRequest struct {
-	TxHash string `json:"txHash"`
+	TxHash   string `json:"txHash"`
+	Currency string `json:"currency"`
 }
 
-// POST /api/liquidity/fiat/deposits {txHash}: record USDT the caller's proven
-// wallet sent to the desk, locked in naira at today's rate.
+// POST /api/liquidity/fiat/deposits {txHash, currency}: record USDT the caller's
+// proven wallet sent to the desk, locked in that currency at today's rate.
 func (h *P2PHandler) FiatLiquidityDeposit(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -108,7 +109,7 @@ func (h *P2PHandler) FiatLiquidityDeposit(c *gin.Context) {
 	if !ok {
 		return
 	}
-	d, err := h.fiatLP.ConfirmDeposit(c.Request.Context(), user.ID, wallet, req.TxHash)
+	d, err := h.fiatLP.ConfirmDeposit(c.Request.Context(), user.ID, wallet, req.TxHash, req.Currency)
 	if err != nil {
 		h.fiatLPFail(c, "confirm your deposit", err)
 		return
@@ -117,8 +118,9 @@ func (h *P2PHandler) FiatLiquidityDeposit(c *gin.Context) {
 }
 
 type fiatWithdrawalRequest struct {
-	Kind   string `json:"kind"`   // principal | earnings
-	Amount string `json:"amount"` // naira for principal, USDT for earnings
+	Kind     string `json:"kind"`     // principal | earnings
+	Currency string `json:"currency"` // principal only
+	Amount   string `json:"amount"`   // the currency for principal, USDT for earnings
 }
 
 // POST /api/liquidity/fiat/withdrawals {kind, amount}
@@ -137,7 +139,7 @@ func (h *P2PHandler) FiatLiquidityWithdraw(c *gin.Context) {
 	if !ok {
 		return
 	}
-	w, err := h.fiatLP.RequestWithdrawal(c.Request.Context(), user.ID, wallet, strings.ToLower(strings.TrimSpace(req.Kind)), req.Amount)
+	w, err := h.fiatLP.RequestWithdrawal(c.Request.Context(), user.ID, wallet, strings.ToLower(strings.TrimSpace(req.Kind)), req.Currency, req.Amount)
 	if err != nil {
 		h.fiatLPFail(c, "request your withdrawal", err)
 		return

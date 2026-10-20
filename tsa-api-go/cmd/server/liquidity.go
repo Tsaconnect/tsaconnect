@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/big"
 	"time"
@@ -11,7 +12,6 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/handlers"
 	"github.com/ojimcy/tsa-api-go/internal/jobs"
-	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
@@ -95,10 +95,10 @@ func poolChainName(cfg *config.Config) string {
 // wireFiatLiquidity is the fiat LP side (plan 2026-10-20): fiat LPs send USDT
 // to the pool's refill wallet, read from the vault. Nil (dormant, reason
 // logged) without the LP side, the chain client or a rate source.
-func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *services.VaultLPService, it *services.ITService) *services.FiatLPService {
+func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *services.VaultLPService, it *services.ITService, currencies *services.CurrencyRegistry) *services.FiatLPService {
 	pool, ok := cfg.LiquidityPool()
 	rate := liquidityFiatRate(it)
-	if !ok || lp == nil || bs == nil || rate == nil || config.DB == nil {
+	if !ok || lp == nil || bs == nil || rate == nil || currencies == nil || config.DB == nil {
 		return nil
 	}
 	client, _ := bs.ClientForChainID(pool.ChainID)
@@ -116,6 +116,13 @@ func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *s
 			return r.CollateralProvider, nil
 		},
 		Verifier: services.NewLogTransferVerifier(client.Client), Rate: rate, CanLP: lp.CanProvide,
+		Currencies: func(context.Context) []string {
+			var codes []string
+			for _, c := range currencies.All() {
+				codes = append(codes, c.Code)
+			}
+			return codes
+		},
 		TxTime: func(ctx context.Context, txHash string) (time.Time, error) {
 			rc, err := client.Client.TransactionReceipt(ctx, common.HexToHash(txHash))
 			if err != nil {
@@ -143,14 +150,19 @@ func attachFiatLiquidity(f *services.FiatLPService, p2p *handlers.P2PHandler) {
 	p2p.SetFiatLiquidity(f)
 }
 
-// liquidityFiatRate prices USDT in a fiat currency with the same mid the
-// company wallet uses (USDT trades at par with the USDC the desk quotes).
-// Nil when there is no IT service, so naira positions stay off.
+// liquidityFiatRate is fiat per $1 from the independent FX feed (market-anchored
+// for currencies with a parallel market, and refused when stale), the same
+// source the sell paths check rates against. USDT trades at par with $1. Nil
+// when there is no IT service, so fiat positions stay off.
 func liquidityFiatRate(it *services.ITService) services.FiatRateFunc {
 	if it == nil {
 		return nil
 	}
 	return func(ctx context.Context, currency string) (*big.Rat, error) {
-		return it.StableMidFiatPerUnit(ctx, currency, models.ITAssetUSDC)
+		r, ok := it.StableFxReference(ctx, currency)
+		if !ok {
+			return nil, errors.New("no fresh rate for " + currency)
+		}
+		return r, nil
 	}
 }

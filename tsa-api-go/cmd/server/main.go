@@ -1926,7 +1926,7 @@ func main() {
 	// central-inbound block above may have built it.
 	vaultLP := wireVaultLiquidity(cfg, blockchainService, pmSvc, releaseSigner, poolGates)
 	attachVaultLiquidity(vaultLP, p2pHandler, pmh, scheduler)
-	attachFiatLiquidity(wireFiatLiquidity(cfg, blockchainService, vaultLP, itService), p2pHandler)
+	attachFiatLiquidity(wireFiatLiquidity(cfg, blockchainService, vaultLP, itService, currencyRegistry), p2pHandler)
 
 	if treasuryRates == nil { // Paycrest off: Flutterwave mid against the FX feed
 		treasuryRates = wireTreasuryMarketRate(itService, nil, cfg.RampTreasuryRateTolBps)

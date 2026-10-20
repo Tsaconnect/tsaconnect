@@ -43,6 +43,7 @@ type FiatLPWithdrawal struct {
 	UserID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"userId"`
 	Wallet        string     `gorm:"size:42;not null" json:"wallet"` // paid here, nowhere else
 	Kind          string     `gorm:"size:16;not null" json:"kind"`
+	Currency      string     `gorm:"size:8" json:"currency,omitempty"` // principal only
 	Status        string     `gorm:"size:16;not null;index" json:"status"`
 	Fiat          *string    `gorm:"type:numeric(30,2)" json:"fiat,omitempty"`
 	UnitsReleased *string    `gorm:"type:numeric(78,0)" json:"unitsReleased,omitempty"`

@@ -44,7 +44,8 @@ type fiatRig struct {
 	db   *gorm.DB
 	v    *fakeFiatVerifier
 	svc  *FiatLPService
-	rate *big.Rat
+	rate *big.Rat // NGN per $1
+	kes  *big.Rat // KES per $1
 	now  time.Time
 }
 
@@ -54,12 +55,21 @@ func newFiatRig(t *testing.T) *fiatRig {
 	if err := db.AutoMigrate(&models.LiquidityLedgerEntry{}, &models.FiatLPDeposit{}, &models.FiatLPWithdrawal{}, &models.P2PAuditLog{}); err != nil {
 		t.Fatal(err)
 	}
-	r := &fiatRig{db: db, v: &fakeFiatVerifier{amount: map[string]*big.Int{}, err: map[string]error{}}, rate: big.NewRat(1365, 1),
+	r := &fiatRig{db: db, v: &fakeFiatVerifier{amount: map[string]*big.Int{}, err: map[string]error{}}, rate: big.NewRat(1365, 1), kes: big.NewRat(129, 1),
 		now: time.Unix(1_760_000_000, 0).UTC()}
 	svc, err := NewFiatLPService(FiatLPConfig{DB: db, Vault: testVaultAddr.Hex(), Verifier: r.v,
-		Token:  PoolToken{ChainID: 56, ChainKey: "bsc", Symbol: "USDT", Address: poolTestUSDT, Decimals: 6},
-		Desk:   func(context.Context) (string, error) { return fiatDesk, nil },
-		Rate:   func(context.Context, string) (*big.Rat, error) { return new(big.Rat).Set(r.rate), nil },
+		Token:      PoolToken{ChainID: 56, ChainKey: "bsc", Symbol: "USDT", Address: poolTestUSDT, Decimals: 6},
+		Desk:       func(context.Context) (string, error) { return fiatDesk, nil },
+		Currencies: func(context.Context) []string { return []string{"NGN", "KES", "XXX"} },
+		Rate: func(_ context.Context, c string) (*big.Rat, error) {
+			switch c {
+			case "NGN":
+				return new(big.Rat).Set(r.rate), nil
+			case "KES":
+				return new(big.Rat).Set(r.kes), nil
+			}
+			return nil, errors.New("no rate") // XXX is listed but unpriced
+		},
 		TxTime: func(context.Context, string) (time.Time, error) { return r.now, nil },
 		Now:    func() time.Time { return r.now }})
 	if err != nil {
@@ -72,7 +82,7 @@ func newFiatRig(t *testing.T) *fiatRig {
 func (r *fiatRig) deposit(t *testing.T, user uuid.UUID, tx string, whole int64) *models.FiatLPDeposit {
 	t.Helper()
 	r.v.amount[tx] = usdt6(whole)
-	d, err := r.svc.ConfirmDeposit(context.Background(), user, fiatLPAddr, tx)
+	d, err := r.svc.ConfirmDeposit(context.Background(), user, fiatLPAddr, tx, "NGN")
 	if err != nil {
 		t.Fatalf("deposit: %v", err)
 	}
@@ -91,16 +101,16 @@ func TestFiatLP_DepositLocksTheRateAndIsIdempotent(t *testing.T) {
 	if !strings.EqualFold(r.v.to, fiatDesk) || !strings.EqualFold(r.v.from, fiatLPAddr) {
 		t.Fatalf("verified %s → %s, want LP → desk", r.v.from, r.v.to)
 	}
-	again, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxA)
+	again, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxA, "NGN")
 	if err != nil || again.ID != d.ID {
 		t.Fatalf("repeat should return the same row: %v", err)
 	}
-	if _, err := r.svc.ConfirmDeposit(ctx, uuid.New(), fiatLPAddr, fiatTxA); !errors.Is(err, ErrFiatLPTaken) {
+	if _, err := r.svc.ConfirmDeposit(ctx, uuid.New(), fiatLPAddr, fiatTxA, "NGN"); !errors.Is(err, ErrFiatLPTaken) {
 		t.Fatalf("another user's claim on the same tx: %v, want ErrFiatLPTaken", err)
 	}
 	r.rate.SetInt64(1500) // the rate moves: the locked claim does not
 	pos, err := r.svc.Position(ctx, user)
-	if err != nil || pos.Principal != "13650.00" || pos.AvgRate != "1365.00" || pos.TodayUSDT != "9.10" {
+	if err != nil || len(pos.Positions) != 1 || pos.Positions[0].Principal != "13650.00" || pos.Positions[0].AvgRate != "1365.00" || pos.Positions[0].TodayUSDT != "9.10" {
 		t.Fatalf("position = %+v %v", pos, err)
 	}
 }
@@ -109,19 +119,19 @@ func TestFiatLP_DepositRefusals(t *testing.T) {
 	r := newFiatRig(t)
 	ctx := context.Background()
 	user := uuid.New()
-	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, "0x12"); !errors.Is(err, ErrFiatLPTxHash) {
+	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, "0x12", "NGN"); !errors.Is(err, ErrFiatLPTxHash) {
 		t.Fatalf("bad hash: %v", err)
 	}
 	r.v.err[fiatTxA] = ErrTransferNotFound
-	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxA); !errors.Is(err, ErrFiatLPUnproven) {
+	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxA, "NGN"); !errors.Is(err, ErrFiatLPUnproven) {
 		t.Fatalf("not mined: %v", err)
 	}
 	r.v.err[fiatTxB] = ErrTransferReverted
-	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxB); !errors.Is(err, ErrFiatLPRefuted) {
+	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxB, "NGN"); !errors.Is(err, ErrFiatLPRefuted) {
 		t.Fatalf("reverted: %v", err)
 	}
 	r.v.amount[fiatTxC] = big.NewInt(500_000) // $0.50
-	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxC); !errors.Is(err, ErrFiatLPTooSmall) {
+	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxC, "NGN"); !errors.Is(err, ErrFiatLPTooSmall) {
 		t.Fatalf("dust: %v", err)
 	}
 }
@@ -133,21 +143,21 @@ func TestFiatLP_PrincipalRequestReservesAndRejectReturns(t *testing.T) {
 	ctx := context.Background()
 	user := uuid.New()
 	r.deposit(t, user, fiatTxA, 10)
-	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "13650.01"); !errors.Is(err, ErrFiatLPAmount) {
+	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "NGN", "13650.01"); !errors.Is(err, ErrFiatLPAmount) {
 		t.Fatalf("over-ask: %v", err)
 	}
-	w, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "6825")
+	w, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "NGN", "6825")
 	if err != nil || *w.Fiat != "6825.00" || *w.UnitsReleased != usdt6(5).String() {
 		t.Fatalf("half: %+v %v", w, err)
 	}
 	pos, _ := r.svc.Position(ctx, user)
-	if pos.Principal != "6825.00" || pos.Units != "5" {
+	if pos.Positions[0].Principal != "6825.00" || pos.Positions[0].Units != "5" {
 		t.Fatalf("after reserving half: %+v", pos)
 	}
 	if _, err := r.svc.Reject(ctx, uuid.New(), w.ID, "wrong wallet"); err != nil {
 		t.Fatal(err)
 	}
-	if pos, _ = r.svc.Position(ctx, user); pos.Principal != "13650.00" || pos.Units != "10" {
+	if pos, _ = r.svc.Position(ctx, user); pos.Positions[0].Principal != "13650.00" || pos.Positions[0].Units != "10" {
 		t.Fatalf("after reject: %+v", pos)
 	}
 	if _, err := r.svc.Reject(ctx, uuid.New(), w.ID, ""); !errors.Is(err, ErrFiatLPState) {
@@ -162,7 +172,7 @@ func TestFiatLP_MarkPaidAtTheDaysRate(t *testing.T) {
 	ctx := context.Background()
 	user, admin := uuid.New(), uuid.New()
 	r.deposit(t, user, fiatTxA, 10)
-	w, _ := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "6825")
+	w, _ := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "NGN", "6825")
 	r.rate.SetInt64(1500)
 	_, list, err := r.svc.AdminOverview(ctx, models.FiatLPRequested)
 	if err != nil || len(list) != 1 || list[0].QuoteUSDT != "4.55" || list[0].Rate != "1500.00" {
@@ -220,11 +230,11 @@ func TestFiatLP_EarningsAreTheVirtualPoolShare(t *testing.T) {
 	r.now = r.now.Add(2 * time.Hour)
 	r.svc.forgetEarnings()
 	pos, err := r.svc.Position(ctx, user)
-	if err != nil || pos.Earned != "0.2" || pos.EarningsAvailable != "0.2" || pos.EarningsNaira != "273.00" {
+	if err != nil || pos.Earned != "0.2" || pos.EarningsAvailable != "0.2" || pos.EarningsValue["NGN"] != "273.00" {
 		t.Fatalf("earnings = %+v %v, want 0.2 USDT / ₦273", pos, err)
 	}
 	// Ask for part of it; the rest stays available; below the minimum is refused.
-	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindEarnings, "0.2"); !errors.Is(err, ErrFiatLPAmount) {
+	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindEarnings, "NGN", "0.2"); !errors.Is(err, ErrFiatLPAmount) {
 		t.Fatalf("below the 0.50 minimum: %v", err)
 	}
 }
@@ -257,11 +267,11 @@ func TestFiatLP_StaleTransferIsNotRecordedAtTodaysRate(t *testing.T) {
 	r.svc.c.TxTime = func(context.Context, string) (time.Time, error) { return minted, nil }
 	r.v.amount[fiatTxA] = usdt6(10)
 	minted = r.now.Add(-time.Hour)
-	if _, err := r.svc.ConfirmDeposit(context.Background(), uuid.New(), fiatLPAddr, fiatTxA); !errors.Is(err, ErrFiatLPStale) {
+	if _, err := r.svc.ConfirmDeposit(context.Background(), uuid.New(), fiatLPAddr, fiatTxA, "NGN"); !errors.Is(err, ErrFiatLPStale) {
 		t.Fatalf("an hour-old transfer: %v, want ErrFiatLPStale", err)
 	}
 	minted = r.now.Add(-2 * time.Minute)
-	if _, err := r.svc.ConfirmDeposit(context.Background(), uuid.New(), fiatLPAddr, fiatTxA); err != nil {
+	if _, err := r.svc.ConfirmDeposit(context.Background(), uuid.New(), fiatLPAddr, fiatTxA, "NGN"); err != nil {
 		t.Fatalf("a fresh transfer: %v", err)
 	}
 }
@@ -275,14 +285,14 @@ func TestFiatLP_ExitIsNeverGatedOnEligibility(t *testing.T) {
 	r.deposit(t, user, fiatTxA, 10)
 	r.svc.c.CanLP = func(context.Context, uuid.UUID) error { return ErrLPNotEligible }
 	r.v.amount[fiatTxB] = usdt6(5)
-	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxB); !errors.Is(err, ErrLPNotEligible) {
+	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxB, "NGN"); !errors.Is(err, ErrLPNotEligible) {
 		t.Fatalf("deposit while ineligible: %v", err)
 	}
 	pos, err := r.svc.Position(ctx, user)
 	if err != nil || pos.Eligible {
 		t.Fatalf("position = %+v %v, want Eligible=false", pos, err)
 	}
-	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "13650"); err != nil {
+	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "NGN", "13650"); err != nil {
 		t.Fatalf("exit while ineligible: %v", err)
 	}
 }
@@ -293,13 +303,59 @@ func TestFiatLP_OnePaymentCannotCloseTwoRequests(t *testing.T) {
 	ctx := context.Background()
 	user, admin := uuid.New(), uuid.New()
 	r.deposit(t, user, fiatTxA, 20)
-	w1, _ := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "1365")
-	w2, _ := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "1365")
+	w1, _ := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "NGN", "1365")
+	w2, _ := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "NGN", "1365")
 	r.v.amount[fiatTxC] = usdt6(1)
 	if _, err := r.svc.MarkPaid(ctx, admin, w1.ID, fiatTxC); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.svc.MarkPaid(ctx, admin, w2.ID, fiatTxC); !errors.Is(err, ErrFiatLPTaken) {
 		t.Fatalf("second request on the same tx: %v, want ErrFiatLPTaken", err)
+	}
+}
+
+// A position can be held in any priced currency; each is locked at its own
+// rate and withdrawn from separately. An unpriced or unknown currency is refused.
+func TestFiatLP_PositionsPerCurrency(t *testing.T) {
+	r := newFiatRig(t)
+	ctx := context.Background()
+	user := uuid.New()
+	r.deposit(t, user, fiatTxA, 10) // NGN
+	r.v.amount[fiatTxB] = usdt6(20)
+	d, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxB, "kes") // case-insensitive
+	if err != nil || d.Currency != "KES" || d.Fiat != "2580.00" {
+		t.Fatalf("KES deposit = %+v %v, want 20 USDT = KSh 2,580", d, err)
+	}
+	r.v.amount[fiatTxC] = usdt6(5)
+	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxC, "JPY"); !errors.Is(err, ErrFiatLPCurrency) {
+		t.Fatalf("unsupported currency: %v", err)
+	}
+	if _, err := r.svc.ConfirmDeposit(ctx, user, fiatLPAddr, fiatTxC, "XXX"); !errors.Is(err, ErrFiatLPUnavailable) {
+		t.Fatalf("listed but unpriced currency: %v, want ErrFiatLPUnavailable", err)
+	}
+	pos, err := r.svc.Position(ctx, user)
+	if err != nil || len(pos.Positions) != 2 || len(pos.Currencies) != 2 {
+		t.Fatalf("position = %+v %v, want NGN and KES lines and two priced currencies", pos, err)
+	}
+	if pos.Positions[0].Currency != "KES" || pos.Positions[1].Currency != "NGN" {
+		t.Fatalf("lines not sorted by code: %+v", pos.Positions)
+	}
+	// A KES exit cannot take from the NGN balance, and is quoted at the KES rate.
+	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "KES", "2580.01"); !errors.Is(err, ErrFiatLPAmount) {
+		t.Fatalf("over the KES balance: %v", err)
+	}
+	if _, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "GHS", "1"); !errors.Is(err, ErrFiatLPAmount) {
+		t.Fatalf("a currency with no balance: %v", err)
+	}
+	w, err := r.svc.RequestWithdrawal(ctx, user, fiatLPAddr, models.FiatLPKindPrincipal, "KES", "1290")
+	if err != nil || w.Currency != "KES" || *w.UnitsReleased != usdt6(10).String() {
+		t.Fatalf("KES half exit: %+v %v", w, err)
+	}
+	sum, list, err := r.svc.AdminOverview(ctx, models.FiatLPRequested)
+	if err != nil || len(sum.Currencies) != 2 || len(list) != 1 || list[0].QuoteUSDT != "10" || list[0].Rate != "129.00" {
+		t.Fatalf("overview = %+v %+v %v", sum, list, err)
+	}
+	if sum.Currencies[0].Currency != "KES" || sum.Currencies[0].Fiat != "1290.00" || sum.Currencies[0].Units != "10" {
+		t.Fatalf("KES summary = %+v", sum.Currencies[0])
 	}
 }
