@@ -619,14 +619,6 @@ func (ch *CheckoutHandler) resolveServicePricing(
 		}
 	}
 
-	// A buyer who unlocked the listing's promotion pays the promo price on the
-	// item price; the call-out/shipping part stays as quoted.
-	factor, ferr := services.NewPromoService(tx).PriceFactor(context.Background(), product, buyerID)
-	if ferr != nil {
-		return 0, 0, zone, nil, nil, "Failed to resolve promotion"
-	}
-	priceUSD *= factor
-
 	if priceUSD+calloutUSD <= 0 {
 		return 0, 0, zone, nil, nil, fmt.Sprintf("%s has no payable amount for your selection", product.Name)
 	}
@@ -930,6 +922,8 @@ type pricedCartLine struct {
 	zone           string
 	menuSelections []models.OrderMenuSelection
 	booking        *models.ServiceBooking
+	// promoClaim is the unlocked promotion this line is priced with, if any.
+	promoClaim     *uuid.UUID
 	productAmount  *big.Int
 	shippingAmount *big.Int
 	platformFee    *big.Int
@@ -1064,11 +1058,14 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 				}
 				priceUSD, calloutUSD, line.zone, line.menuSelections, line.booking = p, co, z, sel, booking
 			} else {
-				factor, ferr := services.NewPromoService(tx).PriceFactor(context.Background(), &product, user.ID)
+				// An unlocked promotion discounts ONE unit; any further units are
+				// full price. Ordering spends the claim (see Redeem below).
+				pp, ferr := services.NewPromoService(tx).Pricing(context.Background(), &product, user.ID)
 				if ferr != nil {
 					return nil, &cartPricingError{http.StatusInternalServerError, "Failed to resolve promotion"}
 				}
-				priceUSD = product.Price * factor * float64(item.Quantity)
+				priceUSD = product.Price*float64(item.Quantity-1) + product.Price*pp.Factor
+				line.promoClaim = pp.ClaimID
 				calloutUSD = GetShippingRate(&product, line.zone) * float64(item.Quantity)
 			}
 
@@ -1360,6 +1357,20 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			log.Printf("Failed to create order: %v", err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
 			return
+		}
+
+		// The promotion is spent with the order or not at all: a concurrent order
+		// that got there first leaves this one without its discount, so it stops.
+		if line.promoClaim != nil {
+			if err := services.NewPromoService(tx).Redeem(context.Background(), *line.promoClaim, order.ID); err != nil {
+				tx.Rollback()
+				if errors.Is(err, services.ErrPromoUsed) {
+					utils.ErrorResponse(c, http.StatusConflict, fmt.Sprintf("The promotion on %s was already used. Review the new price and try again.", line.product.Name))
+				} else {
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
+				}
+				return
+			}
 		}
 
 		// A booking-type order reserves its slot in the same transaction.

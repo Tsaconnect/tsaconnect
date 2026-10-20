@@ -1,28 +1,11 @@
-// Paged Promotions Arena feed with a kind filter.
-//
-// The API filters by `type` (Product | Service) only. The three service kinds
-// (contact / order / booking) live on the listing's CATEGORY, so those chips ask
-// for Services and narrow client-side by the category's serviceType — the same
-// field the marketplace tab uses. A page that narrows to nothing keeps paging
-// (bounded) so the list does not look empty while later pages hold matches.
+// Paged Promotions Arena feed. Promotions are products only for now (the API
+// refuses promos on services), so the feed always asks for type=Product.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import api, { Product } from '@/components/services/api';
 
-export type PromoFilter = 'all' | 'product' | 'order' | 'booking' | 'contact';
-
 const PAGE_SIZE = 20;
-const MAX_SKIPPED_PAGES = 5;
 
-export const categoryIdOf = (p: Product) =>
-  typeof p.category === 'string' ? p.category : p.category?.id;
-
-export function matchesFilter(p: Product, filter: PromoFilter, serviceTypes: Record<string, string>) {
-  if (filter === 'all' || filter === 'product') return true; // already narrowed by `type`
-  const kind = serviceTypes[categoryIdOf(p) ?? ''] ?? 'contact';
-  return kind === filter;
-}
-
-export function usePromotions(filter: PromoFilter) {
+export function usePromotions() {
   const [items, setItems] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -31,44 +14,24 @@ export function usePromotions(filter: PromoFilter) {
   const [hasMore, setHasMore] = useState(false);
   const page = useRef(0);
   const busy = useRef(false);
-  const serviceTypes = useRef<Record<string, string> | null>(null);
-  // Bumped on every filter change/refresh so a slow response from a previous
-  // request cannot overwrite the current list.
+  // Bumped on every refresh so a slow response from a previous request cannot
+  // overwrite the current list.
   const generation = useRef(0);
 
-  const kinds = useCallback(async () => {
-    if (serviceTypes.current) return serviceTypes.current;
-    const res = await api.getCategories({ active: true });
-    const map: Record<string, string> = {};
-    (res.success && Array.isArray(res.data) ? res.data : []).forEach((c: any) => {
-      if (c.serviceType) map[c.id] = c.serviceType;
-    });
-    serviceTypes.current = map;
-    return map;
-  }, []);
-
-  const fetchPages = useCallback(async (reset: boolean) => {
+  const fetchPage = useCallback(async (reset: boolean) => {
     if (busy.current) return;
     busy.current = true;
     const gen = ++generation.current;
     if (reset) page.current = 0;
     setError(null);
     try {
-      const type = filter === 'all' ? undefined : filter === 'product' ? 'Product' : 'Service';
-      const narrowed = filter !== 'all' && filter !== 'product';
-      const types = narrowed ? await kinds() : {};
-      let found: Product[] = [];
-      let more = true;
-      for (let skipped = 0; more && found.length === 0 && skipped < MAX_SKIPPED_PAGES; skipped++) {
-        const res = await api.getPromotions({ page: page.current + 1, limit: PAGE_SIZE, type });
-        if (!res.success || !res.data) throw new Error(res.message || 'Could not load promotions');
-        page.current += 1;
-        const { products, pagination } = res.data;
-        more = page.current * (pagination?.limit ?? PAGE_SIZE) < (pagination?.total ?? 0);
-        found = products.filter((p) => matchesFilter(p, filter, types));
-      }
+      const res = await api.getPromotions({ page: page.current + 1, limit: PAGE_SIZE, type: 'Product' });
+      if (!res.success || !res.data) throw new Error(res.message || 'Could not load promotions');
+      page.current += 1;
+      const { products, pagination } = res.data;
+      const more = page.current * (pagination?.limit ?? PAGE_SIZE) < (pagination?.total ?? 0);
       if (gen !== generation.current) return;
-      setItems((prev) => (reset ? found : [...prev, ...found]));
+      setItems((prev) => (reset ? products : [...prev, ...products]));
       setHasMore(more);
     } catch (e: any) {
       if (gen === generation.current) setError(e?.message || 'Could not load promotions');
@@ -80,25 +43,22 @@ export function usePromotions(filter: PromoFilter) {
         setLoadingMore(false);
       }
     }
-  }, [filter, kinds]);
+  }, []);
 
   useEffect(() => {
-    busy.current = false;
-    setLoading(true);
-    setItems([]);
-    fetchPages(true);
-  }, [fetchPages]);
+    fetchPage(true);
+  }, [fetchPage]);
 
   const refresh = useCallback(() => {
     setRefreshing(true);
-    fetchPages(true);
-  }, [fetchPages]);
+    fetchPage(true);
+  }, [fetchPage]);
 
   const loadMore = useCallback(() => {
     if (!hasMore || busy.current || error) return;
     setLoadingMore(true);
-    fetchPages(false);
-  }, [hasMore, error, fetchPages]);
+    fetchPage(false);
+  }, [hasMore, error, fetchPage]);
 
   return { items, loading, refreshing, loadingMore, error, refresh, loadMore };
 }

@@ -1,9 +1,7 @@
 /* eslint-disable import/first -- jest hoists the mocks above the imports they replace. */
 
 /**
- * Promotions Arena: loading, empty, list and filter change. The API only
- * filters by Product|Service, so the service kinds are narrowed client-side by
- * the listing's category serviceType.
+ * Promotions Arena: loading, empty, list and error. Products only.
  */
 jest.mock('@/theme', () => ({
   __esModule: true,
@@ -18,7 +16,6 @@ jest.mock('@/components/ui', () => {
   const { View, Text: RNText } = jest.requireActual('react-native');
   return {
     __esModule: true,
-    Chip: (p: any) => react.createElement(RNText, { accessibilityLabel: `chip:${p.label}`, onPress: p.onPress }, p.label),
     EmptyState: (p: any) => react.createElement(RNText, null, p.title),
     ErrorState: (p: any) => react.createElement(RNText, null, p.title),
     Spinner: () => react.createElement(View, { accessibilityLabel: 'spinner' }),
@@ -40,7 +37,7 @@ jest.mock('react-native-safe-area-context', () => ({
 }));
 jest.mock('@/components/services/api', () => ({
   __esModule: true,
-  default: { getPromotions: jest.fn(), getCategories: jest.fn() },
+  default: { getPromotions: jest.fn() },
 }));
 
 import React from 'react';
@@ -49,11 +46,9 @@ import api from '@/components/services/api';
 import PromotionsArenaScreen from '@/app/(detail)/promotions';
 
 const getPromotions = api.getPromotions as jest.Mock;
-const getCategories = api.getCategories as jest.Mock;
 const flush = async () => { for (let i = 0; i < 6; i += 1) await act(async () => { await Promise.resolve(); }); };
 
-const item = (id: string, type: 'Product' | 'Service', category = 'c-product') =>
-  ({ id, name: `Item ${id}`, type, category, images: [] });
+const item = (id: string) => ({ id, name: `Item ${id}`, type: 'Product', images: [] });
 const page = (products: any[]) => ({ success: true, data: { products, pagination: { page: 1, limit: 20, total: products.length } } });
 const text = (t: ReactTestRenderer) =>
   (t.root as any).findAll((n: any) => typeof n.type === 'string' && n.type === 'Text').map((n: any) => n.children.join('')).join('|');
@@ -67,10 +62,6 @@ async function render() {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  getCategories.mockResolvedValue({
-    success: true,
-    data: [{ id: 'c-order', serviceType: 'order' }, { id: 'c-booking', serviceType: 'booking' }],
-  });
 });
 
 it('shows a spinner while loading', async () => {
@@ -86,32 +77,13 @@ it('shows the empty state when nothing is on promotion', async () => {
   expect(text(tree)).toContain('No promotions right now');
 });
 
-it('lists promoted items and opens product vs service detail', async () => {
-  getPromotions.mockResolvedValue(page([item('p1', 'Product'), item('s1', 'Service', 'c-order')]));
+it('lists promoted items, always asks for products, and opens product detail', async () => {
+  getPromotions.mockResolvedValue(page([item('p1'), item('p2')]));
   const tree = await render();
-  expect(getPromotions).toHaveBeenCalledWith({ page: 1, limit: 20, type: undefined });
+  expect(getPromotions).toHaveBeenCalledWith({ page: 1, limit: 20, type: 'Product' });
+  expect(tree.root.findAllByProps({ accessibilityLabel: 'chip:All' })).toHaveLength(0);
   await act(async () => { (tree.root as any).findByProps({ accessibilityLabel: 'row:p1' }).props.onPress(); });
   expect(mockPush.mock.calls[0][0]).toContain('/product/p1');
-  await act(async () => { (tree.root as any).findByProps({ accessibilityLabel: 'row:s1' }).props.onPress(); });
-  expect(mockPush.mock.calls[1][0].pathname).toBe('/servicedetail');
-});
-
-it('Products chip asks the API for type=Product', async () => {
-  getPromotions.mockResolvedValue(page([item('p1', 'Product')]));
-  const tree = await render();
-  await act(async () => { (tree.root as any).findByProps({ accessibilityLabel: 'chip:Products' }).props.onPress(); });
-  await flush();
-  expect(getPromotions).toHaveBeenLastCalledWith({ page: 1, limit: 20, type: 'Product' });
-});
-
-it('a service-kind chip asks for Services and narrows by category serviceType', async () => {
-  getPromotions.mockResolvedValue(page([item('s1', 'Service', 'c-order'), item('s2', 'Service', 'c-booking')]));
-  const tree = await render();
-  await act(async () => { (tree.root as any).findByProps({ accessibilityLabel: 'chip:Booking' }).props.onPress(); });
-  await flush();
-  expect(getPromotions).toHaveBeenLastCalledWith({ page: 1, limit: 20, type: 'Service' });
-  expect(text(tree)).toContain('Item s2');
-  expect(text(tree)).not.toContain('Item s1');
 });
 
 it('shows an error state when the feed fails', async () => {

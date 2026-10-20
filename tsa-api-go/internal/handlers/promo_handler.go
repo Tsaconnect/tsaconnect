@@ -12,6 +12,9 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
+// promoProductsOnly is why a service listing cannot be put on promotion yet.
+const promoProductsOnly = "Promotions are available on products only"
+
 // promoFormTerms reads the merchant's promotion fields from a product form.
 // present is false when the form doesn't mention promotions at all, so an
 // update that only edits the name leaves the promo untouched.
@@ -120,11 +123,8 @@ func (h *Handlers) ListPromotions(c *gin.Context) {
 
 	q := config.DB.Model(&models.Product{}).
 		Joins("JOIN users ON users.id = products.user_id AND users.deleted_at IS NULL AND users.account_status = ?", models.AccountStatusActive).
-		Where("products.promo_enabled = ? AND products.status = ? AND products.promo_price > 0 AND products.promo_price < products.price",
-			true, models.ProductStatusActive)
-	if t := c.Query("type"); t != "" {
-		q = q.Where("products.type = ?", t)
-	}
+		Where("products.promo_enabled = ? AND products.status = ? AND products.type = ? AND products.promo_price > 0 AND products.promo_price < products.price",
+			true, models.ProductStatusActive, models.ProductTypeProduct)
 	if cat := c.Query("category"); cat != "" {
 		if id, err := uuid.Parse(cat); err == nil {
 			q = q.Where("products.category_id = ?", id)
