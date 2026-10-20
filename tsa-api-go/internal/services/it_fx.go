@@ -38,6 +38,16 @@ type FxRateProvider interface {
 // RatePerUsd stays the refusing path for everything that trades.
 type OfficialFxRater interface {
 	OfficialRatePerUsd(ctx context.Context, currency string) (rate float64, stale bool, err error)
+	// OfficialCurrencies lists every currency the feed has a rate row for, with
+	// its display name and symbol (rate freshness is asked per currency).
+	OfficialCurrencies(ctx context.Context) []OfficialCurrency
+}
+
+// OfficialCurrency is a currency the rate feed knows.
+type OfficialCurrency struct {
+	Code   string `json:"code"`
+	Name   string `json:"name"`
+	Symbol string `json:"symbol"`
 }
 
 // NewP2PFxProvider adapts the P2P exchange-rate service to the IT FxProvider so
@@ -92,6 +102,19 @@ func (a p2pFxProvider) RatePerUsd(ctx context.Context, currency string) (float64
 	// aggregate — true when ANY row is stale — so it would refuse a fresh NGN
 	// rate just because an unrelated currency (e.g. GHS) had a Bybit failure.
 	return row.MidRate, row.Stale, nil
+}
+
+// OfficialCurrencies is every currency in the rate snapshot.
+func (a p2pFxProvider) OfficialCurrencies(ctx context.Context) []OfficialCurrency {
+	snap, err := a.p2p.GetSnapshot()
+	if err != nil {
+		return nil
+	}
+	out := make([]OfficialCurrency, 0, len(snap.Rates))
+	for code, row := range snap.Rates {
+		out = append(out, OfficialCurrency{Code: code, Name: row.Name, Symbol: row.Symbol})
+	}
+	return out
 }
 
 // OfficialRatePerUsd is the snapshot's mid for currency, market or official,

@@ -178,3 +178,17 @@ export function fiatActivity(p: Pick<FiatPosition, 'deposits' | 'withdrawals'>):
 /** Currencies with a balance, in API order. */
 export const heldPositions = (p: Pick<FiatPosition, 'positions'>): FiatHolding[] =>
   p.positions.filter((h) => !isZeroAmount(h.principal));
+
+const POPULAR_CURRENCIES = ['NGN', 'GHS', 'KES', 'USD', 'EUR', 'GBP', 'UGX', 'TZS', 'ZAR'];
+
+/** More than this many currencies is a searchable list, not a row of chips. */
+export const CURRENCY_CHIP_LIMIT = 6;
+
+/** Picker rows for a long currency list: the common ones first, then the rest by code. */
+export function currencyPickerItems(codes: string[], currencies: FiatCurrency[]): { id: string; label: string; sublabel?: string; group: string }[] {
+  const name = (code: string) => currencies.find((c) => c.code === code)?.name;
+  const rank = (code: string) => { const i = POPULAR_CURRENCIES.indexOf(code); return i < 0 ? POPULAR_CURRENCIES.length : i; };
+  return [...codes]
+    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    .map((code) => ({ id: code, label: code, sublabel: name(code), group: rank(code) < POPULAR_CURRENCIES.length ? 'Popular' : 'All currencies' }));
+}

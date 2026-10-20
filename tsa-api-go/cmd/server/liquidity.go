@@ -95,10 +95,10 @@ func poolChainName(cfg *config.Config) string {
 // wireFiatLiquidity is the fiat LP side (plan 2026-10-20): fiat LPs send USDT
 // to the pool's refill wallet, read from the vault. Nil (dormant, reason
 // logged) without the LP side, the chain client or a rate source.
-func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *services.VaultLPService, it *services.ITService, currencies *services.CurrencyRegistry) *services.FiatLPService {
+func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *services.VaultLPService, it *services.ITService) *services.FiatLPService {
 	pool, ok := cfg.LiquidityPool()
-	rate := liquidityFiatRate(it, currencies)
-	if !ok || lp == nil || bs == nil || rate == nil || currencies == nil || config.DB == nil {
+	rate := liquidityFiatRate(it)
+	if !ok || lp == nil || bs == nil || rate == nil || config.DB == nil {
 		return nil
 	}
 	client, _ := bs.ClientForChainID(pool.ChainID)
@@ -116,13 +116,7 @@ func wireFiatLiquidity(cfg *config.Config, bs *services.BlockchainService, lp *s
 			return r.CollateralProvider, nil
 		},
 		Verifier: services.NewLogTransferVerifier(client.Client), Rate: rate, CanLP: lp.CanProvide,
-		Currencies: func(context.Context) []string {
-			var codes []string
-			for _, c := range currencies.All() {
-				codes = append(codes, c.Code)
-			}
-			return codes
-		},
+		Currencies: it.OfficialCurrencies,
 		TxTime: func(ctx context.Context, txHash string) (time.Time, error) {
 			rc, err := client.Client.TransactionReceipt(ctx, common.HexToHash(txHash))
 			if err != nil {
@@ -150,26 +144,18 @@ func attachFiatLiquidity(f *services.FiatLPService, p2p *handlers.P2PHandler) {
 	p2p.SetFiatLiquidity(f)
 }
 
-// liquidityFiatRate is fiat per $1 for a fiat position. A currency the registry
-// says has a live market is priced from that market only (and refused when
-// stale): it never falls back to an official rate that may be far from where
-// it trades. A currency with no market (USD, EUR, GBP, ...) is priced from the
-// official feed, refused when stale. USDT trades at par with $1. Nil when
-// there is no IT service, so fiat positions stay off.
-func liquidityFiatRate(it *services.ITService, currencies *services.CurrencyRegistry) services.FiatRateFunc {
-	if it == nil || currencies == nil {
+// liquidityFiatRate is fiat per $1 for a fiat position, from the rate snapshot
+// and refused when that row is stale. A currency with a live market feed (NGN,
+// GHS) carries Stale when its market fetch fails, so it is never silently
+// priced from the official fallback; every other currency is the official mid.
+// USDT trades at par with $1. Nil when there is no IT service, so fiat
+// positions stay off.
+func liquidityFiatRate(it *services.ITService) services.FiatRateFunc {
+	if it == nil {
 		return nil
 	}
 	return func(ctx context.Context, currency string) (*big.Rat, error) {
-		row, err := currencies.Get(currency)
-		if err != nil {
-			return nil, err
-		}
-		get := it.OfficialFxReference
-		if row.HasMarketAnchor {
-			get = it.StableFxReference
-		}
-		r, ok := get(ctx, currency)
+		r, ok := it.OfficialFxReference(ctx, currency)
 		if !ok {
 			return nil, errors.New("no fresh rate for " + currency)
 		}

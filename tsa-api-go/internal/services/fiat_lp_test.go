@@ -58,9 +58,11 @@ func newFiatRig(t *testing.T) *fiatRig {
 	r := &fiatRig{db: db, v: &fakeFiatVerifier{amount: map[string]*big.Int{}, err: map[string]error{}}, rate: big.NewRat(1365, 1), kes: big.NewRat(129, 1),
 		now: time.Unix(1_760_000_000, 0).UTC()}
 	svc, err := NewFiatLPService(FiatLPConfig{DB: db, Vault: testVaultAddr.Hex(), Verifier: r.v,
-		Token:      PoolToken{ChainID: 56, ChainKey: "bsc", Symbol: "USDT", Address: poolTestUSDT, Decimals: 6},
-		Desk:       func(context.Context) (string, error) { return fiatDesk, nil },
-		Currencies: func(context.Context) []string { return []string{"NGN", "KES", "XXX"} },
+		Token: PoolToken{ChainID: 56, ChainKey: "bsc", Symbol: "USDT", Address: poolTestUSDT, Decimals: 6},
+		Desk:  func(context.Context) (string, error) { return fiatDesk, nil },
+		Currencies: func(context.Context) []OfficialCurrency {
+			return []OfficialCurrency{{Code: "NGN", Name: "Nigerian naira", Symbol: "₦"}, {Code: "KES", Name: "Kenyan shilling", Symbol: "KSh"}, {Code: "XXX"}}
+		},
 		Rate: func(_ context.Context, c string) (*big.Rat, error) {
 			switch c {
 			case "NGN":
@@ -338,6 +340,9 @@ func TestFiatLP_PositionsPerCurrency(t *testing.T) {
 		t.Fatalf("listed but unpriced currency: %v, want ErrFiatLPUnavailable", err)
 	}
 	pos, err := r.svc.Position(ctx, user)
+	if err == nil && (pos.Currencies[0].Symbol != "KSh" || pos.Currencies[1].Name != "Nigerian naira") {
+		t.Fatalf("currency names and symbols come from the feed: %+v", pos.Currencies)
+	}
 	if err != nil || len(pos.Positions) != 2 || len(pos.Currencies) != 2 {
 		t.Fatalf("position = %+v %v, want NGN and KES lines and two priced currencies", pos, err)
 	}

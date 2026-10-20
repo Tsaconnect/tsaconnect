@@ -9,7 +9,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  AmountInput, BottomActionBar, Button, Card, Chip, ErrorState, ScreenHeader, Sheet, SummaryRow, Text, useToast,
+  AmountInput, BottomActionBar, Button, Card, Chip, ErrorState, PickerSheet, ScreenHeader, SelectRow, Sheet, SummaryRow, Text, useToast,
 } from '@/components/ui';
 import {
   FiatEarningsCard, FiatHero, FiatHistory, FiatIntro, FiatPositionCard, FiatSkeleton, FiatWaitingCard,
@@ -20,7 +20,7 @@ import { getSignableWallet } from '@/services/wallet';
 import { parseTokenAmount } from '@/services/p2p';
 import { promptKycRefusal } from '@/utils/kycRefusal';
 import {
-  exceedsAmount, formatCurrency, formatLiquidityAmount, heldPositions, isValidAmount, isZeroAmount, liquidityMessage,
+  CURRENCY_CHIP_LIMIT, currencyPickerItems, exceedsAmount, formatCurrency, formatLiquidityAmount, heldPositions, isValidAmount, isZeroAmount, liquidityMessage,
   multiplyDecimal, currencySymbol,
 } from '@/utils/liquidityView';
 
@@ -38,6 +38,7 @@ export default function FiatLiquidityScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [mode, setMode] = useState<Mode | null>(null);
   const [currency, setCurrency] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false); // searchable currency list (long lists only)
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const running = useRef(false);
@@ -244,13 +245,21 @@ export default function FiatLiquidityScreen() {
         <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.md }}>
           {mode !== 'earnings' && choices.length > 1 && (
             <View style={{ gap: spacing.xs }}>
-              <Text variant="bodySm" weight="600" color="textSecondary">{mode === 'deposit' ? 'Lock in' : 'Withdraw from'}</Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-                {choices.map((code) => (
-                  <Chip key={code} label={code} selected={code === currency}
-                    disabled={!!busy || (!!pending && mode === 'deposit')} onPress={() => { setCurrency(code); if (mode === 'principal') setAmount(''); }} />
-                ))}
-              </View>
+              {choices.length <= CURRENCY_CHIP_LIMIT ? (
+                <>
+                  <Text variant="bodySm" weight="600" color="textSecondary">{mode === 'deposit' ? 'Lock in' : 'Withdraw from'}</Text>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+                    {choices.map((code) => (
+                      <Chip key={code} label={code} selected={code === currency}
+                        disabled={!!busy || (!!pending && mode === 'deposit')} onPress={() => { setCurrency(code); if (mode === 'principal') setAmount(''); }} />
+                    ))}
+                  </View>
+                </>
+              ) : (
+                <SelectRow label={mode === 'deposit' ? 'Lock in' : 'Withdraw from'} placeholder="Choose a currency"
+                  value={currency ? `${currency}${pos.currencies.find((c) => c.code === currency)?.name ? ` · ${pos.currencies.find((c) => c.code === currency)?.name}` : ''}` : undefined}
+                  disabled={!!busy || (!!pending && mode === 'deposit')} onPress={() => setPickerOpen(true)} />
+              )}
             </View>
           )}
           {mode === 'deposit' && pending && (
@@ -289,6 +298,9 @@ export default function FiatLiquidityScreen() {
           </View>
           {!hasEarnings && mode === 'earnings' ? <Text variant="caption" color="textMuted">Nothing to withdraw yet.</Text> : null}
         </View>
+        <PickerSheet visible={pickerOpen} onClose={() => setPickerOpen(false)} title="Choose a currency"
+          items={currencyPickerItems(choices, pos.currencies)} selectedId={currency}
+          onSelect={(it) => { setCurrency(it.id); setPickerOpen(false); if (mode === 'principal') setAmount(''); }} />
       </Sheet>
     </SafeAreaView>
   );

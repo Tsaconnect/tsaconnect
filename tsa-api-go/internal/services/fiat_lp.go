@@ -93,9 +93,9 @@ type FiatLPConfig struct {
 	Desk     func(ctx context.Context) (string, error) // the pool's refill wallet
 	Verifier ERC20SourcedTransferVerifier
 	Rate     FiatRateFunc
-	// Currencies lists the currency codes a position may be held in (the
-	// registry); only those with a live rate are offered.
-	Currencies func(ctx context.Context) []string
+	// Currencies lists every currency the rate feed knows; only those with a
+	// fresh rate right now are offered.
+	Currencies func(ctx context.Context) []OfficialCurrency
 	// TxTime is the block time of a mined transaction (required: it bounds how
 	// long after a transfer its rate may still be locked).
 	TxTime func(ctx context.Context, txHash string) (time.Time, error)
@@ -232,18 +232,12 @@ type FiatCurrencyInfo struct {
 	Rate   string `json:"rate"` // fiat per $1 today
 }
 
-var fiatCurrencyMeta = map[string]struct{ name, symbol string }{
-	"NGN": {"Nigerian naira", "₦"}, "GHS": {"Ghanaian cedi", "GH₵"}, "KES": {"Kenyan shilling", "KSh"},
-	"UGX": {"Ugandan shilling", "USh"}, "TZS": {"Tanzanian shilling", "TSh"},
-	"USD": {"US dollar", "$"}, "EUR": {"Euro", "€"}, "GBP": {"British pound", "£"},
-}
-
-// priced is every supported currency that has a live rate right now.
+// priced is every known currency that has a fresh rate right now.
 func (s *FiatLPService) priced(ctx context.Context) (map[string]*big.Rat, []FiatCurrencyInfo) {
 	rates := map[string]*big.Rat{}
 	var infos []FiatCurrencyInfo
-	for _, code := range s.c.Currencies(ctx) {
-		code = strings.ToUpper(strings.TrimSpace(code))
+	for _, c := range s.c.Currencies(ctx) {
+		code := strings.ToUpper(strings.TrimSpace(c.Code))
 		if _, dup := rates[code]; dup || code == "" {
 			continue
 		}
@@ -252,9 +246,12 @@ func (s *FiatLPService) priced(ctx context.Context) (map[string]*big.Rat, []Fiat
 			continue
 		}
 		rates[code] = r
-		name, sym := code, code
-		if m, ok := fiatCurrencyMeta[code]; ok {
-			name, sym = m.name, m.symbol
+		name, sym := c.Name, c.Symbol
+		if name == "" {
+			name = code
+		}
+		if sym == "" {
+			sym = code
 		}
 		infos = append(infos, FiatCurrencyInfo{Code: code, Name: name, Symbol: sym, Rate: signedMoney(r)})
 	}
@@ -267,7 +264,7 @@ func (s *FiatLPService) priced(ctx context.Context) (map[string]*big.Rat, []Fiat
 func (s *FiatLPService) rateFor(ctx context.Context, currency string) (*big.Rat, error) {
 	code := strings.ToUpper(strings.TrimSpace(currency))
 	for _, c := range s.c.Currencies(ctx) {
-		if strings.EqualFold(c, code) && code != "" {
+		if strings.EqualFold(c.Code, code) && code != "" {
 			r, err := s.c.Rate(ctx, code)
 			if err != nil || r == nil || r.Sign() <= 0 {
 				return nil, ErrFiatLPUnavailable
@@ -308,7 +305,7 @@ type FiatLPPosition struct {
 	Currencies  []FiatCurrencyInfo `json:"currencies"`
 	Positions   []FiatPositionLine `json:"positions"`
 	// Earned is the pool share accrued so far (USDT); EarningsAvailable what is
-	// not yet requested or paid; EarningsValue that priced in each currency.
+	// not yet requested or paid; EarningsValue that priced in each currency she holds.
 	Earned            string                    `json:"earned"`
 	EarningsAvailable string                    `json:"earningsAvailable"`
 	EarningsValue     map[string]string         `json:"earningsValue"`
@@ -394,9 +391,6 @@ func (s *FiatLPService) Position(ctx context.Context, userID uuid.UUID) (*FiatLP
 		MinDeposit: fmt.Sprint(fiatMinDepositUSD), MinEarnings: "0.5", Currencies: infos, Positions: []FiatPositionLine{},
 		Earned: s.units(gross), EarningsAvailable: s.units(avail), EarningsValue: map[string]string{},
 		Deposits: b.dep, Withdrawals: b.wd}
-	for _, ci := range infos {
-		out.EarningsValue[ci.Code] = FiatOf(avail, dec, rates[ci.Code])
-	}
 	codes := make([]string, 0, len(b.by))
 	for c := range b.by {
 		codes = append(codes, c)
@@ -414,6 +408,7 @@ func (s *FiatLPService) Position(ctx context.Context, userID uuid.UUID) (*FiatLP
 		if r := rates[c]; r != nil {
 			line.CurrentRate = signedMoney(r)
 			line.TodayUSDT = signedMoney(new(big.Rat).Quo(l.naira, r))
+			out.EarningsValue[c] = FiatOf(avail, dec, r) // priced in the currencies she holds
 		}
 		out.Positions = append(out.Positions, line)
 	}

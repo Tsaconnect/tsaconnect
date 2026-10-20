@@ -6,7 +6,7 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
 /* eslint-disable import/first */
 import {
   canClaimGasFree, claimRefusalMessage, formatLiquidityAmount, isZeroAmount, liquidityAmountError, liquidityMessage,
-  baseUnitsToAmount, currencySymbol, exceedsAmount, fiatActivity, formatCurrency, heldPositions, isValidAmount, multiplyDecimal,
+  baseUnitsToAmount, currencyPickerItems, currencySymbol, exceedsAmount, fiatActivity, formatCurrency, heldPositions, isValidAmount, multiplyDecimal,
   limitsKnown, oldWalletFundsMessage, oldWalletHasFunds, overBalanceError, withdrawalMessage,
 } from '@/utils/liquidityView';
 import type { LiquidityMe } from '@/services/liquidityApi';
@@ -227,5 +227,20 @@ describe('fiatActivity / heldPositions', () => {
     expect(heldPositions({ positions: [
       { currency: 'NGN', principal: '0.00', units: '0' }, { currency: 'KES', principal: '100', units: '1' },
     ] }).map((p) => p.currency)).toEqual(['KES']);
+  });
+});
+
+describe('currencyPickerItems', () => {
+  const currencies = [
+    { code: 'AED', name: 'UAE dirham', symbol: 'AED', rate: '3.67' },
+    { code: 'KES', name: 'Kenyan shilling', symbol: 'KSh', rate: '129.00' },
+    { code: 'NGN', name: 'Nigerian naira', symbol: '₦', rate: '1365.00' },
+    { code: 'ZAR', name: 'South African rand', symbol: 'R', rate: '18.00' },
+  ];
+  it('lists the common currencies first, then the rest by code, with names', () => {
+    const items = currencyPickerItems(['ZAR', 'AED', 'NGN', 'KES'], currencies);
+    expect(items.map((i) => i.id)).toEqual(['NGN', 'KES', 'ZAR', 'AED']);
+    expect(items[0]).toMatchObject({ label: 'NGN', sublabel: 'Nigerian naira', group: 'Popular' });
+    expect(items[3].group).toBe('All currencies');
   });
 });

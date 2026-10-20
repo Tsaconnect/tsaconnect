@@ -15,6 +15,9 @@ type officialFx struct {
 func (o officialFx) NgnPerUsd(context.Context) (float64, bool, error) {
 	return 0, false, errors.New("n/a")
 }
+func (o officialFx) OfficialCurrencies(context.Context) []OfficialCurrency {
+	return []OfficialCurrency{{Code: "EUR", Name: "Euro", Symbol: "€"}}
+}
 func (o officialFx) OfficialRatePerUsd(context.Context, string) (float64, bool, error) {
 	return o.rate, o.stale, o.err
 }
@@ -37,5 +40,15 @@ func TestOfficialFxReference(t *testing.T) {
 	}
 	if _, ok := (&ITService{}).OfficialFxReference(ctx, "EUR"); ok {
 		t.Fatal("no provider must be refused")
+	}
+}
+
+func TestOfficialCurrencies(t *testing.T) {
+	got := (&ITService{fx: officialFx{}}).OfficialCurrencies(context.Background())
+	if len(got) != 1 || got[0].Code != "EUR" || got[0].Symbol != "€" {
+		t.Fatalf("currencies = %+v", got)
+	}
+	if (&ITService{}).OfficialCurrencies(context.Background()) != nil {
+		t.Fatal("no provider should list nothing")
 	}
 }

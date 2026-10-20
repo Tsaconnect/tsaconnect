@@ -72,6 +72,18 @@ func (s *ITService) OfficialFxReference(ctx context.Context, currency string) (*
 	return r, ok
 }
 
+// OfficialCurrencies is every currency the rate feed knows (nil without a
+// provider that can list them).
+func (s *ITService) OfficialCurrencies(ctx context.Context) []OfficialCurrency {
+	if s == nil || s.fx == nil {
+		return nil
+	}
+	if o, ok := s.fx.(OfficialFxRater); ok {
+		return o.OfficialCurrencies(ctx)
+	}
+	return nil
+}
+
 // StableMidFiatPerUnit is the mid of Flutterwave's buy and sell rate for one
 // token — the company wallet's second rate source (§13 Q4). It needs only the
 // rate quoter, not the whole Flutterwave buy rail. The adapter asks for USDC
