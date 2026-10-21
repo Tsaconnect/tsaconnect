@@ -140,6 +140,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			shipping_street TEXT,
 			contract_order_id TEXT,
 			escrow_contract_address TEXT,
+			escrow_seller_wallet TEXT,
 			escrow_tx_hash TEXT,
 			approve_tx_hash TEXT,
 			release_tx_hash TEXT, release_reverted_at DATETIME,

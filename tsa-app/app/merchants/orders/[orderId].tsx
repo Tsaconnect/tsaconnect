@@ -108,6 +108,7 @@ const MerchantOrderDetail = () => {
   const [error, setError] = useState<string | null>(null);
   const [orderFetchFailed, setOrderFetchFailed] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  const [recordedOnChain, setRecordedOnChain] = useState(false);
 
   // Ship modal
   const [shipModalVisible, setShipModalVisible] = useState(false);
@@ -280,6 +281,26 @@ const MerchantOrderDetail = () => {
     }
   };
 
+  // Orders delivered before delivery went on-chain: sign it now, so a buyer's
+  // refund request becomes a dispute instead of an instant refund.
+  const handleRecordOnChain = async () => {
+    if (!order) return;
+    setActionLoading(true);
+    let result;
+    try {
+      result = await markOrderDelivered(order.id, order.deliveryProofUrl || '', await signDelivery(order));
+    } catch (err: any) {
+      result = { success: false, message: err.message };
+    }
+    setActionLoading(false);
+    if (result.success) {
+      setRecordedOnChain(true);
+      Alert.alert('Recorded', 'Delivery is now recorded on-chain.');
+    } else {
+      Alert.alert('Error', result.message || 'Failed to record delivery');
+    }
+  };
+
   const handleRefundDecision = async () => {
     if (!order || !refundModalVisible) return;
     setActionLoading(true);
@@ -435,6 +456,8 @@ const MerchantOrderDetail = () => {
   const canShip = !isDisputed && !isService && order.status === 'escrowed';
   const canDeliver =
     !isDisputed && (isService ? order.status === 'escrowed' : order.status === 'shipped');
+  const canRecordOnChain =
+    !isDisputed && !recordedOnChain && !isSpendableOrder(order) && order.status === 'delivered';
   const canResolveRefund = !isDisputed && order.status === 'refund_requested';
   const canHandleCancel = !isDisputed && order.status === 'cancel_requested';
   const canRaiseDispute = !isDisputed && ['escrowed', 'shipped', 'delivered', 'cancel_requested', 'refund_requested'].includes(order.status);
@@ -830,6 +853,15 @@ const MerchantOrderDetail = () => {
             ) : (
               <Button title="Mark as Delivered" leftIcon="checkCircle" onPress={() => setDeliverModalVisible(true)} />
             )
+          )}
+          {canRecordOnChain && (
+            <Button
+              title="Record delivery on-chain"
+              leftIcon="checkCircle"
+              loading={actionLoading}
+              disabled={actionLoading}
+              onPress={handleRecordOnChain}
+            />
           )}
           {canResolveRefund && !order.merchantApprovedRefund && (
             <View style={{ flexDirection: 'row', gap: spacing.sm }}>

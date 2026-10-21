@@ -61,6 +61,19 @@ type EscrowService struct {
 	rates sync.Map
 	// caller serves the read-only fee lookups; nil without an RPC client.
 	caller contractCaller
+	// receipts proves a submitted transaction; nil without an RPC client.
+	receipts escrowReceiptReader
+}
+
+// escrowReceiptReader is the receipt lookup VerifyOrderEvent needs.
+type escrowReceiptReader interface {
+	GetTransactionReceipt(txHash string) (*types.Receipt, error)
+}
+
+// NewEscrowServiceWithBackend builds an EscrowService over the given chain
+// readers instead of an RPC client, so callers can be tested with a fake chain.
+func NewEscrowServiceWithBackend(cfg *config.Config, caller contractCaller, receipts escrowReceiptReader) *EscrowService {
+	return &EscrowService{escrowAddress: cfg.ProductEscrowAddress, cfg: cfg, caller: caller, receipts: receipts}
 }
 
 // contractCaller is the eth_call surface the fee lookups need.
@@ -119,6 +132,7 @@ func NewEscrowService(client *blockchain.EVMClient, cfg *config.Config) *EscrowS
 	}
 	if client != nil {
 		es.caller = client.Client
+		es.receipts = client
 	}
 	return es
 }
@@ -294,6 +308,10 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string, expectedOrderID [32]b
 // chain, which a caller may retry.
 var ErrOrderEventNotFound = errors.New("the transaction does not do this to the order")
 
+// ErrReceiptPending means the node has no receipt for the transaction yet:
+// it is still pending, or the node is a block behind. Retry, do not refuse.
+var ErrReceiptPending = errors.New("the transaction has no receipt yet")
+
 // VerifyOrderEvent checks that txHash succeeded and emitted event (an escrow
 // event whose first indexed argument is the order id) on escrowAddr FOR orderID,
 // and returns that log. A mined transaction proves nothing about an order by
@@ -301,11 +319,16 @@ var ErrOrderEventNotFound = errors.New("the transaction does not do this to the 
 // or resolve it. escrowAddr is the order's own escrow, which may be an older
 // deployment than the configured one.
 func (s *EscrowService) VerifyOrderEvent(txHash, escrowAddr, event string, orderID [32]byte) (*types.Log, error) {
-	if s.client == nil {
+	if s.receipts == nil {
 		return nil, fmt.Errorf("blockchain client not available")
 	}
-	receipt, err := s.client.GetTransactionReceipt(txHash)
+	receipt, err := s.receipts.GetTransactionReceipt(txHash)
 	if err != nil {
+		// A node answers "not found" for a transaction it has not seen mined yet;
+		// the caller retries rather than calling it a failure.
+		if errors.Is(err, ethereum.NotFound) {
+			return nil, ErrReceiptPending
+		}
 		return nil, fmt.Errorf("failed to get receipt: %w", err)
 	}
 	if receipt.Status != 1 {
@@ -365,34 +388,9 @@ type OnChainOrder struct {
 	CreatedAt                                  time.Time
 	// Resolved: the escrow has paid it out (refund or release); it holds nothing.
 	Resolved bool
-}
-
-// SellerDelivered reads whether the seller's markDelivered is on-chain for
-// orderId at escrowAddr (the order's own escrow). Only a successful read of an
-// existing order answers; an RPC failure is an error, never "not delivered".
-func (s *EscrowService) SellerDelivered(ctx context.Context, escrowAddr string, orderId [32]byte) (bool, error) {
-	if s.caller == nil {
-		return false, fmt.Errorf("blockchain client not available")
-	}
-	data, err := parsedEscrowABI.Pack("orders", orderId)
-	if err != nil {
-		return false, fmt.Errorf("pack orders: %w", err)
-	}
-	escrow := common.HexToAddress(escrowAddr)
-	out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &escrow, Data: data}, nil)
-	if err != nil {
-		return false, fmt.Errorf("orders call: %w", err)
-	}
-	vals, err := parsedEscrowABI.Unpack("orders", out)
-	if err != nil || len(vals) < 12 {
-		return false, fmt.Errorf("decode orders: %v (%d values)", err, len(vals))
-	}
-	buyer, ok1 := vals[0].(common.Address)
-	delivered, ok2 := vals[8].(bool)
-	if !ok1 || !ok2 || buyer == (common.Address{}) {
-		return false, fmt.Errorf("decode orders: no escrowed order")
-	}
-	return delivered, nil
+	// SellerDelivered: the seller's markDelivered is on-chain, so a buyer's
+	// refund request becomes a dispute instead of an instant refund.
+	SellerDelivered bool
 }
 
 // EscrowedOrder reads the configured escrow's record of orderId, or nil when
@@ -400,6 +398,12 @@ func (s *EscrowService) SellerDelivered(ctx context.Context, escrowAddr string, 
 // was ever escrowed). Only a successful read is an answer — an RPC failure is
 // an error, never "not escrowed", because callers release stock on nil.
 func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*OnChainOrder, error) {
+	return s.ReadOrder(ctx, s.escrowAddress, orderId)
+}
+
+// ReadOrder is EscrowedOrder against escrowAddr — an order's own escrow, which
+// may be an older deployment than the configured one.
+func (s *EscrowService) ReadOrder(ctx context.Context, escrowAddr string, orderId [32]byte) (*OnChainOrder, error) {
 	if s.caller == nil {
 		return nil, fmt.Errorf("blockchain client not available")
 	}
@@ -407,7 +411,7 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 	if err != nil {
 		return nil, fmt.Errorf("pack orders: %w", err)
 	}
-	escrow := common.HexToAddress(s.escrowAddress)
+	escrow := common.HexToAddress(escrowAddr)
 	out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &escrow, Data: data}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("orders call: %w", err)
@@ -423,8 +427,9 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 	shipping, ok5 := vals[4].(*big.Int)
 	fee, ok6 := vals[5].(*big.Int)
 	created, ok7 := vals[7].(*big.Int)
-	resolved, ok8 := vals[11].(bool)
-	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8) {
+	delivered, ok8 := vals[8].(bool)
+	resolved, ok9 := vals[11].(bool)
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9) {
 		return nil, fmt.Errorf("decode orders: unexpected value types")
 	}
 	if buyer == (common.Address{}) {
@@ -434,7 +439,7 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 		Buyer: buyer, Seller: seller, Token: token,
 		ProductAmount: product, ShippingAmount: shipping, PlatformFee: fee,
 		CreatedAt: time.Unix(created.Int64(), 0),
-		Resolved:  resolved,
+		Resolved:  resolved, SellerDelivered: delivered,
 	}, nil
 }
 

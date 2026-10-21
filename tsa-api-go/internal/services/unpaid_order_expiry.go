@@ -233,7 +233,7 @@ func (s *UnpaidOrderExpiryService) ExpireUnpaidOrders(ctx context.Context) (int6
 		var page []staleOrder
 		if err := s.db.WithContext(ctx).
 			Table("orders").
-			Select("orders.*, sellers.wallet_address AS seller_wallet, buyers.wallet_address AS buyer_wallet").
+			Select("orders.*, COALESCE(NULLIF(orders.escrow_seller_wallet, ''), sellers.wallet_address) AS seller_wallet, buyers.wallet_address AS buyer_wallet").
 			Joins("LEFT JOIN users AS sellers ON sellers.id = orders.seller_id").
 			Joins("LEFT JOIN users AS buyers ON buyers.id = orders.buyer_id").
 			Where("orders.status = ? AND orders.kind <> ? AND orders.created_at >= ? AND orders.updated_at < ? AND orders.id > ?",
