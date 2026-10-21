@@ -1017,7 +1017,7 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 		"cart":            cart,
 		"itemsBySeller":   itemsBySeller,
 		"summary":         summary,
-		"feeConfig":       models.GetFeeConfig(cartFeeLookups()),
+		"feeConfig":       h.feeConfigWithRewards(),
 		"appliedCoupon":   cart.GetAppliedCoupon(),
 		"shippingAddress": cart.ShippingAddress,
 		"billingAddress":  cart.BillingAddress,

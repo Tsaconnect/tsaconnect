@@ -89,12 +89,13 @@ func (s *FeeDistributionService) SettleGlobalPoolEpoch(ctx context.Context) (Glo
 		// (2) Delta accrued since the last fold.
 		deltaTP := pool.AccruedTP - pool.IndexedTP
 
-		// (3) Denominator: ALL registered users (deleted_at IS NULL). No
-		// active/inactive distinction (PM-confirmed).
+		// (3) Denominator: every user who is not deleted and whose account is
+		// active (PM 2026-10-21: not deleted / frozen / suspended).
 		var userCount int64
 		if err := tx.Model(&models.User{}).
-			Where("deleted_at IS NULL").Count(&userCount).Error; err != nil {
-			return fmt.Errorf("count registered users: %w", err)
+			Where("deleted_at IS NULL AND account_status = ?", models.AccountStatusActive).
+			Count(&userCount).Error; err != nil {
+			return fmt.Errorf("count eligible users: %w", err)
 		}
 
 		// (4) No-op guards. delta can be 0 (idempotent re-run) or slightly
@@ -161,6 +162,15 @@ func (s *FeeDistributionService) SettleGlobalPoolEpoch(ctx context.Context) (Glo
 				"updated_at":            time.Now(),
 			}).Error; err != nil {
 			return fmt.Errorf("advance global index: %w", err)
+		}
+
+		// Users left out of the denominator must not claim this epoch through the
+		// index, so push their checkpoint past it. They keep whatever earlier
+		// epochs they were owed; only this one is skipped.
+		if err := tx.Model(&models.User{}).
+			Where("deleted_at IS NULL AND account_status <> ?", models.AccountStatusActive).
+			Update("last_settled_global_index", gorm.Expr("COALESCE(last_settled_global_index, 0) + ?", perUserScaled)).Error; err != nil {
+			return fmt.Errorf("skip ineligible users for epoch: %w", err)
 		}
 
 		// (6) Audit row for this epoch.
@@ -457,3 +467,75 @@ func currentGlobalIndex(tx *gorm.DB) (int64, error) {
 // TPSourceGlobalPool is the TPEarning.SourceType recorded for a credited
 // global-pool share (SP4 lazy settlement).
 const TPSourceGlobalPool = "global_pool"
+
+// PayoutLocation is the zone payouts are scheduled in. Fixed-offset WAT: Lagos
+// has no daylight saving, and this avoids depending on tzdata being installed.
+var PayoutLocation = time.FixedZone("WAT", 60*60)
+
+// LastPayoutInstant returns the most recent payout moment (payoutDay of a month,
+// 00:00 WAT) at or before now.
+func LastPayoutInstant(now time.Time, payoutDay int) time.Time {
+	n := now.In(PayoutLocation)
+	t := time.Date(n.Year(), n.Month(), payoutDay, 0, 0, 0, 0, PayoutLocation)
+	if t.After(n) {
+		t = time.Date(n.Year(), n.Month()-1, payoutDay, 0, 0, 0, 0, PayoutLocation)
+	}
+	return t
+}
+
+// SettleGlobalPoolIfDue is the monthly payout tick (PM 2026-10-21: the pool is
+// paid on the 24th). It folds the pool into the per-user index only when the
+// latest payout moment has not been paid yet, and is safe to call every hour:
+// a restart or an outage over the 24th is made up by the next tick.
+//
+// The first call after rollout only stamps the current window (no fold), so the
+// pool that exists at rollout carries into the next payout instead of paying out
+// on deploy day.
+func (s *FeeDistributionService) SettleGlobalPoolIfDue(ctx context.Context, now time.Time) (GlobalSettlementResult, error) {
+	if s == nil || s.db == nil {
+		return GlobalSettlementResult{}, fmt.Errorf("fee distribution service not initialized")
+	}
+	due := LastPayoutInstant(now, s.TPProgram().PayoutDay)
+
+	var pool models.GlobalTPPool
+	err := s.db.WithContext(ctx).First(&pool, "singleton = ?", models.GlobalTPPoolSingletonID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return GlobalSettlementResult{}, nil // nothing has accrued yet
+	}
+	if err != nil {
+		return GlobalSettlementResult{}, fmt.Errorf("load global pool: %w", err)
+	}
+	if pool.LastPayoutAt == nil {
+		return GlobalSettlementResult{}, s.stampPayout(ctx, due)
+	}
+	if !pool.LastPayoutAt.Before(due) {
+		return GlobalSettlementResult{}, nil // this month's payout already ran
+	}
+	// One payout per calendar month, whatever the payout day is changed to. Without
+	// this, moving the day later after the 24th has paid would pay again on the new
+	// day. (Moving it earlier in a month not yet paid does pay on the next tick,
+	// which is what the new schedule says.)
+	if last, d := pool.LastPayoutAt.In(PayoutLocation), due.In(PayoutLocation); last.Year() == d.Year() && last.Month() == d.Month() {
+		return GlobalSettlementResult{}, nil
+	}
+
+	res, err := s.SettleGlobalPoolEpoch(ctx)
+	if err != nil {
+		return GlobalSettlementResult{}, err
+	}
+	// A fold that no-oped (empty pool, too small to split) still counts as this
+	// month's payout: the next one is the next payout day, not the next tick.
+	if err := s.stampPayout(ctx, due); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+func (s *FeeDistributionService) stampPayout(ctx context.Context, at time.Time) error {
+	if err := s.db.WithContext(ctx).Model(&models.GlobalTPPool{}).
+		Where("singleton = ?", models.GlobalTPPoolSingletonID).
+		Update("last_payout_at", at).Error; err != nil {
+		return fmt.Errorf("stamp payout window: %w", err)
+	}
+	return nil
+}

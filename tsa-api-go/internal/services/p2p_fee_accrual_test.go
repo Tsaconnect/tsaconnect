@@ -103,6 +103,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 			accrued_tp REAL DEFAULT 0,
 			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
 			indexed_tp REAL NOT NULL DEFAULT 0,
+			last_payout_at DATETIME,
 			updated_at DATETIME
 		)`,
 		`CREATE TABLE global_tp_accruals (

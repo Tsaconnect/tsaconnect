@@ -57,6 +57,11 @@ type FeeDistributionService struct {
 	// is what every existing test and any un-wired call path gets.
 	splitConfigs *FeeSplitConfigService
 
+	// tpProgram supplies the admin-edited TP model (user/upline/pool percentages
+	// of the system's share, zero-fee reward, payout day). nil = compiled-in
+	// defaults, which is what tests and un-wired paths get.
+	tpProgram *TPProgramConfigService
+
 	// tpPerUSD is the minting-rate constant captured at construction. Default
 	// 1.0 (1 TP = $1 of pool value); tunable via config so level pacing can be
 	// retuned without code changes.
@@ -108,6 +113,18 @@ func NewFeeDistributionService(db *gorm.DB, graph *ReferralGraphService, tpPerUS
 func (s *FeeDistributionService) WithSplitConfigs(cfg *FeeSplitConfigService) *FeeDistributionService {
 	s.splitConfigs = cfg
 	return s
+}
+
+// WithTPProgram attaches the admin-editable TP program (optional, like
+// WithSplitConfigs).
+func (s *FeeDistributionService) WithTPProgram(cfg *TPProgramConfigService) *FeeDistributionService {
+	s.tpProgram = cfg
+	return s
+}
+
+// TPProgram returns the TP program in effect (defaults when none is attached).
+func (s *FeeDistributionService) TPProgram() models.TPProgramConfig {
+	return s.tpProgram.Current()
 }
 
 // TPPerUSD exposes the minting rate in effect (for tests / diagnostics).
@@ -281,18 +298,30 @@ func (sp FeeSplit) Total() float64 {
 // using the COMPLETE per-feature split table (splitFor). An unknown feature
 // falls back to the product_merchant split (and logs).
 func ComputeSplit(feature string, feeUSD float64) FeeSplit {
-	return computeSplitWith(splitFor(feature), feeUSD)
+	return computeSplitWith(splitFor(feature), feeUSD, models.DefaultTPProgramConfig())
 }
 
-// computeSplitWith is the shared carve, given an already-resolved share table.
-func computeSplitWith(fs FeeShares, feeUSD float64) FeeSplit {
-	return FeeSplit{
+// computeSplitWith is the shared carve, given an already-resolved share table
+// and the TP program.
+//
+// Cashback and provider slices are carved exactly as the table says. TP is then
+// taken from what the platform keeps (the table's System + TP slices):
+// TPPoolUSD = kept × program.TotalPct(), and the rest of kept stays system. A
+// feature whose table carries no TP (gas) mints none.
+func computeSplitWith(fs FeeShares, feeUSD float64, prog models.TPProgramConfig) FeeSplit {
+	sp := FeeSplit{
 		SystemUSD:           feeUSD * fs.System,
 		BuyerCashbackUSD:    feeUSD * fs.Buyer,
 		UplineCashbackUSD:   feeUSD * fs.Upline,
 		ProviderCashbackUSD: feeUSD * fs.Provider,
-		TPPoolUSD:           feeUSD * fs.TP,
 	}
+	if fs.TP <= 0 {
+		return sp
+	}
+	kept := feeUSD * (fs.System + fs.TP)
+	sp.TPPoolUSD = kept * prog.TotalPct()
+	sp.SystemUSD = kept - sp.TPPoolUSD
+	return sp
 }
 
 // errAlreadyDistributed is the sentinel used inside the transaction to bail out
@@ -324,8 +353,7 @@ func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) 
 	if s == nil || s.db == nil {
 		return fmt.Errorf("fee distribution service not initialized")
 	}
-	if ev.FeeUSD <= 0 {
-		// Nothing to distribute; not an error (e.g. MCGP-exempt fee path).
+	if ev.FeeUSD < 0 {
 		return nil
 	}
 	if ev.SourceID == uuid.Nil {
@@ -391,8 +419,8 @@ func (s *FeeDistributionService) SettleInTx(tx *gorm.DB, ev FeeEvent, byGen map[
 	if s == nil {
 		return fmt.Errorf("fee distribution service not initialized")
 	}
-	if ev.FeeUSD <= 0 {
-		return nil // nothing to distribute (e.g. MCGP-exempt)
+	if ev.FeeUSD < 0 {
+		return nil
 	}
 	if ev.SourceID == uuid.Nil {
 		return fmt.Errorf("fee event missing source id (type=%q)", ev.SourceType)
@@ -441,7 +469,8 @@ func (s *FeeDistributionService) distributeWithinTx(tx *gorm.DB, ev FeeEvent, by
 	// Resolve through the admin overrides (falls back to the compiled-in table
 	// when none is configured or the row is invalid), so a rate change takes
 	// effect without a deploy.
-	split := computeSplitWith(s.splitForFeature(ev.Feature), ev.FeeUSD)
+	prog := s.tpProgram.Current()
+	split := computeSplitWith(s.splitForFeature(ev.Feature), ev.FeeUSD, prog)
 
 	// (1) Idempotency guard. ON CONFLICT DO NOTHING then check RowsAffected
 	// so a duplicate is a clean no-op on both PostgreSQL and SQLite.
@@ -473,39 +502,50 @@ func (s *FeeDistributionService) distributeWithinTx(tx *gorm.DB, ev FeeEvent, by
 		return errAlreadyDistributed
 	}
 
-	// (2) Distribute the 30% TP pool across gen0..gen10.
-	var globalPoolUSD float64
-	for gen := 0; gen <= MaxTPGenerations; gen++ {
-		pct := models.GenerationPercentages[gen]
-		shareUSD := split.TPPoolUSD * pct
-		if shareUSD <= 0 {
-			continue
-		}
-
-		if gen == 0 {
-			// gen0 is always the transacting user.
-			if err := s.creditTP(tx, ev.UserID, ev, gen, pct, shareUSD); err != nil {
+	// A transaction that carried no fee (e.g. MCGP-exempt) earns the user a
+	// small fixed TP reward and nothing else — no upline, no pool, no cashback.
+	if ev.FeeUSD == 0 {
+		if reward := prog.ZeroFeeTP; reward > 0 && ev.UserID != uuid.Nil && ev.Feature != models.FeatureGas {
+			if err := s.creditTPAmount(tx, ev.UserID, ev, 0, 0, reward); err != nil {
 				return err
 			}
 			recipients[ev.UserID] = struct{}{}
-			continue
 		}
+		return nil
+	}
 
-		anc, ok := byGen[gen]
-		if ok && anc.Active {
-			if err := s.creditTP(tx, anc.UserID, ev, gen, pct, shareUSD); err != nil {
+	// (2) TP (PM 2026-10-21): the user and their direct upline each get their
+	// configured share of the system's share; the pool share is accrued and paid
+	// to every active user on the monthly payout. A missing or inactive upline
+	// routes that share to the pool too.
+	var globalPoolUSD float64
+	if kept := split.SystemUSD + split.TPPoolUSD; split.TPPoolUSD > 0 {
+		userUSD := kept * prog.UserPct
+		if userUSD > 0 {
+			if err := s.creditTP(tx, ev.UserID, ev, 0, prog.UserPct, userUSD); err != nil {
 				return err
 			}
-			recipients[anc.UserID] = struct{}{}
-			continue
+			recipients[ev.UserID] = struct{}{}
 		}
-
-		// No live ancestor at this generation: route the share to the
-		// global pool and CONTINUE (do not stop the climb).
-		if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonTPGeneration, gen, shareUSD); err != nil {
-			return err
+		if uplineUSD := kept * prog.UplinePct; uplineUSD > 0 {
+			if anc, ok := byGen[1]; ok && anc.Active {
+				if err := s.creditTP(tx, anc.UserID, ev, 1, prog.UplinePct, uplineUSD); err != nil {
+					return err
+				}
+				recipients[anc.UserID] = struct{}{}
+			} else {
+				if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonTPGeneration, 1, uplineUSD); err != nil {
+					return err
+				}
+				globalPoolUSD += uplineUSD
+			}
 		}
-		globalPoolUSD += shareUSD
+		if poolUSD := kept * prog.PoolPct; poolUSD > 0 {
+			if err := s.accrueGlobal(tx, ev, models.GlobalAccrualReasonTPPool, -1, poolUSD); err != nil {
+				return err
+			}
+			globalPoolUSD += poolUSD
+		}
 	}
 
 	// (3a) Buyer cashback (split.Buyer · F) → the transacting user (USD).
@@ -576,7 +616,12 @@ func (s *FeeDistributionService) markRecipientsDirty(ctx context.Context, recipi
 // creditTP writes one TPEarning row and atomically increments the recipient's
 // tp_balance. TP = shareUSD · tpPerUSD.
 func (s *FeeDistributionService) creditTP(tx *gorm.DB, userID uuid.UUID, ev FeeEvent, gen int, pct, shareUSD float64) error {
-	tpEarned := shareUSD * s.tpPerUSD
+	return s.creditTPAmount(tx, userID, ev, gen, pct, shareUSD*s.tpPerUSD)
+}
+
+// creditTPAmount is creditTP for a TP amount that is not derived from a fee
+// share (the zero-fee reward).
+func (s *FeeDistributionService) creditTPAmount(tx *gorm.DB, userID uuid.UUID, ev FeeEvent, gen int, pct, tpEarned float64) error {
 	earning := models.TPEarning{
 		ID:           uuid.New(),
 		UserID:       userID,
@@ -754,4 +799,31 @@ func (s *FeeDistributionService) EnqueueFeeSettled(ev FeeEvent) {
 			"fee NOT distributed, manual replay required: feature=%s token=%s feeUSD=%.6f user=%s type=%s id=%s: %v",
 			feeEnqueueMaxAttempts, ev.Feature, ev.Token, ev.FeeUSD, ev.UserID, ev.SourceType, ev.SourceID, lastErr)
 	}()
+}
+
+// RewardRates is what a buyer earns on a feature, per $1 of FEE charged. It is
+// the live (admin-edited) answer, so the marketplace shows what will actually be
+// paid instead of a copy of the rates.
+type RewardRates struct {
+	BuyerCashback  float64 // USD of cashback per $1 of fee
+	UplineCashback float64 // USD of upline cashback per $1 of fee
+	BuyerTP        float64 // TP the transacting user earns per $1 of fee
+	USDPerTP       float64 // dollar value of one TP
+}
+
+// RewardRatesFor resolves the rates a fee on feature would pay today, through
+// the same split overrides and TP program the settlement uses. Nil-safe: a nil
+// service reports zero rewards rather than inventing numbers.
+func (s *FeeDistributionService) RewardRatesFor(feature string) RewardRates {
+	if s == nil {
+		return RewardRates{}
+	}
+	sp := computeSplitWith(s.splitForFeature(feature), 1, s.tpProgram.Current())
+	kept := sp.SystemUSD + sp.TPPoolUSD
+	return RewardRates{
+		BuyerCashback:  sp.BuyerCashbackUSD,
+		UplineCashback: sp.UplineCashbackUSD,
+		BuyerTP:        kept * s.tpProgram.Current().UserPct * s.tpPerUSD,
+		USDPerTP:       1 / s.tpPerUSD,
+	}
 }

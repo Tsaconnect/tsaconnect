@@ -11,12 +11,14 @@ import (
 // globalPoolSettler is the subset of FeeDistributionService this job needs.
 // An interface keeps the job unit-testable without the full service.
 type globalPoolSettler interface {
-	SettleGlobalPoolEpoch(ctx context.Context) (services.GlobalSettlementResult, error)
+	SettleGlobalPoolIfDue(ctx context.Context, now time.Time) (services.GlobalSettlementResult, error)
 	StrandedGlobalTP(ctx context.Context) (float64, error)
 }
 
-// GlobalPoolSettler runs the SP4 global-pool settlement epoch on a periodic
-// tick (default daily): it folds the global pool's newly-accrued TP into the
+// GlobalPoolSettler is the monthly global-pool payout. It ticks often (default
+// hourly) but only folds when the payout day (24th, 00:00 WAT) has passed and
+// that month has not been paid, so an outage over the 24th is made up on the
+// next tick. A fold folds the global pool's newly-accrued TP into the
 // per-user cumulative index — ONE scalar write per epoch, independent of the
 // user count.
 //
@@ -30,11 +32,11 @@ type GlobalPoolSettler struct {
 }
 
 // NewGlobalPoolSettler builds the worker. A non-positive interval falls back to
-// 24h so the scheduler (which panics on a non-positive interval at Register)
+// 1h so the scheduler (which panics on a non-positive interval at Register)
 // always gets a sane period.
 func NewGlobalPoolSettler(svc globalPoolSettler, interval time.Duration) *GlobalPoolSettler {
 	if interval <= 0 {
-		interval = 24 * time.Hour
+		interval = time.Hour
 	}
 	return &GlobalPoolSettler{svc: svc, interval: interval}
 }
@@ -43,7 +45,7 @@ func (g *GlobalPoolSettler) Name() string            { return "global-pool-settl
 func (g *GlobalPoolSettler) Interval() time.Duration { return g.interval }
 
 func (g *GlobalPoolSettler) Run(ctx context.Context) error {
-	res, err := g.svc.SettleGlobalPoolEpoch(ctx)
+	res, err := g.svc.SettleGlobalPoolIfDue(ctx, time.Now())
 	if err != nil {
 		return err
 	}

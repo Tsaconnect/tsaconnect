@@ -94,6 +94,10 @@ export interface FeeConfig {
     uplineFeePercent: number;
     gasFeeUSD: number;
     buyerPlatformFee: number;
+    /** TP the buyer earns per $1 spent (live from the admin TP program). */
+    buyerTpPerUsd?: number;
+    /** Dollar value of one TP. */
+    usdPerTp?: number;
 }
 
 export interface ShippingAddress {

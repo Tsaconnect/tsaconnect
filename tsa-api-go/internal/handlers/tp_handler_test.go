@@ -146,6 +146,7 @@ func addFeeV2Tables(t *testing.T, db *gorm.DB) {
 			accrued_tp REAL NOT NULL DEFAULT 0,
 			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
 			indexed_tp REAL NOT NULL DEFAULT 0,
+			last_payout_at DATETIME,
 			updated_at DATETIME NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS global_tp_accruals (

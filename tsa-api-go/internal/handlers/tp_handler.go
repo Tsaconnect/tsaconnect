@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -57,9 +58,32 @@ func (h *Handlers) GetTPBalance(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": gin.H{
-			"tpBalance": user.TPBalance,
+			"tpBalance": h.tpBalanceWithPoolShare(c, user),
 		},
 	})
+}
+
+// tpBalanceWithPoolShare is the balance after folding in the user's share of any
+// monthly pool payout. The payout only advances a shared index; a user's share
+// reaches tp_balance when it is settled, which otherwise happens only when they
+// transact or open the rewards screen. Settling here makes the dashboard show
+// the 24th's payout to a user who has been idle, and marks them for the level
+// check so a payout that crosses a level is rewarded.
+func (h *Handlers) tpBalanceWithPoolShare(c *gin.Context, user *models.User) float64 {
+	if h.FeeService == nil {
+		return user.TPBalance
+	}
+	ctx := c.Request.Context()
+	credited, err := h.FeeService.SettleUserGlobalShare(ctx, user.ID)
+	if err != nil {
+		log.Printf("[tp-balance] settle pool share for %s: %v", user.ID, err)
+		return user.TPBalance
+	}
+	if credited <= 0 {
+		return user.TPBalance
+	}
+	h.FeeService.MarkRecipientsDirty(ctx, map[uuid.UUID]struct{}{user.ID: {}})
+	return user.TPBalance + credited
 }
 
 // GetTPEarnings handles GET /api/users/tp-earnings?page=1&limit=20 (auth required).
@@ -277,4 +301,3 @@ func (h *Handlers) GetCashbackSummary(c *gin.Context) {
 		},
 	})
 }
-

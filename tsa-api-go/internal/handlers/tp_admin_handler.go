@@ -26,6 +26,7 @@ type TPAdminHandler struct {
 	DB           *gorm.DB
 	SplitConfigs *services.FeeSplitConfigService
 	Fees         *services.FeeDistributionService
+	Program      *services.TPProgramConfigService
 }
 
 func NewTPAdminHandler(db *gorm.DB, splits *services.FeeSplitConfigService, fees *services.FeeDistributionService) *TPAdminHandler {
@@ -72,6 +73,10 @@ func (h *TPAdminHandler) ListFeeSplits(c *gin.Context) {
 		}
 	}
 
+	// TP is carved from what the platform keeps (System + TP slices), at the
+	// program's total percentage — not from the TP slice on its own.
+	programPct := h.Program.Current().TotalPct()
+
 	rows := make([]gin.H, 0, len(effective))
 	for feature, shares := range effective {
 		def := defaults[feature]
@@ -89,11 +94,23 @@ func (h *TPAdminHandler) ListFeeSplits(c *gin.Context) {
 				"uplineShare": def.Upline, "providerShare": def.Provider, "tpShare": def.TP,
 			},
 			"feeBps": feeBps,
-			// Percent of the TRANSACTION that becomes TP: (bps/10000) × tpShare.
-			"effectiveTpRatePct": (float64(feeBps) / 10000.0) * shares.TP * 100,
+			// Percent of the TRANSACTION that becomes TP: the fee rate × what the
+			// platform keeps × the program's TP percentage. A feature whose table
+			// carries no TP (gas) mints none.
+			"effectiveTpRatePct": effectiveTPRatePct(feeBps, shares, programPct),
+			// Percent of the TRANSACTION paid back as cashback (buyer + upline +
+			// provider shares of the fee).
+			"cashbackRatePct": (float64(feeBps) / 10000.0) * (shares.Buyer + shares.Upline + shares.Provider) * 100,
 		})
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Fee splits", gin.H{"splits": rows})
+}
+
+func effectiveTPRatePct(feeBps int, shares services.FeeShares, programPct float64) float64 {
+	if shares.TP <= 0 {
+		return 0
+	}
+	return (float64(feeBps) / 10000.0) * (shares.System + shares.TP) * programPct * 100
 }
 
 // UpsertFeeSplit — PUT /api/admin/tp/splits/:feature.
@@ -229,6 +246,11 @@ func (h *TPAdminHandler) GetFeeSummary(c *gin.Context) {
 		SystemUSD   float64 `json:"systemUsd"`
 		TPPoolUSD   float64 `json:"tpPoolUsd"`
 		CashbackUSD float64 `json:"cashbackUsd"`
+		// LastAt is when this section last settled a fee — the quickest check
+		// that a section is live (and paying cashback) on the marketplace.
+		// Scanned as text: MAX() comes back untyped on some drivers, and the
+		// console parses it. Empty only for a section with no rows.
+		LastAt string `json:"lastAt"`
 	}
 	var rows []summaryRow
 	if err := q.
@@ -238,7 +260,8 @@ func (h *TPAdminHandler) GetFeeSummary(c *gin.Context) {
 			COALESCE(SUM(fee_usd), 0) AS fee_usd,
 			COALESCE(SUM(system_usd), 0) AS system_usd,
 			COALESCE(SUM(tp_pool_usd), 0) AS tp_pool_usd,
-			COALESCE(SUM(buyer_cashback_usd + upline_cashback_usd + provider_cashback_usd), 0) AS cashback_usd`).
+			COALESCE(SUM(buyer_cashback_usd + upline_cashback_usd + provider_cashback_usd), 0) AS cashback_usd,
+			MAX(created_at) AS last_at`).
 		Group("feature, source_type").
 		Order("system_usd DESC").
 		Scan(&rows).Error; err != nil {
@@ -338,6 +361,78 @@ func (h *TPAdminHandler) GetGlobalPool(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Global TP pool", pool)
+}
+
+// tpProgramView is the admin payload: the program in effect plus the pool state
+// and next payout, so the console shows what will happen on the 24th.
+type tpProgramView struct {
+	models.TPProgramConfig
+	NextPayoutAt time.Time `json:"nextPayoutAt"`
+	PoolTP       float64   `json:"poolTp"`
+	PoolUSD      float64   `json:"poolUsd"`
+}
+
+func (h *TPAdminHandler) programView(c *gin.Context) tpProgramView {
+	cfg := h.Program.Current()
+	next := services.LastPayoutInstant(time.Now(), cfg.PayoutDay).AddDate(0, 1, 0)
+	view := tpProgramView{TPProgramConfig: cfg, NextPayoutAt: next}
+	if pool, err := h.Fees.GlobalPool(c.Request.Context()); err == nil {
+		view.PoolTP = pool.AccruedTP - pool.IndexedTP
+		view.PoolUSD = view.PoolTP / h.Fees.TPPerUSD()
+	}
+	return view
+}
+
+// GetTPProgram — GET /api/admin/tp/program.
+func (h *TPAdminHandler) GetTPProgram(c *gin.Context) {
+	if h.requireAdmin(c) == nil {
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "TP program", h.programView(c))
+}
+
+// UpdateTPProgram — PUT /api/admin/tp/program. Percentages are fractions of the
+// system's share (0.05 = 5%).
+func (h *TPAdminHandler) UpdateTPProgram(c *gin.Context) {
+	admin := h.requireAdmin(c)
+	if admin == nil {
+		return
+	}
+	// Pointers: a field the caller leaves out keeps its current value rather than
+	// silently saving 0 (which would switch the pool or the zero-fee reward off).
+	var in struct {
+		UserPct   *float64 `json:"userPct"`
+		UplinePct *float64 `json:"uplinePct"`
+		PoolPct   *float64 `json:"poolPct"`
+		ZeroFeeTP *float64 `json:"zeroFeeTp"`
+		PayoutDay *int     `json:"payoutDay"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	next := h.Program.Current()
+	if in.UserPct != nil {
+		next.UserPct = *in.UserPct
+	}
+	if in.UplinePct != nil {
+		next.UplinePct = *in.UplinePct
+	}
+	if in.PoolPct != nil {
+		next.PoolPct = *in.PoolPct
+	}
+	if in.ZeroFeeTP != nil {
+		next.ZeroFeeTP = *in.ZeroFeeTP
+	}
+	if in.PayoutDay != nil {
+		next.PayoutDay = *in.PayoutDay
+	}
+	next.UpdatedBy = &admin.ID
+	if _, err := h.Program.Save(next); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "TP program updated", h.programView(c))
 }
 
 // GetTPLeaderboard — GET /api/tp/leaderboard?limit= (auth).

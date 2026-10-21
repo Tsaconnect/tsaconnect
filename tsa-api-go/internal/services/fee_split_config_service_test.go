@@ -130,10 +130,12 @@ func TestEngineAppliesOverride(t *testing.T) {
 
 	engine := NewFeeDistributionService(db, NewReferralGraphService(db), 100).WithSplitConfigs(cfgSvc)
 
-	// $10 fee at the overridden 15% TP share → $1.50 to the TP pool.
-	got := computeSplitWith(engine.splitForFeature(models.FeatureSpot), 10)
-	if got.TPPoolUSD != 1.5 {
-		t.Fatalf("TP pool = %v, want 1.5 under the override", got.TPPoolUSD)
+	// TP is carved from System+TP (what the platform keeps), so moving the
+	// per-feature TP share no longer changes how much TP a fee mints: 12% of
+	// the $10 kept either way. The override still decides cashback shares.
+	got := computeSplitWith(engine.splitForFeature(models.FeatureSpot), 10, models.DefaultTPProgramConfig())
+	if !approx(got.TPPoolUSD, 1.2) {
+		t.Fatalf("TP pool = %v, want 1.2 under the override", got.TPPoolUSD)
 	}
 	if d := got.Total() - 10; d > 1e-9 || d < -1e-9 {
 		t.Fatalf("split must still conserve the fee; total = %v", got.Total())

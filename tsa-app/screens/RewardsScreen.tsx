@@ -54,6 +54,7 @@ import {
   ClaimWouldRevertError,
   WrongWalletError,
 } from '../services/rewardsClaim';
+import { formatTpUsd } from '@/utils/tp';
 
 // ── Local types ──────────────────────────────────────────────────────────────
 
@@ -110,8 +111,9 @@ function sourceLabel(sourceType: string): string {
 
 /** "gen 0 (you)" / "gen N upline". */
 function genLabel(generation: number): string {
-  if (generation <= 0) return 'You (gen 0)';
-  return `Gen ${generation} upline`;
+  if (generation <= 0) return 'Your own activity';
+  if (generation === 1) return 'Your direct referrals';
+  return `Generation ${generation} (earlier model)`;
 }
 
 /** "0x1234…abcd" — compact address for claim-destination copy. */
@@ -526,6 +528,14 @@ const RewardsScreen: React.FC = () => {
     [summary],
   );
 
+  // The current model pays only gen 0 (own activity) and gen 1 (direct
+  // referrals), so those two always show; a deeper generation appears only if
+  // the user still holds TP earned under the earlier model.
+  const visibleGenerations = useMemo(
+    () => (summary?.perGeneration || []).filter((g) => g.generation <= 1 || g.earnedTp > 0),
+    [summary],
+  );
+
   // Label for the NEXT rung in the hero progress copy — prefer its rank name,
   // falling back to "Level N" when the ladder hasn't supplied a name.
   const nextLevelLabel = useMemo(() => {
@@ -601,6 +611,9 @@ const RewardsScreen: React.FC = () => {
                   TP
                 </Text>
               </View>
+              <Text variant="bodySm" color="textSecondary" numeric style={{ marginTop: spacing.xs }}>
+                {formatTpUsd(summary.tpBalance)} · 1 TP = $0.01
+              </Text>
             </View>
             <View
               style={{
@@ -631,7 +644,7 @@ const RewardsScreen: React.FC = () => {
             <Text variant="caption" color="textSecondary">
               {atTop
                 ? 'Top level reached'
-                : `Next: ${formatNumber(summary.nextLevelThresholdTP)} TP`}
+                : `Next: ${formatNumber(summary.nextLevelThresholdTP)} TP (${formatTpUsd(summary.nextLevelThresholdTP)})`}
             </Text>
           </View>
           <ProgressBar progress={summary.progressToNext} />
@@ -713,20 +726,21 @@ const RewardsScreen: React.FC = () => {
 
         {/* ── Per-generation breakdown ── */}
         <Text variant="title3" weight="700" style={{ marginTop: spacing['2xl'], marginBottom: spacing.xs }}>
-          Earnings by Generation
+          Where your TP comes from
         </Text>
         <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.md }}>
-          TP you have earned from your own activity (gen 0) and 10 generations of downline.
+          TP from your own activity and from your direct referrals. Anything earned from deeper generations under the
+          earlier model stays on your balance and is listed too.
         </Text>
         <Card padding="lg">
           {nonZeroGenerations.length === 0 ? (
             <EmptyState
               icon="user"
               title="No generation earnings yet"
-              subtitle="Earn TP from your own trades and your network's activity."
+              subtitle="Earn TP from your own trades and your direct referrals."
             />
           ) : (
-            summary.perGeneration.map((g, i) => (
+            visibleGenerations.map((g, i) => (
               <View key={g.generation}>
                 <View
                   style={{
@@ -758,7 +772,7 @@ const RewardsScreen: React.FC = () => {
                   </View>
                   <TpAmount value={g.earnedTp} color={g.earnedTp > 0 ? 'textPrimary' : 'textSecondary'} />
                 </View>
-                {i < summary.perGeneration.length - 1 && <Divider inset={36} />}
+                {i < visibleGenerations.length - 1 && <Divider inset={36} />}
               </View>
             ))
           )}
@@ -784,7 +798,7 @@ const RewardsScreen: React.FC = () => {
                 Global pool share
               </Text>
               <Text variant="caption" color="textSecondary">
-                TP from the platform-wide reward pool
+                Your equal share of the monthly pool, added when you open the app after payout
               </Text>
             </View>
             <TpAmount value={summary.globalPoolShareTp} weight="700" />
