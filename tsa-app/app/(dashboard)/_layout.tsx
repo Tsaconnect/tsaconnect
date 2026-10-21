@@ -153,7 +153,6 @@ const Layout = () => {
   // application — so "Become Merchant" is for everyone else.
   const linksAfter: Record<string, DrawerLink[]> = {
     settings: isMerchant ? [] : [{ label: "Become Merchant", icon: "storefront-outline", route: "/merchants/merchant-request" }],
-    reward: [{ label: "Promotions Arena", icon: "tag-multiple-outline", route: "/promotions" }],
     categories: liquidity ? [{ label: liquidity.title, icon: "cash-plus", route: liquidity.route }] : [],
   };
 
