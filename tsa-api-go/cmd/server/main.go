@@ -1727,8 +1727,9 @@ func main() {
 	// when Paycrest is on (the pool provider joins the router there), after it
 	// otherwise.
 	var pool *poolWiring
+	var paycrestDir *services.PaycrestDirectory
 	if paycrestClient.IsEnabled() {
-		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
+		paycrestDir = services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes = services.NewPaycrestQuoteService(paycrestClient, nil, nil)
 		treasuryRates = wireTreasuryMarketRate(itService, paycrestQuotes, cfg.RampTreasuryRateTolBps)
 		// Owner ruling 2026-10-07: every Paycrest ramp order is sent the
@@ -2046,7 +2047,22 @@ func main() {
 		log.Print(alert)
 	}
 	routes.RegisterSignerAdmin(router, cfg, &handlers.SignerAdminHandler{DB: config.DB, Registry: blockchainService.Signers()})
+	// Unavailable (503 payout_unavailable) while Paycrest is off: *PaycrestDirectory
+	// answers ErrPaycrestDisabled on a nil receiver.
+	// A nil *EmailService inside the interface would be non-nil: pass none at all.
+	var sellerPayoutMailer services.CodeMailer
+	if payCodeMailer != nil {
+		sellerPayoutMailer = payCodeMailer
+	}
+	var sellerPayoutDir interface {
+		Institutions(ctx context.Context, fiat string) ([]services.PaycrestPayoutOption, error)
+	}
+	if paycrestDir != nil {
+		sellerPayoutDir = paycrestDir
+	}
+	sellerPayoutHandler := handlers.NewSellerPayoutHandler(services.NewSellerPayoutService(config.DB, sellerPayoutDir, bankDirectory, sellerPayoutMailer), eventBus)
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
+	routes.RegisterSellerPayout(router, cfg, sellerPayoutHandler)
 
 	// Configure HTTP server
 	port := cfg.Port

@@ -39,6 +39,7 @@ var emailEvents = map[string]bool{
 	events.SecurityPasswordChanged:      true,
 	events.SecurityAccountLocked:        true,
 	events.SecurityPaySettlementChanged: true,
+	events.SecuritySellerPayoutChanged:  true,
 	events.SecurityPayKeyRolled:         true,
 	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
@@ -113,6 +114,7 @@ var pushEvents = map[string]bool{
 	events.SecurityPasswordChanged:      true,
 	events.SecurityAccountLocked:        true,
 	events.SecurityPaySettlementChanged: true,
+	events.SecuritySellerPayoutChanged:  true,
 	events.SecurityPayKeyRolled:         true,
 	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
@@ -171,6 +173,7 @@ var pushEvents = map[string]bool{
 // take money, and would want the owner not to see.
 var unmutableEvents = map[string]bool{
 	events.SecurityPaySettlementChanged: true,
+	events.SecuritySellerPayoutChanged:  true,
 	events.SecurityPayKeyRolled:         true,
 	events.SecurityPayKeysRevoked:       true,
 	events.SecurityPayEndpointsChanged:  true,
