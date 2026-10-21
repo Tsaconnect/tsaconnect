@@ -13,6 +13,7 @@ import { useCurrency } from '@/contexts/CurrencyContext';
 import { formatPrice, formatPriceDual } from '@/utils/formatPrice';
 import { useTheme } from '@/theme';
 import { PromoPrice } from '@/components/promotion/PromoPrice';
+import { isPromoted } from '@/utils/promo';
 import {
     Badge,
     Card,
@@ -34,6 +35,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
 
     const primaryImage = product.images?.[0]?.url;
     const formatLocal = (usd: number) => formatPrice(usd, { currency, rate });
+    const promoted = isPromoted(product);
     const dualPrice = formatPriceDual(product.price, rate, currency);
     const rating = product.rating?.average || 0;
     const ratingCount = product.rating?.count || 0;
@@ -203,8 +205,15 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
                             )}
                         </View>
 
-                        <PromoPrice product={product} format={formatLocal} />
+                        {/* A promoted price (tag + price + strike-through + %) is too wide to sit
+                            beside the title; it goes underneath so the name keeps its width. */}
+                        {!promoted && <PromoPrice product={product} format={formatLocal} />}
                     </View>
+                    {promoted && (
+                        <View style={{ marginBottom: spacing.xs }}>
+                            <PromoPrice product={product} format={formatLocal} />
+                        </View>
+                    )}
 
                     <Text variant="bodySm" color="textSecondary" numberOfLines={2} style={{ marginBottom: spacing.sm }}>
                         {product.description}
@@ -242,7 +251,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onPress, variant = '
                     )}
 
                     {/* Quick Actions */}
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.sm }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.sm, gap: spacing.sm, flexWrap: 'wrap' }}>
                         <PressableScale
                             style={{
                                 flexDirection: 'row',

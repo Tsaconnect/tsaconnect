@@ -8,7 +8,7 @@ import api, { Product, PromoStatus } from '@/components/services/api';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { useTheme } from '@/theme';
 import { Button, Card, Text } from '@/components/ui';
-import { formatMmSs, isPromoted, promoPhase, remainingMs } from '@/utils/promo';
+import { formatMmSs, isPromoted, promoPhase, remainingMs, verifiedReferrals } from '@/utils/promo';
 import { referralCodeOf, shareReferralCode } from '@/utils/referralShare';
 
 const POLL_MS = 15000;
@@ -126,7 +126,7 @@ export const PromoUnlockCard: React.FC<PromoUnlockCardProps> = ({ product, forma
       {phase === 'unclaimed' && (
         <>
           <Text variant="bodyMed" weight="600">
-            {`Promotion: bring ${product.promoRequiredReferrals ?? 0} verified referrals to unlock ${product.promoDiscountPercent}% off`}
+            {`Promotion: bring ${verifiedReferrals(product.promoRequiredReferrals ?? 0)} to unlock ${product.promoDiscountPercent}% off`}
           </Text>
           <Button title="Unlock discount" onPress={claim} loading={claiming} disabled={claiming} />
         </>
@@ -134,7 +134,7 @@ export const PromoUnlockCard: React.FC<PromoUnlockCardProps> = ({ product, forma
 
       {phase === 'progress' && (
         <>
-          <Text variant="bodyMed" weight="600">{`${current} / ${required} verified referrals`}</Text>
+          <Text variant="bodyMed" weight="600">{`${current} / ${verifiedReferrals(required)}`}</Text>
           <View
             accessibilityRole="progressbar"
             accessibilityLabel="Verified referrals"
@@ -166,7 +166,7 @@ export const PromoUnlockCard: React.FC<PromoUnlockCardProps> = ({ product, forma
       {phase === 'used' && (
         <>
           <Text variant="bodyMed" weight="600">
-            {`Discount used - it covers one item. Bring ${required} new verified referrals to earn it again.`}
+            {`Discount used - it covers one item. Bring ${verifiedReferrals(required).replace('verified', 'new verified')} to earn it again.`}
           </Text>
           <Text variant="bodySm" color="textSecondary" numeric>
             {format(product.price)}

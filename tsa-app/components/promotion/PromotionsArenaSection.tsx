@@ -13,6 +13,9 @@ const PREVIEW_COUNT = 3;
 
 export default function PromotionsArenaSection() {
   const { spacing } = useTheme();
+  // ProductCard insets itself by spacing.lg; inside this padded card that doubles
+  // up and pushes its action row off the edge, so the list cancels it out.
+  const cancelCardInset = { marginHorizontal: -spacing.lg };
   const { items, loading, error } = usePromotions();
 
   const open = (p: Product) =>
@@ -36,7 +39,11 @@ export default function PromotionsArenaSection() {
       {loading ? (
         <Spinner />
       ) : items.length > 0 ? (
-        items.slice(0, PREVIEW_COUNT).map((p) => <ProductCard key={p.id} product={p} onPress={() => open(p)} />)
+        <View style={cancelCardInset}>
+          {items.slice(0, PREVIEW_COUNT).map((p) => (
+            <ProductCard key={p.id} product={p} onPress={() => open(p)} />
+          ))}
+        </View>
       ) : (
         <Text variant="bodySm" color="textMuted">
           {error ? "Couldn't load promotions. Pull down to retry." : 'No promotions right now. Check back soon.'}
