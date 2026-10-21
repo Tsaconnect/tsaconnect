@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -18,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 // ProductEscrow ABI — subset of functions and events we interact with
@@ -33,7 +35,10 @@ const productEscrowABI = `[
 	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"orderId","type":"bytes32"}],"name":"orders","outputs":[{"name":"buyer","type":"address"},{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"productAmount","type":"uint256"},{"name":"shippingAmount","type":"uint256"},{"name":"platformFee","type":"uint256"},{"name":"buyerUpline","type":"address"},{"name":"createdAt","type":"uint256"},{"name":"sellerDelivered","type":"bool"},{"name":"buyerConfirmed","type":"bool"},{"name":"refundRequested","type":"bool"},{"name":"resolved","type":"bool"}],"stateMutability":"view","type":"function"},
-	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"}
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"ReceiptConfirmed","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"OrderCancelled","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":false,"name":"refundedToBuyer","type":"bool"}],"name":"DisputeResolved","type":"event"}
 ]`
 
 var parsedEscrowABI abi.ABI
@@ -271,6 +276,75 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string, expectedOrderID [32]b
 		return nil, fmt.Errorf("transaction failed")
 	}
 	return findOrderCreated(receipt.Logs, common.HexToAddress(s.escrowAddress), expectedOrderID)
+}
+
+// ErrOrderEventNotFound: the transaction is mined but is not the escrow action
+// claimed for the order. Any other VerifyOrderEvent error is an unreadable
+// chain, which a caller may retry.
+var ErrOrderEventNotFound = errors.New("the transaction does not do this to the order")
+
+// VerifyOrderEvent checks that txHash succeeded and emitted event (an escrow
+// event whose first indexed argument is the order id) on escrowAddr FOR orderID,
+// and returns that log. A mined transaction proves nothing about an order by
+// itself: without the event, any successful transaction would complete, refund
+// or resolve it. escrowAddr is the order's own escrow, which may be an older
+// deployment than the configured one.
+func (s *EscrowService) VerifyOrderEvent(txHash, escrowAddr, event string, orderID [32]byte) (*types.Log, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("blockchain client not available")
+	}
+	receipt, err := s.client.GetTransactionReceipt(txHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get receipt: %w", err)
+	}
+	if receipt.Status != 1 {
+		return nil, fmt.Errorf("%w: transaction failed", ErrOrderEventNotFound)
+	}
+	return findOrderEvent(receipt.Logs, common.HexToAddress(escrowAddr), event, orderID)
+}
+
+// findOrderEvent returns the log of event emitted by escrowAddr for orderID.
+func findOrderEvent(logs []*types.Log, escrowAddr common.Address, event string, orderID [32]byte) (*types.Log, error) {
+	ev, ok := parsedEscrowABI.Events[event]
+	if !ok {
+		return nil, fmt.Errorf("unknown escrow event %q", event)
+	}
+	for _, l := range logs {
+		if l.Address == escrowAddr && len(l.Topics) >= 2 && l.Topics[0] == ev.ID && l.Topics[1] == common.Hash(orderID) {
+			return l, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: no %s for this order in the receipt", ErrOrderEventNotFound, event)
+}
+
+// DisputeResolvedRefund reports whether a DisputeResolved log refunded the
+// buyer. The chain's answer is the only one: an admin's request body is not.
+func DisputeResolvedRefund(l *types.Log) (bool, error) {
+	vals, err := parsedEscrowABI.Events["DisputeResolved"].Inputs.NonIndexed().Unpack(l.Data)
+	if err != nil || len(vals) != 1 {
+		return false, fmt.Errorf("decode DisputeResolved: %v", err)
+	}
+	refunded, ok := vals[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("decode DisputeResolved: unexpected value type")
+	}
+	return refunded, nil
+}
+
+// OrderMatchesEscrow reports whether the escrow's record of an order is this
+// order, funded as it was priced: unresolved (the money is still held), this
+// buyer paying this seller, in the order's token, the amounts it was priced at.
+// The order id is derivable from the order's UUID, so anyone could escrow under
+// it, and the buyer signs createOrder on their own device — the seller and
+// token in it are theirs to choose until this is checked.
+func OrderMatchesEscrow(o *models.Order, sellerWallet, buyerWallet, tokenAddr string, onChain *OnChainOrder) bool {
+	product, okP := new(big.Int).SetString(o.ProductAmount, 10)
+	shipping, okS := new(big.Int).SetString(o.ShippingAmount, 10)
+	return !(!okP || !okS || tokenAddr == "" || sellerWallet == "" || buyerWallet == "" || onChain == nil || onChain.Resolved ||
+		!strings.EqualFold(onChain.Buyer.Hex(), common.HexToAddress(buyerWallet).Hex()) ||
+		!strings.EqualFold(onChain.Seller.Hex(), common.HexToAddress(sellerWallet).Hex()) ||
+		!strings.EqualFold(onChain.Token.Hex(), common.HexToAddress(tokenAddr).Hex()) ||
+		onChain.ProductAmount.Cmp(product) != 0 || onChain.ShippingAmount.Cmp(shipping) != 0)
 }
 
 // OnChainOrder is an order as the escrow's orders(id) getter records it.
