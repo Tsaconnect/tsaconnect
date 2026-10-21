@@ -47,3 +47,8 @@ export function promoLineTotal(
   if (!unlocked || !promoPrice || quantity < 1) return price * quantity;
   return (quantity - 1) * price + promoPrice;
 }
+
+/** "1 verified referral" / "5 verified referrals". */
+export function verifiedReferrals(n: number): string {
+  return `${n} verified referral${n === 1 ? '' : 's'}`;
+}

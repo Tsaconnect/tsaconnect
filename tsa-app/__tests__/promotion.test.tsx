@@ -149,3 +149,9 @@ describe('promo helpers', () => {
     expect(promoLineTotal(100, undefined, 2, true)).toBe(200);
   });
 });
+
+it('says "referral" for one and "referrals" otherwise', () => {
+  const { verifiedReferrals } = require('@/utils/promo');
+  expect(verifiedReferrals(1)).toBe('1 verified referral');
+  expect(verifiedReferrals(5)).toBe('5 verified referrals');
+});

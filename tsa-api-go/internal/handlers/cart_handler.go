@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +84,48 @@ func recalcAndSave(cart *models.Cart) error {
 	return config.DB.Save(cart).Error
 }
 
+// promoPricedItems returns items with Price set to what checkout will charge per
+// unit where the buyer has an unlocked promotion, and the stored price elsewhere.
+// A promotion discounts ONE unit, so a quantity above 1 shows the line's average
+// price, which keeps price x quantity equal to the line total. It is a read-time
+// overlay: nothing here is saved.
+func promoPricedItems(ctx context.Context, items []models.CartItem, userID uuid.UUID, products map[uuid.UUID]models.Product) []models.CartItem {
+	svc := services.NewPromoService(config.DB)
+	out := make([]models.CartItem, len(items))
+	copy(out, items)
+	for i, item := range out {
+		p, ok := products[item.Product]
+		if !ok || item.Quantity < 1 || !p.PromoActive() {
+			continue
+		}
+		pp, err := svc.Pricing(ctx, &p, userID)
+		if err != nil || pp.ClaimID == nil {
+			continue
+		}
+		line := p.Price*float64(item.Quantity-1) + p.Price*pp.Factor
+		out[i].Price = line / float64(item.Quantity)
+	}
+	return out
+}
+
+// cartProducts loads the products on a cart's lines by id.
+func cartProducts(items []models.CartItem) map[uuid.UUID]models.Product {
+	ids := make([]uuid.UUID, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.Product)
+	}
+	byID := make(map[uuid.UUID]models.Product, len(ids))
+	if len(ids) == 0 {
+		return byID
+	}
+	var products []models.Product
+	config.DB.Where("id IN ?", ids).Find(&products)
+	for _, p := range products {
+		byID[p.ID] = p
+	}
+	return byID
+}
+
 // GetOrCreateCart handles GET /api/cart/ - returns the user's active cart or creates a new one.
 func (h *Handlers) GetOrCreateCart(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -118,6 +161,13 @@ func (h *Handlers) GetOrCreateCart(c *gin.Context) {
 		cart = &newCart
 	}
 
+	// Show what checkout will charge (an unlocked promotion), not the price the
+	// line was added at. Never saved.
+	if items := cart.GetItems(); len(items) > 0 {
+		priced := promoPricedItems(c.Request.Context(), items, user.ID, cartProducts(items))
+		cart.SetItems(priced)
+		cart.SetSummary(models.CalculateCartSummary(priced, cart.GetAppliedCoupon(), cart.GetSummary().Shipping, cartQuoteToken, cartFeeLookups()))
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Cart retrieved successfully", cart)
 }
 
@@ -861,6 +911,10 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 	}
 
 	items := cart.GetItems()
+	// Prices as checkout will charge them (an unlocked promotion), read-time only.
+	items = promoPricedItems(c.Request.Context(), items, user.ID, cartProducts(items))
+	cart.SetItems(items)
+	summary := models.CalculateCartSummary(items, cart.GetAppliedCoupon(), cart.GetSummary().Shipping, cartQuoteToken, cartFeeLookups())
 
 	// Collect unique product and seller IDs for batch lookup
 	productIDs := make([]uuid.UUID, 0, len(items))
@@ -962,7 +1016,7 @@ func (h *Handlers) GetCartSummary(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Cart summary retrieved successfully", gin.H{
 		"cart":            cart,
 		"itemsBySeller":   itemsBySeller,
-		"summary":         cart.GetSummary(),
+		"summary":         summary,
 		"feeConfig":       models.GetFeeConfig(cartFeeLookups()),
 		"appliedCoupon":   cart.GetAppliedCoupon(),
 		"shippingAddress": cart.ShippingAddress,
