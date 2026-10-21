@@ -2,10 +2,10 @@ package services
 
 import (
 	"context"
-	"database/sql"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log"

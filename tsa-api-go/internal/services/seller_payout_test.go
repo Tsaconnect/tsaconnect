@@ -245,3 +245,34 @@ func TestSellerPayout_NeedsKYCAndAMailer(t *testing.T) {
 		t.Fatalf("no mailer: %v", err)
 	}
 }
+
+func TestSellerPayout_ClearDropsAWaitingChange(t *testing.T) {
+	s, mail := sellerPayoutSvc(t, stubPayoutBanks{name: "ADA OBI"})
+	uid := seller(t, s)
+	ctx := context.Background()
+	p, _ := s.Request(ctx, uid, SetSellerPayoutInput{InstitutionCode: "058", AccountNumber: "0123456789"})
+	if err := s.Clear(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Confirm(ctx, uid, p.ID, mail.code); !errors.Is(err, ErrSellerPayoutNoPending) {
+		t.Fatalf("a cleared seller's waiting code still applied: %v", err)
+	}
+}
+
+func TestSellerPayout_ReRequestReplacesTheWaitingChange(t *testing.T) {
+	s, mail := sellerPayoutSvc(t, stubPayoutBanks{name: "ADA OBI"})
+	uid := seller(t, s)
+	ctx := context.Background()
+	first, _ := s.Request(ctx, uid, SetSellerPayoutInput{InstitutionCode: "058", AccountNumber: "0123456789"})
+	oldCode := mail.code
+	second, err := s.Request(ctx, uid, SetSellerPayoutInput{InstitutionCode: "058", AccountNumber: "0987654321"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Confirm(ctx, uid, first.ID, oldCode); !errors.Is(err, ErrSellerPayoutNoPending) {
+		t.Fatalf("the replaced change still confirms: %v", err)
+	}
+	if m, err := s.Confirm(ctx, uid, second.ID, mail.code); err != nil || m.AccountNumber != "0987654321" {
+		t.Fatalf("got %+v, %v", m, err)
+	}
+}

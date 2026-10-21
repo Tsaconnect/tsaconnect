@@ -120,12 +120,11 @@ func (s *SellerPayoutService) Request(ctx context.Context, userID uuid.UUID, in 
 	}
 	change := models.SellerPayoutChange{ID: uuid.New(), UserID: userID, Payload: string(body), ExpiresAt: s.now().Add(EmailCodeTTL)}
 	change.CodeHash = EmailCodeHash(change.ID, code)
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("user_id = ?", userID).Delete(&models.SellerPayoutChange{}).Error; err != nil {
-			return err
-		}
-		return tx.Create(&change).Error
-	})
+	// One waiting change per seller; a concurrent request replaces it atomically.
+	err = s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "user_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"id", "payload", "code_hash", "attempts", "expires_at", "created_at"}),
+	}).Create(&change).Error
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +165,13 @@ func (s *SellerPayoutService) Confirm(ctx context.Context, userID, changeID uuid
 		return nil, ErrSellerPayoutBadCode
 	default:
 		return nil, ErrSellerPayoutNoPending
+	}
+	// KYC can be revoked while a code is waiting.
+	if ok, err := s.kycOK(ctx, userID); err != nil || !ok {
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSellerPayoutUnavailable, err)
+		}
+		return nil, ErrSellerPayoutKYC
 	}
 	var row models.SellerPayoutMethod
 	if err := json.Unmarshal([]byte(ch.Payload), &row); err != nil {
@@ -264,5 +270,11 @@ func (s *SellerPayoutService) save(ctx context.Context, row models.SellerPayoutM
 
 // Clear returns the seller to wallet payouts.
 func (s *SellerPayoutService) Clear(ctx context.Context, userID uuid.UUID) error {
-	return s.db.WithContext(ctx).Where("user_id = ?", userID).Delete(&models.SellerPayoutMethod{}).Error
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// A code still waiting must not bring the old destination back.
+		if err := tx.Where("user_id = ?", userID).Delete(&models.SellerPayoutChange{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("user_id = ?", userID).Delete(&models.SellerPayoutMethod{}).Error
+	})
 }

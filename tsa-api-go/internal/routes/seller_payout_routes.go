@@ -19,8 +19,11 @@ func RegisterSellerPayout(router *gin.Engine, cfg *config.Config, h *handlers.Se
 	g := router.Group("/api/seller")
 	g.Use(middleware.RateLimiter(500, 15*time.Minute), middleware.Auth(cfg))
 	limit := middleware.RateLimiterBy(20, time.Minute, perUserRateKey)
+	// Each PUT mails a fresh code, and a new request resets the attempt count, so
+	// code requests and guesses share one tight per-user budget.
+	guarded := middleware.RateLimiterBy(10, 15*time.Minute, perUserRateKey)
 	g.GET("/payout-method", h.Get)
-	g.PUT("/payout-method", limit, h.Set)
-	g.POST("/payout-method/:id/confirm", limit, h.Confirm)
+	g.PUT("/payout-method", guarded, h.Set)
+	g.POST("/payout-method/:id/confirm", guarded, h.Confirm)
 	g.DELETE("/payout-method", limit, h.Clear)
 }
