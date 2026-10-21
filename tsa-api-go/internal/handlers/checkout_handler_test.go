@@ -140,6 +140,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			shipping_street TEXT,
 			contract_order_id TEXT,
 			escrow_contract_address TEXT,
+			escrow_seller_wallet TEXT,
 			escrow_tx_hash TEXT,
 			approve_tx_hash TEXT,
 			release_tx_hash TEXT, release_reverted_at DATETIME,
@@ -941,8 +942,11 @@ func TestMarkDelivered_OnlySellerCanDeliver(t *testing.T) {
 
 	ch.MarkDelivered(c2)
 
-	if w2.Code != http.StatusOK {
-		t.Errorf("expected %d for seller delivering, got %d: %s", http.StatusOK, w2.Code, w2.Body.String())
+	// An escrow order is delivered only with the seller's on-chain markDelivered
+	// (a hash, or the escrow's own flag on a retry); without a readable chain
+	// there is no proof, so it is refused rather than recorded.
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected %d for a delivery that cannot be proven, got %d: %s", http.StatusServiceUnavailable, w2.Code, w2.Body.String())
 	}
 }
 

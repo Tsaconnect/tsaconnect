@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
@@ -896,6 +898,10 @@ type deliverRequest struct {
 	// and optional for SERVICE orders ("mark service rendered" — there is nothing
 	// to ship). Enforced per-kind in MarkDelivered rather than via binding.
 	DeliveryProofURL string `json:"deliveryProofUrl"`
+	// TxHash is the seller's markDelivered transaction. Required for escrow
+	// orders: the contract only turns a buyer's refund into a dispute once
+	// delivery is on-chain.
+	TxHash string `json:"txHash"`
 }
 
 type submitConfirmRequest struct {
@@ -2001,6 +2007,12 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		upline = "0x0000000000000000000000000000000000000000"
 	}
 
+	if err := config.DB.Model(order).Update("escrow_seller_wallet", seller.WalletAddress).Error; err != nil {
+		log.Printf("Failed to record escrow seller wallet for order %s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare escrow transaction")
+		return
+	}
+
 	createOrderTxBytes, err := ch.EscrowService.PrepareCreateOrder(
 		contractOrderID,
 		user.WalletAddress,
@@ -2140,6 +2152,10 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
+	if !ch.requireEscrowFundsOrder(c, &order) {
+		return
+	}
+
 	expires := time.Now().Add(services.EscrowWindow)
 	updates := services.EscrowedOrderUpdates(created.OrderID, created.ProductAmount, created.ShippingAmount,
 		created.PlatformFee, ch.EscrowService.CurrentEscrowAddress(), expires)
@@ -2160,6 +2176,69 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 
 	services.NotifyOrderEscrowed(ch.EventBus, &order, expires)
 	respondEscrowSubmitted(c, order.ID, created.OrderID, expires)
+}
+
+// requireOrderEvent confirms txHash did event to order on the order's own
+// escrow. A mined transaction proves nothing about this order by itself, so a
+// confirm, cancel or resolve is recorded only against the escrow's own event.
+// It writes the refusal and returns false when it does not.
+func (ch *CheckoutHandler) requireOrderEvent(c *gin.Context, order *models.Order, txHash, event string) (*types.Log, bool) {
+	if ch.EscrowService == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the transaction — try again later")
+		return nil, false
+	}
+	l, err := ch.EscrowService.VerifyOrderEvent(txHash, ch.orderEscrowContract(order), event, services.GenerateOrderID(order.ID))
+	if errors.Is(err, services.ErrReceiptPending) {
+		utils.ErrorResponse(c, http.StatusConflict, "That transaction is still pending — please wait and retry")
+		return nil, false
+	}
+	if errors.Is(err, services.ErrOrderEventNotFound) {
+		log.Printf("[checkout] order_event_not_found=1 order=%s event=%s tx=%s: %v", order.ID, event, txHash, err)
+		utils.ErrorResponse(c, http.StatusBadRequest, "That transaction is not for this order")
+		return nil, false
+	}
+	if err != nil {
+		log.Printf("[checkout] order event check failed order=%s event=%s tx=%s: %v", order.ID, event, txHash, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the transaction — try again later")
+		return nil, false
+	}
+	return l, true
+}
+
+// requireEscrowFundsOrder reads the escrow's own record of order and refuses
+// to call it paid unless it is this order funded as priced: its seller, its
+// token, its amounts (services.OrderMatchesEscrow). The buyer signs createOrder
+// on their own device, so what they escrowed is theirs to choose until this
+// runs. The buyer is the escrow's own: they may pay from any account of their
+// wallet, and what they pay from it is theirs.
+func (ch *CheckoutHandler) requireEscrowFundsOrder(c *gin.Context, order *models.Order) bool {
+	onChain, err := ch.EscrowService.EscrowedOrder(c.Request.Context(), services.GenerateOrderID(order.ID))
+	if err != nil || onChain == nil {
+		// A node a block behind reads no order yet; retry rather than refuse.
+		log.Printf("[checkout] escrow read for order %s: onChain=%v err=%v", order.ID, onChain != nil, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify your payment — try again in a moment")
+		return false
+	}
+	var seller models.User
+	if err := config.DB.Select("wallet_address").First(&seller, "id = ?", order.SellerID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to verify your payment")
+		return false
+	}
+	tokenAddr := ""
+	if ch.BlockchainService != nil {
+		tokenAddr = ch.BlockchainService.TokenAddress("sonic", order.Token)
+	}
+	sellerWallet := order.EscrowSellerWallet
+	if sellerWallet == "" {
+		sellerWallet = seller.WalletAddress
+	}
+	if !services.OrderMatchesEscrow(order, sellerWallet, onChain.Buyer.Hex(), tokenAddr, onChain) {
+		log.Printf("[checkout] ALERT escrow_order_mismatch=1 order=%s: the escrow holds an order under its id that is not this order as priced", order.ID)
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"Your payment does not match this order. Contact support — do not pay again.", "escrow_mismatch")
+		return false
+	}
+	return true
 }
 
 func respondEscrowSubmitted(c *gin.Context, orderID uuid.UUID, contractOrderID [32]byte, expires time.Time) {
@@ -2264,6 +2343,110 @@ func (ch *CheckoutHandler) MarkShipped(c *gin.Context) {
 	})
 }
 
+// onChainOrder reads the order's own escrow record: whether the seller's
+// markDelivered is on-chain, and the seller the escrow knows. It writes the
+// refusal and returns ok=false when the chain cannot be read or holds no order.
+func (ch *CheckoutHandler) onChainOrder(c *gin.Context, order *models.Order) (*services.OnChainOrder, bool) {
+	if ch.EscrowService == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the order on-chain — try again later")
+		return nil, false
+	}
+	o, err := ch.EscrowService.ReadOrder(c.Request.Context(), ch.orderEscrowContract(order), services.GenerateOrderID(order.ID))
+	if err != nil {
+		log.Printf("[checkout] escrow read order=%s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the order on-chain — try again later")
+		return nil, false
+	}
+	if o == nil {
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "The escrow holds no funds for this order.", "not_escrowed")
+		return nil, false
+	}
+	return o, true
+}
+
+// PrepareDeliver handles POST /api/orders/:id/prepare-deliver. The seller signs
+// markDelivered, then sends the hash to MarkDelivered.
+func (ch *CheckoutHandler) PrepareDeliver(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can mark as delivered")
+		return
+	}
+
+	if refuseSpendableOnChainStep(c, &order, "Mark it delivered directly.") {
+		return
+	}
+
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+
+	// An order delivered before the mark went on-chain still needs it: until
+	// then the buyer's refund request is an instant full refund.
+	redo := order.Status == models.OrderStatusDelivered
+	if !redo && !isValidTransitionForKind(order.Status, models.OrderStatusDelivered, order.Kind) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as delivered: order is in %s status", order.Status))
+		return
+	}
+
+	if user.WalletAddress == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
+		return
+	}
+
+	// A markDelivered that landed while the earlier /deliver call failed would
+	// make a second one revert; tell the app the chain already has it.
+	onChain, ok := ch.onChainOrder(c, &order)
+	if !ok {
+		return
+	}
+	if onChain.SellerDelivered {
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Delivery is already recorded on-chain.", "delivery_on_chain")
+		return
+	}
+	// Only the escrow's seller can sign it. After a wallet change that is no
+	// longer the registered wallet, and the transaction would just revert.
+	if !strings.EqualFold(onChain.Seller.Hex(), common.HexToAddress(user.WalletAddress).Hex()) {
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"This order was paid to a wallet that is no longer yours, so only that wallet can mark it delivered. Contact support.", "seller_wallet_changed")
+		return
+	}
+
+	txBytes, err := ch.EscrowService.PrepareMarkDelivered(services.GenerateOrderID(order.ID), user.WalletAddress, ch.orderEscrowContract(&order))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare delivery transaction")
+		return
+	}
+
+	var deliverTx map[string]interface{}
+	if err := json.Unmarshal(txBytes, &deliverTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode delivery transaction")
+		return
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Delivery transaction prepared", gin.H{
+		"deliverTx": deliverTx,
+	})
+}
+
 // MarkDelivered handles POST /api/orders/:id/deliver
 func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -2303,8 +2486,36 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 		return
 	}
 
-	if !isValidTransitionForKind(order.Status, models.OrderStatusDelivered, order.Kind) {
+	// An order delivered before the mark went on-chain still needs it: until
+	// then the buyer's refund request is an instant full refund.
+	redo := order.Status == models.OrderStatusDelivered
+	if !redo && !isValidTransitionForKind(order.Status, models.OrderStatusDelivered, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as delivered: order is in %s status", order.Status))
+		return
+	}
+
+	if !order.IsSpendableMCGP() {
+		if req.TxHash != "" {
+			if _, ok := ch.requireOrderEvent(c, &order, req.TxHash, "DeliveryMarked"); !ok {
+				return
+			}
+		} else {
+			// A retry after the transaction landed has no hash to show: the
+			// escrow's own flag is the proof.
+			onChain, ok := ch.onChainOrder(c, &order)
+			if !ok {
+				return
+			}
+			if !onChain.SellerDelivered {
+				utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+					"Sign the delivery transaction first — update the app and try again.", "delivery_tx_required")
+				return
+			}
+		}
+	}
+
+	if redo {
+		utils.SuccessResponse(c, http.StatusOK, "Delivery recorded on-chain", order)
 		return
 	}
 
@@ -2599,19 +2810,7 @@ func (ch *CheckoutHandler) SubmitConfirm(c *gin.Context) {
 		return
 	}
 
-	// Verify tx
-	receipt := ch.BlockchainService.GetTransactionReceipt(req.TxHash, "sonic")
-	switch receipt.Status {
-	case "confirmed":
-		// OK
-	case "error":
-		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify confirm transaction — try again later")
-		return
-	case "pending":
-		utils.ErrorResponse(c, http.StatusConflict, "Confirm transaction is still pending — please wait and retry")
-		return
-	default:
-		utils.ErrorResponse(c, http.StatusBadRequest, "Confirm transaction failed on-chain")
+	if _, ok := ch.requireOrderEvent(c, &order, req.TxHash, "ReceiptConfirmed"); !ok {
 		return
 	}
 
@@ -3296,20 +3495,21 @@ func (ch *CheckoutHandler) SubmitAdminResolve(c *gin.Context) {
 		return
 	}
 
-	receipt := ch.BlockchainService.GetTransactionReceipt(body.TxHash, "sonic")
-	switch receipt.Status {
-	case "confirmed":
-		// OK
-	case "error":
-		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify resolve transaction — try again later")
-		return
-	case "pending":
-		utils.ErrorResponse(c, http.StatusConflict, "Resolve transaction is still pending — please wait and retry")
-		return
-	default:
-		utils.ErrorResponse(c, http.StatusBadRequest, "Resolve transaction failed on-chain")
+	// What the chain did, not what the request says it did.
+	resolvedLog, ok := ch.requireOrderEvent(c, &order, body.TxHash, "DisputeResolved")
+	if !ok {
 		return
 	}
+	refunded, err := services.DisputeResolvedRefund(resolvedLog)
+	if err != nil {
+		log.Printf("[checkout] SubmitAdminResolve order=%s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the resolve transaction — try again later")
+		return
+	}
+	if refunded != body.RefundBuyer {
+		log.Printf("[checkout] admin_resolve_direction_mismatch=1 order=%s request_refund=%v chain_refund=%v: recording the chain's", order.ID, body.RefundBuyer, refunded)
+	}
+	body.RefundBuyer = refunded
 
 	var finalStatus string
 	if body.RefundBuyer {
@@ -3724,18 +3924,7 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		return
 	}
 
-	receipt := ch.BlockchainService.GetTransactionReceipt(body.TxHash, "sonic")
-	switch receipt.Status {
-	case "confirmed":
-		// OK
-	case "error":
-		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify cancel transaction — try again later")
-		return
-	case "pending":
-		utils.ErrorResponse(c, http.StatusConflict, "Cancel transaction is still pending — please wait and retry")
-		return
-	default:
-		utils.ErrorResponse(c, http.StatusBadRequest, "Cancel transaction failed on-chain")
+	if _, ok := ch.requireOrderEvent(c, &order, body.TxHash, "OrderCancelled"); !ok {
 		return
 	}
 

@@ -485,6 +485,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		orderResolveLimit := middleware.RateLimiterBy(20, time.Minute, perUserRateKey)
 		orderGroup.POST("/:id/confirm-receipt", orderResolveLimit, ch.ConfirmReceipt)
 		orderGroup.POST("/:id/ship", ch.MarkShipped)
+		orderGroup.POST("/:id/prepare-deliver", ch.PrepareDeliver)
 		orderGroup.POST("/:id/deliver", ch.MarkDelivered)
 		orderGroup.POST("/:id/approve-refund", ch.ApproveRefund)
 		orderGroup.POST("/:id/reject-refund", ch.RejectRefund)

@@ -32,7 +32,7 @@ func setupUnpaidOrderDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE orders (id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, product_id TEXT,
 			quantity INTEGER, kind TEXT, token TEXT, status TEXT,
 			product_amount TEXT, shipping_amount TEXT, platform_fee TEXT, total_amount TEXT,
-			contract_order_id TEXT, escrow_contract_address TEXT, escrow_expires_at DATETIME,
+			contract_order_id TEXT, escrow_contract_address TEXT, escrow_seller_wallet TEXT, escrow_expires_at DATETIME,
 			approve_tx_hash TEXT, escrow_tx_hash TEXT, payment_source TEXT DEFAULT '',
 			created_at DATETIME, updated_at DATETIME)`,
 		orderMcgpPaymentsDDL,
@@ -412,5 +412,26 @@ func TestEscrowedOrder_ReadsTheRecord(t *testing.T) {
 	}
 	if _, err := (&EscrowService{escrowAddress: testEscrow}).EscrowedOrder(context.Background(), id); err == nil {
 		t.Fatal("no client must be an error, never \"not escrowed\"")
+	}
+}
+
+// The seller wallet the buyer was told to pay is the one the order is checked
+// against, even after the seller registers another.
+func TestExpireUnpaidOrders_UsesTheWalletTheBuyerWasToldToPay(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0)
+	id := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
+	// The seller has since moved to another wallet; the buyer paid the old one.
+	db.Exec(`UPDATE orders SET escrow_seller_wallet = ? WHERE id = ?`, testSellerWallet, id)
+	db.Exec(`UPDATE users SET wallet_address = ? WHERE id = (SELECT seller_id FROM orders WHERE id = ?)`, testBuyerWallet, id)
+
+	escrow := &fakeOrderEscrow{held: map[[32]byte]*OnChainOrder{GenerateOrderID(id): paidFor()}}
+	if _, err := newSweep(db, escrow, nil).ExpireUnpaidOrders(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	db.Raw(`SELECT status FROM orders WHERE id = ?`, id).Scan(&status)
+	if status != models.OrderStatusEscrowed {
+		t.Fatalf("a correct payment to the wallet the buyer was given must be recorded, got %q", status)
 	}
 }
