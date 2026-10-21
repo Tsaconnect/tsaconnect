@@ -155,6 +155,7 @@ func AutoMigrate() error {
 		&models.RequestIdempotency{},
 		&models.WebhookEvent{},
 		&models.P2PPaymentMethod{},
+		&models.SellerPayoutMethod{},
 		&models.P2PAd{},
 		&models.P2PTrade{},
 		&models.PoolOrder{},

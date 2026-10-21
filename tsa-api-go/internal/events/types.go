@@ -36,6 +36,9 @@ const (
 	// to redirect a merchant's money, so it is told to the owner on every
 	// channel — the change stands, but it is never silent.
 	SecurityPaySettlementChanged = "security.pay_settlement_changed"
+	// SecuritySellerPayoutChanged: where a marketplace seller is paid was
+	// changed. Same threat as the TSA Pay payout change, told the same way.
+	SecuritySellerPayoutChanged = "security.seller_payout_changed"
 	// A TSA Pay merchant's API key was rolled, their webhook/return-domain
 	// settings changed, or their webhook signing secret was revealed or rolled.
 	// Like the payout change: the owner is always told.
