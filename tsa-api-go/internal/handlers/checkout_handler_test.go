@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -942,10 +941,11 @@ func TestMarkDelivered_OnlySellerCanDeliver(t *testing.T) {
 
 	ch.MarkDelivered(c2)
 
-	// An escrow order is delivered only with the seller's on-chain markDelivered;
-	// without it the buyer's refund would still be instant and full.
-	if w2.Code != http.StatusBadRequest || !strings.Contains(w2.Body.String(), "delivery_tx_required") {
-		t.Errorf("expected delivery_tx_required for a seller delivering without a tx, got %d: %s", w2.Code, w2.Body.String())
+	// An escrow order is delivered only with the seller's on-chain markDelivered
+	// (a hash, or the escrow's own flag on a retry); without a readable chain
+	// there is no proof, so it is refused rather than recorded.
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected %d for a delivery that cannot be proven, got %d: %s", http.StatusServiceUnavailable, w2.Code, w2.Body.String())
 	}
 }
 

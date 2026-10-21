@@ -367,6 +367,34 @@ type OnChainOrder struct {
 	Resolved bool
 }
 
+// SellerDelivered reads whether the seller's markDelivered is on-chain for
+// orderId at escrowAddr (the order's own escrow). Only a successful read of an
+// existing order answers; an RPC failure is an error, never "not delivered".
+func (s *EscrowService) SellerDelivered(ctx context.Context, escrowAddr string, orderId [32]byte) (bool, error) {
+	if s.caller == nil {
+		return false, fmt.Errorf("blockchain client not available")
+	}
+	data, err := parsedEscrowABI.Pack("orders", orderId)
+	if err != nil {
+		return false, fmt.Errorf("pack orders: %w", err)
+	}
+	escrow := common.HexToAddress(escrowAddr)
+	out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &escrow, Data: data}, nil)
+	if err != nil {
+		return false, fmt.Errorf("orders call: %w", err)
+	}
+	vals, err := parsedEscrowABI.Unpack("orders", out)
+	if err != nil || len(vals) < 12 {
+		return false, fmt.Errorf("decode orders: %v (%d values)", err, len(vals))
+	}
+	buyer, ok1 := vals[0].(common.Address)
+	delivered, ok2 := vals[8].(bool)
+	if !ok1 || !ok2 || buyer == (common.Address{}) {
+		return false, fmt.Errorf("decode orders: no escrowed order")
+	}
+	return delivered, nil
+}
+
 // EscrowedOrder reads the configured escrow's record of orderId, or nil when
 // it holds none (createOrder records the buyer, so a zero buyer means nothing
 // was ever escrowed). Only a successful read is an answer — an RPC failure is

@@ -2328,6 +2328,22 @@ func (ch *CheckoutHandler) MarkShipped(c *gin.Context) {
 	})
 }
 
+// deliveredOnChain reads the order's own escrow for the seller's markDelivered.
+// It writes the refusal and returns ok=false when the chain cannot be read.
+func (ch *CheckoutHandler) deliveredOnChain(c *gin.Context, order *models.Order) (delivered, ok bool) {
+	if ch.EscrowService == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify delivery — try again later")
+		return false, false
+	}
+	d, err := ch.EscrowService.SellerDelivered(c.Request.Context(), ch.orderEscrowContract(order), services.GenerateOrderID(order.ID))
+	if err != nil {
+		log.Printf("[checkout] delivery read order=%s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify delivery — try again later")
+		return false, false
+	}
+	return d, true
+}
+
 // PrepareDeliver handles POST /api/orders/:id/prepare-deliver. The seller signs
 // markDelivered, then sends the hash to MarkDelivered.
 func (ch *CheckoutHandler) PrepareDeliver(c *gin.Context) {
@@ -2370,6 +2386,17 @@ func (ch *CheckoutHandler) PrepareDeliver(c *gin.Context) {
 
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
+		return
+	}
+
+	// A markDelivered that landed while the earlier /deliver call failed would
+	// make a second one revert; tell the app the chain already has it.
+	delivered, ok := ch.deliveredOnChain(c, &order)
+	if !ok {
+		return
+	}
+	if delivered {
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Delivery is already recorded on-chain.", "delivery_on_chain")
 		return
 	}
 
@@ -2435,13 +2462,22 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 	}
 
 	if !order.IsSpendableMCGP() {
-		if req.TxHash == "" {
-			utils.ErrorResponseWithCode(c, http.StatusBadRequest,
-				"Sign the delivery transaction first — update the app and try again.", "delivery_tx_required")
-			return
-		}
-		if _, ok := ch.requireOrderEvent(c, &order, req.TxHash, "DeliveryMarked"); !ok {
-			return
+		if req.TxHash != "" {
+			if _, ok := ch.requireOrderEvent(c, &order, req.TxHash, "DeliveryMarked"); !ok {
+				return
+			}
+		} else {
+			// A retry after the transaction landed has no hash to show: the
+			// escrow's own flag is the proof.
+			delivered, ok := ch.deliveredOnChain(c, &order)
+			if !ok {
+				return
+			}
+			if !delivered {
+				utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+					"Sign the delivery transaction first — update the app and try again.", "delivery_tx_required")
+				return
+			}
 		}
 	}
 

@@ -252,6 +252,8 @@ const MerchantOrderDetail = () => {
   const signDelivery = async (target: Order): Promise<string | undefined> => {
     if (isSpendableOrder(target)) return undefined;
     const prep = await prepareDeliver(target.id);
+    // An earlier attempt already put it on-chain; the server accepts that as proof.
+    if (prep.code === 'delivery_on_chain') return undefined;
     if (!prep.success || !prep.data?.deliverTx) {
       throw new Error(prep.message || 'Failed to prepare delivery');
     }
