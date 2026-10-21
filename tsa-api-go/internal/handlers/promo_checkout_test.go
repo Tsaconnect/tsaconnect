@@ -17,12 +17,12 @@ import (
 
 // listingPriceWei runs a one-item checkout for buyer and returns what the
 // buyer is charged for the item: productAmount + platformFee.
-func listingPriceWei(t *testing.T, db *gorm.DB, buyer, seller *models.User, product *models.Product) *big.Int {
+func listingPriceWei(t *testing.T, db *gorm.DB, buyer, seller *models.User, product *models.Product, qty int) *big.Int {
 	t.Helper()
 	ch := setupCheckoutHandler(t)
 	createTestCart(t, db, buyer.ID, []models.CartItem{{
 		ID: uuid.New(), Product: product.ID, Seller: seller.ID,
-		Quantity: 1, Price: product.Price, AddedAt: time.Now(),
+		Quantity: qty, Price: product.Price, AddedAt: time.Now(),
 	}})
 
 	w := httptest.NewRecorder()
@@ -58,7 +58,7 @@ func TestCheckout_ChargesPromoPriceOnlyOnceUnlocked(t *testing.T) {
 	db := setupCheckoutTestDB(t)
 	if err := db.Exec(`CREATE TABLE IF NOT EXISTS promo_claims (
 		id TEXT PRIMARY KEY, product_id TEXT NOT NULL, user_id TEXT NOT NULL,
-		promo_version INTEGER NOT NULL, claimed_at DATETIME NOT NULL, expires_at DATETIME)`).Error; err != nil {
+		promo_version INTEGER NOT NULL, claimed_at DATETIME NOT NULL, expires_at DATETIME, order_id TEXT)`).Error; err != nil {
 		t.Fatal(err)
 	}
 	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
@@ -69,13 +69,13 @@ func TestCheckout_ChargesPromoPriceOnlyOnceUnlocked(t *testing.T) {
 	})
 
 	full := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
-	fullPrice := listingPriceWei(t, db, full, seller, product)
+	fullPrice := listingPriceWei(t, db, full, seller, product, 1)
 
 	// Claimed, but no verified referral yet: still full price.
 	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	db.Exec(`INSERT INTO promo_claims (id, product_id, user_id, promo_version, claimed_at) VALUES (?,?,?,?,?)`,
 		uuid.NewString(), product.ID.String(), buyer.ID.String(), 0, time.Now().Add(-time.Hour))
-	if got := listingPriceWei(t, db, buyer, seller, product); got.Cmp(fullPrice) != 0 {
+	if got := listingPriceWei(t, db, buyer, seller, product, 1); got.Cmp(fullPrice) != 0 {
 		t.Fatalf("locked buyer paid %s, want full %s", got, fullPrice)
 	}
 
@@ -83,10 +83,16 @@ func TestCheckout_ChargesPromoPriceOnlyOnceUnlocked(t *testing.T) {
 	ref := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	db.Exec(`UPDATE users SET referred_by = ?, verification_status = ?, created_at = ? WHERE id = ?`,
 		buyer.ID.String(), models.VerificationStatusVerified, time.Now(), ref.ID.String())
-	got := listingPriceWei(t, db, buyer, seller, product)
-	want := new(big.Int).Div(fullPrice, big.NewInt(10))
+	// Two units: only ONE is discounted, so 1/10 + 1 units' worth.
+	got := listingPriceWei(t, db, buyer, seller, product, 2)
+	want := new(big.Int).Add(fullPrice, new(big.Int).Div(fullPrice, big.NewInt(10)))
 	if diff := new(big.Int).Abs(new(big.Int).Sub(got, want)); diff.Cmp(big.NewInt(10)) > 0 {
-		t.Fatalf("unlocked buyer paid %s, want ~%s (full %s)", got, want, fullPrice)
+		t.Fatalf("unlocked buyer paid %s for 2 units, want ~%s (full unit %s)", got, want, fullPrice)
+	}
+
+	// The order spent the claim: the next purchase is full price again.
+	if again := listingPriceWei(t, db, buyer, seller, product, 1); again.Cmp(fullPrice) != 0 {
+		t.Fatalf("second purchase paid %s, want full %s", again, fullPrice)
 	}
 }
 

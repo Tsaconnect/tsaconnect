@@ -1,6 +1,6 @@
 // Buyer-side claim UI on a promoted listing's detail screen. Hidden for the
 // listing's owner. The server prices checkout; this only shows where the buyer
-// stands (unclaimed -> progress + countdown -> unlocked | expired).
+// stands (unclaimed -> progress + countdown -> unlocked -> used | expired).
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
@@ -153,9 +153,26 @@ export const PromoUnlockCard: React.FC<PromoUnlockCardProps> = ({ product, forma
       )}
 
       {phase === 'unlocked' && (
-        <Text variant="bodyMed" weight="600" color="success">
-          {`Discount unlocked - you pay ${format(product.promoPrice ?? product.price)}`}
-        </Text>
+        <>
+          <Text variant="bodyMed" weight="600" color="success">
+            {`Discount unlocked - you pay ${format(product.promoPrice ?? product.price)}`}
+          </Text>
+          <Text variant="bodySm" color="textSecondary">
+            Applies to one item per unlock
+          </Text>
+        </>
+      )}
+
+      {phase === 'used' && (
+        <>
+          <Text variant="bodyMed" weight="600">
+            {`Discount used - it covers one item. Bring ${required} new verified referrals to earn it again.`}
+          </Text>
+          <Text variant="bodySm" color="textSecondary" numeric>
+            {format(product.price)}
+          </Text>
+          <Button title="Start again" onPress={claim} loading={claiming} disabled={claiming} />
+        </>
       )}
 
       {phase === 'expired' && (

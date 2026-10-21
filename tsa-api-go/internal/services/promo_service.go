@@ -14,20 +14,23 @@ import (
 var (
 	ErrPromoInactive = errors.New("listing has no active promotion")
 	ErrPromoOwn      = errors.New("you can't claim the promotion on your own listing")
+	ErrPromoUsed     = errors.New("this promotion has already been used")
 )
 
 // PromoStatus is a buyer's progress on one listing's promotion.
 type PromoStatus struct {
-	Required  int        `json:"required"`
-	Current   int        `json:"current"`
-	Claimed   bool       `json:"claimed"`
+	Required int  `json:"required"`
+	Current  int  `json:"current"`
+	Claimed  bool `json:"claimed"`
+	// Redeemed: the claim already bought its one discounted item.
+	Redeemed  bool       `json:"redeemed"`
 	Expired   bool       `json:"expired"`
 	Unlocked  bool       `json:"unlocked"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 // PromoService decides whether a buyer has earned a listing's promo price.
-// Only the server decides: checkout asks PriceFactor and never trusts a price
+// Only the server decides: checkout asks Pricing and never trusts a price
 // the client displayed.
 type PromoService struct {
 	db    *gorm.DB
@@ -56,7 +59,18 @@ func (s *PromoService) Claim(ctx context.Context, p *models.Product, userID uuid
 		exp := now.Add(time.Duration(*p.PromoCountdownSeconds) * time.Second)
 		claim.ExpiresAt = &exp
 	}
-	err := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&claim).Error
+	db := s.db.WithContext(ctx)
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&claim).Error; err != nil {
+		return PromoStatus{}, err
+	}
+	// A claim that already bought its discounted item starts over: a fresh
+	// window, so the referrals that earned the first purchase never count twice.
+	// An unredeemed claim (expired or not) is left alone; tapping again never
+	// restarts the clock.
+	err := db.Model(&models.PromoClaim{}).
+		Where("product_id = ? AND user_id = ? AND promo_version = ?", p.ID, userID, p.PromoVersion).
+		Where("order_id IN (SELECT id FROM orders WHERE status <> ?)", models.OrderStatusCancelled).
+		Updates(map[string]interface{}{"claimed_at": now, "expires_at": claim.ExpiresAt, "order_id": nil}).Error
 	if err != nil {
 		return PromoStatus{}, err
 	}
@@ -81,25 +95,63 @@ func (s *PromoService) Status(ctx context.Context, p *models.Product, userID uui
 	}
 	st.Claimed = true
 	st.ExpiresAt = claim.ExpiresAt
+	if claim.OrderID != nil {
+		var live int64
+		if err := s.db.WithContext(ctx).Table("orders").
+			Where("id = ? AND status <> ?", *claim.OrderID, models.OrderStatusCancelled).
+			Count(&live).Error; err != nil {
+			return st, err
+		}
+		st.Redeemed = live > 0
+	}
 	st.Expired = claim.ExpiresAt != nil && time.Now().After(*claim.ExpiresAt)
 	st.Current, err = s.graph.CountVerifiedDirectReferralsSince(ctx, userID, claim.ClaimedAt)
 	if err != nil {
 		return st, err
 	}
-	st.Unlocked = !st.Expired && st.Current >= st.Required
+	st.Unlocked = !st.Redeemed && !st.Expired && st.Current >= st.Required
 	return st, nil
 }
 
-// PriceFactor is the multiplier checkout applies to the listing price: the
-// promo price over the original when the buyer has unlocked it, else 1 (full
-// price, also after the countdown ran out).
-func (s *PromoService) PriceFactor(ctx context.Context, p *models.Product, userID uuid.UUID) (float64, error) {
+// PromoPricing is what checkout applies for one buyer and listing.
+type PromoPricing struct {
+	// Factor multiplies the unit price: promo price over original once unlocked,
+	// else 1 (full price, also after the countdown ran out or the claim was used).
+	Factor float64
+	// ClaimID is set only when Factor discounts; the order must Redeem it.
+	ClaimID *uuid.UUID
+}
+
+func (s *PromoService) Pricing(ctx context.Context, p *models.Product, userID uuid.UUID) (PromoPricing, error) {
+	full := PromoPricing{Factor: 1}
 	if !p.PromoActive() {
-		return 1, nil
+		return full, nil
 	}
 	st, err := s.Status(ctx, p, userID)
 	if err != nil || !st.Unlocked {
-		return 1, err
+		return full, err
 	}
-	return p.PromoPrice / p.Price, nil
+	var claim models.PromoClaim
+	if err := s.db.WithContext(ctx).
+		Where("product_id = ? AND user_id = ? AND promo_version = ?", p.ID, userID, p.PromoVersion).
+		First(&claim).Error; err != nil {
+		return full, err
+	}
+	return PromoPricing{Factor: p.PromoPrice / p.Price, ClaimID: &claim.ID}, nil
+}
+
+// Redeem spends the claim on an order, in the order's own transaction. The
+// conditional update is the guard: two orders racing on one claim cannot both
+// win, and a claim whose order was cancelled can be spent again.
+func (s *PromoService) Redeem(ctx context.Context, claimID, orderID uuid.UUID) error {
+	res := s.db.WithContext(ctx).Exec(
+		`UPDATE promo_claims SET order_id = ? WHERE id = ? AND (order_id IS NULL OR order_id IN (SELECT id FROM orders WHERE status = ?))`,
+		orderID, claimID, models.OrderStatusCancelled)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrPromoUsed
+	}
+	return nil
 }

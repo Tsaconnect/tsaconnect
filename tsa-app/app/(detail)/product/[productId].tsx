@@ -23,6 +23,7 @@ import { useLocalSearchParams, useRouter, Stack, useFocusEffect } from 'expo-rou
 import { goBack } from '@/utils/back';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import api, { Product, PromoStatus } from '@/components/services/api';
+import { promoLineTotal } from '@/utils/promo';
 import { PromoPrice } from '@/components/promotion/PromoPrice';
 import { PromoUnlockCard } from '@/components/promotion/PromoUnlockCard';
 import { cartService, AddToCartRequest, CartItem } from '@/components/services/cart';
@@ -614,7 +615,7 @@ export default function ProductDetailsScreen() {
               product={product}
               format={formatPrice}
               size="detail"
-              fullPrice={!!promoStatus?.expired && !promoStatus.unlocked}
+              fullPrice={!!(promoStatus?.expired || promoStatus?.redeemed) && !promoStatus.unlocked}
             />
             <View
               style={{
@@ -887,7 +888,7 @@ export default function ProductDetailsScreen() {
               />
               <Button
                 title="Buy now"
-                subtitle={formatPrice((promoStatus?.unlocked && product.promoPrice ? product.promoPrice : product.price) * quantity)}
+                subtitle={formatPrice(promoLineTotal(product.price, product.promoPrice, quantity, !!promoStatus?.unlocked))}
                 onPress={handleBuyNow}
                 loading={pendingAction === 'buy'}
                 disabled={pendingAction !== null}

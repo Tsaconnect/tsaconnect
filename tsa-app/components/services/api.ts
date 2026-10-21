@@ -230,6 +230,8 @@ export interface PromoStatus {
   claimed: boolean;
   expired: boolean;
   unlocked: boolean;
+  /** Single-use claim already spent on an order; bring new referrals to earn it again. */
+  redeemed: boolean;
   expiresAt?: string;
 }
 

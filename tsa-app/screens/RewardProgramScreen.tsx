@@ -1,6 +1,6 @@
 // screens/RewardProgramScreen.tsx
 //
-// The "Reward" drawer hub: Signup form | Onboarding form | Automated earnings.
+// The "Reward" drawer hub: Signup form | Onboarding form | Promotions Arena | Automated earnings.
 //
 // DISTINCT from screens/RewardsScreen.tsx (route /rewards), which is the TP
 // ladder + on-chain MCGP claim dashboard. This screen is programme ENROLMENT.
@@ -26,6 +26,7 @@ import {
   type RewardClaimStatus,
   type RewardFormState,
 } from '@/services/rewardProgramApi';
+import PromotionsArenaSection from '@/components/promotion/PromotionsArenaSection';
 
 // StatusPill's kinds are trade/ad/dispute only, so claim statuses map to Badge
 // colours directly.
@@ -221,6 +222,8 @@ const RewardProgramScreen = () => {
             data?.onboarding,
             '/reward-program/onboarding',
           )}
+
+          <PromotionsArenaSection />
 
           <Card padding="lg">
             <Text variant="title3" weight="700" style={{ marginBottom: spacing.sm }}>

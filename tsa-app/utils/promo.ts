@@ -24,11 +24,26 @@ export function formatMmSs(ms: number): string {
   return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
 }
 
-export type PromoPhase = 'unclaimed' | 'progress' | 'unlocked' | 'expired';
+export type PromoPhase = 'unclaimed' | 'progress' | 'unlocked' | 'used' | 'expired';
 
 export function promoPhase(s: PromoStatus | null | undefined): PromoPhase {
   if (!s || !s.claimed) return 'unclaimed';
   if (s.unlocked) return 'unlocked';
+  if (s.redeemed) return 'used';
   if (s.expired) return 'expired';
   return 'progress';
+}
+
+/**
+ * Buy-now total. An unlocked claim discounts ONE unit; the rest are full price
+ * (same as the server).
+ */
+export function promoLineTotal(
+  price: number,
+  promoPrice: number | undefined,
+  quantity: number,
+  unlocked: boolean,
+): number {
+  if (!unlocked || !promoPrice || quantity < 1) return price * quantity;
+  return (quantity - 1) * price + promoPrice;
 }

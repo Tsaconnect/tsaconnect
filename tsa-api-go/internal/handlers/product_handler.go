@@ -218,6 +218,9 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	shippingInternational, _ := strconv.ParseFloat(c.PostForm("shippingInternational"), 64)
 
 	promo, _, promoErr := promoFormTerms(c, price)
+	if promoErr == "" && promo.Enabled && productType != models.ProductTypeProduct {
+		promoErr = promoProductsOnly
+	}
 	if promoErr != "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, promoErr)
 		return
@@ -600,6 +603,9 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 	}
 	if promo, present, msg := promoFormTerms(c, effectivePrice); msg != "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, msg)
+		return
+	} else if present && promo.Enabled && product.Type != models.ProductTypeProduct {
+		utils.ErrorResponse(c, http.StatusBadRequest, promoProductsOnly)
 		return
 	} else if present {
 		updates["promo_enabled"] = promo.Enabled

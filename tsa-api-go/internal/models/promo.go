@@ -19,13 +19,19 @@ type PromoClaim struct {
 	PromoVersion int        `gorm:"not null;uniqueIndex:idx_promo_claim_unique" json:"promoVersion"`
 	ClaimedAt    time.Time  `gorm:"not null" json:"claimedAt"`
 	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	// OrderID is the order that used this claim. A claim buys one discounted
+	// item; it is free again only if that order was cancelled.
+	OrderID *uuid.UUID `gorm:"type:uuid" json:"-"`
 }
 
 func (PromoClaim) TableName() string { return "promo_claims" }
 
 // PromoActive reports whether the listing currently offers a promotion.
+// Products only: a service's charge (menu items, booking fare, access fee) is
+// not derived from Price, so a promo price has nothing sound to scale.
 func (p *Product) PromoActive() bool {
 	return p.PromoEnabled &&
+		p.Type == ProductTypeProduct &&
 		p.Status == ProductStatusActive &&
 		p.PromoRequiredReferrals >= 1 &&
 		p.PromoPrice > 0 && p.PromoPrice < p.Price

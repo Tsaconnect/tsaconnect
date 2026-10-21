@@ -41,6 +41,7 @@ import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { PromoPrice } from '@/components/promotion/PromoPrice';
 import { PromoUnlockCard } from '@/components/promotion/PromoUnlockCard';
+import { promoLineTotal, promoPhase } from '@/utils/promo';
 
 const fmt = (n: number) => `$${n}`;
 const promoted = {
@@ -78,7 +79,7 @@ describe('PromoUnlockCard', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
-    mockStatus.mockResolvedValue({ success: true, data: { required: 5, current: 0, claimed: false, expired: false, unlocked: false } });
+    mockStatus.mockResolvedValue({ success: true, data: { required: 5, current: 0, claimed: false, expired: false, unlocked: false, redeemed: false } });
   });
   afterEach(() => jest.useRealTimers());
 
@@ -93,7 +94,7 @@ describe('PromoUnlockCard', () => {
     const r = await mount();
     expect(texts(r)).toContain('bring 5 verified referrals to unlock 90% off');
     mockClaim.mockResolvedValue({ success: true, data: {
-      required: 5, current: 3, claimed: true, expired: false, unlocked: false,
+      required: 5, current: 3, claimed: true, expired: false, unlocked: false, redeemed: false,
       expiresAt: new Date(Date.now() + 125000).toISOString() } });
     await act(async () => { r.root.findAllByProps({ accessibilityLabel: 'Unlock discount' })[0].props.onPress(); });
     expect(mockClaim).toHaveBeenCalledWith('p1');
@@ -106,18 +107,45 @@ describe('PromoUnlockCard', () => {
   });
 
   it('shows unlocked and expired states', async () => {
-    mockStatus.mockResolvedValue({ success: true, data: { required: 5, current: 5, claimed: true, expired: false, unlocked: true } });
+    mockStatus.mockResolvedValue({ success: true, data: { required: 5, current: 5, claimed: true, expired: false, unlocked: true, redeemed: false } });
     const unlocked = await mount();
     expect(texts(unlocked)).toContain('Discount unlocked - you pay $10');
-    mockStatus.mockResolvedValue({ success: true, data: { required: 5, current: 1, claimed: true, expired: true, unlocked: false } });
+    expect(texts(unlocked)).toContain('Applies to one item per unlock');
+    mockStatus.mockResolvedValue({ success: true, data: { required: 5, current: 1, claimed: true, expired: true, unlocked: false, redeemed: false } });
     const expired = await mount();
     expect(texts(expired)).toContain("Time's up - this item is now full price");
     expect(texts(expired)).toContain('$100');
+  });
+
+  it('shows the used state at full price and restarts via Start again', async () => {
+    mockStatus.mockResolvedValue({ success: true, data: { required: 5, current: 5, claimed: true, expired: false, unlocked: false, redeemed: true } });
+    const r = await mount();
+    expect(texts(r)).toContain('Discount used - it covers one item. Bring 5 new verified referrals to earn it again.');
+    expect(texts(r)).toContain('$100');
+    mockClaim.mockResolvedValue({ success: true, data: { required: 5, current: 0, claimed: true, expired: false, unlocked: false, redeemed: false } });
+    await act(async () => { r.root.findAllByProps({ accessibilityLabel: 'Start again' })[0].props.onPress(); });
+    expect(mockClaim).toHaveBeenCalledWith('p1');
+    expect(texts(r)).toContain('0 / 5 verified referrals');
   });
 
   it('is hidden for the owner and for non-promoted listings', async () => {
     expect((await mount({ ...promoted, userId: 'buyer' })).toJSON()).toBeNull();
     expect((await mount({ ...promoted, promoEnabled: false })).toJSON()).toBeNull();
     expect(mockStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe('promo helpers', () => {
+  it('maps redeemed claims to the used phase', () => {
+    const base = { required: 5, current: 5, claimed: true, expired: false, unlocked: false, redeemed: true };
+    expect(promoPhase(base)).toBe('used');
+    expect(promoPhase({ ...base, redeemed: false, expired: true })).toBe('expired');
+  });
+
+  it('prices one unit at promo and the rest at full price', () => {
+    expect(promoLineTotal(100, 10, 3, true)).toBe(210);
+    expect(promoLineTotal(100, 10, 1, true)).toBe(10);
+    expect(promoLineTotal(100, 10, 3, false)).toBe(300);
+    expect(promoLineTotal(100, undefined, 2, true)).toBe(200);
   });
 });
