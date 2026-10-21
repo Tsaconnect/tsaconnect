@@ -456,19 +456,37 @@ export async function markOrderShipped(
   }
 }
 
+export async function prepareDeliver(
+  orderId: string
+): Promise<ApiResponse<{ deliverTx: UnsignedTx }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/prepare-deliver`, {
+      method: 'POST',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Prepare deliver error:', error);
+    return { success: false, message: error.message || 'Failed to prepare delivery' };
+  }
+}
+
 /**
- * Seller marks an order as delivered. Requires a delivery proof URL.
+ * Seller marks an order as delivered. Requires a delivery proof URL for
+ * products, and the seller's signed markDelivered tx hash for escrow orders.
  */
 export async function markOrderDelivered(
   orderId: string,
-  deliveryProofUrl: string
+  deliveryProofUrl: string,
+  txHash?: string
 ): Promise<ApiResponse<Order>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/orders/${orderId}/deliver`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ deliveryProofUrl }),
+      body: JSON.stringify({ deliveryProofUrl, txHash }),
     });
     return await handleResponse(response);
   } catch (error: any) {

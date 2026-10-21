@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -941,8 +942,10 @@ func TestMarkDelivered_OnlySellerCanDeliver(t *testing.T) {
 
 	ch.MarkDelivered(c2)
 
-	if w2.Code != http.StatusOK {
-		t.Errorf("expected %d for seller delivering, got %d: %s", http.StatusOK, w2.Code, w2.Body.String())
+	// An escrow order is delivered only with the seller's on-chain markDelivered;
+	// without it the buyer's refund would still be instant and full.
+	if w2.Code != http.StatusBadRequest || !strings.Contains(w2.Body.String(), "delivery_tx_required") {
+		t.Errorf("expected delivery_tx_required for a seller delivering without a tx, got %d: %s", w2.Code, w2.Body.String())
 	}
 }
 

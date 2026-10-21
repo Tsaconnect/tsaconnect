@@ -105,3 +105,16 @@ func TestOrderMatchesEscrow(t *testing.T) {
 		t.Error("an unknown seller, token or escrow record was accepted")
 	}
 }
+
+// A delivery proof must be this order's DeliveryMarked, not its cancel.
+func TestFindOrderEvent_DeliveryMarked(t *testing.T) {
+	var mine [32]byte
+	mine[0] = 1
+	escrow := common.HexToAddress(testEscrow)
+	if _, err := findOrderEvent([]*types.Log{escrowEventLog(t, "OrderCancelled", mine, nil)}, escrow, "DeliveryMarked", mine); !errors.Is(err, ErrOrderEventNotFound) {
+		t.Fatalf("a cancel was accepted as a delivery: %v", err)
+	}
+	if _, err := findOrderEvent([]*types.Log{escrowEventLog(t, "DeliveryMarked", mine, nil)}, escrow, "DeliveryMarked", mine); err != nil {
+		t.Fatalf("this order's delivery was refused: %v", err)
+	}
+}

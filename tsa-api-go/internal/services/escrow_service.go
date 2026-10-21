@@ -38,6 +38,7 @@ const productEscrowABI = `[
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"ReceiptConfirmed","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"OrderCancelled","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"DeliveryMarked","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":false,"name":"refundedToBuyer","type":"bool"}],"name":"DisputeResolved","type":"event"}
 ]`
 
@@ -165,6 +166,16 @@ func (s *EscrowService) PrepareRequestRefund(orderId [32]byte, buyer, escrowAddr
 		return nil, fmt.Errorf("failed to pack requestRefund: %w", err)
 	}
 	return s.buildUnsignedTx(buyer, escrowAddr, data)
+}
+
+// PrepareMarkDelivered encodes the markDelivered call against the order's escrow contract.
+// Until it lands on-chain the buyer's requestRefund is an instant full refund.
+func (s *EscrowService) PrepareMarkDelivered(orderId [32]byte, seller, escrowAddr string) ([]byte, error) {
+	data, err := parsedEscrowABI.Pack("markDelivered", orderId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack markDelivered: %w", err)
+	}
+	return s.buildUnsignedTx(seller, escrowAddr, data)
 }
 
 // PrepareCancelOrder encodes the cancelOrder call against the order's escrow contract.

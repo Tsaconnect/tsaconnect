@@ -30,6 +30,8 @@ import {
   getOrderById,
   markOrderShipped,
   markOrderDelivered,
+  prepareDeliver,
+  isSpendableOrder,
   approveRefund,
   rejectRefund,
   approveCancelOrder,
@@ -228,7 +230,7 @@ const MerchantOrderDetail = () => {
         return;
       }
 
-      const result = await markOrderDelivered(order.id, proofUrl);
+      const result = await markOrderDelivered(order.id, proofUrl, await signDelivery(order));
       setActionLoading(false);
       if (result.success) {
         setDeliverModalVisible(false);
@@ -245,12 +247,28 @@ const MerchantOrderDetail = () => {
     }
   };
 
+  // Escrow orders: the seller signs markDelivered, otherwise the buyer's refund
+  // stays instant and full. Spendable MCGP orders have no escrow tx.
+  const signDelivery = async (target: Order): Promise<string | undefined> => {
+    if (isSpendableOrder(target)) return undefined;
+    const prep = await prepareDeliver(target.id);
+    if (!prep.success || !prep.data?.deliverTx) {
+      throw new Error(prep.message || 'Failed to prepare delivery');
+    }
+    return signAndBroadcast(prep.data.deliverTx, 'sonic', MARKETPLACE_NETWORK);
+  };
+
   // Service orders have no physical delivery proof — the backend makes the
   // proof optional for services. Mark rendered with no proof, no image modal.
   const handleMarkRendered = async () => {
     if (!order) return;
     setActionLoading(true);
-    const result = await markOrderDelivered(order.id, '');
+    let result;
+    try {
+      result = await markOrderDelivered(order.id, '', await signDelivery(order));
+    } catch (err: any) {
+      result = { success: false, message: err.message };
+    }
     setActionLoading(false);
     if (result.success) {
       Alert.alert('Service Rendered', 'Marked as rendered. The buyer can now confirm completion.');

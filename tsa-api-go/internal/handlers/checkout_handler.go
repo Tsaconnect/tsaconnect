@@ -897,6 +897,10 @@ type deliverRequest struct {
 	// and optional for SERVICE orders ("mark service rendered" — there is nothing
 	// to ship). Enforced per-kind in MarkDelivered rather than via binding.
 	DeliveryProofURL string `json:"deliveryProofUrl"`
+	// TxHash is the seller's markDelivered transaction. Required for escrow
+	// orders: the contract only turns a buyer's refund into a dispute once
+	// delivery is on-chain.
+	TxHash string `json:"txHash"`
 }
 
 type submitConfirmRequest struct {
@@ -2324,6 +2328,68 @@ func (ch *CheckoutHandler) MarkShipped(c *gin.Context) {
 	})
 }
 
+// PrepareDeliver handles POST /api/orders/:id/prepare-deliver. The seller signs
+// markDelivered, then sends the hash to MarkDelivered.
+func (ch *CheckoutHandler) PrepareDeliver(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can mark as delivered")
+		return
+	}
+
+	if refuseSpendableOnChainStep(c, &order, "Mark it delivered directly.") {
+		return
+	}
+
+	if order.DisputedAt != nil {
+		utils.ErrorResponse(c, http.StatusConflict, "Order is under dispute. Contact admin to resolve.")
+		return
+	}
+
+	if !isValidTransitionForKind(order.Status, models.OrderStatusDelivered, order.Kind) {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as delivered: order is in %s status", order.Status))
+		return
+	}
+
+	if user.WalletAddress == "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
+		return
+	}
+
+	txBytes, err := ch.EscrowService.PrepareMarkDelivered(services.GenerateOrderID(order.ID), user.WalletAddress, ch.orderEscrowContract(&order))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare delivery transaction")
+		return
+	}
+
+	var deliverTx map[string]interface{}
+	if err := json.Unmarshal(txBytes, &deliverTx); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode delivery transaction")
+		return
+	}
+
+	utils.SuccessResponse(c, http.StatusOK, "Delivery transaction prepared", gin.H{
+		"deliverTx": deliverTx,
+	})
+}
+
 // MarkDelivered handles POST /api/orders/:id/deliver
 func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -2366,6 +2432,17 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 	if !isValidTransitionForKind(order.Status, models.OrderStatusDelivered, order.Kind) {
 		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot mark as delivered: order is in %s status", order.Status))
 		return
+	}
+
+	if !order.IsSpendableMCGP() {
+		if req.TxHash == "" {
+			utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+				"Sign the delivery transaction first — update the app and try again.", "delivery_tx_required")
+			return
+		}
+		if _, ok := ch.requireOrderEvent(c, &order, req.TxHash, "DeliveryMarked"); !ok {
+			return
+		}
 	}
 
 	now := time.Now()
