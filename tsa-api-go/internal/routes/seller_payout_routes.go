@@ -21,5 +21,6 @@ func RegisterSellerPayout(router *gin.Engine, cfg *config.Config, h *handlers.Se
 	limit := middleware.RateLimiterBy(20, time.Minute, perUserRateKey)
 	g.GET("/payout-method", h.Get)
 	g.PUT("/payout-method", limit, h.Set)
+	g.POST("/payout-method/:id/confirm", limit, h.Confirm)
 	g.DELETE("/payout-method", limit, h.Clear)
 }

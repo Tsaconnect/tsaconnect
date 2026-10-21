@@ -69,9 +69,11 @@ type setSellerPayoutRequest struct {
 	InstitutionCode string `json:"institutionCode" binding:"required"`
 	AccountNumber   string `json:"accountNumber" binding:"required"`
 	AccountName     string `json:"accountName"`
+	Password        string `json:"password"`
 }
 
-// PUT /api/seller/payout-method
+// PUT /api/seller/payout-method — validates the destination, then emails a code
+// (202). POST /api/seller/payout-method/:id/confirm saves it.
 func (h *SellerPayoutHandler) Set(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -83,10 +85,37 @@ func (h *SellerPayoutHandler) Set(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Choose a bank or provider and enter the account number")
 		return
 	}
-	m, err := h.svc.Set(c.Request.Context(), user.ID, services.SetSellerPayoutInput{
+	if !requireAccountPassword(c, h.events, user, req.Password) {
+		return
+	}
+	pending, err := h.svc.Request(c.Request.Context(), user.ID, services.SetSellerPayoutInput{
 		Currency: req.Currency, InstitutionCode: req.InstitutionCode,
 		AccountNumber: req.AccountNumber, AccountName: req.AccountName,
 	})
+	if err != nil {
+		sellerPayoutFail(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"success": true, "message": "We've emailed you a code to confirm this change",
+		"data": gin.H{"confirmation": pending}})
+}
+
+// POST /api/seller/payout-method/:id/confirm {code}
+func (h *SellerPayoutHandler) Confirm(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	var req struct {
+		Code string `json:"code" binding:"required"`
+	}
+	if err != nil || c.ShouldBindJSON(&req) != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Enter the code we emailed you")
+		return
+	}
+	m, err := h.svc.Confirm(c.Request.Context(), user.ID, id, req.Code)
 	if err != nil {
 		sellerPayoutFail(c, err)
 		return
@@ -131,6 +160,16 @@ func sellerPayoutFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "We couldn't verify that account. Check the details and try again.", "account_unverifiable")
 	case errors.Is(err, services.ErrPaycrestAccountShape):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "account_shape")
+	case errors.Is(err, services.ErrSellerPayoutKYC):
+		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), "kyc_verification_required")
+	case errors.Is(err, services.ErrSellerPayoutUnverified):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "account_unverified")
+	case errors.Is(err, services.ErrSellerPayoutCode):
+		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, err.Error(), "code_unavailable")
+	case errors.Is(err, services.ErrSellerPayoutBadCode):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "code_invalid")
+	case errors.Is(err, services.ErrSellerPayoutNoPending):
+		utils.ErrorResponseWithCode(c, http.StatusGone, err.Error(), "no_pending_change")
 	case errors.Is(err, services.ErrSellerPayoutUnavailable):
 		log.Printf("[seller-payout] unavailable: %v", err)
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable, "Payout setup isn't available right now — try again later", "payout_unavailable")

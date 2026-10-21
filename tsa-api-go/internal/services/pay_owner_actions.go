@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,14 +149,10 @@ func (s *PayMerchantService) requestOwnerAction(ctx context.Context, ownerID uui
 	if s.mailer == nil {
 		return nil, ErrPayCodeUnavailable
 	}
-	var owner struct {
-		Email sql.NullString
-		Name  sql.NullString
-	}
-	if err := s.db.WithContext(ctx).Table("users").Select("email", "name").Where("id = ?", ownerID).Limit(1).Scan(&owner).Error; err != nil {
+	email, ownerName, err := UserContact(ctx, s.db, ownerID)
+	if err != nil {
 		return nil, err
 	}
-	email := strings.TrimSpace(owner.Email.String)
 	if email == "" {
 		return nil, ErrPayCodeUnavailable
 	}
@@ -178,7 +173,7 @@ func (s *PayMerchantService) requestOwnerAction(ctx context.Context, ownerID uui
 	message := fmt.Sprintf("Your code to %s for %s is %s. It expires in %d minutes.\n\n"+
 		"If you didn't ask for this, don't share the code: change your password and contact support.",
 		doing, m.BusinessName, code, int(EmailCodeTTL/time.Minute))
-	if err := s.mailer.Send(email, owner.Name.String, "Your TSA Pay confirmation code", "Confirm this change", message, "", ""); err != nil {
+	if err := s.mailer.Send(email, ownerName, "Your TSA Pay confirmation code", "Confirm this change", message, "", ""); err != nil {
 		log.Printf("[tsa-pay] %s code for merchant %s could not be sent: %v", kind, m.ID, err)
 		s.dropOwnerAction(ctx, action.ID)
 		return nil, ErrPayCodeUnavailable

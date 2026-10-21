@@ -2049,7 +2049,18 @@ func main() {
 	routes.RegisterSignerAdmin(router, cfg, &handlers.SignerAdminHandler{DB: config.DB, Registry: blockchainService.Signers()})
 	// Unavailable (503 payout_unavailable) while Paycrest is off: *PaycrestDirectory
 	// answers ErrPaycrestDisabled on a nil receiver.
-	sellerPayoutHandler := handlers.NewSellerPayoutHandler(services.NewSellerPayoutService(config.DB, paycrestDir, bankDirectory), eventBus)
+	// A nil *EmailService inside the interface would be non-nil: pass none at all.
+	var sellerPayoutMailer services.CodeMailer
+	if payCodeMailer != nil {
+		sellerPayoutMailer = payCodeMailer
+	}
+	var sellerPayoutDir interface {
+		Institutions(ctx context.Context, fiat string) ([]services.PaycrestPayoutOption, error)
+	}
+	if paycrestDir != nil {
+		sellerPayoutDir = paycrestDir
+	}
+	sellerPayoutHandler := handlers.NewSellerPayoutHandler(services.NewSellerPayoutService(config.DB, sellerPayoutDir, bankDirectory, sellerPayoutMailer), eventBus)
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
 	routes.RegisterSellerPayout(router, cfg, sellerPayoutHandler)
 

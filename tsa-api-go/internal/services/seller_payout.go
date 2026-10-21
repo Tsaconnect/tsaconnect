@@ -2,9 +2,12 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -16,6 +19,13 @@ var (
 	ErrSellerPayoutInstitution = errors.New("that bank or mobile money provider is not supported for payouts")
 	ErrSellerPayoutAccount     = errors.New("the account could not be verified")
 	ErrSellerPayoutUnavailable = errors.New("payout destinations are unavailable right now")
+	// Only an account whose holder name the provider confirmed can be paid:
+	// a typed name is the seller's word, and TSA would be the sender.
+	ErrSellerPayoutUnverified = errors.New("that account's name can't be verified, so it can't receive payouts yet")
+	ErrSellerPayoutKYC        = errors.New("verify your identity before adding a payout account")
+	ErrSellerPayoutCode       = errors.New("we couldn't send the confirmation code")
+	ErrSellerPayoutBadCode    = errors.New("that code is incorrect")
+	ErrSellerPayoutNoPending  = errors.New("there is no change waiting for that code")
 )
 
 // sellerPayoutInstitutions is the slice of PaycrestDirectory this needs.
@@ -29,10 +39,22 @@ type SellerPayoutService struct {
 	db    *gorm.DB
 	dir   sellerPayoutInstitutions
 	banks BankDirectory // NGN name enquiry; may be nil
+	// mailer nil: a destination can't be confirmed, so none can be set.
+	mailer CodeMailer
+	kycOK  func(ctx context.Context, userID uuid.UUID) (bool, error)
+	now    func() time.Time
 }
 
-func NewSellerPayoutService(db *gorm.DB, dir sellerPayoutInstitutions, banks BankDirectory) *SellerPayoutService {
-	return &SellerPayoutService{db: db, dir: dir, banks: banks}
+func NewSellerPayoutService(db *gorm.DB, dir sellerPayoutInstitutions, banks BankDirectory, mailer CodeMailer) *SellerPayoutService {
+	return &SellerPayoutService{db: db, dir: dir, banks: banks, mailer: mailer, now: time.Now,
+		kycOK: func(ctx context.Context, id uuid.UUID) (bool, error) { return IsKYCVerified(ctx, db, id) }}
+}
+
+// SellerPayoutPending says where the confirmation code went.
+type SellerPayoutPending struct {
+	ID        uuid.UUID `json:"id"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	SentTo    string    `json:"sentTo"`
 }
 
 // SellerPayout is a seller's resolved destination. Method is nil for a wallet.
@@ -64,8 +86,109 @@ type SetSellerPayoutInput struct {
 	AccountName string
 }
 
-// Set validates and stores the destination, replacing any earlier one.
-func (s *SellerPayoutService) Set(ctx context.Context, userID uuid.UUID, in SetSellerPayoutInput) (*models.SellerPayoutMethod, error) {
+// Request validates the destination and emails the seller a code; it is saved
+// only by Confirm. Nothing changes until then.
+func (s *SellerPayoutService) Request(ctx context.Context, userID uuid.UUID, in SetSellerPayoutInput) (*SellerPayoutPending, error) {
+	if s.mailer == nil {
+		return nil, ErrSellerPayoutCode
+	}
+	ok, err := s.kycOK(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSellerPayoutUnavailable, err)
+	}
+	if !ok {
+		return nil, ErrSellerPayoutKYC
+	}
+	row, err := s.validate(ctx, userID, in)
+	if err != nil {
+		return nil, err
+	}
+	email, name, err := UserContact(ctx, s.db, userID)
+	if err != nil {
+		return nil, err
+	}
+	if email == "" {
+		return nil, ErrSellerPayoutCode
+	}
+	body, err := json.Marshal(row)
+	if err != nil {
+		return nil, err
+	}
+	code, err := NewEmailCode()
+	if err != nil {
+		return nil, err
+	}
+	change := models.SellerPayoutChange{ID: uuid.New(), UserID: userID, Payload: string(body), ExpiresAt: s.now().Add(EmailCodeTTL)}
+	change.CodeHash = EmailCodeHash(change.ID, code)
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&models.SellerPayoutChange{}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&change).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	message := fmt.Sprintf("Your code to pay marketplace sales into %s (%s) is %s. It expires in %d minutes.\n\n"+
+		"If you didn't ask for this, don't share the code: change your password and contact support.",
+		row.InstitutionName, row.AccountName, code, int(EmailCodeTTL/time.Minute))
+	if err := s.mailer.Send(email, name, "Your payout confirmation code", "Confirm this change", message, "", ""); err != nil {
+		log.Printf("[seller-payout] code for user %s could not be sent: %v", userID, err)
+		s.db.WithContext(ctx).Where("id = ?", change.ID).Delete(&models.SellerPayoutChange{})
+		return nil, ErrSellerPayoutCode
+	}
+	return &SellerPayoutPending{ID: change.ID, ExpiresAt: change.ExpiresAt, SentTo: MaskEmail(email)}, nil
+}
+
+// Confirm saves the destination waiting behind code, replacing any earlier one.
+// The attempt is spent before the code is compared and the change is claimed
+// (deleted) before it is applied, so it applies at most once.
+func (s *SellerPayoutService) Confirm(ctx context.Context, userID, changeID uuid.UUID, code string) (*models.SellerPayoutMethod, error) {
+	var ch models.SellerPayoutChange
+	err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", changeID, userID).First(&ch).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrSellerPayoutNoPending
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !s.now().Before(ch.ExpiresAt) {
+		s.db.WithContext(ctx).Where("id = ?", ch.ID).Delete(&models.SellerPayoutChange{})
+		return nil, ErrSellerPayoutNoPending
+	}
+	outcome, err := RedeemEmailCode(ctx, s.db, &models.SellerPayoutChange{}, ch.ID, ch.Attempts, ch.CodeHash, code)
+	if err != nil {
+		return nil, err
+	}
+	switch outcome {
+	case EmailCodeClaimed:
+	case EmailCodeWrong:
+		return nil, ErrSellerPayoutBadCode
+	default:
+		return nil, ErrSellerPayoutNoPending
+	}
+	var row models.SellerPayoutMethod
+	if err := json.Unmarshal([]byte(ch.Payload), &row); err != nil {
+		return nil, err
+	}
+	row.ID, row.UserID = uuid.New(), userID
+	return s.save(ctx, row)
+}
+
+// validate checks the destination against the provider's directory and, for
+// an NGN bank, the bank's own name for the account. It stores nothing.
+func (s *SellerPayoutService) validate(ctx context.Context, userID uuid.UUID, in SetSellerPayoutInput) (*models.SellerPayoutMethod, error) {
+	row, err := s.build(ctx, userID, in)
+	if err != nil {
+		return nil, err
+	}
+	if !row.Verified {
+		return nil, ErrSellerPayoutUnverified
+	}
+	return row, nil
+}
+
+func (s *SellerPayoutService) build(ctx context.Context, userID uuid.UUID, in SetSellerPayoutInput) (*models.SellerPayoutMethod, error) {
 	if s.dir == nil {
 		return nil, ErrSellerPayoutUnavailable
 	}
@@ -114,12 +237,15 @@ func (s *SellerPayoutService) Set(ctx context.Context, userID uuid.UUID, in SetS
 		return nil, ErrSellerPayoutAccount
 	}
 
-	row := models.SellerPayoutMethod{
+	return &models.SellerPayoutMethod{
 		ID: uuid.New(), UserID: userID, Kind: inst.Type, Currency: fiat,
 		InstitutionCode: inst.Code, InstitutionName: inst.Name,
 		AccountNumber: account, AccountName: name, Verified: verified,
-	}
-	err = s.db.WithContext(ctx).Clauses(clause.OnConflict{
+	}, nil
+}
+
+func (s *SellerPayoutService) save(ctx context.Context, row models.SellerPayoutMethod) (*models.SellerPayoutMethod, error) {
+	err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "user_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"kind", "currency", "institution_code", "institution_name",
@@ -130,7 +256,7 @@ func (s *SellerPayoutService) Set(ctx context.Context, userID uuid.UUID, in SetS
 		return nil, err
 	}
 	var saved models.SellerPayoutMethod
-	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).First(&saved).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("user_id = ?", row.UserID).First(&saved).Error; err != nil {
 		return nil, err
 	}
 	return &saved, nil
