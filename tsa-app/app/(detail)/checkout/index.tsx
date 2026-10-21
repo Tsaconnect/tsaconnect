@@ -66,6 +66,7 @@ import { useCheckoutFundingRun, useFundingPrice, type FundingPick } from '@/hook
 import { canForgetRun } from '@/services/checkoutFundingRun';
 import { fundingPickerAllow } from '@/utils/fundingPicker';
 import { cartLineProductId } from '@/utils/cartLine';
+import { rewardsLine } from '@/utils/tp';
 import {
   defaultPaySelection,
   orderTokenFor,
@@ -791,7 +792,7 @@ const CheckoutScreen = () => {
           quote={paidQuote}
           orderCount={orders.length}
           shippingLabel={feeRowLabel}
-          cashbackPercent={isMCGP ? undefined : feeConfig?.buyerCashbackPercent}
+          rewards={isMCGP ? undefined : rewardsLine(feeConfig)}
         />
       </SafeAreaView>
     );
@@ -1029,9 +1030,9 @@ const CheckoutScreen = () => {
             <Notice tone="success" icon="star">
               Paid from your Spendable MCGP: no gas, no platform fee
             </Notice>
-          ) : feeConfig?.buyerCashbackPercent ? (
+          ) : rewardsLine(feeConfig) ? (
             <Notice tone="success" icon="star">
-              {`${feeConfig.buyerCashbackPercent}% cashback when you confirm delivery`}
+              {rewardsLine(feeConfig) ?? ''}
             </Notice>
           ) : null}
         </Card>
@@ -1216,12 +1217,12 @@ const Receipt = ({
   quote,
   orderCount,
   shippingLabel,
-  cashbackPercent,
+  rewards,
 }: {
   quote: CartQuote;
   orderCount: number;
   shippingLabel: string;
-  cashbackPercent?: number;
+  rewards?: string;
 }) => {
   const { colors, spacing, radius } = useTheme();
   const fmt = useQuoteFormat(quote);
@@ -1254,9 +1255,9 @@ const Receipt = ({
         <QuoteBreakdown quote={quote} shippingLabel={shippingLabel} withTotal />
       </Card>
 
-      {cashbackPercent ? (
+      {rewards ? (
         <Text variant="caption" color="success" align="center">
-          {`${cashbackPercent}% cashback lands when you confirm delivery`}
+          {rewards}
         </Text>
       ) : null}
 

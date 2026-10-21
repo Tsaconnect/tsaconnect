@@ -18,7 +18,7 @@ type fakeSettler struct {
 	strandedCalls int
 }
 
-func (f *fakeSettler) SettleGlobalPoolEpoch(_ context.Context) (services.GlobalSettlementResult, error) {
+func (f *fakeSettler) SettleGlobalPoolIfDue(_ context.Context, _ time.Time) (services.GlobalSettlementResult, error) {
 	f.calls++
 	return f.result, f.err
 }
@@ -56,7 +56,7 @@ func TestGlobalPoolSettler_RunPropagatesError(t *testing.T) {
 
 func TestGlobalPoolSettler_DefaultsNonPositiveInterval(t *testing.T) {
 	w := NewGlobalPoolSettler(&fakeSettler{}, 0)
-	if w.Interval() != 24*time.Hour {
-		t.Fatalf("interval = %v, want 24h fallback", w.Interval())
+	if w.Interval() != time.Hour {
+		t.Fatalf("interval = %v, want 1h fallback", w.Interval())
 	}
 }

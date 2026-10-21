@@ -1328,7 +1328,7 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 
 // GetFeeConfig handles GET /api/fees - returns the platform fee schedule.
 func (h *Handlers) GetFeeConfig(c *gin.Context) {
-	utils.SuccessResponse(c, http.StatusOK, "Fee configuration", models.GetFeeConfig(cartFeeLookups()))
+	utils.SuccessResponse(c, http.StatusOK, "Fee configuration", h.feeConfigWithRewards())
 }
 
 // GetMarketplaceProducts handles GET /api/products/public/marketplace - public marketplace listing with sorting.
@@ -1480,4 +1480,30 @@ func updateCategoryProductCount(categoryID uuid.UUID) {
 	if err := config.DB.Model(&models.Category{}).Where("id = ?", categoryID).Update("product_count", count).Error; err != nil {
 		log.Printf("Error updating category product count: %v", err)
 	}
+}
+
+// feeConfigWithRewards is the fee schedule the app shows, with the cashback and
+// TP lines taken from the live reward rates. The static cashback constants in
+// models.GetFeeConfig predate the admin-editable splits and no longer match what
+// the engine pays, so they are replaced whenever the engine is wired.
+func (h *Handlers) feeConfigWithRewards() map[string]interface{} {
+	cfg := models.GetFeeConfig(cartFeeLookups())
+	if h.FeeService == nil {
+		return cfg
+	}
+	rates := h.FeeService.RewardRatesFor(models.FeatureProductMerchant)
+	merchantBPS, _ := cfg["merchantFeeBPS"].(int)
+	fee := float64(merchantBPS) / 10000.0 // fraction of the sale charged as fee
+	// Rounded to hundredths of a basis point so float noise (30.000000000000004)
+	// never reaches the client.
+	cashbackBPS := math.Round(fee*rates.BuyerCashback*10000*100) / 100
+	uplineBPS := math.Round(fee*rates.UplineCashback*10000*100) / 100
+	cfg["buyerCashbackBPS"] = cashbackBPS
+	cfg["buyerCashbackPercent"] = cashbackBPS / 100
+	cfg["uplineFeeBPS"] = uplineBPS
+	cfg["uplineFeePercent"] = uplineBPS / 100
+	// TP the buyer earns per $1 spent, and what one TP is worth.
+	cfg["buyerTpPerUsd"] = fee * rates.BuyerTP
+	cfg["usdPerTp"] = rates.USDPerTP
+	return cfg
 }

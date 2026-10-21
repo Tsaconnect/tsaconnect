@@ -27,6 +27,7 @@ import api, { rewardsApi, type RewardSummary } from '../components/services/api'
 import { isMerchantRole } from '@/hooks/useUserRole';
 import { MARKETPLACE_TAB } from '@/constants/routes';
 import { merchantCta } from '@/utils/tradeEarnCta';
+import { formatTpUsd } from '@/utils/tp';
 
 const TradeAndEarnScreen: React.FC = () => {
   const { colors, spacing, radius } = useTheme();
@@ -144,7 +145,7 @@ const TradeAndEarnScreen: React.FC = () => {
                 style={{ marginTop: spacing.xs }}
               />
               <Text variant="caption" weight="700" color="accent" style={{ marginTop: 2 }}>
-                TP
+                TP · {formatTpUsd(tpBalance)}
               </Text>
             </View>
             <View
@@ -336,7 +337,7 @@ const TradeAndEarnScreen: React.FC = () => {
                 maximumFractionDigits={2}
               />
               <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
-                TP Earned
+                TP Earned · {formatTpUsd(tpBalance)}
               </Text>
             </View>
           </View>
@@ -400,7 +401,7 @@ const TradeAndEarnScreen: React.FC = () => {
                 Trade Points
               </Text>
               <Text variant="bodySm" color="textSecondary" style={{ marginTop: 2 }}>
-                Earn TP from fees across 10 generations of your network
+                Earn TP from fees on your own trades and your direct referrals
               </Text>
             </View>
             <Icon name="chevronRight" size={22} color={colors.textMuted} />
@@ -465,7 +466,7 @@ const TradeAndEarnScreen: React.FC = () => {
               </Text>
             </View>
             <Text variant="bodySm" color="textSecondary">
-              System fees from every transaction are split across 10 generations. You earn 35.4% of fees directly, your direct upline earns 17.7%, and it cascades down to 0.4% at the 10th generation.
+              1 TP = $0.01. A part of the platform share of each fee becomes TP: some for you, some for your direct upline, and some goes into a global pool that is shared equally between all active users every month.
             </Text>
           </View>
 
@@ -500,7 +501,7 @@ const TradeAndEarnScreen: React.FC = () => {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.md }}>
             <Icon name="user" size={16} color={colors.accent} />
             <Text variant="bodySm" color="textSecondary" style={{ flex: 1 }}>
-              Split across you + 10 generations of upline
+              Shared between you, your direct upline and a monthly global pool
             </Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginBottom: spacing.lg }}>
@@ -524,7 +525,7 @@ const TradeAndEarnScreen: React.FC = () => {
           >
             <Icon name="trendingUp" size={16} color={colors.accent} />
             <Text variant="bodySm" weight="700" color="accent">
-              See your TP levels &amp; per-generation earnings
+              See your TP levels &amp; earnings
             </Text>
           </PressableScale>
         </Card>

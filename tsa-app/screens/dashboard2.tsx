@@ -12,7 +12,8 @@ import { View, ScrollView, RefreshControl } from 'react-native';
 import { api } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, useNavigation } from 'expo-router';
-import { DrawerActions } from '@react-navigation/native';
+import { DrawerActions, useFocusEffect } from '@react-navigation/native';
+import { formatTpUsd } from '@/utils/tp';
 import { readPortfolioUsd } from '@/services/portfolioTotal';
 
 import { BalanceCard } from '@/components/dashboard/BalanceCard';
@@ -133,6 +134,21 @@ const Dashboard: React.FC = () => {
 
   useEffect(() => { if (authToken) fetchData(); }, [authToken, fetchData]);
 
+  // TP and cashback are credited when a transaction settles, usually while the
+  // user is on another screen. Re-read them whenever the dashboard comes back
+  // into view so a purchase shows up without a pull-to-refresh.
+  useFocusEffect(
+    useCallback(() => {
+      if (!authToken) return;
+      api.getTPBalance().then((res) => {
+        if (res.success && res.data) setTpBalance(res.data.tpBalance || 0);
+      }).catch(() => {});
+      api.getCashbackBalance().then((res) => {
+        if (res.success && res.data) setCashbackBalance(res.data.cashbackBalance || 0);
+      }).catch(() => {});
+    }, [authToken]),
+  );
+
 
   const onRefresh = useCallback(() => {
     setRwmRefresh((n) => n + 1);
@@ -207,6 +223,9 @@ const Dashboard: React.FC = () => {
                 <Icon name="star" size={16} color={colors.accent} />
                 <Text variant="bodyMed" weight="700" numeric>
                   {tpBalance.toFixed(2)}
+                </Text>
+                <Text variant="caption" color="textSecondary" numeric>
+                  {formatTpUsd(tpBalance)}
                 </Text>
                 <Text variant="caption" color="textMuted">
                   TP

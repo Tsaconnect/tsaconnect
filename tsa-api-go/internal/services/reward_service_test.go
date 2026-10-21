@@ -113,6 +113,7 @@ func setupRewardTestDB(t *testing.T) *gorm.DB {
 			accrued_tp REAL NOT NULL DEFAULT 0,
 			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
 			indexed_tp REAL NOT NULL DEFAULT 0,
+			last_payout_at DATETIME,
 			updated_at DATETIME NOT NULL
 		)`,
 		`CREATE TABLE reward_entries (

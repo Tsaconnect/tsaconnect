@@ -124,6 +124,7 @@ func AutoMigrate() error {
 		&models.PrivateSaleSubmission{},
 		&models.RewardClaim{},
 		&models.FeeSplitConfig{},
+		&models.TPProgramConfig{},
 		&models.FlutterwaveCustomer{},
 		&models.TPEarning{},
 		&models.CashbackEarning{},

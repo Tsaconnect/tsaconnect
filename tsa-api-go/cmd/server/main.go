@@ -737,7 +737,10 @@ func main() {
 	// falling back to its compiled-in table.
 	feeSplitConfigService := services.NewFeeSplitConfigService(config.DB)
 	feeDistributionService.WithSplitConfigs(feeSplitConfigService)
+	tpProgramService := services.NewTPProgramConfigService(config.DB)
+	feeDistributionService.WithTPProgram(tpProgramService)
 	tph := handlers.NewTPAdminHandler(config.DB, feeSplitConfigService, feeDistributionService)
+	tph.Program = tpProgramService
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
 	// AllSwap server-verified settle (design §8, I8): re-queries LiFi + accrues
 	// the verified integrator fee.

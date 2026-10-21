@@ -742,6 +742,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			adminTP.GET("/distributions/:sourceType/:sourceId", tph.GetFeeDistributionDetail)
 			adminTP.GET("/fee-summary", tph.GetFeeSummary)
 			adminTP.GET("/global-pool", tph.GetGlobalPool)
+			adminTP.GET("/program", tph.GetTPProgram)
+			// Retunes how every future fee mints TP, like the split PUT.
+			adminTP.PUT("/program", middleware.RequireP2PAdmin(), tph.UpdateTPProgram)
 		}
 	}
 

@@ -102,6 +102,12 @@ type GlobalTPPool struct {
 	// integer-division dust) is the un-distributed remainder still in the pool.
 	IndexedTP float64 `gorm:"not null;default:0" json:"indexedTp"`
 
+	// LastPayoutAt is the payout moment (payout day, 00:00 Africa/Lagos) whose
+	// monthly fold has already run. NULL until the first scheduler tick, which
+	// stamps the current window WITHOUT folding so the balance that exists at
+	// rollout carries into the next payout.
+	LastPayoutAt *time.Time `json:"lastPayoutAt,omitempty"`
+
 	UpdatedAt time.Time `gorm:"not null" json:"updatedAt"`
 }
 
@@ -185,5 +191,6 @@ func (GlobalTPAccrual) TableName() string {
 // Reasons recorded on GlobalTPAccrual.Reason.
 const (
 	GlobalAccrualReasonTPGeneration   = "tp_generation"
+	GlobalAccrualReasonTPPool         = "tp_pool"
 	GlobalAccrualReasonUplineCashback = "upline_cashback"
 )

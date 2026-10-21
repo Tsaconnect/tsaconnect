@@ -894,7 +894,8 @@ type Config struct {
 
 	// GlobalPoolSettleInterval is the cadence of the SP4 global-pool settlement
 	// epoch (SettleGlobalPoolEpoch folds the pool delta into the cumulative
-	// index once per interval). DEFAULT 24h (daily). Tunable via
+	// index once per payout day; this is only how often the job checks whether that
+	// day has passed). DEFAULT 1h. Tunable via
 	// FEE_GLOBAL_POOL_SETTLE_INTERVAL (a Go duration string, e.g. "1h", "15m").
 	GlobalPoolSettleInterval time.Duration
 
@@ -1428,7 +1429,7 @@ func Load() *Config {
 	// value; tunable without code change.
 	cfg.TPPerUSD = getEnvFloat64("FEE_TP_PER_USD", 100.0)
 	// SP4 global-pool settlement cadence — default daily.
-	cfg.GlobalPoolSettleInterval = getEnvDuration("FEE_GLOBAL_POOL_SETTLE_INTERVAL", 24*time.Hour)
+	cfg.GlobalPoolSettleInterval = getEnvDuration("FEE_GLOBAL_POOL_SETTLE_INTERVAL", time.Hour)
 
 	// SP7 claim-eligibility velocity heuristic. ON by default (advisory auto-
 	// flags only gate the CLAIM, never accrual). Tunable + disable-able via env:
@@ -1979,11 +1980,11 @@ func (c *Config) TPPerUSDOrDefault() float64 {
 }
 
 // GlobalPoolSettleIntervalOrDefault returns the SP4 settlement cadence, falling
-// back to 24h (daily) when unset or non-positive so the job always has a sane
-// tick period.
+// back to 1h when unset or non-positive so the job always has a sane tick
+// period.
 func (c *Config) GlobalPoolSettleIntervalOrDefault() time.Duration {
 	if c == nil || c.GlobalPoolSettleInterval <= 0 {
-		return 24 * time.Hour
+		return time.Hour
 	}
 	return c.GlobalPoolSettleInterval
 }

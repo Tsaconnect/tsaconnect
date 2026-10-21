@@ -120,6 +120,7 @@ func setupFeeDistTestDB(t *testing.T) *gorm.DB {
 			accrued_tp REAL NOT NULL DEFAULT 0,
 			per_user_index_scaled INTEGER NOT NULL DEFAULT 0,
 			indexed_tp REAL NOT NULL DEFAULT 0,
+			last_payout_at DATETIME,
 			updated_at DATETIME NOT NULL
 		)`,
 		`CREATE TABLE global_tp_epochs (
@@ -212,7 +213,24 @@ func approx(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 // tpFrac / buyerFrac / uplineFrac / providerFrac return the per-feature share
 // fractions so tests assert against the COMPLETE split table rather than a
 // removed uniform constant.
-func tpFrac(feature string) float64       { return splitFor(feature).TP }
+func tpFrac(feature string) float64 { return splitFor(feature).TP }
+
+// TP model v3 (PM 2026-10-21): TP is carved from what the platform keeps (the
+// table's System + TP slices), 5% to the user, 5% to the direct upline, 2% to
+// the global pool.
+func keptUSD(feature string, fee float64) float64 {
+	fs := splitFor(feature)
+	return fee * (fs.System + fs.TP)
+}
+func userTPUSD(feature string, fee float64) float64 {
+	return keptUSD(feature, fee) * models.DefaultTPUserPct
+}
+func uplineTPUSD(feature string, fee float64) float64 {
+	return keptUSD(feature, fee) * models.DefaultTPUplinePct
+}
+func poolTPUSD(feature string, fee float64) float64 {
+	return keptUSD(feature, fee) * models.DefaultTPPoolPct
+}
 func buyerFrac(feature string) float64    { return splitFor(feature).Buyer }
 func uplineFrac(feature string) float64   { return splitFor(feature).Upline }
 func providerFrac(feature string) float64 { return splitFor(feature).Provider }
@@ -271,9 +289,14 @@ func TestComputeSplit_SumsToFee(t *testing.T) {
 			if !approx(sp.Total(), fee) {
 				t.Fatalf("%s split of %v sums to %v, want %v", feature, fee, sp.Total(), fee)
 			}
-			if !approx(sp.SystemUSD, fee*fs.System) || !approx(sp.BuyerCashbackUSD, fee*fs.Buyer) ||
+			wantTP, wantSystem := 0.0, fee*fs.System
+			if fs.TP > 0 { // a feature whose table mints no TP (gas) keeps everything
+				wantTP = keptUSD(feature, fee) * models.DefaultTPProgramConfig().TotalPct()
+				wantSystem = keptUSD(feature, fee) - wantTP
+			}
+			if !approx(sp.SystemUSD, wantSystem) || !approx(sp.BuyerCashbackUSD, fee*fs.Buyer) ||
 				!approx(sp.UplineCashbackUSD, fee*fs.Upline) || !approx(sp.ProviderCashbackUSD, fee*fs.Provider) ||
-				!approx(sp.TPPoolUSD, fee*fs.TP) {
+				!approx(sp.TPPoolUSD, wantTP) {
 				t.Fatalf("%s split components wrong for %v: %+v (shares %+v)", feature, fee, sp, fs)
 			}
 		}
@@ -311,10 +334,15 @@ func TestOnFeeSettled_FullTenGenChain(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	tpPool := fee * tpFrac(feature) // 20% for carved features
-	// Each gen i (0..10) gets GenerationPercentages[i] of the pool.
+	// Only the user (5%) and the direct upline (5%) earn TP; nobody further up.
 	for gen := 0; gen <= MaxTPGenerations; gen++ {
-		want := tpPool * models.GenerationPercentages[gen]
+		want := 0.0
+		switch gen {
+		case 0:
+			want = userTPUSD(feature, fee)
+		case 1:
+			want = uplineTPUSD(feature, fee)
+		}
 		got := tpBalance(t, db, users[gen].ID)
 		if !approx(got, want) {
 			t.Fatalf("gen %d tp = %v, want %v", gen, got, want)
@@ -329,10 +357,10 @@ func TestOnFeeSettled_FullTenGenChain(t *testing.T) {
 		t.Fatalf("upline cashback = %v, want %v", got, fee*uplineFrac(feature))
 	}
 
-	// No global-pool accrual on a full active chain.
+	// The pool share (2%) accrues on every fee, nothing else on a live chain.
 	pool, _ := svc.GlobalPool(context.Background())
-	if pool.AccruedUSD != 0 {
-		t.Fatalf("global pool should be empty on full chain, got %v", pool.AccruedUSD)
+	if !approx(pool.AccruedUSD, poolTPUSD(feature, fee)) {
+		t.Fatalf("global pool = %v, want the 2%% pool share %v", pool.AccruedUSD, poolTPUSD(feature, fee))
 	}
 }
 
@@ -409,14 +437,16 @@ func TestOnFeeSettled_TPPoolConserved(t *testing.T) {
 			db.Model(&models.TPEarning{}).Where("source_id = ?", srcID).
 				Select("COALESCE(SUM(tp_earned), 0)").Scan(&sumUserTP)
 
-			// Σ TP routed to the global pool for the TP-generation reason only
-			// (the upline-cashback routing is cashback, not TP-pool value).
+			// Σ TP routed to the global pool (the pool share, plus the upline share
+			// when there is no live upline). Upline-cashback routing is cashback,
+			// not TP value.
 			var sumGlobalTP float64
 			db.Model(&models.GlobalTPAccrual{}).
-				Where("source_id = ? AND reason = ?", srcID, models.GlobalAccrualReasonTPGeneration).
+				Where("source_id = ? AND reason IN ?", srcID,
+					[]string{models.GlobalAccrualReasonTPGeneration, models.GlobalAccrualReasonTPPool}).
 				Select("COALESCE(SUM(amount_tp), 0)").Scan(&sumGlobalTP)
 
-			wantPoolTP := fee * tpFrac(feature) * tc.tpPerUSD
+			wantPoolTP := ComputeSplit(feature, fee).TPPoolUSD * tc.tpPerUSD
 			gotMinted := sumUserTP + sumGlobalTP
 			if !approx(gotMinted, wantPoolTP) {
 				t.Fatalf("TP minted = %.10f (users %.10f + global %.10f), want pool %.10f (delta %.10f) — pool NOT conserved",
@@ -430,8 +460,7 @@ func TestOnFeeSettled_ShortChainRoutesToGlobalPool(t *testing.T) {
 	db := setupFeeDistTestDB(t)
 	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
 
-	// Only gen0 + gen1 + gen2 exist; gen3..gen10 missing → their shares route
-	// to the global pool, but gen0/1/2 still credited.
+	// gen0 + gen1 + gen2 exist. Only gen0 and gen1 earn TP; gen2 earns nothing.
 	users := buildFeeChain(t, db, 3)
 	feature := models.FeatureProductMerchant
 	fee := 100.0
@@ -443,43 +472,36 @@ func TestOnFeeSettled_ShortChainRoutesToGlobalPool(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	tpPool := fee * tpFrac(feature)
-	for gen := 0; gen <= 2; gen++ {
-		want := tpPool * models.GenerationPercentages[gen]
+	for gen, want := range []float64{userTPUSD(feature, fee), uplineTPUSD(feature, fee), 0} {
 		if got := tpBalance(t, db, users[gen].ID); !approx(got, want) {
 			t.Fatalf("gen %d tp = %v, want %v", gen, got, want)
 		}
 	}
 
-	// Global pool should hold the sum of gen3..gen10 shares (no upline-cashback
-	// routing here — gen1 exists & is active).
-	var missingShare float64
-	for gen := 3; gen <= MaxTPGenerations; gen++ {
-		missingShare += tpPool * models.GenerationPercentages[gen]
-	}
+	// Only the pool share is routed to the global pool: a live gen1 means no
+	// upline fallback, and no longer chain is ever walked.
 	pool, _ := svc.GlobalPool(context.Background())
-	if !approx(pool.AccruedUSD, missingShare) {
-		t.Fatalf("global pool = %v, want %v", pool.AccruedUSD, missingShare)
+	if !approx(pool.AccruedUSD, poolTPUSD(feature, fee)) {
+		t.Fatalf("global pool = %v, want %v", pool.AccruedUSD, poolTPUSD(feature, fee))
 	}
-
-	// Accrual ledger rows: one per missing TP generation (gen3..gen10 = 8).
-	var accrualCount int64
-	db.Model(&models.GlobalTPAccrual{}).Where("reason = ?", models.GlobalAccrualReasonTPGeneration).Count(&accrualCount)
-	if accrualCount != 8 {
-		t.Fatalf("expected 8 tp-generation accruals, got %d", accrualCount)
+	var poolRows, genRows int64
+	db.Model(&models.GlobalTPAccrual{}).Where("reason = ?", models.GlobalAccrualReasonTPPool).Count(&poolRows)
+	db.Model(&models.GlobalTPAccrual{}).Where("reason = ?", models.GlobalAccrualReasonTPGeneration).Count(&genRows)
+	if poolRows != 1 || genRows != 0 {
+		t.Fatalf("want 1 tp_pool and 0 tp_generation accruals, got %d and %d", poolRows, genRows)
 	}
 }
 
-func TestOnFeeSettled_InactiveMidChainRoutesAndContinues(t *testing.T) {
+func TestOnFeeSettled_InactiveUplineRoutesToGlobal(t *testing.T) {
 	db := setupFeeDistTestDB(t)
 	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
 
-	// Full 11-deep chain, but gen5 is suspended. Its share routes to the global
-	// pool; the climb CONTINUES so gen6..gen10 still get credited.
+	// The direct upline is suspended: its 5% TP share and the upline cashback
+	// both go to the global pool, and nobody further up inherits them.
 	users := buildFeeChain(t, db, 11)
-	if err := db.Model(&models.User{}).Where("id = ?", users[5].ID).
+	if err := db.Model(&models.User{}).Where("id = ?", users[1].ID).
 		Update("account_status", models.AccountStatusSuspended).Error; err != nil {
-		t.Fatalf("suspend gen5: %v", err)
+		t.Fatalf("suspend gen1: %v", err)
 	}
 
 	feature := models.FeatureProductMerchant
@@ -492,27 +514,20 @@ func TestOnFeeSettled_InactiveMidChainRoutesAndContinues(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	tpPool := fee * tpFrac(feature)
-	// gen5 must get NOTHING; every other gen (incl gen6..10) must be credited.
 	for gen := 0; gen <= MaxTPGenerations; gen++ {
-		got := tpBalance(t, db, users[gen].ID)
-		if gen == 5 {
-			if !approx(got, 0) {
-				t.Fatalf("suspended gen5 should have 0 tp, got %v", got)
-			}
-			continue
+		want := 0.0
+		if gen == 0 {
+			want = userTPUSD(feature, fee)
 		}
-		want := tpPool * models.GenerationPercentages[gen]
-		if !approx(got, want) {
-			t.Fatalf("gen %d tp = %v, want %v (continue-past-inactive failed)", gen, got, want)
+		if got := tpBalance(t, db, users[gen].ID); !approx(got, want) {
+			t.Fatalf("gen %d tp = %v, want %v", gen, got, want)
 		}
 	}
 
-	// Only gen5's share goes to the global pool.
 	pool, _ := svc.GlobalPool(context.Background())
-	want := tpPool * models.GenerationPercentages[5]
+	want := uplineTPUSD(feature, fee) + poolTPUSD(feature, fee) + fee*uplineFrac(feature)
 	if !approx(pool.AccruedUSD, want) {
-		t.Fatalf("global pool = %v, want gen5 share %v", pool.AccruedUSD, want)
+		t.Fatalf("global pool = %v, want upline TP + pool share + upline cashback = %v", pool.AccruedUSD, want)
 	}
 }
 
@@ -520,8 +535,8 @@ func TestOnFeeSettled_NoDirectUplineRoutesBothToGlobal(t *testing.T) {
 	db := setupFeeDistTestDB(t)
 	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
 
-	// Lone user, no referrer, on a CARVED feature (product_merchant). gen1..gen10
-	// TP shares AND the 15% upline cashback all route to the global pool. gen0 TP +
+	// Lone user, no referrer, on a CARVED feature (product_merchant). the upline
+	// TP share AND the 15% upline cashback both route to the global pool. gen0 TP +
 	// buyer cashback still credited.
 	user := mkFeeUser(t, db, "solo"+uuidShort(), nil, models.AccountStatusActive)
 	feature := models.FeatureProductMerchant
@@ -534,22 +549,17 @@ func TestOnFeeSettled_NoDirectUplineRoutesBothToGlobal(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	tpPool := fee * tpFrac(feature)
 	// gen0 credited.
-	if got := tpBalance(t, db, user.ID); !approx(got, tpPool*models.GenerationPercentages[0]) {
-		t.Fatalf("gen0 tp = %v, want %v", got, tpPool*models.GenerationPercentages[0])
+	if got := tpBalance(t, db, user.ID); !approx(got, userTPUSD(feature, fee)) {
+		t.Fatalf("gen0 tp = %v, want %v", got, userTPUSD(feature, fee))
 	}
 	// Buyer cashback credited.
 	if got := cashbackBalance(t, db, user.ID); !approx(got, fee*buyerFrac(feature)) {
 		t.Fatalf("buyer cashback = %v, want %v", got, fee*buyerFrac(feature))
 	}
 
-	// Global pool = sum(gen1..gen10 TP shares) + upline cashback (15%).
-	var tpMissing float64
-	for gen := 1; gen <= MaxTPGenerations; gen++ {
-		tpMissing += tpPool * models.GenerationPercentages[gen]
-	}
-	wantGlobal := tpMissing + fee*uplineFrac(feature)
+	// Global pool = upline TP share + pool share + upline cashback (15%).
+	wantGlobal := uplineTPUSD(feature, fee) + poolTPUSD(feature, fee) + fee*uplineFrac(feature)
 	pool, _ := svc.GlobalPool(context.Background())
 	if !approx(pool.AccruedUSD, wantGlobal) {
 		t.Fatalf("global pool = %v, want %v", pool.AccruedUSD, wantGlobal)
@@ -585,18 +595,17 @@ func TestOnFeeSettled_Idempotent(t *testing.T) {
 	}
 
 	// Balances reflect a SINGLE distribution.
-	tpPool := fee * tpFrac(feature)
-	if got := tpBalance(t, db, users[0].ID); !approx(got, tpPool*models.GenerationPercentages[0]) {
-		t.Fatalf("gen0 tp after double-call = %v, want single %v", got, tpPool*models.GenerationPercentages[0])
+	if got := tpBalance(t, db, users[0].ID); !approx(got, userTPUSD(feature, fee)) {
+		t.Fatalf("gen0 tp after double-call = %v, want single %v", got, userTPUSD(feature, fee))
 	}
 
-	// Exactly 11 TP earnings + 2 cashback earnings + 1 guard row.
+	// Exactly 2 TP earnings (user + upline) + 2 cashback earnings + 1 guard row.
 	var tpRows, cbRows, guards int64
 	db.Model(&models.TPEarning{}).Where("source_id = ?", srcID).Count(&tpRows)
 	db.Model(&models.CashbackEarning{}).Where("source_id = ?", srcID).Count(&cbRows)
 	db.Model(&models.FeeDistribution{}).Where("source_id = ?", srcID).Count(&guards)
-	if tpRows != 11 {
-		t.Fatalf("expected 11 tp earnings, got %d", tpRows)
+	if tpRows != 2 {
+		t.Fatalf("expected 2 tp earnings, got %d", tpRows)
 	}
 	if cbRows != 2 {
 		t.Fatalf("expected 2 cashback earnings, got %d", cbRows)
@@ -622,9 +631,8 @@ func TestOnFeeSettled_TPPerUSDTunable(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	tpPool := fee * tpFrac(feature)
 	// TP credited = shareUSD * rate.
-	want := tpPool * models.GenerationPercentages[0] * rate
+	want := userTPUSD(feature, fee) * rate
 	if got := tpBalance(t, db, users[0].ID); !approx(got, want) {
 		t.Fatalf("gen0 tp with rate %v = %v, want %v", rate, got, want)
 	}
@@ -635,21 +643,53 @@ func TestOnFeeSettled_TPPerUSDTunable(t *testing.T) {
 	}
 }
 
-func TestOnFeeSettled_ZeroFeeNoOp(t *testing.T) {
+// TestOnFeeSettled_ZeroFeeCreditsUserOnly: a transaction with no fee earns the
+// user the fixed zero-fee reward (PM 2026-10-21) and nothing else — no upline,
+// no pool, no cashback — once per source.
+func TestOnFeeSettled_ZeroFeeCreditsUserOnly(t *testing.T) {
 	db := setupFeeDistTestDB(t)
-	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
-	user := mkFeeUser(t, db, "z"+uuidShort(), nil, models.AccountStatusActive)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 100)
+	users := buildFeeChain(t, db, 3)
 	ev := FeeEvent{
 		Feature: models.FeatureP2P, Token: "MCGP", FeeUSD: 0,
-		UserID: user.ID, SourceType: "p2p_release", SourceID: uuid.New(),
+		UserID: users[0].ID, SourceType: "p2p_release", SourceID: uuid.New(),
 	}
-	if err := svc.OnFeeSettled(context.Background(), ev); err != nil {
-		t.Fatalf("zero-fee should be no-op: %v", err)
+	for i := 0; i < 2; i++ { // the replay must not credit twice
+		if err := svc.OnFeeSettled(context.Background(), ev); err != nil {
+			t.Fatalf("zero-fee settle %d: %v", i, err)
+		}
 	}
-	var guards int64
-	db.Model(&models.FeeDistribution{}).Count(&guards)
-	if guards != 0 {
-		t.Fatalf("zero-fee should write no guard row, got %d", guards)
+	if got := tpBalance(t, db, users[0].ID); !approx(got, models.DefaultZeroFeeTP) {
+		t.Fatalf("zero-fee reward = %v, want %v", got, models.DefaultZeroFeeTP)
+	}
+	if got := tpBalance(t, db, users[1].ID); got != 0 {
+		t.Fatalf("upline must earn nothing on a zero-fee transaction, got %v", got)
+	}
+	pool, _ := svc.GlobalPool(context.Background())
+	if pool.AccruedUSD != 0 {
+		t.Fatalf("zero-fee must not touch the pool, got %v", pool.AccruedUSD)
+	}
+	var cb int64
+	db.Model(&models.CashbackEarning{}).Count(&cb)
+	if cb != 0 {
+		t.Fatalf("zero-fee must credit no cashback, got %d rows", cb)
+	}
+}
+
+// Gas carries its own fee and never mints TP, so a zero-value gas event is not
+// a reward either.
+func TestOnFeeSettled_ZeroFeeGasEarnsNothing(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 100)
+	user := mkFeeUser(t, db, "zg"+uuidShort(), nil, models.AccountStatusActive)
+	if err := svc.OnFeeSettled(context.Background(), FeeEvent{
+		Feature: models.FeatureGas, Token: "USDT", FeeUSD: 0,
+		UserID: user.ID, SourceType: "gas", SourceID: uuid.New(),
+	}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	if got := tpBalance(t, db, user.ID); got != 0 {
+		t.Fatalf("zero-fee gas must earn nothing, got %v", got)
 	}
 }
 
@@ -690,7 +730,7 @@ func TestFeatureFlag_OffMeansEngineNotInvoked(t *testing.T) {
 
 // TestOnFeeSettled_DirtyHookMarksAllRecipients asserts the onDirty hook fires
 // exactly once per DISTINCT recipient whose tp_balance or cashback_balance moved
-// — gen0..gen10 TP recipients plus the gen1 upline cashback recipient — and
+// — the gen0 and gen1 TP recipients plus the cashback recipients — and
 // never for global-pool-only generations. This is the bridge that was missing
 // (MarkUserDirty was never called by any accrual path), which left the reward
 // processor's dirty set permanently empty.
@@ -714,15 +754,15 @@ func TestOnFeeSettled_DirtyHookMarksAllRecipients(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	// All 11 chain users got TP (gen0 also got buyer cashback, gen1 also got
-	// upline cashback) — each must be marked dirty EXACTLY once (deduped).
-	for gen, u := range users {
+	// Only the user and the direct upline have a balance change (TP, plus buyer
+	// and upline cashback) — each must be marked dirty EXACTLY once (deduped).
+	for gen, u := range users[:2] {
 		if got[u.ID] != 1 {
 			t.Fatalf("gen %d user marked dirty %d times, want exactly 1", gen, got[u.ID])
 		}
 	}
-	if len(got) != len(users) {
-		t.Fatalf("marked %d distinct users dirty, want %d", len(got), len(users))
+	if len(got) != 2 {
+		t.Fatalf("marked %d distinct users dirty, want 2", len(got))
 	}
 }
 
@@ -786,7 +826,7 @@ func TestOnFeeSettled_NilDirtyHookSafe(t *testing.T) {
 	if err := svc.OnFeeSettled(context.Background(), ev); err != nil {
 		t.Fatalf("OnFeeSettled with nil hook: %v", err)
 	}
-	if got := tpBalance(t, db, user.ID); !approx(got, 20.0*tpFrac(feature)*models.GenerationPercentages[0]) {
+	if got := tpBalance(t, db, user.ID); !approx(got, userTPUSD(feature, 20.0)) {
 		t.Fatalf("nil hook must still distribute TP; got %v", got)
 	}
 }
@@ -841,13 +881,14 @@ func TestCarvedFee_ProductMerchant(t *testing.T) {
 	if got := cashbackBalance(t, db, users[1].ID); !approx(got, fee*0.15) {
 		t.Fatalf("upline cashback = %v, want %v", got, fee*0.15)
 	}
-	// TP pool = 20%, spread gen0..gen10 by GenerationPercentages.
-	tpPool := fee * 0.20
-	for gen := 0; gen <= MaxTPGenerations; gen++ {
-		want := tpPool * models.GenerationPercentages[gen]
+	// TP: 5% of the kept 70 to the user and to the upline, 2% to the pool.
+	for gen, want := range []float64{userTPUSD(feature, fee), uplineTPUSD(feature, fee)} {
 		if got := tpBalance(t, db, users[gen].ID); !approx(got, want) {
 			t.Fatalf("gen %d tp = %v, want %v", gen, got, want)
 		}
+	}
+	if want := 3.5; !approx(userTPUSD(feature, fee), want) {
+		t.Fatalf("golden: user TP on a $100 product fee = %v, want %v", userTPUSD(feature, fee), want)
 	}
 	// No provider cashback row at all (3 cashback rows would mean provider got one).
 	var cbRows int64
@@ -900,9 +941,12 @@ func TestCarvedFee_ServiceContact(t *testing.T) {
 	if provRows != 1 {
 		t.Fatalf("provider must be credited exactly once, got %d rows", provRows)
 	}
-	// TP pool = 20% to requester (gen0).
-	if got := tpBalance(t, db, requester.ID); !approx(got, fee*0.20*models.GenerationPercentages[0]) {
-		t.Fatalf("requester tp = %v, want %v", got, fee*0.20*models.GenerationPercentages[0])
+	// TP: requester earns 5% of the kept share, the upline 5%.
+	if got := tpBalance(t, db, requester.ID); !approx(got, userTPUSD(feature, fee)) {
+		t.Fatalf("requester tp = %v, want %v", got, userTPUSD(feature, fee))
+	}
+	if got := tpBalance(t, db, upline.ID); !approx(got, uplineTPUSD(feature, fee)) {
+		t.Fatalf("upline tp = %v, want %v", got, uplineTPUSD(feature, fee))
 	}
 	// Audit-row completeness: the guard's OWN component columns (system + buyer +
 	// upline + provider + TP) must sum to the full FeeUSD — including the 10%
@@ -954,19 +998,17 @@ func TestSeventyThirtyFee_NoCashback(t *testing.T) {
 			if cbRows != 0 {
 				t.Fatalf("70/30 fee must credit NO cashback, got %d rows", cbRows)
 			}
-			// TP pool = 30%, gen0..gen10.
-			tpPool := fee * 0.30
-			for gen := 0; gen <= MaxTPGenerations; gen++ {
-				want := tpPool * models.GenerationPercentages[gen]
+			// No cashback means the whole fee is kept: 5% to the user, 5% to the
+			// upline, 2% to the pool, the remaining 88% stays system.
+			for gen, want := range []float64{userTPUSD(feature, fee), uplineTPUSD(feature, fee)} {
 				if got := tpBalance(t, db, users[gen].ID); !approx(got, want) {
 					t.Fatalf("gen %d tp = %v, want %v", gen, got, want)
 				}
 			}
-			// System = 70%.
 			var fd models.FeeDistribution
 			db.First(&fd, "source_id = ?", srcID)
-			if !approx(fd.SystemUSD, fee*0.70) {
-				t.Fatalf("system = %v, want %v", fd.SystemUSD, fee*0.70)
+			if !approx(fd.SystemUSD, fee*0.88) {
+				t.Fatalf("system = %v, want %v", fd.SystemUSD, fee*0.88)
 			}
 			// Conservation.
 			if got := creditedTotalUSD(t, db, srcID); !approx(got, fee) {
