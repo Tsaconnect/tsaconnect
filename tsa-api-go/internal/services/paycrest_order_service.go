@@ -1204,7 +1204,8 @@ func (s *PaycrestOrderService) Sync(ctx context.Context, row *models.PaycrestOrd
 	if err := s.db.WithContext(ctx).Model(row).Updates(updates).Error; err != nil {
 		return row, err
 	}
-	return s.Get(ctx, row.UserID, row.ID)
+	// The service's own re-read: a treasury-run payout order is hidden from Get.
+	return s.getOrder(ctx, row.UserID, row.ID, true)
 }
 
 // ClaimPayment records that the user asserts they completed their side of

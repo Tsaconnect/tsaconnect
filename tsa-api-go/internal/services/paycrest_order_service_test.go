@@ -921,3 +921,26 @@ func TestAssertSellRateHeadroomSound(t *testing.T) {
 	// A margin comfortably above the rounding is fine, whatever the rounding is.
 	assertSellRateHeadroomSound(big.NewRat(1, 50), sellRateRounding)
 }
+
+// A treasury-run payout order is hidden from the seller's routes, but the
+// service's own sync still reads back what it wrote — the poller counts it advanced.
+func TestSync_ASellerPayoutOrderSyncsWithoutAnError(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	remote := &PaycrestOrder{ID: "pc-1", Status: PaycrestStatusExpired, AmountPaid: "0"}
+	svc := NewPaycrestOrderService(db, stubGetOrderReturns{order: remote}, NewPaycrestQuoteService(stubPaycrestQuoter{}, nil, nil), nil, "", "")
+	row := newSyncTestRow(t, db, uuid.New(), false)
+	payout := uuid.New()
+	db.Model(row).Update("seller_payout_id", payout)
+	row.SellerPayoutID = &payout
+
+	got, err := svc.Sync(context.Background(), row)
+	if err != nil {
+		t.Fatalf("Sync err = %v; a payout order must sync cleanly", err)
+	}
+	if got.Status != models.PaycrestStatusExpired {
+		t.Fatalf("status = %q", got.Status)
+	}
+}
