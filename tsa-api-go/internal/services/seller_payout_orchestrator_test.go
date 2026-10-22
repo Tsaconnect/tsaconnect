@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -530,4 +531,52 @@ func TestSellerPayout_TickAdvancesEveryPayout(t *testing.T) {
 	r.wantStatus(models.SellerPayoutReceived)
 }
 
-var _ = config.Config{}
+func TestSellerPayout_TellsTheSellerWhenPaidAndWhenHeld(t *testing.T) {
+	r := newPayoutRig(t)
+	bus := events.NewBus()
+	defer bus.Stop()
+	got := make(chan events.Event, 4)
+	bus.Subscribe(events.SellerPayoutPaid, func(e events.Event) { got <- e })
+	bus.Subscribe(events.SellerPayoutReview, func(e events.Event) { got <- e })
+	r.svc.WithEvents(bus)
+
+	r.toBridged()
+	r.mustStep() // ordered
+	r.mustStep() // deposit
+	r.baseTx.mu.Lock()
+	r.baseTx.amount = big.NewInt(99_600000)
+	r.baseTx.mu.Unlock()
+	r.mustStep() // deposited
+	o := r.reload()
+	r.db.Model(&models.PaycrestOrderRecord{}).Where("id = ?", *o.PaycrestOrderID).Update("status", models.PaycrestStatusSettled)
+	r.mustStep()
+	select {
+	case e := <-got:
+		if e.Type != events.SellerPayoutPaid || e.UserID != r.payout.SellerUserID || !strings.Contains(e.Message, "6789") {
+			t.Fatalf("event = %+v", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the seller was not told the naira was sent")
+	}
+
+	// A second tick on a paid payout says nothing more.
+	r.mustStep()
+	select {
+	case e := <-got:
+		t.Fatalf("unexpected second event %+v", e)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	held := newPayoutRig(t)
+	held.svc.WithEvents(bus)
+	held.sonicTx.err = ErrTransferWrongRecipient
+	held.mustStep()
+	select {
+	case e := <-got:
+		if e.Type != events.SellerPayoutReview {
+			t.Fatalf("event = %+v", e)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the seller was not told the payout is being reviewed")
+	}
+}

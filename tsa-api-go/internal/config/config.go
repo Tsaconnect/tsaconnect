@@ -416,6 +416,10 @@ type Config struct {
 	// key with any other hot signer turns a single compromise into one that
 	// drains customer money. Asserted at boot (assertDistinctKey).
 	RampConversionBuyEnabled bool
+	// SellerPayoutBridgeBps is what the Sonic -> Base bridge of a seller's fiat
+	// payout is expected to cost; the buyer's checkout carries it. A route
+	// costing more is absorbed by the platform up to 0.5%, then the payout parks.
+	SellerPayoutBridgeBps int64
 	// Ramp router (docs/specs/2026-10-02-ramp-router-design.md §5).
 	RampPriceToleranceBps  int
 	RampPriceGuard         string // "log" (default) | "enforce"
@@ -1057,6 +1061,7 @@ func Load() *Config {
 	cfg.MarketplaceEscrowGasPerOrder = uint64(max(getEnvInt64("MARKETPLACE_ESCROW_GAS_PER_ORDER", 400_000), 0))
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
+	cfg.SellerPayoutBridgeBps = getEnvInt64("SELLER_PAYOUT_BRIDGE_BPS", 40)
 	cfg.RampPriceToleranceBps = int(getEnvInt64("RAMP_PRICE_TOLERANCE_BPS", 50))
 	cfg.RampPriceGuard = strings.ToLower(strings.TrimSpace(getEnv("RAMP_PRICE_GUARD", "log")))
 	if g := cfg.RampPriceGuard; g != "" && g != "log" && g != "enforce" {

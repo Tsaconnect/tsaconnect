@@ -11,11 +11,15 @@ const (
 	TransactionReceived  = "transaction.received"
 
 	// Order events
-	OrderPlaced          = "order.placed"
-	OrderEscrowed        = "order.escrowed"
-	OrderShipped         = "order.shipped"
-	OrderDelivered       = "order.delivered"
-	OrderCompleted       = "order.completed"
+	OrderPlaced    = "order.placed"
+	OrderEscrowed  = "order.escrowed"
+	OrderShipped   = "order.shipped"
+	OrderDelivered = "order.delivered"
+	OrderCompleted = "order.completed"
+	// SellerPayoutPaid: a marketplace order's naira reached the seller's bank.
+	SellerPayoutPaid = "order.seller_payout_paid"
+	// SellerPayoutReview: a payout is held for a person; the seller is told it is being looked at.
+	SellerPayoutReview   = "order.seller_payout_review"
 	OrderRefundRequested = "order.refund_requested"
 	OrderRefundApproved  = "order.refund_approved"
 	OrderRefundRejected  = "order.refund_rejected"

@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -75,6 +76,8 @@ type SellerPayoutOrchestrator struct {
 	escrowAddr  string
 	retryWindow time.Duration
 	legCeiling  time.Duration
+	// bus tells the seller when the naira is sent or the payout is held; nil is silent.
+	bus *events.Bus
 	// sellRetryWindow bounds how long a payout waits for a venue that refused
 	// before anything was sent (rate moved, below the book's minimum, no venue).
 	sellRetryWindow time.Duration
@@ -104,9 +107,26 @@ func NewSellerPayoutOrchestrator(db *gorm.DB, treasury *Treasury, legs rampLegSt
 	}
 }
 
+// WithEvents lets the machine tell the seller how their payout is going.
+func (o *SellerPayoutOrchestrator) WithEvents(bus *events.Bus) *SellerPayoutOrchestrator {
+	o.bus = bus
+	return o
+}
+
+func (o *SellerPayoutOrchestrator) tell(p *models.SellerPayoutOrder, typ, title, msg string) {
+	if o.bus == nil {
+		return
+	}
+	o.bus.Publish(events.Event{Type: typ, UserID: p.SellerUserID, Title: title, Message: msg,
+		Data: map[string]interface{}{"orderId": p.MarketplaceOrderID.String(), "payoutId": p.ID.String()}})
+}
+
 // Tick advances every payout that is still moving, least recently looked at
 // first. One payout's failure never stops the others.
 func (o *SellerPayoutOrchestrator) Tick(ctx context.Context, limit int) error {
+	if limit <= 0 {
+		limit = 50
+	}
 	var rows []models.SellerPayoutOrder
 	if err := o.db.WithContext(ctx).
 		Where("status NOT IN ?", []string{models.SellerPayoutPaid, models.SellerPayoutCancelled, models.SellerPayoutNeedsReview}).
@@ -188,7 +208,18 @@ func (o *SellerPayoutOrchestrator) park(ctx context.Context, p *models.SellerPay
 		return res.Error
 	}
 	p.Status = models.SellerPayoutNeedsReview
+	if res.RowsAffected == 1 {
+		o.tell(p, events.SellerPayoutReview, "Your payout is being reviewed",
+			fmt.Sprintf("Your payout for order #%s needs a quick check by our team. Your money is safe, and we'll update you.", p.MarketplaceOrderID.String()[:8]))
+	}
 	return nil
+}
+
+func lastDigits(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 func (o *SellerPayoutOrchestrator) treasuryAddr() string { return o.treasury.Address() }
@@ -664,7 +695,13 @@ func (o *SellerPayoutOrchestrator) followSell(ctx context.Context, p *models.Sel
 	}
 	switch order.Status {
 	case models.PaycrestStatusSettled:
-		return o.move(ctx, p, models.SellerPayoutPaid, nil, models.SellerPayoutDeposited)
+		if err := o.move(ctx, p, models.SellerPayoutPaid, nil, models.SellerPayoutDeposited); err != nil {
+			return err
+		}
+		o.tell(p, events.SellerPayoutPaid, "Your payout was sent",
+			fmt.Sprintf("₦%s for order #%s was sent to your %s account ending %s.",
+				payFiatAmount(p.FiatTargetKobo), p.MarketplaceOrderID.String()[:8], p.InstitutionName, lastDigits(p.AccountNumber, 4)))
+		return nil
 	case models.PaycrestStatusRefunded, models.PaycrestStatusExpired, models.PaycrestStatusUnmatched,
 		models.PaycrestStatusFailed, models.PaycrestStatusCancelled:
 		return o.park(ctx, p, fmt.Sprintf("the Paycrest order ended %s after the deposit", order.Status))

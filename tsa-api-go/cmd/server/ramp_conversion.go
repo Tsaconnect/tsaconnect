@@ -38,55 +38,8 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 		log.Printf("[ramp-conversion] dormant: conversion is not priced (RAMP_COMPANY_TAKE_BPS is not a usable sender fee)")
 		return nil, nil
 	}
-	key, ok := rampTreasuryKey(cfg, "[ramp-conversion]")
-	if !ok {
-		return nil, nil
-	}
-
-	caps, ok := rampTreasuryCaps(cfg)
-	if !ok {
-		log.Printf("[ramp-conversion] dormant: refusing to start with an invalid exposure cap")
-		return nil, nil
-	}
-
-	if chains == nil {
-		log.Printf("[ramp-conversion] dormant: no chain registry available")
-		return nil, nil
-	}
-
-	lanes, missing := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
-		chains: cfg.RampTreasuryChains, guardPrefix: "ramp_treasury_", role: "treasury",
-		logTag: "[ramp-conversion]", metric: "ramp_treasury", needRouters: true,
-	})
-	if len(missing) > 0 {
-		// Named once, in one line, rather than only inferred from the
-		// per-chain skip lines above: RampConversionMinUSDByChain is
-		// populated for every configured chain regardless of whether it got
-		// a lane, so without this a chain here would otherwise be quotable
-		// (SetConversionMinimums below would have an entry for it) but
-		// unexecutable — a quote the treasury can never fulfil.
-		log.Printf("[ramp-conversion] chains configured but without a usable treasury lane (not offered as a converted-buy destination): %v", missing)
-	}
-	if len(lanes) == 0 {
-		log.Printf("[ramp-conversion] dormant: no usable chains in RAMP_TREASURY_CHAINS")
-		return nil, nil
-	}
-
-	// Each lane keeps back what converted buys already in flight from it owe
-	// (their route + approve), so a new open or send never spends it.
-	for chain, lane := range lanes {
-		if lane.KeyLane != nil && config.DB != nil {
-			lane.KeyLane.AddReservation("treasury_converting_"+chain, services.NewConversionTreasuryCommitments(config.DB, chain).Units)
-		}
-	}
-	treasury := services.NewTreasury(lanes, caps, nil)
-	// An empty address means the configured lanes disagree about their
-	// signer (NewTreasury already logged the mismatch ALERT) — a hard
-	// refusal, not a silent proceed, because an empty address would
-	// otherwise be handed to Paycrest as a delivery address.
-	addr := treasury.Address()
-	if addr == "" {
-		log.Printf("[ramp-conversion] dormant: treasury lanes disagree on signer, refusing to hand Paycrest an empty delivery address")
+	treasury, addr := buildRampTreasury(cfg, chains)
+	if treasury == nil {
 		return nil, nil
 	}
 
@@ -136,6 +89,65 @@ func buildRampConversion(cfg *config.Config, chains *services.BlockchainService,
 	log.Printf("[ramp-conversion] enabled treasury=%s chains=%v caps=order:$%.0f/chain:$%.0f",
 		addr, cfg.RampTreasuryChains, cfg.RampTreasuryMaxInflightUSDPerOrder, cfg.RampTreasuryMaxInflightUSDPerChain)
 	return treasury, orchestrator
+}
+
+// buildRampTreasury builds the ramp treasury — its key, caps and chain lanes —
+// or returns (nil, "") dormant with a log line saying why. It is the treasury
+// the converted-buy machine and the seller-payout machine both run on, so it
+// is built once, independent of either feature's own switch.
+func buildRampTreasury(cfg *config.Config, chains *services.BlockchainService) (*services.Treasury, string) {
+	key, ok := rampTreasuryKey(cfg, "[ramp-conversion]")
+	if !ok {
+		return nil, ""
+	}
+
+	caps, ok := rampTreasuryCaps(cfg)
+	if !ok {
+		log.Printf("[ramp-conversion] dormant: refusing to start with an invalid exposure cap")
+		return nil, ""
+	}
+
+	if chains == nil {
+		log.Printf("[ramp-conversion] dormant: no chain registry available")
+		return nil, ""
+	}
+
+	lanes, missing := buildTreasuryLanes(cfg, chains, key, treasuryLaneSpec{
+		chains: cfg.RampTreasuryChains, guardPrefix: "ramp_treasury_", role: "treasury",
+		logTag: "[ramp-conversion]", metric: "ramp_treasury", needRouters: true,
+	})
+	if len(missing) > 0 {
+		// Named once, in one line, rather than only inferred from the
+		// per-chain skip lines above: RampConversionMinUSDByChain is
+		// populated for every configured chain regardless of whether it got
+		// a lane, so without this a chain here would otherwise be quotable
+		// (SetConversionMinimums below would have an entry for it) but
+		// unexecutable — a quote the treasury can never fulfil.
+		log.Printf("[ramp-conversion] chains configured but without a usable treasury lane (not offered as a converted-buy destination): %v", missing)
+	}
+	if len(lanes) == 0 {
+		log.Printf("[ramp-conversion] dormant: no usable chains in RAMP_TREASURY_CHAINS")
+		return nil, ""
+	}
+
+	// Each lane keeps back what converted buys already in flight from it owe
+	// (their route + approve), so a new open or send never spends it.
+	for chain, lane := range lanes {
+		if lane.KeyLane != nil && config.DB != nil {
+			lane.KeyLane.AddReservation("treasury_converting_"+chain, services.NewConversionTreasuryCommitments(config.DB, chain).Units)
+		}
+	}
+	treasury := services.NewTreasury(lanes, caps, nil)
+	// An empty address means the configured lanes disagree about their
+	// signer (NewTreasury already logged the mismatch ALERT) — a hard
+	// refusal, not a silent proceed, because an empty address would
+	// otherwise be handed to Paycrest as a delivery address.
+	addr := treasury.Address()
+	if addr == "" {
+		log.Printf("[ramp-conversion] dormant: treasury lanes disagree on signer, refusing to hand Paycrest an empty delivery address")
+		return nil, ""
+	}
+	return treasury, addr
 }
 
 // rampTreasuryKey is the conversion treasury's key, or (nil, false) with a
