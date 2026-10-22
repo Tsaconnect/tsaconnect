@@ -1027,7 +1027,11 @@ const CheckoutScreen = () => {
               <Icon name="chevronRight" size={18} color={colors.textMuted} />
             </PressableScale>
           ) : (
-            <Spinner label="Loading your balances…" />
+            reviewing ? (
+              <Spinner label="Loading your balances…" />
+            ) : (
+              <Text variant="bodySm" color="textSecondary">Add a delivery address to choose how to pay.</Text>
+            )
           )}
           {swapMode ? (
             <FundingPriceLine pick={fundingPick} quote={fundingPrice?.quote} pricing={fundingPricing} error={fundingPrice?.error} />
