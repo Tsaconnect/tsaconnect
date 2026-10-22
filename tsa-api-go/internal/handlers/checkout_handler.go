@@ -45,6 +45,12 @@ type CheckoutHandler struct {
 	// funding pays a checkout with any token the buyer holds, swapped into the
 	// order token in her own wallet first (checkout_funding.go); nil leaves it off.
 	funding marketplaceFunding
+	// payouts pays sellers who set a bank account in fiat (checkout_payout.go);
+	// nil leaves every order paying the seller's wallet.
+	payouts sellerPayoutPlanner
+	// sellerCalls signs markDelivered and cancelOrder as the treasury for
+	// payout orders; nil refuses those actions on them.
+	sellerCalls sellerEscrowCaller
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
@@ -933,6 +939,8 @@ type pricedCartLine struct {
 	productAmount  *big.Int
 	shippingAmount *big.Int
 	platformFee    *big.Int
+	// payout is the line's fiat payout, nil when the seller is paid in crypto.
+	payout *services.PayoutPlan
 }
 
 // orderTotal is what the order records as TotalAmount (escrowed on-chain).
@@ -1090,6 +1098,10 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 			// a clear error. Guards products and services alike.
 			if line.productAmount.Sign() <= 0 {
 				return nil, &cartPricingError{http.StatusBadRequest, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token)}
+			}
+
+			if perr := ch.planLinePayout(context.Background(), &line, token); perr != nil {
+				return nil, perr
 			}
 
 			lines = append(lines, line)
@@ -1334,6 +1346,11 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			CreatedAt:       time.Now(),
 			UpdatedAt:       time.Now(),
 		}
+		if line.payout != nil {
+			// The treasury is this order's on-chain seller; the wallet the buyer
+			// is told to pay is recorded now so nothing later can change it.
+			order.EscrowSellerWallet = ch.payouts.TreasuryAddress()
+		}
 		if in.delivery != nil && !line.isService {
 			order.ShippingRecipientName = in.delivery.RecipientName
 			order.ShippingPhone = in.delivery.Phone
@@ -1363,6 +1380,16 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			log.Printf("Failed to create order: %v", err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
 			return
+		}
+
+		if line.payout != nil {
+			expected := new(big.Int).Add(line.productAmount, line.shippingAmount)
+			if err := ch.payouts.Persist(tx, &order, line.seller.WalletAddress, line.payout, expected); err != nil {
+				tx.Rollback()
+				log.Printf("Failed to record the payout for order %s: %v", order.ID, err)
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create order")
+				return
+			}
 		}
 
 		// The promotion is spent with the order or not at all: a concurrent order
@@ -2007,7 +2034,13 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		upline = "0x0000000000000000000000000000000000000000"
 	}
 
-	if err := config.DB.Model(order).Update("escrow_seller_wallet", seller.WalletAddress).Error; err != nil {
+	sellerAddr, err := escrowSellerFor(c.Request.Context(), config.DB, order, seller.WalletAddress)
+	if err != nil {
+		log.Printf("Failed to resolve the escrow seller for order %s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare escrow transaction")
+		return
+	}
+	if err := config.DB.Model(order).Update("escrow_seller_wallet", sellerAddr).Error; err != nil {
 		log.Printf("Failed to record escrow seller wallet for order %s: %v", order.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare escrow transaction")
 		return
@@ -2016,7 +2049,7 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 	createOrderTxBytes, err := ch.EscrowService.PrepareCreateOrder(
 		contractOrderID,
 		user.WalletAddress,
-		seller.WalletAddress,
+		sellerAddr,
 		tokenAddr,
 		productAmount,
 		shippingAmount,
@@ -2413,6 +2446,16 @@ func (ch *CheckoutHandler) PrepareDeliver(c *gin.Context) {
 		return
 	}
 
+	if payout, err := isPayoutOrder(c.Request.Context(), config.DB, &order); err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare delivery transaction")
+		return
+	} else if payout {
+		// The treasury is this order's on-chain seller: the server marks it
+		// delivered when the seller confirms, so there is nothing to sign.
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "Delivery is recorded on-chain for you.", "delivery_server_signed")
+		return
+	}
+
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
@@ -2513,9 +2556,28 @@ func (ch *CheckoutHandler) MarkDelivered(c *gin.Context) {
 				return
 			}
 			if !onChain.SellerDelivered {
-				utils.ErrorResponseWithCode(c, http.StatusBadRequest,
-					"Sign the delivery transaction first — update the app and try again.", "delivery_tx_required")
-				return
+				payout, err := isPayoutOrder(c.Request.Context(), config.DB, &order)
+				if err != nil {
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to mark as delivered")
+					return
+				}
+				if !payout {
+					utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+						"Sign the delivery transaction first — update the app and try again.", "delivery_tx_required")
+					return
+				}
+				// The treasury is the on-chain seller: it marks the order
+				// delivered for the seller, and the event is then proven like
+				// any other before the status moves.
+				hash, ok := ch.callAsTreasurySeller(c, "mark delivered", func() (string, error) {
+					return ch.sellerCalls.MarkDelivered(c.Request.Context(), order.ID, ch.orderEscrowContract(&order))
+				})
+				if !ok {
+					return
+				}
+				if _, ok := ch.requireOrderEvent(c, &order, hash, "DeliveryMarked"); !ok {
+					return
+				}
 			}
 		}
 	}
@@ -3221,6 +3283,9 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 	}
 
 	// Escrowed cancel requires on-chain tx, seller only.
+	if ch.cancelAsTreasury(c, &order) {
+		return
+	}
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
@@ -3998,6 +4063,9 @@ func (ch *CheckoutHandler) ApproveCancelOrder(c *gin.Context) {
 		})
 		return
 	}
+	if ch.cancelAsTreasury(c, &order) {
+		return
+	}
 	if user.WalletAddress == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "No wallet address registered")
 		return
@@ -4073,22 +4141,29 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		return
 	}
 
+	ch.finishSellerCancel(c, &order, body.TxHash)
+}
+
+// finishSellerCancel records a cancel the escrow has proven: the order is
+// cancelled, its stock returns and both sides are told. The caller has
+// verified txHash as this order's OrderCancelled.
+func (ch *CheckoutHandler) finishSellerCancel(c *gin.Context, order *models.Order, txHash string) {
 	tx := config.DB.Begin()
 	if tx.Error != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
 		return
 	}
-	if err := tx.Model(&order).Updates(map[string]interface{}{
+	if err := tx.Model(order).Updates(map[string]interface{}{
 		"status":          models.OrderStatusCancelled,
-		"release_tx_hash": body.TxHash,
+		"release_tx_hash": txHash,
 	}).Error; err != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}
-	if err := services.RestoreOrderStock(tx, &order); err != nil {
+	if err := services.RestoreOrderStock(tx, order); err != nil {
 		tx.Rollback()
-		log.Printf("SubmitCancelOrder stock restore error for order %s: %v", order.ID, err)
+		log.Printf("seller cancel stock restore error for order %s: %v", order.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
 		return
 	}
@@ -4097,7 +4172,7 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		return
 	}
 
-	ch.publishCancelApproved(&order, body.TxHash)
+	ch.publishCancelApproved(order, txHash)
 
 	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
 		"orderId": order.ID,

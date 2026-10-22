@@ -58,12 +58,12 @@ type SellerPayoutOrder struct {
 
 	// The destination, snapshotted when the order was created so a later change
 	// to the seller's payout method cannot redirect an order already in flight.
-	Currency          string `gorm:"size:3;not null" json:"currency"`
-	InstitutionCode   string `gorm:"size:64;not null" json:"institutionCode"`
-	InstitutionName   string `gorm:"size:128;not null" json:"institutionName"`
-	AccountNumber     string `gorm:"size:32;not null" json:"accountNumber"`
-	AccountName       string `gorm:"size:128;not null" json:"accountName"`
-	SellerWallet string `gorm:"size:64" json:"-"` // for an operator's manual fallback
+	Currency        string `gorm:"size:3;not null" json:"currency"`
+	InstitutionCode string `gorm:"size:64;not null" json:"institutionCode"`
+	InstitutionName string `gorm:"size:128;not null" json:"institutionName"`
+	AccountNumber   string `gorm:"size:32;not null" json:"accountNumber"`
+	AccountName     string `gorm:"size:128;not null" json:"accountName"`
+	SellerWallet    string `gorm:"size:64" json:"-"` // for an operator's manual fallback
 
 	// Where the release lands: the escrow's chain and token.
 	ChainKey string `gorm:"size:24;not null" json:"chain"`
