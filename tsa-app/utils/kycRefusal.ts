@@ -21,8 +21,8 @@ export const KYC_LEGAL_NAME_MISSING = 'kyc_legal_name_missing';
 /** The Didit verification screen. */
 export const KYC_ROUTE = '/profile/kyc';
 
-/** 'p2p' swaps the pay-in wording, which is wrong for a seller. */
-export type KycContext = 'p2p';
+/** 'p2p' and 'buy' swap the pay-in wording, which is wrong for a seller and for a marketplace buyer. */
+export type KycContext = 'p2p' | 'buy';
 
 export type KycRefusal =
   | { kind: 'verify'; title: string; message: string }
@@ -42,7 +42,9 @@ export function kycRefusalFor(
         message:
           context === 'p2p'
             ? 'You need to finish identity verification before you can trade on P2P. It only takes a few minutes.'
-            : 'You need to finish identity verification before you can pay in. It only takes a few minutes.',
+            : context === 'buy'
+              ? 'You need to finish identity verification before you can place an order. It only takes a few minutes.'
+              : 'You need to finish identity verification before you can pay in. It only takes a few minutes.',
       };
     case KYC_LEGAL_NAME_MISSING:
       return {
