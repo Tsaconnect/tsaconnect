@@ -41,6 +41,7 @@ import {
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
+import { shippingWithoutPayoutFee } from '@/utils/payoutFee';
 import { signAndBroadcast } from '@/services/transaction';
 import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
 import api from '@/components/services/api';
@@ -254,7 +255,8 @@ const MerchantOrderDetail = () => {
     if (isSpendableOrder(target)) return undefined;
     const prep = await prepareDeliver(target.id);
     // An earlier attempt already put it on-chain; the server accepts that as proof.
-    if (prep.code === 'delivery_on_chain') return undefined;
+    // (or the server signs it for this order: its seller on-chain is the treasury).
+    if (prep.code === 'delivery_on_chain' || prep.code === 'delivery_server_signed') return undefined;
     if (!prep.success || !prep.data?.deliverTx) {
       throw new Error(prep.message || 'Failed to prepare delivery');
     }
@@ -629,7 +631,7 @@ const MerchantOrderDetail = () => {
                 {isService ? 'Call-out fee' : 'Shipping'} ({formatStatus(order.shippingZone || '')})
               </Text>
               <Text variant="bodySm" numeric>
-                {formatTokenAmount(order.shippingAmount, order.token)}
+                {formatTokenAmount(shippingWithoutPayoutFee(order.shippingAmount, order.payoutFee), order.token)}
               </Text>
             </View>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>

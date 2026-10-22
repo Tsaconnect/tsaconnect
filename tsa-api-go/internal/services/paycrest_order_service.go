@@ -889,6 +889,10 @@ type PaycrestSellRequest struct {
 	// payout bank is the merchant's: the order is marked with it so the
 	// customer's routes mask that bank (models.PaycrestOrderRecord.PayPaymentID).
 	PayPaymentID *uuid.UUID
+	// SellerPayoutID names the marketplace seller payout this sale pays out
+	// (models.PaycrestOrderRecord.SellerPayoutID). The treasury funds it, so it
+	// is outside the one-open-sell-per-user rule.
+	SellerPayoutID *uuid.UUID
 	// KeepSurplus: the payout is owed EXACTLY FiatAmount (a TSA Pay merchant is
 	// paid what they invoiced). The deposit is the invoice plus the configured
 	// fee, and the order's sender fee is set per order so the merchant gets
@@ -975,8 +979,10 @@ func (s *PaycrestOrderService) sellForToken(ctx context.Context, req PaycrestSel
 	}
 	// Checked HERE, where the order is opened, not only when the sale began:
 	// a direct sell opened in between must still hold the one live sell.
-	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
-		return nil, err
+	if req.SellerPayoutID == nil {
+		if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
+			return nil, err
+		}
 	}
 	amount, ok := parsePositiveDecimal(tokenAmount)
 	if !ok {
@@ -1092,6 +1098,7 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 		PayoutAccount:     req.AccountNo,
 		PayoutAccountName: req.AccountName,
 		PayPaymentID:      req.PayPaymentID,
+		SellerPayoutID:    req.SellerPayoutID,
 	}
 	if pa := order.ProviderAccount; pa != nil {
 		row.DepositAddress = pa.ReceiveAddress
@@ -1197,7 +1204,8 @@ func (s *PaycrestOrderService) Sync(ctx context.Context, row *models.PaycrestOrd
 	if err := s.db.WithContext(ctx).Model(row).Updates(updates).Error; err != nil {
 		return row, err
 	}
-	return s.Get(ctx, row.UserID, row.ID)
+	// The service's own re-read: a treasury-run payout order is hidden from Get.
+	return s.getOrder(ctx, row.UserID, row.ID, true)
 }
 
 // ClaimPayment records that the user asserts they completed their side of
@@ -1281,10 +1289,22 @@ func mapPaycrestStatus(o *PaycrestOrder, direction string, claimed bool) string 
 // ─── Reads ─────────────────────────────────────────────────────────────────
 
 // Get fetches one of the user's own orders.
+//
+// A seller payout's sale is the treasury's, not hers: the order carries her
+// user id only for the books, and she can neither read, cancel nor claim it.
 func (s *PaycrestOrderService) Get(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	return s.getOrder(ctx, userID, orderID, false)
+}
+
+// getOrder is Get, optionally reaching a treasury-run payout order — for the
+// service's own writes on it, never for a user-facing route.
+func (s *PaycrestOrderService) getOrder(ctx context.Context, userID, orderID uuid.UUID, treasuryRun bool) (*models.PaycrestOrderRecord, error) {
 	var row models.PaycrestOrderRecord
-	err := s.db.WithContext(ctx).
-		Where("id = ? AND user_id = ?", orderID, userID).First(&row).Error
+	q := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", orderID, userID)
+	if !treasuryRun {
+		q = q.Where("seller_payout_id IS NULL")
+	}
+	err := q.First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrPaycrestOrderNotYours
 	}
@@ -1315,10 +1335,14 @@ func (s *PaycrestOrderService) Cancel(ctx context.Context, userID, orderID uuid.
 // UPDATE as the status supplied by the caller — so a cancel that must also
 // withdraw something (a short order's deposit address) cannot be half done.
 func (s *PaycrestOrderService) cancelOrder(ctx context.Context, userID, orderID uuid.UUID, alsoSet map[string]any) (*models.PaycrestOrderRecord, error) {
+	return s.cancelOrderAs(ctx, userID, orderID, alsoSet, false)
+}
+
+func (s *PaycrestOrderService) cancelOrderAs(ctx context.Context, userID, orderID uuid.UUID, alsoSet map[string]any, treasuryRun bool) (*models.PaycrestOrderRecord, error) {
 	if s == nil {
 		return nil, ErrPaycrestDisabled
 	}
-	row, err := s.Get(ctx, userID, orderID)
+	row, err := s.getOrder(ctx, userID, orderID, treasuryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -1345,7 +1369,7 @@ func (s *PaycrestOrderService) cancelOrder(ctx context.Context, userID, orderID 
 	if res.RowsAffected == 0 {
 		return nil, ErrPaycrestNotCancellable
 	}
-	return s.Get(ctx, userID, orderID)
+	return s.getOrder(ctx, userID, orderID, treasuryRun)
 }
 
 // List returns the user's recent orders, newest first.
@@ -1360,7 +1384,7 @@ func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit
 	// An IT-settled converted buy's conversion record (ITC-) is not listed
 	// either: the IT purchase is her list entry.
 	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND pay_payment_id IS NULL AND reference NOT LIKE ?", userID, ITConversionRefPrefix+"%").
+		Where("user_id = ? AND pay_payment_id IS NULL AND seller_payout_id IS NULL AND reference NOT LIKE ?", userID, ITConversionRefPrefix+"%").
 		Order("created_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -1396,7 +1420,7 @@ func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uui
 		Select("COUNT(*) AS open_count, COUNT(pay_payment_id) AS pay_count").
 		// An IT-settled converted buy's record is not a Paycrest order: it
 		// never holds her to one Paycrest order per direction.
-		Where("user_id = ? AND direction = ? AND status IN ? AND reference NOT LIKE ?",
+		Where("user_id = ? AND direction = ? AND status IN ? AND seller_payout_id IS NULL AND reference NOT LIKE ?",
 			userID, direction, open, ITConversionRefPrefix+"%").
 		Scan(&n).Error; err != nil {
 		return err

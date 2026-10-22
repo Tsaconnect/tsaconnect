@@ -28,6 +28,8 @@ export interface Order {
   token: string;
   productAmount: string;
   shippingAmount: string;
+  /** The part of shippingAmount that pays the seller's bank payout. */
+  payoutFee?: string;
   platformFee: string;
   totalAmount: string;
   shippingZone: string;
@@ -152,6 +154,8 @@ export interface CartQuoteLine {
   gasFee: string;
   /** Everything the approve/escrow pair pulls for this order. */
   total: string;
+  /** The part of shippingAmount that pays the seller's bank payout ("0" when none). */
+  payoutFee?: string;
 }
 
 /**
@@ -164,7 +168,7 @@ export interface CartQuote {
   /** USD value of one token: 1 for USDC/USDT, the OTC buy price for MCGP. */
   usdPerToken: number;
   lines: CartQuoteLine[];
-  totals: Pick<CartQuoteLine, 'productAmount' | 'shippingAmount' | 'platformFee' | 'gasFee' | 'total'>;
+  totals: Pick<CartQuoteLine, 'productAmount' | 'shippingAmount' | 'platformFee' | 'gasFee' | 'total' | 'payoutFee'>;
 }
 
 /** Prices the active cart without creating orders. Same inputs as createOrders. */

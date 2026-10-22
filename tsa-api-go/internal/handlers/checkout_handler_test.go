@@ -120,6 +120,12 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS seller_payouts (
+			id TEXT PRIMARY KEY, marketplace_order_id TEXT NOT NULL UNIQUE, seller_user_id TEXT NOT NULL,
+			currency TEXT, institution_code TEXT, institution_name TEXT, account_number TEXT, account_name TEXT,
+			seller_wallet TEXT, chain_key TEXT, token TEXT, expected_amount TEXT, fiat_target_kobo INTEGER,
+			status TEXT, received_amount TEXT, paycrest_order_id TEXT, failure_reason TEXT,
+			checked_at DATETIME, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE IF NOT EXISTS orders (
 			id TEXT PRIMARY KEY,
 			buyer_id TEXT NOT NULL,
@@ -142,6 +148,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			contract_order_id TEXT,
 			escrow_contract_address TEXT,
 			escrow_seller_wallet TEXT,
+			payout_fee TEXT,
 			escrow_tx_hash TEXT,
 			approve_tx_hash TEXT,
 			release_tx_hash TEXT, release_reverted_at DATETIME,

@@ -1702,6 +1702,11 @@ func main() {
 	// The treasury is hoisted for the same reason: a name change's stablecoin
 	// fee is paid into it and refunded out of it.
 	var rampTreasury *services.Treasury
+	// The seller-payout machine runs on the same treasury, but does not wait
+	// for the converted-buy switch: it is the ramp treasury when that is on,
+	// otherwise one built just for payouts.
+	var payoutTreasury *services.Treasury
+	var payoutOrders *services.PaycrestOrderService
 	// Likewise hoisted for TSA Pay (built after this block): a naira payment
 	// opens its payout through the same order service, sell intents and quoter
 	// the ramp sell uses. Each stays nil when its own gate is off.
@@ -1763,6 +1768,10 @@ func main() {
 		// venues on it (spec §15).
 		rampTreasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
 		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
+		if payoutTreasury = rampTreasury; payoutTreasury == nil && paycrestOrders != nil {
+			payoutTreasury, _ = buildRampTreasury(cfg, blockchainService)
+		}
+		payoutOrders = paycrestOrders
 		wireConvertedBuys(itService, rampTreasury, blockchainService, cfg, paycrestQuotes)
 		// TSA Liquidity before the router: the pool provider needs its desk.
 		pool = wirePoolOrders(cfg, blockchainService, releaseSigner, itService, rampTreasury)
@@ -2060,7 +2069,9 @@ func main() {
 	if paycrestDir != nil {
 		sellerPayoutDir = paycrestDir
 	}
-	sellerPayoutHandler := handlers.NewSellerPayoutHandler(services.NewSellerPayoutService(config.DB, sellerPayoutDir, bankDirectory, sellerPayoutMailer), eventBus)
+	sellerPayoutSvc := services.NewSellerPayoutService(config.DB, sellerPayoutDir, bankDirectory, sellerPayoutMailer)
+	sellerPayoutHandler := handlers.NewSellerPayoutHandler(sellerPayoutSvc, eventBus)
+	wireSellerPayouts(cfg, blockchainService, payoutTreasury, payoutOrders, paycrestQuotes, escrowService, sellerPayoutSvc, ch, scheduler, eventBus)
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
 	routes.RegisterSellerPayout(router, cfg, sellerPayoutHandler)
 

@@ -32,7 +32,7 @@ func setupUnpaidOrderDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE orders (id TEXT PRIMARY KEY, buyer_id TEXT, seller_id TEXT, product_id TEXT,
 			quantity INTEGER, kind TEXT, token TEXT, status TEXT,
 			product_amount TEXT, shipping_amount TEXT, platform_fee TEXT, total_amount TEXT,
-			contract_order_id TEXT, escrow_contract_address TEXT, escrow_seller_wallet TEXT, escrow_expires_at DATETIME,
+			contract_order_id TEXT, escrow_contract_address TEXT, escrow_seller_wallet TEXT, payout_fee TEXT, escrow_expires_at DATETIME,
 			approve_tx_hash TEXT, escrow_tx_hash TEXT, payment_source TEXT DEFAULT '',
 			created_at DATETIME, updated_at DATETIME)`,
 		orderMcgpPaymentsDDL,

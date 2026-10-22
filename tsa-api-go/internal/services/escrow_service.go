@@ -39,6 +39,7 @@ const productEscrowABI = `[
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"ReceiptConfirmed","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"OrderCancelled","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"DeliveryMarked","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"sellerAmount","type":"uint256"},{"indexed":false,"name":"systemAmount","type":"uint256"},{"indexed":false,"name":"buyerCashback","type":"uint256"},{"indexed":false,"name":"uplineAmount","type":"uint256"}],"name":"OrderReleased","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"RefundRequested","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"OrderRefunded","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":false,"name":"refundedToBuyer","type":"bool"}],"name":"DisputeResolved","type":"event"}
@@ -351,6 +352,24 @@ func findOrderEvent(logs []*types.Log, escrowAddr common.Address, event string, 
 		}
 	}
 	return nil, fmt.Errorf("%w: no %s for this order in the receipt", ErrOrderEventNotFound, event)
+}
+
+// OrderReleasedTo decodes an OrderReleased log: who the escrow paid as the
+// seller, and the sellerAmount it paid. The chain's own record of a release is
+// the only thing a payout is funded from.
+func OrderReleasedTo(l *types.Log) (seller common.Address, amount *big.Int, err error) {
+	if len(l.Topics) < 3 {
+		return common.Address{}, nil, fmt.Errorf("decode OrderReleased: %d topics", len(l.Topics))
+	}
+	vals, err := parsedEscrowABI.Events["OrderReleased"].Inputs.NonIndexed().Unpack(l.Data)
+	if err != nil || len(vals) != 4 {
+		return common.Address{}, nil, fmt.Errorf("decode OrderReleased: %v", err)
+	}
+	amt, ok := vals[0].(*big.Int)
+	if !ok {
+		return common.Address{}, nil, fmt.Errorf("decode OrderReleased: unexpected value type")
+	}
+	return common.BytesToAddress(l.Topics[2].Bytes()), amt, nil
 }
 
 // DisputeResolvedRefund reports whether a DisputeResolved log refunded the

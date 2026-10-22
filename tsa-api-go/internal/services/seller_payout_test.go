@@ -71,7 +71,8 @@ func sellerPayoutSvc(t *testing.T, banks BankDirectory) (*SellerPayoutService, *
 	}
 	mail := &codeMailer{}
 	svc := NewSellerPayoutService(db, dir, banks, mail)
-	svc.kycOK = func(context.Context, uuid.UUID) (bool, error) { return true, nil }
+	svc.identity = func(context.Context, uuid.UUID) (bool, string, error) { return true, "Ada Obi", nil }
+	svc.businessNames = func(context.Context, uuid.UUID) ([]string, error) { return nil, nil }
 	return svc, mail
 }
 
@@ -224,12 +225,12 @@ func TestSellerPayout_NeedsKYCAndAMailer(t *testing.T) {
 
 	s, mail := sellerPayoutSvc(t, stubPayoutBanks{name: "ADA OBI"})
 	uid := seller(t, s)
-	s.kycOK = func(context.Context, uuid.UUID) (bool, error) { return false, nil }
+	s.identity = func(context.Context, uuid.UUID) (bool, string, error) { return false, "", nil }
 	if _, err := s.Request(ctx, uid, in); !errors.Is(err, ErrSellerPayoutKYC) {
 		t.Fatalf("unverified user: %v", err)
 	}
 
-	s.kycOK = func(context.Context, uuid.UUID) (bool, error) { return true, nil }
+	s.identity = func(context.Context, uuid.UUID) (bool, string, error) { return true, "Ada Obi", nil }
 	mail.err = errors.New("smtp down")
 	if _, err := s.Request(ctx, uid, in); !errors.Is(err, ErrSellerPayoutCode) {
 		t.Fatalf("mail failure: %v", err)
@@ -274,5 +275,41 @@ func TestSellerPayout_ReRequestReplacesTheWaitingChange(t *testing.T) {
 	}
 	if m, err := s.Confirm(ctx, uid, second.ID, mail.code); err != nil || m.AccountNumber != "0987654321" {
 		t.Fatalf("got %+v, %v", m, err)
+	}
+}
+
+// Money goes only to the seller's own account or their verified business's.
+func TestSellerPayout_AccountMustBeTheirsOrTheirBusiness(t *testing.T) {
+	ctx := context.Background()
+	in := SetSellerPayoutInput{InstitutionCode: "058", AccountNumber: "0123456789"}
+
+	s, mail := sellerPayoutSvc(t, stubPayoutBanks{name: "EMEKA OKAFOR"}) // identity is "Ada Obi"
+	uid := seller(t, s)
+	if _, err := s.Request(ctx, uid, in); !errors.Is(err, ErrSellerPayoutNameMismatch) {
+		t.Fatalf("someone else's account: %v", err)
+	}
+	var waiting int64
+	s.db.Model(&models.SellerPayoutChange{}).Count(&waiting)
+	if waiting != 0 {
+		t.Fatal("a refused account left a change waiting")
+	}
+
+	s.businessNames = func(context.Context, uuid.UUID) ([]string, error) {
+		return []string{"Okafor Emeka Ventures", "Emeka Okafor"}, nil
+	}
+	if _, err := setWithCode(t, s, mail, uid, in); err != nil {
+		t.Fatalf("the verified business's account: %v", err)
+	}
+
+	// A rename review that removes the match between request and confirm.
+	s2, mail2 := sellerPayoutSvc(t, stubPayoutBanks{name: "ADA OBI"})
+	uid2 := seller(t, s2)
+	p, err := s2.Request(ctx, uid2, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.identity = func(context.Context, uuid.UUID) (bool, string, error) { return true, "Someone Else", nil }
+	if _, err := s2.Confirm(ctx, uid2, p.ID, mail2.code); !errors.Is(err, ErrSellerPayoutNameMismatch) {
+		t.Fatalf("a name that stopped matching before confirm: %v", err)
 	}
 }

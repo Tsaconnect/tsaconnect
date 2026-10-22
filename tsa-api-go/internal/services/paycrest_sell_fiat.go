@@ -250,10 +250,10 @@ const sellCancelTimeout = 5 * time.Second
 func (s *PaycrestOrderService) cancelShortOrder(ctx context.Context, row *models.PaycrestOrderRecord, req PaycrestSellRequest) error {
 	cctx, stop := context.WithTimeout(context.WithoutCancel(ctx), sellCancelTimeout)
 	defer stop()
-	_, err := s.cancelOrder(cctx, req.UserID, row.ID, map[string]any{
+	_, err := s.cancelOrderAs(cctx, req.UserID, row.ID, map[string]any{
 		"failure_reason":  "payout would be short of the amount owed",
 		"deposit_address": "",
-	})
+	}, req.SellerPayoutID != nil)
 	if err != nil {
 		log.Printf("[paycrest] ALARM order %s pays short of %s %s and could not be cancelled: %v",
 			row.ID, req.FiatCode, req.FiatAmount, err)
