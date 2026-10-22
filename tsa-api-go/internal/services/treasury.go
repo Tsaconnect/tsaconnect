@@ -53,6 +53,12 @@ type TreasuryLane struct {
 	// would sign anything.
 	Routers []common.Address
 
+	// CallTargets is the allowlist of contracts the treasury may CALL directly
+	// (SendPrepared): the marketplace escrows it is the seller of. It is
+	// separate from Routers on purpose — a LiFi response must never be able to
+	// reach a contract the treasury is only meant to call itself.
+	CallTargets []common.Address
+
 	// convertCh is a capacity-1 channel used as a context-aware lock that
 	// serialises the whole allowance-read -> approve -> route sequence for
 	// THIS lane. It is deliberately separate from the key's KeyLane lock,
@@ -747,6 +753,53 @@ func (t *Treasury) transferTokenRecorded(ctx context.Context, lane *TreasuryLane
 			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast transfer: %w", err)
 		}
 		return "", false, fmt.Errorf("treasury: broadcast transfer: %w", err)
+	}
+	return txHash, true, nil
+}
+
+// treasuryEscrowCallGas bounds the one-word escrow calls SendPrepared makes
+// (markDelivered, cancelOrder), for the lane's gas gate.
+const treasuryEscrowCallGas = 200_000
+
+// SendPrepared signs and sends one pre-built contract call from the treasury
+// lane to an allowlisted target, value 0 — the treasury acting as the
+// marketplace escrow's seller (markDelivered, cancelOrder). build runs inside
+// the key lane's lock, so the nonce pinned there is the one signed; onPrepared
+// is the caller's pre-broadcast hook (LaneHook), and the caller's operation key
+// travels in ctx (WithOperationRef) so a retry never takes a new nonce. Same
+// contract as TransferTokenRecorded: the kill switch and gas gate are checked
+// here, the value caps are not, and an attempted broadcast that errored is
+// returned as attempted so the caller treats it as uncertain.
+func (t *Treasury) SendPrepared(ctx context.Context, lane *TreasuryLane, to string, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
+	h, attempted, err := t.sendPrepared(ctx, lane, to, build, onPrepared)
+	if err != nil && !attempted {
+		return t.refuseOp(ctx, lane, err, []string{""}, nil)
+	}
+	return h, attempted, err
+}
+
+func (t *Treasury) sendPrepared(ctx context.Context, lane *TreasuryLane, to string, build func() ([]byte, error), onPrepared LaneHook) (string, bool, error) {
+	if lane == nil || lane.SponsorLane == nil || lane.Guard == nil {
+		return "", false, ErrSponsorNotAvailable
+	}
+	if lane.Guard.Killed() {
+		return "", false, ErrTreasuryKilled
+	}
+	if !common.IsHexAddress(to) || !routerAllowed(lane.CallTargets, to) {
+		log.Printf("[ramp-conversion] ALERT ramp_treasury_call_target_refused_total=1 chain=%s to=%q", lane.ChainKey, to)
+		return "", false, ErrTreasuryInvalidRecipient
+	}
+	if err := t.requireGas(ctx, lane, treasuryEscrowCallGas); err != nil {
+		return "", false, err
+	}
+	txHash, attempted, err := lane.sendRecorded(ctx, build, onPrepared)
+	if err != nil {
+		if attempted {
+			log.Printf("[ramp-conversion] ALERT ramp_treasury_broadcast_uncertain_total=1 chain=%s kind=call tx=%s err=%s",
+				lane.ChainKey, uncertainTxHash(err), RedactAlertText(err.Error()))
+			return uncertainTxHash(err), true, fmt.Errorf("treasury: broadcast call: %w", err)
+		}
+		return "", false, fmt.Errorf("treasury: broadcast call: %w", err)
 	}
 	return txHash, true, nil
 }

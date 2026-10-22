@@ -889,6 +889,10 @@ type PaycrestSellRequest struct {
 	// payout bank is the merchant's: the order is marked with it so the
 	// customer's routes mask that bank (models.PaycrestOrderRecord.PayPaymentID).
 	PayPaymentID *uuid.UUID
+	// SellerPayoutID names the marketplace seller payout this sale pays out
+	// (models.PaycrestOrderRecord.SellerPayoutID). The treasury funds it, so it
+	// is outside the one-open-sell-per-user rule.
+	SellerPayoutID *uuid.UUID
 	// KeepSurplus: the payout is owed EXACTLY FiatAmount (a TSA Pay merchant is
 	// paid what they invoiced). The deposit is the invoice plus the configured
 	// fee, and the order's sender fee is set per order so the merchant gets
@@ -975,8 +979,10 @@ func (s *PaycrestOrderService) sellForToken(ctx context.Context, req PaycrestSel
 	}
 	// Checked HERE, where the order is opened, not only when the sale began:
 	// a direct sell opened in between must still hold the one live sell.
-	if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
-		return nil, err
+	if req.SellerPayoutID == nil {
+		if err := s.assertNoOpenOrder(ctx, req.UserID, models.PaycrestDirectionSell); err != nil {
+			return nil, err
+		}
 	}
 	amount, ok := parsePositiveDecimal(tokenAmount)
 	if !ok {
@@ -1092,6 +1098,7 @@ func (s *PaycrestOrderService) openOfframp(ctx context.Context, req PaycrestSell
 		PayoutAccount:     req.AccountNo,
 		PayoutAccountName: req.AccountName,
 		PayPaymentID:      req.PayPaymentID,
+		SellerPayoutID:    req.SellerPayoutID,
 	}
 	if pa := order.ProviderAccount; pa != nil {
 		row.DepositAddress = pa.ReceiveAddress
@@ -1360,7 +1367,7 @@ func (s *PaycrestOrderService) List(ctx context.Context, userID uuid.UUID, limit
 	// An IT-settled converted buy's conversion record (ITC-) is not listed
 	// either: the IT purchase is her list entry.
 	err := s.db.WithContext(ctx).
-		Where("user_id = ? AND pay_payment_id IS NULL AND reference NOT LIKE ?", userID, ITConversionRefPrefix+"%").
+		Where("user_id = ? AND pay_payment_id IS NULL AND seller_payout_id IS NULL AND reference NOT LIKE ?", userID, ITConversionRefPrefix+"%").
 		Order("created_at DESC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
@@ -1396,7 +1403,7 @@ func (s *PaycrestOrderService) assertNoOpenOrder(ctx context.Context, userID uui
 		Select("COUNT(*) AS open_count, COUNT(pay_payment_id) AS pay_count").
 		// An IT-settled converted buy's record is not a Paycrest order: it
 		// never holds her to one Paycrest order per direction.
-		Where("user_id = ? AND direction = ? AND status IN ? AND reference NOT LIKE ?",
+		Where("user_id = ? AND direction = ? AND status IN ? AND seller_payout_id IS NULL AND reference NOT LIKE ?",
 			userID, direction, open, ITConversionRefPrefix+"%").
 		Scan(&n).Error; err != nil {
 		return err
