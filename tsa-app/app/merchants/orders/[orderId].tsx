@@ -41,7 +41,7 @@ import {
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
-import { shippingWithoutPayoutFee } from '@/utils/payoutFee';
+import { payoutStageText, shippingWithoutPayoutFee } from '@/utils/payoutFee';
 import { signAndBroadcast } from '@/services/transaction';
 import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
 import api from '@/components/services/api';
@@ -531,6 +531,16 @@ const MerchantOrderDetail = () => {
             </View>
           )}
         </Card>
+
+        {/* Bank payout — only for a seller paid into a bank account */}
+        {order.payout ? (
+          <Card style={{ marginBottom: spacing.md }}>
+            <Text variant="bodyMed" weight="700">{payoutStageText(order.payout).title}</Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+              {payoutStageText(order.payout).body}
+            </Text>
+          </Card>
+        ) : null}
 
         {/* Buyer */}
         <Card style={{ marginBottom: spacing.md }}>

@@ -332,3 +332,27 @@ func TestPayoutOrder_OnlyTheSellerCanHaveTheTreasuryCancelOrDeliver(t *testing.T
 		}
 	}
 }
+
+func TestOrderDetail_OnlyTheSellerSeesThePayoutAndNoInternals(t *testing.T) {
+	f := newProofFixture(t, models.OrderStatusEscrowed)
+	f.withPayout(t)
+	f.db.Exec(`UPDATE seller_payouts SET account_number = '0123456789', institution_name = 'GTBank', fiat_target_kobo = 1770588,
+		status = ?, failure_reason = 'secret internals' WHERE marketplace_order_id = ?`, models.SellerPayoutDepositing, f.order.ID.String())
+
+	w := f.call(f.ch.GetOrderDetail, f.seller, gin.H{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("seller: %d %s", w.Code, w.Body)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"stage":"sending"`, `"amountNgn":"17705.88"`, `"bank":"GTBank"`, `"accountLast4":"6789"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+	if strings.Contains(body, "secret internals") || strings.Contains(body, "0123456789") {
+		t.Fatalf("the seller's view leaks internals or the full account number: %s", body)
+	}
+	if w = f.call(f.ch.GetOrderDetail, f.buyer, gin.H{}); strings.Contains(w.Body.String(), `"payout"`) {
+		t.Fatalf("the buyer must not see the seller's payout: %s", w.Body)
+	}
+}

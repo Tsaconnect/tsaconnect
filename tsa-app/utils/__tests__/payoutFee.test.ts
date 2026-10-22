@@ -1,4 +1,4 @@
-import { hasPayoutFee, shippingWithoutPayoutFee } from '../payoutFee';
+import { hasPayoutFee, payoutStageText, shippingWithoutPayoutFee } from '../payoutFee';
 
 describe('payoutFee', () => {
   it('takes the payout fee back out of the shipping amount', () => {
@@ -21,5 +21,22 @@ describe('payoutFee', () => {
     expect(hasPayoutFee('906138')).toBe(true);
     expect(hasPayoutFee('0')).toBe(false);
     expect(hasPayoutFee(undefined)).toBe(false);
+  });
+});
+
+describe('payoutStageText', () => {
+  const base = { amountNgn: '17705.88', bank: 'GTBank', accountLast4: '6789' };
+  it('says where the naira goes and how much', () => {
+    expect(payoutStageText({ ...base, stage: 'sending' }).body).toContain('₦17,705.88');
+    expect(payoutStageText({ ...base, stage: 'sending' }).body).toContain('GTBank ••••6789');
+  });
+  it('reassures on a review and never shows internals', () => {
+    const t = payoutStageText({ ...base, stage: 'review' });
+    expect(t.body).toContain('money is safe');
+  });
+  it('covers every stage', () => {
+    for (const stage of ['waiting_for_confirmation', 'sending', 'paid', 'paid_wallet', 'review', 'cancelled']) {
+      expect(payoutStageText({ ...base, stage }).title.length).toBeGreaterThan(0);
+    }
   });
 });

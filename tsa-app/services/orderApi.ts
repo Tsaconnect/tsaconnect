@@ -30,6 +30,8 @@ export interface Order {
   shippingAmount: string;
   /** The part of shippingAmount that pays the seller's bank payout. */
   payoutFee?: string;
+  /** The seller's own view of the bank payout this order carries (sellers only). */
+  payout?: SellerPayoutStage;
   platformFee: string;
   totalAmount: string;
   shippingZone: string;
@@ -138,6 +140,15 @@ export function formatTokenAmount(weiStr: string, token: string): string {
 }
 
 // --- API functions ---
+
+/** How a seller's bank payout is going, in plain stages. */
+export interface SellerPayoutStage {
+  stage: 'waiting_for_confirmation' | 'sending' | 'paid' | 'paid_wallet' | 'review' | 'cancelled';
+  /** Naira, "17705.88". */
+  amountNgn: string;
+  bank: string;
+  accountLast4: string;
+}
 
 /** One order-to-be in a cart quote. Amounts are the token's base units. */
 export interface CartQuoteLine {
