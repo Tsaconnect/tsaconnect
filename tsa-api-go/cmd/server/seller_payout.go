@@ -29,12 +29,14 @@ func wireSellerPayouts(cfg *config.Config, chains *services.BlockchainService, t
 	}
 	sw := services.NewSellerPayoutSwitch(config.DB)
 	senderFee := func() string { return services.PayFeeSplit{FeePercent: cfg.TSAPayFeePercent}.SenderFee(false) }
-	ch.WithPayouts(services.NewSellerPayoutPlanner(methods, quotes, treasury, senderFee, cfg.SellerPayoutBridgeBps).WithSwitch(sw))
+	lifiQuotes := services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID)
+	ch.WithPayouts(services.NewSellerPayoutPlanner(methods, quotes, treasury, senderFee, cfg.SellerPayoutBridgeBps).
+		WithSwitch(sw).WithBridge(lifiQuotes))
 	ch.WithSellerCalls(services.NewSellerEscrowCalls(treasury, escrow))
 
 	orchestrator := services.NewSellerPayoutOrchestrator(
 		config.DB, treasury, &services.GormRampLegStore{DB: config.DB},
-		services.NewLiFiQuoteClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID),
+		lifiQuotes,
 		services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
 		rampTransferVerifiers(chains, evmChainKeys(cfg)), orders, escrow, cfg.ProductEscrowAddress,
 		cfg.RampConversionRetryWindow, cfg.RampConversionLegCeiling, nil,

@@ -32,8 +32,19 @@ type SellerPayoutPlanner struct {
 	// (up to sellerPayoutAbsorbBps) or parks, a cheaper one leaves the rest
 	// with the platform.
 	bridgeBps int64
+	// bridge prices the real Sonic -> Base route at checkout; nil prices the
+	// bridge at bridgeBps and trusts it.
+	bridge lifiQuoter
 	// sw is the operator's switch; nil is always on.
 	sw payoutSwitch
+}
+
+// WithBridge makes the planner quote the actual bridge at the order's size: a
+// payout is offered only when that route fits the machine's cap, and the buyer
+// is charged what it really costs. Without it the flat bridgeBps is trusted.
+func (p *SellerPayoutPlanner) WithBridge(q lifiQuoter) *SellerPayoutPlanner {
+	p.bridge = q
+	return p
 }
 
 // WithSwitch stops new payout orders while the operator has payouts off.
@@ -125,7 +136,38 @@ func (p *SellerPayoutPlanner) Plan(ctx context.Context, sellerID uuid.UUID, toke
 	if !target.IsInt64() || target.Sign() <= 0 {
 		return nil, nil
 	}
-	return &PayoutPlan{Method: m, GrossUp: payoutGrossUp(net, fee, p.bridgeBps), FiatTargetKobo: target.Int64()}, nil
+	bridgeBps, ok := p.bridgeCostBps(ctx, token, net, fee)
+	if !ok {
+		// The bridge does not fit this size (its fixed cost dwarfs a small
+		// order) or cannot be priced: pay the wallet, charge the buyer nothing.
+		return nil, nil
+	}
+	return &PayoutPlan{Method: m, GrossUp: payoutGrossUp(net, fee, bridgeBps), FiatTargetKobo: target.Int64()}, nil
+}
+
+// bridgeCostBps is what the buyer's gross-up budgets for the bridge, and false
+// when no payout should be offered. With a quoter it asks LiFi for the route at
+// the amount the treasury will actually hold (net plus its own gross-up at the
+// configured estimate), refuses one that leaves no slack under the machine's
+// cap, and prices the rest at what it cost plus the slack.
+func (p *SellerPayoutPlanner) bridgeCostBps(ctx context.Context, token string, net *big.Int, fee *big.Rat) (int64, bool) {
+	if p.bridge == nil {
+		return p.bridgeBps, true
+	}
+	sonic, base := p.treasury.Lane("sonic"), p.treasury.Lane("base")
+	if sonic == nil || base == nil {
+		return 0, false
+	}
+	held := new(big.Int).Add(net, payoutGrossUp(net, fee, p.bridgeBps))
+	_, cost, err := quoteSellerPayoutBridge(ctx, p.bridge, sonic, base, token, p.treasury.Address(), held)
+	if err != nil || cost < 0 || cost > sellerPayoutMaxBridgeBps-sellerPayoutBridgeSlackBps {
+		return 0, false
+	}
+	bps := int64(cost) + sellerPayoutBridgeSlackBps
+	if bps < p.bridgeBps {
+		bps = p.bridgeBps
+	}
+	return bps, true
 }
 
 // rate is the provider's raw sell rate (naira per token) for about net: asked

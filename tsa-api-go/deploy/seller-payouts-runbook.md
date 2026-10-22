@@ -22,7 +22,13 @@ All of these, else new orders are made the ordinary way (seller wallet) and noth
 - Boot log shows `[seller-payout] enabled treasury=0x… bridge_bps=40`. `[seller-payout] dormant`
   names what is missing.
 
-Tuning: `SELLER_PAYOUT_BRIDGE_BPS` (default 40) is the bridge cost the buyer's payout fee budgets;
+At checkout the planner quotes the real Sonic -> Base LiFi route at the order's size (the same
+`LiFiCostBps` / `TreasuryGasBps` the machine checks): a bank payout is offered only when the route costs at
+most 80 bps (the machine's 100 bps cap less 20 bps slack), and the buyer's payout fee is that cost plus the
+slack. A small order's fixed bridge cost fails the check, so it is made the ordinary wallet order with no
+payout fee line. If LiFi cannot be asked, no payout is offered.
+
+Tuning: `SELLER_PAYOUT_BRIDGE_BPS` (default 40) is the FLOOR the payout fee budgets for the bridge;
 `RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER` / `_PER_CHAIN` cap exposure (payouts count toward the
 per-chain cap); `RAMP_CONVERSION_RETRY_MINUTES` / `RAMP_CONVERSION_LEG_CEILING_HOURS` bound bridge
 retries and a pending leg.

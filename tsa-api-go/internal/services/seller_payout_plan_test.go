@@ -200,3 +200,49 @@ func TestSellerPayoutSwitch_PersistsAndTakesEffectAtOnce(t *testing.T) {
 		t.Fatal("an unreadable switch is an error, never 'on'")
 	}
 }
+
+// The planner asks LiFi for the real Sonic -> Base route at the amount the
+// treasury will hold, offers a payout only when that route fits the machine's
+// cap with slack to spare, and charges the buyer what it costs.
+func TestPayoutPlan_PricesTheRealBridge(t *testing.T) {
+	ctx := context.Background()
+	net := big.NewInt(100_000000)
+
+	t.Run("a route inside the cap is priced at its cost plus the slack", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		p.WithBridge(r.lifi)
+		plan, err := p.Plan(ctx, uid, "USDC", net)
+		if err != nil || plan == nil {
+			t.Fatalf("plan = %+v, %v", plan, err)
+		}
+		l, _ := LiFiCostBps(r.lifi.route)
+		want := int64(l+TreasuryGasBps(r.lifi.route, treasuryERC20Gas)) + sellerPayoutBridgeSlackBps
+		if want < 40 {
+			want = 40
+		}
+		fee, _ := feeFraction("0.5")
+		if exp := payoutGrossUp(net, fee, want); plan.GrossUp.Cmp(exp) != 0 {
+			t.Fatalf("gross-up = %s; want %s (bridge priced at %d bps)", plan.GrossUp, exp, want)
+		}
+		held := new(big.Int).Add(net, payoutGrossUp(net, fee, 40))
+		if r.lifi.calls != 1 || r.lifi.last.FromAmount != held.String() || r.lifi.last.FromChainID != 146 || r.lifi.last.ToChainID != 8453 {
+			t.Fatalf("quoted %d times, last %+v; want one Sonic -> Base quote for %s", r.lifi.calls, r.lifi.last, held)
+		}
+	})
+
+	for name, setup := range map[string]func(r *payoutRig){
+		"a route over the cap (a small order's fixed cost)": func(r *payoutRig) { r.lifi.route.ToAmountUSD = 98 },
+		"a route with no slack under the cap":               func(r *payoutRig) { r.lifi.route.ToAmountUSD = 99.1 }, // 90 bps: inside the 100 cap, past the 20 slack
+		"a route with no price":                             func(r *payoutRig) { r.lifi.route.FromAmountUSD = 0 },
+		"no route":                                          func(r *payoutRig) { r.lifi.err = errors.New("no route") },
+	} {
+		t.Run(name+" pays the wallet", func(t *testing.T) {
+			p, r, _, uid := newPlanner(t)
+			p.WithBridge(r.lifi)
+			setup(r)
+			if plan, err := p.Plan(ctx, uid, "USDC", net); err != nil || plan != nil {
+				t.Fatalf("plan = %+v, err = %v; want the wallet", plan, err)
+			}
+		})
+	}
+}
