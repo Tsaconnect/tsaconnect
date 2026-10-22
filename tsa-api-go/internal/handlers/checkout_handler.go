@@ -3035,18 +3035,27 @@ func (ch *CheckoutHandler) SubmitRefund(c *gin.Context) {
 		return
 	}
 
+	// The move is conditional on the status the request was validated against, so
+	// of two submits racing with the same transaction only one acts: the other
+	// finds the order already moved and answers its current state, restoring no
+	// stock and sending no notice.
+	open := []string{models.OrderStatusEscrowed, models.OrderStatusDelivered}
 	if !refunded {
-		if err := config.DB.Model(&order).Update("status", models.OrderStatusRefundRequested).Error; err != nil {
+		res := config.DB.Model(&models.Order{}).Where("id = ? AND status IN ?", order.ID, open).
+			Update("status", models.OrderStatusRefundRequested)
+		if res.Error != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 			return
 		}
-		ch.EventBus.Publish(events.Event{
-			Type:    events.OrderRefunded,
-			UserID:  order.SellerID,
-			Title:   "Refund Requested",
-			Message: fmt.Sprintf("The buyer asked for a refund on order #%s. It is under admin review.", order.ID.String()[:8]),
-			Data:    map[string]interface{}{"orderId": order.ID.String(), "status": models.OrderStatusRefundRequested},
-		})
+		if res.RowsAffected == 1 {
+			ch.EventBus.Publish(events.Event{
+				Type:    events.OrderRefunded,
+				UserID:  order.SellerID,
+				Title:   "Refund Requested",
+				Message: fmt.Sprintf("The buyer asked for a refund on order #%s. It is under admin review.", order.ID.String()[:8]),
+				Data:    map[string]interface{}{"orderId": order.ID.String(), "status": models.OrderStatusRefundRequested},
+			})
+		}
 		utils.SuccessResponse(c, http.StatusOK, "Refund requested for admin review", gin.H{
 			"orderId": order.ID, "status": models.OrderStatusRefundRequested,
 		})
@@ -3058,24 +3067,28 @@ func (ch *CheckoutHandler) SubmitRefund(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
 		return
 	}
-	if err := tx.Model(&order).Updates(map[string]interface{}{
-		"status": models.OrderStatusRefunded, "release_tx_hash": req.TxHash,
-	}).Error; err != nil {
+	res := tx.Model(&models.Order{}).Where("id = ? AND status IN ?", order.ID, open).
+		Updates(map[string]interface{}{"status": models.OrderStatusRefunded, "release_tx_hash": req.TxHash})
+	if res.Error != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 		return
 	}
-	if err := services.RestoreOrderStock(tx, &order); err != nil {
-		tx.Rollback()
-		log.Printf("SubmitRefund stock restore error for order %s: %v", order.ID, err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
-		return
+	if res.RowsAffected == 1 {
+		if err := services.RestoreOrderStock(tx, &order); err != nil {
+			tx.Rollback()
+			log.Printf("SubmitRefund stock restore error for order %s: %v", order.ID, err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+			return
+		}
 	}
 	if err := tx.Commit().Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
 		return
 	}
-	ch.notifyOrderResolved(&order, models.OrderStatusRefunded, true, req.TxHash)
+	if res.RowsAffected == 1 {
+		ch.notifyOrderResolved(&order, models.OrderStatusRefunded, true, req.TxHash)
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Refunded", gin.H{"orderId": order.ID, "status": models.OrderStatusRefunded})
 }
 

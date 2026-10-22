@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -403,4 +404,38 @@ func TestSubmitRefund(t *testing.T) {
 			t.Fatalf("refused submits moved the order to %q", got)
 		}
 	})
+}
+
+// The same refund proof submitted twice at once restores the unit once.
+func TestSubmitRefund_RestoresStockOnce(t *testing.T) {
+	f := newProofFixture(t, models.OrderStatusEscrowed)
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.orderID, nil)
+	// In-memory SQLite is one database per connection; the goroutines still
+	// interleave their statements on the one connection.
+	sqlDB, err := f.db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	var before models.Product
+	f.db.First(&before, "id = ?", f.order.ProductID)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": "0xaaa"})
+		}()
+	}
+	wg.Wait()
+
+	var after models.Product
+	f.db.First(&after, "id = ?", f.order.ProductID)
+	if after.Stock != before.Stock+f.order.Quantity {
+		t.Fatalf("stock %d -> %d: want exactly one unit back", before.Stock, after.Stock)
+	}
+	if got := f.status(t); got != models.OrderStatusRefunded {
+		t.Fatalf("status %q", got)
+	}
 }
