@@ -1288,10 +1288,22 @@ func mapPaycrestStatus(o *PaycrestOrder, direction string, claimed bool) string 
 // ─── Reads ─────────────────────────────────────────────────────────────────
 
 // Get fetches one of the user's own orders.
+//
+// A seller payout's sale is the treasury's, not hers: the order carries her
+// user id only for the books, and she can neither read, cancel nor claim it.
 func (s *PaycrestOrderService) Get(ctx context.Context, userID, orderID uuid.UUID) (*models.PaycrestOrderRecord, error) {
+	return s.getOrder(ctx, userID, orderID, false)
+}
+
+// getOrder is Get, optionally reaching a treasury-run payout order — for the
+// service's own writes on it, never for a user-facing route.
+func (s *PaycrestOrderService) getOrder(ctx context.Context, userID, orderID uuid.UUID, treasuryRun bool) (*models.PaycrestOrderRecord, error) {
 	var row models.PaycrestOrderRecord
-	err := s.db.WithContext(ctx).
-		Where("id = ? AND user_id = ?", orderID, userID).First(&row).Error
+	q := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", orderID, userID)
+	if !treasuryRun {
+		q = q.Where("seller_payout_id IS NULL")
+	}
+	err := q.First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrPaycrestOrderNotYours
 	}
@@ -1322,10 +1334,14 @@ func (s *PaycrestOrderService) Cancel(ctx context.Context, userID, orderID uuid.
 // UPDATE as the status supplied by the caller — so a cancel that must also
 // withdraw something (a short order's deposit address) cannot be half done.
 func (s *PaycrestOrderService) cancelOrder(ctx context.Context, userID, orderID uuid.UUID, alsoSet map[string]any) (*models.PaycrestOrderRecord, error) {
+	return s.cancelOrderAs(ctx, userID, orderID, alsoSet, false)
+}
+
+func (s *PaycrestOrderService) cancelOrderAs(ctx context.Context, userID, orderID uuid.UUID, alsoSet map[string]any, treasuryRun bool) (*models.PaycrestOrderRecord, error) {
 	if s == nil {
 		return nil, ErrPaycrestDisabled
 	}
-	row, err := s.Get(ctx, userID, orderID)
+	row, err := s.getOrder(ctx, userID, orderID, treasuryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -1352,7 +1368,7 @@ func (s *PaycrestOrderService) cancelOrder(ctx context.Context, userID, orderID 
 	if res.RowsAffected == 0 {
 		return nil, ErrPaycrestNotCancellable
 	}
-	return s.Get(ctx, userID, orderID)
+	return s.getOrder(ctx, userID, orderID, treasuryRun)
 }
 
 // List returns the user's recent orders, newest first.

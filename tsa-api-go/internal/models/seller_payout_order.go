@@ -63,7 +63,7 @@ type SellerPayoutOrder struct {
 	InstitutionName   string `gorm:"size:128;not null" json:"institutionName"`
 	AccountNumber     string `gorm:"size:32;not null" json:"accountNumber"`
 	AccountName       string `gorm:"size:128;not null" json:"accountName"`
-	SellerWalletAfter string `gorm:"size:64" json:"-"` // the seller's wallet, for an operator's manual fallback
+	SellerWallet string `gorm:"size:64" json:"-"` // for an operator's manual fallback
 
 	// Where the release lands: the escrow's chain and token.
 	ChainKey string `gorm:"size:24;not null" json:"chain"`

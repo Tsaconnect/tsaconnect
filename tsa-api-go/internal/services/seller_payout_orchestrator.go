@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
@@ -32,6 +33,11 @@ import (
 // The legs are ramp_legs rows keyed by the payout's ID, handled by the shared
 // legRunner exactly as the converted-buy machine handles its own.
 
+// releaseProver is the slice of EscrowService that proves a release.
+type releaseProver interface {
+	VerifyOrderEvent(txHash, escrowAddr, event string, orderID [32]byte) (*types.Log, error)
+}
+
 // sellerPayoutSeller is the slice of PaycrestOrderService the machine uses.
 type sellerPayoutSeller interface {
 	CreateSellForFiat(ctx context.Context, req PaycrestSellRequest, converted bool, maxTokenBaseUnits *big.Int) (*models.PaycrestOrderRecord, error)
@@ -42,9 +48,6 @@ const (
 	// 0.5% of the payout, as extra USDC deposited beyond what the bridge landed.
 	// Past it the payout parks for a person instead of paying more.
 	sellerPayoutAbsorbBps = 50
-	// sellerPayoutMinReceivedBps: a release that credited less than this share
-	// of what the order should have is not trusted (parks).
-	sellerPayoutMinReceivedBps = 9950
 	// sellerPayoutMaxBridgeBps is the most a Sonic -> Base route may cost
 	// (LiFi's cost plus the treasury's gas) before the attempt is freed.
 	sellerPayoutMaxBridgeBps = 100
@@ -64,9 +67,12 @@ var errSellerPayoutTransition = errors.New("seller payout is no longer in the ex
 // SellerPayoutOrchestrator advances seller payouts. See the file comment.
 type SellerPayoutOrchestrator struct {
 	legRunner
-	lifi        lifiQuoter
-	status      *LiFiStatusClient
-	paycrest    sellerPayoutSeller
+	lifi     lifiQuoter
+	status   *LiFiStatusClient
+	paycrest sellerPayoutSeller
+	escrow   releaseProver
+	// escrowAddr is the configured escrow, for an order that predates recording its own.
+	escrowAddr  string
 	retryWindow time.Duration
 	legCeiling  time.Duration
 	// sellRetryWindow bounds how long a payout waits for a venue that refused
@@ -76,6 +82,7 @@ type SellerPayoutOrchestrator struct {
 
 func NewSellerPayoutOrchestrator(db *gorm.DB, treasury *Treasury, legs rampLegStore, lifi lifiQuoter,
 	status *LiFiStatusClient, transfers map[string]ERC20TransferVerifier, paycrest sellerPayoutSeller,
+	escrow releaseProver, escrowAddr string,
 	retryWindow, legCeiling time.Duration, now func() time.Time) *SellerPayoutOrchestrator {
 	if now == nil {
 		now = time.Now
@@ -92,7 +99,7 @@ func NewSellerPayoutOrchestrator(db *gorm.DB, treasury *Treasury, legs rampLegSt
 	}
 	return &SellerPayoutOrchestrator{
 		legRunner: legRunner{db: db, treasury: treasury, legs: legs, transfers: keyed, now: now},
-		lifi:      lifi, status: status, paycrest: paycrest,
+		lifi:      lifi, status: status, paycrest: paycrest, escrow: escrow, escrowAddr: escrowAddr,
 		retryWindow: retryWindow, legCeiling: legCeiling, sellRetryWindow: retryWindow,
 	}
 }
@@ -216,6 +223,31 @@ func (o *SellerPayoutOrchestrator) awaitRelease(ctx context.Context, p *models.S
 	if order.ReleaseTxHash == "" {
 		return nil // recorded by the confirm; the next tick reads it
 	}
+	// The escrow's own record of THIS order's release: paid as seller to the
+	// treasury, exactly what the order was priced to pay. A transfer to the
+	// treasury in some transaction proves nothing about this order.
+	escrowAddr := firstNonEmpty(order.EscrowContractAddress, o.escrowAddr)
+	l, err := o.escrow.VerifyOrderEvent(order.ReleaseTxHash, escrowAddr, "OrderReleased", GenerateOrderID(order.ID))
+	switch {
+	case errors.Is(err, ErrReceiptPending):
+		return nil
+	case errors.Is(err, ErrOrderEventNotFound):
+		return o.park(ctx, p, fmt.Sprintf("release %s holds no OrderReleased for this order: %v", order.ReleaseTxHash, err))
+	case err != nil:
+		return nil // unreadable now: the next tick looks again
+	}
+	seller, sellerAmount, err := OrderReleasedTo(l)
+	if err != nil {
+		return o.park(ctx, p, err.Error())
+	}
+	if !strings.EqualFold(seller.Hex(), common.HexToAddress(o.treasuryAddr()).Hex()) {
+		return o.park(ctx, p, fmt.Sprintf("the escrow released to %s, not the treasury", seller.Hex()))
+	}
+	want, ok := new(big.Int).SetString(p.ExpectedAmount, 10)
+	if !ok || want.Sign() <= 0 || sellerAmount.Cmp(want) != 0 {
+		return o.park(ctx, p, fmt.Sprintf("the escrow released %s, the order was priced to pay %q", sellerAmount, p.ExpectedAmount))
+	}
+	// And the treasury really was credited that much.
 	credited, proof, err := o.verifyTransfer(ctx, p.ChainKey, lane.tokenAddress(p.Token), order.ReleaseTxHash, o.treasuryAddr())
 	switch proof {
 	case transferWait:
@@ -226,14 +258,12 @@ func (o *SellerPayoutOrchestrator) awaitRelease(ctx context.Context, p *models.S
 	case transferRefuted:
 		return o.park(ctx, p, fmt.Sprintf("release %s did not credit the treasury: %v", order.ReleaseTxHash, err))
 	}
-	want, ok := new(big.Int).SetString(p.ExpectedAmount, 10)
-	if !ok || want.Sign() <= 0 {
-		return o.park(ctx, p, fmt.Sprintf("unreadable expected amount %q", p.ExpectedAmount))
+	if credited.Cmp(sellerAmount) < 0 {
+		return o.park(ctx, p, fmt.Sprintf("release credited %s of the %s the escrow reported", credited, sellerAmount))
 	}
-	floor := new(big.Int).Div(new(big.Int).Mul(want, big.NewInt(sellerPayoutMinReceivedBps)), big.NewInt(10000))
-	if credited.Cmp(floor) < 0 {
-		return o.park(ctx, p, fmt.Sprintf("release credited %s, expected about %s", credited, want))
-	}
+	// What is bridged and sold is what the escrow reported, never more: a
+	// transfer-heavy transaction cannot enlarge a payout.
+	credited = sellerAmount
 	return o.move(ctx, p, models.SellerPayoutReceived, map[string]any{"received_amount": credited.String()}, models.SellerPayoutAwaitingRelease)
 }
 

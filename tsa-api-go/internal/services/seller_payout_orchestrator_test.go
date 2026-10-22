@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -43,6 +45,33 @@ func (f *fakePayoutSeller) CreateSellForFiat(_ context.Context, req PaycrestSell
 	return row, f.db.Create(row).Error
 }
 
+// fakeReleaseProver answers the escrow's OrderReleased lookup.
+type fakeReleaseProver struct {
+	log *types.Log
+	err error
+	// asked records what was looked up.
+	event, addr string
+	orderID     [32]byte
+}
+
+func (f *fakeReleaseProver) VerifyOrderEvent(_, escrowAddr, event string, orderID [32]byte) (*types.Log, error) {
+	f.event, f.addr, f.orderID = event, escrowAddr, orderID
+	return f.log, f.err
+}
+
+// releaseLog is the OrderReleased the escrow emits: paid to seller, amount.
+func releaseLog(t *testing.T, orderID [32]byte, seller string, amount *big.Int) *types.Log {
+	t.Helper()
+	data, err := parsedEscrowABI.Events["OrderReleased"].Inputs.NonIndexed().Pack(amount, big.NewInt(2_000000), big.NewInt(0), big.NewInt(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &types.Log{
+		Topics: []common.Hash{parsedEscrowABI.Events["OrderReleased"].ID, common.Hash(orderID), common.BytesToHash(common.HexToAddress(seller).Bytes())},
+		Data:   data,
+	}
+}
+
 // payoutRig is one confirmed marketplace order whose release went to the
 // treasury: sonic holds the release, base the bridge landing and the deposit.
 type payoutRig struct {
@@ -57,6 +86,7 @@ type payoutRig struct {
 	sonic    *sponsorRig
 	base     *sponsorRig
 	seller   *fakePayoutSeller
+	escrow   *fakeReleaseProver
 	payout   *models.SellerPayoutOrder
 	order    models.Order
 	clock    time.Time
@@ -90,11 +120,12 @@ func newPayoutRig(t *testing.T) *payoutRig {
 	r.sonicTx = &fakeTransferVerifier{amount: big.NewInt(100_000000)}
 	r.baseTx = &fakeTransferVerifier{amount: new(big.Int)}
 	r.seller = &fakePayoutSeller{db: db, deposit: "99.600000"}
+	r.escrow = &fakeReleaseProver{}
 
 	r.svc = NewSellerPayoutOrchestrator(db, r.treasury, r.legStore, r.lifi,
 		NewLiFiStatusClient(r.status.srv.URL, ""),
 		map[string]ERC20TransferVerifier{"sonic": r.sonicTx, "base": r.baseTx},
-		r.seller, 30*time.Minute, 0, func() time.Time { return r.clock })
+		r.seller, r.escrow, "0xescrow", 30*time.Minute, 0, func() time.Time { return r.clock })
 
 	r.order = models.Order{ID: uuid.New(), Status: models.OrderStatusCompleted, ReleaseTxHash: "0xrelease"}
 	if err := db.Exec(`INSERT INTO orders (id, status, release_tx_hash) VALUES (?, ?, ?)`,
@@ -111,6 +142,7 @@ func newPayoutRig(t *testing.T) *payoutRig {
 	if err := db.Create(r.payout).Error; err != nil {
 		t.Fatal(err)
 	}
+	r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), r.treasury.Address(), big.NewInt(100_000000))
 	return r
 }
 
@@ -243,14 +275,25 @@ func TestSellerPayout_MovesNothingOnAnOrderThatIsNotConfirmed(t *testing.T) {
 }
 
 func TestSellerPayout_ProvesTheReleaseBeforeBelievingIt(t *testing.T) {
+	other := uuid.New()
 	cases := map[string]struct {
 		setup func(*payoutRig)
 		want  string
 	}{
-		"not mined yet":     {func(r *payoutRig) { r.sonicTx.err = errors.New("not found") }, models.SellerPayoutAwaitingRelease},
-		"paid someone else": {func(r *payoutRig) { r.sonicTx.err = ErrTransferWrongRecipient }, models.SellerPayoutNeedsReview},
-		"credited far less": {func(r *payoutRig) { r.sonicTx.amount = big.NewInt(50_000000) }, models.SellerPayoutNeedsReview},
+		"receipt not mined yet":     {func(r *payoutRig) { r.escrow.log, r.escrow.err = nil, ErrReceiptPending }, models.SellerPayoutAwaitingRelease},
+		"node unreadable":           {func(r *payoutRig) { r.escrow.log, r.escrow.err = nil, errors.New("rpc down") }, models.SellerPayoutAwaitingRelease},
+		"no release for this order": {func(r *payoutRig) { r.escrow.log, r.escrow.err = nil, ErrOrderEventNotFound }, models.SellerPayoutNeedsReview},
+		"released to someone else": {func(r *payoutRig) {
+			r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), sponsorTestUser, big.NewInt(100_000000))
+		}, models.SellerPayoutNeedsReview},
+		"released a different amount": {func(r *payoutRig) {
+			r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), r.treasury.Address(), big.NewInt(150_000000))
+		}, models.SellerPayoutNeedsReview},
+		"transfer not mined yet":               {func(r *payoutRig) { r.sonicTx.err = errors.New("not found") }, models.SellerPayoutAwaitingRelease},
+		"transfer paid someone else":           {func(r *payoutRig) { r.sonicTx.err = ErrTransferWrongRecipient }, models.SellerPayoutNeedsReview},
+		"treasury credited less than reported": {func(r *payoutRig) { r.sonicTx.amount = big.NewInt(50_000000) }, models.SellerPayoutNeedsReview},
 	}
+	_ = other
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			r := newPayoutRig(t)
@@ -261,6 +304,25 @@ func TestSellerPayout_ProvesTheReleaseBeforeBelievingIt(t *testing.T) {
 				t.Fatal("nothing may move on an unproven release")
 			}
 		})
+	}
+}
+
+// What is sold is what the escrow reported, however much more the transaction
+// happened to credit the treasury.
+func TestSellerPayout_AnOverCreditedTransactionDoesNotEnlargeThePayout(t *testing.T) {
+	r := newPayoutRig(t)
+	r.sonicTx.amount = big.NewInt(900_000000)
+	r.mustStep()
+	if got := r.wantStatus(models.SellerPayoutReceived); got.ReceivedAmount != "100000000" {
+		t.Fatalf("received = %s; want the escrow's reported 100 USDC", got.ReceivedAmount)
+	}
+}
+
+func TestSellerPayout_LooksTheReleaseUpOnTheOrdersOwnEscrow(t *testing.T) {
+	r := newPayoutRig(t)
+	r.mustStep()
+	if r.escrow.event != "OrderReleased" || r.escrow.addr != "0xescrow" || r.escrow.orderID != GenerateOrderID(r.order.ID) {
+		t.Fatalf("lookup = %s %s %x", r.escrow.event, r.escrow.addr, r.escrow.orderID)
 	}
 }
 

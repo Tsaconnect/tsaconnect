@@ -205,3 +205,27 @@ func TestAssertNoOpenOrder_APaymentsOrderIsNamedAsAPayment(t *testing.T) {
 		t.Fatalf("err = %v, want the ordinary open-order lock", err)
 	}
 }
+
+// A seller payout's order is the treasury's: the seller it carries cannot read,
+// cancel or claim it, though the service itself can still cancel it.
+func TestSellerPayoutOrder_IsOutOfTheSellersReach(t *testing.T) {
+	svc, db := newCancelTestService(t)
+	seller := uuid.New()
+	row := seedOrder(t, db, seller, models.PaycrestDirectionSell, models.PaycrestStatusAwaitingDeposit)
+	payout := uuid.New()
+	db.Model(row).Update("seller_payout_id", payout)
+
+	ctx := context.Background()
+	if _, err := svc.Get(ctx, seller, row.ID); !errors.Is(err, ErrPaycrestOrderNotYours) {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := svc.Cancel(ctx, seller, row.ID); !errors.Is(err, ErrPaycrestOrderNotYours) {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := svc.ClaimPayment(ctx, seller, row.ID); !errors.Is(err, ErrPaycrestOrderNotYours) {
+		t.Fatalf("ClaimPayment: %v", err)
+	}
+	if _, err := svc.cancelOrderAs(ctx, seller, row.ID, map[string]any{"failure_reason": "short"}, true); err != nil {
+		t.Fatalf("the service's own cancel: %v", err)
+	}
+}
