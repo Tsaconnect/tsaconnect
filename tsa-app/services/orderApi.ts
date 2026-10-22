@@ -552,6 +552,26 @@ export async function requestRefund(orderId: string): Promise<ApiResponse<any>> 
   }
 }
 
+// After the buyer signs the refund transaction, the server verifies it on-chain
+// and only then moves the order (refunded, or refund_requested for the admin).
+export async function submitRefund(
+  orderId: string,
+  txHash: string
+): Promise<ApiResponse<{ orderId: string; status: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/submit-refund`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ txHash }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Submit refund error:', error);
+    return { success: false, message: error.message || 'Failed to submit refund' };
+  }
+}
+
 // Cancel an order. Buyer may cancel while pending_payment. Seller may cancel
 // while pending_payment (DB transition) or while escrowed (returns an unsigned
 // on-chain cancelTx that must be signed and broadcast by the seller).

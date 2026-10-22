@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -1484,6 +1485,12 @@ func TestRequestRefund_Delivered(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	product := createTestProduct(t, db, seller.ID, 10.0)
 	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusDelivered, "USDC")
+
+	// Delivered before the seller's mark was on-chain: the escrow would refund
+	// at once, so this stays a database request for admin review.
+	chain := services.NewFakeEscrowChain()
+	chain.SetOrder(services.GenerateOrderID(order.ID), services.OnChainOrder{Buyer: common.HexToAddress("0x0000000000000000000000000000000000000001")})
+	ch.EscrowService = services.NewEscrowServiceWithBackend(ch.Config, chain, chain)
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()

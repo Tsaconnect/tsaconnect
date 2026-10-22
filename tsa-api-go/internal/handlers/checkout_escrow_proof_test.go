@@ -335,3 +335,72 @@ func TestPrepareDeliver(t *testing.T) {
 		}
 	})
 }
+
+func TestRequestRefund_AfterDelivery(t *testing.T) {
+	t.Run("delivery on-chain: the buyer signs the dispute, the status waits", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusDelivered)
+		f.holdOrder(func(o *services.OnChainOrder) { o.SellerDelivered = true })
+		w := f.call(f.ch.RequestRefund, f.buyer, gin.H{})
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "refundTx") {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+		if got := f.status(t); got != models.OrderStatusDelivered {
+			t.Fatalf("the status moved to %q before the transaction was proven", got)
+		}
+	})
+	t.Run("delivered before the mark was on-chain: admin review in the database", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusDelivered)
+		f.holdOrder(nil)
+		if w := f.call(f.ch.RequestRefund, f.buyer, gin.H{}); w.Code != http.StatusOK {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+		if got := f.status(t); got != models.OrderStatusRefundRequested {
+			t.Fatalf("status %q", got)
+		}
+	})
+}
+
+func TestSubmitRefund(t *testing.T) {
+	t.Run("RefundRequested makes it a dispute", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusDelivered)
+		f.chain.MineEvent("0xaaa", f.escrow(), "RefundRequested", f.orderID, nil)
+		if w := f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusOK {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+		if got := f.status(t); got != models.OrderStatusRefundRequested {
+			t.Fatalf("status %q", got)
+		}
+	})
+	t.Run("OrderRefunded is the instant refund", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusEscrowed)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.orderID, nil)
+		if w := f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusOK {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+		if got := f.status(t); got != models.OrderStatusRefunded {
+			t.Fatalf("status %q", got)
+		}
+	})
+	t.Run("another event, another order, or another user is refused", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusDelivered)
+		var other [32]byte
+		other[0] = 9
+		f.chain.MineEvent("0xaaa", f.escrow(), "ReceiptConfirmed", f.orderID, nil)
+		f.chain.MineEvent("0xbbb", f.escrow(), "RefundRequested", other, nil)
+		f.chain.MineEvent("0xccc", f.escrow(), "RefundRequested", f.orderID, nil)
+		for _, tx := range []string{"0xaaa", "0xbbb"} {
+			if w := f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": tx}); w.Code != http.StatusBadRequest {
+				t.Fatalf("%s: got %d %s", tx, w.Code, w.Body)
+			}
+		}
+		if w := f.call(f.ch.SubmitRefund, f.seller, gin.H{"txHash": "0xccc"}); w.Code != http.StatusForbidden {
+			t.Fatalf("a seller submitting the buyer's refund: got %d", w.Code)
+		}
+		if w := f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": "0xddd"}); w.Code != http.StatusConflict {
+			t.Fatalf("an unmined tx: got %d", w.Code)
+		}
+		if got := f.status(t); got != models.OrderStatusDelivered {
+			t.Fatalf("refused submits moved the order to %q", got)
+		}
+	})
+}

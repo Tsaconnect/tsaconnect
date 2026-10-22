@@ -82,7 +82,11 @@ func (f *FakeEscrowChain) CallContract(_ context.Context, call ethereum.CallMsg,
 	if o.PlatformFee == nil {
 		o.PlatformFee = zero
 	}
+	created := big.NewInt(0)
+	if !o.CreatedAt.IsZero() {
+		created = big.NewInt(o.CreatedAt.Unix())
+	}
 	return parsedEscrowABI.Methods["orders"].Outputs.Pack(
 		o.Buyer, o.Seller, o.Token, o.ProductAmount, o.ShippingAmount, o.PlatformFee,
-		common.Address{}, big.NewInt(o.CreatedAt.Unix()), o.SellerDelivered, false, false, o.Resolved)
+		common.Address{}, created, o.SellerDelivered, false, false, o.Resolved)
 }

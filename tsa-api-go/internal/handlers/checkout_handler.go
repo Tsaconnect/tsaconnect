@@ -2188,21 +2188,27 @@ func (ch *CheckoutHandler) requireOrderEvent(c *gin.Context, order *models.Order
 		return nil, false
 	}
 	l, err := ch.EscrowService.VerifyOrderEvent(txHash, ch.orderEscrowContract(order), event, services.GenerateOrderID(order.ID))
-	if errors.Is(err, services.ErrReceiptPending) {
-		utils.ErrorResponse(c, http.StatusConflict, "That transaction is still pending — please wait and retry")
-		return nil, false
-	}
-	if errors.Is(err, services.ErrOrderEventNotFound) {
-		log.Printf("[checkout] order_event_not_found=1 order=%s event=%s tx=%s: %v", order.ID, event, txHash, err)
-		utils.ErrorResponse(c, http.StatusBadRequest, "That transaction is not for this order")
-		return nil, false
-	}
 	if err != nil {
-		log.Printf("[checkout] order event check failed order=%s event=%s tx=%s: %v", order.ID, event, txHash, err)
-		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the transaction — try again later")
+		orderEventFail(c, order, txHash, event, err)
 		return nil, false
 	}
 	return l, true
+}
+
+// orderEventFail answers a VerifyOrderEvent error: a transaction that is not
+// mined yet is a retry, one that is not for this order a refusal, and anything
+// else (an unreadable node) a retry later.
+func orderEventFail(c *gin.Context, order *models.Order, txHash, event string, err error) {
+	switch {
+	case errors.Is(err, services.ErrReceiptPending):
+		utils.ErrorResponse(c, http.StatusConflict, "That transaction is still pending — please wait and retry")
+	case errors.Is(err, services.ErrOrderEventNotFound):
+		log.Printf("[checkout] order_event_not_found=1 order=%s event=%s tx=%s: %v", order.ID, event, txHash, err)
+		utils.ErrorResponse(c, http.StatusBadRequest, "That transaction is not for this order")
+	default:
+		log.Printf("[checkout] order event check failed order=%s event=%s tx=%s: %v", order.ID, event, txHash, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the transaction — try again later")
+	}
 }
 
 // requireEscrowFundsOrder reads the escrow's own record of order and refuses
@@ -2921,7 +2927,31 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 		})
 
 	case models.OrderStatusDelivered:
-		// After delivery — update to refund_requested for admin review
+		if !order.IsSpendableMCGP() {
+			// With the seller's delivery on-chain the escrow turns the buyer's
+			// requestRefund into a dispute for the admin. The status changes
+			// only once that transaction is proven (SubmitRefund).
+			onChain, ok := ch.onChainOrder(c, &order)
+			if !ok {
+				return
+			}
+			if onChain.SellerDelivered {
+				refundTxBytes, err := ch.EscrowService.PrepareRequestRefund(services.GenerateOrderID(order.ID), user.WalletAddress, ch.orderEscrowContract(&order))
+				if err != nil {
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare refund transaction")
+					return
+				}
+				var refundTx map[string]interface{}
+				if err := json.Unmarshal(refundTxBytes, &refundTx); err != nil {
+					utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to decode refund transaction")
+					return
+				}
+				utils.SuccessResponse(c, http.StatusOK, "Refund transaction prepared", gin.H{"refundTx": refundTx})
+				return
+			}
+			// Delivered before the mark went on-chain: the escrow would refund
+			// instantly, so this stays a database request for admin review.
+		}
 		if err := config.DB.Model(&order).Update("status", models.OrderStatusRefundRequested).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
 			return
@@ -2945,6 +2975,108 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 	default:
 		utils.ErrorResponse(c, http.StatusBadRequest, "Refund can only be requested when order is escrowed or delivered")
 	}
+}
+
+type submitRefundRequest struct {
+	TxHash string `json:"txHash" binding:"required"`
+}
+
+// SubmitRefund handles POST /api/orders/:id/submit-refund. The buyer signed the
+// escrow's requestRefund (from RequestRefund's refundTx); what it did decides
+// the order: before delivery the escrow refunds at once (OrderRefunded), after
+// it the order becomes a dispute for the admin (RefundRequested). Nothing is
+// recorded without the escrow's own event for this order.
+func (ch *CheckoutHandler) SubmitRefund(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	orderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+	var req submitRefundRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "txHash is required")
+		return
+	}
+	var order models.Order
+	if err := config.DB.First(&order, "id = ?", orderID).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusNotFound, "Order not found")
+		return
+	}
+	if order.BuyerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the buyer can request a refund")
+		return
+	}
+	if refuseSpendableOnChainStep(c, &order, "Request the refund directly.") {
+		return
+	}
+	if order.Status != models.OrderStatusEscrowed && order.Status != models.OrderStatusDelivered {
+		utils.ErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Cannot submit refund: order is in %s status", order.Status))
+		return
+	}
+	if ch.EscrowService == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the transaction — try again later")
+		return
+	}
+
+	escrowAddr, id := ch.orderEscrowContract(&order), services.GenerateOrderID(order.ID)
+	refunded := false
+	_, err = ch.EscrowService.VerifyOrderEvent(req.TxHash, escrowAddr, "RefundRequested", id)
+	if errors.Is(err, services.ErrOrderEventNotFound) {
+		_, err = ch.EscrowService.VerifyOrderEvent(req.TxHash, escrowAddr, "OrderRefunded", id)
+		refunded = err == nil
+	}
+	if err != nil {
+		orderEventFail(c, &order, req.TxHash, "RefundRequested/OrderRefunded", err)
+		return
+	}
+
+	if !refunded {
+		if err := config.DB.Model(&order).Update("status", models.OrderStatusRefundRequested).Error; err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+			return
+		}
+		ch.EventBus.Publish(events.Event{
+			Type:    events.OrderRefunded,
+			UserID:  order.SellerID,
+			Title:   "Refund Requested",
+			Message: fmt.Sprintf("The buyer asked for a refund on order #%s. It is under admin review.", order.ID.String()[:8]),
+			Data:    map[string]interface{}{"orderId": order.ID.String(), "status": models.OrderStatusRefundRequested},
+		})
+		utils.SuccessResponse(c, http.StatusOK, "Refund requested for admin review", gin.H{
+			"orderId": order.ID, "status": models.OrderStatusRefundRequested,
+		})
+		return
+	}
+
+	tx := config.DB.Begin()
+	if tx.Error != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
+		return
+	}
+	if err := tx.Model(&order).Updates(map[string]interface{}{
+		"status": models.OrderStatusRefunded, "release_tx_hash": req.TxHash,
+	}).Error; err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+	if err := services.RestoreOrderStock(tx, &order); err != nil {
+		tx.Rollback()
+		log.Printf("SubmitRefund stock restore error for order %s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to restore stock")
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
+		return
+	}
+	ch.notifyOrderResolved(&order, models.OrderStatusRefunded, true, req.TxHash)
+	utils.SuccessResponse(c, http.StatusOK, "Refunded", gin.H{"orderId": order.ID, "status": models.OrderStatusRefunded})
 }
 
 // CancelOrder handles POST /api/orders/:id/cancel.
