@@ -152,7 +152,7 @@ func (a *SellerPayoutAdmin) Retry(ctx context.Context, id, admin uuid.UUID, note
 	}
 	// A retry is a fresh start for the retry windows.
 	if err := a.orch.move(ctx, p, to, map[string]any{"failure_reason": "", "retry_safe": false, "attempt_started_at": a.orch.now()}, models.SellerPayoutNeedsReview); err != nil {
-		return err
+		return notParkedIfRaced(err)
 	}
 	a.audit(ctx, "seller_payout.retry", admin, p, map[string]any{"note": note, "force": force, "to": to})
 	return nil
@@ -182,7 +182,7 @@ func (a *SellerPayoutAdmin) MarkPaid(ctx context.Context, id, admin uuid.UUID, n
 		}
 	}
 	if err := a.orch.move(ctx, p, models.SellerPayoutPaid, map[string]any{"failure_reason": truncateReason("paid by hand: " + reference)}, models.SellerPayoutNeedsReview); err != nil {
-		return err
+		return notParkedIfRaced(err)
 	}
 	a.audit(ctx, "seller_payout.marked_paid", admin, p, map[string]any{"note": note, "reference": reference, "force": force})
 	return nil
@@ -233,7 +233,7 @@ func (a *SellerPayoutAdmin) Cancel(ctx context.Context, id, admin uuid.UUID, not
 		}
 	}
 	if err := a.orch.move(ctx, p, models.SellerPayoutCancelled, map[string]any{"failure_reason": truncateReason("cancelled: " + note)}, models.SellerPayoutNeedsReview); err != nil {
-		return err
+		return notParkedIfRaced(err)
 	}
 	a.audit(ctx, "seller_payout.cancelled", admin, p, map[string]any{"note": note})
 	return nil
@@ -249,7 +249,7 @@ func (a *SellerPayoutAdmin) PayWallet(ctx context.Context, id, admin uuid.UUID, 
 		return err
 	}
 	if err := a.orch.StartWalletPayment(ctx, p); err != nil {
-		return err
+		return notParkedIfRaced(err)
 	}
 	a.audit(ctx, "seller_payout.pay_wallet", admin, p, map[string]any{"note": note, "wallet": p.SellerWallet})
 	return nil
@@ -265,4 +265,13 @@ func (a *SellerPayoutAdmin) audit(ctx context.Context, action string, admin uuid
 	if err := a.db.WithContext(ctx).Create(&row).Error; err != nil {
 		fmt.Printf("[seller-payout] audit %s for payout %s failed: %v\n", action, p.ID, err)
 	}
+}
+
+// notParkedIfRaced reports a lost race (another action moved the payout first)
+// as "not parked", which the handler answers with 409 instead of a 500.
+func notParkedIfRaced(err error) error {
+	if errors.Is(err, errSellerPayoutTransition) {
+		return ErrPayoutNotParked
+	}
+	return err
 }

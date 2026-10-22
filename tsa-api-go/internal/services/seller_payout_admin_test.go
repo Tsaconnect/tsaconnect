@@ -400,3 +400,13 @@ func TestSellerPayoutAdmin_RetryFromASaleStopRunsTheSaleAgain(t *testing.T) {
 		}
 	})
 }
+
+func TestNotParkedIfRaced(t *testing.T) {
+	if !errors.Is(notParkedIfRaced(errSellerPayoutTransition), ErrPayoutNotParked) {
+		t.Fatal("a lost race must read as not parked (409)")
+	}
+	other := errors.New("db down")
+	if notParkedIfRaced(other) != other {
+		t.Fatal("other errors pass through")
+	}
+}
