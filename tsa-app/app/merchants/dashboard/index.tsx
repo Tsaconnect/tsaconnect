@@ -22,6 +22,7 @@ import { merchantDashboardCta } from '@/utils/pmCta';
 import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { LpCtaCard } from '@/components/liquidity/LpCtaCard';
 import { KYC_ROUTE } from '@/utils/kycRefusal';
+import { SELLER_PAYOUT } from '@/constants/routes';
 import {
   AccentCard,
   Badge,
@@ -313,6 +314,23 @@ export default function MerchantDashboard() {
               </AccentCard>
             </PressableScale>
           ) : null}
+
+          <PressableScale onPress={() => router.push(SELLER_PAYOUT)} style={{ marginBottom: spacing.lg }}>
+            <AccentCard padding="md" railColor={colors.accent}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
+                <Icon name="bank" size={24} color={colors.accent} />
+                <View style={{ flex: 1 }}>
+                  <Text variant="bodyMed" weight="700">
+                    Payout account
+                  </Text>
+                  <Text variant="caption" color="textSecondary">
+                    Get paid for sales in naira to your bank, or to your wallet.
+                  </Text>
+                </View>
+                <Icon name="chevronRight" size={20} color={colors.textMuted} />
+              </View>
+            </AccentCard>
+          </PressableScale>
 
           <LpCtaCard isPm={isPm} kind={pmKind} lpStatus={lpStatus} liquidityAvailable={liquidityAvailable} loading={pmLoading} />
 
