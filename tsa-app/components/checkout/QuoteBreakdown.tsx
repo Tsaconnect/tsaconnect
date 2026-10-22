@@ -6,6 +6,7 @@ import { View } from 'react-native';
 import { SummaryRow, Text } from '@/components/ui';
 import type { CartQuote } from '@/services/orderApi';
 import { listingAmount, useQuoteFormat } from '@/hooks/useCheckoutQuote';
+import { hasPayoutFee, shippingWithoutPayoutFee } from '@/utils/payoutFee';
 
 export const TokenAmount = ({
   quote,
@@ -51,13 +52,22 @@ export const QuoteBreakdown = ({
 }) => {
   const { totals, lines } = quote;
   const orders = lines.length;
+  // The payout fee rides on the shipping amount; show the real shipping apart from it.
+  const shipping = shippingWithoutPayoutFee(totals.shippingAmount, totals.payoutFee);
   return (
     <View>
       <SummaryRow label="Items" value={<TokenAmount quote={quote} base={listingAmount(totals)} />} />
       <SummaryRow
         label={shippingLabel}
-        value={isZero(totals.shippingAmount) ? 'Free' : <TokenAmount quote={quote} base={totals.shippingAmount} />}
+        value={isZero(shipping) ? 'Free' : <TokenAmount quote={quote} base={shipping} />}
       />
+      {hasPayoutFee(totals.payoutFee) && (
+        <SummaryRow
+          label="Payout fee"
+          hint="Pays for the seller to be paid in naira"
+          value={<TokenAmount quote={quote} base={totals.payoutFee ?? '0'} />}
+        />
+      )}
       {!isZero(totals.platformFee) && (
         // Informational: it is inside the item price, not added to the total.
         <SummaryRow label="Platform fee" value="Paid by seller" valueColor="textMuted" />
