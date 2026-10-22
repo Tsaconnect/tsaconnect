@@ -39,7 +39,10 @@ type Order struct {
 	// EscrowSellerWallet is the seller wallet the buyer was told to escrow to
 	// (set at prepare-escrow), so a wallet change afterwards cannot make a
 	// correct payment look like a mismatch.
-	EscrowSellerWallet     string     `gorm:"size:42" json:"-"`
+	EscrowSellerWallet string `gorm:"size:42" json:"-"`
+	// PayoutFee is the part of ShippingAmount that pays the offramp for a
+	// seller's bank payout (base units). The seller's own shipping is the rest.
+	PayoutFee              string     `gorm:"size:78" json:"payoutFee,omitempty"`
 	EscrowTxHash           string     `json:"escrowTxHash,omitempty"`
 	ApproveTxHash          string     `json:"approveTxHash,omitempty"`
 	ReleaseTxHash          string     `json:"releaseTxHash,omitempty"`

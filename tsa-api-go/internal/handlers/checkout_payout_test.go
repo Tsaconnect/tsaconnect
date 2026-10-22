@@ -238,3 +238,57 @@ func TestPlanLinePayout(t *testing.T) {
 		}
 	})
 }
+
+// realPlanner prices every order the same and records the payout row for real.
+type realPlanner struct{ gross *big.Int }
+
+func (p *realPlanner) Plan(context.Context, uuid.UUID, string, *big.Int) (*services.PayoutPlan, error) {
+	return &services.PayoutPlan{
+		Method: &models.SellerPayoutMethod{Currency: "NGN", InstitutionCode: "058", InstitutionName: "GTBank", AccountNumber: "0123456789", AccountName: "ADA OBI"},
+		GrossUp: p.gross, FiatTargetKobo: 1_500_000,
+	}, nil
+}
+func (p *realPlanner) Persist(tx *gorm.DB, order *models.Order, wallet string, plan *services.PayoutPlan, expected *big.Int) error {
+	return (&services.SellerPayoutPlanner{}).Persist(tx, order, wallet, plan, expected)
+}
+func (p *realPlanner) TreasuryAddress() string { return proofTreasury }
+
+func TestCreateServiceOrder_APayoutRidesOnTheShippingAmount(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	ch.WithPayouts(&realPlanner{gross: big.NewInt(906138)})
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	setUserWallet(t, db, seller, proofSellerWallet)
+	cat := createTypedServiceCategory(t, db, models.ServiceTypeOrder)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 0)
+	svc.ShippingSameCity = 4
+	db.Save(svc)
+	item := addMenuItem(t, db, svc.ID, "Combo", 15, true)
+
+	w := postServiceOrder(t, ch, buyer, map[string]interface{}{
+		"productId":      svc.ID.String(),
+		"menuSelections": []map[string]interface{}{{"itemId": item.ID.String(), "quantity": 2}},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	order := firstOrder(t, w)
+	if order["shippingAmount"] != "4906138" || order["payoutFee"] != "906138" {
+		t.Fatalf("shipping %v, payoutFee %v; want the seller's 4 USDC plus the 0.906138 payout fee", order["shippingAmount"], order["payoutFee"])
+	}
+	id, _ := uuid.Parse(order["id"].(string))
+	row, err := services.PayoutForOrder(context.Background(), db, id)
+	if err != nil || row == nil {
+		t.Fatalf("payout row = %+v, %v", row, err)
+	}
+	// What the escrow will credit the treasury: the seller's product share (30 / 1.02) plus shipping with the payout fee.
+	if row.ExpectedAmount != "34317903" || row.SellerWallet != proofSellerWallet || row.AccountNumber != "0123456789" {
+		t.Fatalf("payout = %+v", row)
+	}
+	var stored models.Order
+	db.First(&stored, "id = ?", id)
+	if stored.EscrowSellerWallet != proofTreasury {
+		t.Fatalf("recorded seller wallet = %q; want the treasury", stored.EscrowSellerWallet)
+	}
+}

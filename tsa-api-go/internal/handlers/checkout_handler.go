@@ -943,6 +943,15 @@ type pricedCartLine struct {
 	payout *services.PayoutPlan
 }
 
+// payoutFee is the offramp cost inside the line's shippingAmount, zero when the
+// seller is paid in crypto.
+func (l pricedCartLine) payoutFee() *big.Int {
+	if l.payout == nil {
+		return new(big.Int)
+	}
+	return new(big.Int).Set(l.payout.GrossUp)
+}
+
 // orderTotal is what the order records as TotalAmount (escrowed on-chain).
 func (l pricedCartLine) orderTotal() *big.Int {
 	t := new(big.Int).Add(l.productAmount, l.shippingAmount)
@@ -1347,6 +1356,7 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 			UpdatedAt:       time.Now(),
 		}
 		if line.payout != nil {
+			order.PayoutFee = line.payout.GrossUp.String()
 			// The treasury is this order's on-chain seller; the wallet the buyer
 			// is told to pay is recorded now so nothing later can change it.
 			order.EscrowSellerWallet = ch.payouts.TreasuryAddress()
@@ -1512,11 +1522,15 @@ type cartQuoteLine struct {
 	PlatformFee    string `json:"platformFee"`
 	GasFee         string `json:"gasFee"`
 	Total          string `json:"total"`
+	// PayoutFee is the share of ShippingAmount that pays for the seller's bank
+	// payout ("0" when the seller is paid in crypto).
+	PayoutFee string `json:"payoutFee"`
 }
 
 type cartQuoteTotals struct {
 	ProductAmount  string `json:"productAmount"`
 	ShippingAmount string `json:"shippingAmount"`
+	PayoutFee      string `json:"payoutFee"`
 	PlatformFee    string `json:"platformFee"`
 	GasFee         string `json:"gasFee"`
 	Total          string `json:"total"`
@@ -1539,8 +1553,8 @@ func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
 	}
 
 	gasFee := rates.gasFee
-	sum := struct{ product, shipping, fee, gas, total *big.Int }{
-		new(big.Int), new(big.Int), new(big.Int), new(big.Int), new(big.Int),
+	sum := struct{ product, shipping, fee, gas, total, payout *big.Int }{
+		new(big.Int), new(big.Int), new(big.Int), new(big.Int), new(big.Int), new(big.Int),
 	}
 	out := make([]cartQuoteLine, 0, len(lines))
 	for _, l := range lines {
@@ -1562,7 +1576,9 @@ func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
 			PlatformFee:    l.platformFee.String(),
 			GasFee:         gasFee.String(),
 			Total:          lineTotal.String(),
+			PayoutFee:      l.payoutFee().String(),
 		})
+		sum.payout.Add(sum.payout, l.payoutFee())
 		sum.product.Add(sum.product, l.productAmount)
 		sum.shipping.Add(sum.shipping, l.shippingAmount)
 		sum.fee.Add(sum.fee, l.platformFee)
@@ -1580,6 +1596,7 @@ func (ch *CheckoutHandler) QuoteCart(c *gin.Context) {
 		"totals": cartQuoteTotals{
 			ProductAmount:  sum.product.String(),
 			ShippingAmount: sum.shipping.String(),
+			PayoutFee:      sum.payout.String(),
 			PlatformFee:    sum.fee.String(),
 			GasFee:         sum.gas.String(),
 			Total:          sum.total.String(),
@@ -1793,6 +1810,20 @@ func (ch *CheckoutHandler) placeServiceOrder(
 		return nil, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token), http.StatusBadRequest
 	}
 
+	// A seller with a bank payout gets it for service orders and bookings too:
+	// the offramp costs ride on the shipping amount, as for a cart line.
+	var payout *services.PayoutPlan
+	if ch.payouts != nil {
+		plan, err := ch.payouts.Plan(context.Background(), product.UserID, token, new(big.Int).Add(productAmountWei, shippingAmountWei))
+		if err != nil {
+			return nil, "Failed to resolve the seller's payout", http.StatusInternalServerError
+		}
+		if plan != nil {
+			payout = plan
+			shippingAmountWei = new(big.Int).Add(shippingAmountWei, plan.GrossUp)
+		}
+	}
+
 	totalAmountWei := new(big.Int).Add(productAmountWei, shippingAmountWei)
 	totalAmountWei.Add(totalAmountWei, platformFeeWei)
 
@@ -1827,10 +1858,21 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	}
 	order.SetMenuSelections(menuSel)
 	order.SetServiceAnswers(answers)
+	if payout != nil {
+		order.PayoutFee = payout.GrossUp.String()
+		order.EscrowSellerWallet = ch.payouts.TreasuryAddress()
+	}
 
 	if err := tx.Create(&order).Error; err != nil {
 		log.Printf("Failed to create service order: %v", err)
 		return nil, "Failed to create order", http.StatusInternalServerError
+	}
+	if payout != nil {
+		expected := new(big.Int).Add(productAmountWei, shippingAmountWei)
+		if err := ch.payouts.Persist(tx, &order, seller.WalletAddress, payout, expected); err != nil {
+			log.Printf("Failed to record the payout for service order %s: %v", order.ID, err)
+			return nil, "Failed to create order", http.StatusInternalServerError
+		}
 	}
 	if booking != nil {
 		booking.OrderID = order.ID
@@ -4177,6 +4219,8 @@ func (ch *CheckoutHandler) finishSellerCancel(c *gin.Context, order *models.Orde
 	utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
 		"orderId": order.ID,
 		"status":  models.OrderStatusCancelled,
+		// Nothing for the seller's app to sign: the cancel is already on-chain.
+		"cancelled": true,
 	})
 }
 
