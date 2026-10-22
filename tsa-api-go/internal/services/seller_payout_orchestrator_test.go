@@ -136,7 +136,7 @@ func newPayoutRig(t *testing.T) *payoutRig {
 	r.payout = &models.SellerPayoutOrder{
 		ID: uuid.New(), MarketplaceOrderID: r.order.ID, SellerUserID: uuid.New(),
 		Currency: "NGN", InstitutionCode: "058", InstitutionName: "GTBank",
-		AccountNumber: "0123456789", AccountName: "ADA OBI",
+		AccountNumber: "0123456789", AccountName: "ADA OBI", SellerWallet: sponsorTestUser,
 		ChainKey: "sonic", Token: "USDC", ExpectedAmount: "100000000", FiatTargetKobo: 15_000_000,
 		Status: models.SellerPayoutAwaitingRelease, CreatedAt: r.clock, UpdatedAt: r.clock,
 	}

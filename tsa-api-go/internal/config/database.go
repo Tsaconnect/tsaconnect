@@ -158,6 +158,7 @@ func AutoMigrate() error {
 		&models.SellerPayoutMethod{},
 		&models.SellerPayoutChange{},
 		&models.SellerPayoutOrder{},
+		&models.SellerPayoutSetting{},
 		&models.P2PAd{},
 		&models.P2PTrade{},
 		&models.PoolOrder{},

@@ -137,3 +137,37 @@ func (s *P2PTradeService) alert(ctx context.Context, kind P2PAlertKind, t *model
 	}
 	_ = s.alerter.NotifyP2P(ctx, a)
 }
+
+// SellerPayoutAlert is a seller payout parked for a person.
+type SellerPayoutAlert struct {
+	PayoutID, OrderID uuid.UUID
+	// From is the status it was in when it stopped; RetrySafe says an admin may
+	// let it run again once the cause is fixed.
+	From, Reason string
+	RetrySafe    bool
+}
+
+// SellerPayoutAlerter tells operators a payout needs a person.
+type SellerPayoutAlerter interface {
+	NotifySellerPayoutReview(ctx context.Context, a SellerPayoutAlert)
+}
+
+// NotifySellerPayoutReview emails the INBOUND_ALERT_EMAILS operators. Same
+// contract as NotifyP2P: never errors, never blocks, a no-op when unconfigured.
+func (n *InboundHoldNotifier) NotifySellerPayoutReview(_ context.Context, a SellerPayoutAlert) {
+	if n == nil || n.mailer == nil || len(n.to) == 0 {
+		return
+	}
+	reason := RedactAlertText(a.Reason)
+	if len(reason) > p2pAlertReasonMax {
+		reason = reason[:p2pAlertReasonMax]
+	}
+	body := fmt.Sprintf("Payout: %s\nOrder: %s\nStopped in: %s\nReason: %s\nSafe to retry: %v\n\n"+
+		"Read the chain and the Paycrest order, then use the console (Seller payouts) or the runbook. "+
+		"Nothing was sent to the seller's wallet.", a.PayoutID, a.OrderID, a.From, reason, a.RetrySafe)
+	for _, to := range n.to {
+		if err := n.mailer.Send(to, "", "Seller payout needs review", "A seller payout is parked", body, "", ""); err != nil {
+			log.Printf("[seller-payout] review alert to %s failed: %v", to, err)
+		}
+	}
+}

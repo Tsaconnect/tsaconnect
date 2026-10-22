@@ -21,13 +21,15 @@ import (
 // method is untouched.
 func wireSellerPayouts(cfg *config.Config, chains *services.BlockchainService, treasury *services.Treasury,
 	orders *services.PaycrestOrderService, quotes *services.PaycrestQuoteService, escrow *services.EscrowService,
-	methods *services.SellerPayoutService, ch *handlers.CheckoutHandler, scheduler *jobs.Scheduler, bus *events.Bus) {
+	methods *services.SellerPayoutService, ch *handlers.CheckoutHandler, scheduler *jobs.Scheduler, bus *events.Bus,
+	alerts services.SellerPayoutAlerter) *handlers.SellerPayoutAdminHandler {
 	if treasury == nil || orders == nil || quotes == nil || escrow == nil || methods == nil || ch == nil {
 		log.Printf("[seller-payout] dormant: needs the treasury, Paycrest, the escrow and payout methods")
-		return
+		return nil
 	}
+	sw := services.NewSellerPayoutSwitch(config.DB)
 	senderFee := func() string { return services.PayFeeSplit{FeePercent: cfg.TSAPayFeePercent}.SenderFee(false) }
-	ch.WithPayouts(services.NewSellerPayoutPlanner(methods, quotes, treasury, senderFee, cfg.SellerPayoutBridgeBps))
+	ch.WithPayouts(services.NewSellerPayoutPlanner(methods, quotes, treasury, senderFee, cfg.SellerPayoutBridgeBps).WithSwitch(sw))
 	ch.WithSellerCalls(services.NewSellerEscrowCalls(treasury, escrow))
 
 	orchestrator := services.NewSellerPayoutOrchestrator(
@@ -36,7 +38,8 @@ func wireSellerPayouts(cfg *config.Config, chains *services.BlockchainService, t
 		services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
 		rampTransferVerifiers(chains, evmChainKeys(cfg)), orders, escrow, cfg.ProductEscrowAddress,
 		cfg.RampConversionRetryWindow, cfg.RampConversionLegCeiling, nil,
-	).WithEvents(bus)
+	).WithEvents(bus).WithSwitch(sw).WithAlerts(alerts)
 	scheduler.Register(jobs.NewSellerPayoutWorker(orchestrator, 30*time.Second), jobs.AlertOnFailureStreak())
 	log.Printf("[seller-payout] enabled treasury=%s bridge_bps=%d", treasury.Address(), cfg.SellerPayoutBridgeBps)
+	return &handlers.SellerPayoutAdminHandler{Admin: services.NewSellerPayoutAdmin(config.DB, orchestrator), Switch: sw}
 }

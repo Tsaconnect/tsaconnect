@@ -1748,7 +1748,13 @@ func (o *ConversionOrchestrator) inFlightUSD(ctx context.Context, lane *Treasury
 		}
 		total += usd
 	}
-	return total, nil
+	// Seller payouts hold funds in the same treasury lane: the per-chain cap is
+	// one cap, so their exposure counts here too.
+	payouts, err := sellerPayoutExposureUSD(ctx, o.db, lane.ChainKey, exclude)
+	if err != nil {
+		return 0, fmt.Errorf("conversion: read payout exposure on %s: %w", lane.ChainKey, err)
+	}
+	return total + payouts, nil
 }
 
 // unitsToUSD is a stablecoin-only shortcut: 1 token = 1 USD, so precision is

@@ -145,3 +145,58 @@ func TestPayoutPlan_PersistSnapshotsTheDestination(t *testing.T) {
 	}
 	_ = errors.New
 }
+
+func TestPayoutPlan_AnOperatorSwitchStopsNewPayoutOrders(t *testing.T) {
+	p, _, _, uid := newPlanner(t)
+	sw := &fakeSwitch{on: false}
+	p.WithSwitch(sw)
+	for name, s := range map[string]*fakeSwitch{"off": {on: false}, "unreadable": {err: errors.New("db down")}} {
+		p.WithSwitch(s)
+		if plan, err := p.Plan(context.Background(), uid, "USDC", big.NewInt(100_000000)); err != nil || plan != nil {
+			t.Fatalf("%s: plan = %+v, err = %v; the order is made the ordinary way", name, plan, err)
+		}
+	}
+	p.WithSwitch(&fakeSwitch{on: true})
+	if plan, err := p.Plan(context.Background(), uid, "USDC", big.NewInt(100_000000)); err != nil || plan == nil {
+		t.Fatalf("on: plan = %+v, err = %v", plan, err)
+	}
+}
+
+func TestSellerPayoutSwitch_PersistsAndTakesEffectAtOnce(t *testing.T) {
+	db := newCurrencyTestDB(t)
+	if err := db.AutoMigrate(&models.SellerPayoutSetting{}); err != nil {
+		t.Fatal(err)
+	}
+	sw := NewSellerPayoutSwitch(db)
+	ctx := context.Background()
+	if on, err := sw.Enabled(ctx); err != nil || !on {
+		t.Fatalf("no row means on: %v, %v", on, err)
+	}
+	admin := uuid.New()
+	if err := sw.Set(ctx, false, admin, "incident"); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := sw.Enabled(ctx); on {
+		t.Fatal("this process must see the change at once, not after the cache expires")
+	}
+	// Another process reads the same row.
+	if on, _ := NewSellerPayoutSwitch(db).Enabled(ctx); on {
+		t.Fatal("the switch is persisted")
+	}
+	if err := sw.Set(ctx, true, admin, "all clear"); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := sw.Enabled(ctx); !on {
+		t.Fatal("back on")
+	}
+	var row models.SellerPayoutSetting
+	db.First(&row, "key = ?", models.SellerPayoutSettingKey)
+	if row.Note != "all clear" || row.UpdatedBy == nil || *row.UpdatedBy != admin {
+		t.Fatalf("row = %+v", row)
+	}
+	db.Exec(`DROP TABLE seller_payout_settings`)
+	sw2 := NewSellerPayoutSwitch(db)
+	if _, err := sw2.Enabled(ctx); err == nil {
+		t.Fatal("an unreadable switch is an error, never 'on'")
+	}
+}
