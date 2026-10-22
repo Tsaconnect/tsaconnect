@@ -36,12 +36,17 @@ const (
 	// SellerPayoutCancelled: the escrow order ended without paying the seller
 	// (cancelled or refunded to the buyer); nothing reached the treasury.
 	SellerPayoutCancelled = "cancelled"
+	// SellerPayoutPayingWallet: an operator chose to pay the seller's wallet
+	// instead (only before any bridge moved money); the transfer is in flight.
+	SellerPayoutPayingWallet = "paying_wallet"
+	// SellerPayoutPaidWallet: the seller's wallet was credited (proven). Terminal.
+	SellerPayoutPaidWallet = "paid_wallet"
 	// SellerPayoutNeedsReview: parked for a person; see FailureReason.
 	SellerPayoutNeedsReview = "needs_review"
 )
 
 func SellerPayoutTerminal(status string) bool {
-	return status == SellerPayoutPaid || status == SellerPayoutCancelled
+	return status == SellerPayoutPaid || status == SellerPayoutPaidWallet || status == SellerPayoutCancelled
 }
 
 // SellerPayoutOrder is one marketplace order's payout of fiat to the seller's
@@ -83,6 +88,17 @@ type SellerPayoutOrder struct {
 	// PaycrestOrderID links the sell once opened (set exactly once).
 	PaycrestOrderID *uuid.UUID `gorm:"type:uuid;index" json:"paycrestOrderId,omitempty"`
 	FailureReason   string     `gorm:"size:512" json:"failureReason,omitempty"`
+	// ParkedFrom is the status the payout was in when it went to needs_review,
+	// and RetrySafe says it stopped before anything that could have moved money
+	// was sent, so an admin may simply let it run again.
+	ParkedFrom string `gorm:"size:20" json:"parkedFrom,omitempty"`
+	// AttemptStartedAt restarts the clock of the retry windows: set when the
+	// machine is let go again (an operator's retry, the switch turned back on),
+	// so time spent paused or parked is never counted against a payout.
+	AttemptStartedAt *time.Time `json:"-"`
+	// NextAttemptAt is the earliest the machine tries a refused step again.
+	NextAttemptAt *time.Time `json:"-"`
+	RetrySafe     bool       `gorm:"not null;default:false" json:"retrySafe"`
 	// CheckedAt rotates the worker's attention across rows.
 	CheckedAt *time.Time `gorm:"index" json:"-"`
 	CreatedAt time.Time  `json:"createdAt"`
@@ -104,3 +120,20 @@ func (p *SellerPayoutOrder) BeforeCreate(tx *gorm.DB) error {
 const RampLegsOneLiveDepositIndexSQL = `CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_legs_one_live_deposit
     ON ramp_legs (order_id)
     WHERE kind = 'deposit' AND status IN ('pending','confirmed')`
+
+// SellerPayoutSetting is the operator's switch for seller payouts, one row. No
+// row means on. Off: checkout stops creating payout orders (sellers are paid
+// to their wallets) and the machine stops SENDING (bridge, sale, deposit);
+// proofs and bookkeeping continue.
+type SellerPayoutSetting struct {
+	Key string `gorm:"primaryKey;size:16" json:"key"`
+	// No default: GORM would turn an explicit false into the default.
+	Enabled   bool       `gorm:"not null" json:"enabled"`
+	UpdatedBy *uuid.UUID `gorm:"type:uuid" json:"updatedBy,omitempty"`
+	Note      string     `gorm:"size:255" json:"note,omitempty"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+}
+
+func (SellerPayoutSetting) TableName() string { return "seller_payout_settings" }
+
+const SellerPayoutSettingKey = "payouts"

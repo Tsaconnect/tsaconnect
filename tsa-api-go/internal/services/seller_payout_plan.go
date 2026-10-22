@@ -32,6 +32,14 @@ type SellerPayoutPlanner struct {
 	// (up to sellerPayoutAbsorbBps) or parks, a cheaper one leaves the rest
 	// with the platform.
 	bridgeBps int64
+	// sw is the operator's switch; nil is always on.
+	sw payoutSwitch
+}
+
+// WithSwitch stops new payout orders while the operator has payouts off.
+func (p *SellerPayoutPlanner) WithSwitch(sw payoutSwitch) *SellerPayoutPlanner {
+	p.sw = sw
+	return p
 }
 
 // payoutVenueQuoter is the slice of PaycrestQuoteService the planner needs.
@@ -78,6 +86,12 @@ func (p *SellerPayoutPlanner) ready() bool {
 // plan with a nil error means "pay the wallet".
 func (p *SellerPayoutPlanner) Plan(ctx context.Context, sellerID uuid.UUID, token string, net *big.Int) (*PayoutPlan, error) {
 	token = strings.ToUpper(token)
+	if p != nil && p.sw != nil {
+		// Off, or unreadable: the order is made the ordinary way.
+		if on, err := p.sw.Enabled(ctx); err != nil || !on {
+			return nil, nil
+		}
+	}
 	if !p.ready() || (token != "USDC" && token != "USDT") || net == nil || net.Sign() <= 0 {
 		return nil, nil
 	}
@@ -87,6 +101,11 @@ func (p *SellerPayoutPlanner) Plan(ctx context.Context, sellerID uuid.UUID, toke
 	}
 	m := resolved.Method
 	if m == nil || m.Kind != models.SellerPayoutBank || !m.Verified || m.Currency != "NGN" {
+		return nil, nil
+	}
+	// A payout the treasury's per-order cap would refuse after the buyer paid is
+	// not offered: the order is made the ordinary way instead.
+	if err := p.treasury.CheckCaps("sonic", unitsToUSD(net, 6), 0); err != nil {
 		return nil, nil
 	}
 	fee, ok := feeFraction(p.senderFee())

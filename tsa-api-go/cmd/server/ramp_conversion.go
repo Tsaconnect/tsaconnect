@@ -135,6 +135,7 @@ func buildRampTreasury(cfg *config.Config, chains *services.BlockchainService) (
 	for chain, lane := range lanes {
 		if lane.KeyLane != nil && config.DB != nil {
 			lane.KeyLane.AddReservation("treasury_converting_"+chain, services.NewConversionTreasuryCommitments(config.DB, chain).Units)
+			lane.KeyLane.AddReservation("seller_payout_"+chain, services.NewSellerPayoutCommitments(config.DB, chain).Units)
 		}
 	}
 	treasury := services.NewTreasury(lanes, caps, nil)

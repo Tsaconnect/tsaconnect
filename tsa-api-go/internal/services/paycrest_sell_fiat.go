@@ -561,3 +561,19 @@ func keepSurplusPayoutCovers(row *models.PaycrestOrderRecord, fiatAmount string)
 	}
 	return paycrestSellPayout(tokens, fee, rate).Cmp(owed) >= 0
 }
+
+// CancelPayoutSale withdraws a seller payout's sale that lapsed before the
+// treasury funded it: the order is cancelled and its deposit address cleared in
+// one write, like a short order, so nothing can be sent to it afterwards. Paycrest
+// has no cancel endpoint; their copy lapses on its own. It refuses an order
+// whose payment has been claimed.
+func (s *PaycrestOrderService) CancelPayoutSale(ctx context.Context, row *models.PaycrestOrderRecord) error {
+	if s == nil {
+		return ErrPaycrestDisabled
+	}
+	_, err := s.cancelOrderAs(ctx, row.UserID, row.ID, map[string]any{
+		"failure_reason":  "payout sale lapsed before it was funded",
+		"deposit_address": "",
+	}, true)
+	return err
+}

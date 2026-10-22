@@ -2009,8 +2009,30 @@ func repriceToEscrowFee(db *gorm.DB, order *models.Order, bps int) error {
 	if err := db.Model(order).Updates(updates).Error; err != nil {
 		return err
 	}
+	if err := repricePayout(db, order, newProduct, shipping); err != nil {
+		return err
+	}
 	order.ProductAmount, order.PlatformFee, order.TotalAmount = newProduct.String(), newFee.String(), total.String()
 	return nil
+}
+
+// repricePayout keeps a payout order's snapshot true when its product amount
+// moved: the escrow will release the new figure, so the amount the payout
+// expects and the naira it targets move with it (in proportion).
+func repricePayout(db *gorm.DB, order *models.Order, newProduct, shipping *big.Int) error {
+	p, err := services.PayoutForOrder(context.Background(), db, order.ID)
+	if err != nil || p == nil {
+		return err
+	}
+	oldExpected, ok := new(big.Int).SetString(p.ExpectedAmount, 10)
+	if !ok || oldExpected.Sign() <= 0 {
+		return nil
+	}
+	newExpected := new(big.Int).Add(newProduct, shipping)
+	kobo := new(big.Int).Mul(big.NewInt(p.FiatTargetKobo), newExpected)
+	kobo.Quo(kobo, oldExpected)
+	return db.Model(&models.SellerPayoutOrder{}).Where("id = ? AND status = ?", p.ID, models.SellerPayoutAwaitingRelease).
+		Updates(map[string]any{"expected_amount": newExpected.String(), "fiat_target_kobo": kobo.Int64()}).Error
 }
 
 // PrepareApprove handles POST /api/orders/:id/prepare-approve — returns the ERC20 approve tx.
@@ -3552,7 +3574,9 @@ func (ch *CheckoutHandler) GetOrderDetail(c *gin.Context) {
 	}
 
 	enriched := enrichOrdersWithPreview([]models.Order{order})
-	utils.SuccessResponse(c, http.StatusOK, "Order retrieved", enriched[0])
+	utils.SuccessResponse(c, http.StatusOK, "Order retrieved", orderDetailView{
+		orderPreview: enriched[0], Payout: payoutStatusFor(c.Request.Context(), config.DB, &order, user),
+	})
 }
 
 // GetShippingEstimate handles GET /api/orders/shipping-estimate
@@ -4195,12 +4219,22 @@ func (ch *CheckoutHandler) finishSellerCancel(c *gin.Context, order *models.Orde
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to start transaction")
 		return
 	}
-	if err := tx.Model(order).Updates(map[string]interface{}{
+	// Conditional on the status the request saw: of two requests for the same
+	// cancel only one restores stock and tells the parties.
+	res := tx.Model(&models.Order{}).Where("id = ? AND status = ?", order.ID, order.Status).Updates(map[string]interface{}{
 		"status":          models.OrderStatusCancelled,
 		"release_tx_hash": txHash,
-	}).Error; err != nil {
+	})
+	if res.Error != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to update order")
+		return
+	}
+	if res.RowsAffected == 0 {
+		tx.Rollback()
+		utils.SuccessResponse(c, http.StatusOK, "Order cancelled", gin.H{
+			"orderId": order.ID, "status": models.OrderStatusCancelled, "cancelled": true,
+		})
 		return
 	}
 	if err := services.RestoreOrderStock(tx, order); err != nil {

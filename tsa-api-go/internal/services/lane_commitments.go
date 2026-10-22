@@ -171,6 +171,27 @@ func NewConversionTreasuryCommitments(db *gorm.DB, chainKey string) *LaneCommitm
 	})
 }
 
+// NewSellerPayoutCommitments counts the gas the treasury lane on chainKey still
+// owes seller payouts: a route (+ approve) per payout waiting to bridge from the
+// escrow's chain, a transfer per payout waiting to deposit on Base.
+func NewSellerPayoutCommitments(db *gorm.DB, chainKey string) *LaneCommitments {
+	chainKey = strings.ToLower(chainKey)
+	return newLaneCommitments("seller_payout_"+chainKey, func(ctx context.Context) (uint64, error) {
+		statuses := sellerPayoutHeldOn[chainKey]
+		if len(statuses) == 0 {
+			return 0, nil
+		}
+		var n int64
+		if err := db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("status IN ?", statuses).Count(&n).Error; err != nil {
+			return 0, err
+		}
+		if chainKey == "sonic" {
+			return uint64(n) * treasuryRouteReserveGas, nil
+		}
+		return uint64(n) * treasuryERC20Gas, nil
+	})
+}
+
 // NewCompanyWalletCommitments counts the company wallet's paid, undelivered
 // sales on chainKey: one transfer each.
 func NewCompanyWalletCommitments(db *gorm.DB, chainKey string) *LaneCommitments {

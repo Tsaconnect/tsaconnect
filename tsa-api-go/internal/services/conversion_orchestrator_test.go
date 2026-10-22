@@ -238,7 +238,7 @@ type conversionRig struct {
 func newConversionRig(t *testing.T) *conversionRig {
 	t.Helper()
 	db := newCurrencyTestDB(t)
-	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}, &models.RampLeg{}); err != nil {
+	if err := db.AutoMigrate(&models.PaycrestOrderRecord{}, &models.RampLeg{}, &models.SellerPayoutOrder{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 

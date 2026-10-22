@@ -2071,9 +2071,10 @@ func main() {
 	}
 	sellerPayoutSvc := services.NewSellerPayoutService(config.DB, sellerPayoutDir, bankDirectory, sellerPayoutMailer)
 	sellerPayoutHandler := handlers.NewSellerPayoutHandler(sellerPayoutSvc, eventBus)
-	wireSellerPayouts(cfg, blockchainService, payoutTreasury, payoutOrders, paycrestQuotes, escrowService, sellerPayoutSvc, ch, scheduler, eventBus)
+	sellerPayoutAdmin := wireSellerPayouts(cfg, blockchainService, payoutTreasury, payoutOrders, paycrestQuotes, escrowService, sellerPayoutSvc, ch, scheduler, eventBus, inboundAlerts)
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
 	routes.RegisterSellerPayout(router, cfg, sellerPayoutHandler)
+	routes.RegisterSellerPayoutAdmin(router, cfg, sellerPayoutAdmin)
 
 	// Configure HTTP server
 	port := cfg.Port

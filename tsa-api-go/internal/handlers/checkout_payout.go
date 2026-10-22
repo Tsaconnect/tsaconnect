@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/big"
 	"net/http"
@@ -140,4 +141,57 @@ func (ch *CheckoutHandler) cancelAsTreasury(c *gin.Context, user *models.User, o
 	}
 	ch.finishSellerCancel(c, order, hash)
 	return true
+}
+
+// sellerPayoutStatus is how a seller sees their bank payout on the order: a
+// stage in plain terms, never the machine's internals or the failure reason.
+type sellerPayoutStatus struct {
+	// Stage: waiting_for_confirmation, sending, paid, paid_wallet, review, cancelled.
+	Stage        string `json:"stage"`
+	AmountNGN    string `json:"amountNgn"`
+	Bank         string `json:"bank"`
+	AccountLast4 string `json:"accountLast4"`
+}
+
+var payoutStages = map[string]string{
+	models.SellerPayoutAwaitingRelease: "waiting_for_confirmation",
+	models.SellerPayoutReceived:        "sending",
+	models.SellerPayoutBridging:        "sending",
+	models.SellerPayoutBridged:         "sending",
+	models.SellerPayoutSelling:         "sending",
+	models.SellerPayoutOrdered:         "sending",
+	models.SellerPayoutDepositing:      "sending",
+	models.SellerPayoutDeposited:       "sending",
+	models.SellerPayoutPayingWallet:    "sending",
+	models.SellerPayoutPaid:            "paid",
+	models.SellerPayoutPaidWallet:      "paid_wallet",
+	models.SellerPayoutNeedsReview:     "review",
+	models.SellerPayoutCancelled:       "cancelled",
+}
+
+// orderDetailView is an order with, for its seller only, the status of the
+// bank payout the order carries.
+type orderDetailView struct {
+	orderPreview
+	Payout *sellerPayoutStatus `json:"payout,omitempty"`
+}
+
+// payoutStatusFor is the payout status to show user on order, or nil when the
+// order has no payout or user is not its seller.
+func payoutStatusFor(ctx context.Context, db *gorm.DB, order *models.Order, user *models.User) *sellerPayoutStatus {
+	if order.SellerID != user.ID {
+		return nil
+	}
+	p, err := services.PayoutForOrder(ctx, db, order.ID)
+	if err != nil || p == nil {
+		return nil
+	}
+	last4 := p.AccountNumber
+	if len(last4) > 4 {
+		last4 = last4[len(last4)-4:]
+	}
+	return &sellerPayoutStatus{
+		Stage: payoutStages[p.Status], AmountNGN: fmt.Sprintf("%d.%02d", p.FiatTargetKobo/100, p.FiatTargetKobo%100),
+		Bank: p.InstitutionName, AccountLast4: last4,
+	}
 }

@@ -458,6 +458,27 @@ Marketplace checkout "pay with another token" (`services/marketplace_funding.go`
 - Re-check LiFi's Sonic destinations with `scripts/lifi-sonic-checkout-probe.sh` (read-only)
   when a source starts failing: a toToken other than the configured address is refused.
 
+Seller bank payouts (`services/seller_payout_*.go`, `seller_escrow_calls.go`, worker `seller-payout`; runbook `deploy/seller-payouts-runbook.md`):
+- A marketplace seller with a verified NGN `SellerPayoutMethod` gets orders whose **on-chain seller is the treasury**
+  (`orders.escrow_seller_wallet`, a `seller_payouts` row snapshotting the bank and the quoted naira). The offramp cost rides
+  on `shippingAmount` and is reported as `payoutFee` (the 2% platform fee stays on the product alone). Anything off —
+  no method, no venue for the size, MCGP, treasury not ready, the switch off — makes the ordinary wallet order. No env flag.
+- The treasury signs the seller-only escrow calls (`markDelivered`, `cancelOrder`) through `Treasury.SendPrepared` (one
+  operation key per order and call, escrow allowlisted in `TreasuryLane.CallTargets`); the escrow's own event is proven before
+  any status moves. `cancelAsTreasury` and `MarkDelivered` check the order's seller themselves.
+- The machine (`SellerPayoutOrchestrator`) is release proven (the escrow's `OrderReleased` for THIS order, seller = treasury,
+  amount = priced, plus the Transfer log) → LiFi Sonic→Base → Paycrest sell for the quoted naira (`KeepSurplus`, refund address
+  = treasury, `SellerPayoutID` on the order, hidden from the seller's routes) → deposit → Paycrest `settled` = paid. It reuses
+  the converted-buy machine's `legRunner`, `executeBridgeLeg`, `verifyTransfer`, `qualifyLiFiDone` and the `ramp_legs` ledger
+  (`OrderID` = the payout). Rate drift up to 0.5% of the landing is absorbed as extra USDC deposited; more parks.
+- **Parks, never falls back:** anything unprovable or over a limit goes to `needs_review` with `parked_from`/`retry_safe`; the
+  machine never pays the seller's wallet and never retries what may have moved money. Operators act through
+  `/api/admin/seller-payouts` (super admin; retry / mark-paid / cancel / pay-wallet, all audited) and the console page. Pay-wallet
+  and cancel are refused once a bridge, sale or deposit may have moved money. The switch (`seller_payout_settings`) stops new
+  payout orders and every send; an unreadable switch holds sends.
+- The treasury is built by `buildRampTreasury` independent of `RAMP_CONVERSION_BUY`; payout gas is reserved on its lanes and
+  payout exposure counts toward the per-chain cap.
+
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me
 - `DIDIT_WORKFLOW_ID` - Published KYC workflow UUID
