@@ -942,8 +942,12 @@ func (o *SellerPayoutOrchestrator) StartWalletPayment(ctx context.Context, p *mo
 		ChainKey: p.ChainKey, Token: strings.ToUpper(p.Token), FromAddr: o.treasuryAddr(), ToAddr: p.SellerWallet,
 		Amount: amount.String(), Status: models.RampLegStatusPending, CreatedAt: o.now().UTC(),
 	}
-	if existing, err := o.legs.Reserve(ctx, leg); err != nil || existing != nil {
+	existing, err := o.legs.Reserve(ctx, leg)
+	if err != nil {
 		return err
+	}
+	if existing != nil {
+		return errSellerPayoutTransition // a concurrent call already started this payment
 	}
 	if err := o.move(ctx, p, models.SellerPayoutPayingWallet, nil, models.SellerPayoutNeedsReview); err != nil {
 		_ = o.failLeg(detached(ctx), leg.ID, "payout moved before the wallet payment started")
