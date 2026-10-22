@@ -3325,7 +3325,7 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 	}
 
 	// Escrowed cancel requires on-chain tx, seller only.
-	if ch.cancelAsTreasury(c, &order) {
+	if ch.cancelAsTreasury(c, user, &order) {
 		return
 	}
 	if user.WalletAddress == "" {
@@ -4105,7 +4105,7 @@ func (ch *CheckoutHandler) ApproveCancelOrder(c *gin.Context) {
 		})
 		return
 	}
-	if ch.cancelAsTreasury(c, &order) {
+	if ch.cancelAsTreasury(c, user, &order) {
 		return
 	}
 	if user.WalletAddress == "" {

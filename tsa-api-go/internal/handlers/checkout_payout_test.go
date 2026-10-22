@@ -244,7 +244,7 @@ type realPlanner struct{ gross *big.Int }
 
 func (p *realPlanner) Plan(context.Context, uuid.UUID, string, *big.Int) (*services.PayoutPlan, error) {
 	return &services.PayoutPlan{
-		Method: &models.SellerPayoutMethod{Currency: "NGN", InstitutionCode: "058", InstitutionName: "GTBank", AccountNumber: "0123456789", AccountName: "ADA OBI"},
+		Method:  &models.SellerPayoutMethod{Currency: "NGN", InstitutionCode: "058", InstitutionName: "GTBank", AccountNumber: "0123456789", AccountName: "ADA OBI"},
 		GrossUp: p.gross, FiatTargetKobo: 1_500_000,
 	}, nil
 }
@@ -290,5 +290,45 @@ func TestCreateServiceOrder_APayoutRidesOnTheShippingAmount(t *testing.T) {
 	db.First(&stored, "id = ?", id)
 	if stored.EscrowSellerWallet != proofTreasury {
 		t.Fatalf("recorded seller wallet = %q; want the treasury", stored.EscrowSellerWallet)
+	}
+}
+
+// The treasury signs these for the seller, so nobody else may ask: not the
+// buyer, not a stranger.
+func TestPayoutOrder_OnlyTheSellerCanHaveTheTreasuryCancelOrDeliver(t *testing.T) {
+	stranger := func(f *proofFixture) *models.User {
+		u := createTestUserWithLocation(t, f.db, "Lagos", "Lagos", "Nigeria")
+		return u
+	}
+	cases := map[string]struct {
+		status string
+		call   func(*proofFixture) func(*gin.Context)
+		body   gin.H
+	}{
+		"cancel an escrowed order":       {models.OrderStatusEscrowed, func(f *proofFixture) func(*gin.Context) { return f.ch.CancelOrder }, gin.H{}},
+		"approve a cancel request":       {models.OrderStatusCancelRequested, func(f *proofFixture) func(*gin.Context) { return f.ch.ApproveCancelOrder }, gin.H{}},
+		"mark a shipped order delivered": {models.OrderStatusShipped, func(f *proofFixture) func(*gin.Context) { return f.ch.MarkDelivered }, gin.H{"deliveryProofUrl": "https://example.com/p.jpg"}},
+	}
+	for name, c := range cases {
+		for who, pick := range map[string]func(*proofFixture) *models.User{
+			"the buyer":  func(f *proofFixture) *models.User { return f.buyer },
+			"a stranger": stranger,
+		} {
+			t.Run(name+" as "+who, func(t *testing.T) {
+				f := newProofFixture(t, c.status)
+				calls := f.withPayout(t)
+				f.holdOrder(nil)
+				w := f.call(c.call(f), pick(f), c.body)
+				if w.Code != http.StatusForbidden {
+					t.Fatalf("got %d %s; want 403", w.Code, w.Body)
+				}
+				if len(calls.calls) != 0 {
+					t.Fatalf("the treasury was made to send %v for someone who is not the seller", calls.calls)
+				}
+				if got := f.status(t); got != c.status {
+					t.Fatalf("status moved to %q", got)
+				}
+			})
+		}
 	}
 }

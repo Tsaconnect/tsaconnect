@@ -112,7 +112,11 @@ func (ch *CheckoutHandler) callAsTreasurySeller(c *gin.Context, doing string, fn
 // cancelAsTreasury cancels a payout order on-chain as the treasury and
 // completes it once the escrow has proven the cancel. It returns true when it
 // answered the request (payout order or an error); false for an ordinary order.
-func (ch *CheckoutHandler) cancelAsTreasury(c *gin.Context, order *models.Order) bool {
+//
+// The treasury signs on the seller's behalf, so the chain's own seller check no
+// longer protects the order: only the order's seller may ask, checked here and
+// not left to the caller.
+func (ch *CheckoutHandler) cancelAsTreasury(c *gin.Context, user *models.User, order *models.Order) bool {
 	payout, err := isPayoutOrder(c.Request.Context(), config.DB, order)
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel order")
@@ -120,6 +124,10 @@ func (ch *CheckoutHandler) cancelAsTreasury(c *gin.Context, order *models.Order)
 	}
 	if !payout {
 		return false
+	}
+	if order.SellerID != user.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "Only the seller can cancel this order")
+		return true
 	}
 	hash, ok := ch.callAsTreasurySeller(c, "cancel", func() (string, error) {
 		return ch.sellerCalls.CancelOrder(c.Request.Context(), order.ID, ch.orderEscrowContract(order))
