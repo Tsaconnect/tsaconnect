@@ -492,6 +492,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		orderGroup.POST("/:id/prepare-confirm", ch.PrepareConfirm)
 		orderGroup.POST("/:id/submit-confirm", ch.SubmitConfirm)
 		orderGroup.POST("/:id/request-refund", orderResolveLimit, ch.RequestRefund)
+		orderGroup.POST("/:id/submit-refund", orderResolveLimit, ch.SubmitRefund)
 		orderGroup.POST("/:id/cancel", orderResolveLimit, ch.CancelOrder)
 		orderGroup.POST("/:id/request-cancel", ch.RequestCancelOrder)
 		orderGroup.POST("/:id/approve-cancel", orderResolveLimit, ch.ApproveCancelOrder)

@@ -31,6 +31,7 @@ import {
   prepareConfirm,
   submitConfirm,
   requestRefund,
+  submitRefund,
   cancelOrder,
   requestCancelOrder,
   raiseDispute,
@@ -177,12 +178,19 @@ const OrderDetailScreen = () => {
                 throw new Error(result.message || 'Failed to request refund');
               }
 
-              // If escrowed, we get a refundTx to sign and broadcast
-              if (order.status === 'escrowed' && result.data?.refundTx) {
+              // On-chain orders return a refundTx: sign it, then the server proves
+              // it and moves the order (instant refund, or a dispute once delivered).
+              if (result.data?.refundTx) {
                 const txHash = await signAndBroadcast(result.data.refundTx, 'sonic', MARKETPLACE_NETWORK);
+                const submitted = await submitRefund(order.id, txHash);
+                if (!submitted.success) {
+                  throw new Error(submitted.message || 'Failed to record the refund request');
+                }
                 Alert.alert(
-                  'Refund Requested',
-                  `On-chain refund request submitted.\nTx: ${txHash.slice(0, 16)}...`,
+                  submitted.data?.status === 'refunded' ? 'Refunded' : 'Refund Requested',
+                  submitted.data?.status === 'refunded'
+                    ? 'Your payment has been refunded.'
+                    : 'Your refund request is with an admin for review.',
                 );
               } else if (result.data?.status === 'refunded') {
                 Alert.alert('Refunded', 'The MCGP is back in your Spendable balance.');
