@@ -103,6 +103,11 @@ func (p *SellerPayoutPlanner) Plan(ctx context.Context, sellerID uuid.UUID, toke
 	if m == nil || m.Kind != models.SellerPayoutBank || !m.Verified || m.Currency != "NGN" {
 		return nil, nil
 	}
+	// A payout the treasury's per-order cap would refuse after the buyer paid is
+	// not offered: the order is made the ordinary way instead.
+	if err := p.treasury.CheckCaps("sonic", unitsToUSD(net, 6), 0); err != nil {
+		return nil, nil
+	}
 	fee, ok := feeFraction(p.senderFee())
 	if !ok || fee.Cmp(big.NewRat(1, 1)) >= 0 {
 		return nil, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -354,5 +355,54 @@ func TestOrderDetail_OnlyTheSellerSeesThePayoutAndNoInternals(t *testing.T) {
 	}
 	if w = f.call(f.ch.GetOrderDetail, f.buyer, gin.H{}); strings.Contains(w.Body.String(), `"payout"`) {
 		t.Fatalf("the buyer must not see the seller's payout: %s", w.Body)
+	}
+}
+
+// A fee-rate change re-splits a pending order at approve time; the payout it
+// carries must expect the figure the escrow will now release.
+func TestRepricePayout_MovesTheExpectedAmountAndTheNaira(t *testing.T) {
+	f := newProofFixture(t, models.OrderStatusPendingPayment)
+	f.withPayout(t)
+	f.db.Exec(`UPDATE seller_payouts SET expected_amount = '100000000', fiat_target_kobo = 15000000, status = ? WHERE marketplace_order_id = ?`,
+		models.SellerPayoutAwaitingRelease, f.order.ID.String())
+
+	// The product share rose by 1 USDC at the new rate: the release is 101.
+	if err := repricePayout(f.db, f.order, big.NewInt(96_000000), big.NewInt(5_000000)); err != nil {
+		t.Fatal(err)
+	}
+	row, err := services.PayoutForOrder(context.Background(), f.db, f.order.ID)
+	if err != nil || row == nil {
+		t.Fatal(err)
+	}
+	if row.ExpectedAmount != "101000000" || row.FiatTargetKobo != 15150000 {
+		t.Fatalf("expected %s / %d kobo; want 101 USDC and the naira in proportion", row.ExpectedAmount, row.FiatTargetKobo)
+	}
+	// An ordinary order has no payout to move.
+	g := newProofFixture(t, models.OrderStatusPendingPayment)
+	if err := repricePayout(g.db, g.order, big.NewInt(1), big.NewInt(1)); err != nil {
+		t.Fatalf("ordinary order: %v", err)
+	}
+}
+
+// Two requests for the same proven cancel restore the unit once.
+func TestFinishSellerCancel_RestoresStockOnce(t *testing.T) {
+	f := newProofFixture(t, models.OrderStatusCancelRequested)
+	var before models.Product
+	f.db.First(&before, "id = ?", f.order.ProductID)
+
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request, _ = http.NewRequest("POST", "/", nil)
+		stale := *f.order // each request saw the order as cancel_requested
+		f.ch.finishSellerCancel(c, &stale, "0xcancel")
+		if w.Code != http.StatusOK {
+			t.Fatalf("call %d: %d %s", i, w.Code, w.Body)
+		}
+	}
+	var after models.Product
+	f.db.First(&after, "id = ?", f.order.ProductID)
+	if after.Stock != before.Stock+f.order.Quantity {
+		t.Fatalf("stock %d -> %d; want exactly one unit back", before.Stock, after.Stock)
 	}
 }

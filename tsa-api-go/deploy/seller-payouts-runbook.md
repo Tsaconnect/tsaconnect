@@ -73,14 +73,15 @@ console: *stopped in* (the status it was in), the reason, the legs, the Paycrest
 
 | Stopped in | Typical reason | Do |
 |---|---|---|
-| awaiting_release / received | release proof refused, no lane, cap or kill switch before the bridge | Fix the cause. **Retry** (offered as safe). If it cannot be fixed (e.g. Paycrest has no venue for the size): **Pay seller's wallet** (sends the proven USDC from the treasury to the seller's wallet) or **Cancel** and return it by hand. |
+| awaiting_release / received | release proof refused, no lane, cap or kill switch before the bridge | Fix the cause. **Retry** (offered as safe). If it cannot be fixed (e.g. Paycrest has no venue for the size): **Pay seller's wallet** (sends the proven USDC from the treasury to the seller's wallet). **Cancel** only closes a payout that never held anything; once the treasury holds the funds it is refused. |
+| awaiting_release | "the escrow resolved this order on-chain but the app never recorded it" | The buyer's confirm landed on-chain but never reached the server, so the treasury was paid with no payout watching. Find the release transaction on the explorer (the escrow's `OrderReleased` for the order id), set the order to `completed` with that `release_tx_hash` (SQL), then **Retry**. If the escrow refunded the buyer instead, mark the order `refunded` and **Cancel** the payout. |
 | bridging | LiFi failed/partial, a broadcast bridge never confirmed, over the ceiling | Read the Sonic and Base txs. If the funds landed on Base, **Retry (I checked)** moves it on; if not, it needs a manual rescue. Never pay the wallet from the console here (refused). |
-| bridged / selling | rate moved beyond the 0.5% the platform absorbs, no venue in the window, "a Paycrest order may exist" | Check Paycrest for an order with this payout. None and the rate recovered: **Retry (I checked)**. An order exists: let it complete or **Mark paid** once the seller is paid. |
-| ordered / depositing | order about to expire, deposit unconfirmed, deposit did not reach Paycrest | Read the deposit tx on Base. If it never left: **Retry (I checked)**. If it left: wait for Paycrest and **Mark paid** when settled. |
+| bridged / selling | rate moved beyond the 0.5% the platform absorbs (parked as **safe**: nothing was opened), no venue in the window, "a Paycrest order may exist" | A shortfall: **Retry** once the rate recovers (it runs the sale again). "May exist": check Paycrest for an order with this payout. None: **Retry (I checked)** opens the sale again; one exists: retry adopts it, or let it complete and **Mark paid** once the seller is paid. |
+| ordered / depositing | deposit unconfirmed, deposit did not reach Paycrest | Read the deposit tx on Base. If it never left: **Retry (I checked)**. If it left: wait for Paycrest and **Mark paid** when settled. (A sale that is about to lapse BEFORE any deposit is withdrawn and reopened by the machine itself.) |
 | deposited | Paycrest refunded / expired / unmatched / failed | Money may be back in the treasury on Base. Recover it by hand, pay the seller by hand, then **Mark paid** with the reference. |
 
 Every action needs a note and is audited (`p2p_audit_logs`, actions `seller_payout.*`).
-**Mark paid** needs a reference (bank transfer or Paycrest order id). After **Cancel**, what the treasury
+**Mark paid** needs a reference (bank transfer or Paycrest order id) and is refused while a Paycrest sale or a transfer of the payout is still alive (the seller could be paid twice); tick the confirmation only when you know Paycrest will not also pay. After **Cancel**, what the treasury
 holds for that order is yours to return by hand. Do not send from the treasury address by hand: it
 collides with the server's nonces (see the signer lane runbook in `CLAUDE.md`).
 
@@ -91,5 +92,9 @@ collides with the server's nonces (see the signer lane runbook in `CLAUDE.md`).
 - MCGP orders and contact-service fees are wallet-only.
 - Buy-side exposure and payout exposure share the per-chain cap; the payout machine does not count
   converted-buy exposure when it checks (buys are off in production).
+- Paused (switch off) time and time spent parked are not counted against a payout's retry windows; a refused sale waits two minutes between attempts.
+- A payout order made before an escrow redeploy or a treasury key change cannot be delivered or cancelled by the
+  server (the treasury is no longer the order's on-chain seller or the escrow is not allowlisted): only a buyer
+  refund request ends it. Do not rotate the treasury key or redeploy the escrow while payout orders are open.
 - A payout order's seller-only actions (markDelivered, cancelOrder) are signed by the treasury; if the
   treasury is killed or cannot pay gas they answer 503 until it is back.

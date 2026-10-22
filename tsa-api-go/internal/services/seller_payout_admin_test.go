@@ -146,14 +146,14 @@ func TestSellerPayoutAdmin_MarkPaidNeedsAReferenceAndOnlyWorksWhenParked(t *test
 	r := newPayoutRig(t)
 	admin, who := newAdmin(t, r)
 	ctx := context.Background()
-	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand", "NIP-123"); !errors.Is(err, ErrPayoutNotParked) {
+	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand", "NIP-123", false); !errors.Is(err, ErrPayoutNotParked) {
 		t.Fatalf("not parked: %v", err)
 	}
 	r.park(models.SellerPayoutDeposited, false)
-	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand", ""); !errors.Is(err, ErrPayoutNeedsNote) {
+	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand", "", false); !errors.Is(err, ErrPayoutNeedsNote) {
 		t.Fatalf("no reference: %v", err)
 	}
-	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand", "NIP-123"); err != nil {
+	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand", "NIP-123", false); err != nil {
 		t.Fatal(err)
 	}
 	got := r.wantStatus(models.SellerPayoutPaid)
@@ -171,11 +171,21 @@ func TestSellerPayoutAdmin_CancelOnlyWhenNothingWasSent(t *testing.T) {
 	r := newPayoutRig(t)
 	admin, who := newAdmin(t, r)
 	ctx := context.Background()
-	r.park(models.SellerPayoutReceived, true)
+	r.park(models.SellerPayoutAwaitingRelease, true) // nothing proven, nothing held
 	if err := admin.Cancel(ctx, r.payout.ID, who, "seller asked"); err != nil {
 		t.Fatal(err)
 	}
 	r.wantStatus(models.SellerPayoutCancelled)
+
+	// The treasury holds proven funds: closing the payout would hide them.
+	r1 := newPayoutRig(t)
+	admin1, _ := newAdmin(t, r1)
+	r1.mustStep() // received: 100 USDC held
+	r1.park(models.SellerPayoutReceived, true)
+	if err := admin1.Cancel(ctx, r1.payout.ID, who, "seller asked"); !errors.Is(err, ErrPayoutHoldsFunds) {
+		t.Fatalf("got %v; cancelling would hide funds the treasury holds", err)
+	}
+	r1.wantStatus(models.SellerPayoutNeedsReview)
 
 	// After a bridge broadcast, cancelling would hide money in flight.
 	r2 := newPayoutRig(t)
@@ -183,7 +193,7 @@ func TestSellerPayoutAdmin_CancelOnlyWhenNothingWasSent(t *testing.T) {
 	r2.mustStep()
 	r2.mustStep() // bridge broadcast
 	r2.park(models.SellerPayoutBridging, false)
-	if err := admin2.Cancel(ctx, r2.payout.ID, who, "give up"); !errors.Is(err, ErrWalletPaymentNotSafe) {
+	if err := admin2.Cancel(ctx, r2.payout.ID, who, "give up"); !errors.Is(err, ErrPayoutHoldsFunds) && !errors.Is(err, ErrWalletPaymentNotSafe) {
 		t.Fatalf("got %v", err)
 	}
 	r2.wantStatus(models.SellerPayoutNeedsReview)
@@ -319,4 +329,74 @@ func TestSellerPayout_ExposureAndGasAreCounted(t *testing.T) {
 		t.Fatalf("base gas owed = %d", units)
 	}
 	_ = time.Second
+}
+
+func TestSellerPayoutAdmin_MarkPaidRefusesWhileTheSaleIsStillAlive(t *testing.T) {
+	r := newPayoutRig(t)
+	admin, who := newAdmin(t, r)
+	ctx := context.Background()
+	r.toBridged()
+	r.mustStep() // ordered: a live Paycrest sale
+	r.park(models.SellerPayoutOrdered, false)
+	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand", "NIP-1", false); !errors.Is(err, ErrPayoutStillLive) {
+		t.Fatalf("got %v; paying by hand while Paycrest may also pay is a double payment", err)
+	}
+	r.wantStatus(models.SellerPayoutNeedsReview)
+	if err := admin.MarkPaid(ctx, r.payout.ID, who, "paid by hand; Paycrest order cancelled by me", "NIP-1", true); err != nil {
+		t.Fatalf("forced: %v", err)
+	}
+	r.wantStatus(models.SellerPayoutPaid)
+}
+
+func TestSellerPayoutAdmin_ParkedPayoutsListFirst(t *testing.T) {
+	r := newPayoutRig(t)
+	admin, _ := newAdmin(t, r)
+	// Many waiting payouts newer than the parked one.
+	r.park(models.SellerPayoutReceived, true)
+	for i := 0; i < 5; i++ {
+		row := *r.payout
+		row.ID, row.MarketplaceOrderID = uuid.New(), uuid.New()
+		row.Status, row.CreatedAt = models.SellerPayoutAwaitingRelease, r.clock.Add(time.Duration(i+1)*time.Hour)
+		if err := r.db.Create(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := admin.List(context.Background(), nil, 2)
+	if err != nil || len(rows) != 2 || rows[0].ID != r.payout.ID {
+		t.Fatalf("rows = %+v, %v; the parked payout must come first even when older", rows, err)
+	}
+}
+
+func TestSellerPayoutAdmin_RetryFromASaleStopRunsTheSaleAgain(t *testing.T) {
+	ctx := context.Background()
+	t.Run("no live order: back to where the sale is opened", func(t *testing.T) {
+		r := newPayoutRig(t)
+		admin, who := newAdmin(t, r)
+		r.toBridged()
+		r.park(models.SellerPayoutSelling, false)
+		if err := admin.Retry(ctx, r.payout.ID, who, "no order at Paycrest", true); err != nil {
+			t.Fatal(err)
+		}
+		r.wantStatus(models.SellerPayoutBridged)
+		r.mustStep()
+		r.wantStatus(models.SellerPayoutOrdered)
+	})
+	t.Run("a live order exists: adopted, not opened twice", func(t *testing.T) {
+		r := newPayoutRig(t)
+		admin, who := newAdmin(t, r)
+		r.toBridged()
+		r.mustStep() // ordered, one order
+		order := r.reload().PaycrestOrderID
+		r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).Updates(map[string]any{"paycrest_order_id": nil})
+		r.park(models.SellerPayoutSelling, false)
+		if err := admin.Retry(ctx, r.payout.ID, who, "order exists", true); err != nil {
+			t.Fatal(err)
+		}
+		r.wantStatus(models.SellerPayoutSelling)
+		r.mustStep()
+		got := r.wantStatus(models.SellerPayoutOrdered)
+		if got.PaycrestOrderID == nil || *got.PaycrestOrderID != *order || r.seller.calls != 1 {
+			t.Fatalf("payout = %+v, calls = %d", got, r.seller.calls)
+		}
+	})
 }

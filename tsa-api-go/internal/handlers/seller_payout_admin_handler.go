@@ -99,7 +99,7 @@ func (h *SellerPayoutAdminHandler) Retry(c *gin.Context) {
 // MarkPaid is POST /:id/mark-paid {note, reference}.
 func (h *SellerPayoutAdminHandler) MarkPaid(c *gin.Context) {
 	h.act(c, func(id, admin uuid.UUID, b payoutActionBody) error {
-		return h.Admin.MarkPaid(c.Request.Context(), id, admin, b.Note, b.Reference)
+		return h.Admin.MarkPaid(c.Request.Context(), id, admin, b.Note, b.Reference, b.Force)
 	}, "Payout marked paid")
 }
 
@@ -166,6 +166,10 @@ func payoutAdminFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "retry_unsafe")
 	case errors.Is(err, services.ErrPayoutNotParked):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "not_parked")
+	case errors.Is(err, services.ErrPayoutHoldsFunds):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "holds_funds")
+	case errors.Is(err, services.ErrPayoutStillLive):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "still_live")
 	case errors.Is(err, services.ErrWalletPaymentNotSafe):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "money_may_have_moved")
 	case errors.Is(err, services.ErrWalletPaymentUnavailable):

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/google/uuid"
@@ -23,6 +24,12 @@ var (
 	ErrPayoutNeedsNote = errors.New("a note is required")
 	// ErrPayoutNotFound: no such payout.
 	ErrPayoutNotFound = errors.New("payout not found")
+	// ErrPayoutHoldsFunds: the treasury holds this payout's proven funds; closing
+	// it would hide them. Pay the seller's wallet, or mark it paid once it is.
+	ErrPayoutHoldsFunds = errors.New("the treasury holds this payout's funds: pay the seller's wallet instead of cancelling it")
+	// ErrPayoutStillLive: a sale or a transfer for this payout is still alive;
+	// marking it paid by hand could pay the seller twice.
+	ErrPayoutStillLive = errors.New("a Paycrest order or a transfer for this payout is still alive: wait for it to end, or force it knowing the seller was paid")
 )
 
 // SellerPayoutAdmin is the operators' way through payouts the machine parked.
@@ -60,7 +67,10 @@ func (a *SellerPayoutAdmin) List(ctx context.Context, statuses []string, limit i
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	q := a.db.WithContext(ctx).Order("created_at DESC").Limit(limit)
+	// Parked payouts first: a long queue of waiting ones must never hide them.
+	q := a.db.WithContext(ctx).
+		Order("CASE WHEN status = 'needs_review' THEN 0 ELSE 1 END").
+		Order("created_at DESC").Limit(limit)
 	if len(statuses) == 0 {
 		q = q.Where("status NOT IN ?", []string{models.SellerPayoutPaid, models.SellerPayoutPaidWallet, models.SellerPayoutCancelled})
 	} else {
@@ -125,17 +135,33 @@ func (a *SellerPayoutAdmin) Retry(ctx context.Context, id, admin uuid.UUID, note
 	if !p.RetrySafe && !force {
 		return ErrPayoutRetryUnsafe
 	}
-	if err := a.orch.move(ctx, p, p.ParkedFrom, map[string]any{"failure_reason": "", "retry_safe": false}, models.SellerPayoutNeedsReview); err != nil {
+	to := p.ParkedFrom
+	if to == models.SellerPayoutSelling {
+		// The machine only RECOVERS a payout left in selling; it never opens the
+		// sale from there. With a live Paycrest order it is adopted; with none,
+		// the payout goes back to where the sale is opened.
+		var live int64
+		if err := a.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+			Where("seller_payout_id = ? AND status NOT IN ?", p.ID,
+				[]string{models.PaycrestStatusCancelled, models.PaycrestStatusFailed}).Count(&live).Error; err != nil {
+			return err
+		}
+		if live == 0 {
+			to = models.SellerPayoutBridged
+		}
+	}
+	// A retry is a fresh start for the retry windows.
+	if err := a.orch.move(ctx, p, to, map[string]any{"failure_reason": "", "retry_safe": false, "attempt_started_at": a.orch.now()}, models.SellerPayoutNeedsReview); err != nil {
 		return err
 	}
-	a.audit(ctx, "seller_payout.retry", admin, p, map[string]any{"note": note, "force": force, "to": p.ParkedFrom})
+	a.audit(ctx, "seller_payout.retry", admin, p, map[string]any{"note": note, "force": force, "to": to})
 	return nil
 }
 
 // MarkPaid records that the seller was paid outside the machine (a bank
 // transfer made by hand, a Paycrest order settled another way). The reference
 // is how someone later finds the payment.
-func (a *SellerPayoutAdmin) MarkPaid(ctx context.Context, id, admin uuid.UUID, note, reference string) error {
+func (a *SellerPayoutAdmin) MarkPaid(ctx context.Context, id, admin uuid.UUID, note, reference string, force bool) error {
 	if strings.TrimSpace(note) == "" || strings.TrimSpace(reference) == "" {
 		return ErrPayoutNeedsNote
 	}
@@ -146,11 +172,38 @@ func (a *SellerPayoutAdmin) MarkPaid(ctx context.Context, id, admin uuid.UUID, n
 	if p.Status != models.SellerPayoutNeedsReview {
 		return ErrPayoutNotParked
 	}
+	if !force {
+		live, err := a.hasLiveVenue(ctx, p)
+		if err != nil {
+			return err
+		}
+		if live {
+			return ErrPayoutStillLive
+		}
+	}
 	if err := a.orch.move(ctx, p, models.SellerPayoutPaid, map[string]any{"failure_reason": truncateReason("paid by hand: " + reference)}, models.SellerPayoutNeedsReview); err != nil {
 		return err
 	}
-	a.audit(ctx, "seller_payout.marked_paid", admin, p, map[string]any{"note": note, "reference": reference})
+	a.audit(ctx, "seller_payout.marked_paid", admin, p, map[string]any{"note": note, "reference": reference, "force": force})
 	return nil
+}
+
+// hasLiveVenue is true while a Paycrest sale of this payout has not ended or a
+// leg is still pending: paying the seller by hand then risks paying twice.
+func (a *SellerPayoutAdmin) hasLiveVenue(ctx context.Context, p *models.SellerPayoutOrder) (bool, error) {
+	if p.PaycrestOrderID != nil {
+		var sale models.PaycrestOrderRecord
+		if err := a.db.WithContext(ctx).Select("id", "status").First(&sale, "id = ?", *p.PaycrestOrderID).Error; err != nil {
+			return false, err
+		}
+		if !models.PaycrestOrderTerminal(sale.Status) {
+			return true, nil
+		}
+	}
+	var pending int64
+	err := a.db.WithContext(ctx).Model(&models.RampLeg{}).
+		Where("order_id = ? AND status = ?", p.ID, models.RampLegStatusPending).Count(&pending).Error
+	return pending > 0, err
 }
 
 // Cancel closes a payout nothing was sent for: no bridge, no sale, no deposit
@@ -166,6 +219,9 @@ func (a *SellerPayoutAdmin) Cancel(ctx context.Context, id, admin uuid.UUID, not
 	}
 	if p.Status != models.SellerPayoutNeedsReview {
 		return ErrPayoutNotParked
+	}
+	if n, ok := new(big.Int).SetString(p.ReceivedAmount, 10); ok && n.Sign() > 0 {
+		return ErrPayoutHoldsFunds
 	}
 	legs, err := a.orch.legs.ForOrder(ctx, p.ID)
 	if err != nil {

@@ -92,7 +92,13 @@ type SellerPayoutOrder struct {
 	// and RetrySafe says it stopped before anything that could have moved money
 	// was sent, so an admin may simply let it run again.
 	ParkedFrom string `gorm:"size:20" json:"parkedFrom,omitempty"`
-	RetrySafe  bool   `gorm:"not null;default:false" json:"retrySafe"`
+	// AttemptStartedAt restarts the clock of the retry windows: set when the
+	// machine is let go again (an operator's retry, the switch turned back on),
+	// so time spent paused or parked is never counted against a payout.
+	AttemptStartedAt *time.Time `json:"-"`
+	// NextAttemptAt is the earliest the machine tries a refused step again.
+	NextAttemptAt *time.Time `json:"-"`
+	RetrySafe     bool       `gorm:"not null;default:false" json:"retrySafe"`
 	// CheckedAt rotates the worker's attention across rows.
 	CheckedAt *time.Time `gorm:"index" json:"-"`
 	CreatedAt time.Time  `json:"createdAt"`

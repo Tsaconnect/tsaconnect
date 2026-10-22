@@ -25,7 +25,7 @@ func newPayoutAdminFixture(t *testing.T) (*SellerPayoutAdminHandler, *gorm.DB, *
 		t.Fatal(err)
 	}
 	db.Exec(`CREATE TABLE p2p_audit_logs (id TEXT PRIMARY KEY, actor_id TEXT, trade_id TEXT, ad_id TEXT, action TEXT, metadata TEXT, created_at DATETIME)`)
-	db.Exec(`CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, release_tx_hash TEXT)`)
+	db.Exec(`CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, release_tx_hash TEXT, escrow_contract_address TEXT, updated_at DATETIME)`)
 	p := &models.SellerPayoutOrder{
 		ID: uuid.New(), MarketplaceOrderID: uuid.New(), SellerUserID: uuid.New(), Currency: "NGN",
 		InstitutionCode: "058", InstitutionName: "GTBank", AccountNumber: "0123456789", AccountName: "ADA OBI",

@@ -25,7 +25,15 @@ type fakePayoutSeller struct {
 	last  PaycrestSellRequest
 	max   *big.Int
 	// deposit is the order's TokenAmount (decimal USDC).
-	deposit string
+	deposit   string
+	cancelled []uuid.UUID
+}
+
+// CancelPayoutSale closes the order the way the real service does.
+func (f *fakePayoutSeller) CancelPayoutSale(_ context.Context, row *models.PaycrestOrderRecord) error {
+	f.cancelled = append(f.cancelled, row.ID)
+	return f.db.Model(&models.PaycrestOrderRecord{}).Where("id = ?", row.ID).
+		Updates(map[string]any{"status": models.PaycrestStatusCancelled, "deposit_address": ""}).Error
 }
 
 func (f *fakePayoutSeller) CreateSellForFiat(_ context.Context, req PaycrestSellRequest, _ bool, max *big.Int) (*models.PaycrestOrderRecord, error) {
@@ -50,6 +58,9 @@ func (f *fakePayoutSeller) CreateSellForFiat(_ context.Context, req PaycrestSell
 type fakeReleaseProver struct {
 	log *types.Log
 	err error
+	// onChain answers ReadOrder; reads counts them.
+	onChain *OnChainOrder
+	reads   int
 	// asked records what was looked up.
 	event, addr string
 	orderID     [32]byte
@@ -58,6 +69,11 @@ type fakeReleaseProver struct {
 func (f *fakeReleaseProver) VerifyOrderEvent(_, escrowAddr, event string, orderID [32]byte) (*types.Log, error) {
 	f.event, f.addr, f.orderID = event, escrowAddr, orderID
 	return f.log, f.err
+}
+
+func (f *fakeReleaseProver) ReadOrder(context.Context, string, [32]byte) (*OnChainOrder, error) {
+	f.reads++
+	return f.onChain, nil
 }
 
 // releaseLog is the OrderReleased the escrow emits: paid to seller, amount.
@@ -101,7 +117,7 @@ func newPayoutRig(t *testing.T) *payoutRig {
 		t.Fatalf("migrate: %v", err)
 	}
 	// Raw DDL for the marketplace order: the model carries Postgres-only defaults.
-	if err := db.Exec(`CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, release_tx_hash TEXT)`).Error; err != nil {
+	if err := db.Exec(`CREATE TABLE orders (id TEXT PRIMARY KEY, status TEXT, release_tx_hash TEXT, escrow_contract_address TEXT, updated_at DATETIME)`).Error; err != nil {
 		t.Fatal(err)
 	}
 	sonic, _ := newSponsorRig("sonic", "USDC")
@@ -129,8 +145,8 @@ func newPayoutRig(t *testing.T) *payoutRig {
 		r.seller, r.escrow, "0xescrow", 30*time.Minute, 0, func() time.Time { return r.clock })
 
 	r.order = models.Order{ID: uuid.New(), Status: models.OrderStatusCompleted, ReleaseTxHash: "0xrelease"}
-	if err := db.Exec(`INSERT INTO orders (id, status, release_tx_hash) VALUES (?, ?, ?)`,
-		r.order.ID.String(), r.order.Status, r.order.ReleaseTxHash).Error; err != nil {
+	if err := db.Exec(`INSERT INTO orders (id, status, release_tx_hash, updated_at) VALUES (?, ?, ?, ?)`,
+		r.order.ID.String(), r.order.Status, r.order.ReleaseTxHash, r.clock).Error; err != nil {
 		t.Fatal(err)
 	}
 	r.payout = &models.SellerPayoutOrder{
@@ -460,19 +476,179 @@ func TestSellerPayout_NeverDepositsTwice(t *testing.T) {
 	}
 }
 
-func TestSellerPayout_DoesNotFundAnOrderAboutToExpire(t *testing.T) {
+// A sale that lapses before it is funded is withdrawn and a fresh one opened:
+// nothing was deposited, so nothing is lost by starting again.
+func TestSellerPayout_ALapsingSaleIsWithdrawnAndReopened(t *testing.T) {
 	r := newPayoutRig(t)
 	r.toBridged()
 	r.mustStep() // ordered
+	first := r.reload().PaycrestOrderID
 	r.clock = sponsorTestNow.Add(time.Hour - time.Minute)
 	sent := r.broadcasts()
 	r.mustStep()
-	r.wantStatus(models.SellerPayoutNeedsReview)
+	got := r.wantStatus(models.SellerPayoutBridged)
+	if got.PaycrestOrderID != nil || len(r.seller.cancelled) != 1 || r.seller.cancelled[0] != *first {
+		t.Fatalf("payout = %+v, cancelled = %v; the lapsing order is withdrawn", got, r.seller.cancelled)
+	}
 	if r.broadcasts() != sent {
 		t.Fatal("a deposit that would land after the order lapsed must not be sent")
 	}
+	r.mustStep() // a new sale
+	got = r.wantStatus(models.SellerPayoutOrdered)
+	if got.PaycrestOrderID == nil || *got.PaycrestOrderID == *first || r.seller.calls != 2 {
+		t.Fatalf("payout = %+v, calls = %d; want a second, different sale", got, r.seller.calls)
+	}
 }
 
+// The release can differ a little from the quote (the fee rate was re-split at
+// approve time). The escrow's figure is what is sold.
+func TestSellerPayout_AcceptsAReleaseWithinTheDriftTheyAbsorb(t *testing.T) {
+	for name, tc := range map[string]struct {
+		released int64
+		want     string
+	}{
+		"a little under": {99_600000, models.SellerPayoutReceived},
+		"a little over":  {100_300000, models.SellerPayoutReceived},
+		"far under":      {98_000000, models.SellerPayoutNeedsReview},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newPayoutRig(t)
+			r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), r.treasury.Address(), big.NewInt(tc.released))
+			r.sonicTx.amount = big.NewInt(tc.released)
+			r.mustStep()
+			got := r.wantStatus(tc.want)
+			if tc.want == models.SellerPayoutReceived && got.ReceivedAmount != big.NewInt(tc.released).String() {
+				t.Fatalf("received = %s; want the escrow's figure", got.ReceivedAmount)
+			}
+		})
+	}
+}
+
+// A shortfall opened nothing, so the retry offered must really run the sale.
+func TestSellerPayout_AShortfallParksSafelyFromBridgedAndRetries(t *testing.T) {
+	r := newPayoutRig(t)
+	admin, who := newAdmin(t, r)
+	r.toBridged()
+	r.seller.err = &SellShortfallError{MissingBaseUnits: big.NewInt(900_000)}
+	r.mustStep()
+	got := r.wantStatus(models.SellerPayoutNeedsReview)
+	if got.ParkedFrom != models.SellerPayoutBridged || !got.RetrySafe {
+		t.Fatalf("parked_from=%q retry_safe=%v", got.ParkedFrom, got.RetrySafe)
+	}
+	r.seller.err = nil
+	if err := admin.Retry(context.Background(), r.payout.ID, who, "rate recovered", false); err != nil {
+		t.Fatal(err)
+	}
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutOrdered)
+}
+
+// Time spent paused is not time spent failing.
+func TestSellerPayout_APausedMachineDoesNotBurnTheRetryWindow(t *testing.T) {
+	r := newPayoutRig(t)
+	sw := &fakeSwitch{on: true}
+	r.svc.WithSwitch(sw)
+	r.toBridged()
+	sw.on = false
+	r.mustStep() // paused: waits, and the clock restarts
+	r.clock = r.clock.Add(2 * time.Hour)
+	r.mustStep() // still paused
+	sw.on = true
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutOrdered)
+}
+
+// A bridge that landed late is read before it is given up on.
+func TestSellerPayout_ALateBridgeIsStillReadBeforeTheCeiling(t *testing.T) {
+	r := newPayoutRig(t)
+	r.mustStep()
+	r.mustStep() // bridge broadcast
+	r.clock = r.clock.Add(48 * time.Hour)
+	r.status.set(LiFiStatusDone, "99800000")
+	r.status.setSubstatus(LiFiSubstatusCompleted)
+	r.baseTx.mu.Lock()
+	r.baseTx.amount = big.NewInt(99_800000)
+	r.baseTx.mu.Unlock()
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutBridged)
+}
+
+func TestSellerPayout_AStillPendingBridgePastTheCeilingParks(t *testing.T) {
+	r := newPayoutRig(t)
+	r.mustStep()
+	r.mustStep()
+	r.clock = r.clock.Add(48 * time.Hour)
+	r.mustStep() // LiFi still says pending
+	r.wantStatus(models.SellerPayoutNeedsReview)
+}
+
+// An attempt the sale refused is not repeated every tick.
+func TestSellerPayout_ARefusedSaleBacksOff(t *testing.T) {
+	r := newPayoutRig(t)
+	r.toBridged()
+	r.seller.err = ErrSellRateMoved
+	r.mustStep()
+	r.mustStep()
+	r.mustStep()
+	if r.seller.calls != 1 {
+		t.Fatalf("sell calls = %d; a refusal waits before the next attempt", r.seller.calls)
+	}
+	r.clock = r.clock.Add(3 * time.Minute)
+	r.seller.err = nil
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutOrdered)
+}
+
+// A refused attempt's cancelled order is not this payout's sale.
+func TestSellerPayout_RecoveringIgnoresCancelledAttempts(t *testing.T) {
+	r := newPayoutRig(t)
+	r.toBridged()
+	cancelled := &models.PaycrestOrderRecord{ID: uuid.New(), UserID: r.payout.SellerUserID, Direction: models.PaycrestDirectionSell,
+		Status: models.PaycrestStatusCancelled, Reference: "PCS-x", SellerPayoutID: &r.payout.ID, CreatedAt: r.clock}
+	if err := r.db.Create(cancelled).Error; err != nil {
+		t.Fatal(err)
+	}
+	r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).Updates(map[string]any{"status": models.SellerPayoutSelling})
+	r.clock = r.clock.Add(3 * time.Minute)
+	r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).UpdateColumn("updated_at", sponsorTestNow)
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutNeedsReview) // not adopted, not "2 orders"
+}
+
+func TestSellerPayout_TickLooksAtIdlePayoutsOnlyOnceTheirOrderEnded(t *testing.T) {
+	r := newPayoutRig(t)
+	r.db.Exec(`UPDATE orders SET status = ? WHERE id = ?`, models.OrderStatusDelivered, r.order.ID.String())
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.reload(); got.CheckedAt != nil || got.Status != models.SellerPayoutAwaitingRelease {
+		t.Fatalf("an idle payout was looked at: %+v", got)
+	}
+	r.db.Exec(`UPDATE orders SET status = ? WHERE id = ?`, models.OrderStatusCompleted, r.order.ID.String())
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	r.wantStatus(models.SellerPayoutReceived)
+}
+
+func TestSellerPayout_ParkedFundsStillCountTowardTheCaps(t *testing.T) {
+	r := newPayoutRig(t)
+	r.mustStep() // received: 100 USDC held on sonic
+	r.park(models.SellerPayoutReceived, true)
+	if usd, err := sellerPayoutExposureUSD(context.Background(), r.db, "sonic", uuid.New()); err != nil || usd != 100 {
+		t.Fatalf("exposure = %v, %v; a parked payout still holds its funds", usd, err)
+	}
+	if usd, _ := sellerPayoutExposureUSD(context.Background(), r.db, "base", uuid.New()); usd != 0 {
+		t.Fatalf("base exposure = %v", usd)
+	}
+}
+
+func TestSellerPayout_APayoutThePerOrderCapWouldRefuseIsNotOffered(t *testing.T) {
+	p, _, _, uid := newPlanner(t)
+	if plan, err := p.Plan(context.Background(), uid, "USDC", big.NewInt(3000_000000)); err != nil || plan != nil {
+		t.Fatalf("plan = %+v, %v; over the $2,000 per-order cap the order is made the ordinary way", plan, err)
+	}
+}
 func TestSellerPayout_ADepositThatDidNotReachPaycrestParks(t *testing.T) {
 	r := newPayoutRig(t)
 	r.toBridged()
@@ -578,5 +754,74 @@ func TestSellerPayout_TellsTheSellerWhenPaidAndWhenHeld(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the seller was not told the payout is being reviewed")
+	}
+}
+
+// The buyer's confirm landed on-chain but never reached the server: the treasury
+// was paid and no payout was watching. A stale order is checked against the
+// escrow, and a resolved one parks with the reason.
+func TestSellerPayout_AnOrderTheEscrowResolvedUnrecordedIsFlagged(t *testing.T) {
+	r := newPayoutRig(t)
+	r.db.Exec(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`, models.OrderStatusDelivered, r.clock.Add(-30*time.Hour), r.order.ID.String())
+
+	r.escrow.onChain = &OnChainOrder{Resolved: false}
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	r.wantStatus(models.SellerPayoutAwaitingRelease)
+	if r.escrow.reads != 1 {
+		t.Fatalf("reads = %d; a stale order is checked against the escrow", r.escrow.reads)
+	}
+	// Asked again only after a while, not every tick.
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if r.escrow.reads != 1 {
+		t.Fatalf("reads = %d; the check is throttled", r.escrow.reads)
+	}
+
+	r.clock = r.clock.Add(7 * time.Hour)
+	r.escrow.onChain = &OnChainOrder{Resolved: true}
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	got := r.wantStatus(models.SellerPayoutNeedsReview)
+	if !got.RetrySafe || got.ParkedFrom != models.SellerPayoutAwaitingRelease {
+		t.Fatalf("payout = %+v", got)
+	}
+}
+
+func TestSellerPayout_AFreshUnconfirmedOrderIsNotReadOnChain(t *testing.T) {
+	r := newPayoutRig(t)
+	r.db.Exec(`UPDATE orders SET status = ? WHERE id = ?`, models.OrderStatusDelivered, r.order.ID.String())
+	if err := r.svc.Tick(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if r.escrow.reads != 0 {
+		t.Fatal("an order that is only waiting for the buyer costs no chain read")
+	}
+}
+
+// The converted-buy machine's per-chain cap counts payouts holding funds on the
+// same lane.
+func TestConversionOrchestrator_CountsSellerPayoutExposure(t *testing.T) {
+	r := newConversionRig(t)
+	lane := r.treasury.Lane("base")
+	before, err := r.svc.inFlightUSD(context.Background(), lane, uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &models.SellerPayoutOrder{
+		ID: uuid.New(), MarketplaceOrderID: uuid.New(), SellerUserID: uuid.New(), Currency: "NGN",
+		InstitutionCode: "058", InstitutionName: "GTBank", AccountNumber: "0123456789", AccountName: "A",
+		ChainKey: "sonic", Token: "USDC", ExpectedAmount: "1", FiatTargetKobo: 1,
+		Status: models.SellerPayoutBridged, ReceivedAmount: "700000000", // held on base
+	}
+	if err := r.db.Create(p).Error; err != nil {
+		t.Fatal(err)
+	}
+	after, err := r.svc.inFlightUSD(context.Background(), lane, uuid.New())
+	if err != nil || after-before != 700 {
+		t.Fatalf("exposure rose by %v (%v); want the payout's 700 USDC on base", after-before, err)
 	}
 }
