@@ -23,9 +23,12 @@ var (
 	// a typed name is the seller's word, and TSA would be the sender.
 	ErrSellerPayoutUnverified = errors.New("that account's name can't be verified, so it can't receive payouts yet")
 	ErrSellerPayoutKYC        = errors.New("verify your identity before adding a payout account")
-	ErrSellerPayoutCode       = errors.New("we couldn't send the confirmation code")
-	ErrSellerPayoutBadCode    = errors.New("that code is incorrect")
-	ErrSellerPayoutNoPending  = errors.New("there is no change waiting for that code")
+	// A payout goes only to an account in the seller's own name, or in the name
+	// of their verified business: anything else makes TSA the sender to a third party.
+	ErrSellerPayoutNameMismatch = errors.New("the account name must match your verified name or your verified business name")
+	ErrSellerPayoutCode         = errors.New("we couldn't send the confirmation code")
+	ErrSellerPayoutBadCode      = errors.New("that code is incorrect")
+	ErrSellerPayoutNoPending    = errors.New("there is no change waiting for that code")
 )
 
 // sellerPayoutInstitutions is the slice of PaycrestDirectory this needs.
@@ -41,13 +44,23 @@ type SellerPayoutService struct {
 	banks BankDirectory // NGN name enquiry; may be nil
 	// mailer nil: a destination can't be confirmed, so none can be set.
 	mailer CodeMailer
-	kycOK  func(ctx context.Context, userID uuid.UUID) (bool, error)
-	now    func() time.Time
+	// identity is the seller's KYC status and verified legal name.
+	identity func(ctx context.Context, userID uuid.UUID) (verified bool, legalName string, err error)
+	// businessNames are the seller's verified business names (active TSA Pay merchants).
+	businessNames func(ctx context.Context, userID uuid.UUID) ([]string, error)
+	now           func() time.Time
 }
 
 func NewSellerPayoutService(db *gorm.DB, dir sellerPayoutInstitutions, banks BankDirectory, mailer CodeMailer) *SellerPayoutService {
 	return &SellerPayoutService{db: db, dir: dir, banks: banks, mailer: mailer, now: time.Now,
-		kycOK: func(ctx context.Context, id uuid.UUID) (bool, error) { return IsKYCVerified(ctx, db, id) }}
+		identity: func(ctx context.Context, id uuid.UUID) (bool, string, error) { return KYCIdentity(ctx, db, id) },
+		businessNames: func(ctx context.Context, id uuid.UUID) ([]string, error) {
+			var names []string
+			err := db.WithContext(ctx).Table("pay_merchants").
+				Where("user_id = ? AND status = ?", id, models.PayMerchantActive).
+				Pluck("business_name", &names).Error
+			return names, err
+		}}
 }
 
 // SellerPayoutPending says where the confirmation code went.
@@ -92,15 +105,18 @@ func (s *SellerPayoutService) Request(ctx context.Context, userID uuid.UUID, in 
 	if s.mailer == nil {
 		return nil, ErrSellerPayoutCode
 	}
-	ok, err := s.kycOK(ctx, userID)
+	verified, legalName, err := s.identity(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSellerPayoutUnavailable, err)
 	}
-	if !ok {
+	if !verified {
 		return nil, ErrSellerPayoutKYC
 	}
 	row, err := s.validate(ctx, userID, in)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.requireOwnName(ctx, userID, legalName, row.AccountName); err != nil {
 		return nil, err
 	}
 	email, name, err := UserContact(ctx, s.db, userID)
@@ -167,10 +183,11 @@ func (s *SellerPayoutService) Confirm(ctx context.Context, userID, changeID uuid
 		return nil, ErrSellerPayoutNoPending
 	}
 	// KYC can be revoked while a code is waiting.
-	if ok, err := s.kycOK(ctx, userID); err != nil || !ok {
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrSellerPayoutUnavailable, err)
-		}
+	verified, legalName, err := s.identity(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSellerPayoutUnavailable, err)
+	}
+	if !verified {
 		return nil, ErrSellerPayoutKYC
 	}
 	var row models.SellerPayoutMethod
@@ -178,7 +195,29 @@ func (s *SellerPayoutService) Confirm(ctx context.Context, userID, changeID uuid
 		return nil, err
 	}
 	row.ID, row.UserID = uuid.New(), userID
+	// Names can change between request and confirm (a rename review).
+	if err := s.requireOwnName(ctx, userID, legalName, row.AccountName); err != nil {
+		return nil, err
+	}
 	return s.save(ctx, row)
+}
+
+// requireOwnName holds the account to the seller's verified legal name or one
+// of their verified business names (same matcher as inbound attribution).
+func (s *SellerPayoutService) requireOwnName(ctx context.Context, userID uuid.UUID, legalName, accountName string) error {
+	if MatchAccountName(legalName, accountName).IsMatch() {
+		return nil
+	}
+	names, err := s.businessNames(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrSellerPayoutUnavailable, err)
+	}
+	for _, n := range names {
+		if MatchAccountName(n, accountName).IsMatch() {
+			return nil
+		}
+	}
+	return ErrSellerPayoutNameMismatch
 }
 
 // validate checks the destination against the provider's directory and, for

@@ -162,6 +162,8 @@ func sellerPayoutFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "account_shape")
 	case errors.Is(err, services.ErrSellerPayoutKYC):
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), "kyc_verification_required")
+	case errors.Is(err, services.ErrSellerPayoutNameMismatch):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "account_name_mismatch")
 	case errors.Is(err, services.ErrSellerPayoutUnverified):
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "account_unverified")
 	case errors.Is(err, services.ErrSellerPayoutCode):
