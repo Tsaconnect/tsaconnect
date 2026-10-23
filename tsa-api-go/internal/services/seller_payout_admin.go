@@ -315,10 +315,10 @@ type CompanyOwed struct {
 
 func (a *SellerPayoutAdmin) CompanyOwed(ctx context.Context) (*CompanyOwed, error) {
 	var rows []models.SellerPayoutOrder
-	// Only payouts the central account actually sent (a transfer id is recorded):
-	// one marked paid by hand left the wallet untouched and owes it nothing.
+	// Only payouts the provider confirmed the central account sent (company_paid_at,
+	// set by the transfer read alone): one marked paid by hand owes it nothing.
 	if err := a.db.WithContext(ctx).
-		Where("venue = ? AND status = ? AND rebalanced_at IS NULL AND COALESCE(company_transfer_id, '') <> ''",
+		Where("venue = ? AND status = ? AND rebalanced_at IS NULL AND company_paid_at IS NOT NULL",
 			models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
 		Order("created_at ASC").Find(&rows).Error; err != nil {
 		return nil, err
@@ -364,7 +364,7 @@ func (a *SellerPayoutAdmin) MarkRebalanced(ctx context.Context, ids []uuid.UUID,
 	var affected int64
 	err := a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.SellerPayoutOrder{}).
-			Where("id IN ? AND venue = ? AND status = ? AND rebalanced_at IS NULL AND COALESCE(company_transfer_id, '') <> ''",
+			Where("id IN ? AND venue = ? AND status = ? AND rebalanced_at IS NULL AND company_paid_at IS NOT NULL",
 				uniq, models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
 			UpdateColumn("rebalanced_at", now)
 		if res.Error != nil {

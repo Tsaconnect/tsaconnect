@@ -439,6 +439,10 @@ func TestSellerPayoutCompany_RebalanceIgnoresHandPaidAndDedupesIds(t *testing.T)
 	if err := r.db.Create(handPaid).Error; err != nil {
 		t.Fatal(err)
 	}
+	// Even one that carries a transfer id (it failed, and the operator paid
+	// elsewhere): only a transfer the provider confirmed counts.
+	handPaid.CompanyTransferID = "trf_failed"
+	r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", handPaid.ID).Update("company_transfer_id", "trf_failed")
 	owed, err := admin.CompanyOwed(ctx)
 	if err != nil || len(owed.Payouts) != 0 {
 		t.Fatalf("owed = %+v, %v; a hand-paid payout owes the central account nothing", owed, err)

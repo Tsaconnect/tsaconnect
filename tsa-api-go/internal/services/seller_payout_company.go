@@ -180,7 +180,7 @@ func (o *SellerPayoutOrchestrator) observeCompany(ctx context.Context, p *models
 	}
 	switch strings.ToUpper(strings.TrimSpace(tr.Status)) {
 	case "SUCCESSFUL", "SUCCESS", "SUCCEEDED":
-		if err := o.move(ctx, p, models.SellerPayoutPaid, nil, models.SellerPayoutPayingCompany); err != nil {
+		if err := o.move(ctx, p, models.SellerPayoutPaid, map[string]any{"company_paid_at": o.now().UTC()}, models.SellerPayoutPayingCompany); err != nil {
 			if errors.Is(err, errSellerPayoutTransition) {
 				return nil
 			}

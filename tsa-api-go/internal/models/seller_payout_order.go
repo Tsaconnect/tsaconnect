@@ -122,6 +122,10 @@ type SellerPayoutOrder struct {
 	CompanyRef        string `gorm:"size:42;index" json:"-"`
 	CompanyAttempts   int    `gorm:"not null;default:0" json:"-"`
 	CompanyTransferID string `gorm:"size:64" json:"-"`
+	// CompanyPaidAt is set ONLY when the provider's own transfer read says the
+	// central account sent the naira. A payout marked paid by hand never has it,
+	// so it can never be counted as USDC owed to a rebalance.
+	CompanyPaidAt *time.Time `json:"companyPaidAt,omitempty"`
 	// RebalancedAt is when an operator moved the USDC a paid company payout left
 	// in the treasury back to the central account's funding side (a batch).
 	RebalancedAt *time.Time `gorm:"index" json:"rebalancedAt,omitempty"`
