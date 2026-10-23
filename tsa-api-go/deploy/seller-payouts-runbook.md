@@ -36,6 +36,19 @@ whenever the account's float cannot cover the payout plus every one already prom
   until it is rebalanced (rebalance regularly); float promised at checkout is tracked in memory per process (2 min)
   plus the saved payouts, so it is soft; the hard check is at send time and parks safely.
 
+## Operator tools (console → Seller payouts, super admin)
+
+- **Health** (`GET /api/admin/seller-payouts/health`): the central account's NGN against what is already promised to
+  company payouts (and the transfer fee for each), the treasury's native gas and kept stablecoins per chain (flagged
+  low under its floor), open payouts by status, how long the oldest parked one has waited, and the USDC left to
+  rebalance. A part that could not be read is listed under "Could not read", never shown as zero.
+- **Re-route** (`POST /api/admin/seller-payouts/:id/reroute {note, route: company|paycrest}`): moves a PARKED payout to the
+  other route when it provably sent nothing — no Paycrest order, no leg with a transaction, an approval or a
+  confirmation, no pending leg, and no company transfer that may have left (a provider refusal, which is retry-safe, is
+  fine). The payout goes back to `awaiting_release` (release never proven) or `received` and runs the new venue from
+  there; a company payout that had attempts takes a new reference generation. Refused with 409 `money_may_have_moved`
+  otherwise, and 422 `route_unavailable` when the venue cannot run here. Audited as `seller_payout.reroute`.
+
 ## What must be true before it does anything
 
 All of these, else new orders are made the ordinary way (seller wallet) and nothing changes:

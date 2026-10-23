@@ -132,3 +132,33 @@ func TestSellerPayoutAdminHandler_Switch(t *testing.T) {
 		t.Fatalf("after: %s", w.Body)
 	}
 }
+
+func TestSellerPayoutAdminHandler_RerouteAndHealth(t *testing.T) {
+	h, _, p, admin := newPayoutAdminFixture(t)
+
+	w := callPayoutAdmin(t, h.Health, admin, uuid.Nil, "", nil)
+	var health struct {
+		Data struct {
+			Counts map[string]int64 `json:"counts"`
+		} `json:"data"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &health) != nil || health.Data.Counts[models.SellerPayoutNeedsReview] != 1 {
+		t.Fatalf("health = %d %s", w.Code, w.Body.String())
+	}
+
+	for name, c := range map[string]struct {
+		body map[string]string
+		code int
+		want string
+	}{
+		"no note":            {map[string]string{"route": "company"}, http.StatusBadRequest, ""},
+		"not a route":        {map[string]string{"note": "x", "route": "wire"}, http.StatusBadRequest, ""},
+		"no central account": {map[string]string{"note": "x", "route": "company"}, http.StatusUnprocessableEntity, "route_unavailable"},
+		"the Paycrest route": {map[string]string{"note": "x", "route": "paycrest"}, http.StatusBadRequest, ""}, // already on it
+	} {
+		w := callPayoutAdmin(t, h.Reroute, admin, p.ID, "", c.body)
+		if w.Code != c.code || (c.want != "" && !bytes.Contains(w.Body.Bytes(), []byte(c.want))) {
+			t.Fatalf("%s: %d %s; want %d %s", name, w.Code, w.Body.String(), c.code, c.want)
+		}
+	}
+}

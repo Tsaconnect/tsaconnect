@@ -24,6 +24,8 @@ type payoutActionBody struct {
 	Note      string `json:"note"`
 	Force     bool   `json:"force"`
 	Reference string `json:"reference"`
+	// Route is the venue a reroute moves the payout to: "company" or "paycrest".
+	Route string `json:"route"`
 }
 
 // List is GET /api/admin/seller-payouts?status=needs_review,paying_wallet&limit=.
@@ -170,6 +172,12 @@ func payoutAdminFail(c *gin.Context, err error) {
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "holds_funds")
 	case errors.Is(err, services.ErrPayoutStillLive):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "still_live")
+	case errors.Is(err, services.ErrPayoutRerouteUnsafe):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "money_may_have_moved")
+	case errors.Is(err, services.ErrPayoutRouteUnavailable):
+		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, err.Error(), "route_unavailable")
+	case errors.Is(err, services.ErrPayoutBadRoute):
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, services.ErrWalletPaymentNotSafe):
 		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "money_may_have_moved")
 	case errors.Is(err, services.ErrWalletPaymentUnavailable):
@@ -227,4 +235,25 @@ func (h *SellerPayoutAdminHandler) MarkRebalanced(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payouts marked rebalanced", gin.H{"count": n})
+}
+
+// Reroute is POST /:id/reroute {note, route}: who delivers the naira, for a parked
+// payout that has sent nothing.
+func (h *SellerPayoutAdminHandler) Reroute(c *gin.Context) {
+	h.act(c, func(id, admin uuid.UUID, b payoutActionBody) error {
+		return h.Admin.Reroute(c.Request.Context(), id, admin, b.Note, b.Route)
+	}, "Payout re-routed")
+}
+
+// Health is GET /api/admin/seller-payouts/health: the central account's float
+// against what is promised, the treasury's gas and stablecoins, what is waiting
+// and for how long, and what is left to rebalance.
+func (h *SellerPayoutAdminHandler) Health(c *gin.Context) {
+	health, err := h.Admin.Health(c.Request.Context())
+	if err != nil {
+		log.Printf("[seller-payout-admin] health: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load payout health")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Seller payout health", health)
 }

@@ -19,6 +19,7 @@ func RegisterSellerPayoutAdmin(router *gin.Engine, cfg *config.Config, h *handle
 	g := router.Group("/api/admin/seller-payouts")
 	g.Use(middleware.RateLimiter(500, 15*time.Minute), middleware.AdminAuth(cfg), middleware.RequireSuperAdmin())
 	g.GET("", h.List)
+	g.GET("/health", h.Health)
 	g.GET("/company-owed", h.CompanyOwed)
 	g.POST("/company-rebalanced", h.MarkRebalanced)
 	g.GET("/switch", h.GetSwitch)
@@ -28,4 +29,5 @@ func RegisterSellerPayoutAdmin(router *gin.Engine, cfg *config.Config, h *handle
 	g.POST("/:id/mark-paid", h.MarkPaid)
 	g.POST("/:id/cancel", h.Cancel)
 	g.POST("/:id/pay-wallet", h.PayWallet)
+	g.POST("/:id/reroute", h.Reroute)
 }
