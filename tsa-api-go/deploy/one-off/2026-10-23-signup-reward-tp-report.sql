@@ -35,7 +35,7 @@ GROUP BY u.username, s.highest_awarded_level, c.claimable_mcgp;
 SELECT u.username, r.source_level, r.reward_usd, r.mcgp_amount, r.created_at
 FROM reward_entries r
 JOIN users u ON u.id = r.user_id
-WHERE r.kind = 'level'
+WHERE r.kind = 'level_reward'
   AND r.user_id IN (SELECT user_id FROM tp_earnings WHERE source_type = 'signup_reward')
 ORDER BY u.username, r.source_level;
 
