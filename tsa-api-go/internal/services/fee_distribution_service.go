@@ -181,9 +181,9 @@ func (fs FeeShares) Sum() float64 {
 // models.GenerationPercentages ladder — only the fraction of the fee that BECOMES
 // the TP pool changes per feature.
 //
-//	product_merchant (2%):   carved              {0.50, 0.15,   0.15,   0.00, 0.20}
+//	product_merchant (2%):   carved              {0.64, 0.08,   0.08,   0.00, 0.20}
 //	p2p_platform     (1%):   carved              {0.50, 0.15,   0.15,   0.00, 0.20}
-//	service_contact  ($0.10):carved + provider   {0.50, 0.10,   0.10,   0.10, 0.20}
+//	service_contact  ($0.10):carved + provider   {0.49, 0.08,   0.08,   0.15, 0.20}
 //	instant_transfer (2%):   carved              {0.75, 0.0625, 0.0625, 0.00, 0.125}
 //	otc              (2%):   70/30 no-cashback    {0.70, 0.00,   0.00,   0.00, 0.30}
 //	spot             (3%):                        {0.70, 0.00,   0.00,   0.00, 0.30}
@@ -349,11 +349,11 @@ var errAlreadyDistributed = errors.New("fee already distributed for source")
 // Then, all inside ONE write tx:
 //  1. Insert the FeeDistribution guard row. The unique (source_type, source_id)
 //     index makes a concurrent/duplicate call fail here → treated as a no-op.
-//  2. Distribute the 30% TP pool: gen0 → the user; gen i → the active ancestor
+//  2. Distribute the TP pool (the split's TP slice, carved from what the platform keeps): gen0 → the user; gen i → the active ancestor
 //     at that gen if present, else → global pool. Continue past gaps.
-//  3. Buyer cashback (10%) → the user's CashbackEarning. Upline cashback (10%)
+//  3. Buyer cashback → the user's CashbackEarning. Upline cashback
 //     → the gen-1 ancestor if present+active, else → global pool.
-//  4. System 50% is recorded on the guard row only (treasury retains it).
+//  4. The system share is recorded on the guard row only (treasury retains it).
 func (s *FeeDistributionService) OnFeeSettled(ctx context.Context, ev FeeEvent) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("fee distribution service not initialized")
@@ -476,6 +476,12 @@ func (s *FeeDistributionService) distributeWithinTx(tx *gorm.DB, ev FeeEvent, by
 	// effect without a deploy.
 	prog := s.tpProgram.Current()
 	split := computeSplitWith(s.splitForFeature(ev.Feature), ev.FeeUSD, prog)
+	if split.ProviderCashbackUSD > 0 && (ev.ProviderID == nil || *ev.ProviderID == uuid.Nil) {
+		// No provider to pay: the treasury keeps that share, so the guard row
+		// never reports money as allocated that nobody received.
+		split.SystemUSD += split.ProviderCashbackUSD
+		split.ProviderCashbackUSD = 0
+	}
 
 	// (1) Idempotency guard. ON CONFLICT DO NOTHING then check RowsAffected
 	// so a duplicate is a clean no-op on both PostgreSQL and SQLite.
@@ -591,8 +597,8 @@ func (s *FeeDistributionService) distributeWithinTx(tx *gorm.DB, ev FeeEvent, by
 	// (FeeEvent.ProviderID). Only service_contact carries a non-zero provider
 	// share today; the cashback is recorded in USD here (the SP5 reward rail
 	// converts it to MCGP, like all other cashback). When the split's provider
-	// component is 0, or no ProviderID is supplied, credit nothing — there is
-	// no global-pool fallback for the provider share (unlike upline).
+	// component is 0, or no ProviderID is supplied, nothing is credited: the share was already
+	// folded into the system's before the guard row was written.
 	if split.ProviderCashbackUSD > 0 && ev.ProviderID != nil && *ev.ProviderID != uuid.Nil {
 		if err := s.creditCashback(tx, *ev.ProviderID, ev.UserID, ev, split.ProviderCashbackUSD); err != nil {
 			return err

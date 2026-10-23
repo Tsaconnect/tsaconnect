@@ -1103,3 +1103,30 @@ func TestConservation_EveryFeature(t *testing.T) {
 		})
 	}
 }
+
+// With no provider to pay, the provider's 15% is the treasury's, so the guard row
+// accounts for the whole fee instead of leaving that share unallocated.
+func TestServiceContact_WithoutProviderTheShareStaysWithTheSystem(t *testing.T) {
+	db := setupFeeDistTestDB(t)
+	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
+	requester := mkFeeUser(t, db, "np_req"+uuidShort(), nil, models.AccountStatusActive)
+
+	srcID := uuid.New()
+	fee := 0.10
+	if err := svc.OnFeeSettled(context.Background(), FeeEvent{
+		Feature: models.FeatureServiceContact, Token: "USDT", FeeUSD: fee,
+		UserID: requester.ID, SourceType: "service_contact", SourceID: srcID,
+	}); err != nil {
+		t.Fatalf("OnFeeSettled: %v", err)
+	}
+	var g models.FeeDistribution
+	if err := db.First(&g, "source_id = ?", srcID).Error; err != nil {
+		t.Fatalf("guard row: %v", err)
+	}
+	if g.ProviderCashbackUSD != 0 {
+		t.Fatalf("provider cashback = %v, want 0 with no provider", g.ProviderCashbackUSD)
+	}
+	if sum := g.SystemUSD + g.BuyerCashbackUSD + g.UplineCashbackUSD + g.ProviderCashbackUSD + g.TPPoolUSD; !approx(sum, fee) {
+		t.Fatalf("guard row accounts for %v of a %v fee", sum, fee)
+	}
+}

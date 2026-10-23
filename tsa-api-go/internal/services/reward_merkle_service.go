@@ -372,6 +372,11 @@ func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy
 		return nil, err
 	}
 
+	published, err := s.publishedUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	claimants := make([]EligibleClaimant, 0, len(claimables))
 	for _, cl := range claimables {
 		eligible, _, err := s.elig.IsClaimEligible(ctx, cl.UserID)
@@ -396,9 +401,10 @@ func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy
 			return nil, fmt.Errorf("load user %s: %w", cl.UserID, err)
 		}
 		// PM 2026-10-23: TP is claimable from the pool only from Level 3. A user
-		// already in a published epoch keeps their leaf; dropping it would revoke
-		// an entitlement the chain already honours.
-		if _, published := prev[cl.UserID]; !published && models.LevelFor(user.TPBalance) < MinClaimLevel {
+		// already in a PUBLISHED epoch keeps their leaf; dropping it would revoke
+		// an entitlement the chain already honours. An epoch that was only built
+		// does not count: it grants nothing on-chain.
+		if !published[cl.UserID] && models.LevelFor(user.TPBalance) < MinClaimLevel {
 			continue
 		}
 		addr := strings.TrimSpace(user.WalletAddress)
@@ -551,6 +557,23 @@ func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy
 // cumulative_base_units is a varying-length decimal string, and lexical string
 // ordering is wrong for it (e.g. "9" > "100"). We stream all (user_id,
 // cumulative) rows and fold the max with big.Int.Cmp.
+// publishedUsers is every user who holds a leaf in a published epoch.
+func (s *RewardMerkleService) publishedUsers(ctx context.Context) (map[uuid.UUID]bool, error) {
+	var ids []uuid.UUID
+	if err := s.db.WithContext(ctx).
+		Model(&models.RewardDistributionEntry{}).
+		Joins("JOIN reward_distributions d ON d.epoch = reward_distribution_entries.epoch").
+		Where("d.status = ?", models.RewardDistributionStatusPublished).
+		Distinct().Pluck("reward_distribution_entries.user_id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("load published entries: %w", err)
+	}
+	out := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
+}
+
 func (s *RewardMerkleService) previousCumulativeByUser(ctx context.Context) (map[uuid.UUID]*big.Int, error) {
 	out := map[uuid.UUID]*big.Int{}
 

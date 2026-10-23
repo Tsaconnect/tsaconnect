@@ -95,9 +95,12 @@ func (s *RewardClaimService) creditWelcomeBonus(tx *gorm.DB, claim *models.Rewar
 		Update("tp_balance", gorm.Expr("tp_balance + ?", amount)).Error; err != nil {
 		return fmt.Errorf("reward claim: increment tp_balance: %w", err)
 	}
-	// Best-effort: the level-crossing job also re-scans, so a missing row delays
-	// the level update rather than losing the bonus.
-	tx.Model(&models.UserRewardState{}).Where("user_id = ?", claim.UserID).Update("dirty", true)
+	// A user with no reward-state row updates zero rows (no error); the
+	// level-crossing job re-scans them anyway.
+	if err := tx.Model(&models.UserRewardState{}).Where("user_id = ?", claim.UserID).
+		Update("dirty", true).Error; err != nil {
+		return fmt.Errorf("reward claim: mark reward state dirty: %w", err)
+	}
 	return nil
 }
 
