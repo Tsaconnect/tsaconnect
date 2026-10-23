@@ -248,6 +248,11 @@ func (a *SellerPayoutAdmin) Health(ctx context.Context) (*PayoutHealth, error) {
 		}
 		sort.Slice(floats, func(i, j int) bool { return floats[i].Chain < floats[j].Chain })
 		for _, f := range floats {
+			// Payouts only ever touch the escrow's chain and Base: a lane the ramp keeps
+			// for other chains (and may leave empty) is not this feature's to flag.
+			if f.Chain != "sonic" && f.Chain != "base" {
+				continue
+			}
 			c := TreasuryChainHealth{Chain: f.Chain, Address: f.Address}
 			if f.TokenReadFailed {
 				h.Problems = append(h.Problems, "treasury "+f.Chain+" stablecoin balance")

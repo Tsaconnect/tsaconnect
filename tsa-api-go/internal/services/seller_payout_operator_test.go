@@ -40,6 +40,9 @@ func TestReroute_ASmallOrderTheBridgeRefusedIsPaidByTheCompanyRoute(t *testing.T
 	if p.Venue != models.SellerPayoutVenuePaycrest || r.broadcasts() != 0 {
 		t.Fatalf("payout = %+v broadcasts=%d; want parked on Paycrest with nothing sent", p, r.broadcasts())
 	}
+	if !p.RetrySafe || p.ParkedFrom != models.SellerPayoutBridging {
+		t.Fatalf("payout = %+v; every attempt was refused before broadcasting, so the park is retry-safe", p)
+	}
 
 	if err := admin.Reroute(context.Background(), r.payout.ID, uuid.New(), "too small to bridge", "company"); err != nil {
 		t.Fatalf("reroute = %v", err)
