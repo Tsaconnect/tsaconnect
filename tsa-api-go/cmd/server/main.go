@@ -739,6 +739,7 @@ func main() {
 	feeDistributionService.WithSplitConfigs(feeSplitConfigService)
 	tpProgramService := services.NewTPProgramConfigService(config.DB)
 	feeDistributionService.WithTPProgram(tpProgramService)
+	rewardClaimService.WithTPProgram(tpProgramService)
 	tph := handlers.NewTPAdminHandler(config.DB, feeSplitConfigService, feeDistributionService)
 	tph.Program = tpProgramService
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)

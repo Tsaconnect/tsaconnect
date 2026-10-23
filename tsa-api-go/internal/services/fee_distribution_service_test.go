@@ -646,7 +646,9 @@ func TestOnFeeSettled_TPPerUSDTunable(t *testing.T) {
 // TestOnFeeSettled_ZeroFeeCreditsUserOnly: a transaction with no fee earns the
 // user the fixed zero-fee reward (PM 2026-10-21) and nothing else — no upline,
 // no pool, no cashback — once per source.
-func TestOnFeeSettled_ZeroFeeCreditsUserOnly(t *testing.T) {
+// PM 2026-10-23: a transaction with no fee earns the user AND their direct upline
+// the same small reward, and nothing else.
+func TestOnFeeSettled_ZeroFeeCreditsUserAndDirectUpline(t *testing.T) {
 	db := setupFeeDistTestDB(t)
 	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 100)
 	users := buildFeeChain(t, db, 3)
@@ -662,8 +664,11 @@ func TestOnFeeSettled_ZeroFeeCreditsUserOnly(t *testing.T) {
 	if got := tpBalance(t, db, users[0].ID); !approx(got, models.DefaultZeroFeeTP) {
 		t.Fatalf("zero-fee reward = %v, want %v", got, models.DefaultZeroFeeTP)
 	}
-	if got := tpBalance(t, db, users[1].ID); got != 0 {
-		t.Fatalf("upline must earn nothing on a zero-fee transaction, got %v", got)
+	if got := tpBalance(t, db, users[1].ID); !approx(got, models.DefaultZeroFeeTP) {
+		t.Fatalf("direct upline zero-fee reward = %v, want %v (once, despite the replay)", got, models.DefaultZeroFeeTP)
+	}
+	if got := tpBalance(t, db, users[2].ID); got != 0 {
+		t.Fatalf("only the DIRECT upline earns on a zero-fee transaction, gen-2 got %v", got)
 	}
 	pool, _ := svc.GlobalPool(context.Background())
 	if pool.AccruedUSD != 0 {
@@ -856,8 +861,9 @@ func creditedTotalUSD(t *testing.T, db *gorm.DB, sourceID uuid.UUID) float64 {
 }
 
 // TestCarvedFee_ProductMerchant verifies a carved fee (product_merchant) on a
-// full chain credits buyer 15% + upline 15% + TP 20% (gen0..gen10) + 0 provider,
-// and conserves (every credited share sums to FeeUSD).
+// full chain credits buyer 8% + upline 8% (PM 2026-10-23: 16% cashback) + the TP
+// carved from the system's 84% + 0 provider, and conserves (every credited share
+// sums to FeeUSD).
 func TestCarvedFee_ProductMerchant(t *testing.T) {
 	db := setupFeeDistTestDB(t)
 	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 1.0)
@@ -874,20 +880,20 @@ func TestCarvedFee_ProductMerchant(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	// Buyer 15%, upline 15%, no provider.
-	if got := cashbackBalance(t, db, users[0].ID); !approx(got, fee*0.15) {
-		t.Fatalf("buyer cashback = %v, want %v", got, fee*0.15)
+	// Buyer 8%, upline 8%, no provider.
+	if got := cashbackBalance(t, db, users[0].ID); !approx(got, fee*0.08) {
+		t.Fatalf("buyer cashback = %v, want %v", got, fee*0.08)
 	}
-	if got := cashbackBalance(t, db, users[1].ID); !approx(got, fee*0.15) {
-		t.Fatalf("upline cashback = %v, want %v", got, fee*0.15)
+	if got := cashbackBalance(t, db, users[1].ID); !approx(got, fee*0.08) {
+		t.Fatalf("upline cashback = %v, want %v", got, fee*0.08)
 	}
-	// TP: 5% of the kept 70 to the user and to the upline, 2% to the pool.
+	// TP: 5% of the kept 84 to the user and to the upline, 2% to the pool.
 	for gen, want := range []float64{userTPUSD(feature, fee), uplineTPUSD(feature, fee)} {
 		if got := tpBalance(t, db, users[gen].ID); !approx(got, want) {
 			t.Fatalf("gen %d tp = %v, want %v", gen, got, want)
 		}
 	}
-	if want := 3.5; !approx(userTPUSD(feature, fee), want) {
+	if want := 4.2; !approx(userTPUSD(feature, fee), want) {
 		t.Fatalf("golden: user TP on a $100 product fee = %v, want %v", userTPUSD(feature, fee), want)
 	}
 	// No provider cashback row at all (3 cashback rows would mean provider got one).
@@ -902,8 +908,9 @@ func TestCarvedFee_ProductMerchant(t *testing.T) {
 	}
 }
 
-// TestCarvedFee_ServiceContact verifies service_contact credits buyer 10% +
-// upline 10% + provider 10% + TP 20%, the provider gets exactly ONE cashback row
+// TestCarvedFee_ServiceContact verifies service_contact credits buyer 8% +
+// upline 8% + provider 15% (PM 2026-10-23) + the TP carved from the system's 69%,
+// the provider gets exactly ONE cashback row
 // to ProviderID, and the event conserves.
 func TestCarvedFee_ServiceContact(t *testing.T) {
 	db := setupFeeDistTestDB(t)
@@ -926,11 +933,14 @@ func TestCarvedFee_ServiceContact(t *testing.T) {
 		t.Fatalf("OnFeeSettled: %v", err)
 	}
 
-	if got := cashbackBalance(t, db, requester.ID); !approx(got, fee*0.10) {
-		t.Fatalf("requester (buyer) cashback = %v, want %v", got, fee*0.10)
+	if got := cashbackBalance(t, db, requester.ID); !approx(got, fee*0.08) {
+		t.Fatalf("requester (buyer) cashback = %v, want %v", got, fee*0.08)
 	}
-	if got := cashbackBalance(t, db, upline.ID); !approx(got, fee*0.10) {
-		t.Fatalf("upline cashback = %v, want %v", got, fee*0.10)
+	if got := cashbackBalance(t, db, upline.ID); !approx(got, fee*0.08) {
+		t.Fatalf("upline cashback = %v, want %v", got, fee*0.08)
+	}
+	if got := providerFrac(feature); !approx(got, 0.15) {
+		t.Fatalf("the contacted person's share = %v, want 15%% of the fee", got)
 	}
 	if got := cashbackBalance(t, db, provider.ID); !approx(got, fee*providerFrac(feature)) {
 		t.Fatalf("provider cashback = %v, want %v", got, fee*providerFrac(feature))
@@ -949,7 +959,7 @@ func TestCarvedFee_ServiceContact(t *testing.T) {
 		t.Fatalf("upline tp = %v, want %v", got, uplineTPUSD(feature, fee))
 	}
 	// Audit-row completeness: the guard's OWN component columns (system + buyer +
-	// upline + provider + TP) must sum to the full FeeUSD — including the 10%
+	// upline + provider + TP) must sum to the full FeeUSD — including the 15%
 	// provider share. Without ProviderCashbackUSD on the guard, per-row
 	// reconciliation of service_contact would appear to lose 10%.
 	var fd models.FeeDistribution

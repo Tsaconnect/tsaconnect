@@ -346,6 +346,9 @@ var ErrNoEligibleClaimants = errors.New("no eligible claimants with a positive c
 // user's previous published cumulative, so an epoch can only ever grow a user's
 // cumulative (matching the contract's cumulativeAmount > claimed guard and
 // keeping re-publishes safe).
+// MinClaimLevel is the TP level a user must reach before joining a distribution.
+const MinClaimLevel = 3
+
 func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy *uuid.UUID) (*BuildResult, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("reward merkle service not initialized")
@@ -381,7 +384,7 @@ func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy
 
 		var user models.User
 		if err := s.db.WithContext(ctx).
-			Select("id", "wallet_address").
+			Select("id", "wallet_address", "tp_balance").
 			// deleted_at IS NULL: User.DeletedAt is a plain *time.Time, not
 			// gorm.DeletedAt, so it is NOT auto-scoped. Filter explicitly as
 			// defense-in-depth — a soft-deleted user must never get a leaf even
@@ -391,6 +394,12 @@ func (s *RewardMerkleService) BuildDistribution(ctx context.Context, publishedBy
 				continue
 			}
 			return nil, fmt.Errorf("load user %s: %w", cl.UserID, err)
+		}
+		// PM 2026-10-23: TP is claimable from the pool only from Level 3. A user
+		// already in a published epoch keeps their leaf; dropping it would revoke
+		// an entitlement the chain already honours.
+		if _, published := prev[cl.UserID]; !published && models.LevelFor(user.TPBalance) < MinClaimLevel {
+			continue
 		}
 		addr := strings.TrimSpace(user.WalletAddress)
 		if addr == "" || !common.IsHexAddress(addr) {

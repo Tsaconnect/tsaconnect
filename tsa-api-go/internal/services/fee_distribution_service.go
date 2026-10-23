@@ -192,9 +192,14 @@ func (fs FeeShares) Sum() float64 {
 //	withdrawal       (0.5%):                      {0.70, 0.00,   0.00,   0.00, 0.30}
 //	gas              (0.5%): 100% system, no TP   {1.00, 0.00,   0.00,   0.00, 0.00}
 var featureSplits = map[string]FeeShares{
-	models.FeatureProductMerchant: {System: 0.50, Buyer: 0.15, Upline: 0.15, Provider: 0.00, TP: 0.20},
+	// Product cashback (PM 2026-10-23): 16% of the fee, buyer 8% + upline 8%. The
+	// rest is the system's share (System + TP, 84%), of which TP is carved by the
+	// admin-set program percentages.
+	models.FeatureProductMerchant: {System: 0.64, Buyer: 0.08, Upline: 0.08, Provider: 0.00, TP: 0.20},
 	models.FeatureP2PPlatform:     {System: 0.50, Buyer: 0.15, Upline: 0.15, Provider: 0.00, TP: 0.20},
-	models.FeatureServiceContact:  {System: 0.50, Buyer: 0.10, Upline: 0.10, Provider: 0.10, TP: 0.20},
+	// Contact services (PM 2026-10-23): cashback 8% + 8%, and the contacted person
+	// earns 15% of the fee; the system's share is the remaining 69%.
+	models.FeatureServiceContact: {System: 0.49, Buyer: 0.08, Upline: 0.08, Provider: 0.15, TP: 0.20},
 	// service_other (0.5%): the platform fee on a paid SERVICE order's escrowed
 	// price. Carved split, mirroring product_merchant (services are the service
 	// analogue of a product sale).
@@ -502,14 +507,21 @@ func (s *FeeDistributionService) distributeWithinTx(tx *gorm.DB, ev FeeEvent, by
 		return errAlreadyDistributed
 	}
 
-	// A transaction that carried no fee (e.g. MCGP-exempt) earns the user a
-	// small fixed TP reward and nothing else — no upline, no pool, no cashback.
+	// A transaction that carried no fee (e.g. MCGP-exempt) earns the user AND their
+	// direct upline the same small fixed TP reward (PM 2026-10-23) and nothing
+	// else — no pool, no cashback. No live upline means no upline reward.
 	if ev.FeeUSD == 0 {
 		if reward := prog.ZeroFeeTP; reward > 0 && ev.UserID != uuid.Nil && ev.Feature != models.FeatureGas {
 			if err := s.creditTPAmount(tx, ev.UserID, ev, 0, 0, reward); err != nil {
 				return err
 			}
 			recipients[ev.UserID] = struct{}{}
+			if anc, ok := byGen[1]; ok && anc.Active {
+				if err := s.creditTPAmount(tx, anc.UserID, ev, 1, 0, reward); err != nil {
+					return err
+				}
+				recipients[anc.UserID] = struct{}{}
+			}
 		}
 		return nil
 	}

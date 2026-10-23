@@ -67,7 +67,7 @@ func (s *TPProgramConfigService) Current() models.TPProgramConfig {
 func (s *TPProgramConfigService) Save(cfg models.TPProgramConfig) (models.TPProgramConfig, error) {
 	if !models.ValidTPProgramConfig(cfg) {
 		return models.TPProgramConfig{}, fmt.Errorf(
-			"percentages must be within 0..1 and total at most 1, zero-fee TP must be >= 0, payout day must be 1..28")
+			"percentages must be within 0..1 and total at most 1, zero-fee TP and the welcome bonuses must be >= 0, payout day must be 1..28")
 	}
 	var existing models.TPProgramConfig
 	err := s.db.Order("created_at ASC").First(&existing).Error
@@ -80,11 +80,21 @@ func (s *TPProgramConfigService) Save(cfg models.TPProgramConfig) (models.TPProg
 			"zero_fee_tp": cfg.ZeroFeeTP,
 			"payout_day":  cfg.PayoutDay,
 			"updated_by":  cfg.UpdatedBy,
+
+			"signup_bonus_tp":     cfg.SignupBonusTP,
+			"onboarding_bonus_tp": cfg.OnboardingBonusTP,
 		}).Error; err != nil {
 			return models.TPProgramConfig{}, err
 		}
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		if err := s.db.Create(&cfg).Error; err != nil {
+			return models.TPProgramConfig{}, err
+		}
+		// Create replaces a zero with the column default, which would turn an
+		// admin's "no bonus" into 1 or 10: write the chosen values back exactly.
+		if err := s.db.Model(&cfg).Updates(map[string]interface{}{
+			"signup_bonus_tp": cfg.SignupBonusTP, "onboarding_bonus_tp": cfg.OnboardingBonusTP,
+		}).Error; err != nil {
 			return models.TPProgramConfig{}, err
 		}
 	default:

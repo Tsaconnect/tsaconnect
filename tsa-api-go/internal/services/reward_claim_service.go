@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -38,10 +39,66 @@ type RewardClaimService struct {
 	db          *gorm.DB
 	eligibility *RewardEligibilityService
 	graph       *ReferralGraphService
+	tpProgram   *TPProgramConfigService
 }
 
 func NewRewardClaimService(db *gorm.DB, elig *RewardEligibilityService, graph *ReferralGraphService) *RewardClaimService {
 	return &RewardClaimService{db: db, eligibility: elig, graph: graph}
+}
+
+// WithTPProgram supplies the admin-edited welcome-bonus amounts. Without it the
+// compiled-in defaults (1 TP signup, 10 TP onboarding) apply.
+func (s *RewardClaimService) WithTPProgram(p *TPProgramConfigService) *RewardClaimService {
+	s.tpProgram = p
+	return s
+}
+
+// The TP source types the instant welcome bonuses are recorded under.
+const (
+	tpSourceSignupBonus     = "signup_bonus"
+	tpSourceOnboardingBonus = "onboarding_bonus"
+)
+
+// SubmitClaim stores a claim that already passed Eligibility and pays its welcome
+// bonus in the SAME transaction (PM 2026-10-23: automated, instant, no approval).
+// A duplicate submission fails on the (user, kind) unique index BEFORE any TP is
+// credited, so the bonus is paid at most once per form, and a failure credits
+// nothing and leaves no claim behind, so the user can submit again.
+func (s *RewardClaimService) SubmitClaim(ctx context.Context, claim *models.RewardClaim) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(claim).Error; err != nil {
+			return err
+		}
+		return s.creditWelcomeBonus(tx, claim)
+	})
+}
+
+func (s *RewardClaimService) creditWelcomeBonus(tx *gorm.DB, claim *models.RewardClaim) error {
+	prog := s.tpProgram.Current()
+	amount, source := prog.SignupBonusTP, tpSourceSignupBonus
+	if claim.Kind == models.RewardClaimKindOnboarding {
+		amount, source = prog.OnboardingBonusTP, tpSourceOnboardingBonus
+	}
+	if amount <= 0 {
+		return nil
+	}
+	earning := models.TPEarning{
+		ID: uuid.New(), UserID: claim.UserID, SourceUserID: claim.UserID,
+		SourceType: source, SourceID: claim.ID,
+		Generation: 0, // a direct award, not a referral-generation share
+		TPEarned:   amount, CreatedAt: time.Now(),
+	}
+	if err := tx.Create(&earning).Error; err != nil {
+		return fmt.Errorf("reward claim: create tp earning: %w", err)
+	}
+	if err := tx.Model(&models.User{}).Where("id = ?", claim.UserID).
+		Update("tp_balance", gorm.Expr("tp_balance + ?", amount)).Error; err != nil {
+		return fmt.Errorf("reward claim: increment tp_balance: %w", err)
+	}
+	// Best-effort: the level-crossing job also re-scans, so a missing row delays
+	// the level update rather than losing the bonus.
+	tx.Model(&models.UserRewardState{}).Where("user_id = ?", claim.UserID).Update("dirty", true)
+	return nil
 }
 
 // Eligibility evaluates one form for one user. It fails closed: any unexpected

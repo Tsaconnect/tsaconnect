@@ -165,6 +165,7 @@ func mkRewardDistUser(t *testing.T, db *gorm.DB, wallet string, claimable float6
 		VerificationStatus: models.VerificationStatusVerified,
 		AccountStatus:      models.AccountStatusActive,
 		WalletAddress:      wallet,
+		TPBalance:          models.ThresholdTPForLevel(services.MinClaimLevel), // Level 3 gate
 		CreatedAt:          time.Now(),
 		UpdatedAt:          time.Now(),
 	}

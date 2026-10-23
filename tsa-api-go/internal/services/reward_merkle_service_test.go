@@ -265,6 +265,7 @@ func mkMerkleUser(t *testing.T, db *gorm.DB, wallet string, claimable float64) u
 		VerificationStatus: models.VerificationStatusVerified,
 		AccountStatus:      models.AccountStatusActive,
 		WalletAddress:      wallet,
+		TPBalance:          models.ThresholdTPForLevel(MinClaimLevel), // claimable unless a test lowers it
 		CreatedAt:          time.Now(),
 		UpdatedAt:          time.Now(),
 	}
@@ -849,3 +850,37 @@ func TestClaimData_GatesOnRemainingClaimable(t *testing.T) {
 }
 
 var errReadFail = errors.New("rpc read failed")
+
+// PM 2026-10-23: TP is claimable from the pool only once a user reaches Level 3.
+func TestBuildDistribution_RequiresLevelThree(t *testing.T) {
+	db := setupMerkleTestDB(t)
+	svc := NewRewardMerkleService(db, &fakeEligibility{}, "0xdistributor000000000000000000000000000001", 146)
+
+	low := mkMerkleUser(t, db, walletA, 5)
+	db.Model(&models.User{}).Where("id = ?", low).Update("tp_balance", models.ThresholdTPForLevel(MinClaimLevel)-0.01)
+	mkMerkleUser(t, db, walletB, 5)
+
+	res, err := svc.BuildDistribution(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(res.Entries) != 1 || res.Entries[0].UserID == low {
+		t.Fatalf("entries = %+v; want only the Level 3 user", res.Entries)
+	}
+}
+
+// A user already in a published epoch keeps their leaf even if their level reads lower now.
+func TestBuildDistribution_KeepsPublishedUserBelowLevelThree(t *testing.T) {
+	db := setupMerkleTestDB(t)
+	svc := NewRewardMerkleService(db, &fakeEligibility{}, "0xdistributor000000000000000000000000000001", 146)
+	id := mkMerkleUser(t, db, walletA, 5)
+	first, err := svc.BuildDistribution(context.Background(), nil)
+	if err != nil || len(first.Entries) != 1 {
+		t.Fatalf("first build: %v %+v", err, first)
+	}
+	db.Model(&models.User{}).Where("id = ?", id).Update("tp_balance", 0)
+	second, err := svc.BuildDistribution(context.Background(), nil)
+	if err != nil || len(second.Entries) != 1 {
+		t.Fatalf("second build must keep the published user: %v %+v", err, second)
+	}
+}

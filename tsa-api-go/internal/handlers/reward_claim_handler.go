@@ -247,7 +247,8 @@ func (h *RewardClaimHandler) SubmitRewardClaim(c *gin.Context) {
 		return
 	}
 
-	if err := h.DB.WithContext(c.Request.Context()).Create(&claim).Error; err != nil {
+	// Stores the claim and pays its welcome bonus in one transaction.
+	if err := h.Service.SubmitClaim(c.Request.Context(), &claim); err != nil {
 		// The (user_id, kind) unique index is what enforces one-time; a racing
 		// double-submit lands here rather than creating a second row. Prefer
 		// GORM's translated error over substring-matching driver text, which
