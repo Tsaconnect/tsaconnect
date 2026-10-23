@@ -8,6 +8,34 @@ Code: `services/seller_payout_orchestrator.go` (machine), `seller_payout_plan.go
 pricing), `seller_escrow_calls.go` (treasury-signed markDelivered/cancelOrder),
 `seller_payout_admin.go` (operator actions). Console: **Seller payouts** (super admin).
 
+## The company route (preferred)
+
+When the central account (the Flutterwave wallet IT sells pay out of) can cover it, the NAIRA is paid from there
+with ONE transfer and the USDC stays in the treasury on Sonic. No bridge, no Paycrest sale, no fixed bridge fee, so
+small orders work. Paycrest stays the route for payouts above `SELLER_PAYOUT_COMPANY_MAX_NGN` (default ₦500,000) and
+whenever the account's float cannot cover the payout plus every one already promised.
+
+- **Priced** at the Paycrest reference rate (the seller's naira is the same as on the Paycrest route). The buyer's
+  payout fee carries the provider transfer fee (`SELLER_PAYOUT_COMPANY_FEE_NGN`, default 50) and the company take
+  (`RAMP_COMPANY_TAKE_BPS`). `SELLER_PAYOUT_COMPANY_MAX_NGN=0` turns the route off.
+- **Sent** as `SPO-<payout id>` (`-N` after a checked retry), claimed BEFORE the request leaves. A provider refusal
+  of a first attempt parks safe; any other error, and a claim whose outcome was never recorded, parks UNSAFE and is
+  never sent again: look the reference up on Flutterwave, then Mark paid (it went through) or Retry (I checked,
+  a NEW reference is used). Completion is read from the provider's own transfer, never from the webhook alone.
+- **Float short at release:** the payout parks safe ("top it up, then retry"). Keep the NGN balance above what is
+  promised: the planner stops offering the route when it cannot cover it.
+- **Rebalance (manual, in batches):** console → Seller payouts → "Rebalance". It lists the USDC the treasury holds for
+  PAID company payouts. Move it in one batch, then tick the payouts and record the reference ("Mark rebalanced":
+  all or nothing, audited). Do not send from the treasury address by hand (nonce lane): use the operator tooling.
+- Pay seller's wallet is refused after a company transfer may have left (only after a provider refusal is it safe).
+- A forced Retry first reads the old transfer from the provider and is refused unless it is FAILED or CANCELLED
+  (a pending or successful one cannot be re-sent). A `transfer.reversal` for an `SPO-` reference parks the payout
+  (even one marked paid) for review. An unrecognised transfer status parks too.
+- `SELLER_PAYOUT_COMPANY_MAX_NGN=0` stops NEW orders using the route; payouts already sent stay observed.
+- Known limits: the USDC a paid company payout leaves in the treasury is NOT counted in the per-chain exposure cap
+  until it is rebalanced (rebalance regularly); float promised at checkout is tracked in memory per process (2 min)
+  plus the saved payouts, so it is soft; the hard check is at send time and parks safely.
+
 ## What must be true before it does anything
 
 All of these, else new orders are made the ordinary way (seller wallet) and nothing changes:
@@ -22,7 +50,13 @@ All of these, else new orders are made the ordinary way (seller wallet) and noth
 - Boot log shows `[seller-payout] enabled treasury=0x… bridge_bps=40`. `[seller-payout] dormant`
   names what is missing.
 
-Tuning: `SELLER_PAYOUT_BRIDGE_BPS` (default 40) is the bridge cost the buyer's payout fee budgets;
+At checkout the planner quotes the real Sonic -> Base LiFi route at the order's size (the same
+`LiFiCostBps` / `TreasuryGasBps` the machine checks): a bank payout is offered only when the route costs at
+most 80 bps (the machine's 100 bps cap less 20 bps slack), and the buyer's payout fee is that cost plus the
+slack. A small order's fixed bridge cost fails the check, so it is made the ordinary wallet order with no
+payout fee line. If LiFi cannot be asked, no payout is offered.
+
+Tuning: `SELLER_PAYOUT_BRIDGE_BPS` (default 40) is the FLOOR the payout fee budgets for the bridge;
 `RAMP_TREASURY_MAX_INFLIGHT_USD_PER_ORDER` / `_PER_CHAIN` cap exposure (payouts count toward the
 per-chain cap); `RAMP_CONVERSION_RETRY_MINUTES` / `RAMP_CONVERSION_LEG_CEILING_HOURS` bound bridge
 retries and a pending leg.

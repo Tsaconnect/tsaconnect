@@ -19,6 +19,8 @@ func RegisterSellerPayoutAdmin(router *gin.Engine, cfg *config.Config, h *handle
 	g := router.Group("/api/admin/seller-payouts")
 	g.Use(middleware.RateLimiter(500, 15*time.Minute), middleware.AdminAuth(cfg), middleware.RequireSuperAdmin())
 	g.GET("", h.List)
+	g.GET("/company-owed", h.CompanyOwed)
+	g.POST("/company-rebalanced", h.MarkRebalanced)
 	g.GET("/switch", h.GetSwitch)
 	g.PUT("/switch", h.SetSwitch)
 	g.GET("/:id", h.Get)

@@ -41,8 +41,21 @@ const (
 	SellerPayoutPayingWallet = "paying_wallet"
 	// SellerPayoutPaidWallet: the seller's wallet was credited (proven). Terminal.
 	SellerPayoutPaidWallet = "paid_wallet"
+	// SellerPayoutPayingCompany: the company route's naira transfer from the
+	// central account is claimed or submitted (company_ref names it). Claimed
+	// BEFORE the request leaves, so a crash mid-request still reads as "may have
+	// been sent".
+	SellerPayoutPayingCompany = "paying_company"
 	// SellerPayoutNeedsReview: parked for a person; see FailureReason.
 	SellerPayoutNeedsReview = "needs_review"
+)
+
+// Venues: who delivers the naira. The company pays it from the central account
+// (and the operator rebalances the USDC it holds in batches); Paycrest sells the
+// USDC on Base.
+const (
+	SellerPayoutVenuePaycrest = "paycrest"
+	SellerPayoutVenueCompany  = "company"
 )
 
 func SellerPayoutTerminal(status string) bool {
@@ -83,6 +96,8 @@ type SellerPayoutOrder struct {
 	FiatTargetKobo int64 `gorm:"not null" json:"fiatTargetKobo"`
 
 	Status string `gorm:"size:20;not null;index" json:"status"`
+	// Venue is who delivers the naira, fixed when the order is created.
+	Venue string `gorm:"size:12;not null;default:'paycrest'" json:"venue"`
 	// ReceivedAmount is the amount the release provably credited, base units.
 	ReceivedAmount string `gorm:"size:78" json:"receivedAmount,omitempty"`
 	// PaycrestOrderID links the sell once opened (set exactly once).
@@ -99,6 +114,21 @@ type SellerPayoutOrder struct {
 	// NextAttemptAt is the earliest the machine tries a refused step again.
 	NextAttemptAt *time.Time `json:"-"`
 	RetrySafe     bool       `gorm:"not null;default:false" json:"retrySafe"`
+	// The company route: CompanyRefGen is the reference generation (a retry
+	// after a checked failure takes a new one, so the provider never replays the
+	// old answer), CompanyRef the transfer reference of the current attempt,
+	// CompanyAttempts how many were claimed, CompanyTransferID the provider's id.
+	CompanyRefGen     int    `gorm:"not null;default:0" json:"-"`
+	CompanyRef        string `gorm:"size:42;index" json:"-"`
+	CompanyAttempts   int    `gorm:"not null;default:0" json:"-"`
+	CompanyTransferID string `gorm:"size:64" json:"-"`
+	// CompanyPaidAt is set ONLY when the provider's own transfer read says the
+	// central account sent the naira. A payout marked paid by hand never has it,
+	// so it can never be counted as USDC owed to a rebalance.
+	CompanyPaidAt *time.Time `json:"companyPaidAt,omitempty"`
+	// RebalancedAt is when an operator moved the USDC a paid company payout left
+	// in the treasury back to the central account's funding side (a batch).
+	RebalancedAt *time.Time `gorm:"index" json:"rebalancedAt,omitempty"`
 	// CheckedAt rotates the worker's attention across rows.
 	CheckedAt *time.Time `gorm:"index" json:"-"`
 	CreatedAt time.Time  `json:"createdAt"`

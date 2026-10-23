@@ -88,6 +88,11 @@ type SellerPayoutOrchestrator struct {
 	// sellRetryWindow bounds how long a payout waits for a venue that refused
 	// before anything was sent (rate moved, below the book's minimum, no venue).
 	sellRetryWindow time.Duration
+	// company pays the naira from the central account on the company route
+	// (WithCompany); companyFeeKobo is the provider's transfer fee the float
+	// must also cover. nil parks a company payout safely instead of sending.
+	company        SellerPayoutCompanyPayer
+	companyFeeKobo int64
 }
 
 func NewSellerPayoutOrchestrator(db *gorm.DB, treasury *Treasury, legs rampLegStore, lifi lifiQuoter,
@@ -209,7 +214,10 @@ func (o *SellerPayoutOrchestrator) Advance(ctx context.Context, p *models.Seller
 	if models.SellerPayoutTerminal(p.Status) || p.Status == models.SellerPayoutNeedsReview {
 		return nil
 	}
-	if o.treasury == nil || o.treasury.Address() == "" {
+	// A company payout past its release proof never touches the treasury signer:
+	// its transfer must stay observable whatever the lanes say.
+	companyBeyondRelease := p.Venue == models.SellerPayoutVenueCompany && p.Status != models.SellerPayoutAwaitingRelease
+	if !companyBeyondRelease && (o.treasury == nil || o.treasury.Address() == "") {
 		if p.Status == models.SellerPayoutAwaitingRelease || p.Status == models.SellerPayoutReceived || p.Status == models.SellerPayoutBridged {
 			return o.parkSafe(ctx, p, "treasury lanes disagree on their signer, or none are configured")
 		}
@@ -219,7 +227,12 @@ func (o *SellerPayoutOrchestrator) Advance(ctx context.Context, p *models.Seller
 	case models.SellerPayoutAwaitingRelease:
 		return o.awaitRelease(ctx, p)
 	case models.SellerPayoutReceived, models.SellerPayoutBridging:
+		if p.Venue == models.SellerPayoutVenueCompany {
+			return o.advanceCompany(ctx, p)
+		}
 		return o.advanceBridge(ctx, p)
+	case models.SellerPayoutPayingCompany:
+		return o.advanceCompany(ctx, p)
 	case models.SellerPayoutBridged:
 		return o.openSell(ctx, p)
 	case models.SellerPayoutSelling:
@@ -496,14 +509,7 @@ func (o *SellerPayoutOrchestrator) startBridge(ctx context.Context, p *models.Se
 	}
 
 	baseUSDC := dst.tokenAddress("USDC")
-	route, err := o.lifi.Quote(ctx, LiFiQuoteRequest{
-		FromChainID: src.ChainID, ToChainID: dst.ChainID,
-		FromToken: src.tokenAddress(p.Token), ToToken: baseUSDC,
-		FromAddress: o.treasuryAddr(), ToAddress: o.treasuryAddr(),
-		FromAmount: amount.String(),
-		Slippage:   0.001, // stable to stable
-		Order:      "CHEAPEST",
-	})
+	route, costBps, err := quoteSellerPayoutBridge(ctx, o.lifi, src, dst, p.Token, o.treasuryAddr(), amount)
 	if err != nil {
 		// Nothing was broadcast, so this attempt is provably dead: fail it so
 		// the next tick starts a clean one inside the window.
@@ -515,7 +521,7 @@ func (o *SellerPayoutOrchestrator) startBridge(ctx context.Context, p *models.Se
 	if route.ToAmountMin == nil {
 		return o.failLeg(detached(ctx), leg.ID, "route quotes no guaranteed minimum")
 	}
-	if l, ok := LiFiCostBps(route); !ok || l+TreasuryGasBps(route, treasuryERC20Gas) > sellerPayoutMaxBridgeBps {
+	if costBps < 0 || costBps > sellerPayoutMaxBridgeBps {
 		return o.failLeg(detached(ctx), leg.ID, fmt.Sprintf("route over the %d bps budget", sellerPayoutMaxBridgeBps))
 	}
 	return o.executeBridgeLeg(ctx, src, leg, p.Token, amount, route, o.treasuryAddr(), dst.ChainID, "evm", baseUSDC)
@@ -531,7 +537,8 @@ func (o *SellerPayoutOrchestrator) inFlightUSD(ctx context.Context, chainKey str
 // sellerPayoutHeldOn is where a payout's funds sit at each status: on the
 // escrow's chain until the bridge lands, then on Base.
 var sellerPayoutHeldOn = map[string][]string{
-	"sonic": {models.SellerPayoutReceived, models.SellerPayoutBridging, models.SellerPayoutPayingWallet},
+	"sonic": {models.SellerPayoutReceived, models.SellerPayoutBridging, models.SellerPayoutPayingWallet,
+		models.SellerPayoutPayingCompany},
 	"base": {models.SellerPayoutBridged, models.SellerPayoutSelling, models.SellerPayoutOrdered,
 		models.SellerPayoutDepositing},
 }
@@ -876,9 +883,7 @@ func (o *SellerPayoutOrchestrator) followSell(ctx context.Context, p *models.Sel
 		if err := o.move(ctx, p, models.SellerPayoutPaid, nil, models.SellerPayoutDeposited); err != nil {
 			return err
 		}
-		o.tell(p, events.SellerPayoutPaid, "Your payout was sent",
-			fmt.Sprintf("₦%s for order #%s was sent to your %s account ending %s.",
-				payFiatAmount(p.FiatTargetKobo), p.MarketplaceOrderID.String()[:8], p.InstitutionName, lastDigits(p.AccountNumber, 4)))
+		o.paidNotice(p)
 		return nil
 	case models.PaycrestStatusRefunded, models.PaycrestStatusExpired, models.PaycrestStatusUnmatched,
 		models.PaycrestStatusFailed, models.PaycrestStatusCancelled:
@@ -913,6 +918,12 @@ func (o *SellerPayoutOrchestrator) StartWalletPayment(ctx context.Context, p *mo
 	amount, ok := new(big.Int).SetString(p.ReceivedAmount, 10)
 	if !ok || amount.Sign() <= 0 || !common.IsHexAddress(p.SellerWallet) || p.PaycrestOrderID != nil {
 		return ErrWalletPaymentUnavailable
+	}
+	// A company transfer that may have left the central account means the naira
+	// may already be paid: only a provider refusal (nothing exists) or no attempt
+	// at all leaves the wallet payment safe.
+	if p.CompanyAttempts > 0 && !(p.ParkedFrom == models.SellerPayoutPayingCompany && p.RetrySafe) {
+		return ErrWalletPaymentNotSafe
 	}
 	legs, err := o.legs.ForOrder(ctx, p.ID)
 	if err != nil {
@@ -1010,4 +1021,35 @@ func (o *SellerPayoutOrchestrator) finishWalletPayment(ctx context.Context, p *m
 	o.tell(p, events.SellerPayoutPaid, "Your payout was sent to your wallet",
 		fmt.Sprintf("We couldn't pay order #%s to your bank, so we sent the funds to your wallet instead.", p.MarketplaceOrderID.String()[:8]))
 	return nil
+}
+
+// sellerPayoutBridgeSlackBps is the headroom the planner leaves between the
+// bridge cost it prices a payout at and the cap the machine refuses above, so
+// a route a few bps dearer by release time does not strand a payout the buyer
+// already paid for.
+const sellerPayoutBridgeSlackBps = 20
+
+// quoteSellerPayoutBridge quotes the Sonic -> Base route a payout of amount
+// takes and returns it with its all-in cost in bps of the input: LiFi's own
+// cost plus the treasury's gas (the ramp's LiFiCostBps / TreasuryGasBps). -1
+// means the route carries no usable price. The machine (to run the bridge) and
+// the planner (to decide at checkout whether to offer a payout at all) both
+// call this, so what is offered and what can run cannot disagree.
+func quoteSellerPayoutBridge(ctx context.Context, q lifiQuoter, src, dst *TreasuryLane, token, treasuryAddr string, amount *big.Int) (*LiFiRoute, int, error) {
+	route, err := q.Quote(ctx, LiFiQuoteRequest{
+		FromChainID: src.ChainID, ToChainID: dst.ChainID,
+		FromToken: src.tokenAddress(token), ToToken: dst.tokenAddress("USDC"),
+		FromAddress: treasuryAddr, ToAddress: treasuryAddr,
+		FromAmount: amount.String(),
+		Slippage:   0.001, // stable to stable
+		Order:      "CHEAPEST",
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	l, ok := LiFiCostBps(route)
+	if !ok {
+		return route, -1, nil
+	}
+	return route, l + TreasuryGasBps(route, treasuryERC20Gas), nil
 }

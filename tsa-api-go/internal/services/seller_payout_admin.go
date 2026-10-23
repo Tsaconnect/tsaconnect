@@ -53,6 +53,14 @@ type PayoutDetail struct {
 	Legs   []models.RampLeg            `json:"legs"`
 	Sale   *models.PaycrestOrderRecord `json:"paycrestOrder,omitempty"`
 	Order  *payoutOrderSummary         `json:"order,omitempty"`
+	// Company is the central-account transfer of a company-route payout.
+	Company *payoutCompanyDetail `json:"company,omitempty"`
+}
+
+type payoutCompanyDetail struct {
+	Ref        string `json:"ref"`
+	TransferID string `json:"transferId,omitempty"`
+	Attempts   int    `json:"attempts"`
 }
 
 type payoutOrderSummary struct {
@@ -105,6 +113,9 @@ func (a *SellerPayoutAdmin) Detail(ctx context.Context, id uuid.UUID) (*PayoutDe
 			d.Sale = &sale
 		}
 	}
+	if p.Venue == models.SellerPayoutVenueCompany {
+		d.Company = &payoutCompanyDetail{Ref: p.CompanyRef, TransferID: p.CompanyTransferID, Attempts: p.CompanyAttempts}
+	}
 	var o struct {
 		ID            uuid.UUID
 		Status        string
@@ -150,11 +161,31 @@ func (a *SellerPayoutAdmin) Retry(ctx context.Context, id, admin uuid.UUID, note
 			to = models.SellerPayoutBridged
 		}
 	}
+	updates := map[string]any{"failure_reason": "", "retry_safe": false, "attempt_started_at": a.orch.now()}
+	if to == models.SellerPayoutPayingCompany && p.CompanyTransferID != "" {
+		// A transfer exists: it must be provably dead before another is sent.
+		dead, derr := a.transferDead(ctx, p.CompanyTransferID)
+		if derr != nil {
+			return derr
+		}
+		if !dead {
+			return ErrPayoutStillLive
+		}
+	}
+	if to == models.SellerPayoutPayingCompany {
+		// A company transfer is claimed before it is sent, so a retry starts a new
+		// attempt on a NEW reference: the provider would only replay the old answer.
+		to = models.SellerPayoutReceived
+		updates["company_ref_gen"] = gorm.Expr("company_ref_gen + 1")
+		updates["company_transfer_id"] = ""
+		updates["company_paid_at"] = nil
+	}
 	// A retry is a fresh start for the retry windows.
-	if err := a.orch.move(ctx, p, to, map[string]any{"failure_reason": "", "retry_safe": false, "attempt_started_at": a.orch.now()}, models.SellerPayoutNeedsReview); err != nil {
+	if err := a.orch.move(ctx, p, to, updates, models.SellerPayoutNeedsReview); err != nil {
 		return notParkedIfRaced(err)
 	}
-	a.audit(ctx, "seller_payout.retry", admin, p, map[string]any{"note": note, "force": force, "to": to})
+	a.audit(ctx, "seller_payout.retry", admin, p, map[string]any{
+		"note": note, "force": force, "to": to, "oldCompanyRef": p.CompanyRef, "oldTransferId": p.CompanyTransferID})
 	return nil
 }
 
@@ -191,6 +222,15 @@ func (a *SellerPayoutAdmin) MarkPaid(ctx context.Context, id, admin uuid.UUID, n
 // hasLiveVenue is true while a Paycrest sale of this payout has not ended or a
 // leg is still pending: paying the seller by hand then risks paying twice.
 func (a *SellerPayoutAdmin) hasLiveVenue(ctx context.Context, p *models.SellerPayoutOrder) (bool, error) {
+	if p.Venue == models.SellerPayoutVenueCompany && p.CompanyTransferID != "" {
+		dead, err := a.transferDead(ctx, p.CompanyTransferID)
+		if err != nil {
+			return false, err
+		}
+		if !dead {
+			return true, nil
+		}
+	}
 	if p.PaycrestOrderID != nil {
 		var sale models.PaycrestOrderRecord
 		if err := a.db.WithContext(ctx).Select("id", "status").First(&sale, "id = ?", *p.PaycrestOrderID).Error; err != nil {
@@ -274,4 +314,104 @@ func notParkedIfRaced(err error) error {
 		return ErrPayoutNotParked
 	}
 	return err
+}
+
+// CompanyOwed is what the company route leaves for an operator to rebalance: the
+// USDC (or USDT) the treasury holds for company payouts that are PAID and not yet
+// marked rebalanced, summed per token in base units, with the payouts behind it.
+type CompanyOwed struct {
+	Totals  map[string]string          `json:"totals"`
+	Payouts []models.SellerPayoutOrder `json:"payouts"`
+}
+
+func (a *SellerPayoutAdmin) CompanyOwed(ctx context.Context) (*CompanyOwed, error) {
+	var rows []models.SellerPayoutOrder
+	// Only payouts the provider confirmed the central account sent (company_paid_at,
+	// set by the transfer read alone): one marked paid by hand owes it nothing.
+	if err := a.db.WithContext(ctx).
+		Where("venue = ? AND status = ? AND rebalanced_at IS NULL AND company_paid_at IS NOT NULL",
+			models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
+		Order("created_at ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	sums := map[string]*big.Int{}
+	for _, r := range rows {
+		n, ok := new(big.Int).SetString(r.ReceivedAmount, 10)
+		if !ok {
+			continue
+		}
+		t := strings.ToUpper(r.Token)
+		if sums[t] == nil {
+			sums[t] = new(big.Int)
+		}
+		sums[t].Add(sums[t], n)
+	}
+	out := &CompanyOwed{Totals: map[string]string{}, Payouts: rows}
+	for t, n := range sums {
+		out.Totals[t] = n.String()
+	}
+	return out, nil
+}
+
+// MarkRebalanced records that an operator moved the USDC of these paid company
+// payouts back (a batch). Only paid, not-yet-rebalanced company payouts count;
+// anything else in ids is refused so a wrong id never hides money still owed.
+func (a *SellerPayoutAdmin) MarkRebalanced(ctx context.Context, ids []uuid.UUID, admin uuid.UUID, note, reference string) (int64, error) {
+	if strings.TrimSpace(note) == "" || strings.TrimSpace(reference) == "" {
+		return 0, ErrPayoutNeedsNote
+	}
+	seen := map[uuid.UUID]bool{}
+	uniq := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			uniq = append(uniq, id)
+		}
+	}
+	if len(uniq) == 0 {
+		return 0, ErrPayoutNotFound
+	}
+	now := a.orch.now()
+	var affected int64
+	err := a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.SellerPayoutOrder{}).
+			Where("id IN ? AND venue = ? AND status = ? AND rebalanced_at IS NULL AND company_paid_at IS NOT NULL",
+				uniq, models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
+			UpdateColumn("rebalanced_at", now)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != int64(len(uniq)) {
+			return ErrPayoutNotParked // some were not eligible: nothing changes
+		}
+		affected = res.RowsAffected
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	raw, _ := json.Marshal(map[string]any{"ids": uniq, "note": note, "reference": reference, "count": affected})
+	row := models.P2PAuditLog{ID: uuid.New(), ActorID: &admin, Action: "seller_payout.rebalanced", Metadata: datatypes.JSON(raw)}
+	if err := a.db.WithContext(ctx).Create(&row).Error; err != nil {
+		fmt.Printf("[seller-payout] audit seller_payout.rebalanced failed: %v\n", err)
+	}
+	return affected, nil
+}
+
+// transferDead reports whether a central-account transfer is provably over WITHOUT
+// having paid (failed, cancelled or reversed), read from the provider. It fails
+// closed: with no payer or an unreadable transfer it errors, never "dead".
+func (a *SellerPayoutAdmin) transferDead(ctx context.Context, transferID string) (bool, error) {
+	if a.orch.company == nil {
+		return false, fmt.Errorf("%w: the central account is not configured, so the transfer cannot be read", ErrPayoutStillLive)
+	}
+	tr, err := a.orch.company.GetTransfer(ctx, transferID)
+	if err != nil {
+		return false, fmt.Errorf("cannot read transfer %s to prove it is over: %w", transferID, err)
+	}
+	switch strings.ToUpper(strings.TrimSpace(tr.Status)) {
+	case "FAILED", "CANCELLED", "CANCELED", "REVERSED":
+		return true, nil
+	}
+	return false, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -199,4 +200,217 @@ func TestSellerPayoutSwitch_PersistsAndTakesEffectAtOnce(t *testing.T) {
 	if _, err := sw2.Enabled(ctx); err == nil {
 		t.Fatal("an unreadable switch is an error, never 'on'")
 	}
+}
+
+// The planner asks LiFi for the real Sonic -> Base route at the amount the
+// treasury will hold, offers a payout only when that route fits the machine's
+// cap with slack to spare, and charges the buyer what it costs.
+func TestPayoutPlan_PricesTheRealBridge(t *testing.T) {
+	ctx := context.Background()
+	net := big.NewInt(100_000000)
+
+	t.Run("a route inside the cap is priced at its cost plus the slack", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		p.WithBridge(r.lifi)
+		plan, err := p.Plan(ctx, uid, "USDC", net)
+		if err != nil || plan == nil {
+			t.Fatalf("plan = %+v, %v", plan, err)
+		}
+		l, _ := LiFiCostBps(r.lifi.route)
+		want := int64(l+TreasuryGasBps(r.lifi.route, treasuryERC20Gas)) + sellerPayoutBridgeSlackBps
+		if want < 40 {
+			want = 40
+		}
+		fee, _ := feeFraction("0.5")
+		if exp := payoutGrossUp(net, fee, want); plan.GrossUp.Cmp(exp) != 0 {
+			t.Fatalf("gross-up = %s; want %s (bridge priced at %d bps)", plan.GrossUp, exp, want)
+		}
+		held := new(big.Int).Add(net, payoutGrossUp(net, fee, 40))
+		if r.lifi.calls != 1 || r.lifi.last.FromAmount != held.String() || r.lifi.last.FromChainID != 146 || r.lifi.last.ToChainID != 8453 {
+			t.Fatalf("quoted %d times, last %+v; want one Sonic -> Base quote for %s", r.lifi.calls, r.lifi.last, held)
+		}
+	})
+
+	for name, setup := range map[string]func(r *payoutRig){
+		"a route over the cap (a small order's fixed cost)": func(r *payoutRig) { r.lifi.route.ToAmountUSD = 98 },
+		"a route with no slack under the cap":               func(r *payoutRig) { r.lifi.route.ToAmountUSD = 99.1 }, // 90 bps: inside the 100 cap, past the 20 slack
+		"a route with no price":                             func(r *payoutRig) { r.lifi.route.FromAmountUSD = 0 },
+		"no route":                                          func(r *payoutRig) { r.lifi.err = errors.New("no route") },
+	} {
+		t.Run(name+" pays the wallet", func(t *testing.T) {
+			p, r, _, uid := newPlanner(t)
+			p.WithBridge(r.lifi)
+			setup(r)
+			if plan, err := p.Plan(ctx, uid, "USDC", net); err != nil || plan != nil {
+				t.Fatalf("plan = %+v, err = %v; want the wallet", plan, err)
+			}
+		})
+	}
+}
+
+// The company route is preferred: the central account pays the naira, so a payout
+// is offered with no bridge and no sale, priced at the reference rate, and the
+// buyer's gross-up carries the transfer fee and the company's take.
+func TestPayoutPlan_PrefersTheCompanyRoute(t *testing.T) {
+	ctx := context.Background()
+	net := big.NewInt(100_000000)
+	const takeBps, feeKobo, maxKobo = 50, 5000, 50_000_000
+
+	setup := func(t *testing.T) (*SellerPayoutPlanner, *payoutRig, *fakeCompanyPayer, *fakeVenueQuoter, uuid.UUID) {
+		p, r, q, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		return p, r, fp, q, uid
+	}
+
+	t.Run("offered at the reference rate with the fee and the take on the buyer", func(t *testing.T) {
+		p, _, _, q, uid := setup(t)
+		plan, err := p.Plan(ctx, uid, "USDC", net)
+		if err != nil || plan == nil || plan.Venue != models.SellerPayoutVenueCompany {
+			t.Fatalf("plan = %+v, %v; want the company route", plan, err)
+		}
+		if plan.FiatTargetKobo != 15_000_000 {
+			t.Fatalf("target = %d kobo; want ₦150,000.00", plan.FiatTargetKobo)
+		}
+		// Treasury must receive R with R(1 - 0.5%) = 100 USDC + ₦50 at 1500 per USDC.
+		need := new(big.Rat).Add(big.NewRat(100_000000, 1), big.NewRat(50*1_000_000, 1500))
+		gross := new(big.Rat).Quo(need, big.NewRat(9950, 10000))
+		want := new(big.Int).Quo(gross.Num(), gross.Denom())
+		if new(big.Int).Mul(want, gross.Denom()).Cmp(gross.Num()) != 0 {
+			want.Add(want, big.NewInt(1))
+		}
+		want.Sub(want, net)
+		if plan.GrossUp.Cmp(want) != 0 {
+			t.Fatalf("gross-up = %s; want %s", plan.GrossUp, want)
+		}
+		if len(q.asks) != 1 || q.asks[0] != "100000" {
+			t.Fatalf("venue asks = %v; the company route needs only the reference rate", q.asks)
+		}
+	})
+
+	for name, setup2 := range map[string]func(p *SellerPayoutPlanner, r *payoutRig, fp *fakeCompanyPayer){
+		"a short float": func(_ *SellerPayoutPlanner, _ *payoutRig, fp *fakeCompanyPayer) {
+			fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 100_000}}
+		},
+		"an unreadable float": func(_ *SellerPayoutPlanner, _ *payoutRig, fp *fakeCompanyPayer) {
+			fp.balErr = errors.New("503")
+		},
+		"no NGN balance": func(_ *SellerPayoutPlanner, _ *payoutRig, fp *fakeCompanyPayer) {
+			fp.balances = []FWBalance{{Currency: "USD", AvailableBalance: 9e9}}
+		},
+		"a payout over the route's maximum": func(p *SellerPayoutPlanner, _ *payoutRig, _ *fakeCompanyPayer) {
+			p.companyMaxKobo = 10_000_000
+		},
+		"the route switched off": func(p *SellerPayoutPlanner, _ *payoutRig, _ *fakeCompanyPayer) {
+			p.companyMaxKobo = 0
+		},
+		"payouts already promised the float to": func(_ *SellerPayoutPlanner, r *payoutRig, _ *fakeCompanyPayer) {
+			r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).
+				Updates(map[string]any{"venue": models.SellerPayoutVenueCompany, "fiat_target_kobo": 99_000_000})
+		},
+	} {
+		t.Run(name+" falls back to Paycrest", func(t *testing.T) {
+			p, r, fp, _, uid := setup(t)
+			setup2(p, r, fp)
+			plan, err := p.Plan(ctx, uid, "USDC", net)
+			if err != nil || plan == nil || plan.Venue == models.SellerPayoutVenueCompany {
+				t.Fatalf("plan = %+v, %v; want the Paycrest route", plan, err)
+			}
+		})
+	}
+
+	t.Run("a payout under the provider's floor is not a company payout", func(t *testing.T) {
+		p, _, _, _, uid := setup(t)
+		plan, _ := p.Plan(ctx, uid, "USDC", big.NewInt(50_000)) // 0.05 USDC = ₦75
+		if plan != nil && plan.Venue == models.SellerPayoutVenueCompany {
+			t.Fatalf("plan = %+v; ₦75 is under the transfer floor", plan)
+		}
+	})
+
+	t.Run("without the company route nothing changes", func(t *testing.T) {
+		p, _, _, uid := newPlanner(t)
+		plan, err := p.Plan(ctx, uid, "USDC", net)
+		if err != nil || plan == nil || plan.Venue != "" {
+			t.Fatalf("plan = %+v, %v; want the old Paycrest plan", plan, err)
+		}
+	})
+
+	t.Run("the venue is stored with the payout", func(t *testing.T) {
+		p, r, _, _, uid := setup(t)
+		plan, _ := p.Plan(ctx, uid, "USDC", net)
+		if plan == nil {
+			t.Fatal("no plan")
+		}
+		order := &models.Order{ID: uuid.New(), SellerID: uid, Token: "USDC"}
+		if err := p.Persist(r.db, order, sponsorTestUser, plan, net); err != nil {
+			t.Fatal(err)
+		}
+		var row models.SellerPayoutOrder
+		if err := r.db.First(&row, "marketplace_order_id = ?", order.ID).Error; err != nil || row.Venue != models.SellerPayoutVenueCompany {
+			t.Fatalf("row = %+v, %v; want venue company", row, err)
+		}
+	})
+}
+
+// The float is promised once: a cart's lines and concurrent checkouts plan before
+// any payout is saved, and a parked company payout still holds its share.
+func TestPayoutPlan_PromisesTheCompanyFloatOnlyOnce(t *testing.T) {
+	ctx := context.Background()
+	net := big.NewInt(100_000000) // ₦150,000 each
+	const takeBps, feeKobo, maxKobo = 50, 5000, 50_000_000
+
+	t.Run("a second plan before the first is saved sees less float", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 200_000}} // room for one
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		first, _ := p.Plan(WithPayoutCommit(ctx), uid, "USDC", net)
+		second, _ := p.Plan(WithPayoutCommit(ctx), uid, "USDC", net)
+		if first == nil || first.Venue != models.SellerPayoutVenueCompany {
+			t.Fatalf("first = %+v; want the company route", first)
+		}
+		if second != nil && second.Venue == models.SellerPayoutVenueCompany {
+			t.Fatalf("second = %+v; the float was already promised to the first", second)
+		}
+	})
+
+	t.Run("a quote never holds float", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 200_000}}
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		for i := 0; i < 3; i++ { // the app re-quotes on every refresh
+			if plan, _ := p.Plan(ctx, uid, "USDC", net); plan == nil || plan.Venue != models.SellerPayoutVenueCompany {
+				t.Fatalf("quote %d = %+v; a read-only quote must keep offering the company route", i, plan)
+			}
+		}
+		if got := p.promisedKobo(time.Now()); got != 0 {
+			t.Fatalf("promised = %d after quotes; want 0", got)
+		}
+	})
+
+	t.Run("an expired promise frees its float", func(t *testing.T) {
+		p, r, _, _ := newPlanner(t)
+		p.WithCompany(newFakeCompanyPayer(), r.db, takeBps, feeKobo, maxKobo)
+		now := time.Now()
+		p.promise(1_000, now.Add(-2*floatPromiseTTL))
+		if got := p.promisedKobo(now); got != 0 {
+			t.Fatalf("promised = %d; an old promise must have lapsed", got)
+		}
+	})
+
+	t.Run("a parked company payout still holds its float", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 200_000}}
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).Updates(map[string]any{
+			"venue": models.SellerPayoutVenueCompany, "status": models.SellerPayoutNeedsReview,
+			"parked_from": models.SellerPayoutReceived, "fiat_target_kobo": 15_000_000,
+		})
+		plan, _ := p.Plan(ctx, uid, "USDC", net)
+		if plan != nil && plan.Venue == models.SellerPayoutVenueCompany {
+			t.Fatalf("plan = %+v; a parked payout is still owed from the same float", plan)
+		}
+	})
 }
