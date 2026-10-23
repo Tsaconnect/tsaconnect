@@ -1,0 +1,1063 @@
+package services
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"math/big"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/events"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
+)
+
+// The seller-payout machine pays a marketplace seller fiat into their bank
+// once the buyer's confirmation has released the escrow to the treasury (the
+// treasury is the order's on-chain seller):
+//
+//	release lands on Sonic -> bridge to Base USDC (LiFi) -> Paycrest sell for
+//	exactly the quoted naira (refund address = treasury) -> deposit -> settled
+//
+// Every step moves on a PROOF — a Transfer log, a Paycrest status read back
+// from its API — never on a report, and every step claims its state before it
+// does anything slow, so a second tick cannot do it twice. Anything unclear
+// parks the payout in needs_review. The machine never pays the seller's wallet
+// and never retries an operation that may already have moved money; the way
+// out of needs_review is a person who has read the chain and Paycrest.
+//
+// The legs are ramp_legs rows keyed by the payout's ID, handled by the shared
+// legRunner exactly as the converted-buy machine handles its own.
+
+// releaseProver is the slice of EscrowService that proves a release.
+type releaseProver interface {
+	VerifyOrderEvent(txHash, escrowAddr, event string, orderID [32]byte) (*types.Log, error)
+	ReadOrder(ctx context.Context, escrowAddr string, orderID [32]byte) (*OnChainOrder, error)
+}
+
+// sellerPayoutSeller is the slice of PaycrestOrderService the machine uses.
+type sellerPayoutSeller interface {
+	CreateSellForFiat(ctx context.Context, req PaycrestSellRequest, converted bool, maxTokenBaseUnits *big.Int) (*models.PaycrestOrderRecord, error)
+	// CancelPayoutSale withdraws a payout's sale that lapsed before it was funded.
+	CancelPayoutSale(ctx context.Context, row *models.PaycrestOrderRecord) error
+}
+
+const (
+	// sellerPayoutAbsorbBps is the most the platform gives up to rate drift:
+	// 0.5% of the payout, as extra USDC deposited beyond what the bridge landed.
+	// Past it the payout parks for a person instead of paying more.
+	sellerPayoutAbsorbBps = 50
+	// sellerPayoutMaxBridgeBps is the most a Sonic -> Base route may cost
+	// (LiFi's cost plus the treasury's gas) before the attempt is freed.
+	sellerPayoutMaxBridgeBps = 100
+	// sellerPayoutOrderMargin is how close to the Paycrest order's expiry a
+	// deposit is no longer sent: it would land after the order lapsed.
+	sellerPayoutOrderMargin = 2 * time.Minute
+	// sellerPayoutSellingGrace is how long a payout may sit in selling before
+	// it is assumed the process died while opening the order.
+	sellerPayoutSellingGrace = 2 * time.Minute
+	// sellerPayoutSettleAfter is how long a deposited payout may wait for
+	// Paycrest before it is parked rather than watched.
+	sellerPayoutSettleAfter = 24 * time.Hour
+)
+
+var errSellerPayoutTransition = errors.New("seller payout is no longer in the expected state")
+
+// SellerPayoutOrchestrator advances seller payouts. See the file comment.
+type SellerPayoutOrchestrator struct {
+	legRunner
+	lifi     lifiQuoter
+	status   *LiFiStatusClient
+	paycrest sellerPayoutSeller
+	escrow   releaseProver
+	// escrowAddr is the configured escrow, for an order that predates recording its own.
+	escrowAddr  string
+	retryWindow time.Duration
+	legCeiling  time.Duration
+	// alerts emails operators when a payout is parked; nil is silent (the log line stays).
+	alerts SellerPayoutAlerter
+	// sw pauses every send (bridge, sale, deposit) while off; nil is always on.
+	sw payoutSwitch
+	// bus tells the seller when the naira is sent or the payout is held; nil is silent.
+	bus *events.Bus
+	// sellRetryWindow bounds how long a payout waits for a venue that refused
+	// before anything was sent (rate moved, below the book's minimum, no venue).
+	sellRetryWindow time.Duration
+	// company pays the naira from the central account on the company route
+	// (WithCompany); companyFeeKobo is the provider's transfer fee the float
+	// must also cover. nil parks a company payout safely instead of sending.
+	company        SellerPayoutCompanyPayer
+	companyFeeKobo int64
+	companyMaxKobo int64
+}
+
+func NewSellerPayoutOrchestrator(db *gorm.DB, treasury *Treasury, legs rampLegStore, lifi lifiQuoter,
+	status *LiFiStatusClient, transfers map[string]ERC20TransferVerifier, paycrest sellerPayoutSeller,
+	escrow releaseProver, escrowAddr string,
+	retryWindow, legCeiling time.Duration, now func() time.Time) *SellerPayoutOrchestrator {
+	if now == nil {
+		now = time.Now
+	}
+	if retryWindow <= 0 {
+		retryWindow = 30 * time.Minute
+	}
+	if legCeiling <= 0 {
+		legCeiling = defaultLegCeiling
+	}
+	keyed := make(map[string]ERC20TransferVerifier, len(transfers))
+	for k, v := range transfers {
+		keyed[strings.ToLower(strings.TrimSpace(k))] = v
+	}
+	return &SellerPayoutOrchestrator{
+		legRunner: legRunner{db: db, treasury: treasury, legs: legs, transfers: keyed, now: now},
+		lifi:      lifi, status: status, paycrest: paycrest, escrow: escrow, escrowAddr: escrowAddr,
+		retryWindow: retryWindow, legCeiling: legCeiling, sellRetryWindow: retryWindow,
+	}
+}
+
+// WithEvents lets the machine tell the seller how their payout is going.
+func (o *SellerPayoutOrchestrator) WithEvents(bus *events.Bus) *SellerPayoutOrchestrator {
+	o.bus = bus
+	return o
+}
+
+// WithAlerts emails operators when a payout needs a person.
+func (o *SellerPayoutOrchestrator) WithAlerts(a SellerPayoutAlerter) *SellerPayoutOrchestrator {
+	o.alerts = a
+	return o
+}
+
+// WithSwitch lets an operator pause the machine's sends.
+func (o *SellerPayoutOrchestrator) WithSwitch(sw payoutSwitch) *SellerPayoutOrchestrator {
+	o.sw = sw
+	return o
+}
+
+// windowFrom is when a retry window began: the given moment, or the last time
+// the payout was let go again if that was later.
+func (o *SellerPayoutOrchestrator) windowFrom(p *models.SellerPayoutOrder, t time.Time) time.Time {
+	if p.AttemptStartedAt != nil && p.AttemptStartedAt.After(t) {
+		return *p.AttemptStartedAt
+	}
+	return t
+}
+
+// restartWindow restarts the payout's retry clock: time spent paused is not
+// time spent failing.
+func (o *SellerPayoutOrchestrator) restartWindow(ctx context.Context, p *models.SellerPayoutOrder) {
+	now := o.now()
+	o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("id = ?", p.ID).UpdateColumn("attempt_started_at", now)
+	p.AttemptStartedAt = &now
+}
+
+// sendingAllowed is false while an operator has the payouts switched off, or
+// when the switch cannot be read (an unknown switch is not an open one).
+func (o *SellerPayoutOrchestrator) sendingAllowed(ctx context.Context) bool {
+	if o.sw == nil {
+		return true
+	}
+	on, err := o.sw.Enabled(ctx)
+	if err != nil {
+		log.Printf("[seller-payout] switch unreadable, holding sends: %v", err)
+		return false
+	}
+	return on
+}
+
+func (o *SellerPayoutOrchestrator) tell(p *models.SellerPayoutOrder, typ, title, msg string) {
+	if o.bus == nil {
+		return
+	}
+	o.bus.Publish(events.Event{Type: typ, UserID: p.SellerUserID, Title: title, Message: msg,
+		Data: map[string]interface{}{"orderId": p.MarketplaceOrderID.String(), "payoutId": p.ID.String()}})
+}
+
+// Tick advances every payout that is still moving, least recently looked at
+// first. One payout's failure never stops the others.
+func (o *SellerPayoutOrchestrator) Tick(ctx context.Context, limit int) error {
+	if limit <= 0 {
+		limit = 50
+	}
+	var rows []models.SellerPayoutOrder
+	if err := o.db.WithContext(ctx).
+		Where("status NOT IN ?", []string{models.SellerPayoutPaid, models.SellerPayoutPaidWallet, models.SellerPayoutCancelled, models.SellerPayoutNeedsReview}).
+		// A payout waiting for the buyer is looked at only once its order has
+		// ended: days of idle ones must not crowd out payouts that are moving.
+		Where("status <> ? OR EXISTS (SELECT 1 FROM orders o WHERE o.id = seller_payouts.marketplace_order_id AND "+
+			"(o.status IN ? OR (o.status IN ? AND o.updated_at < ?)))",
+			models.SellerPayoutAwaitingRelease,
+			[]string{models.OrderStatusCompleted, models.OrderStatusCancelled, models.OrderStatusRefunded},
+			[]string{models.OrderStatusEscrowed, models.OrderStatusShipped, models.OrderStatusDelivered},
+			o.now().Add(-sellerPayoutStaleAfter)).
+		Order("checked_at ASC NULLS FIRST").Limit(limit).Find(&rows).Error; err != nil {
+		return err
+	}
+	var errs []error
+	for i := range rows {
+		p := &rows[i]
+		if err := o.Advance(ctx, p); err != nil {
+			log.Printf("[seller-payout] payout=%s status=%s: %v", p.ID, p.Status, err)
+			errs = append(errs, err)
+		}
+		now := o.now()
+		o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("id = ?", p.ID).UpdateColumn("checked_at", now)
+	}
+	return errors.Join(errs...)
+}
+
+// Advance takes one step for p.
+func (o *SellerPayoutOrchestrator) Advance(ctx context.Context, p *models.SellerPayoutOrder) error {
+	if models.SellerPayoutTerminal(p.Status) || p.Status == models.SellerPayoutNeedsReview {
+		return nil
+	}
+	// A company payout past its release proof never touches the treasury signer:
+	// its transfer must stay observable whatever the lanes say.
+	companyBeyondRelease := p.Venue == models.SellerPayoutVenueCompany && p.Status != models.SellerPayoutAwaitingRelease
+	if !companyBeyondRelease && (o.treasury == nil || o.treasury.Address() == "") {
+		if p.Status == models.SellerPayoutAwaitingRelease || p.Status == models.SellerPayoutReceived || p.Status == models.SellerPayoutBridged {
+			return o.parkSafe(ctx, p, "treasury lanes disagree on their signer, or none are configured")
+		}
+		return o.park(ctx, p, "treasury lanes disagree on their signer, or none are configured")
+	}
+	switch p.Status {
+	case models.SellerPayoutAwaitingRelease:
+		return o.awaitRelease(ctx, p)
+	case models.SellerPayoutReceived, models.SellerPayoutBridging:
+		if p.Venue == models.SellerPayoutVenueCompany {
+			return o.advanceCompany(ctx, p)
+		}
+		return o.advanceBridge(ctx, p)
+	case models.SellerPayoutPayingCompany:
+		return o.advanceCompany(ctx, p)
+	case models.SellerPayoutBridged:
+		return o.openSell(ctx, p)
+	case models.SellerPayoutSelling:
+		return o.recoverSelling(ctx, p)
+	case models.SellerPayoutOrdered, models.SellerPayoutDepositing:
+		return o.advanceDeposit(ctx, p)
+	case models.SellerPayoutDeposited:
+		return o.followSell(ctx, p)
+	case models.SellerPayoutPayingWallet:
+		return o.observeWalletPayment(ctx, p)
+	}
+	return nil
+}
+
+// move changes the payout's status only while it is still in one of from, so
+// of two ticks (or a tick and a person) only one wins a transition.
+func (o *SellerPayoutOrchestrator) move(ctx context.Context, p *models.SellerPayoutOrder, to string, updates map[string]any, from ...string) error {
+	if updates == nil {
+		updates = map[string]any{}
+	}
+	updates["status"] = to
+	res := o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).
+		Where("id = ? AND status IN ?", p.ID, from).Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return errSellerPayoutTransition
+	}
+	p.Status = to
+	if v, ok := updates["received_amount"].(string); ok {
+		p.ReceivedAmount = v
+	}
+	if v, ok := updates["paycrest_order_id"].(uuid.UUID); ok {
+		p.PaycrestOrderID = &v
+	}
+	return nil
+}
+
+// park hands the payout to a person, with the reason. It is allowed from any
+// state that is not terminal, and records the alert operators watch for.
+// Nothing here is safe to simply run again: use parkSafe when it provably is.
+func (o *SellerPayoutOrchestrator) park(ctx context.Context, p *models.SellerPayoutOrder, reason string) error {
+	return o.parkWith(ctx, p, reason, false)
+}
+
+// parkSafe is park for a stop before anything was sent that could have moved
+// money: an admin may retry it once the cause is fixed (a lane, a cap, a rate).
+func (o *SellerPayoutOrchestrator) parkSafe(ctx context.Context, p *models.SellerPayoutOrder, reason string) error {
+	return o.parkWith(ctx, p, reason, true)
+}
+
+func (o *SellerPayoutOrchestrator) parkWith(ctx context.Context, p *models.SellerPayoutOrder, reason string, retrySafe bool) error {
+	log.Printf("[seller-payout] ALERT seller_payout_review_total=1 payout=%s order=%s status=%s reason=%s",
+		p.ID, p.MarketplaceOrderID, p.Status, RedactAlertText(reason))
+	from := p.Status
+	res := o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).
+		Where("id = ? AND status NOT IN ?", p.ID, []string{models.SellerPayoutPaid, models.SellerPayoutPaidWallet, models.SellerPayoutCancelled, models.SellerPayoutNeedsReview}).
+		Updates(map[string]any{
+			"status": models.SellerPayoutNeedsReview, "failure_reason": truncateReason(reason),
+			"parked_from": from, "retry_safe": retrySafe,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	p.Status = models.SellerPayoutNeedsReview
+	if res.RowsAffected == 1 {
+		o.tell(p, events.SellerPayoutReview, "Your payout is being reviewed",
+			fmt.Sprintf("Your payout for order #%s needs a quick check by our team. Your money is safe, and we'll update you.", p.MarketplaceOrderID.String()[:8]))
+		if o.alerts != nil {
+			o.alerts.NotifySellerPayoutReview(ctx, SellerPayoutAlert{PayoutID: p.ID, OrderID: p.MarketplaceOrderID, From: from, Reason: reason, RetrySafe: retrySafe})
+		}
+	}
+	return nil
+}
+
+func lastDigits(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
+func (o *SellerPayoutOrchestrator) treasuryAddr() string { return o.treasury.Address() }
+
+func (o *SellerPayoutOrchestrator) lane(chainKey string) *TreasuryLane {
+	return o.treasury.Lane(chainKey)
+}
+
+// ── release ────────────────────────────────────────────────────────────────
+
+// awaitRelease waits for the buyer's confirmation (or an admin's resolve in
+// the seller's favour) and then PROVES the treasury was credited: the order's
+// release transaction is read for the Transfer to the treasury. The order
+// status alone moves nothing.
+func (o *SellerPayoutOrchestrator) awaitRelease(ctx context.Context, p *models.SellerPayoutOrder) error {
+	var order models.Order
+	if err := o.db.WithContext(ctx).First(&order, "id = ?", p.MarketplaceOrderID).Error; err != nil {
+		return err
+	}
+	switch order.Status {
+	case models.OrderStatusCancelled, models.OrderStatusRefunded:
+		// The escrow went back to the buyer: nothing reached the treasury.
+		return o.move(ctx, p, models.SellerPayoutCancelled, map[string]any{"failure_reason": "order " + order.Status}, models.SellerPayoutAwaitingRelease)
+	case models.OrderStatusCompleted:
+	default:
+		return o.checkStale(ctx, p, &order)
+	}
+	lane := o.lane(p.ChainKey)
+	if lane == nil {
+		return o.parkSafe(ctx, p, fmt.Sprintf("no treasury lane for %s", p.ChainKey))
+	}
+	if order.ReleaseTxHash == "" {
+		return nil // recorded by the confirm; the next tick reads it
+	}
+	// The escrow's own record of THIS order's release: paid as seller to the
+	// treasury, exactly what the order was priced to pay. A transfer to the
+	// treasury in some transaction proves nothing about this order.
+	escrowAddr := firstNonEmpty(order.EscrowContractAddress, o.escrowAddr)
+	l, err := o.escrow.VerifyOrderEvent(order.ReleaseTxHash, escrowAddr, "OrderReleased", GenerateOrderID(order.ID))
+	switch {
+	case errors.Is(err, ErrReceiptPending):
+		return nil
+	case errors.Is(err, ErrOrderEventNotFound):
+		return o.parkSafe(ctx, p, fmt.Sprintf("release %s holds no OrderReleased for this order: %v", order.ReleaseTxHash, err))
+	case err != nil:
+		return nil // unreadable now: the next tick looks again
+	}
+	seller, sellerAmount, err := OrderReleasedTo(l)
+	if err != nil {
+		return o.parkSafe(ctx, p, err.Error())
+	}
+	if !strings.EqualFold(seller.Hex(), common.HexToAddress(o.treasuryAddr()).Hex()) {
+		return o.parkSafe(ctx, p, fmt.Sprintf("the escrow released to %s, not the treasury", seller.Hex()))
+	}
+	// The escrow's own figure is the truth; it may differ a little from the
+	// quote (the fee rate was re-split at approve time). Within the drift the
+	// platform absorbs it is accepted; a release far below the quote is not.
+	want, ok := new(big.Int).SetString(p.ExpectedAmount, 10)
+	floor := new(big.Int)
+	if ok {
+		floor.Div(new(big.Int).Mul(want, big.NewInt(10000-sellerPayoutAbsorbBps)), big.NewInt(10000))
+	}
+	if !ok || want.Sign() <= 0 || sellerAmount.Cmp(floor) < 0 {
+		return o.parkSafe(ctx, p, fmt.Sprintf("the escrow released %s, the order was priced to pay %q", sellerAmount, p.ExpectedAmount))
+	}
+	// And the treasury really was credited that much.
+	credited, proof, err := o.verifyTransfer(ctx, p.ChainKey, lane.tokenAddress(p.Token), order.ReleaseTxHash, o.treasuryAddr())
+	switch proof {
+	case transferWait:
+		if err != nil && !errors.Is(err, errTransferNoTx) && !errors.Is(err, errTransferNoVerifier) {
+			log.Printf("[seller-payout] payout=%s release %s not provable yet: %v", p.ID, order.ReleaseTxHash, err)
+		}
+		return nil
+	case transferRefuted:
+		return o.parkSafe(ctx, p, fmt.Sprintf("release %s did not credit the treasury: %v", order.ReleaseTxHash, err))
+	}
+	if credited.Cmp(sellerAmount) < 0 {
+		return o.parkSafe(ctx, p, fmt.Sprintf("release credited %s of the %s the escrow reported", credited, sellerAmount))
+	}
+	// What is bridged and sold is what the escrow reported, never more: a
+	// transfer-heavy transaction cannot enlarge a payout.
+	credited = sellerAmount
+	return o.move(ctx, p, models.SellerPayoutReceived, map[string]any{"received_amount": credited.String()}, models.SellerPayoutAwaitingRelease)
+}
+
+// sellerPayoutStaleAfter is how long an order may sit unconfirmed before the
+// machine asks the escrow whether it was resolved without the app telling us.
+// sellerPayoutStaleEvery is how often it asks after that.
+const (
+	sellerPayoutStaleAfter = 24 * time.Hour
+	sellerPayoutStaleEvery = 6 * time.Hour
+)
+
+// checkStale catches the one way the treasury can be paid with no payout
+// watching: the buyer's confirm landed on-chain but never reached the server
+// (the app died before submitting it), so the order still reads delivered here
+// while the escrow has released it. The release is not guessed at — the payout
+// parks with the reason, and a person finds the transaction and records it.
+func (o *SellerPayoutOrchestrator) checkStale(ctx context.Context, p *models.SellerPayoutOrder, order *models.Order) error {
+	if o.now().Before(order.UpdatedAt.Add(sellerPayoutStaleAfter)) {
+		return nil
+	}
+	if p.NextAttemptAt != nil && o.now().Before(*p.NextAttemptAt) {
+		return nil
+	}
+	next := o.now().Add(sellerPayoutStaleEvery)
+	o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("id = ?", p.ID).UpdateColumn("next_attempt_at", next)
+	p.NextAttemptAt = &next
+	onChain, err := o.escrow.ReadOrder(ctx, firstNonEmpty(order.EscrowContractAddress, o.escrowAddr), GenerateOrderID(order.ID))
+	if err != nil || onChain == nil || !onChain.Resolved {
+		return nil // unreadable now, or still open: asked again later
+	}
+	return o.parkSafe(ctx, p, "the escrow resolved this order on-chain but the app never recorded it: "+
+		"find the release transaction on the explorer, record it on the order (status completed, release_tx_hash), then retry")
+}
+
+// ── bridge ─────────────────────────────────────────────────────────────────
+
+// advanceBridge runs the Sonic -> Base leg, reading the leg ledger the way the
+// converted-buy machine does: a pending leg is observed, a confirmed one ends
+// the step, a bridge that BROADCAST and never confirmed is never retried, and
+// only a fresh start (or one whose earlier attempts provably sent nothing) may
+// reserve a new attempt.
+func (o *SellerPayoutOrchestrator) advanceBridge(ctx context.Context, p *models.SellerPayoutOrder) error {
+	legs, err := o.legs.ForOrder(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if pending := latestPendingLeg(legs); pending != nil {
+		if pending.Kind != models.RampLegKindBridge {
+			return o.park(ctx, p, fmt.Sprintf("unexpected %s leg in flight during the bridge", pending.Kind))
+		}
+		return o.observeBridge(ctx, p, pending)
+	}
+	if done := latestLeg(legs, models.RampLegKindBridge, models.RampLegStatusConfirmed); done != nil {
+		return o.move(ctx, p, models.SellerPayoutBridged, nil, models.SellerPayoutReceived, models.SellerPayoutBridging)
+	}
+	if stranded := broadcastBridgeLeg(legs); stranded != nil {
+		return o.park(ctx, p, fmt.Sprintf("bridge attempt %d broadcast as %s but never confirmed", stranded.Attempt, stranded.TxHash))
+	}
+	// The retry window runs from the first attempt, not from the release.
+	if first := bridgeLegByAttempt(legs, 1); first != nil && o.now().After(o.windowFrom(p, first.CreatedAt).Add(o.retryWindow)) {
+		// Every attempt was refused before it broadcast (a stranded one parked above),
+		// so nothing that moves money was sent: a retry, or another route, is safe.
+		for _, l := range legs {
+			if l.TxHash != "" {
+				return o.park(ctx, p, "no bridge route fit inside the retry window")
+			}
+		}
+		return o.parkSafe(ctx, p, "no bridge route fit inside the retry window")
+	}
+	return o.startBridge(ctx, p, legs)
+}
+
+func (o *SellerPayoutOrchestrator) startBridge(ctx context.Context, p *models.SellerPayoutOrder, _ []models.RampLeg) error {
+	if !o.sendingAllowed(ctx) {
+		o.restartWindow(ctx, p)
+		return nil // paused: the payout waits where it is
+	}
+	ctx = ReservedSend(ctx) // an owed send: it spends the lane reservation held for it
+	src, dst := o.lane(p.ChainKey), o.lane("base")
+	if src == nil || dst == nil {
+		return o.parkSafe(ctx, p, "no treasury lane for the bridge")
+	}
+	amount, ok := new(big.Int).SetString(p.ReceivedAmount, 10)
+	if !ok || amount.Sign() <= 0 {
+		return o.parkSafe(ctx, p, fmt.Sprintf("unreadable received amount %q", p.ReceivedAmount))
+	}
+	orderUSD, err := o.usdValue(src, p.Token, amount)
+	if err != nil {
+		return o.parkSafe(ctx, p, fmt.Sprintf("cannot value the bridge: %v", err))
+	}
+	inFlight, err := o.inFlightUSD(ctx, p.ChainKey, p.ID)
+	if err != nil {
+		return err
+	}
+	// A cap or kill-switch refusal after the money arrived parks: a payout
+	// with no leg is invisible to any stall check, so it must not just error.
+	if err := o.treasury.CheckCaps(p.ChainKey, orderUSD, inFlight); err != nil {
+		return o.parkSafe(ctx, p, fmt.Sprintf("cannot start the bridge: %v", err))
+	}
+
+	attempt, err := o.legs.NextAttempt(ctx, p.ID, models.RampLegKindBridge)
+	if err != nil {
+		return err
+	}
+	leg := &models.RampLeg{
+		OrderID: p.ID, Kind: models.RampLegKindBridge, Attempt: attempt,
+		ChainKey: p.ChainKey, Token: strings.ToUpper(p.Token),
+		FromAddr: o.treasuryAddr(), ToAddr: o.treasuryAddr(),
+		Amount: amount.String(), Status: models.RampLegStatusPending, CreatedAt: o.now().UTC(),
+	}
+	if existing, err := o.legs.Reserve(ctx, leg); err != nil || existing != nil {
+		return err // another tick claimed this attempt
+	}
+	// Claimed before anything slow: the leg row is the idempotency gate, the
+	// status only tells observers where to look.
+	if err := o.move(ctx, p, models.SellerPayoutBridging, nil, models.SellerPayoutReceived, models.SellerPayoutBridging); err != nil && !errors.Is(err, errSellerPayoutTransition) {
+		return err
+	}
+
+	baseUSDC := dst.tokenAddress("USDC")
+	route, costBps, err := quoteSellerPayoutBridge(ctx, o.lifi, src, dst, p.Token, o.treasuryAddr(), amount)
+	if err != nil {
+		// Nothing was broadcast, so this attempt is provably dead: fail it so
+		// the next tick starts a clean one inside the window.
+		if ferr := o.failLeg(detached(ctx), leg.ID, err.Error()); ferr != nil {
+			return ferr
+		}
+		return err
+	}
+	if route.ToAmountMin == nil {
+		return o.failLeg(detached(ctx), leg.ID, "route quotes no guaranteed minimum")
+	}
+	if costBps < 0 || costBps > sellerPayoutMaxBridgeBps {
+		return o.failLeg(detached(ctx), leg.ID, fmt.Sprintf("route over the %d bps budget", sellerPayoutMaxBridgeBps))
+	}
+	return o.executeBridgeLeg(ctx, src, leg, p.Token, amount, route, o.treasuryAddr(), dst.ChainID, "evm", baseUSDC)
+}
+
+// inFlightUSD is this chain's exposure from payouts whose funds sit in the
+// treasury there, other than exclude. The converted-buy machine counts the same
+// figure, so the per-chain cap sees both.
+func (o *SellerPayoutOrchestrator) inFlightUSD(ctx context.Context, chainKey string, exclude uuid.UUID) (float64, error) {
+	return sellerPayoutExposureUSD(ctx, o.db, chainKey, exclude)
+}
+
+// sellerPayoutHeldOn is where a payout's funds sit at each status: on the
+// escrow's chain until the bridge lands, then on Base.
+var sellerPayoutHeldOn = map[string][]string{
+	"sonic": {models.SellerPayoutReceived, models.SellerPayoutBridging, models.SellerPayoutPayingWallet,
+		models.SellerPayoutPayingCompany},
+	"base": {models.SellerPayoutBridged, models.SellerPayoutSelling, models.SellerPayoutOrdered,
+		models.SellerPayoutDepositing},
+}
+
+// sellerPayoutExposureUSD is the USD value of payouts' funds held in the
+// treasury on chainKey (stablecoins, 6 dp), other than exclude. Unreadable
+// means unknown, never zero.
+func sellerPayoutExposureUSD(ctx context.Context, db *gorm.DB, chainKey string, exclude uuid.UUID) (float64, error) {
+	statuses := sellerPayoutHeldOn[strings.ToLower(chainKey)]
+	if len(statuses) == 0 {
+		return 0, nil
+	}
+	var rows []models.SellerPayoutOrder
+	// A parked payout still holds its funds where it stopped.
+	if err := db.WithContext(ctx).Select("id", "received_amount").
+		Where("id <> ? AND (status IN ? OR (status = ? AND parked_from IN ?))", exclude, statuses,
+			models.SellerPayoutNeedsReview, statuses).Find(&rows).Error; err != nil {
+		return 0, err
+	}
+	var total float64
+	for _, r := range rows {
+		if n, ok := new(big.Int).SetString(r.ReceivedAmount, 10); ok {
+			total += unitsToUSD(n, 6)
+		}
+	}
+	return total, nil
+}
+
+func (o *SellerPayoutOrchestrator) observeBridge(ctx context.Context, p *models.SellerPayoutOrder, leg *models.RampLeg) error {
+	if leg.TxHash == "" && leg.ApproveTxHash != "" {
+		return o.resumeBridgeAfterApprove(ctx, p.ID, leg)
+	}
+	if leg.TxHash == "" {
+		return o.recoverHashless(ctx, p.ID, leg)
+	}
+	if o.followLeg(ctx, leg) {
+		return nil
+	}
+	st, err := o.status.Status(ctx, leg.TxHash)
+	if err != nil {
+		return fmt.Errorf("bridge status for payout %s: %w", p.ID, err)
+	}
+	switch st.Status {
+	case LiFiStatusDone:
+		return o.observeBridgeDone(ctx, p, leg, st)
+	case LiFiStatusFailed:
+		return o.park(ctx, p, fmt.Sprintf("lifi reported bridge attempt %d (%s) failed after it broadcast", leg.Attempt, leg.TxHash))
+	}
+	// Judged last, so a bridge that landed late is still read before it is given up on.
+	if legPastCeiling([]models.RampLeg{*leg}, o.windowFrom(p, o.now().Add(-o.legCeiling))) != nil {
+		return o.park(ctx, p, fmt.Sprintf("bridge leg %s pending past the ceiling", leg.ID))
+	}
+	return nil // still in flight
+}
+
+func (o *SellerPayoutOrchestrator) observeBridgeDone(ctx context.Context, p *models.SellerPayoutOrder, leg *models.RampLeg, st *LiFiTransferStatus) error {
+	switch verdict, reason := qualifyLiFiDone(st, o.treasuryAddr()); verdict {
+	case lifiDonePark:
+		return o.park(ctx, p, fmt.Sprintf("bridge %s reported DONE/%s, not a completed delivery", leg.TxHash, st.Substatus))
+	case lifiDoneWrongRecipient:
+		return o.park(ctx, p, fmt.Sprintf("bridge %s reported a landing at %s, not the treasury", leg.TxHash, st.ToAddress))
+	case lifiDoneWait:
+		log.Printf("[seller-payout] payout=%s bridge %s DONE not qualified yet: %s", p.ID, leg.TxHash, reason)
+		return nil
+	}
+	dst := o.lane("base")
+	if dst == nil {
+		return o.parkSafe(ctx, p, "no Base lane to verify the landing")
+	}
+	// LiFi only says WHICH transaction to read; the Transfer log is the proof.
+	landed, proof, err := o.verifyTransfer(ctx, "base", dst.tokenAddress("USDC"), st.DestTxHash, o.treasuryAddr())
+	switch proof {
+	case transferWait:
+		return nil
+	case transferRefuted:
+		return o.park(ctx, p, fmt.Sprintf("bridge landing %s did not credit the treasury: %v", st.DestTxHash, err))
+	}
+	if err := o.legs.Confirm(detached(ctx), leg.ID, landed.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
+		return err
+	}
+	return o.move(ctx, p, models.SellerPayoutBridged, nil, models.SellerPayoutReceived, models.SellerPayoutBridging)
+}
+
+// ── sell ───────────────────────────────────────────────────────────────────
+
+// openSell opens the Paycrest sell for the quoted naira, refund address the
+// treasury. The payout is CLAIMED (bridged -> selling) before Paycrest is
+// called, so only one tick ever asks; a crash in between is handled by
+// recoverSelling, never by asking again.
+func (o *SellerPayoutOrchestrator) openSell(ctx context.Context, p *models.SellerPayoutOrder) error {
+	legs, err := o.legs.ForOrder(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	bridge := latestLeg(legs, models.RampLegKindBridge, models.RampLegStatusConfirmed)
+	if bridge == nil {
+		return o.park(ctx, p, "bridged with no confirmed bridge leg")
+	}
+	landed, ok := new(big.Int).SetString(bridge.AmountReceived, 10)
+	if !ok || landed.Sign() <= 0 {
+		return o.park(ctx, p, fmt.Sprintf("unreadable bridge landing %q", bridge.AmountReceived))
+	}
+	if !o.sendingAllowed(ctx) {
+		o.restartWindow(ctx, p)
+		return nil
+	}
+	if o.windowFrom(p, o.sellStarted(legs)).Before(o.now().Add(-o.sellRetryWindow)) {
+		return o.park(ctx, p, "no venue would take the sale inside the retry window")
+	}
+	// A refused attempt is not repeated every tick: each one opens (and
+	// cancels) an order at Paycrest.
+	if p.NextAttemptAt != nil && o.now().Before(*p.NextAttemptAt) {
+		return nil
+	}
+	if err := o.move(ctx, p, models.SellerPayoutSelling, nil, models.SellerPayoutBridged); err != nil {
+		if errors.Is(err, errSellerPayoutTransition) {
+			return nil
+		}
+		return err
+	}
+	// The platform absorbs rate drift up to sellerPayoutAbsorbBps of the
+	// landing, as USDC deposited beyond it; more than that is a shortfall.
+	ceiling := new(big.Int).Add(landed, new(big.Int).Div(new(big.Int).Mul(landed, big.NewInt(sellerPayoutAbsorbBps)), big.NewInt(10000)))
+	row, err := o.paycrest.CreateSellForFiat(ctx, PaycrestSellRequest{
+		UserID: p.SellerUserID, WalletAddress: o.treasuryAddr(),
+		FiatCode: p.Currency, FiatAmount: payFiatAmount(p.FiatTargetKobo),
+		ChainKey: "base", Token: "USDC",
+		BankCode: p.InstitutionCode, AccountNo: p.AccountNumber, AccountName: p.AccountName,
+		SellerPayoutID: &p.ID, KeepSurplus: true,
+	}, false, ceiling)
+	if err != nil {
+		var short *SellShortfallError
+		switch {
+		case errors.As(err, &short):
+			// Nothing was opened: the payout goes back to bridged first, so the
+			// retry an operator is offered really runs the sale again.
+			if mv := o.move(ctx, p, models.SellerPayoutBridged, nil, models.SellerPayoutSelling); mv != nil {
+				return mv
+			}
+			return o.parkSafe(ctx, p, fmt.Sprintf("the rate moved beyond the %d bps the platform absorbs: %s more USDC needed", sellerPayoutAbsorbBps, short.MissingBaseUnits))
+		case errors.Is(err, ErrSellAttemptMayExist):
+			// An order may be fundable: asking again could open a second one.
+			return o.park(ctx, p, "a Paycrest order may exist for this attempt: "+err.Error())
+		case errors.Is(err, ErrSellRateMoved), errors.Is(err, ErrPaycrestNothingSent):
+			// Provably nothing was opened: back to bridged for another try.
+			log.Printf("[seller-payout] payout=%s sell refused, nothing sent: %v", p.ID, err)
+			return o.move(ctx, p, models.SellerPayoutBridged,
+				map[string]any{"failure_reason": sellRefusedNote, "next_attempt_at": o.now().Add(sellRefusedBackoff)}, models.SellerPayoutSelling)
+		}
+		// Unknown whether Paycrest heard of it: never retry blindly.
+		return o.park(ctx, p, "opening the sale failed with an unknown outcome: "+err.Error())
+	}
+	return o.move(ctx, p, models.SellerPayoutOrdered, map[string]any{"paycrest_order_id": row.ID, "failure_reason": "", "next_attempt_at": nil}, models.SellerPayoutSelling)
+}
+
+// sellRefusedNote marks a payout whose last sale attempt was refused with
+// nothing opened; sellRefusedBackoff is the wait before the next one.
+const (
+	sellRefusedNote    = "sale refused, retrying"
+	sellRefusedBackoff = 2 * time.Minute
+)
+
+// sellStarted is when this payout's sale attempts began: its bridge landing.
+func (o *SellerPayoutOrchestrator) sellStarted(legs []models.RampLeg) time.Time {
+	if b := latestLeg(legs, models.RampLegKindBridge, models.RampLegStatusConfirmed); b != nil && b.ConfirmedAt != nil {
+		return *b.ConfirmedAt
+	}
+	return o.now()
+}
+
+// recoverSelling resolves a payout left in selling: the process died, or the
+// write recording the order failed. An order carrying this payout's ID is
+// adopted; none is not proof that none exists at Paycrest, so past the grace
+// the payout parks rather than opening a second.
+func (o *SellerPayoutOrchestrator) recoverSelling(ctx context.Context, p *models.SellerPayoutOrder) error {
+	var rows []models.PaycrestOrderRecord
+	// A cancelled or failed order is a refused attempt, not this payout's sale.
+	if err := o.db.WithContext(ctx).Where("seller_payout_id = ? AND status NOT IN ?", p.ID,
+		[]string{models.PaycrestStatusCancelled, models.PaycrestStatusFailed}).Find(&rows).Error; err != nil {
+		return err
+	}
+	switch {
+	case len(rows) == 1:
+		return o.move(ctx, p, models.SellerPayoutOrdered, map[string]any{"paycrest_order_id": rows[0].ID}, models.SellerPayoutSelling)
+	case len(rows) > 1:
+		return o.park(ctx, p, fmt.Sprintf("%d Paycrest orders carry this payout", len(rows)))
+	case o.now().After(p.UpdatedAt.Add(sellerPayoutSellingGrace)):
+		return o.park(ctx, p, "was opening the sale when it stopped, and no order is recorded")
+	}
+	return nil
+}
+
+// ── deposit ────────────────────────────────────────────────────────────────
+
+// advanceDeposit sends the one deposit leg to the Paycrest receive address.
+// At most one deposit is ever live or done (a unique index), a deposit that
+// broadcast is never resent, and one that landed is proven from its Transfer
+// log before the order is marked paid-for.
+func (o *SellerPayoutOrchestrator) advanceDeposit(ctx context.Context, p *models.SellerPayoutOrder) error {
+	order, err := o.paycrestOrder(ctx, p)
+	if err != nil {
+		return err
+	}
+	legs, err := o.legs.ForOrder(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if pending := latestPendingLeg(legs); pending != nil {
+		if pending.Kind != models.RampLegKindDeposit {
+			return o.park(ctx, p, fmt.Sprintf("unexpected %s leg in flight during the deposit", pending.Kind))
+		}
+		return o.observeDeposit(ctx, p, order, pending)
+	}
+	if done := latestLeg(legs, models.RampLegKindDeposit, models.RampLegStatusConfirmed); done != nil {
+		return o.move(ctx, p, models.SellerPayoutDeposited, nil, models.SellerPayoutOrdered, models.SellerPayoutDepositing)
+	}
+	return o.sendDeposit(ctx, p, order)
+}
+
+func (o *SellerPayoutOrchestrator) paycrestOrder(ctx context.Context, p *models.SellerPayoutOrder) (*models.PaycrestOrderRecord, error) {
+	if p.PaycrestOrderID == nil {
+		return nil, fmt.Errorf("payout %s has no Paycrest order", p.ID)
+	}
+	var row models.PaycrestOrderRecord
+	if err := o.db.WithContext(ctx).First(&row, "id = ?", *p.PaycrestOrderID).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
+func (o *SellerPayoutOrchestrator) sendDeposit(ctx context.Context, p *models.SellerPayoutOrder, order *models.PaycrestOrderRecord) error {
+	if !o.sendingAllowed(ctx) {
+		o.restartWindow(ctx, p)
+		return nil
+	}
+	ctx = ReservedSend(ctx)
+	lane := o.lane("base")
+	if lane == nil {
+		return o.parkSafe(ctx, p, "no Base lane for the deposit")
+	}
+	if order.SellerPayoutID == nil || *order.SellerPayoutID != p.ID || order.Status != models.PaycrestStatusAwaitingDeposit {
+		return o.park(ctx, p, fmt.Sprintf("Paycrest order %s is %q, not an open order of this payout", order.ID, order.Status))
+	}
+	if !common.IsHexAddress(order.DepositAddress) {
+		return o.park(ctx, p, "the Paycrest order has no usable deposit address")
+	}
+	// A deposit that lands after the order lapsed is an unmatched deposit.
+	if order.ValidUntil != nil && o.now().Add(sellerPayoutOrderMargin).After(*order.ValidUntil) {
+		// Nothing was deposited (advanceDeposit gets here only with no live
+		// deposit leg): withdraw the lapsing sale and open a fresh one.
+		if err := o.paycrest.CancelPayoutSale(ctx, order); err != nil {
+			return o.park(ctx, p, "the Paycrest order lapsed before it was funded and could not be withdrawn: "+err.Error())
+		}
+		log.Printf("[seller-payout] payout=%s sale %s lapsed before it was funded: opening a new one", p.ID, order.ID)
+		now := o.now()
+		return o.move(ctx, p, models.SellerPayoutBridged, map[string]any{"paycrest_order_id": nil, "attempt_started_at": now},
+			models.SellerPayoutOrdered, models.SellerPayoutDepositing)
+	}
+	decimals, err := lane.Native.GetTokenDecimals(lane.tokenAddress("USDC"))
+	if err != nil {
+		return o.parkSafe(ctx, p, fmt.Sprintf("could not read USDC decimals on Base: %v", err))
+	}
+	amount, err := DecimalToBaseUnits(order.TokenAmount, decimals)
+	if err != nil || amount.Sign() <= 0 {
+		return o.parkSafe(ctx, p, fmt.Sprintf("unreadable deposit amount %q", order.TokenAmount))
+	}
+	attempt, err := o.legs.NextAttempt(ctx, p.ID, models.RampLegKindDeposit)
+	if err != nil {
+		return err
+	}
+	leg := &models.RampLeg{
+		OrderID: p.ID, Kind: models.RampLegKindDeposit, Attempt: attempt,
+		ChainKey: "base", Token: "USDC", FromAddr: o.treasuryAddr(), ToAddr: order.DepositAddress,
+		Amount: amount.String(), Status: models.RampLegStatusPending, CreatedAt: o.now().UTC(),
+	}
+	if existing, err := o.legs.Reserve(ctx, leg); err != nil || existing != nil {
+		return err
+	}
+	if err := o.move(ctx, p, models.SellerPayoutDepositing, nil, models.SellerPayoutOrdered, models.SellerPayoutDepositing); err != nil && !errors.Is(err, errSellerPayoutTransition) {
+		return err
+	}
+	txHash, attempted, err := o.treasury.TransferToken(o.legSend(ctx, leg.ID, "deposit"), lane, "USDC", order.DepositAddress, amount)
+	if err != nil {
+		if attempted {
+			// Might have landed: the leg stays pending so no second deposit runs.
+			log.Printf("[seller-payout] ALERT seller_payout_deposit_uncertain_total=1 payout=%s leg=%s err=%v", p.ID, leg.ID, err)
+			return nil
+		}
+		if ferr := o.failLeg(detached(ctx), leg.ID, err.Error()); ferr != nil {
+			return ferr
+		}
+		return err
+	}
+	log.Printf("[seller-payout] payout=%s deposit sent %s USDC to %s tx=%s", p.ID, amount, order.DepositAddress, txHash)
+	return nil
+}
+
+func (o *SellerPayoutOrchestrator) observeDeposit(ctx context.Context, p *models.SellerPayoutOrder, order *models.PaycrestOrderRecord, leg *models.RampLeg) error {
+	if leg.TxHash == "" {
+		return o.recoverHashless(ctx, p.ID, leg)
+	}
+	if o.followLeg(ctx, leg) {
+		return nil
+	}
+	credited, proof, err := o.verifyTransfer(ctx, "base", o.lane("base").tokenAddress("USDC"), leg.TxHash, order.DepositAddress)
+	switch proof {
+	case transferWait:
+		// Judged last, so a deposit that landed late is still read first.
+		if legPastCeiling([]models.RampLeg{*leg}, o.windowFrom(p, o.now().Add(-o.legCeiling))) != nil {
+			return o.park(ctx, p, fmt.Sprintf("deposit leg %s pending past the ceiling", leg.ID))
+		}
+		return nil
+	case transferRefuted:
+		return o.park(ctx, p, fmt.Sprintf("deposit %s did not credit the Paycrest address: %v", leg.TxHash, err))
+	}
+	if err := o.legs.Confirm(detached(ctx), leg.ID, credited.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
+		return err
+	}
+	// Paycrest reads a treasury deposit as unmatched unless the payment is
+	// claimed, so the claim is made here, now that the deposit is proven.
+	now := o.now()
+	if err := o.db.WithContext(ctx).Model(&models.PaycrestOrderRecord{}).
+		Where("id = ? AND payment_claimed_at IS NULL", order.ID).UpdateColumn("payment_claimed_at", now).Error; err != nil {
+		return err
+	}
+	return o.move(ctx, p, models.SellerPayoutDeposited, nil, models.SellerPayoutOrdered, models.SellerPayoutDepositing)
+}
+
+// ── settle ─────────────────────────────────────────────────────────────────
+
+// followSell reads the Paycrest order the poller keeps in sync. Settled is
+// paid; refunded, expired, unmatched, failed or cancelled all park — what to
+// do with money that came back is a person's call, never an automatic wallet
+// payment; anything else waits.
+func (o *SellerPayoutOrchestrator) followSell(ctx context.Context, p *models.SellerPayoutOrder) error {
+	order, err := o.paycrestOrder(ctx, p)
+	if err != nil {
+		return err
+	}
+	switch order.Status {
+	case models.PaycrestStatusSettled:
+		if err := o.move(ctx, p, models.SellerPayoutPaid, nil, models.SellerPayoutDeposited); err != nil {
+			return err
+		}
+		o.paidNotice(p)
+		return nil
+	case models.PaycrestStatusRefunded, models.PaycrestStatusExpired, models.PaycrestStatusUnmatched,
+		models.PaycrestStatusFailed, models.PaycrestStatusCancelled:
+		return o.park(ctx, p, fmt.Sprintf("the Paycrest order ended %s after the deposit", order.Status))
+	}
+	if o.now().After(p.UpdatedAt.Add(sellerPayoutSettleAfter)) {
+		return o.park(ctx, p, fmt.Sprintf("the Paycrest order is still %s a day after the deposit", order.Status))
+	}
+	return nil
+}
+
+// ── paying the seller's wallet (an operator's choice, before any bridge) ───
+
+var (
+	// ErrWalletPaymentNotSafe: money may already be on its way somewhere else.
+	ErrWalletPaymentNotSafe = errors.New("a bridge, sale or deposit may already have moved this payout's money")
+	// ErrWalletPaymentUnavailable: nothing to pay, or nowhere to pay it.
+	ErrWalletPaymentUnavailable = errors.New("this payout has no proven amount or no seller wallet to pay")
+)
+
+// StartWalletPayment pays the proven amount to the seller's own wallet from the
+// treasury, for a payout parked before anything was bridged. It is the only way
+// the machine ever pays a wallet, and only an operator can ask: every other path
+// treats the wallet as off limits. Safe by construction: it needs the release
+// proven, no bridge leg that was ever broadcast, no Paycrest order and no
+// deposit; one refund leg per payout (a unique pending refund index); and the
+// transfer is sent and proven like any other leg.
+func (o *SellerPayoutOrchestrator) StartWalletPayment(ctx context.Context, p *models.SellerPayoutOrder) error {
+	if p.Status != models.SellerPayoutNeedsReview {
+		return errSellerPayoutTransition
+	}
+	amount, ok := new(big.Int).SetString(p.ReceivedAmount, 10)
+	if !ok || amount.Sign() <= 0 || !common.IsHexAddress(p.SellerWallet) || p.PaycrestOrderID != nil {
+		return ErrWalletPaymentUnavailable
+	}
+	// A company transfer that may have left the central account means the naira
+	// may already be paid: only a provider refusal (nothing exists) or no attempt
+	// at all leaves the wallet payment safe.
+	if !companyNothingSent(p) {
+		return ErrWalletPaymentNotSafe
+	}
+	legs, err := o.legs.ForOrder(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	for i := range legs {
+		l := &legs[i]
+		switch {
+		case l.Kind == models.RampLegKindBridge && l.Status == models.RampLegStatusFailed && l.TxHash == "":
+			// Never broadcast (an approve alone moves no money): provably dead.
+		case l.Kind == models.RampLegKindRefund && l.Status == models.RampLegStatusFailed && l.TxHash == "":
+		default:
+			return ErrWalletPaymentNotSafe
+		}
+	}
+	lane := o.lane(p.ChainKey)
+	if lane == nil {
+		return ErrSponsorNotAvailable
+	}
+	ctx = ReservedSend(ctx)
+	attempt, err := o.legs.NextAttempt(ctx, p.ID, models.RampLegKindRefund)
+	if err != nil {
+		return err
+	}
+	leg := &models.RampLeg{
+		OrderID: p.ID, Kind: models.RampLegKindRefund, Attempt: attempt,
+		ChainKey: p.ChainKey, Token: strings.ToUpper(p.Token), FromAddr: o.treasuryAddr(), ToAddr: p.SellerWallet,
+		Amount: amount.String(), Status: models.RampLegStatusPending, CreatedAt: o.now().UTC(),
+	}
+	existing, err := o.legs.Reserve(ctx, leg)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return errSellerPayoutTransition // a concurrent call already started this payment
+	}
+	if err := o.move(ctx, p, models.SellerPayoutPayingWallet, nil, models.SellerPayoutNeedsReview); err != nil {
+		_ = o.failLeg(detached(ctx), leg.ID, "payout moved before the wallet payment started")
+		return err
+	}
+	_, attempted, err := o.treasury.TransferToken(o.legSend(ctx, leg.ID, "wallet"), lane, p.Token, p.SellerWallet, amount)
+	if err != nil {
+		if attempted {
+			log.Printf("[seller-payout] ALERT seller_payout_wallet_uncertain_total=1 payout=%s leg=%s err=%v", p.ID, leg.ID, err)
+			return nil // may have landed: observed, never resent
+		}
+		_ = o.failLeg(detached(ctx), leg.ID, err.Error())
+		_ = o.move(ctx, p, models.SellerPayoutNeedsReview, nil, models.SellerPayoutPayingWallet)
+		return err
+	}
+	return nil
+}
+
+// observeWalletPayment follows the wallet transfer to a proven credit. A
+// transfer that provably never left sends the payout back to review.
+func (o *SellerPayoutOrchestrator) observeWalletPayment(ctx context.Context, p *models.SellerPayoutOrder) error {
+	legs, err := o.legs.ForOrder(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	leg := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusPending)
+	if leg == nil {
+		if done := latestLeg(legs, models.RampLegKindRefund, models.RampLegStatusConfirmed); done != nil {
+			return o.finishWalletPayment(ctx, p)
+		}
+		return o.park(ctx, p, "paying the wallet with no transfer leg")
+	}
+	if leg.TxHash == "" {
+		return o.recoverHashless(ctx, p.ID, leg)
+	}
+	if o.followLeg(ctx, leg) {
+		return nil
+	}
+	lane := o.lane(p.ChainKey)
+	if lane == nil {
+		return o.park(ctx, p, fmt.Sprintf("no treasury lane for %s", p.ChainKey))
+	}
+	credited, proof, err := o.verifyTransfer(ctx, p.ChainKey, lane.tokenAddress(p.Token), leg.TxHash, p.SellerWallet)
+	switch proof {
+	case transferWait:
+		return nil
+	case transferRefuted:
+		return o.park(ctx, p, fmt.Sprintf("wallet payment %s did not credit the seller: %v", leg.TxHash, err))
+	}
+	if err := o.legs.Confirm(detached(ctx), leg.ID, credited.String(), o.now()); err != nil && !errors.Is(err, ErrLegNotPending) {
+		return err
+	}
+	return o.finishWalletPayment(ctx, p)
+}
+
+func (o *SellerPayoutOrchestrator) finishWalletPayment(ctx context.Context, p *models.SellerPayoutOrder) error {
+	if err := o.move(ctx, p, models.SellerPayoutPaidWallet, nil, models.SellerPayoutPayingWallet); err != nil {
+		return err
+	}
+	o.tell(p, events.SellerPayoutPaid, "Your payout was sent to your wallet",
+		fmt.Sprintf("We couldn't pay order #%s to your bank, so we sent the funds to your wallet instead.", p.MarketplaceOrderID.String()[:8]))
+	return nil
+}
+
+// sellerPayoutBridgeSlackBps is the headroom the planner leaves between the
+// bridge cost it prices a payout at and the cap the machine refuses above, so
+// a route a few bps dearer by release time does not strand a payout the buyer
+// already paid for.
+const sellerPayoutBridgeSlackBps = 20
+
+// quoteSellerPayoutBridge quotes the Sonic -> Base route a payout of amount
+// takes and returns it with its all-in cost in bps of the input: LiFi's own
+// cost plus the treasury's gas (the ramp's LiFiCostBps / TreasuryGasBps). -1
+// means the route carries no usable price. The machine (to run the bridge) and
+// the planner (to decide at checkout whether to offer a payout at all) both
+// call this, so what is offered and what can run cannot disagree.
+func quoteSellerPayoutBridge(ctx context.Context, q lifiQuoter, src, dst *TreasuryLane, token, treasuryAddr string, amount *big.Int) (*LiFiRoute, int, error) {
+	route, err := q.Quote(ctx, LiFiQuoteRequest{
+		FromChainID: src.ChainID, ToChainID: dst.ChainID,
+		FromToken: src.tokenAddress(token), ToToken: dst.tokenAddress("USDC"),
+		FromAddress: treasuryAddr, ToAddress: treasuryAddr,
+		FromAmount: amount.String(),
+		Slippage:   0.001, // stable to stable
+		Order:      "CHEAPEST",
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	l, ok := LiFiCostBps(route)
+	if !ok {
+		return route, -1, nil
+	}
+	return route, l + TreasuryGasBps(route, treasuryERC20Gas), nil
+}

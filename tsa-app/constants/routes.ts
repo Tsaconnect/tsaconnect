@@ -39,6 +39,7 @@ export const TSA_PAY_APPLY = '/merchants/merchant-request?type=payment_acceptanc
 
 /** Where a TSA Pay merchant is paid (and her payment links start). */
 export const PAY_SETTINGS = '/merchants/pay-settings' satisfies Href;
+export const SELLER_PAYOUT = '/merchants/payout-method' satisfies Href;
 
 /** A TSA Pay merchant's payment links, and the form that makes one. */
 export const PAY_LINKS = '/merchants/pay-links' satisfies Href;

@@ -18,6 +18,9 @@ import (
 //   - onboarding needs >= MinOnboardingReferrals KYC-VERIFIED direct referrals
 //   - onboarding needs at least one completed transaction
 // Both forms are one-time, so an existing submission blocks re-application.
+//
+// Neither form pays anything today (PM 2026-10-23: no signup reward; claiming comes
+// later): approving a claim records the decision only.
 
 // RewardClaimEligibility is the per-form verdict. Reasons carries one
 // human-readable string per failed rule so the app can list every blocker at
@@ -36,10 +39,69 @@ type RewardClaimService struct {
 	db          *gorm.DB
 	eligibility *RewardEligibilityService
 	graph       *ReferralGraphService
+	tpProgram   *TPProgramConfigService
 }
 
 func NewRewardClaimService(db *gorm.DB, elig *RewardEligibilityService, graph *ReferralGraphService) *RewardClaimService {
 	return &RewardClaimService{db: db, eligibility: elig, graph: graph}
+}
+
+// WithTPProgram supplies the admin-edited welcome-bonus amounts. Without it the
+// compiled-in defaults (1 TP signup, 10 TP onboarding) apply.
+func (s *RewardClaimService) WithTPProgram(p *TPProgramConfigService) *RewardClaimService {
+	s.tpProgram = p
+	return s
+}
+
+// The TP source types the instant welcome bonuses are recorded under.
+const (
+	tpSourceSignupBonus     = "signup_bonus"
+	tpSourceOnboardingBonus = "onboarding_bonus"
+)
+
+// SubmitClaim stores a claim that already passed Eligibility and pays its welcome
+// bonus in the SAME transaction (PM 2026-10-23: automated, instant, no approval).
+// A duplicate submission fails on the (user, kind) unique index BEFORE any TP is
+// credited, so the bonus is paid at most once per form, and a failure credits
+// nothing and leaves no claim behind, so the user can submit again.
+func (s *RewardClaimService) SubmitClaim(ctx context.Context, claim *models.RewardClaim) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(claim).Error; err != nil {
+			return err
+		}
+		return s.creditWelcomeBonus(tx, claim)
+	})
+}
+
+func (s *RewardClaimService) creditWelcomeBonus(tx *gorm.DB, claim *models.RewardClaim) error {
+	prog := s.tpProgram.Current()
+	amount, source := prog.SignupBonusTP, tpSourceSignupBonus
+	if claim.Kind == models.RewardClaimKindOnboarding {
+		amount, source = prog.OnboardingBonusTP, tpSourceOnboardingBonus
+	}
+	if amount <= 0 {
+		return nil
+	}
+	earning := models.TPEarning{
+		ID: uuid.New(), UserID: claim.UserID, SourceUserID: claim.UserID,
+		SourceType: source, SourceID: claim.ID,
+		Generation: 0, // a direct award, not a referral-generation share
+		TPEarned:   amount, CreatedAt: time.Now(),
+	}
+	if err := tx.Create(&earning).Error; err != nil {
+		return fmt.Errorf("reward claim: create tp earning: %w", err)
+	}
+	if err := tx.Model(&models.User{}).Where("id = ?", claim.UserID).
+		Update("tp_balance", gorm.Expr("tp_balance + ?", amount)).Error; err != nil {
+		return fmt.Errorf("reward claim: increment tp_balance: %w", err)
+	}
+	// A user with no reward-state row updates zero rows (no error); the
+	// level-crossing job re-scans them anyway.
+	if err := tx.Model(&models.UserRewardState{}).Where("user_id = ?", claim.UserID).
+		Update("dirty", true).Error; err != nil {
+		return fmt.Errorf("reward claim: mark reward state dirty: %w", err)
+	}
+	return nil
 }
 
 // Eligibility evaluates one form for one user. It fails closed: any unexpected
@@ -101,61 +163,6 @@ func (s *RewardClaimService) Eligibility(ctx context.Context, userID uuid.UUID, 
 	out.Eligible = baseOK && len(out.Reasons) == 0
 	return out, nil
 }
-
-// SignupRewardTP is the TradePoint award for an approved signup claim. The
-// programme pays "airtime or TP"; airtime has no rail in this tree yet (Nomba
-// bill vending lives on the unmerged feat/utility-bills branch), so TP is the
-// leg that can actually settle today.
-const SignupRewardTP = 100.0
-
-// AwardSignupTP credits the signup reward when a claim is approved. Idempotent:
-// the (source_type, source_id) pair is checked first so re-approving — or a
-// retry after a partial failure — can't double-credit.
-//
-// Mirrors creditTP (fee_distribution_service.go): a TPEarning row plus an
-// atomic tp_balance increment in ONE transaction, then mark the user's reward
-// state dirty so the level-crossing job re-evaluates.
-func (s *RewardClaimService) AwardSignupTP(ctx context.Context, claim *models.RewardClaim) error {
-	if claim == nil || claim.Kind != models.RewardClaimKindSignup {
-		return nil // onboarding pays cash off-platform; nothing to credit here
-	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var existing int64
-		if err := tx.Model(&models.TPEarning{}).
-			Where("source_type = ? AND source_id = ?", tpSourceSignupReward, claim.ID).
-			Limit(1).Count(&existing).Error; err != nil {
-			return fmt.Errorf("reward claim: check existing tp award: %w", err)
-		}
-		if existing > 0 {
-			return nil // already credited
-		}
-
-		earning := models.TPEarning{
-			ID:           uuid.New(),
-			UserID:       claim.UserID,
-			SourceUserID: claim.UserID,
-			SourceType:   tpSourceSignupReward,
-			SourceID:     claim.ID,
-			Generation:   0, // direct award, not a referral-generation share
-			TPEarned:     SignupRewardTP,
-			CreatedAt:    time.Now(),
-		}
-		if err := tx.Create(&earning).Error; err != nil {
-			return fmt.Errorf("reward claim: create tp earning: %w", err)
-		}
-		if err := tx.Model(&models.User{}).Where("id = ?", claim.UserID).
-			Update("tp_balance", gorm.Expr("tp_balance + ?", SignupRewardTP)).Error; err != nil {
-			return fmt.Errorf("reward claim: increment tp_balance: %w", err)
-		}
-		// Best-effort: the level-crossing job also re-scans, so a missing row
-		// here delays the level update rather than losing the award.
-		tx.Model(&models.UserRewardState{}).Where("user_id = ?", claim.UserID).
-			Update("dirty", true)
-		return nil
-	})
-}
-
-const tpSourceSignupReward = "signup_reward"
 
 // verifiedReferralCount counts DIRECT referrals (generation 1) that are
 // KYC-verified and active. Deeper generations don't count: the PM copy is

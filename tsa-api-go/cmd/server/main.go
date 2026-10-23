@@ -739,6 +739,7 @@ func main() {
 	feeDistributionService.WithSplitConfigs(feeSplitConfigService)
 	tpProgramService := services.NewTPProgramConfigService(config.DB)
 	feeDistributionService.WithTPProgram(tpProgramService)
+	rewardClaimService.WithTPProgram(tpProgramService)
 	tph := handlers.NewTPAdminHandler(config.DB, feeSplitConfigService, feeDistributionService)
 	tph.Program = tpProgramService
 	slh := handlers.NewSwapLiFiHandler(cfg.LiFiBaseURL, cfg.LiFiAPIKey, cfg.LiFiIntegratorID, cfg.LiFiIntegratorFee)
@@ -1702,6 +1703,11 @@ func main() {
 	// The treasury is hoisted for the same reason: a name change's stablecoin
 	// fee is paid into it and refunded out of it.
 	var rampTreasury *services.Treasury
+	// The seller-payout machine runs on the same treasury, but does not wait
+	// for the converted-buy switch: it is the ramp treasury when that is on,
+	// otherwise one built just for payouts.
+	var payoutTreasury *services.Treasury
+	var payoutOrders *services.PaycrestOrderService
 	// Likewise hoisted for TSA Pay (built after this block): a naira payment
 	// opens its payout through the same order service, sell intents and quoter
 	// the ramp sell uses. Each stays nil when its own gate is off.
@@ -1727,8 +1733,9 @@ func main() {
 	// when Paycrest is on (the pool provider joins the router there), after it
 	// otherwise.
 	var pool *poolWiring
+	var paycrestDir *services.PaycrestDirectory
 	if paycrestClient.IsEnabled() {
-		paycrestDir := services.NewPaycrestDirectory(paycrestClient, bankDirectory)
+		paycrestDir = services.NewPaycrestDirectory(paycrestClient, bankDirectory)
 		paycrestQuotes = services.NewPaycrestQuoteService(paycrestClient, nil, nil)
 		treasuryRates = wireTreasuryMarketRate(itService, paycrestQuotes, cfg.RampTreasuryRateTolBps)
 		// Owner ruling 2026-10-07: every Paycrest ramp order is sent the
@@ -1762,6 +1769,10 @@ func main() {
 		// venues on it (spec §15).
 		rampTreasury, conversionOrch = buildRampConversion(cfg, blockchainService, chainRegistry, paycrestOrders, paycrestQuotes)
 		registerRampConversionWorkers(scheduler, rampTreasury, conversionOrch, cfg.RampTreasuryKeptUSDCAlert)
+		if payoutTreasury = rampTreasury; payoutTreasury == nil && paycrestOrders != nil {
+			payoutTreasury, _ = buildRampTreasury(cfg, blockchainService)
+		}
+		payoutOrders = paycrestOrders
 		wireConvertedBuys(itService, rampTreasury, blockchainService, cfg, paycrestQuotes)
 		// TSA Liquidity before the router: the pool provider needs its desk.
 		pool = wirePoolOrders(cfg, blockchainService, releaseSigner, itService, rampTreasury)
@@ -2046,7 +2057,25 @@ func main() {
 		log.Print(alert)
 	}
 	routes.RegisterSignerAdmin(router, cfg, &handlers.SignerAdminHandler{DB: config.DB, Registry: blockchainService.Signers()})
+	// Unavailable (503 payout_unavailable) while Paycrest is off: *PaycrestDirectory
+	// answers ErrPaycrestDisabled on a nil receiver.
+	// A nil *EmailService inside the interface would be non-nil: pass none at all.
+	var sellerPayoutMailer services.CodeMailer
+	if payCodeMailer != nil {
+		sellerPayoutMailer = payCodeMailer
+	}
+	var sellerPayoutDir interface {
+		Institutions(ctx context.Context, fiat string) ([]services.PaycrestPayoutOption, error)
+	}
+	if paycrestDir != nil {
+		sellerPayoutDir = paycrestDir
+	}
+	sellerPayoutSvc := services.NewSellerPayoutService(config.DB, sellerPayoutDir, bankDirectory, sellerPayoutMailer)
+	sellerPayoutHandler := handlers.NewSellerPayoutHandler(sellerPayoutSvc, eventBus)
+	sellerPayoutAdmin := wireSellerPayouts(cfg, blockchainService, payoutTreasury, payoutOrders, paycrestQuotes, escrowService, sellerPayoutSvc, ch, scheduler, eventBus, inboundAlerts, fwClient)
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)
+	routes.RegisterSellerPayout(router, cfg, sellerPayoutHandler)
+	routes.RegisterSellerPayoutAdmin(router, cfg, sellerPayoutAdmin)
 
 	// Configure HTTP server
 	port := cfg.Port

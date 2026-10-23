@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -235,7 +233,7 @@ func (s *UnpaidOrderExpiryService) ExpireUnpaidOrders(ctx context.Context) (int6
 		var page []staleOrder
 		if err := s.db.WithContext(ctx).
 			Table("orders").
-			Select("orders.*, sellers.wallet_address AS seller_wallet, buyers.wallet_address AS buyer_wallet").
+			Select("orders.*, COALESCE(NULLIF(orders.escrow_seller_wallet, ''), sellers.wallet_address) AS seller_wallet, buyers.wallet_address AS buyer_wallet").
 			Joins("LEFT JOIN users AS sellers ON sellers.id = orders.seller_id").
 			Joins("LEFT JOIN users AS buyers ON buyers.id = orders.buyer_id").
 			Where("orders.status = ? AND orders.kind <> ? AND orders.created_at >= ? AND orders.updated_at < ? AND orders.id > ?",
@@ -303,17 +301,11 @@ func (s *UnpaidOrderExpiryService) settle(ctx context.Context, o *staleOrder, cu
 // token, the amounts it was priced at. Anything else is left pending and
 // alerted.
 func (s *UnpaidOrderExpiryService) reconcilePaid(ctx context.Context, o *staleOrder, onChain *OnChainOrder) error {
-	product, okP := new(big.Int).SetString(o.ProductAmount, 10)
-	shipping, okS := new(big.Int).SetString(o.ShippingAmount, 10)
 	tokenAddr := ""
 	if s.tokens != nil {
 		tokenAddr = s.tokens.TokenAddress("sonic", o.Token)
 	}
-	if !okP || !okS || tokenAddr == "" || o.SellerWallet == "" || o.BuyerWallet == "" || onChain.Resolved ||
-		!strings.EqualFold(onChain.Buyer.Hex(), common.HexToAddress(o.BuyerWallet).Hex()) ||
-		!strings.EqualFold(onChain.Seller.Hex(), common.HexToAddress(o.SellerWallet).Hex()) ||
-		!strings.EqualFold(onChain.Token.Hex(), common.HexToAddress(tokenAddr).Hex()) ||
-		onChain.ProductAmount.Cmp(product) != 0 || onChain.ShippingAmount.Cmp(shipping) != 0 {
+	if !OrderMatchesEscrow(&o.Order, o.SellerWallet, o.BuyerWallet, tokenAddr, onChain) {
 		log.Printf("[unpaid-order-expiry] ALERT unpaid_order_escrow_mismatch=1 order=%s: escrow holds an order under its id that does not match it", o.ID)
 		return nil
 	}

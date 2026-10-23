@@ -132,12 +132,12 @@ const SignupRewardForm = () => {
           />
           <Input
             ref={socialRef}
-            label="Social links (optional)"
+            label="Social usernames (optional)"
             value={socialLinks}
             onChangeText={setSocialLinks}
-            placeholder="Links to the socials you followed"
+            placeholder="e.g. @yourname on X, Instagram"
             autoCapitalize="none"
-            helper="Paste the profiles you follow us on"
+            helper="Your usernames on the socials you follow us on"
           />
 
           <Button

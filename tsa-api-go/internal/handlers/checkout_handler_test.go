@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -119,6 +120,13 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
+		`CREATE TABLE IF NOT EXISTS seller_payouts (
+			id TEXT PRIMARY KEY, marketplace_order_id TEXT NOT NULL UNIQUE, seller_user_id TEXT NOT NULL,
+			currency TEXT, institution_code TEXT, institution_name TEXT, account_number TEXT, account_name TEXT,
+			seller_wallet TEXT, chain_key TEXT, token TEXT, expected_amount TEXT, fiat_target_kobo INTEGER,
+			status TEXT, received_amount TEXT, paycrest_order_id TEXT, failure_reason TEXT, parked_from TEXT, retry_safe INTEGER, attempt_started_at DATETIME, next_attempt_at DATETIME,
+			venue TEXT DEFAULT 'paycrest', company_ref_gen INTEGER DEFAULT 0, company_ref TEXT, company_attempts INTEGER DEFAULT 0, company_transfer_id TEXT, company_paid_at DATETIME, rebalanced_at DATETIME,
+			checked_at DATETIME, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE IF NOT EXISTS orders (
 			id TEXT PRIMARY KEY,
 			buyer_id TEXT NOT NULL,
@@ -140,6 +148,8 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			shipping_street TEXT,
 			contract_order_id TEXT,
 			escrow_contract_address TEXT,
+			escrow_seller_wallet TEXT,
+			payout_fee TEXT,
 			escrow_tx_hash TEXT,
 			approve_tx_hash TEXT,
 			release_tx_hash TEXT, release_reverted_at DATETIME,
@@ -941,8 +951,11 @@ func TestMarkDelivered_OnlySellerCanDeliver(t *testing.T) {
 
 	ch.MarkDelivered(c2)
 
-	if w2.Code != http.StatusOK {
-		t.Errorf("expected %d for seller delivering, got %d: %s", http.StatusOK, w2.Code, w2.Body.String())
+	// An escrow order is delivered only with the seller's on-chain markDelivered
+	// (a hash, or the escrow's own flag on a retry); without a readable chain
+	// there is no proof, so it is refused rather than recorded.
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected %d for a delivery that cannot be proven, got %d: %s", http.StatusServiceUnavailable, w2.Code, w2.Body.String())
 	}
 }
 
@@ -1480,6 +1493,12 @@ func TestRequestRefund_Delivered(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	product := createTestProduct(t, db, seller.ID, 10.0)
 	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusDelivered, "USDC")
+
+	// Delivered before the seller's mark was on-chain: the escrow would refund
+	// at once, so this stays a database request for admin review.
+	chain := services.NewFakeEscrowChain()
+	chain.SetOrder(services.GenerateOrderID(order.ID), services.OnChainOrder{Buyer: common.HexToAddress("0x0000000000000000000000000000000000000001")})
+	ch.EscrowService = services.NewEscrowServiceWithBackend(ch.Config, chain, chain)
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()

@@ -11,11 +11,15 @@ const (
 	TransactionReceived  = "transaction.received"
 
 	// Order events
-	OrderPlaced          = "order.placed"
-	OrderEscrowed        = "order.escrowed"
-	OrderShipped         = "order.shipped"
-	OrderDelivered       = "order.delivered"
-	OrderCompleted       = "order.completed"
+	OrderPlaced    = "order.placed"
+	OrderEscrowed  = "order.escrowed"
+	OrderShipped   = "order.shipped"
+	OrderDelivered = "order.delivered"
+	OrderCompleted = "order.completed"
+	// SellerPayoutPaid: a marketplace order's naira reached the seller's bank.
+	SellerPayoutPaid = "order.seller_payout_paid"
+	// SellerPayoutReview: a payout is held for a person; the seller is told it is being looked at.
+	SellerPayoutReview   = "order.seller_payout_review"
 	OrderRefundRequested = "order.refund_requested"
 	OrderRefundApproved  = "order.refund_approved"
 	OrderRefundRejected  = "order.refund_rejected"
@@ -36,6 +40,9 @@ const (
 	// to redirect a merchant's money, so it is told to the owner on every
 	// channel — the change stands, but it is never silent.
 	SecurityPaySettlementChanged = "security.pay_settlement_changed"
+	// SecuritySellerPayoutChanged: where a marketplace seller is paid was
+	// changed. Same threat as the TSA Pay payout change, told the same way.
+	SecuritySellerPayoutChanged = "security.seller_payout_changed"
 	// A TSA Pay merchant's API key was rolled, their webhook/return-domain
 	// settings changed, or their webhook signing secret was revealed or rolled.
 	// Like the payout change: the owner is always told.

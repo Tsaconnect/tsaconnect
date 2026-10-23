@@ -30,6 +30,8 @@ import {
   getOrderById,
   markOrderShipped,
   markOrderDelivered,
+  prepareDeliver,
+  isSpendableOrder,
   approveRefund,
   rejectRefund,
   approveCancelOrder,
@@ -39,6 +41,7 @@ import {
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
+import { payoutStageText, shippingWithoutPayoutFee } from '@/utils/payoutFee';
 import { signAndBroadcast } from '@/services/transaction';
 import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
 import api from '@/components/services/api';
@@ -106,6 +109,7 @@ const MerchantOrderDetail = () => {
   const [error, setError] = useState<string | null>(null);
   const [orderFetchFailed, setOrderFetchFailed] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  const [recordedOnChain, setRecordedOnChain] = useState(false);
 
   // Ship modal
   const [shipModalVisible, setShipModalVisible] = useState(false);
@@ -228,7 +232,7 @@ const MerchantOrderDetail = () => {
         return;
       }
 
-      const result = await markOrderDelivered(order.id, proofUrl);
+      const result = await markOrderDelivered(order.id, proofUrl, await signDelivery(order));
       setActionLoading(false);
       if (result.success) {
         setDeliverModalVisible(false);
@@ -245,18 +249,57 @@ const MerchantOrderDetail = () => {
     }
   };
 
+  // Escrow orders: the seller signs markDelivered, otherwise the buyer's refund
+  // stays instant and full. Spendable MCGP orders have no escrow tx.
+  const signDelivery = async (target: Order): Promise<string | undefined> => {
+    if (isSpendableOrder(target)) return undefined;
+    const prep = await prepareDeliver(target.id);
+    // An earlier attempt already put it on-chain; the server accepts that as proof.
+    // (or the server signs it for this order: its seller on-chain is the treasury).
+    if (prep.code === 'delivery_on_chain' || prep.code === 'delivery_server_signed') return undefined;
+    if (!prep.success || !prep.data?.deliverTx) {
+      throw new Error(prep.message || 'Failed to prepare delivery');
+    }
+    return signAndBroadcast(prep.data.deliverTx, 'sonic', MARKETPLACE_NETWORK);
+  };
+
   // Service orders have no physical delivery proof — the backend makes the
   // proof optional for services. Mark rendered with no proof, no image modal.
   const handleMarkRendered = async () => {
     if (!order) return;
     setActionLoading(true);
-    const result = await markOrderDelivered(order.id, '');
+    let result;
+    try {
+      result = await markOrderDelivered(order.id, '', await signDelivery(order));
+    } catch (err: any) {
+      result = { success: false, message: err.message };
+    }
     setActionLoading(false);
     if (result.success) {
       Alert.alert('Service Rendered', 'Marked as rendered. The buyer can now confirm completion.');
       fetchOrder();
     } else {
       Alert.alert('Error', result.message || 'Failed to mark service rendered');
+    }
+  };
+
+  // Orders delivered before delivery went on-chain: sign it now, so a buyer's
+  // refund request becomes a dispute instead of an instant refund.
+  const handleRecordOnChain = async () => {
+    if (!order) return;
+    setActionLoading(true);
+    let result;
+    try {
+      result = await markOrderDelivered(order.id, order.deliveryProofUrl || '', await signDelivery(order));
+    } catch (err: any) {
+      result = { success: false, message: err.message };
+    }
+    setActionLoading(false);
+    if (result.success) {
+      setRecordedOnChain(true);
+      Alert.alert('Recorded', 'Delivery is now recorded on-chain.');
+    } else {
+      Alert.alert('Error', result.message || 'Failed to record delivery');
     }
   };
 
@@ -415,6 +458,8 @@ const MerchantOrderDetail = () => {
   const canShip = !isDisputed && !isService && order.status === 'escrowed';
   const canDeliver =
     !isDisputed && (isService ? order.status === 'escrowed' : order.status === 'shipped');
+  const canRecordOnChain =
+    !isDisputed && !recordedOnChain && !isSpendableOrder(order) && order.status === 'delivered';
   const canResolveRefund = !isDisputed && order.status === 'refund_requested';
   const canHandleCancel = !isDisputed && order.status === 'cancel_requested';
   const canRaiseDispute = !isDisputed && ['escrowed', 'shipped', 'delivered', 'cancel_requested', 'refund_requested'].includes(order.status);
@@ -486,6 +531,16 @@ const MerchantOrderDetail = () => {
             </View>
           )}
         </Card>
+
+        {/* Bank payout — only for a seller paid into a bank account */}
+        {order.payout ? (
+          <Card style={{ marginBottom: spacing.md }}>
+            <Text variant="bodyMed" weight="700">{payoutStageText(order.payout).title}</Text>
+            <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+              {payoutStageText(order.payout).body}
+            </Text>
+          </Card>
+        ) : null}
 
         {/* Buyer */}
         <Card style={{ marginBottom: spacing.md }}>
@@ -586,7 +641,7 @@ const MerchantOrderDetail = () => {
                 {isService ? 'Call-out fee' : 'Shipping'} ({formatStatus(order.shippingZone || '')})
               </Text>
               <Text variant="bodySm" numeric>
-                {formatTokenAmount(order.shippingAmount, order.token)}
+                {formatTokenAmount(shippingWithoutPayoutFee(order.shippingAmount, order.payoutFee), order.token)}
               </Text>
             </View>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
@@ -810,6 +865,15 @@ const MerchantOrderDetail = () => {
             ) : (
               <Button title="Mark as Delivered" leftIcon="checkCircle" onPress={() => setDeliverModalVisible(true)} />
             )
+          )}
+          {canRecordOnChain && (
+            <Button
+              title="Record delivery on-chain"
+              leftIcon="checkCircle"
+              loading={actionLoading}
+              disabled={actionLoading}
+              onPress={handleRecordOnChain}
+            />
           )}
           {canResolveRefund && !order.merchantApprovedRefund && (
             <View style={{ flexDirection: 'row', gap: spacing.sm }}>

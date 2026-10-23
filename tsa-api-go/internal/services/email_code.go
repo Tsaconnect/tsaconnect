@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -119,4 +120,14 @@ func MaskEmail(email string) string {
 	}
 	first, _ := utf8.DecodeRuneInString(local)
 	return string(first) + "***@" + domain
+}
+
+// UserContact is the address and name an emailed code goes to.
+func UserContact(ctx context.Context, db *gorm.DB, userID uuid.UUID) (email, name string, err error) {
+	var u struct {
+		Email sql.NullString
+		Name  sql.NullString
+	}
+	err = db.WithContext(ctx).Table("users").Select("email", "name").Where("id = ?", userID).Limit(1).Scan(&u).Error
+	return strings.TrimSpace(u.Email.String), u.Name.String, err
 }

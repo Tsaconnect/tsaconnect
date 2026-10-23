@@ -13,9 +13,10 @@
     "test:ci": "jest --ci",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
-    "build:android": "eas build --platform android --profile preview",
-    "build:ios": "eas build --platform ios --profile preview",
-    "update": "eas update"
+    "build:android": "scripts/eas.sh build --platform android --profile preview",
+    "build:ios": "scripts/eas.sh build --platform ios --profile preview",
+    "update": "scripts/eas.sh update",
+    "eas": "scripts/eas.sh"
   },
   "jest": {
     "preset": "jest-expo",

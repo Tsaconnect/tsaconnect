@@ -63,7 +63,7 @@ func TestConvertedBuy_EndToEnd_OrchestratorReadsWhatCreateBuyWrote(t *testing.T)
 	// Same database CreateBuy just wrote into, additionally migrated for the
 	// orchestrator's own ledger — this stays the row CreateBuy inserted, not
 	// a re-seeded copy of it.
-	if err := ordersRig.db.AutoMigrate(&models.RampLeg{}); err != nil {
+	if err := ordersRig.db.AutoMigrate(&models.RampLeg{}, &models.SellerPayoutOrder{}); err != nil {
 		t.Fatalf("migrate ramp_legs: %v", err)
 	}
 

@@ -63,7 +63,9 @@ func TestUpdateTPProgram_OmittedFieldsKeepCurrentValues(t *testing.T) {
 	db := setupTPTestDB(t)
 	if err := db.Exec(`CREATE TABLE tp_program_configs (
 		id TEXT PRIMARY KEY, user_pct REAL NOT NULL, upline_pct REAL NOT NULL, pool_pct REAL NOT NULL,
-		zero_fee_tp REAL NOT NULL, payout_day INTEGER NOT NULL, updated_by TEXT, created_at DATETIME, updated_at DATETIME)`).Error; err != nil {
+		zero_fee_tp REAL NOT NULL, payout_day INTEGER NOT NULL,
+		signup_bonus_tp REAL NOT NULL DEFAULT 1, onboarding_bonus_tp REAL NOT NULL DEFAULT 10,
+		updated_by TEXT, created_at DATETIME, updated_at DATETIME)`).Error; err != nil {
 		t.Fatal(err)
 	}
 	prog := services.NewTPProgramConfigService(db)

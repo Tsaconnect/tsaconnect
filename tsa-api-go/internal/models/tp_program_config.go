@@ -26,6 +26,13 @@ type TPProgramConfig struct {
 	// PayoutDay is the day of month (Africa/Lagos, 00:00) the global pool is paid.
 	PayoutDay int `gorm:"not null" json:"payoutDay"`
 
+	// SignupBonusTP and OnboardingBonusTP are the welcome bonuses credited
+	// instantly when an eligible user submits the signup form (verified user) or the
+	// onboarding form (10 verified referrals) — PM 2026-10-23, automated, no admin
+	// approval. The DB default carries rows saved before these columns existed.
+	SignupBonusTP     float64 `gorm:"not null;default:1" json:"signupBonusTp"`
+	OnboardingBonusTP float64 `gorm:"not null;default:10" json:"onboardingBonusTp"`
+
 	UpdatedBy *uuid.UUID `gorm:"type:uuid" json:"updatedBy,omitempty"`
 	CreatedAt time.Time  `json:"createdAt"`
 	UpdatedAt time.Time  `json:"updatedAt"`
@@ -47,6 +54,10 @@ const (
 	DefaultTPPoolPct   = 0.02
 	DefaultZeroFeeTP   = 0.001
 	DefaultPayoutDay   = 24
+	// PM 2026-10-23: 1 TP welcome bonus for a verified signup, 10 TP for onboarding
+	// 10 verified referrals.
+	DefaultSignupBonusTP     = 1.0
+	DefaultOnboardingBonusTP = 10.0
 )
 
 // DefaultTPProgramConfig returns the compiled-in program.
@@ -57,6 +68,9 @@ func DefaultTPProgramConfig() TPProgramConfig {
 		PoolPct:   DefaultTPPoolPct,
 		ZeroFeeTP: DefaultZeroFeeTP,
 		PayoutDay: DefaultPayoutDay,
+
+		SignupBonusTP:     DefaultSignupBonusTP,
+		OnboardingBonusTP: DefaultOnboardingBonusTP,
 	}
 }
 
@@ -64,12 +78,14 @@ func DefaultTPProgramConfig() TPProgramConfig {
 func (c TPProgramConfig) TotalPct() float64 { return c.UserPct + c.UplinePct + c.PoolPct }
 
 // ValidTPProgramConfig: each pct within 0..1, the total within 0..1, a
-// non-negative zero-fee reward, and a payout day every month has (1..28).
+// non-negative zero-fee reward and welcome bonuses, and a payout day every month
+// has (1..28).
 func ValidTPProgramConfig(c TPProgramConfig) bool {
 	for _, p := range []float64{c.UserPct, c.UplinePct, c.PoolPct} {
 		if p < 0 || p > 1 {
 			return false
 		}
 	}
-	return c.TotalPct() <= 1 && c.ZeroFeeTP >= 0 && c.PayoutDay >= 1 && c.PayoutDay <= 28
+	return c.TotalPct() <= 1 && c.ZeroFeeTP >= 0 && c.PayoutDay >= 1 && c.PayoutDay <= 28 &&
+		c.SignupBonusTP >= 0 && c.OnboardingBonusTP >= 0
 }

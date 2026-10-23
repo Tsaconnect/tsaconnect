@@ -406,6 +406,9 @@ func (h *TPAdminHandler) UpdateTPProgram(c *gin.Context) {
 		PoolPct   *float64 `json:"poolPct"`
 		ZeroFeeTP *float64 `json:"zeroFeeTp"`
 		PayoutDay *int     `json:"payoutDay"`
+
+		SignupBonusTP     *float64 `json:"signupBonusTp"`
+		OnboardingBonusTP *float64 `json:"onboardingBonusTp"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
@@ -426,6 +429,12 @@ func (h *TPAdminHandler) UpdateTPProgram(c *gin.Context) {
 	}
 	if in.PayoutDay != nil {
 		next.PayoutDay = *in.PayoutDay
+	}
+	if in.SignupBonusTP != nil {
+		next.SignupBonusTP = *in.SignupBonusTP
+	}
+	if in.OnboardingBonusTP != nil {
+		next.OnboardingBonusTP = *in.OnboardingBonusTP
 	}
 	next.UpdatedBy = &admin.ID
 	if _, err := h.Program.Save(next); err != nil {

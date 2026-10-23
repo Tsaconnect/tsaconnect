@@ -31,11 +31,18 @@ type Order struct {
 	ShippingCountry string `json:"shippingCountry,omitempty"`
 	// Snapshot of the buyer's saved delivery address at checkout. Empty on
 	// service orders and on orders placed before saved addresses existed.
-	ShippingRecipientName  string     `json:"shippingRecipientName,omitempty"`
-	ShippingPhone          string     `json:"shippingPhone,omitempty"`
-	ShippingStreet         string     `json:"shippingStreet,omitempty"`
-	ContractOrderID        string     `json:"contractOrderId,omitempty"`
-	EscrowContractAddress  string     `json:"escrowContractAddress,omitempty"`
+	ShippingRecipientName string `json:"shippingRecipientName,omitempty"`
+	ShippingPhone         string `json:"shippingPhone,omitempty"`
+	ShippingStreet        string `json:"shippingStreet,omitempty"`
+	ContractOrderID       string `json:"contractOrderId,omitempty"`
+	EscrowContractAddress string `json:"escrowContractAddress,omitempty"`
+	// EscrowSellerWallet is the seller wallet the buyer was told to escrow to
+	// (set at prepare-escrow), so a wallet change afterwards cannot make a
+	// correct payment look like a mismatch.
+	EscrowSellerWallet string `gorm:"size:42" json:"-"`
+	// PayoutFee is the part of ShippingAmount that pays the offramp for a
+	// seller's bank payout (base units). The seller's own shipping is the rest.
+	PayoutFee              string     `gorm:"size:78" json:"payoutFee,omitempty"`
 	EscrowTxHash           string     `json:"escrowTxHash,omitempty"`
 	ApproveTxHash          string     `json:"approveTxHash,omitempty"`
 	ReleaseTxHash          string     `json:"releaseTxHash,omitempty"`

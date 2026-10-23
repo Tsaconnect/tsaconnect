@@ -188,11 +188,21 @@ func (s *PMAutomationService) DispatchFlutterwave(ctx context.Context, body []by
 		if s.itHooks != nil && strings.HasPrefix(p.MerchantTxRef, ITPayoutRefPrefix) {
 			return s.itHooks.ResolvePayoutFromWebhook(ctx, p.MerchantTxRef, p.PayoutID, p.Status)
 		}
+		// A seller payout's transfer: the webhook only wakes the machine, which
+		// reads the transfer from the provider itself.
+		if strings.HasPrefix(p.MerchantTxRef, SellerPayoutRefPrefix) {
+			return NudgeCompanyPayout(ctx, s.db, p.MerchantTxRef)
+		}
 		return s.HandlePayoutStatus(ctx, *p)
 	case fwEventTransferReversal:
 		p, err := ParseFlutterwavePayout(body)
 		if err != nil {
 			return err
+		}
+		if strings.HasPrefix(p.MerchantTxRef, SellerPayoutRefPrefix) {
+			if err := FlagCompanyReversal(ctx, s.db, p.MerchantTxRef); err != nil {
+				return err
+			}
 		}
 		log.Printf("[fw dispatch] transfer REVERSED (payoutId=%q ref=%q event=%s) — operator action required, no automated re-drive", p.PayoutID, p.MerchantTxRef, webhookID)
 		return fmt.Errorf("%w: transfer reversal", ErrNonSettlingEvent)

@@ -264,6 +264,10 @@ type PaycrestOrderRecord struct {
 	// is released, which would leave a refunded attempt unrecognisable. Not part
 	// of the JSON, so no route changes shape.
 	PayPaymentID *uuid.UUID `gorm:"type:uuid;index" json:"-"`
+	// SellerPayoutID marks an order that is a marketplace seller payout's sale:
+	// the treasury funds it and its bank is the seller's, so it is hidden from
+	// the seller's own order list and never counts toward their one open order.
+	SellerPayoutID *uuid.UUID `gorm:"type:uuid;index" json:"-"`
 
 	// FailureReason is operator-facing text for anything the user cannot fix.
 	FailureReason string `gorm:"size:512" json:"failureReason,omitempty"`

@@ -28,6 +28,10 @@ export interface Order {
   token: string;
   productAmount: string;
   shippingAmount: string;
+  /** The part of shippingAmount that pays the seller's bank payout. */
+  payoutFee?: string;
+  /** The seller's own view of the bank payout this order carries (sellers only). */
+  payout?: SellerPayoutStage;
   platformFee: string;
   totalAmount: string;
   shippingZone: string;
@@ -137,6 +141,15 @@ export function formatTokenAmount(weiStr: string, token: string): string {
 
 // --- API functions ---
 
+/** How a seller's bank payout is going, in plain stages. */
+export interface SellerPayoutStage {
+  stage: 'waiting_for_confirmation' | 'sending' | 'paid' | 'paid_wallet' | 'review' | 'cancelled';
+  /** Naira, "17705.88". */
+  amountNgn: string;
+  bank: string;
+  accountLast4: string;
+}
+
 /** One order-to-be in a cart quote. Amounts are the token's base units. */
 export interface CartQuoteLine {
   productId: string;
@@ -152,6 +165,8 @@ export interface CartQuoteLine {
   gasFee: string;
   /** Everything the approve/escrow pair pulls for this order. */
   total: string;
+  /** The part of shippingAmount that pays the seller's bank payout ("0" when none). */
+  payoutFee?: string;
 }
 
 /**
@@ -164,7 +179,7 @@ export interface CartQuote {
   /** USD value of one token: 1 for USDC/USDT, the OTC buy price for MCGP. */
   usdPerToken: number;
   lines: CartQuoteLine[];
-  totals: Pick<CartQuoteLine, 'productAmount' | 'shippingAmount' | 'platformFee' | 'gasFee' | 'total'>;
+  totals: Pick<CartQuoteLine, 'productAmount' | 'shippingAmount' | 'platformFee' | 'gasFee' | 'total' | 'payoutFee'>;
 }
 
 /** Prices the active cart without creating orders. Same inputs as createOrders. */
@@ -456,19 +471,37 @@ export async function markOrderShipped(
   }
 }
 
+export async function prepareDeliver(
+  orderId: string
+): Promise<ApiResponse<{ deliverTx: UnsignedTx }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/prepare-deliver`, {
+      method: 'POST',
+      headers,
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Prepare deliver error:', error);
+    return { success: false, message: error.message || 'Failed to prepare delivery' };
+  }
+}
+
 /**
- * Seller marks an order as delivered. Requires a delivery proof URL.
+ * Seller marks an order as delivered. Requires a delivery proof URL for
+ * products, and the seller's signed markDelivered tx hash for escrow orders.
  */
 export async function markOrderDelivered(
   orderId: string,
-  deliveryProofUrl: string
+  deliveryProofUrl: string,
+  txHash?: string
 ): Promise<ApiResponse<Order>> {
   try {
     const headers = await getAuthHeaders();
     const response = await fetch(`${API_BASE_URL}/orders/${orderId}/deliver`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ deliveryProofUrl }),
+      body: JSON.stringify({ deliveryProofUrl, txHash }),
     });
     return await handleResponse(response);
   } catch (error: any) {
@@ -531,6 +564,26 @@ export async function requestRefund(orderId: string): Promise<ApiResponse<any>> 
   } catch (error: any) {
     console.error('Request refund error:', error);
     return { success: false, message: error.message || 'Failed to request refund' };
+  }
+}
+
+// After the buyer signs the refund transaction, the server verifies it on-chain
+// and only then moves the order (refunded, or refund_requested for the admin).
+export async function submitRefund(
+  orderId: string,
+  txHash: string
+): Promise<ApiResponse<{ orderId: string; status: string }>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/${orderId}/submit-refund`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ txHash }),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    console.error('Submit refund error:', error);
+    return { success: false, message: error.message || 'Failed to submit refund' };
   }
 }
 

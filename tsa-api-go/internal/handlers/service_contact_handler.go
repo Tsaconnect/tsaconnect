@@ -399,7 +399,7 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		Token:      tokenSymbol,
 		FeeUSD:     contactFeeUSD,
 		UserID:     user.ID,
-		ProviderID: &providerID, // service_contact carries a 10% provider cashback
+		ProviderID: &providerID, // service_contact carries the provider's 15% share
 		SourceType: "service_contact",
 		SourceID:   payment.ID,
 	}); err != nil {

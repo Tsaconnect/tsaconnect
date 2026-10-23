@@ -46,6 +46,9 @@ type SponsorFloat struct {
 	// a converted buy leaves the round trip's unspent budget sitting here as
 	// USDC, which nothing sweeps automatically.
 	TokenUSD float64
+	// TokenReadFailed: at least one stablecoin balance behind TokenUSD could not be
+	// read, so TokenUSD understates it (the operator panel says so instead of showing 0).
+	TokenReadFailed bool
 	// Tokens is free stock per token in USD — only the company wallet
 	// populates it (spec 2026-10-03 §5.3), for its low-stock alert.
 	Tokens map[string]float64

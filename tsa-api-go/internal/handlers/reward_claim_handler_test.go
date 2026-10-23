@@ -569,43 +569,41 @@ func TestUpdateRewardClaimStatus_PreservesReviewNotesWhenOmitted(t *testing.T) {
 	}
 }
 
-func TestUpdateRewardClaimStatus_ApprovalAwardsTPOnce(t *testing.T) {
-	db := setupRewardClaimTestDB(t)
-	h := newRewardClaimHandler(t, db)
-	regular := mkRcUser(t, db, "ada", true, models.RoleUser)
-	admin := mkRcUser(t, db, "root", true, models.RoleAdmin)
+// The signup form carries no reward (PM 2026-10-23): approving it records the
+// decision and credits no TP, whatever the claim's kind.
+func TestUpdateRewardClaimStatus_ApprovalCreditsNothing(t *testing.T) {
+	for _, kind := range []string{models.RewardClaimKindSignup, models.RewardClaimKindOnboarding} {
+		db := setupRewardClaimTestDB(t)
+		h := newRewardClaimHandler(t, db)
+		regular := mkRcUser(t, db, "ada", true, models.RoleUser)
+		admin := mkRcUser(t, db, "root", true, models.RoleAdmin)
+		claim := models.RewardClaim{
+			UserID: regular.ID, Kind: kind,
+			Status: models.RewardClaimStatusPending, Name: "Ada", Username: "ada",
+		}
+		db.Create(&claim)
 
-	claim := models.RewardClaim{
-		UserID: regular.ID, Kind: models.RewardClaimKindSignup,
-		Status: models.RewardClaimStatusPending, Name: "Ada", Username: "ada",
-	}
-	db.Create(&claim)
-
-	c, w := spotCtx(t, http.MethodPatch, `{"status":"approved"}`, admin)
-	c.Params = gin.Params{{Key: "id", Value: claim.ID.String()}}
-	h.UpdateRewardClaimStatus(c)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-
-	var user models.User
-	db.First(&user, "id = ?", regular.ID)
-	if user.TPBalance != services.SignupRewardTP {
-		t.Fatalf("tp_balance = %v, want %v", user.TPBalance, services.SignupRewardTP)
-	}
-	var earnings int64
-	db.Model(&models.TPEarning{}).Where("source_id = ?", claim.ID).Count(&earnings)
-	if earnings != 1 {
-		t.Fatalf("tp_earnings rows = %d, want 1", earnings)
-	}
-
-	// Idempotent: awarding again (e.g. a retry) must not double-credit.
-	if err := h.Service.AwardSignupTP(c.Request.Context(), &claim); err != nil {
-		t.Fatalf("second award: %v", err)
-	}
-	db.First(&user, "id = ?", regular.ID)
-	if user.TPBalance != services.SignupRewardTP {
-		t.Fatalf("tp_balance = %v after retry, want it unchanged", user.TPBalance)
+		c, w := spotCtx(t, http.MethodPatch, `{"status":"approved"}`, admin)
+		c.Params = gin.Params{{Key: "id", Value: claim.ID.String()}}
+		h.UpdateRewardClaimStatus(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body=%s", kind, w.Code, w.Body.String())
+		}
+		var got models.RewardClaim
+		db.First(&got, "id = ?", claim.ID)
+		if got.Status != models.RewardClaimStatusApproved || got.ReviewedBy == nil {
+			t.Fatalf("%s: claim = %+v; want approved with a reviewer", kind, got)
+		}
+		var user models.User
+		db.First(&user, "id = ?", regular.ID)
+		if user.TPBalance != 0 {
+			t.Fatalf("%s: tp_balance = %v; approving a reward form must credit no TP", kind, user.TPBalance)
+		}
+		var earnings int64
+		db.Model(&models.TPEarning{}).Where("source_id = ?", claim.ID).Count(&earnings)
+		if earnings != 0 {
+			t.Fatalf("%s: tp_earnings rows = %d, want 0", kind, earnings)
+		}
 	}
 }
 
@@ -649,5 +647,149 @@ func mkCompletedTxFor(t *testing.T, db *gorm.DB, userID uuid.UUID) {
 		uuid.New().String(), userID.String(), models.TransactionStatusCompleted,
 	).Error; err != nil {
 		t.Fatalf("insert tx: %v", err)
+	}
+}
+
+// bonusTP is what the user's TP balance and earnings say after a submission.
+func bonusTP(t *testing.T, db *gorm.DB, userID uuid.UUID) (balance float64, rows int64, source string) {
+	t.Helper()
+	var u models.User
+	db.First(&u, "id = ?", userID)
+	var earn []models.TPEarning
+	db.Where("user_id = ?", userID).Find(&earn)
+	if len(earn) > 0 {
+		source = earn[0].SourceType
+	}
+	return u.TPBalance, int64(len(earn)), source
+}
+
+// PM 2026-10-23: a verified user's signup submission earns a 1 TP welcome bonus,
+// instantly and with no admin approval.
+func TestSubmitRewardClaim_SignupPaysTheWelcomeBonusInstantly(t *testing.T) {
+	db := setupRewardClaimTestDB(t)
+	h := newRewardClaimHandler(t, db)
+	user := mkRcUser(t, db, "ada", true, models.RoleUser)
+
+	c, w := spotCtx(t, http.MethodPost, validSignupBody, user)
+	h.SubmitRewardClaim(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if bal, rows, src := bonusTP(t, db, user.ID); bal != 1 || rows != 1 || src != "signup_bonus" {
+		t.Fatalf("balance=%v rows=%d source=%q; want 1 TP once, as signup_bonus, with no approval", bal, rows, src)
+	}
+
+	// A second submission is refused and credits nothing more.
+	c2, w2 := spotCtx(t, http.MethodPost, validSignupBody, user)
+	h.SubmitRewardClaim(c2)
+	if w2.Code == http.StatusCreated {
+		t.Fatalf("second submit = 201; the form is one-time")
+	}
+	if bal, rows, _ := bonusTP(t, db, user.ID); bal != 1 || rows != 1 {
+		t.Fatalf("balance=%v rows=%d after a refused resubmission; want it unchanged", bal, rows)
+	}
+}
+
+func TestSubmitRewardClaim_UnverifiedUserEarnsNothing(t *testing.T) {
+	db := setupRewardClaimTestDB(t)
+	h := newRewardClaimHandler(t, db)
+	user := mkRcUser(t, db, "ada", false, models.RoleUser)
+	c, w := spotCtx(t, http.MethodPost, validSignupBody, user)
+	h.SubmitRewardClaim(c)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+	if bal, rows, _ := bonusTP(t, db, user.ID); bal != 0 || rows != 0 {
+		t.Fatalf("balance=%v rows=%d; a refused submission must credit nothing", bal, rows)
+	}
+}
+
+// Onboarding: 10 verified referrals earn the 10 TP bonus on submission.
+func TestSubmitRewardClaim_OnboardingPaysTenTP(t *testing.T) {
+	db := setupRewardClaimTestDB(t)
+	h := newRewardClaimHandler(t, db)
+	user := mkRcUser(t, db, "ada", true, models.RoleUser)
+	mkCompletedTxFor(t, db, user.ID)
+	names := make([]string, 0, models.MinOnboardingReferrals)
+	for i := 0; i < models.MinOnboardingReferrals; i++ {
+		name := "ref" + string(rune('a'+i))
+		r := mkRcUser(t, db, name, true, models.RoleUser)
+		db.Model(&models.User{}).Where("id = ?", r.ID).Update("referred_by", user.ID)
+		names = append(names, name)
+	}
+	body := `{"kind":"onboarding","payoutMethod":"bank","payoutDetails":"0123456789 GTB","invitedUsernames":"` + strings.Join(names, ",") + `"}`
+	c, w := spotCtx(t, http.MethodPost, body, user)
+	h.SubmitRewardClaim(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if bal, rows, src := bonusTP(t, db, user.ID); bal != 10 || rows != 1 || src != "onboarding_bonus" {
+		t.Fatalf("balance=%v rows=%d source=%q; want 10 TP once as onboarding_bonus", bal, rows, src)
+	}
+}
+
+// The onboarding bonus is earned only with 10 VERIFIED referrals, not 10 listed names.
+func TestSubmitRewardClaim_OnboardingWithTooFewVerifiedEarnsNothing(t *testing.T) {
+	db := setupRewardClaimTestDB(t)
+	h := newRewardClaimHandler(t, db)
+	user := mkRcUser(t, db, "ada", true, models.RoleUser)
+	mkCompletedTxFor(t, db, user.ID)
+	names := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		name := "ref" + string(rune('a'+i))
+		r := mkRcUser(t, db, name, i < 9, models.RoleUser) // the tenth is not KYC-verified
+		db.Model(&models.User{}).Where("id = ?", r.ID).Update("referred_by", user.ID)
+		names = append(names, name)
+	}
+	body := `{"kind":"onboarding","payoutMethod":"bank","payoutDetails":"0123456789 GTB","invitedUsernames":"` + strings.Join(names, ",") + `"}`
+	c, w := spotCtx(t, http.MethodPost, body, user)
+	h.SubmitRewardClaim(c)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 with 9 verified referrals", w.Code)
+	}
+	if bal, rows, _ := bonusTP(t, db, user.ID); bal != 0 || rows != 0 {
+		t.Fatalf("balance=%v rows=%d; nothing is credited without 10 verified referrals", bal, rows)
+	}
+}
+
+// The amounts are the admin's: an edit applies to the next submission, and 0 means no bonus.
+func TestSubmitRewardClaim_BonusFollowsTheAdminProgram(t *testing.T) {
+	db := setupRewardClaimTestDB(t)
+	if err := db.Exec(`CREATE TABLE tp_program_configs (
+		id TEXT PRIMARY KEY, user_pct REAL NOT NULL, upline_pct REAL NOT NULL, pool_pct REAL NOT NULL,
+		zero_fee_tp REAL NOT NULL, payout_day INTEGER NOT NULL,
+		signup_bonus_tp REAL NOT NULL DEFAULT 1, onboarding_bonus_tp REAL NOT NULL DEFAULT 10,
+		updated_by TEXT, created_at DATETIME, updated_at DATETIME)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	prog := services.NewTPProgramConfigService(db)
+	graph := services.NewReferralGraphService(db)
+	svc := services.NewRewardClaimService(db, services.NewRewardEligibilityService(db, graph), graph).WithTPProgram(prog)
+	h := NewRewardClaimHandler(db, svc, graph)
+
+	cfg := models.DefaultTPProgramConfig()
+	cfg.SignupBonusTP = 2.5
+	if _, err := prog.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	a := mkRcUser(t, db, "ada", true, models.RoleUser)
+	c, _ := spotCtx(t, http.MethodPost, validSignupBody, a)
+	h.SubmitRewardClaim(c)
+	if bal, _, _ := bonusTP(t, db, a.ID); bal != 2.5 {
+		t.Fatalf("balance = %v, want the admin's 2.5", bal)
+	}
+
+	cfg.SignupBonusTP = 0
+	if _, err := prog.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := mkRcUser(t, db, "bob", true, models.RoleUser)
+	c2, w2 := spotCtx(t, http.MethodPost, validSignupBody, b)
+	h.SubmitRewardClaim(c2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("status = %d; a zero bonus still files the form", w2.Code)
+	}
+	if bal, rows, _ := bonusTP(t, db, b.ID); bal != 0 || rows != 0 {
+		t.Fatalf("balance=%v rows=%d with the bonus set to 0", bal, rows)
 	}
 }

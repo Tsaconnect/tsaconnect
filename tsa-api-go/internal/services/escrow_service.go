@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -18,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 // ProductEscrow ABI — subset of functions and events we interact with
@@ -33,7 +35,14 @@ const productEscrowABI = `[
 	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"orderId","type":"bytes32"}],"name":"orders","outputs":[{"name":"buyer","type":"address"},{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"productAmount","type":"uint256"},{"name":"shippingAmount","type":"uint256"},{"name":"platformFee","type":"uint256"},{"name":"buyerUpline","type":"address"},{"name":"createdAt","type":"uint256"},{"name":"sellerDelivered","type":"bool"},{"name":"buyerConfirmed","type":"bool"},{"name":"refundRequested","type":"bool"},{"name":"resolved","type":"bool"}],"stateMutability":"view","type":"function"},
-	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"}
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"token","type":"address"},{"indexed":false,"name":"productAmount","type":"uint256"},{"indexed":false,"name":"shippingAmount","type":"uint256"},{"indexed":false,"name":"platformFee","type":"uint256"}],"name":"OrderCreated","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"ReceiptConfirmed","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"OrderCancelled","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"DeliveryMarked","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"seller","type":"address"},{"indexed":false,"name":"sellerAmount","type":"uint256"},{"indexed":false,"name":"systemAmount","type":"uint256"},{"indexed":false,"name":"buyerCashback","type":"uint256"},{"indexed":false,"name":"uplineAmount","type":"uint256"}],"name":"OrderReleased","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"}],"name":"RefundRequested","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":true,"name":"buyer","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"OrderRefunded","type":"event"},
+	{"anonymous":false,"inputs":[{"indexed":true,"name":"orderId","type":"bytes32"},{"indexed":false,"name":"refundedToBuyer","type":"bool"}],"name":"DisputeResolved","type":"event"}
 ]`
 
 var parsedEscrowABI abi.ABI
@@ -55,6 +64,19 @@ type EscrowService struct {
 	rates sync.Map
 	// caller serves the read-only fee lookups; nil without an RPC client.
 	caller contractCaller
+	// receipts proves a submitted transaction; nil without an RPC client.
+	receipts escrowReceiptReader
+}
+
+// escrowReceiptReader is the receipt lookup VerifyOrderEvent needs.
+type escrowReceiptReader interface {
+	GetTransactionReceipt(txHash string) (*types.Receipt, error)
+}
+
+// NewEscrowServiceWithBackend builds an EscrowService over the given chain
+// readers instead of an RPC client, so callers can be tested with a fake chain.
+func NewEscrowServiceWithBackend(cfg *config.Config, caller contractCaller, receipts escrowReceiptReader) *EscrowService {
+	return &EscrowService{escrowAddress: cfg.ProductEscrowAddress, cfg: cfg, caller: caller, receipts: receipts}
 }
 
 // contractCaller is the eth_call surface the fee lookups need.
@@ -113,6 +135,7 @@ func NewEscrowService(client *blockchain.EVMClient, cfg *config.Config) *EscrowS
 	}
 	if client != nil {
 		es.caller = client.Client
+		es.receipts = client
 	}
 	return es
 }
@@ -160,6 +183,16 @@ func (s *EscrowService) PrepareRequestRefund(orderId [32]byte, buyer, escrowAddr
 		return nil, fmt.Errorf("failed to pack requestRefund: %w", err)
 	}
 	return s.buildUnsignedTx(buyer, escrowAddr, data)
+}
+
+// PrepareMarkDelivered encodes the markDelivered call against the order's escrow contract.
+// Until it lands on-chain the buyer's requestRefund is an instant full refund.
+func (s *EscrowService) PrepareMarkDelivered(orderId [32]byte, seller, escrowAddr string) ([]byte, error) {
+	data, err := parsedEscrowABI.Pack("markDelivered", orderId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack markDelivered: %w", err)
+	}
+	return s.buildUnsignedTx(seller, escrowAddr, data)
 }
 
 // PrepareCancelOrder encodes the cancelOrder call against the order's escrow contract.
@@ -273,6 +306,102 @@ func (s *EscrowService) VerifyEscrowCreated(txHash string, expectedOrderID [32]b
 	return findOrderCreated(receipt.Logs, common.HexToAddress(s.escrowAddress), expectedOrderID)
 }
 
+// ErrOrderEventNotFound: the transaction is mined but is not the escrow action
+// claimed for the order. Any other VerifyOrderEvent error is an unreadable
+// chain, which a caller may retry.
+var ErrOrderEventNotFound = errors.New("the transaction does not do this to the order")
+
+// ErrReceiptPending means the node has no receipt for the transaction yet:
+// it is still pending, or the node is a block behind. Retry, do not refuse.
+var ErrReceiptPending = errors.New("the transaction has no receipt yet")
+
+// VerifyOrderEvent checks that txHash succeeded and emitted event (an escrow
+// event whose first indexed argument is the order id) on escrowAddr FOR orderID,
+// and returns that log. A mined transaction proves nothing about an order by
+// itself: without the event, any successful transaction would complete, refund
+// or resolve it. escrowAddr is the order's own escrow, which may be an older
+// deployment than the configured one.
+func (s *EscrowService) VerifyOrderEvent(txHash, escrowAddr, event string, orderID [32]byte) (*types.Log, error) {
+	if s.receipts == nil {
+		return nil, fmt.Errorf("blockchain client not available")
+	}
+	receipt, err := s.receipts.GetTransactionReceipt(txHash)
+	if err != nil {
+		// A node answers "not found" for a transaction it has not seen mined yet;
+		// the caller retries rather than calling it a failure.
+		if errors.Is(err, ethereum.NotFound) {
+			return nil, ErrReceiptPending
+		}
+		return nil, fmt.Errorf("failed to get receipt: %w", err)
+	}
+	if receipt.Status != 1 {
+		return nil, fmt.Errorf("%w: transaction failed", ErrOrderEventNotFound)
+	}
+	return findOrderEvent(receipt.Logs, common.HexToAddress(escrowAddr), event, orderID)
+}
+
+// findOrderEvent returns the log of event emitted by escrowAddr for orderID.
+func findOrderEvent(logs []*types.Log, escrowAddr common.Address, event string, orderID [32]byte) (*types.Log, error) {
+	ev, ok := parsedEscrowABI.Events[event]
+	if !ok {
+		return nil, fmt.Errorf("unknown escrow event %q", event)
+	}
+	for _, l := range logs {
+		if l.Address == escrowAddr && len(l.Topics) >= 2 && l.Topics[0] == ev.ID && l.Topics[1] == common.Hash(orderID) {
+			return l, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: no %s for this order in the receipt", ErrOrderEventNotFound, event)
+}
+
+// OrderReleasedTo decodes an OrderReleased log: who the escrow paid as the
+// seller, and the sellerAmount it paid. The chain's own record of a release is
+// the only thing a payout is funded from.
+func OrderReleasedTo(l *types.Log) (seller common.Address, amount *big.Int, err error) {
+	if len(l.Topics) < 3 {
+		return common.Address{}, nil, fmt.Errorf("decode OrderReleased: %d topics", len(l.Topics))
+	}
+	vals, err := parsedEscrowABI.Events["OrderReleased"].Inputs.NonIndexed().Unpack(l.Data)
+	if err != nil || len(vals) != 4 {
+		return common.Address{}, nil, fmt.Errorf("decode OrderReleased: %v", err)
+	}
+	amt, ok := vals[0].(*big.Int)
+	if !ok {
+		return common.Address{}, nil, fmt.Errorf("decode OrderReleased: unexpected value type")
+	}
+	return common.BytesToAddress(l.Topics[2].Bytes()), amt, nil
+}
+
+// DisputeResolvedRefund reports whether a DisputeResolved log refunded the
+// buyer. The chain's answer is the only one: an admin's request body is not.
+func DisputeResolvedRefund(l *types.Log) (bool, error) {
+	vals, err := parsedEscrowABI.Events["DisputeResolved"].Inputs.NonIndexed().Unpack(l.Data)
+	if err != nil || len(vals) != 1 {
+		return false, fmt.Errorf("decode DisputeResolved: %v", err)
+	}
+	refunded, ok := vals[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("decode DisputeResolved: unexpected value type")
+	}
+	return refunded, nil
+}
+
+// OrderMatchesEscrow reports whether the escrow's record of an order is this
+// order, funded as it was priced: unresolved (the money is still held), this
+// buyer paying this seller, in the order's token, the amounts it was priced at.
+// The order id is derivable from the order's UUID, so anyone could escrow under
+// it, and the buyer signs createOrder on their own device — the seller and
+// token in it are theirs to choose until this is checked.
+func OrderMatchesEscrow(o *models.Order, sellerWallet, buyerWallet, tokenAddr string, onChain *OnChainOrder) bool {
+	product, okP := new(big.Int).SetString(o.ProductAmount, 10)
+	shipping, okS := new(big.Int).SetString(o.ShippingAmount, 10)
+	return !(!okP || !okS || tokenAddr == "" || sellerWallet == "" || buyerWallet == "" || onChain == nil || onChain.Resolved ||
+		!strings.EqualFold(onChain.Buyer.Hex(), common.HexToAddress(buyerWallet).Hex()) ||
+		!strings.EqualFold(onChain.Seller.Hex(), common.HexToAddress(sellerWallet).Hex()) ||
+		!strings.EqualFold(onChain.Token.Hex(), common.HexToAddress(tokenAddr).Hex()) ||
+		onChain.ProductAmount.Cmp(product) != 0 || onChain.ShippingAmount.Cmp(shipping) != 0)
+}
+
 // OnChainOrder is an order as the escrow's orders(id) getter records it.
 type OnChainOrder struct {
 	Buyer, Seller, Token                       common.Address
@@ -280,6 +409,9 @@ type OnChainOrder struct {
 	CreatedAt                                  time.Time
 	// Resolved: the escrow has paid it out (refund or release); it holds nothing.
 	Resolved bool
+	// SellerDelivered: the seller's markDelivered is on-chain, so a buyer's
+	// refund request becomes a dispute instead of an instant refund.
+	SellerDelivered bool
 }
 
 // EscrowedOrder reads the configured escrow's record of orderId, or nil when
@@ -287,6 +419,12 @@ type OnChainOrder struct {
 // was ever escrowed). Only a successful read is an answer — an RPC failure is
 // an error, never "not escrowed", because callers release stock on nil.
 func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*OnChainOrder, error) {
+	return s.ReadOrder(ctx, s.escrowAddress, orderId)
+}
+
+// ReadOrder is EscrowedOrder against escrowAddr — an order's own escrow, which
+// may be an older deployment than the configured one.
+func (s *EscrowService) ReadOrder(ctx context.Context, escrowAddr string, orderId [32]byte) (*OnChainOrder, error) {
 	if s.caller == nil {
 		return nil, fmt.Errorf("blockchain client not available")
 	}
@@ -294,7 +432,7 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 	if err != nil {
 		return nil, fmt.Errorf("pack orders: %w", err)
 	}
-	escrow := common.HexToAddress(s.escrowAddress)
+	escrow := common.HexToAddress(escrowAddr)
 	out, err := s.caller.CallContract(ctx, ethereum.CallMsg{To: &escrow, Data: data}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("orders call: %w", err)
@@ -310,8 +448,9 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 	shipping, ok5 := vals[4].(*big.Int)
 	fee, ok6 := vals[5].(*big.Int)
 	created, ok7 := vals[7].(*big.Int)
-	resolved, ok8 := vals[11].(bool)
-	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8) {
+	delivered, ok8 := vals[8].(bool)
+	resolved, ok9 := vals[11].(bool)
+	if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9) {
 		return nil, fmt.Errorf("decode orders: unexpected value types")
 	}
 	if buyer == (common.Address{}) {
@@ -321,7 +460,7 @@ func (s *EscrowService) EscrowedOrder(ctx context.Context, orderId [32]byte) (*O
 		Buyer: buyer, Seller: seller, Token: token,
 		ProductAmount: product, ShippingAmount: shipping, PlatformFee: fee,
 		CreatedAt: time.Unix(created.Int64(), 0),
-		Resolved:  resolved,
+		Resolved:  resolved, SellerDelivered: delivered,
 	}, nil
 }
 

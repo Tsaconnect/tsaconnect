@@ -155,6 +155,10 @@ func AutoMigrate() error {
 		&models.RequestIdempotency{},
 		&models.WebhookEvent{},
 		&models.P2PPaymentMethod{},
+		&models.SellerPayoutMethod{},
+		&models.SellerPayoutChange{},
+		&models.SellerPayoutOrder{},
+		&models.SellerPayoutSetting{},
 		&models.P2PAd{},
 		&models.P2PTrade{},
 		&models.PoolOrder{},
@@ -577,6 +581,12 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_ramp_legs_one_pending_refund
 	    ON ramp_legs (order_id)
 	    WHERE kind = 'refund' AND status = 'pending'`)
+
+	// Seller payouts — at most one deposit leg per payout. Kind 'deposit' was
+	// reserved and unused, so no existing row can block the build. Idempotent.
+	if err := DB.Exec(models.RampLegsOneLiveDepositIndexSQL).Error; err != nil {
+		log.Printf("[Migrate] WARNING could not build uq_ramp_legs_one_live_deposit: %v — a second deposit for one payout is then stopped only by the machine, not the database", err)
+	}
 
 	// Company wallet — "one live sale per order" (spec 2026-10-03 §5.4). Kind
 	// 'sale' is new, so no existing row can block the build. Idempotent.
