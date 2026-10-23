@@ -93,6 +93,22 @@ func (o *SellerPayoutOrchestrator) WithCompany(c SellerPayoutCompanyPayer, feeKo
 	return o
 }
 
+// WithCompanyMax is the largest payout the company route takes (0 = no cap): an
+// operator's re-route obeys the same limit the planner does.
+func (o *SellerPayoutOrchestrator) WithCompanyMax(maxKobo int64) *SellerPayoutOrchestrator {
+	o.companyMaxKobo = maxKobo
+	return o
+}
+
+// companyNothingSent is true only when no company transfer can exist for the
+// payout: none was ever attempted, or the ONE attempt made was refused on its first
+// reference (a refusal proves nothing exists only for a reference's first attempt;
+// a later reference's refusal says nothing about an earlier one that may have landed).
+func companyNothingSent(p *models.SellerPayoutOrder) bool {
+	return p.CompanyAttempts == 0 ||
+		(p.CompanyAttempts == 1 && p.ParkedFrom == models.SellerPayoutPayingCompany && p.RetrySafe)
+}
+
 // advanceCompany takes one step for a company-route payout.
 func (o *SellerPayoutOrchestrator) advanceCompany(ctx context.Context, p *models.SellerPayoutOrder) error {
 	if p.Status == models.SellerPayoutPayingCompany {

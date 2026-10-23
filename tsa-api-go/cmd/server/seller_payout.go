@@ -54,7 +54,7 @@ func wireSellerPayouts(cfg *config.Config, chains *services.BlockchainService, t
 		cfg.RampConversionRetryWindow, cfg.RampConversionLegCeiling, nil,
 	).WithEvents(bus).WithSwitch(sw).WithAlerts(alerts)
 	if companyPayer != nil {
-		orchestrator.WithCompany(companyPayer, cfg.SellerPayoutCompanyFeeKobo)
+		orchestrator.WithCompany(companyPayer, cfg.SellerPayoutCompanyFeeKobo).WithCompanyMax(cfg.SellerPayoutCompanyMaxKobo)
 	}
 	scheduler.Register(jobs.NewSellerPayoutWorker(orchestrator, 30*time.Second), jobs.AlertOnFailureStreak())
 	log.Printf("[seller-payout] enabled treasury=%s bridge_bps=%d company_route=%v company_new_orders_max_ngn=%d company_fee_ngn=%d take_bps=%d",

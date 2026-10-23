@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -48,24 +49,31 @@ func (a *SellerPayoutAdmin) Reroute(ctx context.Context, id, admin uuid.UUID, no
 	if err != nil {
 		return err
 	}
+	return a.rerouteLoaded(ctx, p, admin, note, to)
+}
+
+// rerouteLoaded is Reroute on a row already read: every safety decision below is
+// made on p, and the final update only applies while the row is still exactly p.
+func (a *SellerPayoutAdmin) rerouteLoaded(ctx context.Context, p *models.SellerPayoutOrder, admin uuid.UUID, note, to string) error {
 	if p.Status != models.SellerPayoutNeedsReview {
 		return ErrPayoutNotParked
 	}
 	if p.Venue == to {
 		return fmt.Errorf("%w: it is already on the %s route", ErrPayoutBadRoute, to)
 	}
-	if to == models.SellerPayoutVenueCompany && a.orch.company == nil {
-		return ErrPayoutRouteUnavailable
+	if to == models.SellerPayoutVenueCompany {
+		if err := a.companyCanTake(ctx, p); err != nil {
+			return err
+		}
 	}
-	if to == models.SellerPayoutVenuePaycrest && !a.orch.treasuryReadyForBridge() {
+	if to == models.SellerPayoutVenuePaycrest && !a.orch.canBridge(p) {
 		return ErrPayoutRouteUnavailable
 	}
 	if p.PaycrestOrderID != nil {
 		return ErrPayoutRerouteUnsafe
 	}
-	// A company transfer that may have left blocks any change of route: only a
-	// provider refusal (retry-safe, parked from the transfer) proves none exists.
-	if p.CompanyAttempts > 0 && !(p.ParkedFrom == models.SellerPayoutPayingCompany && p.RetrySafe) {
+	// A company transfer that may have left blocks any change of route.
+	if !companyNothingSent(p) {
 		return ErrPayoutRerouteUnsafe
 	}
 	legs, err := a.orch.legs.ForOrder(ctx, p.ID)
@@ -83,26 +91,66 @@ func (a *SellerPayoutAdmin) Reroute(ctx context.Context, id, admin uuid.UUID, no
 		status = models.SellerPayoutAwaitingRelease
 	}
 	updates := map[string]any{
-		"venue": to, "parked_from": "", "retry_safe": false, "failure_reason": "",
+		"status": status, "venue": to, "parked_from": "", "retry_safe": false, "failure_reason": "",
 		"attempt_started_at": a.orch.now(), "next_attempt_at": nil,
 	}
 	if p.CompanyAttempts > 0 {
-		// Whatever comes next on the company route is a new attempt on a new reference.
+		// Only a refusal on the first reference gets here (companyNothingSent): no
+		// transfer exists, so the counter starts over, and any later company
+		// attempt takes a new reference generation.
+		updates["company_attempts"] = 0
 		updates["company_ref_gen"] = gorm.Expr("company_ref_gen + 1")
 		updates["company_transfer_id"] = ""
 	}
-	if err := a.orch.move(ctx, p, status, updates, models.SellerPayoutNeedsReview); err != nil {
-		return notParkedIfRaced(err)
+	// Compare-and-set on everything the safety decision read, not just the status: a
+	// retry and a new park by another operator in between changes at least one of them.
+	res := a.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).
+		Where("id = ? AND status = ? AND venue = ? AND parked_from = ? AND company_attempts = ? AND paycrest_order_id IS NULL AND updated_at = ?",
+			p.ID, models.SellerPayoutNeedsReview, p.Venue, p.ParkedFrom, p.CompanyAttempts, p.UpdatedAt).
+		Updates(updates)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return ErrPayoutNotParked
 	}
 	a.audit(ctx, "seller_payout.reroute", admin, p, map[string]any{
-		"note": note, "from": p.Venue, "to": to, "status": status})
+		"note": note, "fromVenue": p.Venue, "to": to, "status": status})
 	return nil
 }
 
-// treasuryReadyForBridge is true when the Paycrest route can run at all: a live
-// treasury with the Base lane the bridge lands on.
-func (o *SellerPayoutOrchestrator) treasuryReadyForBridge() bool {
-	return o.treasury != nil && o.treasury.Enabled() && o.treasury.Address() != "" && o.treasury.Lane("base") != nil
+// canBridge is true when the Paycrest route can run for p at all: the source lane,
+// the Base lane the bridge lands on, a LiFi quoter and the Paycrest service.
+func (o *SellerPayoutOrchestrator) canBridge(p *models.SellerPayoutOrder) bool {
+	return o.treasury != nil && o.treasury.Enabled() && o.treasury.Address() != "" &&
+		o.treasury.Lane(p.ChainKey) != nil && o.treasury.Lane("base") != nil && o.lifi != nil && o.paycrest != nil
+}
+
+// companyCanTake applies the company route's own limits to a payout being moved
+// onto it: a central account is set up, the amount is within the route's range, and
+// the float covers it on top of what is already promised. Anything else is refused
+// here and not parked later.
+func (a *SellerPayoutAdmin) companyCanTake(ctx context.Context, p *models.SellerPayoutOrder) error {
+	if a.orch.company == nil {
+		return ErrPayoutRouteUnavailable
+	}
+	if p.FiatTargetKobo < companyMinPayoutKobo || (a.orch.companyMaxKobo > 0 && p.FiatTargetKobo > a.orch.companyMaxKobo) {
+		return fmt.Errorf("%w: ₦%.2f is outside what the company route pays", ErrPayoutRouteUnavailable, float64(p.FiatTargetKobo)/100)
+	}
+	promised, n, err := openCompanyPromises(ctx, a.db)
+	if err != nil {
+		return err
+	}
+	bals, err := a.orch.company.FetchBalances(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot read the central account balance: %w", err)
+	}
+	avail, ok := ngnAvailable(bals)
+	if need := promised + p.FiatTargetKobo + (n+1)*a.orch.companyFeeKobo; !ok || avail*100 < float64(need) {
+		return fmt.Errorf("%w: the central account holds ₦%.2f and ₦%.2f is needed with what is already promised",
+			ErrPayoutRouteUnavailable, avail, float64(need)/100)
+	}
+	return nil
 }
 
 // PayoutHealth is what an operator needs at a glance: can the company route pay,
@@ -133,12 +181,13 @@ type CentralHealth struct {
 
 // TreasuryChainHealth is the treasury's native gas and kept stablecoins on a chain.
 type TreasuryChainHealth struct {
-	Chain     string  `json:"chain"`
-	Address   string  `json:"address"`
-	NativeWei string  `json:"nativeWei"`
-	FloorWei  string  `json:"floorWei"`
-	StableUSD float64 `json:"stableUsd"`
-	Low       bool    `json:"low"`
+	Chain     string `json:"chain"`
+	Address   string `json:"address"`
+	NativeWei string `json:"nativeWei"`
+	FloorWei  string `json:"floorWei"`
+	// StableUSD is null when a stablecoin balance could not be read (see problems).
+	StableUSD *float64 `json:"stableUsd"`
+	Low       bool     `json:"low"`
 }
 
 func (a *SellerPayoutAdmin) Health(ctx context.Context) (*PayoutHealth, error) {
@@ -184,7 +233,7 @@ func (a *SellerPayoutAdmin) Health(ctx context.Context) (*PayoutHealth, error) {
 				h.Problems = append(h.Problems, "the central account lists no NGN balance")
 				break
 			}
-			availKobo := int64(avail * 100)
+			availKobo := int64(math.Round(avail * 100))
 			h.Central = &CentralHealth{
 				AvailableKobo: availKobo, PromisedKobo: promised, OpenPayouts: n,
 				FreeKobo: availKobo - promised - n*a.orch.companyFeeKobo,
@@ -199,7 +248,13 @@ func (a *SellerPayoutAdmin) Health(ctx context.Context) (*PayoutHealth, error) {
 		}
 		sort.Slice(floats, func(i, j int) bool { return floats[i].Chain < floats[j].Chain })
 		for _, f := range floats {
-			c := TreasuryChainHealth{Chain: f.Chain, Address: f.Address, StableUSD: f.TokenUSD}
+			c := TreasuryChainHealth{Chain: f.Chain, Address: f.Address}
+			if f.TokenReadFailed {
+				h.Problems = append(h.Problems, "treasury "+f.Chain+" stablecoin balance")
+			} else {
+				usd := f.TokenUSD
+				c.StableUSD = &usd
+			}
 			if f.BalanceWei != nil {
 				c.NativeWei = f.BalanceWei.String()
 			}
