@@ -16,6 +16,7 @@ func setupTPProgramDB(t *testing.T) *gorm.DB {
 		id TEXT PRIMARY KEY,
 		user_pct REAL NOT NULL, upline_pct REAL NOT NULL, pool_pct REAL NOT NULL,
 		zero_fee_tp REAL NOT NULL, payout_day INTEGER NOT NULL,
+		signup_bonus_tp REAL NOT NULL DEFAULT 1, onboarding_bonus_tp REAL NOT NULL DEFAULT 10,
 		updated_by TEXT, created_at DATETIME, updated_at DATETIME
 	)`).Error; err != nil {
 		t.Fatalf("ddl: %v", err)
@@ -167,10 +168,10 @@ func TestRewardRatesFor_FollowsLiveSplitsAndProgram(t *testing.T) {
 	svc := NewFeeDistributionService(db, NewReferralGraphService(db), 100).
 		WithTPProgram(NewTPProgramConfigService(db))
 
-	// Product sale: buyer 15% of the fee back; TP = 5% of the 70% the platform keeps.
+	// Product sale: buyer 8% of the fee back; TP = 5% of the 84% the platform keeps.
 	got := svc.RewardRatesFor(models.FeatureProductMerchant)
-	if !approx(got.BuyerCashback, 0.15) || !approx(got.UplineCashback, 0.15) ||
-		!approx(got.BuyerTP, 0.7*0.05*100) || !approx(got.USDPerTP, 0.01) {
+	if !approx(got.BuyerCashback, 0.08) || !approx(got.UplineCashback, 0.08) ||
+		!approx(got.BuyerTP, 0.84*0.05*100) || !approx(got.USDPerTP, 0.01) {
 		t.Fatalf("default rates = %+v", got)
 	}
 
@@ -178,8 +179,8 @@ func TestRewardRatesFor_FollowsLiveSplitsAndProgram(t *testing.T) {
 	if _, err := svc.tpProgram.Save(models.TPProgramConfig{UserPct: 0.10, UplinePct: 0.05, PoolPct: 0.02, ZeroFeeTP: 0.001, PayoutDay: 24}); err != nil {
 		t.Fatal(err)
 	}
-	if got := svc.RewardRatesFor(models.FeatureProductMerchant); !approx(got.BuyerTP, 0.7*0.10*100) {
-		t.Fatalf("after the edit BuyerTP = %v, want %v", got.BuyerTP, 0.7*0.10*100)
+	if got := svc.RewardRatesFor(models.FeatureProductMerchant); !approx(got.BuyerTP, 0.84*0.10*100) {
+		t.Fatalf("after the edit BuyerTP = %v, want %v", got.BuyerTP, 0.84*0.10*100)
 	}
 
 	var nilSvc *FeeDistributionService

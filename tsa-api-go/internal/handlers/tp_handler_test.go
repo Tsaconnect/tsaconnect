@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -208,16 +209,17 @@ func TestSettleFeeEarnings_CreditsCashbackOnce(t *testing.T) {
 		t.Fatalf("expected exactly 1 upline cashback row under v2, got %d (double-count?)", uplineRows)
 	}
 
-	// And the credited balances reflect a single 15% credit each (= $1.5), not a
-	// doubled/legacy-base amount (product_merchant carved split: buyer 15%, upline 15%).
+	// And the credited balances reflect a single 8% credit each (= $0.80 on the $10
+	// fee; PM 2026-10-23), not a doubled/legacy-base amount (product_merchant carved
+	// split: buyer 8%, upline 8%).
 	var b, u models.User
 	db.First(&b, "id = ?", buyer.ID)
 	db.First(&u, "id = ?", upline.ID)
-	if b.CashbackBalance != 1.5 {
-		t.Fatalf("buyer cashback balance = %v, want exactly 1.5 (single 15%% credit)", b.CashbackBalance)
+	if math.Abs(b.CashbackBalance-0.8) > 1e-9 {
+		t.Fatalf("buyer cashback balance = %v, want 0.8 (single 8%% credit)", b.CashbackBalance)
 	}
-	if u.CashbackBalance != 1.5 {
-		t.Fatalf("upline cashback balance = %v, want exactly 1.5 (single 15%% credit)", u.CashbackBalance)
+	if math.Abs(u.CashbackBalance-0.8) > 1e-9 {
+		t.Fatalf("upline cashback balance = %v, want 0.8 (single 8%% credit)", u.CashbackBalance)
 	}
 }
 
