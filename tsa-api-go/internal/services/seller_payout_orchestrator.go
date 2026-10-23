@@ -457,7 +457,14 @@ func (o *SellerPayoutOrchestrator) advanceBridge(ctx context.Context, p *models.
 	}
 	// The retry window runs from the first attempt, not from the release.
 	if first := bridgeLegByAttempt(legs, 1); first != nil && o.now().After(o.windowFrom(p, first.CreatedAt).Add(o.retryWindow)) {
-		return o.park(ctx, p, "no bridge route fit inside the retry window")
+		// Every attempt was refused before it broadcast (a stranded one parked above),
+		// so nothing that moves money was sent: a retry, or another route, is safe.
+		for _, l := range legs {
+			if l.TxHash != "" {
+				return o.park(ctx, p, "no bridge route fit inside the retry window")
+			}
+		}
+		return o.parkSafe(ctx, p, "no bridge route fit inside the retry window")
 	}
 	return o.startBridge(ctx, p, legs)
 }
