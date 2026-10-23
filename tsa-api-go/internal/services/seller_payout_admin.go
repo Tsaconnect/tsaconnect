@@ -162,13 +162,13 @@ func (a *SellerPayoutAdmin) Retry(ctx context.Context, id, admin uuid.UUID, note
 		}
 	}
 	updates := map[string]any{"failure_reason": "", "retry_safe": false, "attempt_started_at": a.orch.now()}
-	if to == models.SellerPayoutPayingCompany && p.CompanyTransferID != "" && a.orch.company != nil {
+	if to == models.SellerPayoutPayingCompany && p.CompanyTransferID != "" {
 		// A transfer exists: it must be provably dead before another is sent.
-		tr, terr := a.orch.company.GetTransfer(ctx, p.CompanyTransferID)
-		if terr != nil {
-			return fmt.Errorf("cannot read transfer %s to prove it failed: %w", p.CompanyTransferID, terr)
+		dead, derr := a.transferDead(ctx, p.CompanyTransferID)
+		if derr != nil {
+			return derr
 		}
-		if st := strings.ToUpper(strings.TrimSpace(tr.Status)); st != "FAILED" && st != "CANCELLED" && st != "CANCELED" {
+		if !dead {
 			return ErrPayoutStillLive
 		}
 	}
@@ -178,12 +178,14 @@ func (a *SellerPayoutAdmin) Retry(ctx context.Context, id, admin uuid.UUID, note
 		to = models.SellerPayoutReceived
 		updates["company_ref_gen"] = gorm.Expr("company_ref_gen + 1")
 		updates["company_transfer_id"] = ""
+		updates["company_paid_at"] = nil
 	}
 	// A retry is a fresh start for the retry windows.
 	if err := a.orch.move(ctx, p, to, updates, models.SellerPayoutNeedsReview); err != nil {
 		return notParkedIfRaced(err)
 	}
-	a.audit(ctx, "seller_payout.retry", admin, p, map[string]any{"note": note, "force": force, "to": to})
+	a.audit(ctx, "seller_payout.retry", admin, p, map[string]any{
+		"note": note, "force": force, "to": to, "oldCompanyRef": p.CompanyRef, "oldTransferId": p.CompanyTransferID})
 	return nil
 }
 
@@ -220,6 +222,15 @@ func (a *SellerPayoutAdmin) MarkPaid(ctx context.Context, id, admin uuid.UUID, n
 // hasLiveVenue is true while a Paycrest sale of this payout has not ended or a
 // leg is still pending: paying the seller by hand then risks paying twice.
 func (a *SellerPayoutAdmin) hasLiveVenue(ctx context.Context, p *models.SellerPayoutOrder) (bool, error) {
+	if p.Venue == models.SellerPayoutVenueCompany && p.CompanyTransferID != "" {
+		dead, err := a.transferDead(ctx, p.CompanyTransferID)
+		if err != nil {
+			return false, err
+		}
+		if !dead {
+			return true, nil
+		}
+	}
 	if p.PaycrestOrderID != nil {
 		var sale models.PaycrestOrderRecord
 		if err := a.db.WithContext(ctx).Select("id", "status").First(&sale, "id = ?", *p.PaycrestOrderID).Error; err != nil {
@@ -385,4 +396,22 @@ func (a *SellerPayoutAdmin) MarkRebalanced(ctx context.Context, ids []uuid.UUID,
 		fmt.Printf("[seller-payout] audit seller_payout.rebalanced failed: %v\n", err)
 	}
 	return affected, nil
+}
+
+// transferDead reports whether a central-account transfer is provably over WITHOUT
+// having paid (failed, cancelled or reversed), read from the provider. It fails
+// closed: with no payer or an unreadable transfer it errors, never "dead".
+func (a *SellerPayoutAdmin) transferDead(ctx context.Context, transferID string) (bool, error) {
+	if a.orch.company == nil {
+		return false, fmt.Errorf("%w: the central account is not configured, so the transfer cannot be read", ErrPayoutStillLive)
+	}
+	tr, err := a.orch.company.GetTransfer(ctx, transferID)
+	if err != nil {
+		return false, fmt.Errorf("cannot read transfer %s to prove it is over: %w", transferID, err)
+	}
+	switch strings.ToUpper(strings.TrimSpace(tr.Status)) {
+	case "FAILED", "CANCELLED", "CANCELED", "REVERSED":
+		return true, nil
+	}
+	return false, nil
 }

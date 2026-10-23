@@ -981,7 +981,7 @@ func buyerLocation(req createOrderRequest, user *models.User) (city, state, coun
 
 // priceCartItems validates and prices every cart item for token inside tx. It
 // writes nothing: stock is checked here and decremented by the caller.
-func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items []models.CartItem, req createOrderRequest, rates pricingRates) ([]pricedCartLine, *cartPricingError) {
+func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items []models.CartItem, req createOrderRequest, rates pricingRates, commit bool) ([]pricedCartLine, *cartPricingError) {
 	buyerCity, buyerState, buyerCountry := buyerLocation(req, user)
 	token := rates.token
 
@@ -1109,7 +1109,11 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 				return nil, &cartPricingError{http.StatusBadRequest, fmt.Sprintf("%s resolves to a zero on-chain amount for %s", product.Name, token)}
 			}
 
-			if perr := ch.planLinePayout(context.Background(), &line, token); perr != nil {
+			planCtx := context.Background()
+			if commit {
+				planCtx = services.WithPayoutCommit(planCtx)
+			}
+			if perr := ch.planLinePayout(planCtx, &line, token); perr != nil {
 				return nil, perr
 			}
 
@@ -1247,7 +1251,7 @@ func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 		}
 	}()
 
-	lines, perr := ch.priceCartItems(tx, user, items, req, rates)
+	lines, perr := ch.priceCartItems(tx, user, items, req, rates, true)
 	if perr != nil {
 		tx.Rollback()
 		utils.ErrorResponse(c, perr.status, perr.msg)
@@ -1498,7 +1502,7 @@ func (ch *CheckoutHandler) priceActiveCart(c *gin.Context, in *cartCheckout) ([]
 		return nil, pricingRates{}, false
 	}
 	defer tx.Rollback()
-	lines, perr := ch.priceCartItems(tx, in.user, in.items, in.req, rates)
+	lines, perr := ch.priceCartItems(tx, in.user, in.items, in.req, rates, false)
 	if perr != nil {
 		utils.ErrorResponse(c, perr.status, perr.msg)
 		return nil, pricingRates{}, false
@@ -1814,7 +1818,7 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	// the offramp costs ride on the shipping amount, as for a cart line.
 	var payout *services.PayoutPlan
 	if ch.payouts != nil {
-		plan, err := ch.payouts.Plan(context.Background(), product.UserID, token, new(big.Int).Add(productAmountWei, shippingAmountWei))
+		plan, err := ch.payouts.Plan(services.WithPayoutCommit(context.Background()), product.UserID, token, new(big.Int).Add(productAmountWei, shippingAmountWei))
 		if err != nil {
 			return nil, "Failed to resolve the seller's payout", http.StatusInternalServerError
 		}

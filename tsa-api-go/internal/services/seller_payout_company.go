@@ -147,11 +147,17 @@ func (o *SellerPayoutOrchestrator) startCompany(ctx context.Context, p *models.S
 		}
 		return o.park(ctx, p, fmt.Sprintf("the transfer may have been sent (%v): look up reference %s on Flutterwave before retrying", err, ref))
 	}
-	if err := o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).
+	res := o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).
 		Where("id = ? AND status = ?", p.ID, models.SellerPayoutPayingCompany).
-		Update("company_transfer_id", id).Error; err != nil {
-		log.Printf("[seller-payout] ALERT seller_payout_company_id_unrecorded=1 payout=%s ref=%s transfer=%s: %v", p.ID, ref, id, err)
-		return err
+		Update("company_transfer_id", id)
+	if res.Error != nil {
+		log.Printf("[seller-payout] ALERT seller_payout_company_id_unrecorded=1 payout=%s ref=%s transfer=%s: %v", p.ID, ref, id, res.Error)
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		// The row moved between the claim and this write (a reversal, an admin
+		// action): the transfer exists but its id is on no row.
+		log.Printf("[seller-payout] ALERT seller_payout_company_id_unrecorded=1 payout=%s ref=%s transfer=%s: the payout moved before the id was written", p.ID, ref, id)
 	}
 	p.CompanyTransferID = id
 	return nil
@@ -236,7 +242,8 @@ func FlagCompanyReversal(ctx context.Context, db *gorm.DB, merchantTxRef string)
 		Where("company_ref = ? AND status IN ?", merchantTxRef, []string{models.SellerPayoutPaid, models.SellerPayoutPayingCompany}).
 		Updates(map[string]any{
 			"status": models.SellerPayoutNeedsReview, "parked_from": models.SellerPayoutPayingCompany, "retry_safe": false,
-			"failure_reason": truncateReason("the provider reports transfer " + merchantTxRef + " reversed: the naira came back; confirm, then retry or pay by hand"),
+			"company_paid_at": nil,
+			"failure_reason":  truncateReason("the provider reports transfer " + merchantTxRef + " reversed: the naira came back; confirm, then retry or pay by hand"),
 		})
 	if res.Error != nil {
 		return res.Error

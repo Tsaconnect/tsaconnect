@@ -460,3 +460,117 @@ func TestSellerPayoutCompany_ReservesNoBridgeGas(t *testing.T) {
 		t.Fatalf("units = %d, %v; a company payout needs no bridge so reserves no Sonic gas", got, err)
 	}
 }
+
+func TestSellerPayoutCompany_AReversedTransferCanBeRetriedAndANewReversalClearsThePaidMark(t *testing.T) {
+	r, fp := companyRig(t)
+	admin, _ := newAdmin(t, r)
+	r.mustStep()
+	fp.setStatus("SUCCESSFUL")
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutPaid)
+	if r.reload().CompanyPaidAt == nil {
+		t.Fatal("a confirmed transfer must stamp company_paid_at")
+	}
+	if err := FlagCompanyReversal(context.Background(), r.db, r.reload().CompanyRef); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.wantStatus(models.SellerPayoutNeedsReview); got.CompanyPaidAt != nil {
+		t.Fatal("a reversal means the central account was not debited: the paid mark must clear")
+	}
+	// The provider now reads the transfer REVERSED: that is provably over, so a forced retry works.
+	fp.setStatus("REVERSED")
+	if err := admin.Retry(context.Background(), r.payout.ID, uuid.New(), "naira came back", true); err != nil {
+		t.Fatalf("retry of a reversed transfer = %v", err)
+	}
+	if r.reload().CompanyPaidAt != nil {
+		t.Fatal("a retry starts a new attempt with no paid mark")
+	}
+}
+
+func TestSellerPayoutCompany_MarkPaidIsRefusedWhileTheTransferMayStillPay(t *testing.T) {
+	r, fp := companyRig(t)
+	admin, _ := newAdmin(t, r)
+	r.mustStep()
+	fp.mu.Lock()
+	fp.transfer.Reference = "SPO-other" // parks on the reference mismatch with the transfer still live
+	fp.mu.Unlock()
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutNeedsReview)
+	fp.mu.Lock()
+	fp.transfer.Reference = sellerPayoutRef(r.payout.ID, 0)
+	fp.mu.Unlock()
+	for _, st := range []string{"PENDING", "SUCCESSFUL"} {
+		fp.setStatus(st)
+		if err := admin.MarkPaid(context.Background(), r.payout.ID, uuid.New(), "paid it", "ref-1", false); !errors.Is(err, ErrPayoutStillLive) {
+			t.Fatalf("%s: mark paid = %v; a live or successful transfer could pay twice", st, err)
+		}
+	}
+	fp.setStatus("FAILED")
+	if err := admin.MarkPaid(context.Background(), r.payout.ID, uuid.New(), "paid it", "ref-1", false); err != nil {
+		t.Fatalf("mark paid after a failed transfer = %v", err)
+	}
+}
+
+func TestSellerPayoutCompany_ProvingATransferDeadFailsClosed(t *testing.T) {
+	r, fp := companyRig(t)
+	admin, _ := newAdmin(t, r)
+	r.mustStep()
+	fp.mu.Lock()
+	fp.transfer.Reference = "SPO-other"
+	fp.mu.Unlock()
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutNeedsReview)
+
+	fp.getErr = errors.New("503")
+	if err := admin.Retry(context.Background(), r.payout.ID, uuid.New(), "checked", true); err == nil {
+		t.Fatal("an unreadable transfer must refuse the retry")
+	}
+	fp.getErr = nil
+	r.svc.company = nil
+	if err := admin.Retry(context.Background(), r.payout.ID, uuid.New(), "checked", true); !errors.Is(err, ErrPayoutStillLive) {
+		t.Fatalf("no payer = %v; must fail closed", err)
+	}
+	if r.reload().Status != models.SellerPayoutNeedsReview {
+		t.Fatal("a refused retry changes nothing")
+	}
+}
+
+func TestSellerPayoutCompany_ABridgeCommitmentStillCountsForPaycrestPayouts(t *testing.T) {
+	r := newPayoutRig(t) // a Paycrest-venue payout
+	r.mustStep()         // received
+	got, err := NewSellerPayoutCommitments(r.db, "sonic").Units(context.Background())
+	if err != nil || got == 0 {
+		t.Fatalf("units = %d, %v; a payout that must still bridge reserves Sonic gas", got, err)
+	}
+}
+
+// The Flutterwave webhook routes a seller payout's reference here, not to a PM
+// trade: a disburse event only wakes the machine, a reversal parks the payout.
+func TestSellerPayoutCompany_TheWebhookIsRoutedByItsReference(t *testing.T) {
+	r, fp := companyRig(t)
+	r.mustStep()
+	fp.setStatus("SUCCESSFUL")
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutPaid)
+	ref := r.reload().CompanyRef
+	s := NewPMAutomationService(r.db, nil, nil, nil, nil, nil, "")
+	event := func(typ, status string) []byte {
+		return []byte(`{"webhook_id":"wh_` + typ + `","type":"` + typ + `","data":{"id":"trf_1","reference":"` + ref + `","status":"` + status + `","amount":150000,"currency":"NGN"}}`)
+	}
+
+	r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).UpdateColumn("checked_at", r.clock)
+	if err := s.DispatchFlutterwave(context.Background(), event("transfer.disburse", "SUCCESSFUL")); err != nil {
+		t.Fatalf("disburse = %v; a seller payout reference must not reach PM trade handling", err)
+	}
+	if r.reload().CheckedAt != nil {
+		t.Fatal("a disburse event must wake the machine")
+	}
+
+	err := s.DispatchFlutterwave(context.Background(), event("transfer.reversal", "SUCCESSFUL"))
+	if !errors.Is(err, ErrNonSettlingEvent) {
+		t.Fatalf("reversal = %v; want the acknowledged non-settling answer", err)
+	}
+	if p := r.wantStatus(models.SellerPayoutNeedsReview); !strings.Contains(p.FailureReason, "reversed") {
+		t.Fatalf("payout = %+v", p)
+	}
+}

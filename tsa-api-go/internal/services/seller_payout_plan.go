@@ -53,6 +53,20 @@ type SellerPayoutPlanner struct {
 	sw payoutSwitch
 }
 
+type payoutCommitKey struct{}
+
+// WithPayoutCommit marks a Plan call as the order-creating one: only it promises
+// float, because a quote (read-only, repeated on every cart refresh) must never
+// hold naira that no order will use.
+func WithPayoutCommit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, payoutCommitKey{}, true)
+}
+
+func payoutCommitting(ctx context.Context) bool {
+	v, _ := ctx.Value(payoutCommitKey{}).(bool)
+	return v
+}
+
 type floatPromise struct {
 	kobo  int64
 	until time.Time
@@ -339,7 +353,6 @@ func (p *SellerPayoutPlanner) planCompany(ctx context.Context, m *models.SellerP
 	if !ok || avail*100 < float64(open.Kobo+p.promisedKobo(now)+target+(open.N+1)*p.companyFeeKobo) {
 		return nil
 	}
-	p.promise(target+p.companyFeeKobo, now)
 
 	// What the treasury must receive R so that R(1-take) = net + the fee in USDC.
 	feeUSD := new(big.Rat).Quo(big.NewRat(p.companyFeeKobo, 100), rate)
@@ -352,6 +365,9 @@ func (p *SellerPayoutPlanner) planCompany(ctx context.Context, m *models.SellerP
 	whole, rem := new(big.Int).QuoRem(gross.Num(), gross.Denom(), new(big.Int))
 	if rem.Sign() > 0 {
 		whole.Add(whole, big.NewInt(1))
+	}
+	if payoutCommitting(ctx) {
+		p.promise(target+p.companyFeeKobo, now)
 	}
 	return &PayoutPlan{Method: m, GrossUp: whole.Sub(whole, net), FiatTargetKobo: target, Venue: models.SellerPayoutVenueCompany}
 }

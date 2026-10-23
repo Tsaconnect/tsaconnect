@@ -364,13 +364,28 @@ func TestPayoutPlan_PromisesTheCompanyFloatOnlyOnce(t *testing.T) {
 		fp := newFakeCompanyPayer()
 		fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 200_000}} // room for one
 		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
-		first, _ := p.Plan(ctx, uid, "USDC", net)
-		second, _ := p.Plan(ctx, uid, "USDC", net)
+		first, _ := p.Plan(WithPayoutCommit(ctx), uid, "USDC", net)
+		second, _ := p.Plan(WithPayoutCommit(ctx), uid, "USDC", net)
 		if first == nil || first.Venue != models.SellerPayoutVenueCompany {
 			t.Fatalf("first = %+v; want the company route", first)
 		}
 		if second != nil && second.Venue == models.SellerPayoutVenueCompany {
 			t.Fatalf("second = %+v; the float was already promised to the first", second)
+		}
+	})
+
+	t.Run("a quote never holds float", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 200_000}}
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		for i := 0; i < 3; i++ { // the app re-quotes on every refresh
+			if plan, _ := p.Plan(ctx, uid, "USDC", net); plan == nil || plan.Venue != models.SellerPayoutVenueCompany {
+				t.Fatalf("quote %d = %+v; a read-only quote must keep offering the company route", i, plan)
+			}
+		}
+		if got := p.promisedKobo(time.Now()); got != 0 {
+			t.Fatalf("promised = %d after quotes; want 0", got)
 		}
 	})
 
