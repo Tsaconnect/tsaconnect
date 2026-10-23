@@ -14,8 +14,10 @@
 --      The removed entries are copied to reward_entries_reversed_20261023 first.
 --
 -- REFUSES (aborts the transaction) when:
---   * any credited user already sits in a PUBLISHED distribution epoch (their MCGP may
---     already be claimable on-chain — that needs a decision, not a script);
+--   * any credited user has a leaf in ANY distribution epoch, published or still pending:
+--     a published one may already be claimable on-chain, and a pending one would carry the
+--     old, higher cumulative if it were published later and undo this reversal. Handle those
+--     by hand (a pending epoch is simply rebuilt after the reversal);
 --   * the credit was already reversed (re-running does nothing twice);
 --   * the new balance would go negative.
 --
@@ -43,11 +45,9 @@ BEGIN
     RAISE EXCEPTION 'nothing to reverse (no signup_reward credit, or already reversed)';
   END IF;
   IF EXISTS (
-    SELECT 1 FROM reward_distribution_entries en
-    JOIN reward_distributions d ON d.epoch = en.epoch
-    WHERE d.status = 'published' AND en.user_id IN (SELECT user_id FROM _rev)
+    SELECT 1 FROM reward_distribution_entries en WHERE en.user_id IN (SELECT user_id FROM _rev)
   ) THEN
-    RAISE EXCEPTION 'a credited user is in a PUBLISHED distribution epoch: handle by hand';
+    RAISE EXCEPTION 'a credited user has a leaf in a distribution epoch (published or pending): handle by hand';
   END IF;
   IF EXISTS (
     SELECT 1 FROM users u JOIN _rev r ON r.user_id = u.id
@@ -56,6 +56,11 @@ BEGIN
     RAISE EXCEPTION 'reversal would make a tp_balance negative: look at the user first';
   END IF;
 END $$;
+
+-- Lock the rows we are about to change BEFORE reading them, so a fee credit landing
+-- meanwhile waits and is seen, never overwritten.
+SELECT 1 FROM users WHERE id IN (SELECT user_id FROM _rev) ORDER BY id FOR UPDATE;
+SELECT 1 FROM user_reward_states WHERE user_id IN (SELECT user_id FROM _rev) ORDER BY user_id FOR UPDATE;
 
 -- The balance each user will have, and the level it supports (thresholds 1,10,100,...).
 CREATE TEMP TABLE _after ON COMMIT DROP AS
@@ -94,7 +99,7 @@ SELECT gen_random_uuid(), a.user_id, a.user_id, 'signup_reward_reversal', gen_ra
        0, 0, -a.amount, now()
 FROM _after a;
 
-UPDATE users u SET tp_balance = a.new_balance FROM _after a WHERE u.id = a.user_id;
+UPDATE users u SET tp_balance = u.tp_balance - a.amount FROM _after a WHERE u.id = a.user_id;
 
 -- Review before committing.
 SELECT u.username, a.amount AS tp_removed, a.new_balance AS tp_now, a.new_level AS level_now,
