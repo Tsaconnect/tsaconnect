@@ -413,6 +413,8 @@ func createTestUserWithLocation(t *testing.T, db *gorm.DB, city, state, country 
 		City:     city,
 		State:    state,
 		Country:  country,
+		// Buying needs a verified buyer; the unverified case has its own test.
+		VerificationStatus: models.VerificationStatusVerified,
 	}
 	if err := db.Create(user).Error; err != nil {
 		t.Fatalf("failed to create test user: %v", err)

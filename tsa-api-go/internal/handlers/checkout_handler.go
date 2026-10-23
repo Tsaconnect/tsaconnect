@@ -1207,12 +1207,34 @@ func cartTotal(lines []pricedCartLine, gasFee *big.Int) *big.Int {
 	return total
 }
 
+// requireBuyerKYC refuses an order from a buyer whose identity verification has
+// not passed, with the machine code the app routes to the verification flow.
+// An unreadable status fails closed: a buyer is never let through on a guess.
+func requireBuyerKYC(c *gin.Context, userID uuid.UUID) bool {
+	verified, err := services.IsKYCVerified(c.Request.Context(), config.DB, userID)
+	if err != nil {
+		log.Printf("[checkout] kyc status for user %s: %v", userID, err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "We could not check your verification — try again")
+		return false
+	}
+	if !verified {
+		utils.ErrorResponseWithCode(c, http.StatusForbidden,
+			"verify your identity before buying — finish verification in the app, then try again",
+			services.KYCVerificationRequiredCode)
+		return false
+	}
+	return true
+}
+
 func (ch *CheckoutHandler) CreateOrderFromCart(c *gin.Context) {
 	in, ok := loadCartCheckout(c)
 	if !ok {
 		return
 	}
 	user, req, token, cart, items := in.user, in.req, in.token, in.cart, in.items
+	if !requireBuyerKYC(c, user.ID) {
+		return
+	}
 	buyerCity, buyerState, buyerCountry := buyerLocation(req, user)
 	if ch.refuseMcgpUnavailable(c, token) {
 		return
@@ -1631,6 +1653,9 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
 		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	if !requireBuyerKYC(c, user.ID) {
 		return
 	}
 	var req createServiceOrderRequest

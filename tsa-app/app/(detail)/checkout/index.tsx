@@ -66,6 +66,7 @@ import { useCheckoutFundingRun, useFundingPrice, type FundingPick } from '@/hook
 import { canForgetRun } from '@/services/checkoutFundingRun';
 import { fundingPickerAllow } from '@/utils/fundingPicker';
 import { cartLineProductId } from '@/utils/cartLine';
+import { promptKycRefusal } from '@/utils/kycRefusal';
 import { rewardsLine } from '@/utils/tp';
 import {
   defaultPaySelection,
@@ -479,6 +480,7 @@ const CheckoutScreen = () => {
           setRepriced(true);
           throw new Error('The total changed since you confirmed it. Review the new amount before paying.');
         }
+        if (promptKycRefusal(res.code, res.message, 'buy')) throw new Error(res.message);
         if (!res.success || !res.data?.orders?.length || !res.data.checkoutGroupId) {
           throw new Error(res.message || 'Failed to create orders');
         }
@@ -549,6 +551,12 @@ const CheckoutScreen = () => {
         setPaidQuote(null);
         setRepriced(true);
         Alert.alert('Price updated', 'The total changed since you confirmed it. Review the new amount before paying.');
+        return;
+      }
+      if (promptKycRefusal(createResult.code, createResult.message, 'buy')) {
+        setStep('review');
+        setSigningPhase('idle');
+        setPaidQuote(null);
         return;
       }
       if (!createResult.success || !createResult.data?.orders) {
@@ -1019,7 +1027,11 @@ const CheckoutScreen = () => {
               <Icon name="chevronRight" size={18} color={colors.textMuted} />
             </PressableScale>
           ) : (
-            <Spinner label="Loading your balances…" />
+            reviewing ? (
+              <Spinner label="Loading your balances…" />
+            ) : (
+              <Text variant="bodySm" color="textSecondary">Add a delivery address to choose how to pay.</Text>
+            )
           )}
           {swapMode ? (
             <FundingPriceLine pick={fundingPick} quote={fundingPrice?.quote} pricing={fundingPricing} error={fundingPrice?.error} />

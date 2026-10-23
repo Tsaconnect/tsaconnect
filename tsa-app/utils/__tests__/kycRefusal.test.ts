@@ -92,3 +92,12 @@ describe('promptKycRefusal', () => {
     expect(mockAlert).not.toHaveBeenCalled();
   });
 });
+
+describe('kycRefusalFor buy context', () => {
+  it('asks a marketplace buyer to verify before placing an order, not before paying in', () => {
+    const r = kycRefusalFor(KYC_VERIFICATION_REQUIRED, undefined, 'buy');
+    expect(r?.kind).toBe('verify');
+    expect(r?.message).toMatch(/place an order/);
+    expect(r?.message).not.toMatch(/pay in/);
+  });
+});
