@@ -404,6 +404,11 @@ func (h *RewardClaimHandler) UpdateRewardClaimStatus(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusNotFound, "Submission not found")
 		return
 	}
+	// An admin never decides their own submission: approval authorises a payout.
+	if claim.UserID == admin.ID {
+		utils.ErrorResponse(c, http.StatusForbidden, "You cannot review your own submission")
+		return
+	}
 	if !canTransition(claim.Status, status) {
 		utils.ErrorResponse(c, http.StatusConflict,
 			"Cannot change a "+claim.Status+" submission to "+status)

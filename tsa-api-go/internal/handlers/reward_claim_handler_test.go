@@ -793,3 +793,29 @@ func TestSubmitRewardClaim_BonusFollowsTheAdminProgram(t *testing.T) {
 		t.Fatalf("balance=%v rows=%d with the bonus set to 0", bal, rows)
 	}
 }
+
+// An admin cannot approve or reject their own submission, whatever the new status.
+func TestUpdateRewardClaimStatus_AdminCannotReviewOwnClaim(t *testing.T) {
+	for _, status := range []string{"approved", "rejected"} {
+		db := setupRewardClaimTestDB(t)
+		h := newRewardClaimHandler(t, db)
+		admin := mkRcUser(t, db, "root", true, models.RoleAdmin)
+		claim := models.RewardClaim{
+			UserID: admin.ID, Kind: models.RewardClaimKindSignup,
+			Status: models.RewardClaimStatusPending, Name: "Root", Username: "root",
+		}
+		db.Create(&claim)
+
+		c, w := spotCtx(t, http.MethodPatch, `{"status":"`+status+`"}`, admin)
+		c.Params = gin.Params{{Key: "id", Value: claim.ID.String()}}
+		h.UpdateRewardClaimStatus(c)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%s: status = %d, want 403; body=%s", status, w.Code, w.Body.String())
+		}
+		var row models.RewardClaim
+		db.First(&row, "id = ?", claim.ID)
+		if row.Status != models.RewardClaimStatusPending || row.ReviewedBy != nil {
+			t.Fatalf("%s: claim changed to %q (reviewedBy %v)", status, row.Status, row.ReviewedBy)
+		}
+	}
+}
