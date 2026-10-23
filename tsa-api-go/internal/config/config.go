@@ -420,6 +420,12 @@ type Config struct {
 	// payout is expected to cost; the buyer's checkout carries it. A route
 	// costing more is absorbed by the platform up to 0.5%, then the payout parks.
 	SellerPayoutBridgeBps int64
+	// SellerPayoutCompanyFeeKobo is the provider's transfer fee (naira, in kobo)
+	// the central account's float must also cover per company payout, and the
+	// buyer's payout fee carries. SellerPayoutCompanyMaxKobo caps one payout on
+	// the company route (0 turns the route off): larger ones go to Paycrest.
+	SellerPayoutCompanyFeeKobo int64
+	SellerPayoutCompanyMaxKobo int64
 	// Ramp router (docs/specs/2026-10-02-ramp-router-design.md §5).
 	RampPriceToleranceBps  int
 	RampPriceGuard         string // "log" (default) | "enforce"
@@ -1062,6 +1068,8 @@ func Load() *Config {
 
 	cfg.RampConversionBuyEnabled = getEnvBool("RAMP_CONVERSION_BUY", false)
 	cfg.SellerPayoutBridgeBps = getEnvInt64("SELLER_PAYOUT_BRIDGE_BPS", 40)
+	cfg.SellerPayoutCompanyFeeKobo = getEnvInt64("SELLER_PAYOUT_COMPANY_FEE_NGN", 50) * 100
+	cfg.SellerPayoutCompanyMaxKobo = getEnvInt64("SELLER_PAYOUT_COMPANY_MAX_NGN", 500000) * 100
 	cfg.RampPriceToleranceBps = int(getEnvInt64("RAMP_PRICE_TOLERANCE_BPS", 50))
 	cfg.RampPriceGuard = strings.ToLower(strings.TrimSpace(getEnv("RAMP_PRICE_GUARD", "log")))
 	if g := cfg.RampPriceGuard; g != "" && g != "log" && g != "enforce" {

@@ -188,6 +188,11 @@ func (s *PMAutomationService) DispatchFlutterwave(ctx context.Context, body []by
 		if s.itHooks != nil && strings.HasPrefix(p.MerchantTxRef, ITPayoutRefPrefix) {
 			return s.itHooks.ResolvePayoutFromWebhook(ctx, p.MerchantTxRef, p.PayoutID, p.Status)
 		}
+		// A seller payout's transfer: the webhook only wakes the machine, which
+		// reads the transfer from the provider itself.
+		if strings.HasPrefix(p.MerchantTxRef, SellerPayoutRefPrefix) {
+			return NudgeCompanyPayout(ctx, s.db, p.MerchantTxRef)
+		}
 		return s.HandlePayoutStatus(ctx, *p)
 	case fwEventTransferReversal:
 		p, err := ParseFlutterwavePayout(body)

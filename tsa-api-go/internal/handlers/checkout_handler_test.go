@@ -125,6 +125,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			currency TEXT, institution_code TEXT, institution_name TEXT, account_number TEXT, account_name TEXT,
 			seller_wallet TEXT, chain_key TEXT, token TEXT, expected_amount TEXT, fiat_target_kobo INTEGER,
 			status TEXT, received_amount TEXT, paycrest_order_id TEXT, failure_reason TEXT, parked_from TEXT, retry_safe INTEGER, attempt_started_at DATETIME, next_attempt_at DATETIME,
+			venue TEXT DEFAULT 'paycrest', company_ref_gen INTEGER DEFAULT 0, company_ref TEXT, company_attempts INTEGER DEFAULT 0, company_transfer_id TEXT, rebalanced_at DATETIME,
 			checked_at DATETIME, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE IF NOT EXISTS orders (
 			id TEXT PRIMARY KEY,

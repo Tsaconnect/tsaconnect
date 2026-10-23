@@ -246,3 +246,107 @@ func TestPayoutPlan_PricesTheRealBridge(t *testing.T) {
 		})
 	}
 }
+
+// The company route is preferred: the central account pays the naira, so a payout
+// is offered with no bridge and no sale, priced at the reference rate, and the
+// buyer's gross-up carries the transfer fee and the company's take.
+func TestPayoutPlan_PrefersTheCompanyRoute(t *testing.T) {
+	ctx := context.Background()
+	net := big.NewInt(100_000000)
+	const takeBps, feeKobo, maxKobo = 50, 5000, 50_000_000
+
+	setup := func(t *testing.T) (*SellerPayoutPlanner, *payoutRig, *fakeCompanyPayer, *fakeVenueQuoter, uuid.UUID) {
+		p, r, q, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		return p, r, fp, q, uid
+	}
+
+	t.Run("offered at the reference rate with the fee and the take on the buyer", func(t *testing.T) {
+		p, _, _, q, uid := setup(t)
+		plan, err := p.Plan(ctx, uid, "USDC", net)
+		if err != nil || plan == nil || plan.Venue != models.SellerPayoutVenueCompany {
+			t.Fatalf("plan = %+v, %v; want the company route", plan, err)
+		}
+		if plan.FiatTargetKobo != 15_000_000 {
+			t.Fatalf("target = %d kobo; want ₦150,000.00", plan.FiatTargetKobo)
+		}
+		// Treasury must receive R with R(1 - 0.5%) = 100 USDC + ₦50 at 1500 per USDC.
+		need := new(big.Rat).Add(big.NewRat(100_000000, 1), big.NewRat(50*1_000_000, 1500))
+		gross := new(big.Rat).Quo(need, big.NewRat(9950, 10000))
+		want := new(big.Int).Quo(gross.Num(), gross.Denom())
+		if new(big.Int).Mul(want, gross.Denom()).Cmp(gross.Num()) != 0 {
+			want.Add(want, big.NewInt(1))
+		}
+		want.Sub(want, net)
+		if plan.GrossUp.Cmp(want) != 0 {
+			t.Fatalf("gross-up = %s; want %s", plan.GrossUp, want)
+		}
+		if len(q.asks) != 1 || q.asks[0] != "100000" {
+			t.Fatalf("venue asks = %v; the company route needs only the reference rate", q.asks)
+		}
+	})
+
+	for name, setup2 := range map[string]func(p *SellerPayoutPlanner, r *payoutRig, fp *fakeCompanyPayer){
+		"a short float": func(_ *SellerPayoutPlanner, _ *payoutRig, fp *fakeCompanyPayer) {
+			fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 100_000}}
+		},
+		"an unreadable float": func(_ *SellerPayoutPlanner, _ *payoutRig, fp *fakeCompanyPayer) {
+			fp.balErr = errors.New("503")
+		},
+		"no NGN balance": func(_ *SellerPayoutPlanner, _ *payoutRig, fp *fakeCompanyPayer) {
+			fp.balances = []FWBalance{{Currency: "USD", AvailableBalance: 9e9}}
+		},
+		"a payout over the route's maximum": func(p *SellerPayoutPlanner, _ *payoutRig, _ *fakeCompanyPayer) {
+			p.companyMaxKobo = 10_000_000
+		},
+		"the route switched off": func(p *SellerPayoutPlanner, _ *payoutRig, _ *fakeCompanyPayer) {
+			p.companyMaxKobo = 0
+		},
+		"payouts already promised the float to": func(_ *SellerPayoutPlanner, r *payoutRig, _ *fakeCompanyPayer) {
+			r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).
+				Updates(map[string]any{"venue": models.SellerPayoutVenueCompany, "fiat_target_kobo": 99_000_000})
+		},
+	} {
+		t.Run(name+" falls back to Paycrest", func(t *testing.T) {
+			p, r, fp, _, uid := setup(t)
+			setup2(p, r, fp)
+			plan, err := p.Plan(ctx, uid, "USDC", net)
+			if err != nil || plan == nil || plan.Venue == models.SellerPayoutVenueCompany {
+				t.Fatalf("plan = %+v, %v; want the Paycrest route", plan, err)
+			}
+		})
+	}
+
+	t.Run("a payout under the provider's floor is not a company payout", func(t *testing.T) {
+		p, _, _, _, uid := setup(t)
+		plan, _ := p.Plan(ctx, uid, "USDC", big.NewInt(50_000)) // 0.05 USDC = ₦75
+		if plan != nil && plan.Venue == models.SellerPayoutVenueCompany {
+			t.Fatalf("plan = %+v; ₦75 is under the transfer floor", plan)
+		}
+	})
+
+	t.Run("without the company route nothing changes", func(t *testing.T) {
+		p, _, _, uid := newPlanner(t)
+		plan, err := p.Plan(ctx, uid, "USDC", net)
+		if err != nil || plan == nil || plan.Venue != "" {
+			t.Fatalf("plan = %+v, %v; want the old Paycrest plan", plan, err)
+		}
+	})
+
+	t.Run("the venue is stored with the payout", func(t *testing.T) {
+		p, r, _, _, uid := setup(t)
+		plan, _ := p.Plan(ctx, uid, "USDC", net)
+		if plan == nil {
+			t.Fatal("no plan")
+		}
+		order := &models.Order{ID: uuid.New(), SellerID: uid, Token: "USDC"}
+		if err := p.Persist(r.db, order, sponsorTestUser, plan, net); err != nil {
+			t.Fatal(err)
+		}
+		var row models.SellerPayoutOrder
+		if err := r.db.First(&row, "marketplace_order_id = ?", order.ID).Error; err != nil || row.Venue != models.SellerPayoutVenueCompany {
+			t.Fatalf("row = %+v, %v; want venue company", row, err)
+		}
+	})
+}

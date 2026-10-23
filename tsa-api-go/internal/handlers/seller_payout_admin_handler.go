@@ -179,3 +179,52 @@ func payoutAdminFail(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "That did not work — try again")
 	}
 }
+
+// CompanyOwed is GET /api/admin/seller-payouts/company-owed: the USDC the treasury
+// holds for paid company-route payouts, per token, waiting for an operator's
+// batch rebalance.
+func (h *SellerPayoutAdminHandler) CompanyOwed(c *gin.Context) {
+	owed, err := h.Admin.CompanyOwed(c.Request.Context())
+	if err != nil {
+		log.Printf("[seller-payout-admin] company owed: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Could not load what is owed")
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Company payouts to rebalance", owed)
+}
+
+type rebalancedBody struct {
+	IDs       []string `json:"ids"`
+	Note      string   `json:"note"`
+	Reference string   `json:"reference"`
+}
+
+// MarkRebalanced is POST /api/admin/seller-payouts/company-rebalanced
+// {ids, note, reference}: the batch an operator moved back, all or nothing.
+func (h *SellerPayoutAdminHandler) MarkRebalanced(c *gin.Context) {
+	admin := getUserFromContext(c)
+	if admin == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	var b rebalancedBody
+	if err := c.ShouldBindJSON(&b); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "ids, a note and a reference are required")
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(b.IDs))
+	for _, s := range b.IDs {
+		id, err := uuid.Parse(strings.TrimSpace(s))
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, "Invalid payout id")
+			return
+		}
+		ids = append(ids, id)
+	}
+	n, err := h.Admin.MarkRebalanced(c.Request.Context(), ids, admin.ID, b.Note, b.Reference)
+	if err != nil {
+		payoutAdminFail(c, err)
+		return
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Payouts marked rebalanced", gin.H{"count": n})
+}

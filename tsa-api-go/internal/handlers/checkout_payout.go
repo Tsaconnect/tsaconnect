@@ -161,6 +161,7 @@ var payoutStages = map[string]string{
 	models.SellerPayoutSelling:         "sending",
 	models.SellerPayoutOrdered:         "sending",
 	models.SellerPayoutDepositing:      "sending",
+	models.SellerPayoutPayingCompany:   "sending",
 	models.SellerPayoutDeposited:       "sending",
 	models.SellerPayoutPayingWallet:    "sending",
 	models.SellerPayoutPaid:            "paid",

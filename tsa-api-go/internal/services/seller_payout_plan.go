@@ -32,11 +32,37 @@ type SellerPayoutPlanner struct {
 	// (up to sellerPayoutAbsorbBps) or parks, a cheaper one leaves the rest
 	// with the platform.
 	bridgeBps int64
+	// The company route (WithCompany): the central account pays the naira and the
+	// USDC stays in the treasury for an operator to rebalance.
+	company        companyBalances
+	companyDB      *gorm.DB
+	companyTakeBps int64
+	companyFeeKobo int64
+	companyMaxKobo int64
 	// bridge prices the real Sonic -> Base route at checkout; nil prices the
 	// bridge at bridgeBps and trusts it.
 	bridge lifiQuoter
 	// sw is the operator's switch; nil is always on.
 	sw payoutSwitch
+}
+
+// companyBalances is the slice of the central account the planner reads.
+type companyBalances interface {
+	FetchBalances(ctx context.Context) ([]FWBalance, error)
+}
+
+// companyMinPayoutKobo is the smallest transfer the company route sends (₦100:
+// below it the provider's floor refuses).
+const companyMinPayoutKobo = 10_000
+
+// WithCompany turns on the company route, which is preferred over Paycrest
+// whenever it can run: it is offered when the central account holds enough naira
+// for this payout and every one already promised, and the payout is not above
+// maxKobo (0 turns the route off). takeBps is the company's margin and feeKobo
+// the provider's transfer fee; the buyer's gross-up carries both.
+func (p *SellerPayoutPlanner) WithCompany(c companyBalances, db *gorm.DB, takeBps, feeKobo, maxKobo int64) *SellerPayoutPlanner {
+	p.company, p.companyDB, p.companyTakeBps, p.companyFeeKobo, p.companyMaxKobo = c, db, takeBps, feeKobo, maxKobo
+	return p
 }
 
 // WithBridge makes the planner quote the actual bridge at the order's size: a
@@ -71,6 +97,8 @@ type PayoutPlan struct {
 	// FiatTargetKobo is the naira the seller is quoted: what Net buys at the
 	// venue's rate, before the sender fee (which the deposit carries).
 	FiatTargetKobo int64
+	// Venue is who delivers the naira; empty means Paycrest.
+	Venue string
 }
 
 // TreasuryAddress is the on-chain seller of every payout order.
@@ -81,15 +109,21 @@ func (p *SellerPayoutPlanner) TreasuryAddress() string {
 	return p.treasury.Address()
 }
 
-// ready is true when the treasury can run a payout end to end: lanes for the
-// escrow's chain (with the escrow as a call target) and for Base, and no kill
-// switch. Checked per order, so flipping the switch stops new payout orders.
-func (p *SellerPayoutPlanner) ready() bool {
+// sonicReady is true when the treasury can hold a payout's release: its signer
+// is consistent, no kill switch, and the escrow is a call target on Sonic (the
+// treasury signs the seller-only calls). Checked per order, so flipping the
+// switch stops new payout orders.
+func (p *SellerPayoutPlanner) sonicReady() bool {
 	if p == nil || p.treasury == nil || !p.treasury.Enabled() || p.treasury.Killed() || p.treasury.Address() == "" {
 		return false
 	}
-	sonic, base := p.treasury.Lane("sonic"), p.treasury.Lane("base")
-	return sonic != nil && base != nil && len(sonic.CallTargets) > 0
+	sonic := p.treasury.Lane("sonic")
+	return sonic != nil && len(sonic.CallTargets) > 0
+}
+
+// ready is sonicReady plus the Base lane the Paycrest route bridges to.
+func (p *SellerPayoutPlanner) ready() bool {
+	return p.sonicReady() && p.treasury.Lane("base") != nil
 }
 
 // Plan prices a payout for seller's net amount (the base units the seller
@@ -103,7 +137,7 @@ func (p *SellerPayoutPlanner) Plan(ctx context.Context, sellerID uuid.UUID, toke
 			return nil, nil
 		}
 	}
-	if !p.ready() || (token != "USDC" && token != "USDT") || net == nil || net.Sign() <= 0 {
+	if !p.sonicReady() || (token != "USDC" && token != "USDT") || net == nil || net.Sign() <= 0 {
 		return nil, nil
 	}
 	resolved, err := p.methods.Resolve(ctx, sellerID)
@@ -117,6 +151,13 @@ func (p *SellerPayoutPlanner) Plan(ctx context.Context, sellerID uuid.UUID, toke
 	// A payout the treasury's per-order cap would refuse after the buyer paid is
 	// not offered: the order is made the ordinary way instead.
 	if err := p.treasury.CheckCaps("sonic", unitsToUSD(net, 6), 0); err != nil {
+		return nil, nil
+	}
+	// The company route is preferred: no bridge, no sale, no fixed fee to size.
+	if plan := p.planCompany(ctx, m, net); plan != nil {
+		return plan, nil
+	}
+	if !p.ready() {
 		return nil, nil
 	}
 	fee, ok := feeFraction(p.senderFee())
@@ -178,13 +219,9 @@ func (p *SellerPayoutPlanner) rate(ctx context.Context, net *big.Int) (*big.Rat,
 	if !ok {
 		return nil, errors.New("unusable sender fee")
 	}
-	ref, err := p.rater.VenueForFee(ctx, "sell", "NGN", "100000", "base", "USDC", pct)
+	r0, err := p.referenceRate(ctx)
 	if err != nil {
 		return nil, err
-	}
-	r0, ok := new(big.Rat).SetString(strings.TrimSpace(ref.RawRate))
-	if !ok || r0.Sign() <= 0 {
-		return nil, fmt.Errorf("unusable reference rate %q", ref.RawRate)
 	}
 	guess := new(big.Rat).Mul(new(big.Rat).SetFrac(net, pow10(6)), r0)
 	amount := new(big.Int).Quo(guess.Num(), guess.Denom())
@@ -197,6 +234,82 @@ func (p *SellerPayoutPlanner) rate(ctx context.Context, net *big.Int) (*big.Rat,
 		return nil, fmt.Errorf("unusable rate %q", venue.RawRate)
 	}
 	return r, nil
+}
+
+// referenceRate is the provider's raw sell rate (naira per token) at a reference
+// size: the scale the sized quote starts from, and the price the company route
+// quotes at (it has no book whose rate depends on size).
+func (p *SellerPayoutPlanner) referenceRate(ctx context.Context) (*big.Rat, error) {
+	pct, ok := parseSenderFeePercent(p.senderFee())
+	if !ok {
+		return nil, errors.New("unusable sender fee")
+	}
+	ref, err := p.rater.VenueForFee(ctx, "sell", "NGN", "100000", "base", "USDC", pct)
+	if err != nil {
+		return nil, err
+	}
+	r0, ok := new(big.Rat).SetString(strings.TrimSpace(ref.RawRate))
+	if !ok || r0.Sign() <= 0 {
+		return nil, fmt.Errorf("unusable reference rate %q", ref.RawRate)
+	}
+	return r0, nil
+}
+
+// planCompany prices a payout the central account pays, or returns nil when the
+// route cannot run (not configured, no rate, too small or too large, or not
+// enough naira in the account for this payout plus every one already promised).
+// The seller is quoted net at the reference rate, exactly as on the Paycrest
+// route; the buyer's gross-up carries the transfer fee and the company's take.
+func (p *SellerPayoutPlanner) planCompany(ctx context.Context, m *models.SellerPayoutMethod, net *big.Int) *PayoutPlan {
+	if p.company == nil || p.companyDB == nil || p.companyMaxKobo <= 0 {
+		return nil
+	}
+	rate, err := p.referenceRate(ctx)
+	if err != nil {
+		return nil
+	}
+	koboRat := new(big.Rat).Mul(new(big.Rat).SetFrac(net, pow10(6)), rate)
+	koboRat.Mul(koboRat, big.NewRat(100, 1))
+	kobo := new(big.Int).Quo(koboRat.Num(), koboRat.Denom()) // floor
+	if !kobo.IsInt64() || kobo.Int64() < companyMinPayoutKobo || kobo.Int64() > p.companyMaxKobo {
+		return nil
+	}
+	target := kobo.Int64()
+
+	// The float must cover this payout and every company payout already promised.
+	var open struct {
+		Kobo int64
+		N    int64
+	}
+	if err := p.companyDB.WithContext(ctx).Table("seller_payouts").
+		Select("COALESCE(SUM(fiat_target_kobo), 0) AS kobo, COUNT(*) AS n").
+		Where("venue = ? AND status IN ?", models.SellerPayoutVenueCompany,
+			[]string{models.SellerPayoutAwaitingRelease, models.SellerPayoutReceived, models.SellerPayoutPayingCompany}).
+		Scan(&open).Error; err != nil {
+		return nil
+	}
+	bals, err := p.company.FetchBalances(ctx)
+	if err != nil {
+		return nil
+	}
+	avail, ok := ngnAvailable(bals)
+	if !ok || avail*100 < float64(open.Kobo+target+(open.N+1)*p.companyFeeKobo) {
+		return nil
+	}
+
+	// What the treasury must receive R so that R(1-take) = net + the fee in USDC.
+	feeUSD := new(big.Rat).Quo(big.NewRat(p.companyFeeKobo, 100), rate)
+	need := new(big.Rat).Add(new(big.Rat).SetInt(net), new(big.Rat).Mul(feeUSD, new(big.Rat).SetInt(pow10(6))))
+	keep := new(big.Rat).Sub(big.NewRat(1, 1), big.NewRat(p.companyTakeBps, 10000))
+	if keep.Sign() <= 0 {
+		return nil
+	}
+	gross := new(big.Rat).Quo(need, keep)
+	whole, rem := new(big.Int).QuoRem(gross.Num(), gross.Denom(), new(big.Int))
+	if rem.Sign() > 0 {
+		whole.Add(whole, big.NewInt(1))
+	}
+	return &PayoutPlan{Method: m, GrossUp: whole.Sub(whole, net), FiatTargetKobo: target, Venue: models.SellerPayoutVenueCompany}
 }
 
 // payoutGrossUp is what the buyer pays on top so the seller still nets `net`
@@ -227,7 +340,7 @@ func (p *SellerPayoutPlanner) Persist(tx *gorm.DB, order *models.Order, sellerWa
 		AccountNumber: m.AccountNumber, AccountName: m.AccountName, SellerWallet: sellerWallet,
 		ChainKey: "sonic", Token: strings.ToUpper(order.Token),
 		ExpectedAmount: expected.String(), FiatTargetKobo: plan.FiatTargetKobo,
-		Status: models.SellerPayoutAwaitingRelease,
+		Status: models.SellerPayoutAwaitingRelease, Venue: planVenue(plan),
 	}).Error
 }
 
@@ -242,4 +355,11 @@ func PayoutForOrder(ctx context.Context, db *gorm.DB, orderID uuid.UUID) (*model
 		return nil, err
 	}
 	return &row, nil
+}
+
+func planVenue(plan *PayoutPlan) string {
+	if plan.Venue == "" {
+		return models.SellerPayoutVenuePaycrest
+	}
+	return plan.Venue
 }

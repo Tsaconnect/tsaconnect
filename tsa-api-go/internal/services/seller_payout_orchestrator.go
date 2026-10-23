@@ -88,6 +88,11 @@ type SellerPayoutOrchestrator struct {
 	// sellRetryWindow bounds how long a payout waits for a venue that refused
 	// before anything was sent (rate moved, below the book's minimum, no venue).
 	sellRetryWindow time.Duration
+	// company pays the naira from the central account on the company route
+	// (WithCompany); companyFeeKobo is the provider's transfer fee the float
+	// must also cover. nil parks a company payout safely instead of sending.
+	company        SellerPayoutCompanyPayer
+	companyFeeKobo int64
 }
 
 func NewSellerPayoutOrchestrator(db *gorm.DB, treasury *Treasury, legs rampLegStore, lifi lifiQuoter,
@@ -219,7 +224,12 @@ func (o *SellerPayoutOrchestrator) Advance(ctx context.Context, p *models.Seller
 	case models.SellerPayoutAwaitingRelease:
 		return o.awaitRelease(ctx, p)
 	case models.SellerPayoutReceived, models.SellerPayoutBridging:
+		if p.Venue == models.SellerPayoutVenueCompany {
+			return o.advanceCompany(ctx, p)
+		}
 		return o.advanceBridge(ctx, p)
+	case models.SellerPayoutPayingCompany:
+		return o.advanceCompany(ctx, p)
 	case models.SellerPayoutBridged:
 		return o.openSell(ctx, p)
 	case models.SellerPayoutSelling:
@@ -524,7 +534,8 @@ func (o *SellerPayoutOrchestrator) inFlightUSD(ctx context.Context, chainKey str
 // sellerPayoutHeldOn is where a payout's funds sit at each status: on the
 // escrow's chain until the bridge lands, then on Base.
 var sellerPayoutHeldOn = map[string][]string{
-	"sonic": {models.SellerPayoutReceived, models.SellerPayoutBridging, models.SellerPayoutPayingWallet},
+	"sonic": {models.SellerPayoutReceived, models.SellerPayoutBridging, models.SellerPayoutPayingWallet,
+		models.SellerPayoutPayingCompany},
 	"base": {models.SellerPayoutBridged, models.SellerPayoutSelling, models.SellerPayoutOrdered,
 		models.SellerPayoutDepositing},
 }
@@ -869,9 +880,7 @@ func (o *SellerPayoutOrchestrator) followSell(ctx context.Context, p *models.Sel
 		if err := o.move(ctx, p, models.SellerPayoutPaid, nil, models.SellerPayoutDeposited); err != nil {
 			return err
 		}
-		o.tell(p, events.SellerPayoutPaid, "Your payout was sent",
-			fmt.Sprintf("₦%s for order #%s was sent to your %s account ending %s.",
-				payFiatAmount(p.FiatTargetKobo), p.MarketplaceOrderID.String()[:8], p.InstitutionName, lastDigits(p.AccountNumber, 4)))
+		o.paidNotice(p)
 		return nil
 	case models.PaycrestStatusRefunded, models.PaycrestStatusExpired, models.PaycrestStatusUnmatched,
 		models.PaycrestStatusFailed, models.PaycrestStatusCancelled:
@@ -906,6 +915,12 @@ func (o *SellerPayoutOrchestrator) StartWalletPayment(ctx context.Context, p *mo
 	amount, ok := new(big.Int).SetString(p.ReceivedAmount, 10)
 	if !ok || amount.Sign() <= 0 || !common.IsHexAddress(p.SellerWallet) || p.PaycrestOrderID != nil {
 		return ErrWalletPaymentUnavailable
+	}
+	// A company transfer that may have left the central account means the naira
+	// may already be paid: only a provider refusal (nothing exists) or no attempt
+	// at all leaves the wallet payment safe.
+	if p.CompanyAttempts > 0 && !(p.ParkedFrom == models.SellerPayoutPayingCompany && p.RetrySafe) {
+		return ErrWalletPaymentNotSafe
 	}
 	legs, err := o.legs.ForOrder(ctx, p.ID)
 	if err != nil {
