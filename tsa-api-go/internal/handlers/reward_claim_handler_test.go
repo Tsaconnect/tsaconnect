@@ -569,43 +569,41 @@ func TestUpdateRewardClaimStatus_PreservesReviewNotesWhenOmitted(t *testing.T) {
 	}
 }
 
-func TestUpdateRewardClaimStatus_ApprovalAwardsTPOnce(t *testing.T) {
-	db := setupRewardClaimTestDB(t)
-	h := newRewardClaimHandler(t, db)
-	regular := mkRcUser(t, db, "ada", true, models.RoleUser)
-	admin := mkRcUser(t, db, "root", true, models.RoleAdmin)
+// The signup form carries no reward (PM 2026-10-23): approving it records the
+// decision and credits no TP, whatever the claim's kind.
+func TestUpdateRewardClaimStatus_ApprovalCreditsNothing(t *testing.T) {
+	for _, kind := range []string{models.RewardClaimKindSignup, models.RewardClaimKindOnboarding} {
+		db := setupRewardClaimTestDB(t)
+		h := newRewardClaimHandler(t, db)
+		regular := mkRcUser(t, db, "ada", true, models.RoleUser)
+		admin := mkRcUser(t, db, "root", true, models.RoleAdmin)
+		claim := models.RewardClaim{
+			UserID: regular.ID, Kind: kind,
+			Status: models.RewardClaimStatusPending, Name: "Ada", Username: "ada",
+		}
+		db.Create(&claim)
 
-	claim := models.RewardClaim{
-		UserID: regular.ID, Kind: models.RewardClaimKindSignup,
-		Status: models.RewardClaimStatusPending, Name: "Ada", Username: "ada",
-	}
-	db.Create(&claim)
-
-	c, w := spotCtx(t, http.MethodPatch, `{"status":"approved"}`, admin)
-	c.Params = gin.Params{{Key: "id", Value: claim.ID.String()}}
-	h.UpdateRewardClaimStatus(c)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-
-	var user models.User
-	db.First(&user, "id = ?", regular.ID)
-	if user.TPBalance != services.SignupRewardTP {
-		t.Fatalf("tp_balance = %v, want %v", user.TPBalance, services.SignupRewardTP)
-	}
-	var earnings int64
-	db.Model(&models.TPEarning{}).Where("source_id = ?", claim.ID).Count(&earnings)
-	if earnings != 1 {
-		t.Fatalf("tp_earnings rows = %d, want 1", earnings)
-	}
-
-	// Idempotent: awarding again (e.g. a retry) must not double-credit.
-	if err := h.Service.AwardSignupTP(c.Request.Context(), &claim); err != nil {
-		t.Fatalf("second award: %v", err)
-	}
-	db.First(&user, "id = ?", regular.ID)
-	if user.TPBalance != services.SignupRewardTP {
-		t.Fatalf("tp_balance = %v after retry, want it unchanged", user.TPBalance)
+		c, w := spotCtx(t, http.MethodPatch, `{"status":"approved"}`, admin)
+		c.Params = gin.Params{{Key: "id", Value: claim.ID.String()}}
+		h.UpdateRewardClaimStatus(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body=%s", kind, w.Code, w.Body.String())
+		}
+		var got models.RewardClaim
+		db.First(&got, "id = ?", claim.ID)
+		if got.Status != models.RewardClaimStatusApproved || got.ReviewedBy == nil {
+			t.Fatalf("%s: claim = %+v; want approved with a reviewer", kind, got)
+		}
+		var user models.User
+		db.First(&user, "id = ?", regular.ID)
+		if user.TPBalance != 0 {
+			t.Fatalf("%s: tp_balance = %v; approving a reward form must credit no TP", kind, user.TPBalance)
+		}
+		var earnings int64
+		db.Model(&models.TPEarning{}).Where("source_id = ?", claim.ID).Count(&earnings)
+		if earnings != 0 {
+			t.Fatalf("%s: tp_earnings rows = %d, want 0", kind, earnings)
+		}
 	}
 }
 

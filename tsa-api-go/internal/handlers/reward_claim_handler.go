@@ -431,18 +431,9 @@ func (h *RewardClaimHandler) UpdateRewardClaimStatus(c *gin.Context) {
 		return
 	}
 
-	// Approval is what authorises the reward. Airtime still has no rail in this
-	// tree, but the TP leg is available today, so award it here rather than
-	// leaving approval with no effect at all.
-	if status == models.RewardClaimStatusApproved {
-		if err := h.Service.AwardSignupTP(ctx, &claim); err != nil {
-			// The status change already committed; surface the failure rather
-			// than rolling back a legitimate approval decision.
-			utils.ErrorResponse(c, http.StatusInternalServerError,
-				"Approved, but the TradePoint award failed — retry the award")
-			return
-		}
-	}
+	// Approval records the decision only. The signup form carries no reward today
+	// (PM 2026-10-23: no signup reward; claiming comes later, paid through the bills
+	// rails), so approving credits nothing: no TP, no airtime.
 
 	if err := h.DB.WithContext(ctx).First(&claim, "id = ?", id).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Updated, but could not reload the submission")
