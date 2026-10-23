@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -347,6 +348,54 @@ func TestPayoutPlan_PrefersTheCompanyRoute(t *testing.T) {
 		var row models.SellerPayoutOrder
 		if err := r.db.First(&row, "marketplace_order_id = ?", order.ID).Error; err != nil || row.Venue != models.SellerPayoutVenueCompany {
 			t.Fatalf("row = %+v, %v; want venue company", row, err)
+		}
+	})
+}
+
+// The float is promised once: a cart's lines and concurrent checkouts plan before
+// any payout is saved, and a parked company payout still holds its share.
+func TestPayoutPlan_PromisesTheCompanyFloatOnlyOnce(t *testing.T) {
+	ctx := context.Background()
+	net := big.NewInt(100_000000) // ₦150,000 each
+	const takeBps, feeKobo, maxKobo = 50, 5000, 50_000_000
+
+	t.Run("a second plan before the first is saved sees less float", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 200_000}} // room for one
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		first, _ := p.Plan(ctx, uid, "USDC", net)
+		second, _ := p.Plan(ctx, uid, "USDC", net)
+		if first == nil || first.Venue != models.SellerPayoutVenueCompany {
+			t.Fatalf("first = %+v; want the company route", first)
+		}
+		if second != nil && second.Venue == models.SellerPayoutVenueCompany {
+			t.Fatalf("second = %+v; the float was already promised to the first", second)
+		}
+	})
+
+	t.Run("an expired promise frees its float", func(t *testing.T) {
+		p, r, _, _ := newPlanner(t)
+		p.WithCompany(newFakeCompanyPayer(), r.db, takeBps, feeKobo, maxKobo)
+		now := time.Now()
+		p.promise(1_000, now.Add(-2*floatPromiseTTL))
+		if got := p.promisedKobo(now); got != 0 {
+			t.Fatalf("promised = %d; an old promise must have lapsed", got)
+		}
+	})
+
+	t.Run("a parked company payout still holds its float", func(t *testing.T) {
+		p, r, _, uid := newPlanner(t)
+		fp := newFakeCompanyPayer()
+		fp.balances = []FWBalance{{Currency: "NGN", AvailableBalance: 200_000}}
+		p.WithCompany(fp, r.db, takeBps, feeKobo, maxKobo)
+		r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).Updates(map[string]any{
+			"venue": models.SellerPayoutVenueCompany, "status": models.SellerPayoutNeedsReview,
+			"parked_from": models.SellerPayoutReceived, "fiat_target_kobo": 15_000_000,
+		})
+		plan, _ := p.Plan(ctx, uid, "USDC", net)
+		if plan != nil && plan.Venue == models.SellerPayoutVenueCompany {
+			t.Fatalf("plan = %+v; a parked payout is still owed from the same float", plan)
 		}
 	})
 }

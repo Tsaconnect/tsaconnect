@@ -162,6 +162,16 @@ func (a *SellerPayoutAdmin) Retry(ctx context.Context, id, admin uuid.UUID, note
 		}
 	}
 	updates := map[string]any{"failure_reason": "", "retry_safe": false, "attempt_started_at": a.orch.now()}
+	if to == models.SellerPayoutPayingCompany && p.CompanyTransferID != "" && a.orch.company != nil {
+		// A transfer exists: it must be provably dead before another is sent.
+		tr, terr := a.orch.company.GetTransfer(ctx, p.CompanyTransferID)
+		if terr != nil {
+			return fmt.Errorf("cannot read transfer %s to prove it failed: %w", p.CompanyTransferID, terr)
+		}
+		if st := strings.ToUpper(strings.TrimSpace(tr.Status)); st != "FAILED" && st != "CANCELLED" && st != "CANCELED" {
+			return ErrPayoutStillLive
+		}
+	}
 	if to == models.SellerPayoutPayingCompany {
 		// A company transfer is claimed before it is sent, so a retry starts a new
 		// attempt on a NEW reference: the provider would only replay the old answer.
@@ -305,9 +315,12 @@ type CompanyOwed struct {
 
 func (a *SellerPayoutAdmin) CompanyOwed(ctx context.Context) (*CompanyOwed, error) {
 	var rows []models.SellerPayoutOrder
+	// Only payouts the central account actually sent (a transfer id is recorded):
+	// one marked paid by hand left the wallet untouched and owes it nothing.
 	if err := a.db.WithContext(ctx).
-		Where("venue = ? AND status = ? AND rebalanced_at IS NULL", models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
-		Order("created_at ASC").Limit(500).Find(&rows).Error; err != nil {
+		Where("venue = ? AND status = ? AND rebalanced_at IS NULL AND COALESCE(company_transfer_id, '') <> ''",
+			models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
+		Order("created_at ASC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	sums := map[string]*big.Int{}
@@ -336,25 +349,40 @@ func (a *SellerPayoutAdmin) MarkRebalanced(ctx context.Context, ids []uuid.UUID,
 	if strings.TrimSpace(note) == "" || strings.TrimSpace(reference) == "" {
 		return 0, ErrPayoutNeedsNote
 	}
-	if len(ids) == 0 {
+	seen := map[uuid.UUID]bool{}
+	uniq := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			uniq = append(uniq, id)
+		}
+	}
+	if len(uniq) == 0 {
 		return 0, ErrPayoutNotFound
 	}
 	now := a.orch.now()
-	res := a.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).
-		Where("id IN ? AND venue = ? AND status = ? AND rebalanced_at IS NULL", ids, models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
-		UpdateColumn("rebalanced_at", now)
-	if res.Error != nil {
-		return 0, res.Error
+	var affected int64
+	err := a.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&models.SellerPayoutOrder{}).
+			Where("id IN ? AND venue = ? AND status = ? AND rebalanced_at IS NULL AND COALESCE(company_transfer_id, '') <> ''",
+				uniq, models.SellerPayoutVenueCompany, models.SellerPayoutPaid).
+			UpdateColumn("rebalanced_at", now)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != int64(len(uniq)) {
+			return ErrPayoutNotParked // some were not eligible: nothing changes
+		}
+		affected = res.RowsAffected
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
-	if res.RowsAffected != int64(len(ids)) {
-		// Some were not eligible. Undo, so the batch is all or nothing.
-		a.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("id IN ? AND rebalanced_at = ?", ids, now).UpdateColumn("rebalanced_at", nil)
-		return 0, ErrPayoutNotParked
-	}
-	raw, _ := json.Marshal(map[string]any{"ids": ids, "note": note, "reference": reference, "count": res.RowsAffected})
+	raw, _ := json.Marshal(map[string]any{"ids": uniq, "note": note, "reference": reference, "count": affected})
 	row := models.P2PAuditLog{ID: uuid.New(), ActorID: &admin, Action: "seller_payout.rebalanced", Metadata: datatypes.JSON(raw)}
 	if err := a.db.WithContext(ctx).Create(&row).Error; err != nil {
 		fmt.Printf("[seller-payout] audit seller_payout.rebalanced failed: %v\n", err)
 	}
-	return res.RowsAffected, nil
+	return affected, nil
 }

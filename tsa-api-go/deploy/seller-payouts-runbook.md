@@ -28,6 +28,13 @@ whenever the account's float cannot cover the payout plus every one already prom
   PAID company payouts. Move it in one batch, then tick the payouts and record the reference ("Mark rebalanced":
   all or nothing, audited). Do not send from the treasury address by hand (nonce lane): use the operator tooling.
 - Pay seller's wallet is refused after a company transfer may have left (only after a provider refusal is it safe).
+- A forced Retry first reads the old transfer from the provider and is refused unless it is FAILED or CANCELLED
+  (a pending or successful one cannot be re-sent). A `transfer.reversal` for an `SPO-` reference parks the payout
+  (even one marked paid) for review. An unrecognised transfer status parks too.
+- `SELLER_PAYOUT_COMPANY_MAX_NGN=0` stops NEW orders using the route; payouts already sent stay observed.
+- Known limits: the USDC a paid company payout leaves in the treasury is NOT counted in the per-chain exposure cap
+  until it is rebalanced (rebalance regularly); float promised at checkout is tracked in memory per process (2 min)
+  plus the saved payouts, so it is soft; the hard check is at send time and parks safely.
 
 ## What must be true before it does anything
 

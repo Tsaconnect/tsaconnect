@@ -191,6 +191,14 @@ func (o *SellerPayoutOrchestrator) observeCompany(ctx context.Context, p *models
 	case "FAILED", "CANCELLED", "CANCELED":
 		return o.park(ctx, p, fmt.Sprintf("the provider reports transfer %s %s (%s): confirm no money left, then retry", p.CompanyTransferID, strings.ToLower(tr.Status), tr.ProviderResponse.Message))
 	}
+	switch strings.ToUpper(strings.TrimSpace(tr.Status)) {
+	case "", "NEW", "PENDING", "PROCESSING", "QUEUED", "INITIATED":
+		// still in flight
+	default:
+		// REVERSED, or a status this code has never seen: money may have moved
+		// either way, so a person reads it.
+		return o.park(ctx, p, fmt.Sprintf("the provider reports transfer %s as %q: read it on Flutterwave before anything else", p.CompanyTransferID, tr.Status))
+	}
 	if o.now().Sub(p.UpdatedAt) > sellerPayoutCompanyPendingAlertAfter {
 		alertf("seller-payout-company-pending:"+p.ID.String(),
 			"[seller-payout] ALERT seller_payout_company_pending=1 payout=%s ref=%s transfer=%s still %s", p.ID, p.CompanyRef, p.CompanyTransferID, tr.Status)
@@ -216,6 +224,25 @@ func NudgeCompanyPayout(ctx context.Context, db *gorm.DB, merchantTxRef string) 
 	}
 	if res.RowsAffected == 0 {
 		log.Printf("[seller-payout] webhook for unknown transfer reference %q", merchantTxRef)
+	}
+	return nil
+}
+
+// FlagCompanyReversal handles a transfer.reversal webhook for a seller payout:
+// the bank sent the naira back, so a payout that reads paid (or is still being
+// watched) is parked for a person and the seller is not left believing it was paid.
+func FlagCompanyReversal(ctx context.Context, db *gorm.DB, merchantTxRef string) error {
+	res := db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).
+		Where("company_ref = ? AND status IN ?", merchantTxRef, []string{models.SellerPayoutPaid, models.SellerPayoutPayingCompany}).
+		Updates(map[string]any{
+			"status": models.SellerPayoutNeedsReview, "parked_from": models.SellerPayoutPayingCompany, "retry_safe": false,
+			"failure_reason": truncateReason("the provider reports transfer " + merchantTxRef + " reversed: the naira came back; confirm, then retry or pay by hand"),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("[seller-payout] ALERT seller_payout_company_reversed=1 ref=%s — parked for review", merchantTxRef)
 	}
 	return nil
 }

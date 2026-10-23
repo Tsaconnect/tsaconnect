@@ -214,7 +214,10 @@ func (o *SellerPayoutOrchestrator) Advance(ctx context.Context, p *models.Seller
 	if models.SellerPayoutTerminal(p.Status) || p.Status == models.SellerPayoutNeedsReview {
 		return nil
 	}
-	if o.treasury == nil || o.treasury.Address() == "" {
+	// A company payout past its release proof never touches the treasury signer:
+	// its transfer must stay observable whatever the lanes say.
+	companyBeyondRelease := p.Venue == models.SellerPayoutVenueCompany && p.Status != models.SellerPayoutAwaitingRelease
+	if !companyBeyondRelease && (o.treasury == nil || o.treasury.Address() == "") {
 		if p.Status == models.SellerPayoutAwaitingRelease || p.Status == models.SellerPayoutReceived || p.Status == models.SellerPayoutBridged {
 			return o.parkSafe(ctx, p, "treasury lanes disagree on their signer, or none are configured")
 		}

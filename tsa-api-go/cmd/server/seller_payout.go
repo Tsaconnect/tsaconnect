@@ -35,9 +35,13 @@ func wireSellerPayouts(cfg *config.Config, chains *services.BlockchainService, t
 	// The company route: the central account (the Flutterwave wallet IT sells pay
 	// out of) pays the naira; preferred over Paycrest whenever it can run.
 	var companyPayer services.SellerPayoutCompanyPayer
-	if fw != nil && cfg.SellerPayoutCompanyMaxKobo > 0 {
+	if fw != nil {
+		// Built whenever Flutterwave is: a payout already sent must stay observable
+		// even if the route is turned off for NEW orders (MAX_NGN=0).
 		companyPayer = services.FlutterwaveCompanyPayer{Gateway: services.NewFlutterwaveGateway(fw, cfg.NombaSenderName), Client: fw}
-		planner.WithCompany(companyPayer, config.DB, cfg.RampCompanyTakeBps, cfg.SellerPayoutCompanyFeeKobo, cfg.SellerPayoutCompanyMaxKobo)
+		if cfg.SellerPayoutCompanyMaxKobo > 0 {
+			planner.WithCompany(companyPayer, config.DB, cfg.RampCompanyTakeBps, cfg.SellerPayoutCompanyFeeKobo, cfg.SellerPayoutCompanyMaxKobo)
+		}
 	}
 	ch.WithPayouts(planner)
 	ch.WithSellerCalls(services.NewSellerEscrowCalls(treasury, escrow))
@@ -53,7 +57,7 @@ func wireSellerPayouts(cfg *config.Config, chains *services.BlockchainService, t
 		orchestrator.WithCompany(companyPayer, cfg.SellerPayoutCompanyFeeKobo)
 	}
 	scheduler.Register(jobs.NewSellerPayoutWorker(orchestrator, 30*time.Second), jobs.AlertOnFailureStreak())
-	log.Printf("[seller-payout] enabled treasury=%s bridge_bps=%d company_route=%v company_max_ngn=%d company_fee_ngn=%d take_bps=%d",
+	log.Printf("[seller-payout] enabled treasury=%s bridge_bps=%d company_route=%v company_new_orders_max_ngn=%d company_fee_ngn=%d take_bps=%d",
 		treasury.Address(), cfg.SellerPayoutBridgeBps, companyPayer != nil, cfg.SellerPayoutCompanyMaxKobo/100,
 		cfg.SellerPayoutCompanyFeeKobo/100, cfg.RampCompanyTakeBps)
 	return &handlers.SellerPayoutAdminHandler{Admin: services.NewSellerPayoutAdmin(config.DB, orchestrator), Switch: sw}

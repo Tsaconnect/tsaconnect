@@ -199,6 +199,11 @@ func (s *PMAutomationService) DispatchFlutterwave(ctx context.Context, body []by
 		if err != nil {
 			return err
 		}
+		if strings.HasPrefix(p.MerchantTxRef, SellerPayoutRefPrefix) {
+			if err := FlagCompanyReversal(ctx, s.db, p.MerchantTxRef); err != nil {
+				return err
+			}
+		}
 		log.Printf("[fw dispatch] transfer REVERSED (payoutId=%q ref=%q event=%s) — operator action required, no automated re-drive", p.PayoutID, p.MerchantTxRef, webhookID)
 		return fmt.Errorf("%w: transfer reversal", ErrNonSettlingEvent)
 	default:

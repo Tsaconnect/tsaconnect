@@ -182,7 +182,9 @@ func NewSellerPayoutCommitments(db *gorm.DB, chainKey string) *LaneCommitments {
 			return 0, nil
 		}
 		var n int64
-		if err := db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("status IN ?", statuses).Count(&n).Error; err != nil {
+		if err := db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("status IN ? AND COALESCE(venue, ?) <> ?", statuses, models.SellerPayoutVenuePaycrest, models.SellerPayoutVenueCompany).
+			Count(&n).Error; err != nil {
+			// A company payout needs no bridge or deposit, so it reserves no lane gas.
 			return 0, err
 		}
 		if chainKey == "sonic" {

@@ -342,3 +342,117 @@ func TestSellerPayoutCompany_InFlightFundsCountTowardTheCaps(t *testing.T) {
 	}
 	_ = big.NewInt
 }
+
+// A forced retry must first prove the old transfer dead: the operator's word
+// that it "may have been sent" is not enough to send another.
+func TestSellerPayoutCompany_AForcedRetryNeedsTheOldTransferProvenDead(t *testing.T) {
+	r, fp := companyRig(t)
+	r.mustStep() // sent: trf_1, pending
+	// The provider's read comes back wrong once, parking it with a transfer on record.
+	fp.mu.Lock()
+	fp.transfer.Reference = "SPO-someoneelse"
+	fp.mu.Unlock()
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutNeedsReview)
+
+	admin, _ := newAdmin(t, r)
+	fp.mu.Lock()
+	fp.transfer.Reference = sellerPayoutRef(r.payout.ID, 0)
+	fp.transfer.Status = "SUCCESSFUL"
+	fp.mu.Unlock()
+	if err := admin.Retry(context.Background(), r.payout.ID, uuid.New(), "it said it may have been sent", true); !errors.Is(err, ErrPayoutStillLive) {
+		t.Fatalf("retry = %v; a transfer that succeeded must refuse a second one", err)
+	}
+	fp.setStatus("PENDING")
+	if err := admin.Retry(context.Background(), r.payout.ID, uuid.New(), "still pending", true); !errors.Is(err, ErrPayoutStillLive) {
+		t.Fatalf("retry = %v; a pending transfer must refuse a second one", err)
+	}
+	fp.setStatus("FAILED")
+	if err := admin.Retry(context.Background(), r.payout.ID, uuid.New(), "failed at the provider", true); err != nil {
+		t.Fatalf("retry of a provably failed transfer = %v", err)
+	}
+	r.wantStatus(models.SellerPayoutReceived)
+}
+
+func TestSellerPayoutCompany_AReversedOrUnknownTransferStatusParks(t *testing.T) {
+	for _, status := range []string{"REVERSED", "SOMETHING_NEW"} {
+		r, fp := companyRig(t)
+		r.mustStep()
+		fp.setStatus(status)
+		r.mustStep()
+		p := r.wantStatus(models.SellerPayoutNeedsReview)
+		if p.RetrySafe {
+			t.Fatalf("%s: an unrecognised outcome is never a safe retry", status)
+		}
+	}
+}
+
+func TestSellerPayoutCompany_AReversalFlagsAPaidPayout(t *testing.T) {
+	r, fp := companyRig(t)
+	r.mustStep()
+	fp.setStatus("SUCCESSFUL")
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutPaid)
+	if err := FlagCompanyReversal(context.Background(), r.db, r.reload().CompanyRef); err != nil {
+		t.Fatal(err)
+	}
+	p := r.wantStatus(models.SellerPayoutNeedsReview)
+	if p.RetrySafe || p.ParkedFrom != models.SellerPayoutPayingCompany || !strings.Contains(p.FailureReason, "reversed") {
+		t.Fatalf("payout = %+v", p)
+	}
+	// An unrelated reference changes nothing.
+	if err := FlagCompanyReversal(context.Background(), r.db, "SPO-unknown"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSellerPayoutCompany_ATransferInFlightStaysObservableWhateverTheTreasurySays(t *testing.T) {
+	r, fp := companyRig(t)
+	r.mustStep() // sent
+	r.svc.treasury = nil
+	fp.setStatus("SUCCESSFUL")
+	r.mustStep()
+	r.wantStatus(models.SellerPayoutPaid)
+}
+
+func TestSellerPayoutCompany_RebalanceIgnoresHandPaidAndDedupesIds(t *testing.T) {
+	r, fp := companyRig(t)
+	admin, _ := newAdmin(t, r)
+	ctx := context.Background()
+	r.mustStep()
+	fp.setStatus("SUCCESSFUL")
+	r.mustStep()
+	r.db.Model(&models.SellerPayoutOrder{}).Where("id = ?", r.payout.ID).Update("received_amount", "100000000")
+
+	// The same id twice is one payout, not a refused batch.
+	if n, err := admin.MarkRebalanced(ctx, []uuid.UUID{r.payout.ID, r.payout.ID}, uuid.New(), "batch", "0xabc"); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+
+	// A payout marked paid by hand never debited the central account: not owed.
+	handPaid := &models.SellerPayoutOrder{
+		ID: uuid.New(), MarketplaceOrderID: uuid.New(), SellerUserID: uuid.New(), Currency: "NGN",
+		InstitutionCode: "058", InstitutionName: "GTBank", AccountNumber: "0123456789", AccountName: "A",
+		ChainKey: "sonic", Token: "USDC", ExpectedAmount: "1", FiatTargetKobo: 1, ReceivedAmount: "50000000",
+		Status: models.SellerPayoutPaid, Venue: models.SellerPayoutVenueCompany,
+	}
+	if err := r.db.Create(handPaid).Error; err != nil {
+		t.Fatal(err)
+	}
+	owed, err := admin.CompanyOwed(ctx)
+	if err != nil || len(owed.Payouts) != 0 {
+		t.Fatalf("owed = %+v, %v; a hand-paid payout owes the central account nothing", owed, err)
+	}
+	if _, err := admin.MarkRebalanced(ctx, []uuid.UUID{handPaid.ID}, uuid.New(), "batch", "0xdef"); err == nil {
+		t.Fatal("a hand-paid payout cannot be marked rebalanced")
+	}
+}
+
+func TestSellerPayoutCompany_ReservesNoBridgeGas(t *testing.T) {
+	r, _ := companyRig(t)
+	c := NewSellerPayoutCommitments(r.db, "sonic")
+	got, err := c.Units(context.Background())
+	if err != nil || got != 0 {
+		t.Fatalf("units = %d, %v; a company payout needs no bridge so reserves no Sonic gas", got, err)
+	}
+}

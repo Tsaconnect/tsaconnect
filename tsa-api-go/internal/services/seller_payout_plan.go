@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -39,11 +41,48 @@ type SellerPayoutPlanner struct {
 	companyTakeBps int64
 	companyFeeKobo int64
 	companyMaxKobo int64
+	// promised holds the float this process has just promised to payouts not yet
+	// persisted (a cart plans each line before any is saved, and checkouts run
+	// concurrently), so two plans never count the same naira as free.
+	promised   []floatPromise
+	promisedMu sync.Mutex
 	// bridge prices the real Sonic -> Base route at checkout; nil prices the
 	// bridge at bridgeBps and trusts it.
 	bridge lifiQuoter
 	// sw is the operator's switch; nil is always on.
 	sw payoutSwitch
+}
+
+type floatPromise struct {
+	kobo  int64
+	until time.Time
+}
+
+// floatPromiseTTL is how long an unpersisted promise holds float: long enough for
+// the order to be saved, short enough that an abandoned checkout frees it.
+const floatPromiseTTL = 2 * time.Minute
+
+// promisedKobo is the naira promised to plans not yet saved; expired promises
+// are dropped.
+func (p *SellerPayoutPlanner) promisedKobo(now time.Time) int64 {
+	p.promisedMu.Lock()
+	defer p.promisedMu.Unlock()
+	var total int64
+	live := p.promised[:0]
+	for _, f := range p.promised {
+		if f.until.After(now) {
+			live = append(live, f)
+			total += f.kobo
+		}
+	}
+	p.promised = live
+	return total
+}
+
+func (p *SellerPayoutPlanner) promise(kobo int64, now time.Time) {
+	p.promisedMu.Lock()
+	p.promised = append(p.promised, floatPromise{kobo: kobo, until: now.Add(floatPromiseTTL)})
+	p.promisedMu.Unlock()
 }
 
 // companyBalances is the slice of the central account the planner reads.
@@ -283,8 +322,11 @@ func (p *SellerPayoutPlanner) planCompany(ctx context.Context, m *models.SellerP
 	}
 	if err := p.companyDB.WithContext(ctx).Table("seller_payouts").
 		Select("COALESCE(SUM(fiat_target_kobo), 0) AS kobo, COUNT(*) AS n").
-		Where("venue = ? AND status IN ?", models.SellerPayoutVenueCompany,
-			[]string{models.SellerPayoutAwaitingRelease, models.SellerPayoutReceived, models.SellerPayoutPayingCompany}).
+		// A parked company payout is still owed from the float: one stopped before
+		// or at the transfer keeps its claim on it.
+		Where("venue = ? AND (status IN ? OR (status = ? AND parked_from IN ?))", models.SellerPayoutVenueCompany,
+			[]string{models.SellerPayoutAwaitingRelease, models.SellerPayoutReceived, models.SellerPayoutPayingCompany},
+			models.SellerPayoutNeedsReview, []string{models.SellerPayoutReceived, models.SellerPayoutPayingCompany}).
 		Scan(&open).Error; err != nil {
 		return nil
 	}
@@ -293,9 +335,11 @@ func (p *SellerPayoutPlanner) planCompany(ctx context.Context, m *models.SellerP
 		return nil
 	}
 	avail, ok := ngnAvailable(bals)
-	if !ok || avail*100 < float64(open.Kobo+target+(open.N+1)*p.companyFeeKobo) {
+	now := time.Now()
+	if !ok || avail*100 < float64(open.Kobo+p.promisedKobo(now)+target+(open.N+1)*p.companyFeeKobo) {
 		return nil
 	}
+	p.promise(target+p.companyFeeKobo, now)
 
 	// What the treasury must receive R so that R(1-take) = net + the fee in USDC.
 	feeUSD := new(big.Rat).Quo(big.NewRat(p.companyFeeKobo, 100), rate)
