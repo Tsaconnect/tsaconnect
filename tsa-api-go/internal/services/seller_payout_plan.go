@@ -330,18 +330,8 @@ func (p *SellerPayoutPlanner) planCompany(ctx context.Context, m *models.SellerP
 	target := kobo.Int64()
 
 	// The float must cover this payout and every company payout already promised.
-	var open struct {
-		Kobo int64
-		N    int64
-	}
-	if err := p.companyDB.WithContext(ctx).Table("seller_payouts").
-		Select("COALESCE(SUM(fiat_target_kobo), 0) AS kobo, COUNT(*) AS n").
-		// A parked company payout is still owed from the float: one stopped before
-		// or at the transfer keeps its claim on it.
-		Where("venue = ? AND (status IN ? OR (status = ? AND parked_from IN ?))", models.SellerPayoutVenueCompany,
-			[]string{models.SellerPayoutAwaitingRelease, models.SellerPayoutReceived, models.SellerPayoutPayingCompany},
-			models.SellerPayoutNeedsReview, []string{models.SellerPayoutReceived, models.SellerPayoutPayingCompany}).
-		Scan(&open).Error; err != nil {
+	openKobo, openN, err := openCompanyPromises(ctx, p.companyDB)
+	if err != nil {
 		return nil
 	}
 	bals, err := p.company.FetchBalances(ctx)
@@ -350,7 +340,7 @@ func (p *SellerPayoutPlanner) planCompany(ctx context.Context, m *models.SellerP
 	}
 	avail, ok := ngnAvailable(bals)
 	now := time.Now()
-	if !ok || avail*100 < float64(open.Kobo+p.promisedKobo(now)+target+(open.N+1)*p.companyFeeKobo) {
+	if !ok || avail*100 < float64(openKobo+p.promisedKobo(now)+target+(openN+1)*p.companyFeeKobo) {
 		return nil
 	}
 
@@ -422,4 +412,23 @@ func planVenue(plan *PayoutPlan) string {
 		return models.SellerPayoutVenuePaycrest
 	}
 	return plan.Venue
+}
+
+// openCompanyPromises is the naira (kobo) the central account already owes to
+// company-route payouts that have not been paid, and how many there are. A
+// parked company payout still holds its share: one stopped before or at the
+// transfer is still owed. The planner (before promising more) and the operator
+// health panel both read it here.
+func openCompanyPromises(ctx context.Context, db *gorm.DB) (kobo, n int64, err error) {
+	var open struct {
+		Kobo int64
+		N    int64
+	}
+	err = db.WithContext(ctx).Table("seller_payouts").
+		Select("COALESCE(SUM(fiat_target_kobo), 0) AS kobo, COUNT(*) AS n").
+		Where("venue = ? AND (status IN ? OR (status = ? AND parked_from IN ?))", models.SellerPayoutVenueCompany,
+			[]string{models.SellerPayoutAwaitingRelease, models.SellerPayoutReceived, models.SellerPayoutPayingCompany},
+			models.SellerPayoutNeedsReview, []string{models.SellerPayoutReceived, models.SellerPayoutPayingCompany}).
+		Scan(&open).Error
+	return open.Kobo, open.N, err
 }

@@ -823,9 +823,10 @@ func (t *Treasury) FloatBalances(ctx context.Context) ([]SponsorFloat, error) {
 			errs = append(errs, fmt.Errorf("treasury float %s: %w", chain, err))
 			continue
 		}
+		kept, keptFailed := t.laneKeptUSD(lane)
 		out = append(out, SponsorFloat{
 			Chain: chain, Address: addr, BalanceWei: bal, FloorWei: lane.Guard.Floor(),
-			TokenUSD: t.laneKeptUSD(lane),
+			TokenUSD: kept, TokenReadFailed: keptFailed,
 		})
 	}
 	return out, errors.Join(errs...)
@@ -856,8 +857,7 @@ func laneTokenBalance(lane *TreasuryLane, symbol string) (*big.Int, int, error) 
 // a bad token read is logged and treated as 0 rather than failing the whole
 // FloatBalances call, the same carry-on-past-one-bad-read stance the native
 // balance loop above takes at the chain level.
-func (t *Treasury) laneKeptUSD(lane *TreasuryLane) float64 {
-	var usd float64
+func (t *Treasury) laneKeptUSD(lane *TreasuryLane) (usd float64, failed bool) {
 	for symbol := range lane.Tokens {
 		if !IsStableAsset(symbol) {
 			continue
@@ -865,16 +865,18 @@ func (t *Treasury) laneKeptUSD(lane *TreasuryLane) float64 {
 		bal, decimals, err := laneTokenBalance(lane, symbol)
 		if err != nil {
 			log.Printf("[ramp-conversion] treasury kept-USDC read %s %s: %v", lane.ChainKey, symbol, err)
+			failed = true
 			continue
 		}
 		amount, err := strconv.ParseFloat(BaseUnitsToDecimal(bal, decimals), 64)
 		if err != nil {
 			log.Printf("[ramp-conversion] treasury kept-USDC parse %s %s: %v", lane.ChainKey, symbol, err)
+			failed = true
 			continue
 		}
 		usd += amount
 	}
-	return usd
+	return usd, failed
 }
 
 // routerAllowed reports whether addr is one of the lane's allowlisted router

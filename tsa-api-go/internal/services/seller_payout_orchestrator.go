@@ -93,6 +93,7 @@ type SellerPayoutOrchestrator struct {
 	// must also cover. nil parks a company payout safely instead of sending.
 	company        SellerPayoutCompanyPayer
 	companyFeeKobo int64
+	companyMaxKobo int64
 }
 
 func NewSellerPayoutOrchestrator(db *gorm.DB, treasury *Treasury, legs rampLegStore, lifi lifiQuoter,
@@ -922,7 +923,7 @@ func (o *SellerPayoutOrchestrator) StartWalletPayment(ctx context.Context, p *mo
 	// A company transfer that may have left the central account means the naira
 	// may already be paid: only a provider refusal (nothing exists) or no attempt
 	// at all leaves the wallet payment safe.
-	if p.CompanyAttempts > 0 && !(p.ParkedFrom == models.SellerPayoutPayingCompany && p.RetrySafe) {
+	if !companyNothingSent(p) {
 		return ErrWalletPaymentNotSafe
 	}
 	legs, err := o.legs.ForOrder(ctx, p.ID)
