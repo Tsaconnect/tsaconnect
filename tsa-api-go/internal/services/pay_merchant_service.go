@@ -613,10 +613,20 @@ func (s *PayMerchantService) GetOrProvisionByOwner(ctx context.Context, userID u
 	if err != nil {
 		return nil, err
 	}
-	// A marketplace request carries no TSA Pay website or settlement, which
-	// CreateFromRequest then leaves blank for the merchant to set.
+	// A marketplace request carries no TSA Pay website or settlement. Settlement
+	// starts from the merchant's payout account when they have a naira bank one
+	// (CreateFromRequest re-checks the name at the bank), else it is left blank
+	// for them to choose in Payment Settings.
 	req.Website = ""
 	req.SettlementBankCode, req.SettlementAccountNumber, req.SettlementAccountName = "", "", ""
+	account, err := MerchantBankAccount(ctx, s.db, userID)
+	if err != nil {
+		return nil, err
+	}
+	if account != nil {
+		req.SettlementBankCode, req.SettlementAccountNumber, req.SettlementAccountName =
+			account.InstitutionCode, account.AccountNumber, account.AccountName
+	}
 	created, err := s.CreateFromRequest(ctx, &req)
 	if err != nil {
 		// Not "no merchant": a name that breaks the TSA Pay rule maps to its own
@@ -625,6 +635,36 @@ func (s *PayMerchantService) GetOrProvisionByOwner(ctx context.Context, userID u
 		return nil, err
 	}
 	return created, nil
+}
+
+// FollowPayoutAccount points a merchant's TSA Pay bank settlement at their
+// payout account, so changing the payout account changes it here too. The owner
+// just changed it through its own guarded flow (password and emailed code), so
+// this goes through the same audited update as any settlement edit — the bank
+// re-resolves the name, the version moves, and the payout cool-off starts —
+// but asks for nothing more. It deliberately leaves alone a merchant with no
+// TSA Pay account, a suspended one, and one settling in crypto, which is a
+// choice the payout account cannot make for them. Nothing to do is not an error.
+func (s *PayMerchantService) FollowPayoutAccount(ctx context.Context, ownerID uuid.UUID, bankCode, accountNumber string) error {
+	m, err := s.GetByOwner(ctx, ownerID)
+	if errors.Is(err, ErrPayMerchantNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if m.Status != models.PayMerchantActive || m.SettlementMode == models.PaySettlementCrypto {
+		return nil
+	}
+	if m.SettlementMode == models.PaySettlementFiat && m.BankCode == bankCode && m.AccountNumber == accountNumber {
+		return nil
+	}
+	in, err := s.ownerUpdate(m, PaySettlementChange{SettlementMode: models.PaySettlementFiat, BankCode: bankCode, AccountNumber: accountNumber})
+	if err != nil {
+		return err
+	}
+	_, _, err = s.update(ctx, ownerID, m.ID, in, nil)
+	return err
 }
 
 // UpdateSettlementByOwner is a merchant changing where they are paid. It is the

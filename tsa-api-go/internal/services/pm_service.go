@@ -405,6 +405,26 @@ func (s *PMService) ListAll(ctx context.Context) ([]models.PaymentMerchant, erro
 	return s.ListByKind(ctx, "")
 }
 
+// PeopleByID reads the users behind payment merchants (owners and reviewing
+// admins) in one query, keyed by id. Only the columns an admin detail view
+// shows are selected.
+func (s *PMService) PeopleByID(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]models.User, error) {
+	people := map[uuid.UUID]models.User{}
+	if len(ids) == 0 {
+		return people, nil
+	}
+	var users []models.User
+	if err := s.db.WithContext(ctx).
+		Select("id", "name", "email", "phone_number", "verified_legal_name").
+		Where("id IN ?", ids).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		people[u.ID] = u
+	}
+	return people, nil
+}
+
 // ListByKind is ListAll narrowed to one kind ("" = every row).
 func (s *PMService) ListByKind(ctx context.Context, kind string) ([]models.PaymentMerchant, error) {
 	q := s.db.WithContext(ctx).Order("created_at DESC")

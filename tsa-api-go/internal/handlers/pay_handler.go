@@ -153,6 +153,14 @@ func (h *PayHandler) OpenLinksEnabled() bool {
 // Nil-safe on the receiver itself: buildTSAPay returns a nil *PayHandler
 // when TSA Pay is dormant, and routes.go calls payh.Enabled() before ever
 // registering a route, so a dormant handler must not panic here.
+// Merchants is the TSA Pay merchant service, nil while TSA Pay is dormant.
+func (h *PayHandler) Merchants() *services.PayMerchantService {
+	if h == nil {
+		return nil
+	}
+	return h.merchants
+}
+
 func (h *PayHandler) Enabled() bool {
 	return h != nil && h.merchants != nil && h.payments != nil
 }

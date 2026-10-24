@@ -1498,6 +1498,7 @@ func main() {
 		if pmOnboarding != nil {
 			pmh.SetApprover(pmOnboarding)
 			pmh.SetActivator(pmOnboarding)
+			pmh.SetEnroller(pmOnboarding)
 			log.Printf("[pm] admin PM approval + merchant activation ready (provider=%s)", cfg.ResolveFiatProvider())
 		} else {
 			log.Printf("[pm] admin PM approval/activation dormant: no fiat provider configured — approve/activate will 503 (reject/pause/resume still available)")
@@ -1623,6 +1624,7 @@ func main() {
 				mrh.PMOnboarding = pmOnboarding
 				pmh.SetApprover(pmOnboarding)
 				pmh.SetActivator(pmOnboarding)
+				pmh.SetEnroller(pmOnboarding)
 			}
 			pmOnboarding.SetVirtualAccountsRetired(true)
 			log.Printf("[pm] merchant activation mints no virtual account, asks no BVN/NIN and requires Didit verification (central inbound)")
@@ -2071,6 +2073,10 @@ func main() {
 		sellerPayoutDir = paycrestDir
 	}
 	sellerPayoutSvc := services.NewSellerPayoutService(config.DB, sellerPayoutDir, bankDirectory, sellerPayoutMailer)
+	// One payout account: saving it also moves a bank-mode TSA Pay settlement.
+	if payMerchants := payHandler.Merchants(); payMerchants != nil {
+		sellerPayoutSvc.FollowWith(payMerchants.FollowPayoutAccount)
+	}
 	sellerPayoutHandler := handlers.NewSellerPayoutHandler(sellerPayoutSvc, eventBus)
 	sellerPayoutAdmin := wireSellerPayouts(cfg, blockchainService, payoutTreasury, payoutOrders, paycrestQuotes, escrowService, sellerPayoutSvc, ch, scheduler, eventBus, inboundAlerts, fwClient)
 	routes.SetupRoutes(router, cfg, h, ch, mrh, sch, swh, slh, psh, wsHub, eh, p2pHandler, fch, rfh, rdh, rsh, fah, rph, pmh, nwh, mcgpSwapHandler, itHandler, osh, rch, tph, fwh, feeQuoteHandler, fwlh, billHandler, paycrestHandler, paycrestWebhookHandler, disputeHandler, inboundAdminHandler, payHandler)

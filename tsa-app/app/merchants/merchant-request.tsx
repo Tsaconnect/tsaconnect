@@ -35,7 +35,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../AuthContext/AuthContext';
 import api, { getMyMerchantRequest, submitMerchantRequest } from '../../components/services/api';
 import { getNigerianBanks, NgBank, resolveAccountName } from '../../services/ngBanks';
-import { getMyPmStatus } from '../../services/p2p';
+import { enrollPmAccount, getMyPmStatus } from '../../services/p2p';
+import { getPayoutMethod, type SellerPayout } from '@/services/sellerPayoutApi';
+import { SELLER_PAYOUT } from '@/constants/routes';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { COMPANY } from '@/constants/legal';
@@ -210,6 +212,11 @@ export function resolveMerchantGate(args: {
   if (gate.screen === 'form' && args.formType === 'payment_acceptance' && args.kycVerified === false) {
     return { screen: 'verify' };
   }
+  // An approved merchant gets TSA Pay without applying: the API sets it up on
+  // first use, so the form is replaced by the way to Payment Settings.
+  if (gate.screen === 'form' && args.isMerchant && args.formType === 'payment_acceptance') {
+    return { screen: 'approved', pm: false, payFlow: true };
+  }
   return gate;
 }
 
@@ -334,8 +341,23 @@ export default function MerchantRequestScreen() {
 
   const isPm = businessType === 'p2p_merchant';
   const isPay = businessType === 'payment_acceptance';
-  const screenTitle = 'Merchant Application';
   const needsBanks = isPm;
+  // An approved merchant needs no second application for P2P: they give only
+  // where they are paid and which wallet signs their ads.
+  const enrollMode = isPm && isMerchantRole;
+  const screenTitle = enrollMode ? 'Payment Merchant' : 'Merchant Application';
+
+  // Where P2P pays an enrolling merchant is their one payout account, not a
+  // second bank entry. undefined while it loads; null when it can't be read.
+  const [payout, setPayout] = useState<SellerPayout | null | undefined>(undefined);
+  useEffect(() => {
+    if (!enrollMode) return;
+    let live = true;
+    getPayoutMethod().then((p) => live && setPayout(p)).catch(() => live && setPayout(null));
+    return () => { live = false; };
+  }, [enrollMode]);
+  // P2P settles in naira into a bank account.
+  const payoutBank = payout?.kind === 'bank' && payout.currency === 'NGN' ? payout : null;
 
   useEffect(() => {
     fetchExistingRequest();
@@ -487,7 +509,7 @@ export default function MerchantRequestScreen() {
   };
 
   const handleSubmit = async () => {
-    if (!businessName || !address || !city || !state || !country || !phone) {
+    if (!enrollMode && (!businessName || !address || !city || !state || !country || !phone)) {
       Alert.alert('Error', 'Please fill in all required fields');
       return;
     }
@@ -499,9 +521,20 @@ export default function MerchantRequestScreen() {
       return;
     }
 
+    if (enrollMode && !payoutBank) {
+      Alert.alert('Add a payout account first', 'P2P payments are paid into your naira bank payout account.');
+      return;
+    }
+
     // Validate PM-specific fields before submitting
     if (isPm) {
-      const errors = validatePmFields({
+      const errors = validatePmFields(enrollMode ? {
+        // Enrolling merchants are paid into their payout account; only the wallet is theirs to give.
+        settlementBankCode: payoutBank!.institutionCode ?? '',
+        settlementAccountNumber: payoutBank!.accountNumber ?? '',
+        settlementAccountName: payoutBank!.accountName ?? '',
+        makerWalletAddress,
+      } : {
         settlementBankCode: settlementBank?.code ?? '',
         settlementAccountNumber,
         settlementAccountName,
@@ -513,6 +546,24 @@ export default function MerchantRequestScreen() {
         Alert.alert('Payment Merchant setup incomplete', 'Please fill in all required Payment Merchant fields correctly.');
         return;
       }
+    }
+
+    if (enrollMode) {
+      setSubmitting(true);
+      const enrolled = await enrollPmAccount({ makerWalletAddress: makerWalletAddress.trim() });
+      setSubmitting(false);
+      const enrollRefusal = enrolled.success ? null : kycRefusalFor(enrolled.code, enrolled.message);
+      if (enrollRefusal) {
+        promptKycRefusal(enrolled.code, enrolled.message);
+        return;
+      }
+      if (enrolled.success) {
+        Alert.alert("You're set up", 'Finish activating your Payment Merchant account from your dashboard.');
+        router.replace('/merchants/dashboard' as never);
+      } else {
+        Alert.alert('Error', enrolled.message || 'Could not set up Payment Merchant');
+      }
+      return;
     }
 
     setSubmitting(true);
@@ -713,6 +764,32 @@ export default function MerchantRequestScreen() {
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ padding: spacing.lg, paddingBottom: spacing['4xl'] + kbHeight }}
         >
+          {enrollMode && (
+            <View
+              style={{
+                flexDirection: 'row',
+                gap: spacing.md,
+                padding: spacing.lg,
+                borderRadius: 12,
+                backgroundColor: colors.successBg,
+                marginBottom: spacing.xl,
+              }}
+            >
+              <Icon name="checkCircle" size={22} color={colors.success} />
+              <View style={{ flex: 1 }}>
+                <Text variant="bodyMed" weight="700">
+                  You&apos;re already an approved merchant
+                </Text>
+                <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+                  No new application. Add the wallet that signs your ads, then activate from your
+                  dashboard. P2P pays into your payout account.
+                </Text>
+              </View>
+            </View>
+          )}
+
+          {!enrollMode && (
+          <>
           <Text variant="bodySm" color="textSecondary" style={{ marginBottom: spacing.xl }}>
             Fill in your business details to apply
           </Text>
@@ -819,6 +896,8 @@ export default function MerchantRequestScreen() {
                 : handleSubmit
             }
           />
+          </>
+          )}
 
           {/* ─── TSA Pay setup (payment_acceptance only) ─────────────────── */}
           {isPay && (
@@ -840,19 +919,66 @@ export default function MerchantRequestScreen() {
           {isPm && (
             <View
               style={{
-                marginTop: spacing.xl,
-                borderTopWidth: 1,
+                marginTop: enrollMode ? 0 : spacing.xl,
+                borderTopWidth: enrollMode ? 0 : 1,
                 borderTopColor: colors.border,
-                paddingTop: spacing.xl,
+                paddingTop: enrollMode ? 0 : spacing.xl,
               }}
             >
               <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.xs }}>
-                Payment Merchant setup
+                {enrollMode ? 'P2P trading' : 'Payment Merchant setup'}
               </Text>
               <Text variant="caption" color="textSecondary" style={{ marginBottom: spacing.lg }}>
-                These details are required for your corporate P2P Merchant account.
+                {enrollMode
+                  ? 'Naira from your trades is paid into your payout account. Your wallet signs the ads you publish.'
+                  : 'These details are required for your corporate P2P Merchant account.'}
               </Text>
 
+              {enrollMode ? (
+                payout === undefined ? (
+                  <Spinner size="small" label="Loading your payout account…" />
+                ) : payoutBank ? (
+                  <View
+                    style={{
+                      padding: spacing.md,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: colors.border,
+                      backgroundColor: colors.surface,
+                      marginBottom: spacing.md,
+                    }}
+                  >
+                    <Text variant="caption" color="textMuted">Paid into your payout account</Text>
+                    <Text variant="bodyMed" weight="700" style={{ marginTop: spacing.xs }}>
+                      {payoutBank.institutionName} · {payoutBank.accountNumber}
+                    </Text>
+                    <Text variant="bodySm" color="textSecondary">{payoutBank.accountName}</Text>
+                    <PressableScale onPress={() => router.push(SELLER_PAYOUT as never)} style={{ marginTop: spacing.sm }}>
+                      <Text variant="bodySm" weight="600" color="accent">Change payout account</Text>
+                    </PressableScale>
+                  </View>
+                ) : (
+                  <View
+                    style={{
+                      padding: spacing.md,
+                      borderRadius: 12,
+                      backgroundColor: colors.warningBg,
+                      marginBottom: spacing.md,
+                    }}
+                  >
+                    <Text variant="bodyMed" weight="700">Add a naira bank payout account first</Text>
+                    <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+                      P2P payments are paid into the account you set for payouts, so you only set it once.
+                    </Text>
+                    <Button
+                      title="Set payout account"
+                      onPress={() => router.push(SELLER_PAYOUT as never)}
+                      style={{ marginTop: spacing.sm }}
+                    />
+                  </View>
+                )
+              ) : (
+              <>
               {/* Settlement bank picker */}
               <SelectRow
                 label="Settlement Bank *"
@@ -953,12 +1079,14 @@ export default function MerchantRequestScreen() {
                 )}
               </View>
 
+              </>
+              )}
               {isPm && (
               <>
               {/* Maker wallet address */}
               <Field
                 ref={makerWalletRef}
-                label="Maker Wallet Address *"
+                label={enrollMode ? 'Wallet that signs your ads *' : 'Maker Wallet Address *'}
                 value={makerWalletAddress}
                 onChangeText={setMakerWalletAddress}
                 placeholder="0x…"
@@ -969,6 +1097,8 @@ export default function MerchantRequestScreen() {
                 error={pmErrors.makerWalletAddress}
               />
 
+              {!enrollMode && (
+              <>
               {/* Per-trade cap */}
               <Field
                 ref={perTradeCapRef}
@@ -994,11 +1124,13 @@ export default function MerchantRequestScreen() {
               />
               </>
               )}
+              </>
+              )}
             </View>
           )}
 
           <Button
-            title="Submit Application"
+            title={enrollMode ? 'Set up Payment Merchant' : 'Submit Application'}
             onPress={handleSubmit}
             disabled={submitting}
             loading={submitting}

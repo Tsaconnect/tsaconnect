@@ -7,6 +7,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { router } from 'expo-router';
+import { PAY_SETTINGS } from '@/constants/routes';
 import { useTheme } from '@/theme';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { Button, Card, ErrorState, Input, PickerSheet, SelectRow, Spinner, Text, useToast } from '@/components/ui';
@@ -157,7 +159,16 @@ export default function PayoutMethod() {
               Orders paid in USDC or USDT are sent to this account in naira when the buyer confirms. Buyers see a small payout fee.
             </Text>
           ) : null}
+          {onBank ? (
+            <Text variant="caption" color="textMuted">
+              TSA Pay and P2P are paid into this account too. Change it here and they follow.
+            </Text>
+          ) : null}
         </Card>
+
+        {pending ? null : (
+          <Button title="TSA Pay settings" variant="ghost" onPress={() => router.push(PAY_SETTINGS)} fullWidth />
+        )}
 
         {pending ? (
           <Card style={{ gap: spacing.sm }}>

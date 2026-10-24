@@ -2,7 +2,7 @@ jest.mock('@react-native-async-storage/async-storage', () =>
   // eslint-disable-next-line @typescript-eslint/no-require-imports -- jest.mock factories cannot import.
   require('@react-native-async-storage/async-storage/jest/async-storage-mock'));
 /* eslint-disable import/first -- jest hoists the mock above the imports it replaces. */
-import { describeSettlement, settlementChangeFrom, settlesIn } from '../paySettlement';
+import { describeSettlement, payoutBankOf, paysIntoPayoutAccount, settlementChangeFrom, settlesIn } from '../paySettlement';
 import type { OwnMerchant } from '@/services/payMerchantApi';
 
 const USDC_BASE = { address: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', symbol: 'USDC', decimals: 6, chainId: 8453 } as any;
@@ -55,5 +55,28 @@ describe('describeSettlement', () => {
   });
   it('nothing set up yet', () => {
     expect(describeSettlement({ ...base, settlementMode: '' } as OwnMerchant)).toBe('Not set up yet');
+  });
+});
+
+describe('the payout account as the bank destination', () => {
+  const bank = { kind: 'bank' as const, currency: 'NGN', institutionCode: '070', institutionName: 'Fidelity Bank', accountNumber: '6554258761', accountName: 'ADA OBI' };
+
+  it('only a naira bank account counts', () => {
+    expect(payoutBankOf(bank)).toEqual(bank);
+    expect(payoutBankOf(null)).toBeNull();
+    expect(payoutBankOf(undefined)).toBeNull();
+    expect(payoutBankOf({ kind: 'wallet' })).toBeNull();
+    expect(payoutBankOf({ ...bank, kind: 'mobile_money' })).toBeNull();
+    expect(payoutBankOf({ ...bank, currency: 'GHS' })).toBeNull();
+    expect(payoutBankOf({ ...bank, accountNumber: undefined })).toBeNull();
+  });
+
+  it('knows when TSA Pay already pays into it', () => {
+    const paid = { settlementMode: 'fiat' as const, bankCode: '070', accountNumber: '******8761' };
+    expect(paysIntoPayoutAccount(paid, { institutionCode: '070', accountNumber: '6554258761' })).toBe(true);
+    expect(paysIntoPayoutAccount({ ...paid, accountNumber: '******6789' }, { institutionCode: '070', accountNumber: '6554258761' })).toBe(false);
+    expect(paysIntoPayoutAccount({ ...paid, accountNumber: undefined }, { institutionCode: '070', accountNumber: '6554258761' })).toBe(false);
+    expect(paysIntoPayoutAccount({ ...paid, bankCode: '058' }, { institutionCode: '070', accountNumber: '6554258761' })).toBe(false);
+    expect(paysIntoPayoutAccount({ settlementMode: 'crypto' }, { institutionCode: '070', accountNumber: '6554258761' })).toBe(false);
   });
 });

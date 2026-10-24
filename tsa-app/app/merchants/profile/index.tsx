@@ -179,7 +179,7 @@ const MerchantProfileScreen = () => {
                 </Text>
                 <View style={{ gap: spacing.sm }}>
                     <MenuRow icon="user" label="Edit Profile" />
-                    <MenuRow icon="bank" label="Payout account" onPress={() => router.push("/merchants/payout-method")} />
+                    <MenuRow icon="bank" label="Payout settings" onPress={() => router.push("/merchants/payout-method")} />
                     <MenuRow icon="shield" label="Security & Privacy" />
                     <MenuRow icon="notifications" label="Notifications" />
                     {/* Optional: Add referral code section if needed */}

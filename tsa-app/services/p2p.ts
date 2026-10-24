@@ -966,6 +966,17 @@ export function activatePmAccount(idType?: PmIdType, idNumber?: string, kind?: '
   return request<{ status: string }>('POST', '/p2p/pm/activate', body, kind ? { query: { kind } } : undefined);
 }
 
+/**
+ * An approved merchant takes part in P2P without a second application: POST
+ * /p2p/pm/enroll creates their payment-merchant row (already approved), which
+ * they then activate with activatePmAccount. P2P pays into the merchant's own
+ * payout account, so only the wallet is sent; without a naira bank payout
+ * account the API answers 409 payout_account_required.
+ */
+export function enrollPmAccount(body: { makerWalletAddress: string }) {
+  return request<{ status: string }>('POST', '/p2p/pm/enroll', body);
+}
+
 // ─── Sellers ────────────────────────────────────────────────────────────────
 
 export const sellersApi = {
