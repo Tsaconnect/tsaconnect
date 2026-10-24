@@ -979,6 +979,10 @@ func (s *PayMerchantService) commit(ctx context.Context, actor uuid.UUID, e *pay
 			if err := supersedePendingBusinessNames(tx, id, "superseded by an admin edit of the business name"); err != nil {
 				return err
 			}
+			// The owner's other merchant records follow, as they do for an approved rename.
+			if _, err := renameOwnersBusiness(tx, before.UserID, updated.BusinessName); err != nil {
+				return err
+			}
 		}
 		return s.writeAudit(tx, id, actor, models.PayAuditActionMerchantUpdate, payAuditChanges(&before, &updated))
 	})

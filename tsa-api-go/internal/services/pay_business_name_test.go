@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -258,5 +259,109 @@ func TestPayMerchant_ApprovalRechecksTheName(t *testing.T) {
 	}
 	if change, _, err := f.s.ReviewBusinessNameChange(ctx, uuid.New(), rows[0].ID, false, "reserved now"); err != nil || change.Status != models.PayNameChangeRejected {
 		t.Fatalf("it can still be rejected: %+v %v", change, err)
+	}
+}
+
+// seedOtherMerchantRecords gives the fixture's owner the records an approved
+// marketplace merchant who also trades P2P would have, plus ones a rename must
+// leave alone: a liquidity-provider row, the TSA Pay application, and a
+// stranger's merchant.
+func (f *ownerFixture) seedOtherMerchantRecords(t *testing.T) (stranger uuid.UUID) {
+	t.Helper()
+	stranger = uuid.New()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if err := f.s.db.Exec(q, args...).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO payment_merchants (id, user_id, name, kind) VALUES (?, ?, 'Sky Air Stores', 'merchant')`, uuid.New(), f.owner)
+	exec(`INSERT INTO payment_merchants (id, user_id, name, kind) VALUES (?, ?, 'Sky Air LP', 'lp')`, uuid.New(), f.owner)
+	exec(`INSERT INTO payment_merchants (id, user_id, name, kind) VALUES (?, ?, 'Sky Air Stores', 'merchant')`, uuid.New(), stranger)
+	exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status) VALUES (?, ?, 'general_products', 'Sky Air Stores', 'approved')`, uuid.New(), f.owner)
+	exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status) VALUES (?, ?, 'p2p_merchant', 'Sky Air Stores', 'approved')`, uuid.New(), f.owner)
+	exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status) VALUES (?, ?, 'payment_acceptance', 'Sky Air', 'approved')`, uuid.New(), f.owner)
+	exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status) VALUES (?, ?, 'general_products', 'Sky Air Stores', 'pending')`, uuid.New(), f.owner)
+	exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status) VALUES (?, ?, 'general_products', 'Sky Air Stores', 'approved')`, uuid.New(), stranger)
+	return stranger
+}
+
+func (f *ownerFixture) names(t *testing.T, query string, args ...any) []string {
+	t.Helper()
+	var out []string
+	if err := f.s.db.Raw(query, args...).Scan(&out).Error; err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// One approval renames the merchant everywhere it is the owner's: the payment
+// merchant and the approved requests follow; the LP row, the TSA Pay
+// application, an unapproved request and other people's records do not.
+func TestPayMerchant_ApprovedRenameFollowsToTheOwnersOtherRecords(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	stranger := f.seedOtherMerchantRecords(t)
+	f.requestRename(t, "Kite Travel")
+	rows := f.nameChanges(t)
+
+	if got := f.names(t, `SELECT name FROM payment_merchants WHERE user_id = ? AND kind = 'merchant'`, f.owner); len(got) != 1 || got[0] != "Sky Air Stores" {
+		t.Fatalf("a pending rename must change nothing yet: %v", got)
+	}
+	if _, _, err := f.s.ReviewBusinessNameChange(ctx, uuid.New(), rows[0].ID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := f.names(t, `SELECT name FROM payment_merchants WHERE user_id = ? AND kind = 'merchant'`, f.owner); len(got) != 1 || got[0] != "Kite Travel" {
+		t.Errorf("payment merchant = %v, want renamed", got)
+	}
+	if got := f.names(t, `SELECT business_name FROM merchant_requests WHERE user_id = ? AND status = 'approved' AND business_type IN ('general_products','p2p_merchant')`, f.owner); len(got) != 2 || got[0] != "Kite Travel" || got[1] != "Kite Travel" {
+		t.Errorf("approved requests = %v, want both renamed", got)
+	}
+	if got := f.names(t, `SELECT name FROM payment_merchants WHERE user_id = ? AND kind = 'lp'`, f.owner); got[0] != "Sky Air LP" {
+		t.Errorf("the LP row must keep its name: %v", got)
+	}
+	if got := f.names(t, `SELECT business_name FROM merchant_requests WHERE user_id = ? AND business_type = 'payment_acceptance'`, f.owner); got[0] != "Sky Air" {
+		t.Errorf("the TSA Pay application is history: %v", got)
+	}
+	if got := f.names(t, `SELECT business_name FROM merchant_requests WHERE user_id = ? AND status = 'pending'`, f.owner); got[0] != "Sky Air Stores" {
+		t.Errorf("an unapproved request must keep its name: %v", got)
+	}
+	if got := f.names(t, `SELECT name FROM payment_merchants WHERE user_id = ?`, stranger); got[0] != "Sky Air Stores" {
+		t.Errorf("another person's merchant was renamed: %v", got)
+	}
+	if got := f.names(t, `SELECT business_name FROM merchant_requests WHERE user_id = ?`, stranger); got[0] != "Sky Air Stores" {
+		t.Errorf("another person's request was renamed: %v", got)
+	}
+	var audit models.PayAuditEvent
+	if err := f.s.db.Where("merchant_id = ? AND action = ?", f.m.ID, models.PayAuditActionBusinessNameReview).First(&audit).Error; err != nil || !strings.Contains(audit.Details, "paymentMerchants") {
+		t.Errorf("the review audit must say what the rename reached: %v %s", err, audit.Details)
+	}
+}
+
+func TestPayMerchant_RejectedRenameLeavesOtherRecordsAlone(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, "", "")
+	f.seedOtherMerchantRecords(t)
+	f.requestRename(t, "Kite Travel")
+	rows := f.nameChanges(t)
+	if _, _, err := f.s.ReviewBusinessNameChange(ctx, uuid.New(), rows[0].ID, false, "no"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.names(t, `SELECT name FROM payment_merchants WHERE user_id = ? AND kind = 'merchant'`, f.owner); got[0] != "Sky Air Stores" {
+		t.Errorf("payment merchant = %v after a rejection", got)
+	}
+}
+
+// A super admin renaming the merchant directly renames it everywhere too.
+func TestPayMerchant_AdminRenameFollowsToTheOwnersOtherRecords(t *testing.T) {
+	f := ownedMerchant(t, "", "")
+	f.seedOtherMerchantRecords(t)
+	renamed := "Kite Travel Limited"
+	if _, _, err := f.s.Update(context.Background(), payActor, f.m.ID, PayMerchantUpdate{BusinessName: &renamed}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.names(t, `SELECT name FROM payment_merchants WHERE user_id = ? AND kind = 'merchant'`, f.owner); got[0] != renamed {
+		t.Errorf("payment merchant = %v", got)
 	}
 }

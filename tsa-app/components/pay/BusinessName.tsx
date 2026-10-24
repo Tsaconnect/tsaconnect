@@ -1,7 +1,8 @@
 // components/pay/BusinessName.tsx
 //
-// A TSA Pay merchant's business name on Payment Settings: the name in use, a
-// rename waiting for approval, and the form that asks for one. A rename takes
+// A merchant's business name: the name in use, a rename waiting for approval,
+// and the form that asks for one. The name is the merchant's, so an approved
+// rename reaches TSA Pay, P2P and the store together. A rename takes
 // effect only once an admin approves it — until then customers and payouts
 // keep the current name. The screen owns the guarded send (password, PIN/
 // biometric, the emailed code), shared with the payout change.
@@ -88,7 +89,7 @@ export function BusinessNameForm({
       />
       <Text variant="caption" color="textMuted">
         {`Your new name takes effect once our team approves it. Until then customers and payouts keep '${merchant.businessName}'.`
-          + ' We email you a code to confirm the request.'}
+          + ' It renames your whole merchant account — TSA Pay, P2P and your store — and we email you a code to confirm the request.'}
       </Text>
       {passwordField}
       {errorLine}

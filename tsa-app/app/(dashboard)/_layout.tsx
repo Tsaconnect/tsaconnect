@@ -143,6 +143,7 @@ const Layout = () => {
     { label: "Buy Crypto with Cash", icon: "cash-multiple", route: "/merchants/buy-usdt" },
     { label: "Digital Assets", icon: "wallet-outline", route: "/merchants/digital" },
     { label: "Payment Links", icon: "link-variant", route: "/merchants/pay-links" },
+    { label: "Business Name", icon: "storefront-outline", route: "/merchants/pay-settings?section=name" },
     { label: "Payment Settings", icon: "credit-card-outline", route: "/merchants/pay-settings" },
     { label: "Payout Account", icon: "bank-outline", route: "/merchants/payout-method" },
   ];
