@@ -62,6 +62,13 @@ func sellerPayoutSvc(t *testing.T, banks BankDirectory) (*SellerPayoutService, *
 		attempts INTEGER NOT NULL DEFAULT 0, expires_at DATETIME NOT NULL, created_at DATETIME)`).Error; err != nil {
 		t.Fatal(err)
 	}
+	// Saving a payout account also points the owner's payment merchant at it.
+	if err := db.Exec(`CREATE TABLE payment_merchants (
+		id TEXT PRIMARY KEY, user_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'merchant',
+		settlement_bank_code TEXT, settlement_account_number TEXT, settlement_account_name TEXT,
+		created_at DATETIME, updated_at DATETIME)`).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Exec(`CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT, name TEXT)`).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +126,75 @@ func TestSellerPayout_NGNBankNameComesFromTheBank(t *testing.T) {
 	p, _ := s.Resolve(context.Background(), uid)
 	if p.Kind != models.SellerPayoutBank || p.Method.InstitutionName != "GTBank" {
 		t.Fatalf("resolve: %+v", p)
+	}
+}
+
+// One payout account: saving it (after the emailed code) moves the owner's P2P
+// settlement to it too, and nobody else's.
+func TestSellerPayout_SavingTheAccountMovesTheOwnersPaymentMerchant(t *testing.T) {
+	s, mail := sellerPayoutSvc(t, stubPayoutBanks{name: "ADA OBI"})
+	uid := seller(t, s)
+	other := uuid.New()
+	for _, owner := range []uuid.UUID{uid, other} {
+		if err := s.db.Exec(`INSERT INTO payment_merchants (id, user_id, kind, settlement_bank_code, settlement_account_number, settlement_account_name)
+			VALUES (?, ?, 'merchant', '044', '0000000001', 'OLD')`, uuid.New().String(), owner.String()).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := setWithCode(t, s, mail, uid, SetSellerPayoutInput{
+		Currency: "ngn", InstitutionCode: "058", AccountNumber: "0123456789",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read := func(owner uuid.UUID) string {
+		var out string
+		s.db.Raw(`SELECT settlement_bank_code || ':' || settlement_account_number || ':' || settlement_account_name FROM payment_merchants WHERE user_id = ?`,
+			owner.String()).Scan(&out)
+		return out
+	}
+	if got := read(uid); got != "058:0123456789:ADA OBI" {
+		t.Errorf("owner's payment merchant = %q, want the saved payout account", got)
+	}
+	if got := read(other); got != "044:0000000001:OLD" {
+		t.Errorf("another merchant changed: %q", got)
+	}
+}
+
+// Saving a naira bank account hands it to TSA Pay; a failure there is for an
+// operator and never undoes the saved account; a non-bank account is not offered.
+func TestSellerPayout_SavedBankAccountIsHandedToTSAPay(t *testing.T) {
+	s, mail := sellerPayoutSvc(t, stubPayoutBanks{name: "ADA OBI"})
+	uid := seller(t, s)
+	var gotBank, gotAccount string
+	calls := 0
+	s.FollowWith(func(_ context.Context, user uuid.UUID, bank, account string) error {
+		calls++
+		gotBank, gotAccount = bank, account
+		if user != uid {
+			t.Errorf("followed for %s, want %s", user, uid)
+		}
+		return errors.New("tsa pay down")
+	})
+	m, err := setWithCode(t, s, mail, uid, SetSellerPayoutInput{Currency: "ngn", InstitutionCode: "058", AccountNumber: "0123456789"})
+	if err != nil || m.AccountNumber != "0123456789" {
+		t.Fatalf("a TSA Pay failure must not undo the saved account: %v %+v", err, m)
+	}
+	if calls != 1 || gotBank != "058" || gotAccount != "0123456789" {
+		t.Fatalf("follow called %d times with %q %q", calls, gotBank, gotAccount)
+	}
+	if p, _ := s.Resolve(context.Background(), uid); p.Method == nil || p.Method.AccountNumber != "0123456789" {
+		t.Fatalf("the account was not kept: %+v", p)
+	}
+
+	for _, other := range []*models.SellerPayoutMethod{
+		{UserID: uid, Kind: models.SellerPayoutMobileMoney, Currency: "NGN", Verified: true},
+		{UserID: uid, Kind: PaycrestInstitutionBank, Currency: "GHS", Verified: true},
+		{UserID: uid, Kind: PaycrestInstitutionBank, Currency: "NGN", Verified: false},
+	} {
+		s.followTSAPay(context.Background(), other)
+	}
+	if calls != 1 {
+		t.Fatalf("only a verified naira bank account reaches TSA Pay settlement (calls = %d)", calls)
 	}
 }
 

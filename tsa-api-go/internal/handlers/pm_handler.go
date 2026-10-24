@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -58,6 +59,12 @@ type PMActivator interface {
 	NeedsIdentity() bool
 }
 
+// PMEnroller gives an approved merchant their payment-merchant row without a
+// second application. *services.PMOnboardingService satisfies it.
+type PMEnroller interface {
+	EnrollApprovedMerchant(ctx context.Context, in services.PMEnrollInput) (*models.PaymentMerchant, error)
+}
+
 // PMHandler serves the PM operator endpoints (manual-release queue, release
 // action, sell-payout kick, and the read-only PM list) plus the dormant-safe
 // user-facing PM-status read.
@@ -67,6 +74,7 @@ type PMHandler struct {
 	pmStatus  PMStatusGetter // nil when PM stack is unconfigured (dormant)
 	approver  PMApprover     // nil when no fiat provider: approve returns 503
 	activator PMActivator    // nil when no fiat provider: activate returns 503
+	enroller  PMEnroller     // nil until the onboarding service is wired: enroll returns 503
 	// liquidityOn: the shared pool's LP side is wired (/liquidity/activate);
 	// it shows the app's "Provide liquidity" CTA.
 	liquidityOn bool
@@ -90,6 +98,9 @@ func (h *PMHandler) SetApprover(a PMApprover) { h.approver = a }
 // SetActivator wires the PM onboarding service used by ActivatePM. Left nil
 // (the default) when no fiat provider is configured, in which case ActivatePM 503s.
 func (h *PMHandler) SetActivator(a PMActivator) { h.activator = a }
+
+// SetEnroller wires the onboarding service used by EnrollPM.
+func (h *PMHandler) SetEnroller(e PMEnroller) { h.enroller = e }
 
 // SetLiquidityAvailable says the shared pool's LP side is wired.
 func (h *PMHandler) SetLiquidityAvailable(on bool) { h.liquidityOn = on }
@@ -202,6 +213,32 @@ type pmListItem struct {
 	Kind                    string     `json:"kind"`
 	PoolChainID             *int64     `json:"poolChainId,omitempty"`
 	UserID                  string     `json:"userId"`
+	CreatedAt               time.Time  `json:"createdAt"`
+	UpdatedAt               time.Time  `json:"updatedAt"`
+	// Owner and Reviewer are filled by ListPMs only; a lifecycle action's
+	// response leaves them out and the console refetches the list.
+	Owner    *pmPerson `json:"owner,omitempty"`
+	Reviewer *pmPerson `json:"reviewer,omitempty"`
+}
+
+// pmPerson is the admin-facing identity of a merchant's owner or of the admin
+// who last actioned the row.
+type pmPerson struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Email       string `json:"email"`
+	PhoneNumber string `json:"phoneNumber"`
+	LegalName   string `json:"legalName,omitempty"`
+}
+
+func newPMPerson(u models.User) *pmPerson {
+	return &pmPerson{
+		ID:          u.ID.String(),
+		Name:        u.Name,
+		Email:       u.Email,
+		PhoneNumber: u.PhoneNumber,
+		LegalName:   u.VerifiedLegalName,
+	}
 }
 
 // toPMListItem maps a PaymentMerchant to the safe projection. Single source of
@@ -226,6 +263,8 @@ func toPMListItem(p *models.PaymentMerchant) pmListItem {
 		Kind:                    p.Kind,
 		PoolChainID:             p.PoolChainID,
 		UserID:                  p.UserID.String(),
+		CreatedAt:               p.CreatedAt,
+		UpdatedAt:               p.UpdatedAt,
 	}
 }
 
@@ -248,9 +287,29 @@ func (h *PMHandler) ListPMs(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load payment merchants")
 		return
 	}
+	ids := make([]uuid.UUID, 0, 2*len(pms))
+	for i := range pms {
+		ids = append(ids, pms[i].UserID)
+		if pms[i].ReviewedBy != uuid.Nil {
+			ids = append(ids, pms[i].ReviewedBy)
+		}
+	}
+	people, err := h.pm.PeopleByID(c.Request.Context(), ids)
+	if err != nil {
+		log.Printf("[pm handler] ListPMs people: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to load payment merchants")
+		return
+	}
 	items := make([]pmListItem, 0, len(pms))
 	for i := range pms {
-		items = append(items, toPMListItem(&pms[i]))
+		item := toPMListItem(&pms[i])
+		if u, ok := people[pms[i].UserID]; ok {
+			item.Owner = newPMPerson(u)
+		}
+		if u, ok := people[pms[i].ReviewedBy]; ok {
+			item.Reviewer = newPMPerson(u)
+		}
+		items = append(items, item)
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Payment merchants", items)
 }
@@ -638,5 +697,58 @@ func (h *PMHandler) respondLifecycleErr(c *gin.Context, op string, pmID uuid.UUI
 	default:
 		log.Printf("[pm handler] %s pm=%s: %v", op, pmID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Action failed")
+	}
+}
+
+// enrollRequest is the JSON body for EnrollPM: only the wallet that signs the
+// merchant's P2P ads. Where they are paid is their payout account.
+type enrollRequest struct {
+	MakerWalletAddress string `json:"makerWalletAddress"`
+}
+
+// EnrollPM handles POST /api/p2p/pm/enroll — an approved merchant takes part in
+// P2P without a second application. The row it creates is 'approved'; the
+// merchant then activates it through POST /p2p/pm/activate.
+func (h *PMHandler) EnrollPM(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Please authenticate")
+		return
+	}
+	if h.enroller == nil {
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Payment merchant enrollment is unavailable")
+		return
+	}
+	var req enrollRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if !common.IsHexAddress(req.MakerWalletAddress) || common.HexToAddress(req.MakerWalletAddress) == (common.Address{}) {
+		utils.ErrorResponse(c, http.StatusBadRequest,
+			"A valid non-zero maker wallet address is required for a payment merchant")
+		return
+	}
+
+	pm, err := h.enroller.EnrollApprovedMerchant(c.Request.Context(), services.PMEnrollInput{
+		UserID:             user.ID,
+		MakerWalletAddress: req.MakerWalletAddress,
+	})
+	switch {
+	case errors.Is(err, services.ErrPayoutAccountRequired):
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"Add a naira bank account in Payout account first. P2P payments are settled into it.", "payout_account_required")
+	case errors.Is(err, services.ErrNotAMerchant):
+		utils.ErrorResponse(c, http.StatusForbidden, "Only an approved merchant can become a payment merchant")
+	case errors.Is(err, services.ErrPMEnrollDecided):
+		utils.ErrorResponse(c, http.StatusConflict, "Your payment merchant account is already under review. Contact support.")
+	case errors.Is(err, services.ErrSecondRoleNotEnabled):
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"You can't hold both roles yet. Try again later.", "second_role_not_enabled")
+	case err != nil:
+		log.Printf("[pm handler] EnrollPM user=%s: %v", user.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Enrollment failed")
+	default:
+		utils.SuccessResponse(c, http.StatusOK, "Payment merchant enrolled", toPMListItem(pm))
 	}
 }

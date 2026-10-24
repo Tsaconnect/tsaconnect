@@ -11,31 +11,32 @@
 //
 // She asks for a business rename the same guarded way (components/pay/
 // BusinessName); it takes effect only once an admin approves it.
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import { getChainByChainId } from '@/constants/chains';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import AssetPicker from '@/components/assets/AssetPicker';
 import {
-  Button, Card, ErrorState, Input, PickerSheet, SegmentedControl, SelectRow, Spinner, Text, useToast,
+  Button, Card, ErrorState, Input, SegmentedControl, SelectRow, Spinner, Text, useToast,
 } from '@/components/ui';
-import type { PickerItem } from '@/components/ui';
 import { PayLinkEntry } from '@/components/pay/PayLinkEntry';
 import { BusinessNameCard, BusinessNameForm, businessNameChangeFrom } from '@/components/pay/BusinessName';
 import { usePayAuthorization } from '@/hooks/usePayAuthorization';
 import { loadOwnMerchant, type OwnMerchantLoad } from '@/hooks/useOwnPayMerchant';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
 import type { LiFiToken } from '@/services/lifi';
-import { getNigerianBanks, resolveAccountName, type NgBank } from '@/services/ngBanks';
+import { getNigerianBanks, type NgBank } from '@/services/ngBanks';
 import {
   confirmOwnerAction, OWNER_CODES, updateBusinessName, updateSettlement,
   type OwnMerchant, type PendingConfirmation, type SettlementChange, type SettlementMode,
 } from '@/services/payMerchantApi';
 import { errorCode, errorMessage } from '@/utils/payCheckout';
-import { describeSettlement, settlementChangeFrom, settlesIn } from '@/utils/paySettlement';
+import { describeSettlement, payoutBankOf, paysIntoPayoutAccount, settlementChangeFrom, settlesIn } from '@/utils/paySettlement';
+import { getPayoutMethod, type SellerPayout } from '@/services/sellerPayoutApi';
+import { SELLER_PAYOUT } from '@/constants/routes';
 
 /** A guarded owner change this screen sends: where she is paid, or her business name. */
 type OwnerChange =
@@ -53,11 +54,8 @@ export default function PaySettings() {
   const [mode, setMode] = useState<SettlementMode>('fiat');
 
   const [banks, setBanks] = useState<NgBank[]>([]);
-  const [bankPickerOpen, setBankPickerOpen] = useState(false);
-  const [bank, setBank] = useState<NgBank | null>(null);
-  const [accountNumber, setAccountNumber] = useState('');
-  const [resolvedName, setResolvedName] = useState<string | null>(null);
-  const [resolving, setResolving] = useState(false);
+  // The merchant's one payout account: a bank-mode TSA Pay account is paid into it, not into a second one.
+  const [payoutAccount, setPayoutAccount] = useState<SellerPayout | null | undefined>(undefined);
 
   const [tokenPickerOpen, setTokenPickerOpen] = useState(false);
   const [token, setToken] = useState<(LiFiToken & { chainId: number }) | undefined>();
@@ -91,6 +89,7 @@ export default function PaySettings() {
 
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => { getNigerianBanks().then(setBanks).catch(() => {}); }, []);
+  useEffect(() => { getPayoutMethod().then(setPayoutAccount).catch(() => setPayoutAccount(null)); }, []);
   // With no crypto destination yet, her own wallet on this device is the natural
   // place to be paid; she can type another.
   useEffect(() => {
@@ -100,26 +99,6 @@ export default function PaySettings() {
     }
   }, [address, load.kind]);
 
-  // The bank's own name for the account, shown before she saves: it is what the
-  // server will check against her business and verified names.
-  useEffect(() => {
-    setResolvedName(null);
-    if (!bank || accountNumber.length !== 10) { setResolving(false); return; }
-    let cancelled = false;
-    setResolving(true);
-    const t = setTimeout(async () => {
-      const res = await resolveAccountName(bank.code, accountNumber);
-      if (cancelled) return;
-      setResolving(false);
-      setResolvedName(res.ok ? res.accountName : null);
-    }, 400);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [bank, accountNumber]);
-
-  const bankItems: PickerItem[] = useMemo(
-    () => banks.map((b) => ({ id: b.code, label: b.name, icon: 'bank' as const })),
-    [banks],
-  );
   const bankName = useCallback((code: string) => banks.find((b) => b.code === code)?.name, [banks]);
 
   /**
@@ -132,7 +111,6 @@ export default function PaySettings() {
   const applied = (merchant: OwnMerchant, kind: string | undefined, confirmed: boolean) => {
     setLoad({ kind: 'ready', merchant });
     setPassword('');
-    setAccountNumber('');
     setPending(null);
     setCode('');
     if (kind !== 'business_name') { toast.success('Payment settings saved'); return; }
@@ -196,8 +174,10 @@ export default function PaySettings() {
   });
 
   const onSave = () => {
+    const payoutBank = payoutBankOf(payoutAccount);
+    if (mode === 'fiat' && !payoutBank) { setFormError('Set your naira bank payout account first.'); return; }
     const out = settlementChangeFrom(mode === 'fiat'
-      ? { mode, bankCode: bank?.code, accountNumber }
+      ? { mode, bankCode: payoutBank!.institutionCode, accountNumber: payoutBank!.accountNumber }
       : { mode, token, walletAddress: wallet });
     if ('missing' in out) { setFormError(out.missing); return; }
     if (!password) { setFormError('Enter your account password to confirm.'); return; }
@@ -234,6 +214,11 @@ export default function PaySettings() {
   const codeFor = pending?.kind === 'business_name'
     ? 'send your new business name for approval'
     : `confirm the new ${mode === 'fiat' ? 'bank account' : 'wallet'}`;
+
+  const payoutBank = payoutBankOf(payoutAccount);
+  const alreadyPaidThere = !!payoutBank && paysIntoPayoutAccount(merchant, payoutBank);
+  // A bank-mode change has nothing to send without a payout account, or when TSA Pay already uses it.
+  const hideSave = mode === 'fiat' && (payoutAccount === undefined || !payoutBank || alreadyPaidThere);
 
   const passwordField = (
     <Input
@@ -320,20 +305,27 @@ export default function PaySettings() {
 
             {mode === 'fiat' ? (
               <View style={{ gap: spacing.sm }}>
-                <SelectRow label="Bank" placeholder="Choose your bank" value={bank?.name} leftIcon="bank" onPress={() => setBankPickerOpen(true)} />
-                <Input
-                  label="Account number"
-                  value={accountNumber}
-                  onChangeText={(v) => setAccountNumber(v.replace(/\D/g, ''))}
-                  placeholder="10-digit account number"
-                  keyboardType="number-pad"
-                  maxLength={10}
-                />
-                {resolving ? <Text variant="caption" color="textMuted">Checking the account…</Text> : null}
-                {resolvedName ? <Text variant="caption" weight="600">Account name: {resolvedName}</Text> : null}
-                <Text variant="caption" color="textMuted">
-                  Check the account name above before you save. We email you a code to confirm the change.
-                </Text>
+                {payoutAccount === undefined ? (
+                  <Text variant="caption" color="textMuted">Loading your payout account…</Text>
+                ) : payoutBank ? (
+                  <>
+                    <Card style={{ gap: spacing.xs }}>
+                      <Text variant="caption" color="textMuted">Your payout account</Text>
+                      <Text variant="bodyMed" weight="700">{payoutBank.institutionName} · {payoutBank.accountNumber}</Text>
+                      <Text variant="bodySm" color="textSecondary">{payoutBank.accountName}</Text>
+                    </Card>
+                    <Text variant="caption" color="textMuted">
+                      {alreadyPaidThere
+                        ? 'TSA Pay pays into this account. Change it in Payout settings and TSA Pay follows.'
+                        : 'TSA Pay is paid into your payout account, so you only set it once. We email you a code to confirm the change.'}
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Text variant="bodySm">Set a naira bank payout account first. TSA Pay is paid into it.</Text>
+                    <Button title="Set payout account" variant="secondary" onPress={() => router.push(SELLER_PAYOUT as never)} fullWidth />
+                  </>
+                )}
               </View>
             ) : (
               <View style={{ gap: spacing.sm }}>
@@ -358,29 +350,23 @@ export default function PaySettings() {
               </View>
             )}
 
-            {passwordField}
-            {formErrorLine}
-            <Button title="Save" onPress={onSave} loading={saving} disabled={saving} fullWidth />
+            {hideSave ? null : (
+              <>
+                {passwordField}
+                {formErrorLine}
+                <Button
+                  title={mode === 'fiat' ? 'Use my payout account' : 'Save'}
+                  onPress={onSave}
+                  loading={saving}
+                  disabled={saving}
+                  fullWidth
+                />
+              </>
+            )}
           </>
         )}
       </ScrollView>
 
-      <PickerSheet
-        visible={bankPickerOpen}
-        onClose={() => setBankPickerOpen(false)}
-        title="Choose your bank"
-        items={bankItems}
-        loading={banks.length === 0}
-        selectedId={bank?.code}
-        emptyText="No banks found."
-        onSelect={(item) => {
-          const b = banks.find((x) => x.code === item.id);
-          if (!b) return;
-          setBank(b);
-          setBankPickerOpen(false);
-          setAccountNumber('');
-        }}
-      />
       <AssetPicker
         visible={tokenPickerOpen}
         side="to"

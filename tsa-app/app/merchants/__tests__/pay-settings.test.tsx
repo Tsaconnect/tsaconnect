@@ -71,6 +71,10 @@ jest.mock('@/components/assets/AssetPicker', () => ({
   default: (props: any) => { mockAssetPicker.props = props; return null; },
 }));
 jest.mock('@/hooks/useSignableWallet', () => ({ __esModule: true, useSignableWallet: () => ({ address: '0xPayer' }) }));
+jest.mock('@/services/sellerPayoutApi', () => ({
+  __esModule: true,
+  getPayoutMethod: jest.fn(),
+}));
 jest.mock('@/services/ngBanks', () => ({
   __esModule: true,
   getNigerianBanks: jest.fn(async () => [{ code: '044', name: 'Access Bank' }]),
@@ -88,6 +92,7 @@ jest.mock('@/services/payMerchantApi', () => ({
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
 import { router } from 'expo-router';
+import { getPayoutMethod } from '@/services/sellerPayoutApi';
 import { confirmOwnerAction, getOwnMerchant, updateBusinessName, updateSettlement, type OwnMerchant } from '@/services/payMerchantApi';
 import PaySettings from '../pay-settings';
 
@@ -111,12 +116,15 @@ async function mount() {
   return tree;
 }
 
+// Her one payout account, a different bank account than TSA Pay pays into now.
+const payoutAccount = {
+  kind: 'bank', currency: 'NGN', institutionCode: '058', institutionName: 'GTBank',
+  accountNumber: '9876543210', accountName: 'SKY AIR LTD',
+} as const;
+
+// Bank mode has no account to type: she confirms with her password.
 async function fillBankChange(tree: ReactTestRenderer, password: string) {
-  await act(async () => { byLabel(tree, 'select:Bank').props.onPress(); });
-  await act(async () => { byLabel(tree, 'bank:044').props.onPress(); });
-  await act(async () => { byLabel(tree, 'input:Account number').props.onChangeText('9876543210'); });
   await act(async () => { byLabel(tree, 'input:Account password').props.onChangeText(password); });
-  jest.advanceTimersByTime(500);
   await flush();
 }
 
@@ -124,6 +132,7 @@ beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
   jest.clearAllMocks();
   jest.mocked(getOwnMerchant).mockResolvedValue(merchant);
+  jest.mocked(getPayoutMethod).mockResolvedValue(payoutAccount);
 });
 afterEach(() => jest.useRealTimers());
 
@@ -140,7 +149,7 @@ it('sends nothing until PIN/biometric, then the change she entered with her pass
   jest.mocked(updateSettlement).mockResolvedValue(pendingCode);
   const tree = await mount();
   await fillBankChange(tree, 'correct-horse');
-  await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
+  await act(async () => { byLabel(tree, 'button:Use my payout account').props.onPress(); });
   expect(updateSettlement).not.toHaveBeenCalled();
   expect(mockAuthorization.props.visible).toBe(true);
 
@@ -149,7 +158,7 @@ it('sends nothing until PIN/biometric, then the change she entered with her pass
   await flush();
   expect(updateSettlement).toHaveBeenCalledTimes(1);
   expect(updateSettlement).toHaveBeenCalledWith(
-    { settlementMode: 'fiat', bankCode: '044', accountNumber: '9876543210' }, 'correct-horse', 7);
+    { settlementMode: 'fiat', bankCode: '058', accountNumber: '9876543210' }, 'correct-horse', 7);
 });
 
 it('a bank account waits for the emailed code, and only the code applies it', async () => {
@@ -157,7 +166,7 @@ it('a bank account waits for the emailed code, and only the code applies it', as
   jest.mocked(confirmOwnerAction).mockResolvedValue({ merchant: { ...merchant, version: 8, accountNumber: '******3210', accountName: 'SKY AIR LIMITED' } });
   const tree = await mount();
   await fillBankChange(tree, 'correct-horse');
-  await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
+  await act(async () => { byLabel(tree, 'button:Use my payout account').props.onPress(); });
   await act(async () => { mockAuthorization.props.onAuthorized(); });
   await flush();
   expect(text(tree)).toContain('o***@skyair.ng');
@@ -215,9 +224,33 @@ it('only the server saying "no merchant" sends her to apply', async () => {
 it('asks for the password before anything else', async () => {
   const tree = await mount();
   await fillBankChange(tree, '');
-  await act(async () => { byLabel(tree, 'button:Save').props.onPress(); });
+  await act(async () => { byLabel(tree, 'button:Use my payout account').props.onPress(); });
   expect(mockAuthorization.props.visible).toBeFalsy();
   expect(text(tree)).toContain('Enter your account password to confirm.');
+});
+
+it('bank mode pays into her one payout account: nothing to type, nothing to save when it is already used', async () => {
+  const tree = await mount();
+  expect(text(tree)).toContain('Your payout account');
+  expect(text(tree)).toContain('GTBank');
+  expect(text(tree)).toContain('9876543210');
+  expect(() => byLabel(tree, 'select:Bank')).toThrow();
+  expect(() => byLabel(tree, 'input:Account number')).toThrow();
+
+  // TSA Pay already pays into it (same bank, same last four digits).
+  jest.mocked(getOwnMerchant).mockResolvedValue({ ...merchant, bankCode: '058', accountNumber: '******3210' });
+  const same = await mount();
+  expect(text(same)).toContain('TSA Pay pays into this account');
+  expect(() => byLabel(same, 'button:Use my payout account')).toThrow();
+});
+
+it('with no naira bank payout account she is sent to set one, not asked for bank details', async () => {
+  jest.mocked(getPayoutMethod).mockResolvedValue({ kind: 'wallet' });
+  const tree = await mount();
+  expect(text(tree)).toContain('Set a naira bank payout account first');
+  expect(() => byLabel(tree, 'button:Use my payout account')).toThrow();
+  await act(async () => { byLabel(tree, 'button:Set payout account').props.onPress(); });
+  expect(router.push).toHaveBeenCalledWith('/merchants/payout-method');
 });
 
 it('starts her payment links: Request payment and the Payment links row', async () => {

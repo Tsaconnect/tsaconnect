@@ -1483,6 +1483,30 @@ func TestPayMerchant_AVerifiedMerchantGetsTSAPayWithNoSecondApplication(t *testi
 	}
 }
 
+// A merchant sets their payout account once: a TSA Pay account provisioned for
+// them starts settling into it (the bank's own name for it, as always).
+func TestPayMerchant_ProvisionedTSAPayStartsFromThePayoutAccount(t *testing.T) {
+	s, _ := newPayMerchantSvc(t)
+	uid := seedVerifiedUser(t, s.db)
+	seedApprovedMarketplaceRequest(t, s, uid, models.RoleMerchant)
+	if err := s.db.Exec(`INSERT INTO seller_payout_methods
+		(id, user_id, kind, currency, institution_code, institution_name, account_number, account_name, verified)
+		VALUES (?, ?, 'bank', 'NGN', '070', 'Fidelity Bank', '6554258761', 'TYPED NAME', true)`, uuid.New(), uid).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := s.GetOrProvisionByOwner(context.Background(), uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.SettlementMode != models.PaySettlementFiat || m.BankCode != "070" || m.AccountNumber != "6554258761" {
+		t.Fatalf("settlement = %q %q %q, want the payout account", m.SettlementMode, m.BankCode, m.AccountNumber)
+	}
+	if m.AccountName != "SKY AIR LIMITED" {
+		t.Fatalf("account name = %q; it must be the bank's name enquiry", m.AccountName)
+	}
+}
+
 func TestPayMerchant_TSAPayIsNotProvisionedForAnUnverifiedOrNonMerchant(t *testing.T) {
 	s, _ := newPayMerchantSvc(t)
 	unverified := seedUserAt(t, s.db, uuid.New(), models.VerificationStatusPending)
@@ -1509,4 +1533,92 @@ func TestPayMerchant_ARejectedOrPendingTSAPayApplicationIsNotBypassedByAutoProvi
 	if _, err := s.GetOrProvisionByOwner(context.Background(), uid); !errors.Is(err, ErrPayMerchantNotFound) {
 		t.Fatalf("err = %v; a TSA Pay application's own approval decides, auto-provisioning must not", err)
 	}
+}
+
+// The payout account is the merchant's one destination: saving it moves a
+// bank-mode TSA Pay settlement, through the audited update, and never one the
+// payout account has no say over.
+func TestPayMerchant_FollowPayoutAccount(t *testing.T) {
+	ctx := context.Background()
+	stored := func(s *PayMerchantService, id uuid.UUID) *models.PayMerchant {
+		t.Helper()
+		m, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	t.Run("moves a bank settlement and audits it", func(t *testing.T) {
+		s, _ := newPayMerchantSvc(t)
+		m := seedPayMerchant(t, s.db)
+		if err := s.FollowPayoutAccount(ctx, m.UserID, "070", "6554258761"); err != nil {
+			t.Fatal(err)
+		}
+		got := stored(s, m.ID)
+		if got.BankCode != "070" || got.AccountNumber != "6554258761" || got.AccountName != "SKY AIR LIMITED" ||
+			got.SettlementMode != models.PaySettlementFiat || got.Version != m.Version+1 || got.PayoutChangedAt == nil {
+			t.Fatalf("merchant = %+v", got)
+		}
+		var audits int64
+		s.db.Model(&models.PayAuditEvent{}).Where("merchant_id = ? AND action = ?", m.ID, models.PayAuditActionMerchantUpdate).Count(&audits)
+		if audits != 1 {
+			t.Fatalf("settlement change audits = %d, want 1", audits)
+		}
+	})
+
+	t.Run("an unconfigured settlement starts from it", func(t *testing.T) {
+		s, _ := newPayMerchantSvc(t)
+		m := seedPayMerchant(t, s.db)
+		s.db.Model(&models.PayMerchant{}).Where("id = ?", m.ID).Updates(map[string]any{"settlement_mode": "", "bank_code": "", "account_number": ""})
+		if err := s.FollowPayoutAccount(ctx, m.UserID, "070", "6554258761"); err != nil {
+			t.Fatal(err)
+		}
+		if got := stored(s, m.ID); got.SettlementMode != models.PaySettlementFiat || got.BankCode != "070" {
+			t.Fatalf("merchant = %+v", got)
+		}
+	})
+
+	t.Run("the same account changes nothing", func(t *testing.T) {
+		s, _ := newPayMerchantSvc(t)
+		m := seedPayMerchant(t, s.db)
+		if err := s.FollowPayoutAccount(ctx, m.UserID, m.BankCode, m.AccountNumber); err != nil {
+			t.Fatal(err)
+		}
+		if got := stored(s, m.ID); got.Version != m.Version {
+			t.Fatalf("version moved to %d for an unchanged account", got.Version)
+		}
+	})
+
+	t.Run("a crypto settlement, a suspended merchant and no merchant are left alone", func(t *testing.T) {
+		s, _ := newPayMerchantSvc(t)
+		crypto := seedPayMerchant(t, s.db)
+		s.db.Model(&models.PayMerchant{}).Where("id = ?", crypto.ID).Update("settlement_mode", models.PaySettlementCrypto)
+		suspended := seedPayMerchant(t, s.db)
+		s.db.Model(&models.PayMerchant{}).Where("id = ?", suspended.ID).Update("status", models.PayMerchantSuspended)
+
+		for _, m := range []*models.PayMerchant{crypto, suspended} {
+			if err := s.FollowPayoutAccount(ctx, m.UserID, "070", "6554258761"); err != nil {
+				t.Fatal(err)
+			}
+			if got := stored(s, m.ID); got.BankCode != "058" || got.Version != m.Version {
+				t.Fatalf("%s merchant changed: %+v", m.Status, got)
+			}
+		}
+		if err := s.FollowPayoutAccount(ctx, uuid.New(), "070", "6554258761"); err != nil {
+			t.Fatalf("no TSA Pay account is nothing to do, got %v", err)
+		}
+	})
+
+	t.Run("an account that does not resolve refuses and changes nothing", func(t *testing.T) {
+		s, banks := newPayMerchantSvc(t)
+		m := seedPayMerchant(t, s.db)
+		banks.err = errors.New("provider down")
+		if err := s.FollowPayoutAccount(ctx, m.UserID, "070", "6554258761"); err == nil {
+			t.Fatal("an unresolvable account must be refused")
+		}
+		if got := stored(s, m.ID); got.BankCode != "058" {
+			t.Fatalf("merchant changed: %+v", got)
+		}
+	})
 }

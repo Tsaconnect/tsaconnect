@@ -105,7 +105,7 @@ export default function MerchantLayout() {
             <Stack.Screen
                 name="payout-method"
                 options={{
-                    title: 'Payout account',
+                    title: 'Payout settings',
                 }}
             />
             <Stack.Screen
