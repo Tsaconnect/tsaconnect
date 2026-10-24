@@ -236,3 +236,19 @@ func TestComposeBusinessNames_OneTimeStepForExistingMerchants(t *testing.T) {
 		}
 	}
 }
+
+// The owner's legal name is joined with " - ", so the owner's own part may not
+// hold a spaced dash that could pass its own text off as the verified one.
+func TestBusinessName_RefusesASpacedDashInTheOwnersPart(t *testing.T) {
+	s := &PayMerchantService{}
+	for _, bad := range []string{"Ojay store - John Okafor", "Ojay store – John Okafor", "Ojay store — John Okafor", "Ojay store \u2212 John", "A - B"} {
+		if _, err := s.NormalizeBusinessName(bad); !errors.Is(err, ErrPayBusinessNameInvalid) {
+			t.Errorf("%q: err = %v, want ErrPayBusinessNameInvalid", bad, err)
+		}
+	}
+	for _, fine := range []string{"Sky-Air", "Ojay store", "Sky -Air", "Sky- Air", "Co. Ltd (Lagos)"} {
+		if _, err := s.NormalizeBusinessName(fine); err != nil {
+			t.Errorf("%q refused: %v", fine, err)
+		}
+	}
+}

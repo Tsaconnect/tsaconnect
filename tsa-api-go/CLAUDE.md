@@ -426,6 +426,8 @@ TSA Pay business names (`services/pay_business_display.go`, `pay_business_name.g
   says who stands behind it. `business_base_name` is the owner's part; `business_name_key` (the name folded as
   `foldBusinessName` reads it: case, spacing, punctuation, accents and lookalikes ignored) carries a partial UNIQUE index, so two
   merchants never show the same name. Two people may both pick "Ojay store": their legal names tell them apart.
+- The owner's own part may not contain a spaced dash (" - ", also en/em dashes): that is the joiner, and an owner could
+  otherwise pass their own text off as the verified legal-name part (`hasSpacedDash`, a `business_name_invalid` refusal).
 - Every writer composes through `composeBusinessName` and refuses a taken name with `ErrPayBusinessNameTaken` (409
   `business_name_taken`): sign-up (`CreateFromRequest`), an owner's rename request (before the code is sent), its approval (the
   name is composed with the legal name as it stands THEN, and re-checked), and an admin edit (the given name is the owner's own

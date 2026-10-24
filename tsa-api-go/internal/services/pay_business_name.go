@@ -106,6 +106,11 @@ func (s *PayMerchantService) normalizeBusinessName(name string) (string, error) 
 	if mixedScripts(name) {
 		return "", businessNameInvalid("a business name can't mix letters from different alphabets")
 	}
+	// " - " is what joins the owner's legal name to a business name, so a name
+	// that already holds one could pass off its own text as the verified part.
+	if hasSpacedDash(name) {
+		return "", businessNameInvalid("a business name can't contain a dash with spaces around it (\" - \"); your legal name is added after it for you")
+	}
 	reserved := s.reserved
 	if reserved == nil {
 		reserved = DefaultReservedBusinessNames
@@ -117,6 +122,19 @@ func (s *PayMerchantService) normalizeBusinessName(name string) (string, error) 
 		}
 	}
 	return name, nil
+}
+
+// hasSpacedDash reports a dash of any kind with a space on both sides — the
+// shape that separates a business's own name from the legal name added to it.
+// A dash inside a word ("Sky-Air") is fine.
+func hasSpacedDash(name string) bool {
+	runes := []rune(name)
+	for i := 1; i+1 < len(runes); i++ {
+		if (unicode.Is(unicode.Pd, runes[i]) || runes[i] == '\u2212') && unicode.IsSpace(runes[i-1]) && unicode.IsSpace(runes[i+1]) {
+			return true
+		}
+	}
+	return false
 }
 
 // businessNameScriptSets are the scripts one name may mix (Unicode's "highly
