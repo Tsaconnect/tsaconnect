@@ -14,7 +14,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
+import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import { getChainByChainId } from '@/constants/chains';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
@@ -45,6 +45,9 @@ type OwnerChange =
 
 export default function PaySettings() {
   const { colors, spacing } = useTheme();
+  // `?section=name` opens just the business name: the same guarded rename, without payout settings.
+  const { section } = useLocalSearchParams<{ section?: string }>();
+  const nameOnly = section === 'name';
   const toast = useToast();
   const { address } = useSignableWallet();
   const [load, setLoad] = useState<OwnMerchantLoad>({ kind: 'loading' });
@@ -200,7 +203,9 @@ export default function PaySettings() {
     return <ErrorState title="Could not load your payment settings" subtitle={load.message} onRetry={refresh} />;
   }
   if (load.kind === 'none') {
-    return <ErrorState title="No TSA Pay account" subtitle="Apply to accept payments with TSA Pay first." />;
+    return nameOnly
+      ? <ErrorState title="Business name isn't available yet" subtitle="Verify your identity, then come back to change your business name." />
+      : <ErrorState title="No TSA Pay account" subtitle="Apply to accept payments with TSA Pay first." />;
   }
   const { merchant } = load;
   const suspended = merchant.status === 'suspended';
@@ -229,11 +234,14 @@ export default function PaySettings() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
+      <Stack.Screen options={{ title: nameOnly ? 'Business name' : 'Payment Settings' }} />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }} keyboardShouldPersistTaps="handled">
-        <Card style={{ gap: spacing.xs }}>
-          <Text variant="caption" color="textMuted">{merchant.businessName} is paid to</Text>
-          <Text variant="bodyMed" weight="700">{describeSettlement(merchant, bankName)}</Text>
-        </Card>
+        {nameOnly ? null : (
+          <Card style={{ gap: spacing.xs }}>
+            <Text variant="caption" color="textMuted">{merchant.businessName} is paid to</Text>
+            <Text variant="bodyMed" weight="700">{describeSettlement(merchant, bankName)}</Text>
+          </Card>
+        )}
 
         {pending || (renaming && canRename) ? null : (
           <BusinessNameCard
@@ -243,7 +251,7 @@ export default function PaySettings() {
           />
         )}
 
-        {pending ? null : (
+        {pending || nameOnly ? null : (
           <Card style={{ gap: spacing.sm }}>
             <Text variant="bodyMed" weight="700">Get paid with a link</Text>
             <Text variant="bodySm" color="textSecondary">
@@ -286,7 +294,7 @@ export default function PaySettings() {
             onSave={onRename}
             onCancel={stopRenaming}
           />
-        ) : (
+        ) : nameOnly ? null : (
           <>
             <Text variant="bodyMed" weight="700">Change where you are paid</Text>
             <SegmentedControl<SettlementMode>

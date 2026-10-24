@@ -15,8 +15,8 @@ var (
 	// enroll for P2P without a second application.
 	ErrNotAMerchant = errors.New("payment merchant: caller is not an approved merchant")
 	// ErrPMEnrollDecided: the user already has a merchant row that is pending,
-	// rejected or paused, so an admin's decision stands rather than being
-	// replaced by a self-service enrollment.
+	// rejected or paused, or a P2P application an admin has not approved, so an
+	// admin's decision stands rather than being replaced by self-service.
 	ErrPMEnrollDecided = errors.New("payment merchant: an admin decision already exists for this merchant")
 	// ErrPayoutAccountRequired: the merchant has no verified naira bank payout
 	// account yet. It is their one payout destination, so they set it there
@@ -45,6 +45,21 @@ func (s *PMOnboardingService) EnrollApprovedMerchant(ctx context.Context, in PME
 	}
 	if user.Role != models.RoleMerchant {
 		return nil, ErrNotAMerchant
+	}
+
+	// An admin's decision on a P2P application stands: a pending or rejected
+	// application (the newest one, so a later approval after a rejection counts)
+	// is not something self-service can step around.
+	var latest models.MerchantRequest
+	switch err := s.db.WithContext(ctx).
+		Where("user_id = ? AND business_type = ?", in.UserID, models.BusinessTypeP2PMerchant).
+		Order("created_at DESC").First(&latest).Error; {
+	case err == nil:
+		if latest.Status != models.MerchantRequestStatusApproved {
+			return nil, ErrPMEnrollDecided
+		}
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return nil, err
 	}
 
 	var existing models.PaymentMerchant

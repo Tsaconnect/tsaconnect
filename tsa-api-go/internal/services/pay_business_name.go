@@ -271,6 +271,37 @@ func (s *PayMerchantService) confirmBusinessNameByOwner(ctx context.Context, own
 	return m, nil
 }
 
+// BusinessNameCascade says what a rename reached beyond the TSA Pay merchant.
+type BusinessNameCascade struct {
+	PaymentMerchants int64 `json:"paymentMerchants"`
+	Requests         int64 `json:"requests"`
+}
+
+// renameOwnersBusiness carries a business rename to the owner's other merchant
+// records, so one approval renames the merchant everywhere: their payment
+// merchant (the name P2P shows) and the approved marketplace / payment-merchant
+// requests (the name payout accounts are matched against). The TSA Pay
+// application and any liquidity-provider record keep their own history. It runs
+// in the caller's transaction, so the rename and its cascade commit together.
+func renameOwnersBusiness(tx *gorm.DB, ownerID uuid.UUID, newName string) (BusinessNameCascade, error) {
+	var out BusinessNameCascade
+	pms := wherePMKind(tx.Model(&models.PaymentMerchant{}).Where("user_id = ?", ownerID), models.PaymentMerchantKindMerchant).
+		Update("name", newName)
+	if pms.Error != nil {
+		return out, pms.Error
+	}
+	out.PaymentMerchants = pms.RowsAffected
+	reqs := tx.Model(&models.MerchantRequest{}).
+		Where("user_id = ? AND status = ? AND business_type NOT IN ?", ownerID, models.MerchantRequestStatusApproved,
+			[]string{models.BusinessTypePaymentAcceptance, models.BusinessTypeLiquidityProvider}).
+		Update("business_name", newName)
+	if reqs.Error != nil {
+		return out, reqs.Error
+	}
+	out.Requests = reqs.RowsAffected
+	return out, nil
+}
+
 // supersedePendingBusinessNames closes every rename still waiting for review.
 func supersedePendingBusinessNames(tx *gorm.DB, merchantID uuid.UUID, note string) error {
 	return tx.Model(&models.PayMerchantNameChange{}).
@@ -368,6 +399,7 @@ func (s *PayMerchantService) ReviewBusinessNameChange(ctx context.Context, admin
 		}
 	}
 	note = truncateRunes(strings.TrimSpace(note), 512)
+	var cascade BusinessNameCascade
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&models.PayMerchantNameChange{}).Where("id = ? AND status = ?", change.ID, models.PayNameChangePending).
 			Updates(map[string]interface{}{"status": status, "reviewed_by": adminID, "reviewed_at": &now, "note": note})
@@ -393,9 +425,13 @@ func (s *PayMerchantService) ReviewBusinessNameChange(ctx context.Context, admin
 			if err := s.writeAudit(tx, m.ID, adminID, models.PayAuditActionMerchantUpdate, payAuditChanges(m, &after)); err != nil {
 				return err
 			}
+			if cascade, err = renameOwnersBusiness(tx, m.UserID, change.NewName); err != nil {
+				return err
+			}
 		}
 		return s.writeAudit(tx, change.MerchantID, adminID, models.PayAuditActionBusinessNameReview, map[string]any{
-			"changeId": change.ID, "decision": status, "oldName": change.OldName, "newName": change.NewName, "note": note})
+			"changeId": change.ID, "decision": status, "oldName": change.OldName, "newName": change.NewName, "note": note,
+			"cascade": cascade})
 	})
 	if err != nil {
 		return nil, nil, err

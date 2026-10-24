@@ -12,6 +12,7 @@
 import api from '@/components/services/api';
 import { useAuth } from '@/AuthContext/AuthContext';
 import { router } from 'expo-router';
+import { BUSINESS_NAME } from '@/constants/routes';
 import React, { useEffect, useState } from 'react';
 import { Alert, ScrollView, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard'; // Updated import
@@ -179,6 +180,7 @@ const MerchantProfileScreen = () => {
                 </Text>
                 <View style={{ gap: spacing.sm }}>
                     <MenuRow icon="user" label="Edit Profile" />
+                    <MenuRow icon="storefront" label="Business name" onPress={() => router.push(BUSINESS_NAME)} />
                     <MenuRow icon="bank" label="Payout settings" onPress={() => router.push("/merchants/payout-method")} />
                     <MenuRow icon="shield" label="Security & Privacy" />
                     <MenuRow icon="notifications" label="Notifications" />

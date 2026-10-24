@@ -22,6 +22,7 @@ func newPayTestDB(t *testing.T) *gorm.DB {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	createTestUsersTable(t, db)
+	createPaymentMerchantTables(t, db)
 	createPayoutTable(t, db)
 	if err := db.AutoMigrate(&models.PayMerchant{}, &models.PayPayment{}, &models.PayWebhookDelivery{}, &models.PayAuditEvent{}, &models.PayOwnerAction{}, &models.PayOpenLink{}, &models.PayRetiredSlug{}, &models.PayMerchantNameChange{}, &models.PayRefund{}); err != nil {
 		t.Fatal(err)

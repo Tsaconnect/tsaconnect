@@ -24,11 +24,14 @@ jest.mock('@/theme', () => ({
     radius: new Proxy({}, { get: () => 8 }),
   }),
 }));
+let mockParams: Record<string, string> = {};
 jest.mock('expo-router', () => {
   const react = jest.requireActual('react');
   return {
     __esModule: true,
     router: { push: jest.fn() },
+    Stack: { Screen: () => null },
+    useLocalSearchParams: () => mockParams,
     useFocusEffect: (cb: () => void | (() => void)) => react.useEffect(cb, [cb]),
   };
 });
@@ -392,5 +395,28 @@ describe('business name', () => {
     jest.mocked(getOwnMerchant).mockResolvedValue({ ...merchant, status: 'suspended' });
     const tree = await mount();
     expect(() => byLabel(tree, 'button:Change business name')).toThrow();
+  });
+});
+
+describe('business name on its own (?section=name)', () => {
+  beforeEach(() => {
+    mockParams = { section: 'name' };
+    jest.mocked(getOwnMerchant).mockResolvedValue({ ...merchant, businessNameChangeEnabled: true });
+  });
+  afterEach(() => { mockParams = {}; });
+
+  it('shows the name and the way to change it, without payout settings or pay links', async () => {
+    const tree = await mount();
+    expect(text(tree)).toContain('Business name');
+    expect(() => byLabel(tree, 'button:Change business name')).not.toThrow();
+    expect(text(tree)).not.toContain('is paid to');
+    expect(text(tree)).not.toContain('Change where you are paid');
+    expect(text(tree)).not.toContain('Get paid with a link');
+  });
+
+  it('the same screen without the section still shows payout settings', async () => {
+    mockParams = {};
+    const tree = await mount();
+    expect(text(tree)).toContain('Change where you are paid');
   });
 });
