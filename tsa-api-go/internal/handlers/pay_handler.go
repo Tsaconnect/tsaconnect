@@ -105,8 +105,9 @@ type PayHandler struct {
 	refunds     payRefundAPI // nil until WithRefunds: refund routes answer 503
 	events      *events.Bus
 	liveEnabled bool
-	// businessNameChange: owners may ask for a rename (NAME_CHANGE_ENABLED).
-	// The route exists only when it is on, and the owner view says so.
+	// businessNameChange: owners may ask for a rename. The server always turns it
+	// on (cmd/server/tsa_pay.go); the route exists only when it is on, and the
+	// owner view says so.
 	businessNameChange bool
 	// keyRefusedAlerted: merchant ID → when its owner was last told a live
 	// key was refused for its address (AnnounceLiveKeyRefused).
