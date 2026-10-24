@@ -213,3 +213,38 @@ func TestSyncPMSettlement_FollowsTheSavedPayoutAccount(t *testing.T) {
 		t.Errorf("a non-bank payout account moved P2P settlement: %q", got)
 	}
 }
+
+// An admin's decision on a P2P application stands: self-service cannot step around
+// a rejection (which leaves no payment-merchant row) or a review still waiting.
+func TestEnrollApprovedMerchant_RespectsTheP2PApplicationDecision(t *testing.T) {
+	cases := []struct {
+		name     string
+		requests [][2]string // status, created_at
+		wantErr  error
+	}{
+		{"rejected", [][2]string{{"rejected", "2026-10-01 10:00:00"}}, ErrPMEnrollDecided},
+		{"still pending", [][2]string{{"pending", "2026-10-01 10:00:00"}}, ErrPMEnrollDecided},
+		{"approved", [][2]string{{"approved", "2026-10-01 10:00:00"}}, nil},
+		{"approved after an earlier rejection", [][2]string{{"rejected", "2026-09-01 10:00:00"}, {"approved", "2026-10-01 10:00:00"}}, nil},
+		{"rejected after an earlier approval", [][2]string{{"approved", "2026-09-01 10:00:00"}, {"rejected", "2026-10-01 10:00:00"}}, ErrPMEnrollDecided},
+		{"no P2P application at all", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newSQLiteForOnboarding(t)
+			svc := NewPMOnboardingService(db, nil)
+			userID := seedEnrollUser(t, db, models.RoleMerchant)
+			seedPayoutAccount(t, db, userID, PaycrestInstitutionBank, "NGN", true)
+			for _, r := range tc.requests {
+				if err := db.Exec(`INSERT INTO merchant_requests (id, user_id, business_type, business_name, status, created_at)
+					VALUES (?, ?, 'p2p_merchant', 'Ada Stores', ?, ?)`, uuid.New(), userID, r[0], r[1]).Error; err != nil {
+					t.Fatalf("seed request: %v", err)
+				}
+			}
+			_, err := svc.EnrollApprovedMerchant(context.Background(), enrollInput(userID))
+			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
