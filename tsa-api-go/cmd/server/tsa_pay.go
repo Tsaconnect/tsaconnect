@@ -87,7 +87,9 @@ func buildTSAPay(cfg *config.Config, db *gorm.DB, banks services.BankDirectory, 
 	scheduler.Register(jobs.NewPayReconciler(payments, 30*time.Second), jobs.AlertOnFailureStreak())
 
 	handler := handlers.NewPayHandler(merchants, payments, sender, cfg.TSAPayLiveEnabled).WithEvents(bus).WithOpenLinks(payments).
-		WithBusinessNameChange(cfg.NameChangeEnabled)
+		// Renaming a business is part of being a merchant, so it is always on: no
+		// env switch. (NAME_CHANGE_ENABLED gates only the paid re-verification.)
+		WithBusinessNameChange(true)
 	if checkout := buildPayCheckout(payments, orders, intents, quoter, rates, cfg.TSAPayLiveEnabled); checkout != nil {
 		handler.WithCheckout(checkout)
 	}

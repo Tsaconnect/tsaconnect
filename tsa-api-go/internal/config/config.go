@@ -601,9 +601,10 @@ type Config struct {
 	BillsQuoteTTL      time.Duration
 	BillsFloatAlertNgn int64
 
-	// Name change by re-verification (verified users) and merchant
-	// business-name change. NameChangeEnabled (NAME_CHANGE_ENABLED, default off)
-	// is the switch that lets the API deploy dark. NameChangeFeeUSD is the
+	// Name change by re-verification (verified users). A merchant's business
+	// rename is not gated: it is always on. NameChangeEnabled
+	// (NAME_CHANGE_ENABLED, default off) is the switch that lets the paid
+	// re-verification deploy dark. NameChangeFeeUSD is the
 	// re-verification fee as a plain decimal ("1.00"; "0" charges nothing), read
 	// when a change is quoted and frozen on it. A paid change allows
 	// NameChangeMaxAttempts Didit sessions within NameChangeTTL, and a user may
