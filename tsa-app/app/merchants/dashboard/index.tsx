@@ -321,10 +321,10 @@ export default function MerchantDashboard() {
                 <Icon name="bank" size={24} color={colors.accent} />
                 <View style={{ flex: 1 }}>
                   <Text variant="bodyMed" weight="700">
-                    Payout account
+                    Payout settings
                   </Text>
                   <Text variant="caption" color="textSecondary">
-                    Get paid for sales in naira to your bank, or to your wallet.
+                    One payout account for your sales, TSA Pay and P2P.
                   </Text>
                 </View>
                 <Icon name="chevronRight" size={20} color={colors.textMuted} />

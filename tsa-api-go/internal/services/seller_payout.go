@@ -49,6 +49,15 @@ type SellerPayoutService struct {
 	// businessNames are the seller's verified business names (active TSA Pay merchants).
 	businessNames func(ctx context.Context, userID uuid.UUID) ([]string, error)
 	now           func() time.Time
+	// follow points the owner's TSA Pay settlement at a saved bank payout account.
+	// nil while TSA Pay is dormant.
+	follow func(ctx context.Context, userID uuid.UUID, bankCode, accountNumber string) error
+}
+
+// FollowWith makes a saved naira bank payout account also move the owner's TSA
+// Pay settlement (PayMerchantService.FollowPayoutAccount).
+func (s *SellerPayoutService) FollowWith(f func(ctx context.Context, userID uuid.UUID, bankCode, accountNumber string) error) {
+	s.follow = f
 }
 
 func NewSellerPayoutService(db *gorm.DB, dir sellerPayoutInstitutions, banks BankDirectory, mailer CodeMailer) *SellerPayoutService {
@@ -290,21 +299,42 @@ func (s *SellerPayoutService) build(ctx context.Context, userID uuid.UUID, in Se
 }
 
 func (s *SellerPayoutService) save(ctx context.Context, row models.SellerPayoutMethod) (*models.SellerPayoutMethod, error) {
-	err := s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "user_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"kind", "currency", "institution_code", "institution_name",
-			"account_number", "account_name", "verified", "updated_at",
-		}),
-	}).Create(&row).Error
+	var saved models.SellerPayoutMethod
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "user_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"kind", "currency", "institution_code", "institution_name",
+				"account_number", "account_name", "verified", "updated_at",
+			}),
+		}).Create(&row).Error
+		if err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", row.UserID).First(&saved).Error; err != nil {
+			return err
+		}
+		// One payout account: the merchant's P2P settlement follows it.
+		return syncPMSettlement(tx, &saved)
+	})
 	if err != nil {
 		return nil, err
 	}
-	var saved models.SellerPayoutMethod
-	if err := s.db.WithContext(ctx).Where("user_id = ?", row.UserID).First(&saved).Error; err != nil {
-		return nil, err
-	}
+	s.followTSAPay(ctx, &saved)
 	return &saved, nil
+}
+
+// followTSAPay carries a saved naira bank account to the owner's TSA Pay
+// settlement. The payout account is already saved, so a failure here is logged
+// for an operator and never undoes it: the TSA Pay settlement just stays as it
+// was until the account is saved again.
+func (s *SellerPayoutService) followTSAPay(ctx context.Context, m *models.SellerPayoutMethod) {
+	if s.follow == nil || m.Kind != PaycrestInstitutionBank || m.Currency != "NGN" || !m.Verified {
+		return
+	}
+	if err := s.follow(ctx, m.UserID, m.InstitutionCode, m.AccountNumber); err != nil {
+		log.Printf("[seller-payout] ALERT tsa_pay_follow_failed=1 user=%s: %v", m.UserID, err)
+	}
 }
 
 // Clear returns the seller to wallet payouts.

@@ -799,6 +799,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			}
 			pmh.GetMyPMStatus(c)
 		})
+		// An approved merchant takes part in P2P without a second application.
+		p2pUserGroup.POST("/pm/enroll", func(c *gin.Context) {
+			if pmh == nil {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "PM enrollment not configured"})
+				return
+			}
+			pmh.EnrollPM(c)
+		})
 		// Merchant self-activation: supply BVN/NIN to mint the NGN virtual account
 		// and go live. Dormant path returns 503 so the app shows a clear message.
 		p2pUserGroup.POST("/pm/activate", func(c *gin.Context) {

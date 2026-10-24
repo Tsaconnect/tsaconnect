@@ -176,6 +176,20 @@ describe('verify first', () => {
     })).toEqual({ screen: 'pending', pm: false });
   });
 
+  it('an approved merchant is sent to Payment Settings instead of a second application', () => {
+    const merchant = { existingRequest: null, pmActive: false, isMerchant: true };
+    expect(resolveMerchantGate({ ...merchant, formType: 'payment_acceptance', kycVerified: true }))
+      .toEqual({ screen: 'approved', pm: false, payFlow: true });
+    // Unverified merchants still verify first: TSA Pay sets up only for a verified identity.
+    expect(resolveMerchantGate({ ...merchant, formType: 'payment_acceptance', kycVerified: false }))
+      .toEqual({ screen: 'verify' });
+    // A TSA Pay request she already made keeps its own status screen.
+    expect(resolveMerchantGate({
+      ...merchant, existingRequest: { status: 'rejected', businessType: 'payment_acceptance' },
+      formType: 'payment_acceptance', kycVerified: true,
+    })).toEqual({ screen: 'rejected' });
+  });
+
   it('an unverified applicant sees the verify card, not the form, and it opens the KYC screen', async () => {
     const tree = await mount(<MerchantRequestScreen />);
     expect(text(tree)).toContain('Verify your identity first');

@@ -65,6 +65,11 @@ func newSQLiteForPMHandler(t *testing.T) *gorm.DB {
 	)`).Error; err != nil {
 		t.Fatalf("create payment_merchants: %v", err)
 	}
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY, name TEXT, email TEXT, phone_number TEXT, verified_legal_name TEXT
+	)`).Error; err != nil {
+		t.Fatalf("create users: %v", err)
+	}
 	return db
 }
 

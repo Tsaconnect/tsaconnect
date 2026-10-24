@@ -143,8 +143,7 @@ const Layout = () => {
     { label: "Buy Crypto with Cash", icon: "cash-multiple", route: "/merchants/buy-usdt" },
     { label: "Digital Assets", icon: "wallet-outline", route: "/merchants/digital" },
     { label: "Payment Links", icon: "link-variant", route: "/merchants/pay-links" },
-    { label: "Payment Settings", icon: "credit-card-outline", route: "/merchants/pay-settings" },
-    { label: "Payout Account", icon: "bank-outline", route: "/merchants/payout-method" },
+    { label: "Payout Settings", icon: "bank-outline", route: "/merchants/payout-method" },
   ];
 
   type DrawerLink = { label: string; icon: string; route: string };

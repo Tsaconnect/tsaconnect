@@ -9,6 +9,7 @@ import { ethers } from 'ethers';
 import { getChainByChainId } from '@/constants/chains';
 import { isNativeTokenAddress, type LiFiToken } from '@/services/lifi';
 import type { OwnMerchant, SettlementChange } from '@/services/payMerchantApi';
+import type { SellerPayout } from '@/services/sellerPayoutApi';
 
 /** What a merchant can choose to be paid in themselves; anything else is an admin's call. */
 export const OWNER_SETTLEMENT_SYMBOLS = ['USDC', 'USDT'];
@@ -57,4 +58,20 @@ export function describeSettlement(m: OwnMerchant, bankName?: (code: string) => 
     return `${m.tokenSymbol ?? ''} on ${chain} to ${shortAddress(m.walletAddress ?? '')}`;
   }
   return 'Not set up yet';
+}
+
+/** The merchant's payout account when it is a naira bank account, else null: the only kind TSA Pay can be paid into from it. */
+export function payoutBankOf(payout: SellerPayout | null | undefined): (SellerPayout & { institutionCode: string; accountNumber: string }) | null {
+  if (payout?.kind !== 'bank' || payout.currency !== 'NGN' || !payout.institutionCode || !payout.accountNumber) return null;
+  return payout as SellerPayout & { institutionCode: string; accountNumber: string };
+}
+
+/**
+ * TSA Pay already pays into this payout account: the same bank, and an account
+ * number ending the same way (the server masks all but the last four digits).
+ */
+export function paysIntoPayoutAccount(m: Pick<OwnMerchant, 'settlementMode' | 'bankCode' | 'accountNumber'>, payout: { institutionCode: string; accountNumber: string }): boolean {
+  const last4 = (n?: string) => (n ?? '').slice(-4);
+  return m.settlementMode === 'fiat' && m.bankCode === payout.institutionCode
+    && last4(m.accountNumber).length === 4 && last4(m.accountNumber) === last4(payout.accountNumber);
 }
