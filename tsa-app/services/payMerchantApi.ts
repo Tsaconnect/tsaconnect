@@ -26,6 +26,10 @@ export type OwnMerchant = {
   pendingSince?: string;
   /** She may ask for a rename now (the feature is on). Absent (an older API) reads as off. */
   businessNameChangeEnabled?: boolean;
+  /** The owner's own part of the name, before their legal name is added. Absent (an older API) reads as the whole name. */
+  businessBaseName?: string;
+  /** The business itself is verified, so its name carries no legal name. */
+  businessVerified?: boolean;
   status: 'active' | 'suspended';
   /** A super admin has switched her live (her own switch only). */
   liveEnabled: boolean;
@@ -73,6 +77,8 @@ export const OWNER_CODES = {
   LINK_NOT_FOUND: 'link_not_found',
   /** A business name the rule refuses (hidden characters, length, reserved or mixed-script words); the message is the reason. */
   BUSINESS_NAME_INVALID: 'business_name_invalid',
+  /** Another merchant already shows that name; the message says so. */
+  BUSINESS_NAME_TAKEN: 'business_name_taken',
 } as const;
 
 const request = createApiRequest({

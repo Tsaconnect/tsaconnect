@@ -46,6 +46,10 @@ func (h *PayHandler) WithEvents(bus *events.Bus) *PayHandler {
 type payOwnerMerchantView struct {
 	ID           uuid.UUID `json:"id"`
 	BusinessName string    `json:"businessName"`
+	// BusinessBaseName is the owner's own part of the name, before their legal
+	// name is added; BusinessVerified says whether it is added at all.
+	BusinessBaseName string `json:"businessBaseName"`
+	BusinessVerified bool   `json:"businessVerified"`
 	// PendingBusinessName is a rename the owner asked for that waits for an
 	// admin (since PendingSince); BusinessName stays in use until then.
 	PendingBusinessName string     `json:"pendingBusinessName,omitempty"`
@@ -77,7 +81,11 @@ type payOwnerMerchantView struct {
 }
 
 func (h *PayHandler) payOwnerView(m *models.PayMerchant) payOwnerMerchantView {
-	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, Status: m.Status, LiveEnabled: m.LiveEnabled,
+	base := m.BusinessBaseName
+	if base == "" {
+		base = m.BusinessName
+	}
+	v := payOwnerMerchantView{ID: m.ID, BusinessName: m.BusinessName, BusinessBaseName: base, BusinessVerified: m.BusinessVerified, Status: m.Status, LiveEnabled: m.LiveEnabled,
 		LiveAllowed: m.LiveAllowed(h.liveEnabled), Version: m.Version, SettlementMode: m.SettlementMode,
 		WebsiteDomain: m.WebsiteDomain, HasLiveKey: m.LiveKeyHash != nil, HasTestKey: m.TestKeyHash != nil,
 		WebhookURL: m.WebhookURL, TestWebhookURL: m.TestWebhookURL, ReturnDomains: m.ReturnDomainList(), AllowedIPs: m.AllowedIPList(),
@@ -681,6 +689,8 @@ func payOwnerFail(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPayAccountUnverifiable):
 		log.Printf("[tsa-pay] owner account lookup failed: %v", err)
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, "We couldn't verify that account. Check the bank and account number and try again.", "account_unverifiable")
+	case errors.Is(err, services.ErrPayBusinessNameTaken):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "That business name is already taken. Choose another.", services.BusinessNameTakenCode)
 	case businessNameRefusal(err) != "":
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, businessNameRefusal(err), services.BusinessNameInvalidCode)
 	case errors.Is(err, services.ErrPayMerchantInvalid):

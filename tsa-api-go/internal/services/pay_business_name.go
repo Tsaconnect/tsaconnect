@@ -221,18 +221,29 @@ func (s *PayMerchantService) RequestBusinessNameChange(ctx context.Context, owne
 	if expectedVersion != nil && *expectedVersion != m.Version {
 		return nil, ErrPayMerchantStale
 	}
-	name, err = s.normalizeBusinessName(name)
+	legal, err := ownerLegalName(ctx, s.db, ownerID)
 	if err != nil {
 		return nil, err
 	}
-	if name == m.BusinessName {
+	base, err := s.normalizeBusinessName(stripLegalSuffix(strings.Join(strings.Fields(name), " "), legal))
+	if err != nil {
+		return nil, err
+	}
+	// The name customers will see carries the owner's legal name until the
+	// business is verified; asking for the one already shown is no change.
+	shown := composeBusinessName(base, legal, m.BusinessVerified)
+	if shown == m.BusinessName {
 		if err := supersedePendingBusinessNames(s.db.WithContext(ctx), m.ID, "withdrawn: the owner asked for the current name back"); err != nil {
 			return nil, err
 		}
 		return &PaySettlementResult{Merchant: m}, nil
 	}
-	pending, err := s.requestOwnerAction(ctx, ownerID, m, models.PayOwnerActionBusinessName, payBusinessNamePayload{Name: name},
-		fmt.Sprintf("ask for your business to be renamed %q", name))
+	// Refused now, before a code is sent, when another merchant already shows it.
+	if err := ensureBusinessNameFree(ctx, s.db, businessNameKey(shown), m.ID); err != nil {
+		return nil, err
+	}
+	pending, err := s.requestOwnerAction(ctx, ownerID, m, models.PayOwnerActionBusinessName, payBusinessNamePayload{Name: base},
+		fmt.Sprintf("ask for your business to be renamed %q", shown))
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +258,7 @@ func (s *PayMerchantService) confirmBusinessNameByOwner(ctx context.Context, own
 	if err := json.Unmarshal([]byte(a.Payload), &p); err != nil {
 		return nil, err
 	}
-	name, err := s.normalizeBusinessName(p.Name)
+	base, err := s.normalizeBusinessName(p.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -258,11 +269,15 @@ func (s *PayMerchantService) confirmBusinessNameByOwner(ctx context.Context, own
 	if !verified {
 		legal = ""
 	}
+	shown := composeBusinessName(base, legal, m.BusinessVerified)
+	if err := ensureBusinessNameFree(ctx, s.db, businessNameKey(shown), m.ID); err != nil {
+		return nil, err
+	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := supersedePendingBusinessNames(tx, m.ID, "superseded by a later rename request"); err != nil {
 			return err
 		}
-		return tx.Create(&models.PayMerchantNameChange{MerchantID: m.ID, OldName: m.BusinessName, NewName: name,
+		return tx.Create(&models.PayMerchantNameChange{MerchantID: m.ID, OldName: m.BusinessName, NewName: shown, NewBaseName: base,
 			OwnerVerifiedName: legal, Status: models.PayNameChangePending, RequestedBy: ownerID}).Error
 	})
 	if err != nil {
@@ -389,14 +404,27 @@ func (s *PayMerchantService) ReviewBusinessNameChange(ctx context.Context, admin
 	}
 	now := s.now()
 	status := models.PayNameChangeRejected
+	var approvedName, approvedBase string
 	if approve {
 		status = models.PayNameChangeApproved
 		// The rule may have tightened (reserved words, script mixing) since
 		// the request was filed: an approval puts the name in front of
 		// customers now, so it is held to the rule as it stands now.
-		if _, err := s.normalizeBusinessName(change.NewName); err != nil {
+		base := change.NewBaseName
+		if base == "" {
+			base = change.NewName // a request made before names were composed
+		}
+		var err error
+		if approvedBase, err = s.normalizeBusinessName(base); err != nil {
 			return nil, nil, err
 		}
+		legal, err := ownerLegalName(ctx, s.db, m.UserID)
+		if err != nil {
+			return nil, nil, err
+		}
+		// The name is composed as it stands now: the owner's legal name may have
+		// changed since they asked.
+		approvedName = composeBusinessName(approvedBase, legal, m.BusinessVerified)
 	}
 	note = truncateRunes(strings.TrimSpace(note), 512)
 	var cascade BusinessNameCascade
@@ -413,7 +441,12 @@ func (s *PayMerchantService) ReviewBusinessNameChange(ctx context.Context, admin
 			if m.BusinessName != change.OldName {
 				return ErrPayBusinessNameChangeDecided
 			}
-			won, err := s.casUpdate(tx, m.ID, m.Version, map[string]interface{}{"business_name": change.NewName})
+			key := businessNameKey(approvedName)
+			if err := ensureBusinessNameFree(ctx, tx, key, m.ID); err != nil {
+				return err
+			}
+			won, err := s.casUpdate(tx, m.ID, m.Version, map[string]interface{}{
+				"business_name": approvedName, "business_base_name": approvedBase, "business_name_key": key})
 			if err != nil {
 				return err
 			}
@@ -421,11 +454,11 @@ func (s *PayMerchantService) ReviewBusinessNameChange(ctx context.Context, admin
 				return ErrPayMerchantStale
 			}
 			after := *m
-			after.BusinessName = change.NewName
+			after.BusinessName = approvedName
 			if err := s.writeAudit(tx, m.ID, adminID, models.PayAuditActionMerchantUpdate, payAuditChanges(m, &after)); err != nil {
 				return err
 			}
-			if cascade, err = renameOwnersBusiness(tx, m.UserID, change.NewName); err != nil {
+			if cascade, err = renameOwnersBusiness(tx, m.UserID, approvedName); err != nil {
 				return err
 			}
 		}

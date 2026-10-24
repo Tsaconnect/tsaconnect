@@ -41,15 +41,17 @@ func TestPayMerchant_RenameTakesEffectOnlyOnApproval(t *testing.T) {
 	f := ownedMerchant(t, models.VerificationStatusVerified, "Ada Chioma Obi")
 
 	m := f.requestRename(t, "  Obaino4Christ   Ventures ")
-	if m.BusinessName != "Sky Air" || f.stored(t).BusinessName != "Sky Air" || f.stored(t).Version != f.m.Version {
+	// The name customers see carries the owner's legal name until the business is verified.
+	const shownBefore, shownAfter = "Sky Air - Ada Chioma Obi", "Obaino4Christ Ventures - Ada Chioma Obi"
+	if m.BusinessName != shownBefore || f.stored(t).BusinessName != shownBefore || f.stored(t).Version != f.m.Version {
 		t.Fatalf("a confirmed request renamed the merchant: %+v", f.stored(t))
 	}
 	rows := f.nameChanges(t)
-	if len(rows) != 1 || rows[0].Status != models.PayNameChangePending || rows[0].NewName != "Obaino4Christ Ventures" ||
-		rows[0].OldName != "Sky Air" || rows[0].OwnerVerifiedName != "Ada Chioma Obi" || rows[0].RequestedBy != f.owner {
+	if len(rows) != 1 || rows[0].Status != models.PayNameChangePending || rows[0].NewName != shownAfter ||
+		rows[0].NewBaseName != "Obaino4Christ Ventures" || rows[0].OldName != shownBefore || rows[0].OwnerVerifiedName != "Ada Chioma Obi" || rows[0].RequestedBy != f.owner {
 		t.Fatalf("rename record %+v", rows)
 	}
-	if p, _ := f.s.PendingBusinessName(ctx, f.m.ID); p == nil || p.Name != "Obaino4Christ Ventures" || p.Since.IsZero() {
+	if p, _ := f.s.PendingBusinessName(ctx, f.m.ID); p == nil || p.Name != shownAfter || p.Since.IsZero() {
 		t.Fatalf("pending = %+v", p)
 	}
 
@@ -58,7 +60,7 @@ func TestPayMerchant_RenameTakesEffectOnlyOnApproval(t *testing.T) {
 	}
 	change, m, err := f.s.ReviewBusinessNameChange(ctx, uuid.New(), rows[0].ID, true, "")
 	if err != nil || change.Status != models.PayNameChangeApproved || change.ReviewedBy == nil || change.ReviewedAt == nil ||
-		m.BusinessName != "Obaino4Christ Ventures" || m.Version != f.m.Version+1 {
+		m.BusinessName != shownAfter || m.Version != f.m.Version+1 {
 		t.Fatalf("err %v change %+v merchant %+v", err, change, m)
 	}
 	for _, action := range []models.PayAuditAction{models.PayAuditActionBusinessNameReview, models.PayAuditActionMerchantUpdate} {

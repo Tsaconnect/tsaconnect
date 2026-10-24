@@ -420,6 +420,21 @@ TSA Pay crypto refunds (`services/pay_refund_*.go`, `pay-refund-confirmer` job):
   a 403 endpoint must not be first in a `*_MAINNET_RPC_URL` list. All chains verified
   2026-10-09.
 
+TSA Pay business names (`services/pay_business_display.go`, `pay_business_name.go`):
+- The name customers see is `pay_merchants.business_name`. Until the business is verified (`business_verified`, set by the
+  coming KYB, never by hand) it is the owner's own name plus their legal name — "Ojay store - Ademu Emmanuel" — so a name
+  says who stands behind it. `business_base_name` is the owner's part; `business_name_key` (the name folded as
+  `foldBusinessName` reads it: case, spacing, punctuation, accents and lookalikes ignored) carries a partial UNIQUE index, so two
+  merchants never show the same name. Two people may both pick "Ojay store": their legal names tell them apart.
+- Every writer composes through `composeBusinessName` and refuses a taken name with `ErrPayBusinessNameTaken` (409
+  `business_name_taken`): sign-up (`CreateFromRequest`), an owner's rename request (before the code is sent), its approval (the
+  name is composed with the legal name as it stands THEN, and re-checked), and an admin edit (the given name is the owner's own
+  part; giving back the shown name, or pasting it with the suffix, adds nothing twice). The owner's legal name changing
+  (`NameChangeService.apply`) recomposes the name (`RecomposeBusinessName`); if the new name is taken the old stays, with an ALERT.
+- Boot fills the key/base of merchants that lack one (`FillBusinessNameKeys`, idempotent). **One-time operator step** after the
+  deploy: `tsa-api-go -compose-business-names` lists what it would rename (dry run); `-compose-business-names -apply` does it
+  (owners with no verified legal name, and names that would be taken, are listed and skipped). Re-running changes nothing.
+
 Background-job failure alerts (`internal/jobs/scheduler_alert.go`):
 - A worker registered with `jobs.AlertOnFailureStreak()` alerts when it has failed every tick
   for ~5 minutes (`ceil(5m / interval)` consecutive failures, never fewer than 3; override with

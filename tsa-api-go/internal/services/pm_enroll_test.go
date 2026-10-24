@@ -58,8 +58,8 @@ func TestEnrollApprovedMerchant_SettlesIntoThePayoutAccount(t *testing.T) {
 	if pm.Status != models.PaymentMerchantStatusApproved {
 		t.Errorf("status = %q, want approved", pm.Status)
 	}
-	if pm.Name != "Ada Stores" {
-		t.Errorf("name = %q, want the approved business name", pm.Name)
+	if pm.Name != "Ada Stores - Ada Chioma Obi" {
+		t.Errorf("name = %q, want the approved business name with the owner's legal name", pm.Name)
 	}
 	if pm.PerTradeCapUSD != 0 || pm.DailyCapUSD != 0 {
 		t.Errorf("caps = %v/%v, want 0/0 (no cap)", pm.PerTradeCapUSD, pm.DailyCapUSD)
@@ -120,8 +120,8 @@ func TestEnrollApprovedMerchant_FallsBackToAccountName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
-	if pm.Name != "Ada Obi" {
-		t.Errorf("name = %q, want the account name", pm.Name)
+	if pm.Name != "Ada Obi - Ada Chioma Obi" {
+		t.Errorf("name = %q, want the account name with the owner's legal name", pm.Name)
 	}
 }
 
