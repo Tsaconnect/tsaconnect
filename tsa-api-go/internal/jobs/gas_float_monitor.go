@@ -23,8 +23,10 @@ type StockLowNotifier interface {
 	NotifyStockLow(ctx context.Context, a services.StockLowAlert) error
 }
 
-// stockAlertEvery bounds how often one (chain, asset) is emailed.
-const stockAlertEvery = time.Hour
+// stockAlertEvery bounds how often one (chain, asset) is emailed. A low
+// wallet is a standing condition that only a manual refill clears, so an
+// hourly repeat across every asset is noise; the log ALERT still fires every tick.
+const stockAlertEvery = 24 * time.Hour
 
 // GasFloatMonitor watches a native-balance float — the gas sponsor lane or,
 // with a different metric prefix, the conversion treasury. Below the floor

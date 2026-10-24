@@ -28,8 +28,8 @@ func (m *mutableFloats) FloatBalances(context.Context) ([]services.SponsorFloat,
 	return m.floats, m.err
 }
 
-// §5.3: below $50 free → ALERT + email, at most hourly; one recovery email.
-func TestGasFloatMonitor_TokenLowAlertsHourlyAndRecovers(t *testing.T) {
+// §5.3: below $50 free → ALERT + email, at most daily; one recovery email.
+func TestGasFloatMonitor_TokenLowAlertsDailyAndRecovers(t *testing.T) {
 	src := &mutableFloats{floats: []services.SponsorFloat{{Chain: "base", Address: "0xw",
 		BalanceWei: big.NewInt(10_000), FloorWei: big.NewInt(1_000), Tokens: map[string]float64{"USDC": 41.2, "USDT": 900}}}}
 	n := &recordingStockNotifier{}
@@ -46,15 +46,15 @@ func TestGasFloatMonitor_TokenLowAlertsHourlyAndRecovers(t *testing.T) {
 	if len(n.got) != 1 || n.got[0].Asset != "USDC" || n.got[0].Recovered {
 		t.Fatalf("emails = %+v", n.got)
 	}
-	clock = start.Add(30 * time.Minute)
-	_ = m.Run(ctx)
-	if len(n.got) != 1 {
-		t.Fatal("re-emailed inside the hour")
-	}
 	clock = start.Add(61 * time.Minute)
 	_ = m.Run(ctx)
+	if len(n.got) != 1 {
+		t.Fatal("re-emailed inside the day")
+	}
+	clock = start.Add(25 * time.Hour)
+	_ = m.Run(ctx)
 	if len(n.got) != 2 {
-		t.Fatalf("no hourly repeat: %d", len(n.got))
+		t.Fatalf("no daily repeat: %d", len(n.got))
 	}
 	src.floats[0].Tokens["USDC"] = 250 // refilled
 	_ = m.Run(ctx)

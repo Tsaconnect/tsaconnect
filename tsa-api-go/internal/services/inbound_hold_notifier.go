@@ -413,7 +413,7 @@ func (n *InboundHoldNotifier) NotifyStockLow(_ context.Context, a StockLowAlert)
 		fmt.Fprintf(&b, "%s on %s is below the alert threshold (%s).\n\nNow: %s\n", a.Asset, a.Chain, a.Threshold, a.Have)
 		fmt.Fprintf(&b, "Wallet: %s\n\n", a.Address)
 		b.WriteString("Send it to the wallet address above on that chain. Buyers are offered this token only while its free stock covers the smallest order; " +
-			"the app sees a refill within 30 seconds. This repeats hourly until it is refilled.")
+			"the app sees a refill within 30 seconds. This repeats daily until it is refilled.")
 	}
 	ctaText, ctaURL := "", ""
 	if n.consoleBaseURL != "" {
