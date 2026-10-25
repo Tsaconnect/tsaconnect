@@ -56,19 +56,34 @@ func titleCaseName(s string) string {
 	return b.String()
 }
 
-// idFieldLabel matches the words printed on an ID as field labels. Didit's scan
-// of a Nigerian NIN slip reads them as the person's name ("Surname N Surname N"),
-// so a legal name holding one is a scan error, not a person.
-var idFieldLabel = regexp.MustCompile(`^(surname[ns]?|first|firstnames?|given|givennames?|middle|middlenames?|last|lastnames?|none|null|unknown)$`)
+// Didit's scan of a Nigerian NIN slip reads the words printed as field labels as
+// the person's name ("Surname N Surname N"), so a legal name made of them is a
+// scan error, not a person. "Surname" is only ever a label. The other words
+// ("Given", "First", "Last", …) are also real names, so they count only when
+// nothing but labels and initials is left.
+var (
+	surnameLabel = regexp.MustCompile(`^surname[ns]?$`)
+	idFieldLabel = regexp.MustCompile(`^(first|firstnames?|given|givennames?|middle|middlenames?|last|lastnames?|names?|none|null|unknown)$`)
+)
 
-// looksLikeFieldLabels reports a legal name that has an ID's field label in it.
+// looksLikeFieldLabels reports a legal name that is a scan of an ID's field labels.
 func looksLikeFieldLabels(legalName string) bool {
-	for _, word := range strings.Fields(strings.ToLower(legalName)) {
-		if idFieldLabel.MatchString(strings.Trim(word, ".,:;-")) {
+	words := strings.Fields(strings.ToLower(legalName))
+	if len(words) == 0 {
+		return false
+	}
+	onlyPlaceholders := true
+	for _, word := range words {
+		word = strings.Trim(word, ".,:;-")
+		switch {
+		case surnameLabel.MatchString(word):
 			return true
+		case idFieldLabel.MatchString(word) || utf8.RuneCountInString(word) <= 1: // a label, or an initial
+		default:
+			onlyPlaceholders = false
 		}
 	}
-	return false
+	return onlyPlaceholders
 }
 
 // legalNameSuffix is the owner's legal name as it is added to a business name,

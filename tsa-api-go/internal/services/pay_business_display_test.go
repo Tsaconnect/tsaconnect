@@ -253,16 +253,23 @@ func TestBusinessName_RefusesASpacedDashInTheOwnersPart(t *testing.T) {
 	}
 }
 
-// A legal name that is only an ID's field labels (a NIN slip Didit could not
-// read) is never added to a business name.
+// A legal name that is only a scan of an ID's field labels is never added to a
+// business name; a real name that happens to be a label word is.
 func TestComposeBusinessName_IgnoresALegalNameThatIsAScanOfFieldLabels(t *testing.T) {
-	for _, junk := range []string{"SURNAME N SURNAME N", "Surnamen Surnamen", "First Middle Last", "NONE", "Given Names"} {
+	for _, junk := range []string{"SURNAME N SURNAME N", "Surnamen Surnamen", "Surname", "First Middle Last", "Given Names", "NONE", "N A", "- -"} {
 		if got := composeBusinessName("Justice_Ad", junk, false); got != "Justice_Ad" {
 			t.Errorf("%q: composed %q, want the plain name", junk, got)
 		}
 	}
-	if got := composeBusinessName("Shop", "ADA SURNAMELOVER OBI", false); got != "Shop - Ada Surnamelover Obi" {
-		t.Errorf("a name merely containing a label's letters is a name: %q", got)
+	for legal, want := range map[string]string{
+		"GIVEN NCUBE":          "Shop - Given Ncube",  // Given is a real given name
+		"FIRST OKAFOR":         "Shop - First Okafor", // so is First
+		"ADA SURNAMELOVER OBI": "Shop - Ada Surnamelover Obi",
+		"LAST ADE B":           "Shop - Last Ade B",
+	} {
+		if got := composeBusinessName("Shop", legal, false); got != want {
+			t.Errorf("%q: composed %q, want %q", legal, got, want)
+		}
 	}
 }
 
