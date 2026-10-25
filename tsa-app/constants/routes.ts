@@ -41,6 +41,9 @@ export const TSA_PAY_APPLY = '/merchants/merchant-request?type=payment_acceptanc
 export const PAY_SETTINGS = '/merchants/pay-settings' satisfies Href;
 /** The merchant's business name and the rename request — the name is the merchant's, not TSA Pay's. */
 export const BUSINESS_NAME = '/merchants/pay-settings?section=name' satisfies Href;
+/** Set up a wallet: create one (with its own prompt) or restore one from its recovery phrase. */
+export const WALLET_CREATE = '/wallet/seedphrase?mode=create' satisfies Href;
+export const WALLET_IMPORT = '/wallet/seedphrase?mode=import' satisfies Href;
 export const SELLER_PAYOUT = '/merchants/payout-method' satisfies Href;
 
 /** A TSA Pay merchant's payment links, and the form that makes one. */

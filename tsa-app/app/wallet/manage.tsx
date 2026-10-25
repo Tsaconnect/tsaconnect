@@ -299,10 +299,22 @@ const WalletManage = () => {
       ? 'This is your only wallet. Deleting it will remove all wallet data. Make sure you have your seed phrase backed up.'
       : `Delete "${wallet.label}"? Make sure you have the seed phrase backed up.`;
 
-    Alert.alert('Delete Wallet', message, [
-      { text: 'Cancel', style: 'cancel' },
+    // Deleting a wallet that was never backed up destroys the only copy of its key.
+    const title = wallet.backedUp ? 'Delete Wallet' : 'Delete a wallet you have not backed up?';
+    // The backup screen backs up the ACTIVE wallet, so only offer it for that one.
+    const canBackUpNow = wallet.address === activeAddress;
+    const warning = wallet.backedUp
+      ? message
+      : `"${wallet.label}" has no confirmed backup. Once deleted, its funds are lost for good — nobody, including TSA Connect, can recover it.${
+          canBackUpNow ? '' : ' Make it your active wallet to back it up first.'
+        }`;
+
+    Alert.alert(title, warning, [
+      !wallet.backedUp && canBackUpNow
+        ? { text: 'Back up first', style: 'cancel' as const, onPress: () => router.push('/wallet/seedphrase') }
+        : { text: 'Cancel', style: 'cancel' as const },
       {
-        text: 'Delete',
+        text: wallet.backedUp ? 'Delete' : 'Delete anyway',
         style: 'destructive',
         onPress: async () => {
           await removeWallet(wallet.address);

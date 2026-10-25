@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useTheme } from '@/theme';
 import { EmptyState } from '@/components/ui';
+import { WALLET_IMPORT } from '@/constants/routes';
 
 export interface NoLocalWalletProps {
   /** What the user came here to do, e.g. "swap", "buy MCGP", "pay". */
@@ -27,7 +28,7 @@ export function NoLocalWalletNotice({ action = 'continue' }: NoLocalWalletProps)
       title="Import your wallet"
       subtitle={`Your MCGP is held on-chain by your own wallet. Import its recovery phrase on this device to view your balance and ${action}.`}
       actionLabel="Import wallet"
-      onAction={() => router.push('/wallet/seedphrase')}
+      onAction={() => router.push(WALLET_IMPORT)}
     />
   );
 }
