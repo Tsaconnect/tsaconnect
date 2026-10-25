@@ -9,6 +9,7 @@
 // effects (balance fetch + race guard, discovery/custom-token merges,
 // AsyncStorage hidden-tokens), navigation routes/params, money handling, and
 // network switching are unchanged — this is a visual/structural restyle only.
+import { WALLET_CREATE, WALLET_IMPORT } from '@/constants/routes';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import ActivityFeed from '@/components/activity/ActivityFeed';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
@@ -1470,14 +1471,14 @@ const WalletScreen: React.FC = () => {
           <Button
             title="Create New Wallet"
             leftIcon="plus"
-            onPress={() => router.push('/wallet/seedphrase')}
+            onPress={() => router.push(WALLET_CREATE)}
             style={{ marginBottom: spacing.md }}
           />
           <Button
             title="Import Existing Wallet"
             variant="secondary"
             leftIcon="upload"
-            onPress={() => router.push('/wallet/seedphrase')}
+            onPress={() => router.push(WALLET_IMPORT)}
           />
         </View>
       </SafeAreaView>

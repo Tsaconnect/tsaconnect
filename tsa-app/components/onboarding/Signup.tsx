@@ -22,7 +22,7 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import PhoneNumber from "../country/phoneNumber";
 import LocationPicker from "../common/LocationPicker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { generateWallet, addWallet } from "../../services/wallet";
+import { generateWallet, addWallet, removeWallet } from "../../services/wallet";
 import { registerWalletAddress } from "../../services/walletApi";
 import { useTheme } from "@/theme";
 import {
@@ -107,12 +107,23 @@ const Signup = () => {
             await AsyncStorage.setItem('authToken', result.data.token);
           }
           const wallet = await generateWallet();
+          // Store, then link; a link that fails (it returns, never throws) is
+          // undone so no unlinked key is left behind.
           await addWallet(wallet, 'Wallet 1');
-          await registerWalletAddress(wallet.address, wallet.privateKey);
+          const registered = await registerWalletAddress(wallet.address, wallet.privateKey);
+          if (!registered.success) {
+            await removeWallet(wallet.address).catch(() => undefined);
+            throw new Error(registered.message || 'Wallet could not be linked');
+          }
         } catch (walletErr) {
           console.warn('Auto wallet generation failed, user can set up later:', walletErr);
           setLoading(false);
-          router.push("/home");
+          Alert.alert(
+            "Account created",
+            "We couldn't set up your wallet just now. You can create it any time from the Wallet tab.",
+            [{ text: "OK", onPress: () => router.push("/home") }],
+            { cancelable: false }
+          );
           return;
         }
 
