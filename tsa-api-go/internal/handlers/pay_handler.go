@@ -417,7 +417,7 @@ func (h *PayHandler) adminReviewBusinessName(c *gin.Context, approve bool) {
 		return
 	}
 	if approve {
-		h.announce(m.UserID, events.PayBusinessNameApproved, fmt.Sprintf("Your business is now called %s", change.NewName),
+		h.announce(m.UserID, events.PayBusinessNameApproved, fmt.Sprintf("Your business is now called %s", m.BusinessName),
 			"Your new business name is approved. Customers see it from now on, and payouts can go to an account in this name.")
 	} else {
 		message := fmt.Sprintf("Your business keeps the name %s.", m.BusinessName)
@@ -591,6 +591,8 @@ func payMerchantAdminFail(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, services.ErrPayMerchantNotFound):
 		utils.ErrorResponse(c, http.StatusNotFound, err.Error())
+	case errors.Is(err, services.ErrPayBusinessNameTaken):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, "That business name is already taken by another merchant.", services.BusinessNameTakenCode)
 	case businessNameRefusal(err) != "":
 		utils.ErrorResponseWithCode(c, http.StatusUnprocessableEntity, businessNameRefusal(err), services.BusinessNameInvalidCode)
 	case errors.Is(err, services.ErrPayMerchantInvalid):

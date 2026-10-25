@@ -418,6 +418,9 @@ func (s *NameChangeService) apply(ctx context.Context, ch *models.UserNameChange
 		if res.RowsAffected != 1 {
 			return errNameChangeAccountUnverified
 		}
+		// A business shown with its owner's legal name follows the new one. It
+		// never fails the change: if the new name is taken the old one stays.
+		RecomposeBusinessName(ctx, tx, ch.UserID, name)
 		source := "didit"
 		if reviewer != nil {
 			source = "admin"

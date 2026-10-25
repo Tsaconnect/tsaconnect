@@ -53,9 +53,19 @@ type PayMerchant struct {
 	ID                uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 	MerchantRequestID uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"merchantRequestId"`
 	UserID            uuid.UUID `gorm:"type:uuid;not null;index" json:"userId"`
-	BusinessName      string    `gorm:"size:255;not null" json:"businessName"`
-	WebsiteDomain     string    `gorm:"size:255" json:"websiteDomain"`
-	Status            string    `gorm:"size:16;not null;index" json:"status"`
+	// BusinessName is what customers see and payouts are matched against. For a
+	// business that is not verified it is the owner's own name for it plus their
+	// legal name ("Ojay store - Ademu Emmanuel"); BusinessBaseName is the owner's
+	// part alone. BusinessNameKey is BusinessName folded to the letters a reader
+	// sees, and is unique: two merchants never show the same name.
+	BusinessName     string `gorm:"size:255;not null" json:"businessName"`
+	BusinessBaseName string `gorm:"size:255" json:"-"`
+	BusinessNameKey  string `gorm:"size:255;uniqueIndex:uq_pay_merchants_name_key,where:business_name_key <> ''" json:"-"`
+	// BusinessVerified is set when the business itself has passed verification
+	// (KYB); only then is its name shown without the owner's legal name.
+	BusinessVerified bool   `gorm:"not null;default:false" json:"businessVerified"`
+	WebsiteDomain    string `gorm:"size:255" json:"websiteDomain"`
+	Status           string `gorm:"size:16;not null;index" json:"status"`
 	// LiveEnabled is this merchant's own live switch, on top of the global
 	// TSA_PAY_LIVE_ENABLED: a live key is refused until a super admin turns it
 	// on. Only the admin merchant update can change it.
@@ -390,10 +400,13 @@ const (
 // current name meanwhile. A later request (or asking for the current name
 // back) closes a pending one as rejected, with a note saying why.
 type PayMerchantNameChange struct {
-	ID                uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	MerchantID        uuid.UUID  `gorm:"type:uuid;not null;index" json:"merchantId"`
-	OldName           string     `gorm:"size:255;not null" json:"oldName"`
-	NewName           string     `gorm:"size:255;not null" json:"newName"`
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	MerchantID uuid.UUID `gorm:"type:uuid;not null;index" json:"merchantId"`
+	OldName    string    `gorm:"size:255;not null" json:"oldName"`
+	NewName    string    `gorm:"size:255;not null" json:"newName"`
+	// NewBaseName is the owner's part of the requested name, before their legal
+	// name is added. Empty on requests made before names were composed.
+	NewBaseName       string     `gorm:"size:255" json:"newBaseName,omitempty"`
 	OwnerVerifiedName string     `gorm:"size:255" json:"ownerVerifiedName"`
 	Status            string     `gorm:"size:16;not null;index" json:"status"`
 	RequestedBy       uuid.UUID  `gorm:"type:uuid;not null" json:"requestedBy"`

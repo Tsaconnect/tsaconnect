@@ -144,6 +144,9 @@ func main() {
 		"run database migrations and exit; used by the deploy between build and restart")
 	backfillLegalNamesFlag := flag.Bool("backfill-legal-names", false,
 		"one-time: read the Didit legal name for every verified user missing one, then exit")
+	composeBusinessNamesFlag := flag.Bool("compose-business-names", false,
+		"one-time: add each unverified merchant's owner legal name to their business name (dry run unless -apply), then exit")
+	applyFlag := flag.Bool("apply", false, "with -compose-business-names: make the changes instead of only listing them")
 	flag.Parse()
 
 	// Load .env from the PROCESS WORKING DIRECTORY, and say which one that was.
@@ -266,6 +269,10 @@ func main() {
 		runLegalNameBackfill(cfg)
 		return
 	}
+	if *composeBusinessNamesFlag {
+		runBusinessNameCompose(*applyFlag)
+		return
+	}
 
 	// Schema migration runs once per deploy, not once per process — several
 	// processes share this database during a cutover and would race on DDL locks.
@@ -288,6 +295,11 @@ func main() {
 	// Initialize the unified fee-rate config (seeds defaults if the table is
 	// empty) and assign the process-wide singleton used by fee call sites.
 	feeConfigService := services.InitFeeConfigService(config.DB)
+
+	// Every merchant gets the key business-name uniqueness reads (idempotent).
+	if err := services.FillBusinessNameKeys(context.Background(), config.DB); err != nil {
+		log.Printf("[tsa-pay] ALERT business_name_keys_failed=1: %v", err)
+	}
 
 	// Referral-graph service (SP2 of the fee/TP overhaul): single-query,
 	// cycle-safe upline/downline traversal over users.referred_by. Additive —

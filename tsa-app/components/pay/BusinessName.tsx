@@ -14,6 +14,26 @@ import type { OwnMerchant } from '@/services/payMerchantApi';
 /** A business name as the server stores it: surrounding space dropped, inner runs of space made one. */
 export const normalizeBusinessName = (name: string): string => name.split(/\s+/).filter(Boolean).join(' ');
 
+type NameFields = Pick<OwnMerchant, 'businessName' | 'businessBaseName'>;
+
+/** The owner's own part of the name they are shown under. */
+export const businessBaseName = (m: NameFields): string => m.businessBaseName || m.businessName;
+
+/**
+ * What is added after the owner's own name — " - Ademu Emmanuel", their legal
+ * name until the business is verified — or '' when nothing is.
+ */
+export const businessNameSuffix = (m: NameFields): string => {
+  const base = businessBaseName(m);
+  return m.businessName.length > base.length && m.businessName.startsWith(base) ? m.businessName.slice(base.length) : '';
+};
+
+/** A name with the legal-name suffix taken off, so pasting the shown name back adds nothing twice. */
+const withoutSuffix = (name: string, suffix: string): string =>
+  suffix && name.length > suffix.length && name.toLowerCase().endsWith(suffix.toLowerCase())
+    ? name.slice(0, name.length - suffix.length).trim()
+    : name;
+
 /** The server's bounds on a business name, in characters (code points — what it counts, not UTF-16 units). */
 export const BUSINESS_NAME_MIN = 2;
 export const BUSINESS_NAME_MAX = 100;
@@ -25,16 +45,17 @@ export const BUSINESS_NAME_MAX = 100;
  * business_name_invalid.
  */
 export function businessNameChangeFrom(
-  input: string, m: Pick<OwnMerchant, 'businessName' | 'pendingBusinessName'>,
+  input: string, m: Pick<OwnMerchant, 'businessName' | 'businessBaseName' | 'pendingBusinessName'>,
 ): { name: string } | { missing: string } {
-  const name = normalizeBusinessName(input);
+  const suffix = businessNameSuffix(m);
+  const name = withoutSuffix(normalizeBusinessName(input), suffix);
   if (!name) return { missing: 'Enter the new business name.' };
   const length = [...name].length;
   if (length < BUSINESS_NAME_MIN || length > BUSINESS_NAME_MAX) {
     return { missing: `Enter a name of ${BUSINESS_NAME_MIN} to ${BUSINESS_NAME_MAX} characters.` };
   }
-  if (name === m.pendingBusinessName) return { missing: 'That name is already waiting for approval.' };
-  if (name === normalizeBusinessName(m.businessName) && !m.pendingBusinessName) return { missing: 'That is already your business name.' };
+  if (m.pendingBusinessName && name === withoutSuffix(m.pendingBusinessName, suffix)) return { missing: 'That name is already waiting for approval.' };
+  if (name === businessBaseName(m) && !m.pendingBusinessName) return { missing: 'That is already your business name.' };
   return { name };
 }
 
@@ -55,6 +76,11 @@ export function BusinessNameCard({ merchant, canRename, onRename }: {
     <Card style={{ gap: spacing.xs }}>
       <Text variant="caption" color="textMuted">Business name</Text>
       <Text variant="bodyMed" weight="700">{merchant.businessName}</Text>
+      {businessNameSuffix(merchant) ? (
+        <Text variant="caption" color="textMuted">
+          Your legal name is added to your business name until your business is verified.
+        </Text>
+      ) : null}
       {note ? <Text variant="caption" color="textSecondary">{note}</Text> : null}
       {canRename ? (
         <Button title="Change business name" variant="ghost" size="sm" fullWidth={false} onPress={onRename} />
@@ -84,9 +110,14 @@ export function BusinessNameForm({
         label="New business name"
         value={name}
         onChangeText={onChangeName}
-        placeholder={merchant.businessName}
+        placeholder={businessBaseName(merchant)}
         autoCapitalize="words"
       />
+      {businessNameSuffix(merchant) ? (
+        <Text variant="caption" color="textSecondary">
+          {`Customers will see it as '${normalizeBusinessName(name) || businessBaseName(merchant)}${businessNameSuffix(merchant)}'. Names are unique, so one that is taken is refused.`}
+        </Text>
+      ) : null}
       <Text variant="caption" color="textMuted">
         {`Your new name takes effect once our team approves it. Until then customers and payouts keep '${merchant.businessName}'.`
           + ' It renames your whole merchant account — TSA Pay, P2P and your store — and we email you a code to confirm the request.'}

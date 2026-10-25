@@ -112,16 +112,22 @@ func (s *PMOnboardingService) EnrollApprovedMerchant(ctx context.Context, in PME
 	return pm, nil
 }
 
-// enrollName is the business name the merchant was approved under, else the
-// account name.
+// enrollName is the name the merchant shows: the business name they were
+// approved under (else their account name), with their legal name added as on
+// every merchant record until the business is verified.
 func (s *PMOnboardingService) enrollName(ctx context.Context, user *models.User) string {
+	base := user.Name
 	var req models.MerchantRequest
 	err := s.db.WithContext(ctx).
 		Where("user_id = ? AND status = ? AND business_type <> ?", user.ID,
 			models.MerchantRequestStatusApproved, models.BusinessTypePaymentAcceptance).
 		Order("created_at DESC").First(&req).Error
 	if err == nil && strings.TrimSpace(req.BusinessName) != "" {
-		return strings.TrimSpace(req.BusinessName)
+		base = strings.TrimSpace(req.BusinessName)
 	}
-	return user.Name
+	legal, err := ownerLegalName(ctx, s.db, user.ID)
+	if err != nil {
+		return base
+	}
+	return composeBusinessName(stripLegalSuffix(base, legal), legal, false)
 }

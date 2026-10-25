@@ -356,8 +356,20 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 	}
 	// Checked at submit and approval too; this is the resume path for requests
 	// made before business names were held to the rule.
-	name, err := s.normalizeBusinessName(req.BusinessName)
+	base, err := s.normalizeBusinessName(req.BusinessName)
 	if err != nil {
+		return nil, err
+	}
+	// The name customers see carries the owner's legal name until the business
+	// is verified, and no two merchants show the same one.
+	legal, err := ownerLegalName(ctx, s.db, req.UserID)
+	if err != nil {
+		return nil, err
+	}
+	base = stripLegalSuffix(base, legal)
+	name := composeBusinessName(base, legal, false)
+	key := businessNameKey(name)
+	if err := ensureBusinessNameFree(ctx, s.db, key, uuid.Nil); err != nil {
 		return nil, err
 	}
 
@@ -365,6 +377,8 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 		MerchantRequestID:       req.ID,
 		UserID:                  req.UserID,
 		BusinessName:            name,
+		BusinessBaseName:        base,
+		BusinessNameKey:         key,
 		WebsiteDomain:           domain,
 		ReturnDomains:           domain,
 		Status:                  models.PayMerchantActive,
@@ -392,6 +406,8 @@ func (s *PayMerchantService) CreateFromRequest(ctx context.Context, req *models.
 			if reErr := s.db.WithContext(ctx).Where("merchant_request_id = ?", req.ID).First(&again).Error; reErr == nil {
 				return &again, nil
 			}
+			// Not this request's merchant, so it was the name another merchant took first.
+			return nil, ErrPayBusinessNameTaken
 		}
 		return nil, err
 	}
@@ -892,13 +908,29 @@ func (s *PayMerchantService) prepare(ctx context.Context, m *models.PayMerchant,
 	changes := map[string]interface{}{}
 
 	if in.BusinessName != nil {
-		// A super admin's rename is held to the same rule as an owner's.
-		name, err := s.normalizeBusinessName(*in.BusinessName)
+		// A super admin's rename is held to the same rule as an owner's. What is
+		// given is the business's own name; the owner's legal name is added to it
+		// as for any rename. Giving back the name already shown changes nothing.
+		legal, err := ownerLegalName(ctx, s.db, m.UserID)
 		if err != nil {
 			return nil, err
 		}
-		updated.BusinessName = name
-		changes["business_name"] = updated.BusinessName
+		given := strings.Join(strings.Fields(*in.BusinessName), " ")
+		// The rule is applied to whatever was given first, so a name that only
+		// differs from the current one by hidden characters is refused, not read
+		// as "unchanged".
+		base, err := s.normalizeBusinessName(stripLegalSuffix(given, legal))
+		if err != nil {
+			return nil, err
+		}
+		if name := composeBusinessName(base, legal, m.BusinessVerified); name != m.BusinessName {
+			key := businessNameKey(name)
+			if err := ensureBusinessNameFree(ctx, s.db, key, m.ID); err != nil {
+				return nil, err
+			}
+			updated.BusinessName, updated.BusinessBaseName, updated.BusinessNameKey = name, base, key
+			changes["business_name"], changes["business_base_name"], changes["business_name_key"] = name, base, key
+		}
 	}
 	if in.Status != nil {
 		updated.Status = *in.Status

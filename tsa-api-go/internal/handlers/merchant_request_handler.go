@@ -744,6 +744,11 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	// already enforced in the pre-flight gate above.
 	if req.BusinessType == models.BusinessTypePaymentAcceptance {
 		if _, err := h.PayMerchants.CreateFromRequest(c.Request.Context(), &req); err != nil {
+			if errors.Is(err, services.ErrPayBusinessNameTaken) {
+				utils.ErrorResponseWithCode(c, http.StatusConflict,
+					"Merchant approved, but another merchant already shows that business name. Have a super admin approve it again with a different name.", services.BusinessNameTakenCode)
+				return
+			}
 			log.Printf("ApproveMerchantRequest: TSA Pay provisioning failed for request %s: %v", req.ID, err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Merchant approved but TSA Pay setup failed — retry the approval to resume")
 			return

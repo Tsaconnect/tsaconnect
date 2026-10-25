@@ -994,7 +994,7 @@ func TestPayMerchant_OwnerSettlementRefusals(t *testing.T) {
 func TestPayMerchant_OwnerWithTwoMerchantsIsRefusedNotGuessed(t *testing.T) {
 	f := ownedMerchant(t, "", "")
 	second := payRequest()
-	second.ID, second.UserID = uuid.New(), f.owner
+	second.ID, second.UserID, second.BusinessName = uuid.New(), f.owner, "Another Business"
 	if _, err := f.s.CreateFromRequest(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
