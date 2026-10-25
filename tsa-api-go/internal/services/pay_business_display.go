@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -55,9 +56,43 @@ func titleCaseName(s string) string {
 	return b.String()
 }
 
+// Didit's scan of a Nigerian NIN slip reads the words printed as field labels as
+// the person's name ("Surname N Surname N"), so a legal name made of them is a
+// scan error, not a person. "Surname" is only ever a label. The other words
+// ("Given", "First", "Last", …) are also real names, so they count only when
+// nothing but labels and initials is left.
+var (
+	surnameLabel = regexp.MustCompile(`^surname[ns]?$`)
+	idFieldLabel = regexp.MustCompile(`^(first|firstnames?|given|givennames?|middle|middlenames?|last|lastnames?|names?|none|null|unknown)$`)
+)
+
+// looksLikeFieldLabels reports a legal name that is a scan of an ID's field labels.
+func looksLikeFieldLabels(legalName string) bool {
+	words := strings.Fields(strings.ToLower(legalName))
+	if len(words) == 0 {
+		return false
+	}
+	onlyPlaceholders := true
+	for _, word := range words {
+		word = strings.Trim(word, ".,:;-")
+		switch {
+		case surnameLabel.MatchString(word):
+			return true
+		case idFieldLabel.MatchString(word) || utf8.RuneCountInString(word) <= 1: // a label, or an initial
+		default:
+			onlyPlaceholders = false
+		}
+	}
+	return onlyPlaceholders
+}
+
 // legalNameSuffix is the owner's legal name as it is added to a business name,
-// or "" when they have none on record.
+// or "" when they have none on record, or one that is only a scan of an ID's
+// field labels.
 func legalNameSuffix(legalName string) string {
+	if looksLikeFieldLabels(legalName) {
+		return ""
+	}
 	name := titleCaseName(legalName)
 	if utf8.RuneCountInString(name) > payLegalNameMaxRunes {
 		name = string([]rune(name)[:payLegalNameMaxRunes])
@@ -198,6 +233,8 @@ func ComposeBusinessNames(ctx context.Context, db *gorm.DB, dryRun bool) ([]Busi
 		if base == "" {
 			base = m.BusinessName
 		}
+		// Stray spaces are tidied here, so one never doubles at the joiner.
+		base = strings.Join(strings.Fields(base), " ")
 		legal, err := ownerLegalName(ctx, db, m.UserID)
 		if err != nil {
 			return out, err
@@ -208,7 +245,7 @@ func ComposeBusinessNames(ctx context.Context, db *gorm.DB, dryRun bool) ([]Busi
 		case item.To == m.BusinessName && m.BusinessBaseName != "":
 			item.Skipped = "already composed"
 		case legalNameSuffix(legal) == "" && !m.BusinessVerified:
-			item.Skipped = "owner has no verified legal name"
+			item.Skipped = "owner has no usable verified legal name"
 		default:
 			if err := ensureBusinessNameFree(ctx, db, businessNameKey(item.To), m.ID); err != nil {
 				item.Skipped = "the composed name is taken"

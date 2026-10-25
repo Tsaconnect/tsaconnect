@@ -433,6 +433,8 @@ TSA Pay business names (`services/pay_business_display.go`, `pay_business_name.g
   name is composed with the legal name as it stands THEN, and re-checked), and an admin edit (the given name is the owner's own
   part; giving back the shown name, or pasting it with the suffix, adds nothing twice). The owner's legal name changing
   (`NameChangeService.apply`) recomposes the name (`RecomposeBusinessName`); if the new name is taken the old stays, with an ALERT.
+- A legal name that is only a scan of an ID's field labels ("Surname N Surname N" from an unreadable NIN slip; `looksLikeFieldLabels`)
+  is treated as no legal name: nothing is added and the one-time rename skips that merchant until a real name is set.
 - Boot fills the key/base of merchants that lack one (`FillBusinessNameKeys`, idempotent). **One-time operator step** after the
   deploy: `tsa-api-go -compose-business-names` lists what it would rename (dry run); `-compose-business-names -apply` does it
   (owners with no verified legal name, and names that would be taken, are listed and skipped). Re-running changes nothing.

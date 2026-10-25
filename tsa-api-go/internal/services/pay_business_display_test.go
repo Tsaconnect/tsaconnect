@@ -252,3 +252,49 @@ func TestBusinessName_RefusesASpacedDashInTheOwnersPart(t *testing.T) {
 		}
 	}
 }
+
+// A legal name that is only a scan of an ID's field labels is never added to a
+// business name; a real name that happens to be a label word is.
+func TestComposeBusinessName_IgnoresALegalNameThatIsAScanOfFieldLabels(t *testing.T) {
+	for _, junk := range []string{"SURNAME N SURNAME N", "Surnamen Surnamen", "Surname", "First Middle Last", "Given Names", "NONE", "N A", "- -"} {
+		if got := composeBusinessName("Justice_Ad", junk, false); got != "Justice_Ad" {
+			t.Errorf("%q: composed %q, want the plain name", junk, got)
+		}
+	}
+	for legal, want := range map[string]string{
+		"GIVEN NCUBE":          "Shop - Given Ncube",  // Given is a real given name
+		"FIRST OKAFOR":         "Shop - First Okafor", // so is First
+		"ADA SURNAMELOVER OBI": "Shop - Ada Surnamelover Obi",
+		"LAST ADE B":           "Shop - Last Ade B",
+	} {
+		if got := composeBusinessName("Shop", legal, false); got != want {
+			t.Errorf("%q: composed %q, want %q", legal, got, want)
+		}
+	}
+}
+
+func TestComposeBusinessNames_SkipsJunkLegalNamesAndTidiesSpaces(t *testing.T) {
+	ctx := context.Background()
+	f := ownedMerchant(t, models.VerificationStatusVerified, "Ada Chioma Obi")
+	if err := f.s.db.Model(&models.PayMerchant{}).Where("id = ?", f.m.ID).
+		Updates(map[string]any{"business_name": "Sky Air  ", "business_base_name": "", "business_name_key": ""}).Error; err != nil {
+		t.Fatal(err)
+	}
+	junkOwner, junk, err := f.addOwnedMerchant(t, "SURNAME N SURNAME N", "Justice_Ad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = junkOwner
+	if err := FillBusinessNameKeys(ctx, f.s.db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ComposeBusinessNames(ctx, f.s.db, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.stored(t).BusinessName; got != "Sky Air - Ada Chioma Obi" {
+		t.Errorf("stray spaces doubled at the joiner: %q", got)
+	}
+	if again, _ := f.s.Get(ctx, junk.ID); again.BusinessName != "Justice_Ad" {
+		t.Errorf("a junk legal name must leave the plain name: %q", again.BusinessName)
+	}
+}
