@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -55,9 +56,28 @@ func titleCaseName(s string) string {
 	return b.String()
 }
 
+// idFieldLabel matches the words printed on an ID as field labels. Didit's scan
+// of a Nigerian NIN slip reads them as the person's name ("Surname N Surname N"),
+// so a legal name holding one is a scan error, not a person.
+var idFieldLabel = regexp.MustCompile(`^(surname[ns]?|first|firstnames?|given|givennames?|middle|middlenames?|last|lastnames?|none|null|unknown)$`)
+
+// looksLikeFieldLabels reports a legal name that has an ID's field label in it.
+func looksLikeFieldLabels(legalName string) bool {
+	for _, word := range strings.Fields(strings.ToLower(legalName)) {
+		if idFieldLabel.MatchString(strings.Trim(word, ".,:;-")) {
+			return true
+		}
+	}
+	return false
+}
+
 // legalNameSuffix is the owner's legal name as it is added to a business name,
-// or "" when they have none on record.
+// or "" when they have none on record, or one that is only a scan of an ID's
+// field labels.
 func legalNameSuffix(legalName string) string {
+	if looksLikeFieldLabels(legalName) {
+		return ""
+	}
 	name := titleCaseName(legalName)
 	if utf8.RuneCountInString(name) > payLegalNameMaxRunes {
 		name = string([]rune(name)[:payLegalNameMaxRunes])
@@ -198,6 +218,8 @@ func ComposeBusinessNames(ctx context.Context, db *gorm.DB, dryRun bool) ([]Busi
 		if base == "" {
 			base = m.BusinessName
 		}
+		// Stray spaces are tidied here, so one never doubles at the joiner.
+		base = strings.Join(strings.Fields(base), " ")
 		legal, err := ownerLegalName(ctx, db, m.UserID)
 		if err != nil {
 			return out, err
@@ -208,7 +230,7 @@ func ComposeBusinessNames(ctx context.Context, db *gorm.DB, dryRun bool) ([]Busi
 		case item.To == m.BusinessName && m.BusinessBaseName != "":
 			item.Skipped = "already composed"
 		case legalNameSuffix(legal) == "" && !m.BusinessVerified:
-			item.Skipped = "owner has no verified legal name"
+			item.Skipped = "owner has no usable verified legal name"
 		default:
 			if err := ensureBusinessNameFree(ctx, db, businessNameKey(item.To), m.ID); err != nil {
 				item.Skipped = "the composed name is taken"
