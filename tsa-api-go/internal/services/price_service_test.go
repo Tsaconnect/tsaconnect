@@ -357,3 +357,29 @@ func TestGetPrices_SameSymbolsInAnyOrderShareACacheEntry(t *testing.T) {
 		t.Fatalf("CoinGecko called %d times, want 1", got)
 	}
 }
+
+// Each spot-listed token needs a CoinGecko id or its row shows no price. ANSEM
+// must be The Black Bull (the Solana mint LiFi lists), not another "ANSEM".
+func TestGetPrices_SpotListedTokensResolve(t *testing.T) {
+	var gotIDs string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIDs = r.URL.Query().Get("ids")
+		_, _ = w.Write([]byte(`{"pepe":{"usd":0.000004},"the-black-bull":{"usd":0.07},"cash-cat":{"usd":0.001},"xpin-network":{"usd":0.02}}`))
+	}))
+	defer srv.Close()
+	ps := NewPriceService()
+	ps.SetBaseURLForTest(srv.URL)
+
+	got, err := ps.GetPrices([]string{"PEPE", "ANSEM", "CASHCAT", "XPIN"})
+	if err != nil {
+		t.Fatalf("GetPrices: %v", err)
+	}
+	for _, sym := range []string{"PEPE", "ANSEM", "CASHCAT", "XPIN"} {
+		if got[sym].USD <= 0 {
+			t.Errorf("%s has no price: %+v", sym, got[sym])
+		}
+	}
+	if !strings.Contains(gotIDs, "the-black-bull") || strings.Contains(gotIDs, "ansem-s-minutes") {
+		t.Errorf("ANSEM must resolve to the-black-bull, requested ids %q", gotIDs)
+	}
+}

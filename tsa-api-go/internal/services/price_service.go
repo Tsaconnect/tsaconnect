@@ -146,6 +146,11 @@ func NewPriceService() *PriceService {
 			"SUI":   "sui",
 			"WBTC":  "wrapped-bitcoin",
 			"WETH":  "weth",
+			// Spot-listed tokens: a listing without an id here shows no price.
+			"PEPE":    "pepe",
+			"ANSEM":   "the-black-bull", // Solana 9cRCn9rG…pump; not "ansem-s-minutes", another ANSEM
+			"CASHCAT": "cash-cat",
+			"XPIN":    "xpin-network",
 		},
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		cacheTTL:   60 * time.Second,
