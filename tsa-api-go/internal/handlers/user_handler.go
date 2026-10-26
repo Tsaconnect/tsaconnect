@@ -51,10 +51,63 @@ func (h *Handlers) GetProfile(c *gin.Context) {
 		return
 	}
 
+	// users.role holds one value, so staff approved as a merchant keep their staff
+	// role; the app reads this flag to show them the merchant section.
+	approved, err := hasApprovedMerchantRequest(config.DB, dbUser.ID)
+	if err != nil {
+		log.Printf("GetProfile: merchant request lookup for %s: %v", dbUser.ID, err)
+	}
+	data, err := profileWithMerchantFlag(dbUser, approved)
+	if err != nil {
+		log.Printf("GetProfile error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": "Failed to fetch profile",
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    dbUser,
+		"data":    data,
 	})
+}
+
+// hasApprovedMerchantRequest reports whether the user is a merchant by record
+// rather than by role: an approved merchant application (any business type but
+// the retired liquidity-provider one grants the merchant role, see the approval
+// handler), or a live payment-merchant row of kind merchant. An LP row alone
+// does not count: LPs are not console merchants.
+func hasApprovedMerchantRequest(db *gorm.DB, userID uuid.UUID) (bool, error) {
+	var n int64
+	err := db.Model(&models.MerchantRequest{}).
+		Where("user_id = ? AND status = ? AND business_type <> ?",
+			userID, models.MerchantRequestStatusApproved, models.BusinessTypeLiquidityProvider).
+		Limit(1).Count(&n).Error
+	if err != nil || n > 0 {
+		return n > 0, err
+	}
+	err = db.Model(&models.PaymentMerchant{}).
+		Where("user_id = ? AND kind = ? AND status = ?",
+			userID, models.PaymentMerchantKindMerchant, models.PaymentMerchantStatusActive).
+		Limit(1).Count(&n).Error
+	return n > 0, err
+}
+
+// profileWithMerchantFlag adds merchantApproved to the user's JSON. User has its
+// own MarshalJSON, so the flag is merged into the marshalled object rather than
+// embedded (an embedded User would swallow any sibling field).
+func profileWithMerchantFlag(u models.User, merchantApproved bool) (map[string]interface{}, error) {
+	raw, err := json.Marshal(u)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	out["merchantApproved"] = merchantApproved
+	return out, nil
 }
 
 // updateProfileRequest defines allowed fields for profile update.

@@ -49,6 +49,9 @@ const Layout = () => {
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userRole, setUserRole] = useState<string | null>(null);
+  // Server flag: an approved merchant application. Staff keep their staff role,
+  // so this (not the role) is what shows them the merchant section.
+  const [merchantApproved, setMerchantApproved] = useState(false);
   // Liquidity row: "Provide liquidity & earn", or "Your liquidity" once an LP —
   // the same entry Profile shows, hidden while the pool is off.
   const pm = useIsPaymentMerchant();
@@ -72,6 +75,10 @@ const Layout = () => {
             if (profileResponse.data.role) {
               await AsyncStorage.setItem("role", String(profileResponse.data.role).toLowerCase());
             }
+            await AsyncStorage.setItem(
+              "merchantApproved",
+              profileResponse.data.merchantApproved === true ? "true" : "false",
+            );
           } else {
             console.warn('Failed to fetch profile:', profileResponse.message);
           }
@@ -79,6 +86,7 @@ const Layout = () => {
           // Get user role
           const role = await AsyncStorage.getItem("role");
           setUserRole(role?.toLowerCase() || null);
+          setMerchantApproved((await AsyncStorage.getItem("merchantApproved")) === "true");
         }
       } catch (error) {
         console.error('Error checking auth or fetching profile:', error);
@@ -120,7 +128,7 @@ const Layout = () => {
     return null;
   }
 
-  const isMerchant = isMerchantAccount(userRole, pm);
+  const isMerchant = isMerchantAccount(userRole, merchantApproved);
 
   // ONE row treatment for every drawer row — auto items (Drawer.Screen) and the
   // merchant DrawerItems below both use these, so the two sections can't drift.

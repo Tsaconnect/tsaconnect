@@ -12,7 +12,6 @@ import { RefreshControl, ScrollView, View } from 'react-native';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '@/theme';
-import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
 import { isMerchantAccount } from '@/utils/isMerchantAccount';
 import {
   Badge,
@@ -37,14 +36,14 @@ export default function OrderingRequestsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Same merchant gate as the drawer's MERCHANT section: role stored at login.
-  const pm = useIsPaymentMerchant();
+  // Same merchant gate as the drawer's MERCHANT section: role and the server's
+  // merchantApproved flag, both stored when the profile loads.
   useEffect(() => {
-    AsyncStorage.getItem('role').then(
-      (role) => setIsMerchant(isMerchantAccount(role, pm)),
+    Promise.all([AsyncStorage.getItem('role'), AsyncStorage.getItem('merchantApproved')]).then(
+      ([role, approved]) => setIsMerchant(isMerchantAccount(role, approved === 'true')),
       () => setIsMerchant(false)
     );
-  }, [pm.isPm, pm.kind]);
+  }, []);
 
   const load = useCallback(async () => {
     const res = await getOrders({ role: tab, page: 1, limit: 50 });
