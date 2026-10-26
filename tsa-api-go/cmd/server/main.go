@@ -740,7 +740,16 @@ func main() {
 	// Fee wallet — the admin-assigned destination for system fees. The per-chain
 	// escrow registry is passed so the panel can compare the assignment against
 	// what every deployed escrow actually pays, contract by contract.
-	fwlh := handlers.NewFeeWalletHandler(config.DB, cfg.SystemWalletAddress, p2pEscrowRegistry)
+	// Product and service contracts pay fees too, so they are read alongside the
+	// P2P escrows; a nil client leaves them out rather than reporting a wrong answer.
+	feeSinks := services.CombinedFeeSinks{p2pEscrowRegistry}
+	if sonicClient != nil {
+		feeSinks = append(feeSinks, services.NewFeeSinks(
+			services.FeeSinkContract{Label: "Product escrow", ChainKey: "sonic", ChainID: sonicClient.ChainID().Int64(), Address: cfg.ProductEscrowAddress, Caller: sonicClient.Client},
+			services.FeeSinkContract{Label: "Service contact", ChainKey: "sonic", ChainID: sonicClient.ChainID().Int64(), Address: cfg.ServiceContractAddress, Caller: sonicClient.Client},
+		))
+	}
+	fwlh := handlers.NewFeeWalletHandler(config.DB, cfg.SystemWalletAddress, feeSinks)
 	// Reward programme enrolment forms — reuses the existing eligibility and
 	// referral-graph services rather than restating their rules.
 	rewardClaimService := services.NewRewardClaimService(config.DB, rewardEligibilityService, referralGraphService)

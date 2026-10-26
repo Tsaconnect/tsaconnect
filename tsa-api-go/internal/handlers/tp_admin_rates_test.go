@@ -28,3 +28,14 @@ func TestEffectiveTPRatePct(t *testing.T) {
 		}
 	}
 }
+
+func TestFeeRailFor(t *testing.T) {
+	for src, want := range map[string]string{
+		"checkout": feeRailEscrow, "service_contact": feeRailEscrow, "p2p_release": feeRailEscrow,
+		"swap": feeRailOffchain, "send": feeRailOffchain, "it_intent": feeRailOffchain, "allswap": feeRailOffchain,
+	} {
+		if got := feeRailFor(src); got != want {
+			t.Errorf("feeRailFor(%q) = %q, want %q", src, got, want)
+		}
+	}
+}

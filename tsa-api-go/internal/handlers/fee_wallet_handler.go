@@ -106,6 +106,7 @@ func (h *FeeWalletHandler) onChainChecks(assigned string) []gin.H {
 	out := make([]gin.H, 0, len(sinks))
 	for _, s := range sinks {
 		row := gin.H{
+			"label":    s.Label,
 			"chainId":  s.ChainID,
 			"chainKey": s.ChainKey,
 			"contract": s.Contract,
@@ -116,6 +117,7 @@ func (h *FeeWalletHandler) onChainChecks(assigned string) []gin.H {
 		} else {
 			row["verified"] = true
 			row["systemWallet"] = s.SystemWallet
+			row["source"] = s.Source
 			// The assignment is only real for this contract once it agrees.
 			row["matches"] = strings.EqualFold(strings.TrimSpace(s.SystemWallet), strings.TrimSpace(assigned))
 		}

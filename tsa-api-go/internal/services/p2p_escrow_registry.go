@@ -240,12 +240,17 @@ type systemWalletReader interface {
 // FeeSinkStatus is one escrow's answer to "where do your fees go?".
 // Reason is set when the read could not be made; SystemWallet is then empty.
 type FeeSinkStatus struct {
+	// Label names the contract's role ("P2P escrow", "Product escrow", ...).
+	Label    string `json:"label"`
 	ChainID  int64  `json:"chainId"`
 	ChainKey string `json:"chainKey"`
 	Contract string `json:"contract"`
-	// SystemWallet is the address this contract pays trade fees to.
+	// SystemWallet is the address this contract pays fees to.
 	SystemWallet string `json:"systemWallet,omitempty"`
-	Reason       string `json:"reason,omitempty"`
+	// Source is where SystemWallet was read from: "systemWallet" (the contract's
+	// own fee wallet) or "owner" (a contract with no fee wallet pays its owner).
+	Source string `json:"source,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // SystemWallets reads systemWallet() from every enabled P2P escrow, so the
@@ -260,7 +265,7 @@ func (r *P2PEscrowRegistry) SystemWallets() []FeeSinkStatus {
 	}
 	out := make([]FeeSinkStatus, 0, len(r.byChain))
 	for id, e := range r.byChain {
-		row := FeeSinkStatus{ChainID: id, ChainKey: e.chainKey, Contract: e.service.ContractAddress()}
+		row := FeeSinkStatus{Label: "P2P escrow", ChainID: id, ChainKey: e.chainKey, Contract: e.service.ContractAddress()}
 		reader, ok := e.service.(systemWalletReader)
 		if !ok {
 			row.Reason = "escrow adapter cannot read systemWallet"
@@ -275,6 +280,7 @@ func (r *P2PEscrowRegistry) SystemWallets() []FeeSinkStatus {
 			row.Reason = "contract returned an empty systemWallet"
 		default:
 			row.SystemWallet = addr
+			row.Source = FeeSinkSourceSystemWallet
 		}
 		out = append(out, row)
 	}

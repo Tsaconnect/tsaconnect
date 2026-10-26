@@ -219,6 +219,27 @@ func (h *TPAdminHandler) ListFeeDistributions(c *gin.Context) {
 	})
 }
 
+// Where a settled fee's money lands, by the source that produced it.
+const (
+	feeRailEscrow   = "escrow"    // paid on-chain by an escrow contract
+	feeRailOffchain = "off-chain" // recorded in the ledger; payout address not read on-chain
+)
+
+// feeRailFor classifies a fee source by who pays it out, not by whether a
+// read succeeded: the fee-wallet card carries the per-contract verdict (and any
+// failed read), so this column never claims a destination was verified.
+// Everything that is not escrow-paid is reported as off-chain rather than
+// implying a destination we have not checked. Keep it in step with the
+// contracts wired into the card (cmd/server/main.go); P2P moves to BSC.
+func feeRailFor(sourceType string) string {
+	switch sourceType {
+	case "checkout", "service_contact", "p2p_release":
+		return feeRailEscrow
+	default:
+		return feeRailOffchain
+	}
+}
+
 // GetFeeSummary — GET /api/admin/tp/fee-summary?from=&to=
 //
 // What reached the system wallet, and from where. Every fee row already carries
@@ -251,6 +272,9 @@ func (h *TPAdminHandler) GetFeeSummary(c *gin.Context) {
 		// Scanned as text: MAX() comes back untyped on some drivers, and the
 		// console parses it. Empty only for a section with no rows.
 		LastAt string `json:"lastAt"`
+		// Rail says where the fee money physically lands: an escrow contract
+		// (whose payout address the fee-wallet card reads) or nowhere we verify.
+		Rail string `json:"rail"`
 	}
 	var rows []summaryRow
 	if err := q.
@@ -271,7 +295,9 @@ func (h *TPAdminHandler) GetFeeSummary(c *gin.Context) {
 
 	var totalFee, totalSystem, totalTP, totalCashback float64
 	var totalCount int64
-	for _, r := range rows {
+	for i := range rows {
+		r := &rows[i]
+		r.Rail = feeRailFor(r.SourceType)
 		totalFee += r.FeeUSD
 		totalSystem += r.SystemUSD
 		totalTP += r.TPPoolUSD
