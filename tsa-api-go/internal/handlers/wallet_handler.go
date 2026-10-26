@@ -140,18 +140,16 @@ func markPendingSwapFeeSettled(txHash string) {
 }
 
 // shouldAccrueSubmitFee reports whether a submitted transaction settles its own
-// fee here. Swaps and sends normally do. A fee-deferred one never does: its fee
-// is accrued against a server-verified USD value by POST /swap/lifi/settle, and
+// fee here. Only a swap does, and a fee-deferred one never does: its fee is
+// accrued against a server-verified USD value by POST /swap/lifi/settle, and
 // charging here as well would bill the user twice and double-count TP.
+//
+// A send charges no platform fee (the app never supplies one and nothing is
+// moved to a fee wallet), so there is nothing to settle. It used to record a
+// nominal $0.01 "withdrawal" fee that was never collected, which showed up as
+// revenue in the admin ledger.
 func shouldAccrueSubmitFee(req submitTxRequest) bool {
-	// Only a swap may defer: its amount is a token quantity that this path
-	// cannot value. A send's fee is a flat nominal charge that is always
-	// computable here, so honouring the flag there would just be a way for a
-	// client to opt out of paying.
-	if req.FeeDeferred && req.TxType == models.TxTypeSwap {
-		return false
-	}
-	return req.TxType == models.TxTypeSwap || req.TxType == models.TxTypeSend
+	return req.TxType == models.TxTypeSwap && !req.FeeDeferred
 }
 
 // isValidEthAddress checks if the given string is a valid Ethereum address.
@@ -867,8 +865,8 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 		recordPendingSwapFee(user.ID, txHash, settleFeature(req.FeeFeature), req.TokenSymbol, req.Amount, req.ChainID)
 	}
 
-	// Distribute TP for swap and send transaction types.
-	// Escrow TP is handled separately by the checkout handler on order resolution.
+	// Distribute TP for swaps. Escrow TP is handled separately by the checkout
+	// handler on order resolution.
 	if shouldAccrueSubmitFee(req) {
 		systemFeeUSD := req.FeeUSD
 		if systemFeeUSD <= 0 {
@@ -876,26 +874,15 @@ func (h *Handlers) SubmitTransaction(c *gin.Context) {
 			// when the amount is denominated in something near $1 — see
 			// FeeDeferred on submitTxRequest.
 			amountFloat, _ := strconv.ParseFloat(req.Amount, 64)
-			switch req.TxType {
-			case models.TxTypeSwap:
-				// System earns ~1% of swap amount (remainder of 2% platform fee after cashback+splits)
-				systemFeeUSD = amountFloat * 0.01
-			case models.TxTypeSend:
-				// Nominal fee proxy for P2P sends (gas cost equivalent)
-				systemFeeUSD = 0.01
-			}
+			// System earns ~1% of swap amount (remainder of 2% platform fee after cashback+splits)
+			systemFeeUSD = amountFloat * 0.01
 		}
 		if systemFeeUSD > 0 {
 			// Fee settlement (see settleFeeEarnings): idempotent on
-			// req.TxType/walletTx.ID. Feature maps the wallet tx type to a fee
-			// feature: a raw send is a withdrawal (70/30, earns TP); a swap is the
-			// internal spot exchange (FeatureSpot, 70/30).
-			feeFeature := models.FeatureWithdrawal
-			if req.TxType == models.TxTypeSwap {
-				feeFeature = models.FeatureSpot
-			}
+			// req.TxType/walletTx.ID. A swap is the internal spot exchange
+			// (FeatureSpot, 70/30).
 			if err := settleFeeEarnings(h.FeeService, services.FeeEvent{
-				Feature:    feeFeature,
+				Feature:    models.FeatureSpot,
 				Token:      tokenUpper,
 				FeeUSD:     systemFeeUSD,
 				UserID:     user.ID,

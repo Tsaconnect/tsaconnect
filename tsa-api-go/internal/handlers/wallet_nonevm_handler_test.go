@@ -301,12 +301,12 @@ func TestShouldAccrueSubmitFee(t *testing.T) {
 		want bool
 	}{
 		{"swap accrues", submitTxRequest{TxType: models.TxTypeSwap}, true},
-		{"send accrues", submitTxRequest{TxType: models.TxTypeSend}, true},
+		// A send charges no platform fee, so there is nothing to settle (it used to
+		// record a phantom $0.01 that was never collected).
+		{"send does not", submitTxRequest{TxType: models.TxTypeSend}, false},
+		{"send with a claimed fee does not", submitTxRequest{TxType: models.TxTypeSend, FeeUSD: 5}, false},
 		{"deferred swap does not", submitTxRequest{TxType: models.TxTypeSwap, FeeDeferred: true}, false},
-		// Only a swap may defer. A send's fee is a flat nominal charge this path
-		// can always compute, so honouring the flag there would just be a way to
-		// opt out of paying it.
-		{"deferred send still accrues", submitTxRequest{TxType: models.TxTypeSend, FeeDeferred: true}, true},
+		{"deferred send does not", submitTxRequest{TxType: models.TxTypeSend, FeeDeferred: true}, false},
 		{"approve never did", submitTxRequest{TxType: "approve"}, false},
 		// A deferred tx must not slip through on a client-supplied fee either —
 		// the whole point is that the server figures the number out itself.
