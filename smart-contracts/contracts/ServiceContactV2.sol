@@ -129,9 +129,9 @@ contract ServiceContactV2 is
 
             // Distribute
             if (requesterUpline == address(0)) {
-                erc20.safeTransfer(owner(), systemAmount + uplineAmount);
+                erc20.safeTransfer(_feeRecipient(), systemAmount + uplineAmount);
             } else {
-                erc20.safeTransfer(owner(), systemAmount);
+                erc20.safeTransfer(_feeRecipient(), systemAmount);
                 erc20.safeTransfer(requesterUpline, uplineAmount);
             }
             erc20.safeTransfer(serviceProvider, providerAmount);
@@ -139,7 +139,7 @@ contract ServiceContactV2 is
         } else {
             // D5 cutover: 100% of the fee to system; off-chain v2 engine does the
             // provider(25%)/caller(12.5%)/upline(12.5%) split.
-            erc20.safeTransfer(owner(), fee);
+            erc20.safeTransfer(_feeRecipient(), fee);
         }
 
         emit ContactFeePaid(msg.sender, serviceProvider, token, fee, requesterUpline);
@@ -184,6 +184,22 @@ contract ServiceContactV2 is
         emit TokenSymbolUpdated(token, sym);
     }
 
+    event SystemWalletUpdated(address indexed oldWallet, address indexed newWallet);
+
+    /// @notice Point platform fees at the system fee wallet. Zero is rejected: clear it by setting `owner()` explicitly.
+    function setSystemWallet(address wallet) external onlyOwner {
+        require(wallet != address(0), "Zero address");
+        address old = systemWallet;
+        systemWallet = wallet;
+        emit SystemWalletUpdated(old, wallet);
+    }
+
+    /// @dev Fee destination: the system wallet once set, else the owner as before.
+    function _feeRecipient() internal view returns (address) {
+        address sw = systemWallet;
+        return sw == address(0) ? owner() : sw;
+    }
+
     function pause() external onlyOwner {
         _pause();
     }
@@ -202,5 +218,8 @@ contract ServiceContactV2 is
     /// @dev Reserved storage to allow new state variables in future upgrades
     ///      without shifting existing slots. V2 added feeManager+legacySplitEnabled (PACK into one
     ///      slot) and tokenSymbol (one slot) → 2 new slots → 48 - 2 = 46. (OZ plugin authoritative.)
-    uint256[46] private __gap;
+    /// @notice Where platform fees are paid. address(0) = fall back to `owner()` (pre-upgrade behaviour).
+    address public systemWallet;
+
+    uint256[45] private __gap;
 }

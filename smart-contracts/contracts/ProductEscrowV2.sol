@@ -225,6 +225,22 @@ contract ProductEscrowV2 is
         emit TokenSymbolUpdated(token, sym);
     }
 
+    event SystemWalletUpdated(address indexed oldWallet, address indexed newWallet);
+
+    /// @notice Point platform fees at the system fee wallet. Zero is rejected: clear it by setting `owner()` explicitly.
+    function setSystemWallet(address wallet) external onlyOwner {
+        require(wallet != address(0), "Zero address");
+        address old = systemWallet;
+        systemWallet = wallet;
+        emit SystemWalletUpdated(old, wallet);
+    }
+
+    /// @dev Fee destination: the system wallet once set, else the owner as before.
+    function _feeRecipient() internal view returns (address) {
+        address sw = systemWallet;
+        return sw == address(0) ? owner() : sw;
+    }
+
     function pause() external onlyOwner {
         _pause();
     }
@@ -265,7 +281,7 @@ contract ProductEscrowV2 is
 
         // Gas fee goes directly to system wallet
         if (gasFee > 0) {
-            IERC20(token).safeTransfer(owner(), gasFee);
+            IERC20(token).safeTransfer(_feeRecipient(), gasFee);
         }
 
         orders[orderId] = Order({
@@ -376,7 +392,7 @@ contract ProductEscrowV2 is
             uint256 sellerShare = totalAmount - buyerShare - systemShare; // remainder to seller
 
             IERC20(order.token).safeTransfer(order.buyer, buyerShare);
-            IERC20(order.token).safeTransfer(owner(), systemShare);
+            IERC20(order.token).safeTransfer(_feeRecipient(), systemShare);
             IERC20(order.token).safeTransfer(order.seller, sellerShare);
         }
 
@@ -473,28 +489,28 @@ contract ProductEscrowV2 is
                     try token.transfer(order.buyerUpline, uplineAmount) returns (bool success) {
                         if (!success) {
                             // Upline transfer failed, send to system wallet
-                            token.safeTransfer(owner(), systemAmount + uplineAmount);
+                            token.safeTransfer(_feeRecipient(), systemAmount + uplineAmount);
                             emit OrderReleased(orderId, order.seller, sellerAmount, systemAmount + uplineAmount, buyerCashback, 0);
                             token.safeTransfer(order.seller, sellerAmount);
                             return;
                         }
                     } catch {
                         // Upline is a reverting contract, send their share to system wallet
-                        token.safeTransfer(owner(), systemAmount + uplineAmount);
+                        token.safeTransfer(_feeRecipient(), systemAmount + uplineAmount);
                         emit OrderReleased(orderId, order.seller, sellerAmount, systemAmount + uplineAmount, buyerCashback, 0);
                         token.safeTransfer(order.seller, sellerAmount);
                         return;
                     }
-                    token.safeTransfer(owner(), systemAmount);
+                    token.safeTransfer(_feeRecipient(), systemAmount);
                 } else {
                     // No upline — system gets system + upline share
-                    token.safeTransfer(owner(), systemAmount + uplineAmount);
+                    token.safeTransfer(_feeRecipient(), systemAmount + uplineAmount);
                 }
 
                 emit OrderReleased(orderId, order.seller, sellerAmount, systemAmount, buyerCashback, uplineAmount);
             } else {
                 // D5 cutover: 100% of the platform fee to system; off-chain v2 engine splits.
-                token.safeTransfer(owner(), order.platformFee);
+                token.safeTransfer(_feeRecipient(), order.platformFee);
                 emit OrderReleased(orderId, order.seller, sellerAmount, order.platformFee, 0, 0);
             }
         } else {
@@ -508,5 +524,8 @@ contract ProductEscrowV2 is
     ///      variable, place it above this gap and shrink the gap by the same
     ///      number of slots. V2 added feeManager+legacySplitEnabled (PACK into one slot) and
     ///      tokenSymbol (one slot) → 2 new slots → 47 - 2 = 45. (OZ plugin authoritative.)
-    uint256[45] private __gap;
+    /// @notice Where platform fees are paid. address(0) = fall back to `owner()` (pre-upgrade behaviour).
+    address public systemWallet;
+
+    uint256[44] private __gap;
 }
