@@ -39,6 +39,7 @@ import {
   WalletMeta,
 } from '../../services/wallet';
 import { registerWalletAddress } from '../../services/walletApi';
+import { SEED_WORD_COUNT } from '@/utils/walletSetup';
 import { useNetwork } from '../../hooks/useNetwork';
 import { invalidateWalletHoldings } from '@/hooks/useWalletHoldings';
 import { useTheme } from '@/theme';
@@ -56,7 +57,7 @@ import {
   Text,
 } from '@/components/ui';
 
-const SEED_LENGTH = 12;
+const SEED_LENGTH = SEED_WORD_COUNT;
 const enWordlist = ethers.wordlists.en;
 const isBip39Word = (w: string) => {
   if (!w) return false;
