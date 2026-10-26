@@ -12,6 +12,8 @@ import { RefreshControl, ScrollView, View } from 'react-native';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from '@/theme';
+import { useIsPaymentMerchant } from '@/hooks/useIsPaymentMerchant';
+import { isMerchantAccount } from '@/utils/isMerchantAccount';
 import {
   Badge,
   Button,
@@ -36,12 +38,13 @@ export default function OrderingRequestsScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   // Same merchant gate as the drawer's MERCHANT section: role stored at login.
+  const pm = useIsPaymentMerchant();
   useEffect(() => {
     AsyncStorage.getItem('role').then(
-      (role) => setIsMerchant((role || '').toLowerCase() === 'merchant'),
+      (role) => setIsMerchant(isMerchantAccount(role, pm)),
       () => setIsMerchant(false)
     );
-  }, []);
+  }, [pm.isPm, pm.kind]);
 
   const load = useCallback(async () => {
     const res = await getOrders({ role: tab, page: 1, limit: 50 });

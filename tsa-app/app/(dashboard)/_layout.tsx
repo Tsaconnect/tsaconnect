@@ -15,6 +15,7 @@
 // variants so the set reads as one family. Auth check, profile fetch, the
 // 5-minute refresh interval, handleAvatarPress, the unauthenticated guard,
 // and the loading/auth render gate are unchanged.
+import { isMerchantAccount } from "@/utils/isMerchantAccount";
 import { Pressable, View } from "react-native";
 import React, { useEffect, useState } from "react";
 import { Drawer } from "expo-router/drawer";
@@ -119,7 +120,7 @@ const Layout = () => {
     return null;
   }
 
-  const isMerchant = userRole === "merchant";
+  const isMerchant = isMerchantAccount(userRole, pm);
 
   // ONE row treatment for every drawer row — auto items (Drawer.Screen) and the
   // merchant DrawerItems below both use these, so the two sections can't drift.

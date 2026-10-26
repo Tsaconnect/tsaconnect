@@ -670,7 +670,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 			// Only the retired liquidity-provider application does not: LPs are
 			// not console merchants.
 			if req.BusinessType != models.BusinessTypeLiquidityProvider {
-				if err := tx.Model(&models.User{}).Where("id = ?", req.UserID).
+				if err := tx.Model(&models.User{}).Where("id = ? AND role = ?", req.UserID, models.RoleUser).
 					Update("role", models.RoleMerchant).Error; err != nil {
 					return err
 				}
@@ -716,7 +716,7 @@ func (h *MerchantRequestHandler) ApproveMerchantRequest(c *gin.Context) {
 	// A TSA Pay request approved before the one-role change never got the role,
 	// and its retry skips the transaction above. The grant is idempotent.
 	if isPayRetry {
-		if err := h.DB.Model(&models.User{}).Where("id = ?", req.UserID).
+		if err := h.DB.Model(&models.User{}).Where("id = ? AND role = ?", req.UserID, models.RoleUser).
 			Update("role", models.RoleMerchant).Error; err != nil {
 			log.Printf("ApproveMerchantRequest: merchant role grant on pay retry failed for %s: %v", req.UserID, err)
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to grant the merchant role — retry the approval to resume")
