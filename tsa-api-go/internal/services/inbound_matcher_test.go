@@ -1187,3 +1187,45 @@ func TestInboundMatcher_HoldLogLineCarriesNoPII(t *testing.T) {
 		t.Errorf("hold log line does not carry the reason code:\n%s", out)
 	}
 }
+
+// A claim past its window is offered by LateClaimSource: the matcher never
+// binds it on its own, but a super admin's manual assign may.
+type fakeLateMatcherSource struct {
+	fakeClaimSource
+	late []InboundClaim
+}
+
+func (f *fakeLateMatcherSource) LateClaims(_ context.Context, _ string) ([]InboundClaim, error) {
+	return f.late, nil
+}
+
+func TestInboundMatcher_BindManuallyAcceptsALateClaimButTheMatcherNeverDoes(t *testing.T) {
+	db := setupMatcherDB(t)
+	payer := seedMatcherUser(t, db, "Emmanuel Ademu")
+	credit := seedCredit(t, db, "sess-late", 200_000, "EMMANUEL ADEMU")
+
+	late := claimFor(payer, 200_000)
+	late.PastWindow = true
+	src := &fakeLateMatcherSource{fakeClaimSource: fakeClaimSource{typ: InboundClaimTypeITMCGP}, late: []InboundClaim{late}}
+	m := NewInboundMatcher(db)
+	m.Register(InboundClaimTypeITMCGP, src)
+	ctx := context.Background()
+
+	if _, err := m.MatchPending(ctx, 10); err != nil {
+		t.Fatalf("MatchPending: %v", err)
+	}
+	if len(src.accepted) != 0 {
+		t.Fatalf("the matcher bound a claim past its window: %+v", src.accepted)
+	}
+
+	admin := uuid.New()
+	if err := m.BindManually(ctx, credit.ID, InboundClaimTypeITMCGP, late.ID, admin); err != nil {
+		t.Fatalf("BindManually on a late claim: %v", err)
+	}
+	if len(src.accepted) != 1 || src.accepted[0].claimID != late.ID {
+		t.Fatalf("manual bind did not run Accept: %+v", src.accepted)
+	}
+	if got := reloadCredit(t, db, credit.ID); got.Status != models.InboundCreditMatched {
+		t.Fatalf("status = %q, want matched", got.Status)
+	}
+}

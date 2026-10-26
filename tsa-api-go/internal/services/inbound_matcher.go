@@ -600,6 +600,22 @@ func (m *InboundMatcher) BindManually(ctx context.Context, creditID uuid.UUID, c
 		}
 	}
 	if target == nil {
+		// A claim past its window is still assignable by hand: this is the
+		// admin path, and the console lists exactly these (LateClaimSource).
+		if late, ok := src.(LateClaimSource); ok {
+			lateClaims, err := late.LateClaims(ctx, credit.Currency)
+			if err != nil {
+				return fmt.Errorf("inbound bind: late claims for %s: %w", claimType, err)
+			}
+			for i := range lateClaims {
+				if lateClaims[i].ID == claimID {
+					target = &lateClaims[i]
+					break
+				}
+			}
+		}
+	}
+	if target == nil {
 		return fmt.Errorf("%w: inbound bind: %s claim %s is not open — it may already be settled or expired", ErrInboundBindRefused, claimType, claimID)
 	}
 	target.Type = claimType
