@@ -644,3 +644,37 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// A claim past its window is offered to the admin view (marked) but never to
+// the matcher's OpenClaims.
+type fakeLateClaimSource struct {
+	fakeAdminClaimSource
+	late []InboundClaim
+}
+
+func (f *fakeLateClaimSource) LateClaims(context.Context, string) ([]InboundClaim, error) {
+	return f.late, nil
+}
+
+func TestInboundAdminCandidatesListsLateClaimsMarkedPastWindow(t *testing.T) {
+	db := setupInboundAdminDB(t)
+	credit := insertHeldCredit(t, db, "SOMEONE PAYING FOR THEM", 50000)
+	buyer := insertAdminTestUser(t, db, "The Buyer")
+	lateClaim := uuid.New()
+
+	svc := NewInboundAdminService(db)
+	svc.AddClaimSource(InboundClaimTypeITStable, &fakeLateClaimSource{
+		late: []InboundClaim{{Type: InboundClaimTypeITStable, ID: lateClaim, UserID: buyer, AmountKobo: 50000, PastWindow: true}},
+	})
+
+	view, err := svc.Candidates(context.Background(), credit.ID)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(view.Candidates) != 1 || view.Candidates[0].ClaimID != lateClaim {
+		t.Fatalf("candidates = %+v, want only the late claim", view.Candidates)
+	}
+	if !view.Candidates[0].PastWindow || !view.Candidates[0].AmountMatches {
+		t.Errorf("late candidate = %+v, want pastWindow and amountMatches", view.Candidates[0])
+	}
+}

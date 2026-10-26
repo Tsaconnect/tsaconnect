@@ -50,6 +50,19 @@ type itStableClaimRow struct {
 // path itself would refuse — the matcher would bind it, Accept would decline it,
 // and the credit would look attributed while nothing happened.
 func (s *ITStableClaimSource) OpenClaims(ctx context.Context, currency string) ([]InboundClaim, error) {
+	return s.claims(ctx, currency, false)
+}
+
+// LateClaims returns the purchases still pending_payment past the claim
+// window: the ones whose money arrived after the matcher stopped offering
+// them (a statement that lagged more than a day). Never read by the matcher —
+// only the admin candidate view, so a super admin can still assign the credit
+// by hand.
+func (s *ITStableClaimSource) LateClaims(ctx context.Context, currency string) ([]InboundClaim, error) {
+	return s.claims(ctx, currency, true)
+}
+
+func (s *ITStableClaimSource) claims(ctx context.Context, currency string, late bool) ([]InboundClaim, error) {
 	cur := normaliseCurrency(currency)
 	if cur == "" {
 		return nil, errors.New("it stable claims: empty currency")
@@ -58,11 +71,15 @@ func (s *ITStableClaimSource) OpenClaims(ctx context.Context, currency string) (
 		return nil, errors.New("it stable claims: service not wired")
 	}
 
+	age := "created_at >= ?"
+	if late {
+		age = "created_at < ?"
+	}
 	var rows []itStableClaimRow
 	if err := s.it.db.WithContext(ctx).
 		Table("it_intents").
 		Select("id, user_id, ngn_kobo, currency, created_at").
-		Where("direction = ? AND status = ? AND asset IN ? AND currency = ? AND created_at >= ?",
+		Where("direction = ? AND status = ? AND asset IN ? AND currency = ? AND "+age,
 			models.ITDirectionBuy, models.ITStatusPendingPayment,
 			[]string{models.ITAssetUSDC, models.ITAssetUSDT}, cur,
 			time.Now().Add(-stableBuyClaimWindow)).
@@ -91,8 +108,9 @@ func (s *ITStableClaimSource) OpenClaims(ctx context.Context, currency string) (
 			// The intent's OWN currency, not the argument echoed back: echoing
 			// it would make the matcher's assertion tautological and re-hide
 			// the mismatch it exists to catch.
-			Currency: normaliseCurrency(r.Currency),
-			OpenedAt: r.CreatedAt,
+			Currency:   normaliseCurrency(r.Currency),
+			OpenedAt:   r.CreatedAt,
+			PastWindow: late,
 		})
 	}
 	return claims, nil

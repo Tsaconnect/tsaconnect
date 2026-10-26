@@ -232,6 +232,9 @@ type InboundCandidate struct {
 	User       *InboundCandidateUser `json:"user,omitempty"`
 	AmountKobo int64                 `json:"amountKobo"`
 	OpenedAt   time.Time             `json:"openedAt"`
+	// PastWindow: still unpaid in our books but older than the claim window, so
+	// the matcher would never pick it; only a super admin's assign can.
+	PastWindow bool `json:"pastWindow,omitempty"`
 
 	AmountMatches bool `json:"amountMatches"`
 	// AmountDeltaKobo is claim minus credit at naira granularity: negative
@@ -307,6 +310,17 @@ func (s *InboundAdminService) Candidates(ctx context.Context, creditID uuid.UUID
 			continue
 		}
 		claims = append(claims, got...)
+		if late, ok := src.src.(LateClaimSource); ok {
+			lateGot, err := late.LateClaims(ctx, credit.Currency)
+			if err != nil {
+				log.Printf("[inbound-admin] late claims unavailable for credit=%s source=%s: %v",
+					creditID, src.claimType, err)
+				view.SourceErrors = append(view.SourceErrors,
+					fmt.Sprintf("%s late claims unavailable", src.claimType))
+				continue
+			}
+			claims = append(claims, lateGot...)
+		}
 	}
 	if len(claims) == 0 {
 		return view, nil
@@ -375,6 +389,7 @@ func (s *InboundAdminService) Candidates(ctx context.Context, creditID uuid.UUID
 			UserID:           sc.claim.UserID,
 			AmountKobo:       sc.claim.AmountKobo,
 			OpenedAt:         sc.claim.OpenedAt,
+			PastWindow:       sc.claim.PastWindow,
 			AmountMatches:    sc.amountOK,
 			AmountDeltaKobo:  sc.claim.AmountKobo - view.MatchedNairaKobo,
 			NameStrength:     string(sc.strength),

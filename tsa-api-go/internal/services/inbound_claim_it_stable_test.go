@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -532,5 +533,44 @@ func TestITStableAccept_RefusesACreditInAnotherCurrency(t *testing.T) {
 	}
 	if got.PaymentRef == "100004250250000000000000000099" {
 		t.Fatal("the foreign credit's session id was attributed to an NGN purchase")
+	}
+}
+
+func TestITStableLateClaims_OffersOnlyPurchasesPastTheWindow(t *testing.T) {
+	s, userID := newCentralStableBuyService(t)
+	intent, _, err := s.CreateStableBuyIntent(context.Background(), userID, testBuyQuote(), "POLYGON", testBuyEVM)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	src := NewITStableClaimSource(s)
+
+	late, err := src.LateClaims(context.Background(), "NGN")
+	if err != nil || len(late) != 0 {
+		t.Fatalf("fresh purchase: late = %d, err = %v; want none", len(late), err)
+	}
+
+	if err := s.db.Model(&models.ITIntent{}).Where("id = ?", intent.ID).
+		Update("created_at", time.Now().Add(-stableBuyClaimWindow-time.Hour)).Error; err != nil {
+		t.Fatalf("age: %v", err)
+	}
+	open, _ := src.OpenClaims(context.Background(), "NGN")
+	late, err = src.LateClaims(context.Background(), "NGN")
+	if err != nil {
+		t.Fatalf("LateClaims: %v", err)
+	}
+	if len(open) != 0 || len(late) != 1 || late[0].ID != intent.ID || !late[0].PastWindow {
+		t.Fatalf("open = %d, late = %+v; want the matcher blind to it and the admin view seeing it", len(open), late)
+	}
+
+	// A hand assign still funds it: Accept checks status, not age.
+	var row models.ITIntent
+	s.db.First(&row, "id = ?", intent.ID)
+	if err := src.Accept(context.Background(), intent.ID,
+		stableInboundCredit("100004250250000000000000000002", mustInt64(t, row.NgnKobo))); err != nil {
+		t.Fatalf("Accept on a late purchase: %v", err)
+	}
+	s.db.First(&row, "id = ?", intent.ID)
+	if row.Status != models.ITStatusPaymentReceived {
+		t.Fatalf("status = %q, want payment_received", row.Status)
 	}
 }

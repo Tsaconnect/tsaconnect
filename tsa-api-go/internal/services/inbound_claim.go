@@ -24,6 +24,10 @@ type InboundClaim struct {
 	Type string
 	ID   uuid.UUID
 
+	// PastWindow marks a claim from LateClaimSource. Only the admin candidate
+	// view sets it.
+	PastWindow bool
+
 	// UserID is whose name is expected on the transfer, which is NOT always who
 	// receives the value. On a P2P trade this is the BUYER (they send the naira)
 	// while the merchant is credited.
@@ -70,6 +74,13 @@ type ClaimSource interface {
 	// Returning a *ClaimNeedsReviewError holds the credit for an operator
 	// instead of retrying it; any other error is retried next tick.
 	Accept(ctx context.Context, claimID uuid.UUID, credit *models.InboundCredit) error
+}
+
+// LateClaimSource is an optional second face of a ClaimSource: claims the
+// matcher no longer offers because they outlived their window, but which a
+// super admin may still bind a late credit to. The matcher never calls it.
+type LateClaimSource interface {
+	LateClaims(ctx context.Context, currency string) ([]InboundClaim, error)
 }
 
 // ClaimNeedsReviewError is how a source says "this credit is correctly
