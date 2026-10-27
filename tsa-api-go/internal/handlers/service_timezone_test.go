@@ -201,11 +201,9 @@ func TestReserveBookingSlotHonoursServiceTimezone(t *testing.T) {
 		MaxCapacityPerSlot:  1,
 	}
 
-	// Far-future Monday so the past-slot guard never fires.
-	monday := time.Date(2030, 1, 7, 0, 0, 0, 0, time.UTC)
-	if monday.Weekday() != time.Monday {
-		t.Fatalf("test fixture is not a Monday: %s", monday.Weekday())
-	}
+	// The next Monday at least two days out: in the future, and well inside the
+	// booking lead time (MaxBookingLeadDays).
+	monday := nextWeekdayUTC(time.Now(), time.Monday, 2)
 
 	// 08:00 UTC == 09:00 WAT, the window's opening slot.
 	ok := monday.Add(8 * time.Hour)
@@ -233,5 +231,75 @@ func TestReserveBookingSlotHonoursServiceTimezone(t *testing.T) {
 	offGrid := monday.Add(8*time.Hour + 30*time.Minute)
 	if _, errMsg := ch.reserveBookingSlot(db, buyer.ID, svc, &profile, bookingSlotRequest{SlotStart: offGrid, PartySize: 1}); errMsg == "" {
 		t.Error("expected an off-grid slot to be rejected")
+	}
+}
+
+// nextWeekdayUTC is midnight UTC of the first given weekday at least minDays after now.
+func nextWeekdayUTC(now time.Time, day time.Weekday, minDays int) time.Time {
+	d := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, minDays)
+	for d.Weekday() != day {
+		d = d.AddDate(0, 0, 1)
+	}
+	return d
+}
+
+// Slot bookings are limited to MaxBookingLeadDays ahead (owner 2026-10-27): the order escrow gives
+// a seller at most 30 days to deliver, and a slot is delivered on the day.
+func TestReserveBookingSlotRefusesBeyondLeadTime(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := &CheckoutHandler{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 20.0, 3.0)
+	for dow := 0; dow < 7; dow++ {
+		writeAvailability(t, db, svc.ID, dow, "00:00", "23:00")
+	}
+	profile := models.ServiceProfile{Timezone: "UTC", SlotDurationMinutes: 60, MaxCapacityPerSlot: 5}
+
+	today := time.Now().UTC().Truncate(time.Hour)
+	inside := today.Add(time.Duration(MaxBookingLeadDays)*24*time.Hour - 2*time.Hour)
+	if _, errMsg := ch.reserveBookingSlot(db, buyer.ID, svc, &profile, bookingSlotRequest{SlotStart: inside, PartySize: 1}); errMsg != "" {
+		t.Fatalf("a slot inside the lead time must be accepted, got %q", errMsg)
+	}
+	beyond := today.Add(time.Duration(MaxBookingLeadDays)*24*time.Hour + 2*time.Hour)
+	_, errMsg := ch.reserveBookingSlot(db, buyer.ID, svc, &profile, bookingSlotRequest{SlotStart: beyond, PartySize: 1})
+	if errMsg != "Bookings can be made up to 28 days ahead" {
+		t.Fatalf("a slot beyond the lead time must be refused, got %q", errMsg)
+	}
+}
+
+// The slot list never offers a slot checkout would refuse.
+func TestGetServiceSlotsStopsAtLeadTime(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &Handlers{}
+
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 20.0, 3.0)
+	writeSlotProfile(t, db, svc.ID, "UTC", 60, 1)
+	for dow := 0; dow < 7; dow++ {
+		writeAvailability(t, db, svc.ID, dow, "09:00", "10:00")
+	}
+
+	from := time.Now().UTC().AddDate(0, 0, MaxBookingLeadDays-3)
+	to := time.Now().UTC().AddDate(0, 0, MaxBookingLeadDays+5)
+	w := getSlots(t, h, svc.ID, from.Format("2006-01-02"), to.Format("2006-01-02"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var got slotsPayload
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if len(got.Data.Slots) == 0 {
+		t.Fatal("expected some slots inside the lead time")
+	}
+	horizon := maxBookingSlotStart(time.Now())
+	for _, slot := range got.Data.Slots {
+		if slot.Start.After(horizon) {
+			t.Fatalf("slot %s is beyond the %d-day lead time", slot.Start.Format(time.RFC3339), MaxBookingLeadDays)
+		}
 	}
 }

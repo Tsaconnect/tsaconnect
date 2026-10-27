@@ -502,6 +502,9 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 	if !slotStart.After(time.Now().UTC()) {
 		return nil, fmt.Sprintf("%s is in the past", formatSlot(local))
 	}
+	if slotStart.After(maxBookingSlotStart(time.Now())) {
+		return nil, fmt.Sprintf("Bookings can be made up to %d days ahead", MaxBookingLeadDays)
+	}
 
 	within, windowStart := slotWithinAvailability(tx, product.ID, local, duration)
 	if !within {

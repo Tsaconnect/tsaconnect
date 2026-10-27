@@ -168,6 +168,7 @@ func (h *Handlers) GetServiceSlots(c *gin.Context) {
 	// UTC-bounded query. Extra rows are keyed by exact slot start and ignored.
 	booked := bookedBySlot(productID, from.AddDate(0, 0, -1), to.AddDate(0, 0, 2))
 
+	horizon := maxBookingSlotStart(time.Now())
 	slots := []openSlot{}
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
 		dow := int(d.Weekday())
@@ -189,6 +190,9 @@ func (h *Handlers) GetServiceSlots(c *gin.Context) {
 				// under-offers rather than double-books.)
 				if start.Hour()*60+start.Minute() != m {
 					continue
+				}
+				if start.After(horizon) {
+					continue // beyond the booking lead time; checkout would refuse it
 				}
 				end := start.Add(time.Duration(slotMin) * time.Minute)
 				b := booked[start.Unix()]
@@ -240,4 +244,15 @@ func bookedBySlot(productID uuid.UUID, from, to time.Time) map[int64]int {
 // formatSlot is a tiny helper for slot error messages.
 func formatSlot(t time.Time) string {
 	return t.Format("2006-01-02 15:04")
+}
+
+// MaxBookingLeadDays is how far ahead a slot booking may be made (owner 2026-10-27). The order
+// escrow gives a seller at most 30 days to deliver, and a slot is delivered on the day: 28 days
+// leaves room for the deadline of slot end + 2 days. Request-mode bookings (flights, hotels) are
+// not capped: they are delivered when the merchant issues the booking, not on the travel date.
+const MaxBookingLeadDays = 28
+
+// maxBookingSlotStart is the latest slot start that can still be booked.
+func maxBookingSlotStart(now time.Time) time.Time {
+	return now.UTC().Add(MaxBookingLeadDays * 24 * time.Hour)
 }
