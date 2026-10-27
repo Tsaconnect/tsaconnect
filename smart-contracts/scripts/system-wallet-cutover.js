@@ -4,7 +4,11 @@
 //   1. upgrade the proxy to the build that has systemWallet (skipped when it
 //      already answers systemWallet())
 //   2. setSystemWallet(FEE_WALLET)
-//   3. setLegacySplitEnabled(false) — the on-chain 25/25/50 split pays buyer and
+//   3. setLegacySplitEnabled(false)
+// The live proxies never ran their public initializeV2() (it sets the split back
+// to true and anyone may call it once). The upgrade runs it in the same tx, and a
+// proxy already upgraded without it gets it before the split is turned off, so
+// nobody can switch the split back on afterwards. — the on-chain 25/25/50 split pays buyer and
 //      upline USDC while the off-chain engine also credits them cashback, so
 //      users are paid twice; with it off the whole fee goes to the system wallet
 //      and the engine is the sole splitter (spec D5).
@@ -39,7 +43,16 @@ const ABI = [
   "function legacySplitEnabled() view returns (bool)",
   "function setLegacySplitEnabled(bool)",
   "function upgradeToAndCall(address,bytes)",
+  "function initializeV2()",
 ];
+
+// OpenZeppelin v5 Initializable slot; its low 8 bytes are the initialized version.
+const INITIALIZABLE_SLOT = "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00";
+
+async function initializedVersion(addr) {
+  const raw = await ethers.provider.getStorage(addr, INITIALIZABLE_SLOT);
+  return Number(BigInt(raw) & 0xffffffffffffffffn);
+}
 
 const same = (a, b) => a.toLowerCase() === b.toLowerCase();
 
@@ -70,16 +83,22 @@ async function upgradeAndFlip(name, factoryName, addr, signer) {
   if (!same(await c.owner(), signer.address)) {
     throw new Error(`${name}: signer ${signer.address} is not the owner (${await c.owner()})`);
   }
+  const initOpen = (await initializedVersion(addr)) < 2;
   if (!(await hasSystemWallet(c))) {
-    console.log(`  ${name}: upgrade to ${factoryName} (adds systemWallet)`);
+    console.log(`  ${name}: upgrade to ${factoryName} (adds systemWallet)${initOpen ? ", running initializeV2 in the same tx" : ""}`);
     if (execute) {
       const impl = await (await ethers.getContractFactory(factoryName)).deploy();
       await impl.waitForDeployment();
-      await (await c.upgradeToAndCall(await impl.getAddress(), "0x")).wait();
+      const data = initOpen ? c.interface.encodeFunctionData("initializeV2") : "0x";
+      await (await c.upgradeToAndCall(await impl.getAddress(), data)).wait();
       console.log(`    new implementation ${await impl.getAddress()}`);
     }
   } else {
     console.log(`  ${name}: already has systemWallet, no upgrade`);
+    if (initOpen) {
+      console.log(`  ${name}: initializeV2 never ran, running it so nobody else can`);
+      if (execute) await (await c.initializeV2()).wait();
+    }
   }
   // Before the upgrade runs (dry-run), systemWallet() cannot be read back.
   if (execute || (await hasSystemWallet(c))) await repoint(name, c, signer);
