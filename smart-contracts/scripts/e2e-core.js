@@ -15,6 +15,9 @@
 //     scales every amount: the buyer needs 7 units plus the flat order fee 4 times, the seller 6
 //     units of E2E_TOKEN (default USDT). At E2E_UNIT=0.1 on Sonic that is 1.1 and 0.6 USDT.
 //     Refunds and withdrawals return most of it, and every fee goes to the deployer for the run.
+//   - E2E_MOCK=1 needs no real stablecoin: the admin deploys a test token (public mint) priced
+//     exactly like E2E_TOKEN and mints the wallets their balances. Only gas is spent. Real-token
+//     behaviour is what the fork run proves.
 //
 // Not covered here, because they need hours or days to pass: payment and auto-release timeouts
 // (30 minutes), the delivery timeout (1+ days), the 7-day confirm window and the 14/60-day dispute
@@ -24,7 +27,7 @@ const hre = require("hardhat");
 const { ethers } = hre;
 const { main: deployCore } = require("../deploy/core");
 const { chains } = require("../deploy/chains");
-const { readLedger } = require("../deploy/lib");
+const { readLedger, writeLedger } = require("../deploy/lib");
 
 const P2P_FQN = "contracts/core/P2PTradeEscrow.sol:P2PTradeEscrow";
 const ERC20 = [
@@ -92,6 +95,36 @@ async function impersonate(addr) {
   return ethers.getSigner(addr);
 }
 
+/**
+ * E2E_MOCK=1: a test stablecoin (public mint) priced exactly like `realSymbol`: same decimals,
+ * rates and limits, written by the admin (dev set only). Recorded as CoreDevE2EToken and reused.
+ */
+async function mockStable(cfg, realSymbol, feeConfig, admin, withOrders) {
+  const real = cfg.tokens[realSymbol];
+  const recorded = readLedger(hre.network.name).CoreDevE2EToken?.address;
+  let mock;
+  if (recorded && hre.network.name !== "localhost") {
+    mock = await ethers.getContractAt("MockERC20", recorded);
+  } else {
+    const dec = await new ethers.Contract(real, ERC20, ethers.provider).decimals();
+    mock = await (await ethers.getContractFactory("MockERC20", admin)).deploy("TSA e2e test USD", "tUSD", dec);
+    await mock.waitForDeployment();
+    if (hre.network.name !== "localhost") writeLedger(hre.network.name, "CoreDevE2EToken", { address: await mock.getAddress() });
+    console.log(`  test token tUSD ${await mock.getAddress()} (${dec} decimals)`);
+  }
+  const M = await mock.getAddress();
+  const features = [...(withOrders ? ["order"] : []), "p2p_platform", "p2p_gas"].map((f) => ethers.encodeBytes32String(f));
+  const rates = await Promise.all(features.map((f) => feeConfig.rateFor(f, real)));
+  const configured = await feeConfig.rawRate(features[0], M);
+  if (!configured.active) {
+    await send(feeConfig.connect(admin).setRates(features, features.map(() => M), rates.map((r) => ({ bps: r.bps, flatFee: r.flatFee, active: true }))));
+    const l = await feeConfig.limitsFor(real);
+    await send(feeConfig.connect(admin).setLimits(M, { maxPerOrder: l.maxPerOrder, maxOwed: l.maxOwed }));
+    console.log(`  tUSD priced like ${realSymbol}: same rates and limits`);
+  }
+  return mock;
+}
+
 /** The contracts and the four actors, for a fork (fresh deploy) or a live network (dev set). */
 async function setup() {
   const fork = hre.network.name === "localhost";
@@ -124,8 +157,12 @@ async function setup() {
   const admin = fork ? await impersonate(adminAddr) : deployer;
   assert(admin.address === adminAddr, `the deployer ${deployer.address} is not the set's admin ${adminAddr}`);
 
-  const symbol = process.env.E2E_TOKEN || Object.keys(cfg.core.p2p)[0];
-  const token = new ethers.Contract(cfg.tokens[symbol], ERC20, ethers.provider);
+  const realSymbol = process.env.E2E_TOKEN || Object.keys(cfg.core.p2p)[0];
+  const mock = process.env.E2E_MOCK === "1";
+  const token = mock
+    ? await mockStable(cfg, realSymbol, feeConfig, admin, Boolean(addrs.order))
+    : new ethers.Contract(cfg.tokens[realSymbol], ERC20, ethers.provider);
+  const symbol = mock ? "tUSD" : realSymbol;
   const dec = await token.decimals();
   const u = (n) => ethers.parseUnits(String(n), dec);
   // Steps are written in units of E2E_UNIT tokens (n has at most one decimal); bigint math keeps
@@ -133,7 +170,9 @@ async function setup() {
   const unit = u(process.env.E2E_UNIT || "1");
   const amt = (n) => (u(n) * unit) / u(1);
 
-  if (fork) {
+  if (mock) {
+    for (const who of [buyer, seller]) await send(token.connect(admin).mint(who.address, amt(100)));
+  } else if (fork) {
     for (const who of [buyer, seller]) await fundOnFork(await token.getAddress(), who.address, amt(100));
   } else {
     // The buyer also pays the flat order fee (it does not scale) on each of the 4 orders.
@@ -142,6 +181,10 @@ async function setup() {
     for (const [name, w, need] of names) {
       const have = await token.balanceOf(w.address);
       assert(have >= need, `${name} ${w.address} holds ${ethers.formatUnits(have, dec)} ${symbol}, needs ${ethers.formatUnits(need, dec)}`);
+    }
+  }
+  if (!fork) {
+    for (const [name, w] of [["buyer", buyer], ["seller", seller]]) {
       assert((await ethers.provider.getBalance(w.address)) > 0n, `${name} ${w.address} has no gas`);
     }
   }
