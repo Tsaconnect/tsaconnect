@@ -87,14 +87,14 @@ async function main() {
   const { chainId } = await ethers.provider.getNetwork();
   const v = {
     seller: seller.address, token: await token.getAddress(), maxAmount: u(500), minPerTrade: 0n, maxPerTrade: 0n,
-    deadline: BigInt(Math.floor(Date.now() / 1000) + 86400 * 365), nonce: ethers.id("rehearsal-voucher"),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + 86400 * 365), nonce: ethers.id("rehearsal-voucher"), taker: ethers.ZeroAddress,
   };
   const sig = await seller.signTypedData(
     { name: "TSAConnectP2PEscrow", version: "3", chainId, verifyingContract: out.p2p.address },
     { AdVoucher: [
       { name: "seller", type: "address" }, { name: "token", type: "address" }, { name: "maxAmount", type: "uint256" },
       { name: "minPerTrade", type: "uint256" }, { name: "maxPerTrade", type: "uint256" }, { name: "deadline", type: "uint256" },
-      { name: "nonce", type: "bytes32" },
+      { name: "nonce", type: "bytes32" }, { name: "taker", type: "address" },
     ] },
     v,
   );

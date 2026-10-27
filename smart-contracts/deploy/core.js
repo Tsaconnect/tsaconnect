@@ -87,7 +87,7 @@ function buildInitialConfig(cfg) {
 }
 
 function checkRoles(core, deployer) {
-  const hot = new Set(Object.values(CANONICAL_HOT_KEYS).map(getAddress));
+  const hot = new Set([...Object.values(CANONICAL_HOT_KEYS), ...core.forbidden].map(getAddress));
   const admin = checkedAddress("CORE_ADMIN", core.admin);
   if (admin === getAddress(deployer)) fail("the admin is the deployer: a deploy key must never hold the admin role");
   if (hot.has(admin)) fail(`the admin ${admin} is a hot key`);
@@ -97,6 +97,8 @@ function checkRoles(core, deployer) {
     if (hot.has(a)) fail(`${a} is a hot key and may not be a resolver or pauser`);
     if (a === getAddress(deployer)) fail(`${a} is the deployer and may not hold a role`);
   }
+  const recipient = checkedAddress("CORE_FEE_RECIPIENT", core.feeRecipient);
+  if (recipient === getAddress(deployer) || hot.has(recipient)) fail(`the fee recipient ${recipient} is the deployer or a forbidden key`);
   if (MAINNETS.has(hre.network.name)) {
     if (!core.adminConfirm || getAddress(core.adminConfirm) !== admin) {
       fail(`set CORE_ADMIN_CONFIRM to the admin (${admin}) to deploy on ${hre.network.name}`);
@@ -158,8 +160,24 @@ async function main() {
   initial.limitTokens.forEach((t, i) =>
     console.log(`  limits ${t}: ${initial.limits[i].maxPerOrder} per order, ${initial.limits[i].maxOwed} owed`));
 
-  if (forwarder !== ZeroAddress && (await ethers.provider.getCode(forwarder)) === "0x") fail(`forwarder ${forwarder} has no code`);
-  for (const t of new Set(initial.tokens)) if ((await ethers.provider.getCode(t)) === "0x") fail(`token ${t} has no code`);
+  if (core.chainId && BigInt(core.chainId) !== net.chainId) fail(`the RPC is chain ${net.chainId}, the config expects ${core.chainId}`);
+  if (forwarder !== ZeroAddress) {
+    // The forwarder is immutable in the escrows and a wrong one could act as any user.
+    if ((await ethers.provider.getCode(forwarder)) === "0x") fail(`forwarder ${forwarder} has no code`);
+    const fwd = new ethers.Contract(forwarder, ["function eip712Domain() view returns (bytes1,string,string,uint256,address,bytes32,uint256[])"], ethers.provider);
+    const [, name, , fwdChain, verifying] = await fwd.eip712Domain();
+    if (!core.forwarderName) fail("set CORE_FORWARDER_NAME: the EIP-712 name the forwarder was deployed with");
+    if (name !== core.forwarderName || fwdChain !== net.chainId || getAddress(verifying) !== forwarder) {
+      fail(`${forwarder} reports "${name}" on chain ${fwdChain}, not the expected forwarder "${core.forwarderName}"`);
+    }
+  }
+  const symbolOf = Object.fromEntries(Object.entries(cfg.tokens).filter(([, a]) => a).map(([sym, a]) => [getAddress(a), sym]));
+  for (const t of new Set(initial.tokens)) {
+    if ((await ethers.provider.getCode(t)) === "0x") fail(`token ${t} has no code`);
+    const dec = Number(await new ethers.Contract(t, ["function decimals() view returns (uint8)"], ethers.provider).decimals());
+    const want = core.decimals[symbolOf[t]];
+    if (dec !== want) fail(`token ${symbolOf[t]} ${t} has ${dec} decimals, the limits assume ${want}`);
+  }
 
   if (process.env.CHECK_ONLY === "1") {
     console.log("CHECK_ONLY=1: nothing sent.");
@@ -183,6 +201,10 @@ async function main() {
   for (let i = 0; i < initial.features.length; i++) {
     const r = await out.feeConfig.contract.rateFor(initial.features[i], initial.tokens[i]);
     if (Number(r.bps) !== initial.rates[i].bps || r.flatFee !== initial.rates[i].flatFee) fail(`FeeConfig rate ${i} mismatch`);
+  }
+  for (let i = 0; i < initial.limitTokens.length; i++) {
+    const l = await out.feeConfig.contract.limitsFor(initial.limitTokens[i]);
+    if (l.maxPerOrder !== initial.limits[i].maxPerOrder || l.maxOwed !== initial.limits[i].maxOwed) fail(`FeeConfig limits ${i} mismatch`);
   }
   for (const [key, label] of [["order", "OrderEscrow"], ["p2p", "P2PEscrow"]]) {
     if (!out[key]) continue;

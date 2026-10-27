@@ -45,6 +45,7 @@ async function voucher(ctx, overrides = {}) {
     maxPerTrade: usd(500),
     deadline: (await time.latest()) + DAY,
     nonce: ethers.id(`n-${Math.random()}`),
+    taker: ethers.ZeroAddress,
     ...overrides,
   };
   const { chainId } = await ethers.provider.getNetwork();
@@ -53,7 +54,7 @@ async function voucher(ctx, overrides = {}) {
     AdVoucher: [
       { name: "seller", type: "address" }, { name: "token", type: "address" }, { name: "maxAmount", type: "uint256" },
       { name: "minPerTrade", type: "uint256" }, { name: "maxPerTrade", type: "uint256" }, { name: "deadline", type: "uint256" },
-      { name: "nonce", type: "bytes32" },
+      { name: "nonce", type: "bytes32" }, { name: "taker", type: "address" },
     ],
   };
   const signer = overrides.signer ?? ctx.seller;
@@ -227,13 +228,15 @@ describe("P2PEscrow", () => {
         .to.emit(ctx.escrow, "TradeResolved").withArgs(k, true, usd(98.5), usd(1.5));
     });
 
-    it("an unresolved dispute returns the crypto to the seller after the 14-day backstop", async () => {
+    it("an unresolved dispute returns the crypto to the seller after the 60-day backstop", async () => {
       const ctx = await setup();
       const k = await openPooled(ctx, "bs");
       await ctx.escrow.connect(ctx.buyer).markPaid(k);
       await ctx.escrow.connect(ctx.buyer).raiseDispute(k);
       await expect(ctx.escrow.claimDisputeBackstop(k)).to.be.revertedWithCustomError(ctx.escrow, "TimeoutNotElapsed");
-      await time.increase(14 * DAY + 1);
+      await time.increase(14 * DAY);
+      await expect(ctx.escrow.claimDisputeBackstop(k)).to.be.revertedWithCustomError(ctx.escrow, "TimeoutNotElapsed");
+      await time.increase(46 * DAY + 1);
       await ctx.escrow.connect(ctx.stranger).claimDisputeBackstop(k);
       const [available] = await ctx.escrow.balanceOf(ctx.seller.address, ctx.T);
       expect(available).to.equal(usd(1000));
@@ -307,6 +310,113 @@ describe("P2PEscrow", () => {
         kind: "uups",
         constructorArgs: [await ctx.forwarder.getAddress(), await ctx.fc.getAddress()],
       });
+    });
+  });
+
+  describe("review follow-ups", () => {
+    it("a voucher bound to a taker can only be opened by that buyer", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).deposit(ctx.T, usd(1000));
+      const { v, sig } = await voucher(ctx, { taker: ctx.buyer.address });
+      await expect(ctx.escrow.connect(ctx.stranger).openTrade(id("tk"), v, sig, usd(10)))
+        .to.be.revertedWithCustomError(ctx.escrow, "NotVoucherTaker");
+      await ctx.escrow.connect(ctx.buyer).openTrade(id("tk"), v, sig, usd(10));
+    });
+
+    it("the taker is part of the signed voucher: changing it breaks the signature", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).deposit(ctx.T, usd(1000));
+      const { v, sig } = await voucher(ctx, { taker: ctx.buyer.address });
+      const opened = { ...v, taker: ethers.ZeroAddress };
+      await expect(ctx.escrow.connect(ctx.stranger).openTrade(id("tk2"), opened, sig, usd(10)))
+        .to.be.revertedWithCustomError(ctx.escrow, "BadVoucherSignature");
+    });
+
+    it("a buyer cannot mark paid after the payment window", async () => {
+      const ctx = await setup();
+      const k = await openPooled(ctx, "late");
+      await time.increase(30 * MIN);
+      await expect(ctx.escrow.connect(ctx.buyer).markPaid(k)).to.be.revertedWithCustomError(ctx.escrow, "PaymentWindowClosed");
+    });
+
+    it("nobody can dispute once an armed auto-release is due", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(DAY);
+      const k = await openPooled(ctx, "due");
+      await ctx.escrow.connect(ctx.buyer).markPaid(k);
+      await time.increase(DAY);
+      await expect(ctx.escrow.connect(ctx.seller).raiseDispute(k)).to.be.revertedWithCustomError(ctx.escrow, "AutoReleaseDue");
+      await ctx.escrow.connect(ctx.stranger).finalizeRelease(k);
+    });
+
+    it("auto-release windows are 0 or between 30 minutes and 7 days", async () => {
+      const ctx = await setup();
+      await expect(ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(1)).to.be.revertedWithCustomError(ctx.escrow, "WindowOutOfBounds");
+      await ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(30 * MIN);
+      await ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(0);
+    });
+
+    it("a P2P rate with a flat fee is refused rather than silently ignored", async () => {
+      const ctx = await setup();
+      await ctx.fc.setRate(GAS, ctx.T, { bps: 50, flatFee: 1, active: true });
+      await ctx.escrow.connect(ctx.seller).deposit(ctx.T, usd(1000));
+      const { v, sig } = await voucher(ctx);
+      await expect(ctx.escrow.connect(ctx.buyer).openTrade(id("ff"), v, sig, usd(10))).to.be.revertedWithCustomError(ctx.escrow, "FlatFeeNotSupported");
+    });
+
+    it("a voucher signed for another chain or another escrow is refused", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).deposit(ctx.T, usd(1000));
+      const v = { seller: ctx.seller.address, token: ctx.T, maxAmount: usd(100), minPerTrade: 0n, maxPerTrade: 0n,
+        deadline: (await time.latest()) + DAY, nonce: ethers.id("x"), taker: ethers.ZeroAddress };
+      const types = { AdVoucher: [
+        { name: "seller", type: "address" }, { name: "token", type: "address" }, { name: "maxAmount", type: "uint256" },
+        { name: "minPerTrade", type: "uint256" }, { name: "maxPerTrade", type: "uint256" }, { name: "deadline", type: "uint256" },
+        { name: "nonce", type: "bytes32" }, { name: "taker", type: "address" } ] };
+      const otherChain = await ctx.seller.signTypedData({ name: "TSAConnectP2PEscrow", version: "3", chainId: 56, verifyingContract: await ctx.escrow.getAddress() }, types, v);
+      const otherEscrow = await ctx.seller.signTypedData({ name: "TSAConnectP2PEscrow", version: "3", chainId: (await ethers.provider.getNetwork()).chainId, verifyingContract: ctx.stranger.address }, types, v);
+      for (const sig of [otherChain, otherEscrow]) {
+        await expect(ctx.escrow.connect(ctx.buyer).openTrade(id(`x-${sig.slice(2, 8)}`), v, sig, usd(10)))
+          .to.be.revertedWithCustomError(ctx.escrow, "BadVoucherSignature");
+      }
+    });
+
+    it("works through the forwarder: a gasless markPaid acts for the signer, not the relayer", async () => {
+      const ctx = await setup();
+      const k = await openPooled(ctx, "fwd");
+      const data = ctx.escrow.interface.encodeFunctionData("markPaid", [k]);
+      const { chainId } = await ethers.provider.getNetwork();
+      const domain = { name: "TSAForwarder", version: "1", chainId, verifyingContract: await ctx.forwarder.getAddress() };
+      const types = { ForwardRequest: [
+        { name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" },
+        { name: "gas", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint48" },
+        { name: "data", type: "bytes" } ] };
+      const req = { from: ctx.buyer.address, to: await ctx.escrow.getAddress(), value: 0, gas: 300000,
+        nonce: await ctx.forwarder.nonces(ctx.buyer.address), deadline: (await time.latest()) + 600, data };
+      const signature = await ctx.buyer.signTypedData(domain, types, req);
+      await ctx.forwarder.connect(ctx.stranger).execute({ ...req, signature });
+      expect((await ctx.escrow.getTrade(k)).status).to.equal(Status.Paid);
+      // An ordinary caller appending the buyer's address is still treated as itself.
+      await expect(ctx.stranger.sendTransaction({ to: await ctx.escrow.getAddress(), data: ctx.escrow.interface.encodeFunctionData("raiseDispute", [k]) + ctx.buyer.address.slice(2) }))
+        .to.be.revertedWithCustomError(ctx.escrow, "NotAParty");
+    });
+
+    it("a cancelled trade and a backstopped dispute both give the voucher capacity back", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).deposit(ctx.T, usd(1000));
+      const { v, sig } = await voucher(ctx, { maxAmount: usd(100), maxPerTrade: usd(100) });
+      const h = await ctx.escrow.hashVoucher(v);
+      await ctx.escrow.connect(ctx.buyer).openTrade(id("c1"), v, sig, usd(60));
+      await ctx.escrow.connect(ctx.buyer).openTrade(id("c2"), v, sig, usd(40));
+      expect(await ctx.escrow.voucherFilled(h)).to.equal(usd(100));
+      await ctx.escrow.connect(ctx.buyer).markPaid(keyOf(ctx.buyer, "c2"));
+      await ctx.escrow.connect(ctx.seller).raiseDispute(keyOf(ctx.buyer, "c2"));
+      await time.increase(30 * MIN);
+      await ctx.escrow.cancelByTimeout(keyOf(ctx.buyer, "c1"));
+      expect(await ctx.escrow.voucherFilled(h)).to.equal(usd(40));
+      await time.increase(60 * DAY + 1);
+      await ctx.escrow.claimDisputeBackstop(keyOf(ctx.buyer, "c2"));
+      expect(await ctx.escrow.voucherFilled(h)).to.equal(0);
     });
   });
 });

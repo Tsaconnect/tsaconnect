@@ -79,8 +79,20 @@ P2PEscrow
 | | OrderEscrow | P2PEscrow |
 |---|---|---|
 | Delivery / payment | `handlingDays` (1–30) per order; after it anyone can refund the buyer | 30 minutes to mark paid; after it anyone can cancel back to the seller |
-| Confirmation | 7 days after delivery; after it anyone can release to the seller | seller's own auto-release window (0–7 days, opt-in) |
-| Dispute backstop | 14 days; unresolved → buyer refunded | 14 days; unresolved → crypto back to the seller |
+| Confirmation | 7 days after delivery; after it anyone can release to the seller | seller's own auto-release window (off, or 30 minutes–7 days); no dispute once it is due |
+| Dispute backstop | 14 days; unresolved → buyer refunded | 60 days; unresolved → crypto back to the seller |
+
+## Operations runbook
+
+- **Admin handover** (e.g. a key rotation): `beginDefaultAdminTransfer(new)` then
+  `acceptDefaultAdminTransfer()` from the new key moves only `DEFAULT_ADMIN_ROLE`. The new admin
+  must then grant itself UPGRADER, PAUSER, RESCUER, RESOLVER (escrows) and CONFIG, UPGRADER
+  (FeeConfig), and **revoke every role from the old key** on every contract. Until that is done the
+  old key keeps upgrade power.
+- **Disputes:** resolve inside the backstop windows (14 days orders, 60 days P2P); alert on
+  `OrderDisputed` / `TradeDisputed`.
+- **Fee recipient:** must be able to receive the tokens; if it is blacklisted, fees accrue as
+  `claimable` until it claims to another address.
 
 ## Trust assumptions and known limitations
 
@@ -93,8 +105,13 @@ P2PEscrow
   downtime favours buyers. Operations must monitor `OrderDisputed`.
 - **Seller self-reporting.** "Delivered" is the seller's own claim; the buyer's protection is the
   7-day dispute window.
-- **Voucher griefing (P2P).** Anyone can open trades against a public voucher and lock that
-  liquidity for one payment window at a time.
+- **Voucher griefing (P2P).** Anyone can open trades against a public voucher (`taker` = 0) and
+  mark them paid without paying, locking that liquidity until the seller disputes and a resolver
+  acts (or the 60-day backstop). Sellers who need protection bind a voucher to one buyer
+  (`taker`), and should not enable auto-release on public vouchers.
+- **P2P backstop favours the seller.** A seller who disputes a genuinely paid trade keeps the
+  crypto if no resolver acts within 60 days (and has the fiat). The backstop is a liveness
+  fallback only; operations must resolve disputes well inside it and alert on `TradeDisputed`.
 - **Shared limits.** `maxOwed` is checked against each escrow's own `owed`, so it caps exposure per
   contract, not per chain.
 - **Token assumptions.** Only plain ERC-20s without transfer fees or negative rebasing may be given

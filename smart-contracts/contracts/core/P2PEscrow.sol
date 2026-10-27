@@ -37,8 +37,12 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     uint16 public constant MAX_GAS_FEE_BPS = 300;
     uint16 public constant MAX_FEE_BPS = 500;
     uint40 public constant PAYMENT_WINDOW = 30 minutes;
+    uint40 public constant MIN_AUTO_RELEASE_WINDOW = 30 minutes;
     uint40 public constant MAX_AUTO_RELEASE_WINDOW = 7 days;
-    uint40 public constant DISPUTE_BACKSTOP = 14 days;
+    /// @dev A liveness fallback only. It returns the crypto to the seller, so a seller who
+    ///      disputes a genuinely paid trade gains if no resolver acts; resolvers must act well
+    ///      inside this window (alert on TradeDisputed). Long on purpose.
+    uint40 public constant DISPUTE_BACKSTOP = 60 days;
 
     enum Status {
         None,
@@ -63,6 +67,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         uint256 maxPerTrade;
         uint256 deadline;
         bytes32 nonce;
+        address taker; // address(0): any buyer; otherwise only this buyer may open trades on it
     }
 
     /// @dev `expiresAt` (payment deadline) and the fee bps are fixed when the trade opens.
@@ -83,7 +88,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     }
 
     bytes32 private constant AD_VOUCHER_TYPEHASH = keccak256(
-        "AdVoucher(address seller,address token,uint256 maxAmount,uint256 minPerTrade,uint256 maxPerTrade,uint256 deadline,bytes32 nonce)"
+        "AdVoucher(address seller,address token,uint256 maxAmount,uint256 minPerTrade,uint256 maxPerTrade,uint256 deadline,bytes32 nonce,address taker)"
     );
 
     /// @custom:storage-location erc7201:tsa.storage.P2PEscrow
@@ -143,6 +148,10 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     error FeeAboveCap();
     error AmountAboveLimit(uint256 amount, uint256 limit);
     error WindowOutOfBounds();
+    error NotVoucherTaker();
+    error PaymentWindowClosed(uint40 at);
+    error AutoReleaseDue(uint40 at);
+    error FlatFeeNotSupported();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(address forwarder, IFeeConfig feeConfig_) EscrowBase(forwarder, feeConfig_) {}
@@ -194,7 +203,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     /// @notice Opt in to auto-release: a Paid trade releases to the buyer `window` after markPaid
     ///         unless you release or dispute first. 0 turns it off. Applies to trades marked paid later.
     function setAutoReleaseWindow(uint40 window) external {
-        if (window > MAX_AUTO_RELEASE_WINDOW) revert WindowOutOfBounds();
+        if (window != 0 && (window < MIN_AUTO_RELEASE_WINDOW || window > MAX_AUTO_RELEASE_WINDOW)) revert WindowOutOfBounds();
         address seller = _msgSender();
         _s().autoReleaseWindow[seller] = window;
         emit AutoReleaseWindowSet(seller, window);
@@ -205,7 +214,9 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     function hashVoucher(AdVoucher calldata v) public view returns (bytes32) {
         return _hashTypedDataV4(
             keccak256(
-                abi.encode(AD_VOUCHER_TYPEHASH, v.seller, v.token, v.maxAmount, v.minPerTrade, v.maxPerTrade, v.deadline, v.nonce)
+                abi.encode(
+                    AD_VOUCHER_TYPEHASH, v.seller, v.token, v.maxAmount, v.minPerTrade, v.maxPerTrade, v.deadline, v.nonce, v.taker
+                )
             )
         );
     }
@@ -233,6 +244,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         bytes32 key = _checkNewTrade(buyer, tradeId, amount);
         if (v.seller == address(0)) revert InvalidVoucherSeller();
         if (v.seller == buyer) revert SelfTrade();
+        if (v.taker != address(0) && v.taker != buyer) revert NotVoucherTaker();
         if (block.timestamp > v.deadline) revert VoucherExpired();
         if (v.maxAmount == 0) revert VoucherBadBounds();
         if (v.maxPerTrade != 0 && v.maxPerTrade > v.maxAmount) revert VoucherBadBounds();
@@ -284,6 +296,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         Trade storage t = _trade(key);
         if (t.status != Status.Pending) revert InvalidStatus(key, t.status);
         if (_msgSender() != t.buyer) revert OnlyBuyer();
+        if (block.timestamp >= t.expiresAt) revert PaymentWindowClosed(t.expiresAt);
         t.status = Status.Paid;
         uint40 window = _s().autoReleaseWindow[t.seller];
         if (window != 0) t.autoReleaseAt = uint40(block.timestamp) + window;
@@ -318,10 +331,12 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         emit TradeCancelled(key, t.amount, toPool);
     }
 
-    /// @notice Either party disputes a trade the buyer has marked paid.
+    /// @notice Either party disputes a trade the buyer has marked paid. Not once an armed
+    ///         auto-release is due: the seller agreed that silence means release.
     function raiseDispute(bytes32 key) external {
         Trade storage t = _trade(key);
         if (t.status != Status.Paid) revert InvalidStatus(key, t.status);
+        if (t.autoReleaseAt != 0 && block.timestamp >= t.autoReleaseAt) revert AutoReleaseDue(t.autoReleaseAt);
         address by = _msgSender();
         if (by != t.buyer && by != t.seller) revert NotAParty();
         t.status = Status.Disputed;
@@ -419,6 +434,8 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     ) private {
         IFeeConfig.Rate memory p = feeConfig.rateFor(FEATURE_PLATFORM, token);
         IFeeConfig.Rate memory g = feeConfig.rateFor(FEATURE_GAS, token);
+        // P2P fees are bps only; refuse a flat fee rather than silently ignore it.
+        if (p.flatFee != 0 || g.flatFee != 0) revert FlatFeeNotSupported();
         if (p.bps > MAX_PLATFORM_FEE_BPS || g.bps > MAX_GAS_FEE_BPS || uint256(p.bps) + g.bps > MAX_FEE_BPS) {
             revert FeeAboveCap();
         }

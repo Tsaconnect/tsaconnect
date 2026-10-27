@@ -81,7 +81,7 @@ describe("P2PEscrow invariants (stateful fuzz)", function () {
         AdVoucher: [
           { name: "seller", type: "address" }, { name: "token", type: "address" }, { name: "maxAmount", type: "uint256" },
           { name: "minPerTrade", type: "uint256" }, { name: "maxPerTrade", type: "uint256" }, { name: "deadline", type: "uint256" },
-          { name: "nonce", type: "bytes32" },
+          { name: "nonce", type: "bytes32" }, { name: "taker", type: "address" },
         ],
       };
 
@@ -141,7 +141,7 @@ describe("P2PEscrow invariants (stateful fuzz)", function () {
           const s = pick(sellers);
           const max = BigInt(between(50, 800)) * 1_000_000n;
           const v = { seller: s.address, token: T, maxAmount: max, minPerTrade: 0n, maxPerTrade: 0n,
-            deadline: BigInt((await time.latest()) + 30 * DAY), nonce: ethers.id(`v-${seed}-${nonce++}`) };
+            deadline: BigInt((await time.latest()) + 30 * DAY), nonce: ethers.id(`v-${seed}-${nonce++}`), taker: ethers.ZeroAddress };
           const sig = await s.signTypedData(domain, types, v);
           vouchers.push({ v, sig, hash: await escrow.hashVoucher(v) });
         },
@@ -179,7 +179,7 @@ describe("P2PEscrow invariants (stateful fuzz)", function () {
           expect(await tryTx(escrow.connect(admin).release(k)), "admin release").to.equal(false);
         },
         async setReleaser() { const s = pick(sellers); await escrow.connect(s).setReleaser(rand() < 0.5 ? releaser.address : ethers.ZeroAddress); },
-        async setAuto() { const s = pick(traders); await escrow.connect(s).setAutoReleaseWindow(pick([0, 3600, DAY])); },
+        async setAuto() { const s = pick(traders); await escrow.connect(s).setAutoReleaseWindow(pick([0, 1800, 3600, DAY])); },
         async finalize() { const k = pick(openKeys()); if (!k) return; if (await tryTx(escrow.connect(stranger).finalizeRelease(k))) trades.get(k).toBuyer = true; await sync(k); },
         async cancel() { const k = pick(openKeys()); if (!k) return; await tryTx(escrow.connect(stranger).cancelByTimeout(k)); await sync(k); },
         async dispute() { const k = pick(openKeys()); if (!k) return; const t = trades.get(k); await tryTx(escrow.connect(rand() < 0.5 ? t.buyer : t.seller).raiseDispute(k)); await sync(k); },
@@ -190,7 +190,7 @@ describe("P2PEscrow invariants (stateful fuzz)", function () {
           await sync(k);
         },
         async backstop() { const k = pick(openKeys()); if (!k) return; await tryTx(escrow.connect(stranger).claimDisputeBackstop(k)); await sync(k); },
-        async wait() { await time.increase(pick([60, 1800, 3600, DAY, 15 * DAY])); },
+        async wait() { await time.increase(pick([60, 1800, 3600, DAY, 15 * DAY, 61 * DAY])); },
         async pauseToggle() {
           if (paused) { await escrow.connect(admin).unpause(); paused = false; } else { await escrow.connect(pauser).pause(); paused = true; }
         },
@@ -236,11 +236,19 @@ describe("P2PEscrow invariants (stateful fuzz)", function () {
       for (const k of openKeys()) {
         const t = trades.get(k);
         if (t.status === S.Pending) await escrow.connect(stranger).cancelByTimeout(k);
-        else if (t.status === S.Paid) await escrow.connect(t.buyer).raiseDispute(k);
+        else if (t.status === S.Paid && !(await tryTx(escrow.connect(t.buyer).raiseDispute(k)))) {
+          await escrow.connect(stranger).finalizeRelease(k); // auto-release already due
+        }
         await sync(k);
       }
-      await time.increase(15 * DAY);
-      for (const k of openKeys()) { await escrow.connect(stranger).claimDisputeBackstop(k); await sync(k); }
+      await time.increase(61 * DAY);
+      for (const k of openKeys()) {
+        const t = trades.get(k);
+        // A paid trade whose auto-release came due cannot be disputed; finalize it instead.
+        if (t.status === S.Paid) await escrow.connect(stranger).finalizeRelease(k);
+        else await escrow.connect(stranger).claimDisputeBackstop(k);
+        await sync(k);
+      }
       expect(openKeys().length, "P7 liveness").to.equal(0);
       await check(`seed ${seed} drained`);
     });
