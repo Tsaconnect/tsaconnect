@@ -11,9 +11,10 @@
 //   E2E_BUYER_KEY=0x… E2E_SELLER_KEY=0x… npx hardhat run scripts/e2e-core.js --network sonicMainnet
 //   - The deployer (DEPLOYER_PRIVATE_KEY) must be the set's admin: it pauses, resolves, relays the
 //     gasless calls and, for the run, receives the fees (the recipient is restored at the end).
-//   - Buyer and seller are two throwaway wallets, each with a little gas. With E2E_UNIT=1 (whole
-//     tokens, the default) the buyer needs about 7 and the seller about 6 of E2E_TOKEN (default
-//     USDT); refunds and withdrawals return most of it.
+//   - Buyer and seller are two throwaway wallets, each with a little gas. E2E_UNIT (default 1)
+//     scales every amount: the buyer needs 7 units plus the flat order fee 4 times, the seller 6
+//     units of E2E_TOKEN (default USDT). At E2E_UNIT=0.1 on Sonic that is 1.1 and 0.6 USDT.
+//     Refunds and withdrawals return most of it, and every fee goes to the deployer for the run.
 //
 // Not covered here, because they need hours or days to pass: payment and auto-release timeouts
 // (30 minutes), the delivery timeout (1+ days), the 7-day confirm window and the 14/60-day dispute
@@ -127,13 +128,17 @@ async function setup() {
   const token = new ethers.Contract(cfg.tokens[symbol], ERC20, ethers.provider);
   const dec = await token.decimals();
   const u = (n) => ethers.parseUnits(String(n), dec);
-  const unit = Number(process.env.E2E_UNIT || "1");
-  const amt = (n) => u(n * unit);
+  // Steps are written in units of E2E_UNIT tokens (n has at most one decimal); bigint math keeps
+  // small units such as 0.01 exact.
+  const unit = u(process.env.E2E_UNIT || "1");
+  const amt = (n) => (u(n) * unit) / u(1);
 
   if (fork) {
     for (const who of [buyer, seller]) await fundOnFork(await token.getAddress(), who.address, amt(100));
   } else {
-    const names = [["buyer", buyer, amt(7)], ["seller", seller, amt(6)]];
+    // The buyer also pays the flat order fee (it does not scale) on each of the 4 orders.
+    const flat = addrs.order ? (await feeConfig.rateFor(ethers.encodeBytes32String("order"), cfg.tokens[symbol])).flatFee : 0n;
+    const names = [["buyer", buyer, amt(7) + 4n * flat], ["seller", seller, amt(6)]];
     for (const [name, w, need] of names) {
       const have = await token.balanceOf(w.address);
       assert(have >= need, `${name} ${w.address} holds ${ethers.formatUnits(have, dec)} ${symbol}, needs ${ethers.formatUnits(need, dec)}`);
