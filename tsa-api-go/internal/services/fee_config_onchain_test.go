@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -54,8 +55,8 @@ func TestFeeConfigFeatureKey(t *testing.T) {
 	if _, err := FeeConfigFeatureKey(""); err == nil {
 		t.Fatal("empty feature must be refused")
 	}
-	if _, err := FeeConfigFeatureKey("a_feature_name_longer_than_31_bytes"); err == nil {
-		t.Fatal("a feature over 31 bytes must be refused")
+	if _, err := FeeConfigFeatureKey("p2p_platfrom"); err == nil {
+		t.Fatal("an unknown feature must be refused")
 	}
 }
 
@@ -67,10 +68,10 @@ func TestFeeConfigReader_ReadsRateLimitsAndRecipient(t *testing.T) {
 		"limitsFor":    mustPackOutputs(t, "limitsFor", feeConfigLimitsTuple{MaxPerOrder: big.NewInt(1_000_000_000), MaxOwed: big.NewInt(20_000_000_000)}),
 		"feeRecipient": mustPackOutputs(t, "feeRecipient", recipient),
 	}}
-	r := NewFeeConfigReader(fake)
+	r := NewFeeConfigReader(map[int64]FeeManagerRPCClient{146: fake})
 	ctx := context.Background()
 
-	rate, err := r.RawRate(ctx, "0x4826533B4897376654Bb4d4AD88B7faFD0C98528", FeeConfigFeatureOrder, usdc)
+	rate, err := r.RawRate(ctx, 146, "0x4826533B4897376654Bb4d4AD88B7faFD0C98528", FeeConfigFeatureOrder, usdc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,23 +81,70 @@ func TestFeeConfigReader_ReadsRateLimitsAndRecipient(t *testing.T) {
 	if fake.lastTo != common.HexToAddress("0x4826533B4897376654Bb4d4AD88B7faFD0C98528") {
 		t.Fatalf("called %s, not the FeeConfig", fake.lastTo.Hex())
 	}
-	l, err := r.LimitsFor(ctx, "0x4826533B4897376654Bb4d4AD88B7faFD0C98528", usdc)
+	l, err := r.LimitsFor(ctx, 146, "0x4826533B4897376654Bb4d4AD88B7faFD0C98528", usdc)
 	if err != nil || l.MaxPerOrder.Int64() != 1_000_000_000 || l.MaxOwed.Int64() != 20_000_000_000 {
 		t.Fatalf("limits = %+v err %v", l, err)
 	}
-	got, err := r.FeeRecipient(ctx, "0x4826533B4897376654Bb4d4AD88B7faFD0C98528")
+	got, err := r.FeeRecipient(ctx, 146, "0x4826533B4897376654Bb4d4AD88B7faFD0C98528")
 	if err != nil || got != recipient {
 		t.Fatalf("recipient = %s err %v", got.Hex(), err)
 	}
 }
 
-func TestFeeConfigReader_UnconfiguredLimitsIsAnError(t *testing.T) {
-	r := NewFeeConfigReader(&fakeFeeConfigChain{answers: map[string][]byte{}})
-	if _, err := r.LimitsFor(context.Background(), "0x1", common.HexToAddress("0x2")); err == nil {
-		t.Fatal("a reverting limitsFor must surface as an error, never as zero limits")
+func TestFeeConfigReader_UnconfiguredLimitsIsARevert(t *testing.T) {
+	r := NewFeeConfigReader(map[int64]FeeManagerRPCClient{146: &fakeFeeConfigChain{answers: map[string][]byte{}}})
+	_, err := r.LimitsFor(context.Background(), 146, "0x1", common.HexToAddress("0x2"))
+	if !errors.Is(err, ErrFeeConfigReverted) {
+		t.Fatalf("a reverting limitsFor must surface as ErrFeeConfigReverted, never as zero limits; got %v", err)
 	}
-	if NewFeeConfigReader(nil) != nil {
-		t.Fatal("a nil RPC client must leave the reader dormant (nil)")
+}
+
+// An RPC failure is "could not check", not a revert.
+func TestFeeConfigReader_RPCErrorIsNotARevert(t *testing.T) {
+	r := NewFeeConfigReader(map[int64]FeeManagerRPCClient{146: rpcDownChain{}})
+	_, err := r.FeeRecipient(context.Background(), 146, "0x1")
+	if err == nil || errors.Is(err, ErrFeeConfigReverted) {
+		t.Fatalf("want a plain RPC error, got %v", err)
+	}
+}
+
+type rpcDownChain struct{}
+
+func (rpcDownChain) CallContract(context.Context, ethereum.CallMsg, *big.Int) ([]byte, error) {
+	return nil, errors.New("dial tcp: connection refused")
+}
+
+func (rpcDownChain) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
+	return nil, errors.New("dial tcp: connection refused")
+}
+
+func TestFeeConfigReader_Dormant(t *testing.T) {
+	if NewFeeConfigReader(nil) != nil || NewFeeConfigReader(map[int64]FeeManagerRPCClient{146: nil}) != nil {
+		t.Fatal("no RPC client must leave the reader dormant (nil)")
+	}
+	var r *FeeConfigReader
+	if _, err := r.FeeRecipient(context.Background(), 146, "0x1"); !errors.Is(err, ErrFeeConfigDormant) {
+		t.Fatalf("a nil reader must answer ErrFeeConfigDormant, got %v", err)
+	}
+	live := NewFeeConfigReader(map[int64]FeeManagerRPCClient{146: &fakeFeeConfigChain{}})
+	if _, err := live.TxSucceeded(context.Background(), 56, "0xabc"); !errors.Is(err, ErrFeeConfigDormant) {
+		t.Fatalf("a chain without an RPC client must answer ErrFeeConfigDormant, got %v", err)
+	}
+}
+
+// 18-decimal amounts must reach JS as strings: a JSON number above 2^53 loses precision.
+func TestFeeConfigJSON_AmountsAreStrings(t *testing.T) {
+	big18, _ := new(big.Int).SetString("20000000000000000000000", 10)
+	out, err := json.Marshal(struct {
+		R FeeConfigRate   `json:"r"`
+		L FeeConfigLimits `json:"l"`
+	}{FeeConfigRate{BPS: 200, FlatFee: big18, Active: true}, FeeConfigLimits{MaxPerOrder: big18, MaxOwed: nil}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"r":{"bps":200,"flatFee":"20000000000000000000000","active":true},"l":{"maxPerOrder":"20000000000000000000000","maxOwed":"0"}}`
+	if string(out) != want {
+		t.Fatalf("json = %s\nwant   %s", out, want)
 	}
 }
 
@@ -123,8 +171,27 @@ func TestPackFeeConfigWrites(t *testing.T) {
 	if _, err := PackFeeConfigSetRates([]FeeConfigRateRow{{Feature: "order", Rate: FeeConfigRate{BPS: 1}}}); err == nil {
 		t.Fatal("a row without a token must be refused")
 	}
+	if _, err := PackFeeConfigSetRates([]FeeConfigRateRow{{Feature: "order", Token: usdt, Rate: FeeConfigRate{BPS: FeeConfigMaxBPS + 1}}}); err == nil {
+		t.Fatal("a rate above MAX_BPS must be refused")
+	}
+	tooBig := new(big.Int).Lsh(big.NewInt(1), 128)
+	if _, err := PackFeeConfigSetRates([]FeeConfigRateRow{{Feature: "order", Token: usdt, Rate: FeeConfigRate{FlatFee: tooBig}}}); err == nil {
+		t.Fatal("a flat fee above uint128 must be refused")
+	}
+	if _, err := PackFeeConfigSetRates([]FeeConfigRateRow{
+		{Feature: "order", Token: usdt, Rate: FeeConfigRate{BPS: 200}},
+		{Feature: "order", Token: usdt, Rate: FeeConfigRate{BPS: 100}},
+	}); err == nil {
+		t.Fatal("a repeated (feature, token) row must be refused")
+	}
 	if _, err := PackFeeConfigSetLimits(usdt, FeeConfigLimits{MaxPerOrder: big.NewInt(1), MaxOwed: big.NewInt(0)}); err == nil {
 		t.Fatal("zero limits must be refused")
+	}
+	if _, err := PackFeeConfigSetLimits(common.Address{}, FeeConfigLimits{MaxPerOrder: big.NewInt(1), MaxOwed: big.NewInt(1)}); err == nil {
+		t.Fatal("limits without a token must be refused")
+	}
+	if _, err := PackFeeConfigSetLimits(usdt, FeeConfigLimits{MaxPerOrder: big.NewInt(1), MaxOwed: tooBig}); err == nil {
+		t.Fatal("a limit above uint128 must be refused")
 	}
 	if _, err := PackFeeConfigSetFeeRecipient(common.Address{}); err == nil {
 		t.Fatal("a zero fee recipient must be refused")

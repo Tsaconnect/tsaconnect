@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -27,6 +29,19 @@ const (
 	FeeConfigFeatureP2PPlatform = "p2p_platform" // bps, no flat fee
 	FeeConfigFeatureP2PGas      = "p2p_gas"      // bps, no flat fee
 )
+
+// FeeConfigMaxBPS mirrors FeeConfig.MAX_BPS (10%); setRates reverts above it.
+const FeeConfigMaxBPS = 1000
+
+// ErrFeeConfigReverted marks a FeeConfig read the contract refused (an unset row or limits),
+// as opposed to an RPC failure: the first is an answer, the second is "could not check".
+var ErrFeeConfigReverted = errors.New("fee config call reverted")
+
+// ErrFeeConfigDormant is returned by a nil reader or a chain without an RPC client.
+var ErrFeeConfigDormant = errors.New("fee config reader not configured")
+
+// maxUint128 bounds every uint128 field the contract stores.
+var maxUint128 = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
 
 const feeConfigABIJSON = `[
   {"type":"function","name":"rawRate","stateMutability":"view",
@@ -62,15 +77,39 @@ var parsedFeeConfigABI = func() abi.ABI {
 
 // FeeConfigRate is one FeeConfig row. FlatFee is in the token's base units.
 type FeeConfigRate struct {
-	BPS     uint16   `json:"bps"`
-	FlatFee *big.Int `json:"flatFee"`
-	Active  bool     `json:"active"`
+	BPS     uint16
+	FlatFee *big.Int
+	Active  bool
+}
+
+// MarshalJSON writes FlatFee as a decimal string: 18-decimal amounts overflow a JS number.
+func (r FeeConfigRate) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		BPS     uint16 `json:"bps"`
+		FlatFee string `json:"flatFee"`
+		Active  bool   `json:"active"`
+	}{r.BPS, baseUnitsString(r.FlatFee), r.Active})
 }
 
 // FeeConfigLimits are a token's value caps, in base units.
 type FeeConfigLimits struct {
-	MaxPerOrder *big.Int `json:"maxPerOrder"`
-	MaxOwed     *big.Int `json:"maxOwed"`
+	MaxPerOrder *big.Int
+	MaxOwed     *big.Int
+}
+
+// MarshalJSON writes both limits as decimal strings (see FeeConfigRate.MarshalJSON).
+func (l FeeConfigLimits) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		MaxPerOrder string `json:"maxPerOrder"`
+		MaxOwed     string `json:"maxOwed"`
+	}{baseUnitsString(l.MaxPerOrder), baseUnitsString(l.MaxOwed)})
+}
+
+func baseUnitsString(x *big.Int) string {
+	if x == nil {
+		return "0"
+	}
+	return x.String()
 }
 
 // feeConfigRateTuple / feeConfigLimitsTuple mirror the Solidity structs for ABI encoding
@@ -87,32 +126,64 @@ type feeConfigLimitsTuple struct {
 }
 
 // FeeConfigFeatureKey is the bytes32 key of a feature name: its ASCII bytes, right-padded with
-// zeros (Solidity's bytes32("order") and ethers' encodeBytes32String).
+// zeros (Solidity's bytes32("order") and ethers' encodeBytes32String). Only the three features
+// the contracts read are accepted, so a typo cannot write a row nothing will ever use.
 func FeeConfigFeatureKey(name string) ([32]byte, error) {
 	var key [32]byte
-	if name == "" || len(name) > 31 {
-		return key, fmt.Errorf("fee config: feature %q must be 1-31 bytes", name)
+	switch name {
+	case FeeConfigFeatureOrder, FeeConfigFeatureP2PPlatform, FeeConfigFeatureP2PGas:
+	default:
+		return key, fmt.Errorf("fee config: unknown feature %q", name)
 	}
 	copy(key[:], name)
 	return key, nil
 }
 
-// FeeConfigReader reads one chain's FeeConfig. It reuses the FeeManager chain reader's eth_call
-// and receipt plumbing rather than restating it.
+// FeeConfigReader reads each chain's FeeConfig, routed by chainID. It reuses the FeeManager chain
+// reader's eth_call and receipt plumbing rather than restating it.
 type FeeConfigReader struct {
-	chain *evmFeeManagerChainReader
+	byChain map[int64]*evmFeeManagerChainReader
 }
 
-// NewFeeConfigReader returns nil when caller is nil, so callers keep the path dormant.
-func NewFeeConfigReader(caller FeeManagerRPCClient) *FeeConfigReader {
-	if caller == nil {
+// NewFeeConfigReader builds the reader from a chainID → RPC client map. Chains with a nil client
+// are skipped; it returns nil when none is left, so callers keep the path dormant.
+func NewFeeConfigReader(rpcByChain map[int64]FeeManagerRPCClient) *FeeConfigReader {
+	byChain := feeChainReaders(rpcByChain)
+	if len(byChain) == 0 {
 		return nil
 	}
-	return &FeeConfigReader{chain: &evmFeeManagerChainReader{caller: caller}}
+	return &FeeConfigReader{byChain: byChain}
+}
+
+func (r *FeeConfigReader) chain(chainID int64) (*evmFeeManagerChainReader, error) {
+	if r == nil {
+		return nil, ErrFeeConfigDormant
+	}
+	c, ok := r.byChain[chainID]
+	if !ok {
+		return nil, fmt.Errorf("chain %d: %w", chainID, ErrFeeConfigDormant)
+	}
+	return c, nil
+}
+
+// read eth_calls feeConfig on chainID, marking a contract revert with ErrFeeConfigReverted.
+func (r *FeeConfigReader) read(ctx context.Context, chainID int64, feeConfig, what string, data []byte) ([]byte, error) {
+	c, err := r.chain(chainID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.call(ctx, feeConfig, data)
+	if isRevert(err) {
+		return nil, fmt.Errorf("%s: %w: %v", what, ErrFeeConfigReverted, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s call: %w", what, err)
+	}
+	return out, nil
 }
 
 // RawRate reads a row whether or not it is active (rateFor would revert on an inactive one).
-func (r *FeeConfigReader) RawRate(ctx context.Context, feeConfig, feature string, token common.Address) (FeeConfigRate, error) {
+func (r *FeeConfigReader) RawRate(ctx context.Context, chainID int64, feeConfig, feature string, token common.Address) (FeeConfigRate, error) {
 	key, err := FeeConfigFeatureKey(feature)
 	if err != nil {
 		return FeeConfigRate{}, err
@@ -121,9 +192,9 @@ func (r *FeeConfigReader) RawRate(ctx context.Context, feeConfig, feature string
 	if err != nil {
 		return FeeConfigRate{}, fmt.Errorf("pack rawRate(%s,%s): %w", feature, token.Hex(), err)
 	}
-	out, err := r.chain.call(ctx, feeConfig, data)
+	out, err := r.read(ctx, chainID, feeConfig, fmt.Sprintf("rawRate(%s,%s)", feature, token.Hex()), data)
 	if err != nil {
-		return FeeConfigRate{}, fmt.Errorf("rawRate(%s,%s) call: %w", feature, token.Hex(), err)
+		return FeeConfigRate{}, err
 	}
 	var res struct{ Arg0 feeConfigRateTuple }
 	if err := parsedFeeConfigABI.UnpackIntoInterface(&res, "rawRate", out); err != nil {
@@ -133,15 +204,15 @@ func (r *FeeConfigReader) RawRate(ctx context.Context, feeConfig, feature string
 }
 
 // LimitsFor reads a token's limits. The contract reverts (LimitsNotConfigured) for a token with
-// none, which surfaces here as a call error.
-func (r *FeeConfigReader) LimitsFor(ctx context.Context, feeConfig string, token common.Address) (FeeConfigLimits, error) {
+// none, which surfaces here as ErrFeeConfigReverted.
+func (r *FeeConfigReader) LimitsFor(ctx context.Context, chainID int64, feeConfig string, token common.Address) (FeeConfigLimits, error) {
 	data, err := parsedFeeConfigABI.Pack("limitsFor", token)
 	if err != nil {
 		return FeeConfigLimits{}, fmt.Errorf("pack limitsFor(%s): %w", token.Hex(), err)
 	}
-	out, err := r.chain.call(ctx, feeConfig, data)
+	out, err := r.read(ctx, chainID, feeConfig, fmt.Sprintf("limitsFor(%s)", token.Hex()), data)
 	if err != nil {
-		return FeeConfigLimits{}, fmt.Errorf("limitsFor(%s) call: %w", token.Hex(), err)
+		return FeeConfigLimits{}, err
 	}
 	var res struct{ Arg0 feeConfigLimitsTuple }
 	if err := parsedFeeConfigABI.UnpackIntoInterface(&res, "limitsFor", out); err != nil {
@@ -151,18 +222,21 @@ func (r *FeeConfigReader) LimitsFor(ctx context.Context, feeConfig string, token
 }
 
 // FeeRecipient reads where every fee on this chain is paid.
-func (r *FeeConfigReader) FeeRecipient(ctx context.Context, feeConfig string) (common.Address, error) {
+func (r *FeeConfigReader) FeeRecipient(ctx context.Context, chainID int64, feeConfig string) (common.Address, error) {
 	data, err := parsedFeeConfigABI.Pack("feeRecipient")
 	if err != nil {
 		return common.Address{}, fmt.Errorf("pack feeRecipient: %w", err)
 	}
-	out, err := r.chain.call(ctx, feeConfig, data)
+	out, err := r.read(ctx, chainID, feeConfig, "feeRecipient", data)
 	if err != nil {
-		return common.Address{}, fmt.Errorf("feeRecipient call: %w", err)
+		return common.Address{}, err
 	}
 	vals, err := parsedFeeConfigABI.Unpack("feeRecipient", out)
-	if err != nil || len(vals) == 0 {
-		return common.Address{}, fmt.Errorf("decode feeRecipient: %v", err)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("decode feeRecipient: %w", err)
+	}
+	if len(vals) == 0 {
+		return common.Address{}, errors.New("decode feeRecipient: empty result")
 	}
 	addr, ok := vals[0].(common.Address)
 	if !ok {
@@ -171,9 +245,15 @@ func (r *FeeConfigReader) FeeRecipient(ctx context.Context, feeConfig string) (c
 	return addr, nil
 }
 
-// TxSucceeded reports whether a mined tx succeeded (for confirming a signed config change).
-func (r *FeeConfigReader) TxSucceeded(ctx context.Context, txHash string) (bool, error) {
-	return r.chain.txSucceeded(ctx, txHash)
+// TxSucceeded reports whether a mined tx on chainID succeeded. A success says nothing about what
+// the tx did: a flow that confirms a config change must re-read the row (RawRate, LimitsFor,
+// FeeRecipient) and compare it with the intent, never trust a caller-supplied hash alone.
+func (r *FeeConfigReader) TxSucceeded(ctx context.Context, chainID int64, txHash string) (bool, error) {
+	c, err := r.chain(chainID)
+	if err != nil {
+		return false, err
+	}
+	return c.txSucceeded(ctx, txHash)
 }
 
 // FeeConfigRateRow is one row of a setRates batch.
@@ -183,14 +263,17 @@ type FeeConfigRateRow struct {
 	Rate    FeeConfigRate
 }
 
-// PackFeeConfigSetRates encodes setRates for the admin to sign. All-or-nothing on-chain.
+// PackFeeConfigSetRates encodes setRates for the admin to sign. It refuses what the contract would
+// revert on (and duplicate rows, whose last write would silently win), so the admin is never
+// asked to sign a doomed tx.
 func PackFeeConfigSetRates(rows []FeeConfigRateRow) ([]byte, error) {
 	if len(rows) == 0 {
-		return nil, fmt.Errorf("fee config: no rows to set")
+		return nil, errors.New("fee config: no rows to set")
 	}
 	features := make([][32]byte, len(rows))
 	tokens := make([]common.Address, len(rows))
 	rates := make([]feeConfigRateTuple, len(rows))
+	seen := make(map[[32]byte]map[common.Address]bool, 3)
 	for i, row := range rows {
 		key, err := FeeConfigFeatureKey(row.Feature)
 		if err != nil {
@@ -199,12 +282,22 @@ func PackFeeConfigSetRates(rows []FeeConfigRateRow) ([]byte, error) {
 		if row.Token == (common.Address{}) {
 			return nil, fmt.Errorf("fee config: row %d has no token address", i)
 		}
+		if seen[key] == nil {
+			seen[key] = map[common.Address]bool{}
+		}
+		if seen[key][row.Token] {
+			return nil, fmt.Errorf("fee config: row %d repeats %s for %s", i, row.Feature, row.Token.Hex())
+		}
+		seen[key][row.Token] = true
+		if row.Rate.BPS > FeeConfigMaxBPS {
+			return nil, fmt.Errorf("fee config: row %d rate %d bps is above the %d bps cap", i, row.Rate.BPS, FeeConfigMaxBPS)
+		}
 		flat := row.Rate.FlatFee
 		if flat == nil {
 			flat = new(big.Int)
 		}
-		if flat.Sign() < 0 {
-			return nil, fmt.Errorf("fee config: row %d has a negative flat fee", i)
+		if err := checkUint128(flat); err != nil {
+			return nil, fmt.Errorf("fee config: row %d flat fee: %w", i, err)
 		}
 		features[i], tokens[i] = key, row.Token
 		rates[i] = feeConfigRateTuple{Bps: row.Rate.BPS, FlatFee: flat, Active: row.Rate.Active}
@@ -214,8 +307,17 @@ func PackFeeConfigSetRates(rows []FeeConfigRateRow) ([]byte, error) {
 
 // PackFeeConfigSetLimits encodes setLimits for one token. Both limits must be positive.
 func PackFeeConfigSetLimits(token common.Address, l FeeConfigLimits) ([]byte, error) {
+	if token == (common.Address{}) {
+		return nil, errors.New("fee config: limits need a token address")
+	}
 	if l.MaxPerOrder == nil || l.MaxOwed == nil || l.MaxPerOrder.Sign() <= 0 || l.MaxOwed.Sign() <= 0 {
-		return nil, fmt.Errorf("fee config: limits must both be positive")
+		return nil, errors.New("fee config: limits must both be positive")
+	}
+	if err := checkUint128(l.MaxPerOrder); err != nil {
+		return nil, fmt.Errorf("fee config: max per order: %w", err)
+	}
+	if err := checkUint128(l.MaxOwed); err != nil {
+		return nil, fmt.Errorf("fee config: max owed: %w", err)
 	}
 	return parsedFeeConfigABI.Pack("setLimits", token, feeConfigLimitsTuple{MaxPerOrder: l.MaxPerOrder, MaxOwed: l.MaxOwed})
 }
@@ -223,7 +325,17 @@ func PackFeeConfigSetLimits(token common.Address, l FeeConfigLimits) ([]byte, er
 // PackFeeConfigSetFeeRecipient encodes setFeeRecipient.
 func PackFeeConfigSetFeeRecipient(recipient common.Address) ([]byte, error) {
 	if recipient == (common.Address{}) {
-		return nil, fmt.Errorf("fee config: zero fee recipient")
+		return nil, errors.New("fee config: zero fee recipient")
 	}
 	return parsedFeeConfigABI.Pack("setFeeRecipient", recipient)
+}
+
+func checkUint128(x *big.Int) error {
+	if x.Sign() < 0 {
+		return errors.New("negative")
+	}
+	if x.Cmp(maxUint128) > 0 {
+		return errors.New("does not fit uint128")
+	}
+	return nil
 }
