@@ -1,6 +1,6 @@
 # Core contracts: security model
 
-Scope: `FeeConfig`, `EscrowBase`, `OrderEscrow`, `P2PEscrow` (this directory). The legacy
+Scope: `FeeConfig`, `EscrowBase`, `OrderEscrow`, `P2PTradeEscrow` (this directory). The legacy
 contracts one level up (`ProductEscrowV2`, `ServiceContactV2`, `P2PEscrowV3`, `FeeManager`,
 `MCGPRewardDistributor`) are being retired and are out of scope.
 
@@ -14,7 +14,7 @@ Deployed on Sonic (146) and BSC (56). Stablecoins: 6 decimals on Sonic, 18 on BS
   the rate table is also the token allowlist.
 - **OrderEscrow** holds a buyer's payment for a product or paid service until delivery, then pays
   the seller minus the merchant fee.
-- **P2PEscrow** holds sellers' pooled liquidity and locks it per trade against EIP-712 signed ad
+- **P2PTradeEscrow** holds sellers' pooled liquidity and locks it per trade against EIP-712 signed ad
   vouchers, releasing to the buyer minus the fee.
 
 Money only ever moves to a party of the order or trade (buyer, seller, merchant) or to
@@ -31,8 +31,8 @@ never touch these contracts.
 | `PAUSER_ROLE` | escrows | pause new exposure | pause blocks only create / deposit / open; every exit stays open; cannot unpause |
 | `RESCUER_ROLE` | escrows | `rescue(token)` | only `balanceOf(this) − owed[token]`, always paid to the fee recipient |
 | `RESOLVER_ROLE` | escrows | settle disputes | only the disputed order's or trade's own funds; OrderEscrow split bounded by the order total |
-| seller's releaser | P2PEscrow | release that seller's trades | opt-in per seller (`setReleaser`); no global release power exists |
-| trade releaser | P2PEscrow | release one buy-ad trade | named by the depositing user in `openTradeWithDeposit` (e.g. the platform key that pays the user out off-chain); never the receiving merchant |
+| seller's releaser | P2PTradeEscrow | release that seller's trades | opt-in per seller (`setReleaser`); no global release power exists |
+| trade releaser | P2PTradeEscrow | release one buy-ad trade | named by the depositing user in `openTradeWithDeposit` (e.g. the platform key that pays the user out off-chain); never the receiving merchant |
 
 At deployment every role is granted in the initializers; the deployer holds none
 (`deploy/core.js` asserts this). The admin is the platform owner's wallet (business decision D2,
@@ -52,7 +52,7 @@ OrderEscrow
 - Liveness: every open order reaches a terminal state without an admin, even while paused and with
   every payee blacklisted.
 
-P2PEscrow
+P2PTradeEscrow
 - `owed[token] = Σ available + Σ locked + Σ claimable ≤ token.balanceOf(escrow)`.
 - `locked[seller] = Σ` amounts of that seller's open trades.
 - `voucherFilled[h] ≤ maxAmount` and equals the amount of its trades not returned to the pool.
@@ -77,10 +77,10 @@ P2PEscrow
 
 ## Timeouts
 
-| | OrderEscrow | P2PEscrow |
+| | OrderEscrow | P2PTradeEscrow |
 |---|---|---|
 | Delivery / payment | `handlingDays` (1–30) per order; after it anyone can refund the buyer | 30 minutes to mark paid; after it anyone can cancel back to the seller |
-| Confirmation | 7 days after delivery; after it anyone can release to the seller | seller's own auto-release window (off, or 30 minutes–7 days); no dispute once it is due |
+| Confirmation | 7 days after delivery; after it anyone can release to the seller | seller's own auto-release window (off, or 30 minutes–7 days), fixed when the trade opens and never on a buy-ad trade; no dispute once it is due |
 | Dispute backstop | 14 days; unresolved → buyer refunded | 60 days; unresolved → crypto back to the seller |
 
 ## Operations runbook
@@ -115,6 +115,15 @@ P2PEscrow
   fallback only; operations must resolve disputes well inside it and alert on `TradeDisputed`.
 - **Shared limits.** `maxOwed` is checked against each escrow's own `owed`, so it caps exposure per
   contract, not per chain.
+- **Cap griefing.** `maxOwed` is one cap per token for the whole contract (D7). Anyone willing to
+  lock that much of their own money can fill it (self-dealt orders until their deadline, or idle
+  P2P pool deposits) and block new orders or buy-ad trades meanwhile; they get the money back, less
+  the flat fees. The cap bounds loss from a bug until the audit; the response to griefing is the
+  admin raising it with `setLimits`. Alert when `owed` nears `maxOwed`.
+- **The buyer chooses the order split.** `createOrder` takes the product and shipping amounts from
+  the buyer and the merchant fee applies to the product part only, so a colluding buyer and seller
+  can move value into shipping to avoid the fee. The backend must check both amounts of every
+  `OrderCreated` against the order it priced before treating it as paid.
 - **Token assumptions.** Only plain ERC-20s without transfer fees or negative rebasing may be given
   a rate. Blacklisting is handled by deferred payouts; a token that blacklists the escrow itself
   would freeze everything in that token.

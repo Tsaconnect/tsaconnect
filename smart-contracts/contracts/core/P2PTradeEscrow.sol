@@ -6,7 +6,7 @@ import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EscrowBase} from "./EscrowBase.sol";
 import {IFeeConfig} from "./interfaces/IFeeConfig.sol";
 
-/// @title P2PEscrow
+/// @title P2PTradeEscrow
 /// @notice Pool-based P2P escrow. A seller deposits once and publishes ads off-chain as signed
 ///         EIP-712 vouchers; a buyer opens a trade against a voucher, which locks that amount
 ///         until it is released to the buyer (minus the fee), cancelled back to the seller's
@@ -27,7 +27,7 @@ import {IFeeConfig} from "./interfaces/IFeeConfig.sol";
 ///         - Trades are stored under `tradeKey(opener, tradeId)` (opener = the buyer for openTrade,
 ///           the depositing user for openTradeWithDeposit), so nobody can claim someone else's
 ///           trade id first. Events carry the key in the `tradeId` field; every action takes it.
-contract P2PEscrow is EscrowBase, EIP712Upgradeable {
+contract P2PTradeEscrow is EscrowBase, EIP712Upgradeable {
     bytes32 public constant RESOLVER_ROLE = keccak256("RESOLVER_ROLE");
 
     bytes32 public constant FEATURE_PLATFORM = "p2p_platform";
@@ -70,7 +70,8 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         address taker; // address(0): any buyer; otherwise only this buyer may open trades on it
     }
 
-    /// @dev `expiresAt` (payment deadline) and the fee bps are fixed when the trade opens.
+    /// @dev `expiresAt` (payment deadline), the fee bps and the auto-release window are fixed when
+    ///      the trade opens.
     struct Trade {
         address seller;
         uint96 amount;
@@ -84,6 +85,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         uint40 disputedAt;
         uint16 platformFeeBps;
         uint16 gasFeeBps;
+        uint40 autoReleaseWindow; // the seller's window at open; 0 on buy-ad trades
         bytes32 voucherHash;
         address tradeReleaser; // set by the depositing user on a buy-ad trade; may release this trade only
     }
@@ -204,7 +206,10 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     }
 
     /// @notice Opt in to auto-release: a Paid trade releases to the buyer `window` after markPaid
-    ///         unless you release or dispute first. 0 turns it off. Applies to trades marked paid later.
+    ///         unless you release or dispute first. 0 turns it off. Applies to your sell-ad trades
+    ///         opened later; a trade keeps the window it opened with. Never applies when you sell
+    ///         into a buy-ad (openTradeWithDeposit): the merchant marking paid must not be able to
+    ///         take your crypto by the clock.
     function setAutoReleaseWindow(uint40 window) external {
         if (window != 0 && (window < MIN_AUTO_RELEASE_WINDOW || window > MAX_AUTO_RELEASE_WINDOW)) revert WindowOutOfBounds();
         address seller = _msgSender();
@@ -289,7 +294,6 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         if (merchant == user) revert SelfTrade();
         if (releaser == merchant) revert InvalidReleaser();
 
-        _addOwed(token, amount, feeConfig.limitsFor(token).maxOwed);
         _s().locked[user][token] += amount;
         _storeTrade(key, user, merchant, token, amount, Funding.DepositedByTaker, bytes32(0));
         if (releaser != address(0)) {
@@ -309,8 +313,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         if (_msgSender() != t.buyer) revert OnlyBuyer();
         if (block.timestamp >= t.expiresAt) revert PaymentWindowClosed(t.expiresAt);
         t.status = Status.Paid;
-        uint40 window = _s().autoReleaseWindow[t.seller];
-        if (window != 0) t.autoReleaseAt = uint40(block.timestamp) + window;
+        if (t.autoReleaseWindow != 0) t.autoReleaseAt = uint40(block.timestamp) + t.autoReleaseWindow;
         emit TradePaid(key);
     }
 
@@ -453,8 +456,10 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         if (p.bps > MAX_PLATFORM_FEE_BPS || g.bps > MAX_GAS_FEE_BPS || uint256(p.bps) + g.bps > MAX_FEE_BPS) {
             revert FeeAboveCap();
         }
-        uint256 maxPerTrade = feeConfig.limitsFor(token).maxPerOrder;
-        if (amount > maxPerTrade) revert AmountAboveLimit(amount, maxPerTrade);
+        IFeeConfig.Limits memory l = feeConfig.limitsFor(token);
+        if (amount > l.maxPerOrder) revert AmountAboveLimit(amount, l.maxPerOrder);
+        // A buy-ad deposit brings new funds in; a sell-ad trade locks what the pool already owes.
+        if (funding == Funding.DepositedByTaker) _addOwed(token, amount, l.maxOwed);
 
         _s().trades[key] = Trade({
             seller: seller,
@@ -469,6 +474,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
             disputedAt: 0,
             platformFeeBps: p.bps,
             gasFeeBps: g.bps,
+            autoReleaseWindow: funding == Funding.PooledFromMaker ? _s().autoReleaseWindow[seller] : 0,
             voucherHash: voucherHash,
             tradeReleaser: address(0)
         });

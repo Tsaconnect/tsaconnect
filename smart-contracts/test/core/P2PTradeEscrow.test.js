@@ -2,7 +2,7 @@ const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
-// P2PEscrow: the redeployed P2P escrow (docs/specs/2026-10-27-contracts-audit-ready-redesign.md §6.3, §14).
+// P2PTradeEscrow: the redeployed P2P escrow (docs/specs/2026-10-27-contracts-audit-ready-redesign.md §6.3, §14).
 
 const PLATFORM = ethers.encodeBytes32String("p2p_platform");
 const GAS = ethers.encodeBytes32String("p2p_gas");
@@ -18,7 +18,7 @@ async function setup({ platformBps = 100, gasBps = 50, maxPerOrder = usd(5000), 
   const [admin, seller, buyer, feeWallet, resolver, stranger, pauser, releaser, merchant] = await ethers.getSigners();
   const fc = await upgrades.deployProxy(await ethers.getContractFactory("FeeConfig"), [admin.address, feeWallet.address, { features: [], tokens: [], rates: [], limitTokens: [], limits: [] }], { kind: "uups" });
   const forwarder = await (await ethers.getContractFactory("TSAForwarder")).deploy("TSAForwarder");
-  const escrow = await upgrades.deployProxy(await ethers.getContractFactory("contracts/core/P2PEscrow.sol:P2PEscrow"), [admin.address, [], []], {
+  const escrow = await upgrades.deployProxy(await ethers.getContractFactory("contracts/core/P2PTradeEscrow.sol:P2PTradeEscrow"), [admin.address, [], []], {
     kind: "uups",
     constructorArgs: [await forwarder.getAddress(), await fc.getAddress()],
   });
@@ -71,7 +71,7 @@ async function openPooled(ctx, name, amount = usd(100)) {
 
 const bal = (ctx, who) => ctx.token.balanceOf(who.address ?? who);
 
-describe("P2PEscrow", () => {
+describe("P2PTradeEscrow", () => {
   describe("pool", () => {
     it("deposit and withdraw track owed; withdraw works while paused and needs no token config", async () => {
       const ctx = await setup();
@@ -205,6 +205,35 @@ describe("P2PEscrow", () => {
       await expect(ctx.escrow.connect(ctx.stranger).finalizeRelease(k2)).to.emit(ctx.escrow, "TradeAutoReleased");
       await expect(ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(8 * DAY)).to.be.revertedWithCustomError(ctx.escrow, "WindowOutOfBounds");
     });
+
+    it("a trade keeps the window it opened with", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(DAY);
+      const armed = await openPooled(ctx, "w1");
+      await ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(0);
+      const unarmed = await openPooled(ctx, "w2", usd(50));
+      await ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(30 * MIN);
+
+      // Turning it off cannot disarm a trade the buyer opened under it, and turning it on (or
+      // shortening it) cannot arm one opened without it.
+      await ctx.escrow.connect(ctx.buyer).markPaid(armed);
+      await ctx.escrow.connect(ctx.buyer).markPaid(unarmed);
+      expect((await ctx.escrow.getTrade(armed)).autoReleaseAt).to.equal((await time.latest()) - 1 + DAY);
+      expect((await ctx.escrow.getTrade(unarmed)).autoReleaseAt).to.equal(0);
+      await time.increase(DAY);
+      await ctx.escrow.finalizeRelease(armed);
+      await expect(ctx.escrow.finalizeRelease(unarmed)).to.be.revertedWithCustomError(ctx.escrow, "AutoReleaseNotArmed");
+    });
+
+    it("never arms when the seller sold into a buy-ad: the merchant cannot mark paid and wait", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).setAutoReleaseWindow(30 * MIN);
+      await ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("ba"), ctx.T, usd(100), ctx.merchant.address, ethers.ZeroAddress);
+      const k = keyOf(ctx.seller, "ba");
+      await ctx.escrow.connect(ctx.merchant).markPaid(k);
+      await time.increase(7 * DAY);
+      await expect(ctx.escrow.connect(ctx.merchant).finalizeRelease(k)).to.be.revertedWithCustomError(ctx.escrow, "AutoReleaseNotArmed");
+    });
   });
 
   describe("disputes", () => {
@@ -306,7 +335,7 @@ describe("P2PEscrow", () => {
     it("cannot be initialized twice, and passes OpenZeppelin upgrade validation", async () => {
       const ctx = await setup();
       await expect(ctx.escrow.initialize(ctx.stranger.address, [], [])).to.be.revertedWithCustomError(ctx.escrow, "InvalidInitialization");
-      await upgrades.validateUpgrade(await ctx.escrow.getAddress(), await ethers.getContractFactory("contracts/core/P2PEscrow.sol:P2PEscrow"), {
+      await upgrades.validateUpgrade(await ctx.escrow.getAddress(), await ethers.getContractFactory("contracts/core/P2PTradeEscrow.sol:P2PTradeEscrow"), {
         kind: "uups",
         constructorArgs: [await ctx.forwarder.getAddress(), await ctx.fc.getAddress()],
       });

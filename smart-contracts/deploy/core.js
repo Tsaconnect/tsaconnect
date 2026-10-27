@@ -1,28 +1,34 @@
 // smart-contracts/deploy/core.js
 //
 // Deploy the audit-ready core set on one network: FeeConfig, OrderEscrow (where the chain has
-// `core.order`) and P2PEscrow. Spec: docs/specs/2026-10-27-contracts-audit-ready-redesign.md.
+// `core.order`) and P2PTradeEscrow. Spec: docs/specs/2026-10-27-contracts-audit-ready-redesign.md.
 //
 //   CHECK_ONLY=1 npx hardhat run deploy/core.js --network sonicMainnet     # plan only, sends nothing
 //   CORE_ADMIN_CONFIRM=0x62bA… npx hardhat run deploy/core.js --network sonicMainnet
 //
+// Dev set (CORE_DEV=1): the deployer is the admin, and the default resolver and pauser, so the
+// whole flow can be tested end to end without the PM's wallet. It is recorded under CoreDev*
+// ledger names, never the production ones, and is thrown away: the production set is a fresh
+// deploy with the PM as admin, not a handover of the dev contracts.
+//   CORE_DEV=1 CORE_ADMIN_CONFIRM=<deployer> npx hardhat run deploy/core.js --network sonicMainnet
+//
 // How it stays safe:
 //   - Every role and the whole fee/limit configuration are set in the proxies' initializers, so the
-//     admin (default: the PM) owns each contract from its first block. The deployer only pays gas
-//     and never holds a role; the script asserts that after deploying.
+//     admin (default: the PM) owns each contract from its first block. Outside a dev set the
+//     deployer only pays gas and never holds a role; the script asserts that after deploying.
 //   - Proxies are created with their init calldata in the ERC1967Proxy constructor (no window in
 //     which anyone else could initialize them), and the implementations disable initializers.
-//   - The admin may not be the deployer or a hot key; resolvers and pausers may not be hot keys.
-//     On mainnets the admin must be typed twice (CORE_ADMIN_CONFIRM).
-//   - Everything is read back and asserted, then recorded in deployments/<network>.json, then
-//     verified on the explorer.
+//   - The admin may not be a hot key, nor the deployer outside a dev set; resolvers and pausers may
+//     not be hot keys. On mainnets the admin must be typed twice (CORE_ADMIN_CONFIRM).
+//   - Each proxy is recorded in deployments/<network>.json as soon as it exists; everything is
+//     then read back and asserted, marked `readBack`, and verified on the explorer.
 //
 // Config lives in deploy/chains.js (`core` block per network).
 
 const hre = require("hardhat");
 const { ethers, upgrades } = hre;
 const { getAddress, isAddress, ZeroAddress, encodeBytes32String } = require("ethers");
-const { resolveChain, validateAddresses, writeLedger, reuseFromLedger } = require("./lib");
+const { resolveChain, validateAddresses, writeLedger, reuseFromLedger, assertOwnerConfirm } = require("./lib");
 const { chains, CANONICAL_HOT_KEYS } = require("./chains");
 
 // A rehearsal against a local fork (anvil / hardhat node on `localhost`) borrows a real chain's
@@ -40,10 +46,15 @@ function chainConfig() {
 const ORDER = encodeBytes32String("order");
 const P2P_PLATFORM = encodeBytes32String("p2p_platform");
 const P2P_GAS = encodeBytes32String("p2p_gas");
-const P2P_FQN = "contracts/core/P2PEscrow.sol:P2PEscrow";
+const P2P_FQN = "contracts/core/P2PTradeEscrow.sol:P2PTradeEscrow";
 
 const MAINNETS = new Set(["sonicMainnet", "bscMainnet"]);
-const LEDGER = { feeConfig: "CoreFeeConfig", order: "CoreOrderEscrow", p2p: "CoreP2PEscrow" };
+
+/** Ledger names: a dev set never shares a name with the production one. */
+function ledgerNames(dev) {
+  const p = dev ? "CoreDev" : "Core";
+  return { feeConfig: `${p}FeeConfig`, order: `${p}OrderEscrow`, p2p: `${p}P2PTradeEscrow` };
+}
 
 function fail(msg) {
   throw new Error(`deploy/core: ${msg}`);
@@ -86,24 +97,28 @@ function buildInitialConfig(cfg) {
   return { features, tokens, rates, limitTokens, limits };
 }
 
-function checkRoles(core, deployer) {
+/**
+ * Resolve and check every role holder before anything is sent. Production: the deployer holds no
+ * role. Dev (`dev`): the deployer is the admin, and the resolver and pauser unless others are
+ * named. Both refuse hot keys, and on mainnets the admin must be typed twice (CORE_ADMIN_CONFIRM).
+ */
+function checkRoles(core, deployer, { dev = false } = {}) {
+  deployer = getAddress(deployer);
   const hot = new Set([...Object.values(CANONICAL_HOT_KEYS), ...core.forbidden].map(getAddress));
-  const admin = checkedAddress("CORE_ADMIN", core.admin);
-  if (admin === getAddress(deployer)) fail("the admin is the deployer: a deploy key must never hold the admin role");
+  const admin = dev ? deployer : checkedAddress("CORE_ADMIN", core.admin);
   if (hot.has(admin)) fail(`the admin ${admin} is a hot key`);
-  const resolvers = core.resolvers.map((a) => checkedAddress("CORE_RESOLVERS", a));
-  const pausers = core.pausers.map((a) => checkedAddress("CORE_PAUSERS", a));
+  const named = (list, label) => list.map((a) => checkedAddress(label, a));
+  const resolvers = dev && core.resolvers.length === 0 ? [deployer] : named(core.resolvers, "CORE_RESOLVERS");
+  const pausers = dev && core.pausers.length === 0 ? [deployer] : named(core.pausers, "CORE_PAUSERS");
   for (const a of [...resolvers, ...pausers]) {
     if (hot.has(a)) fail(`${a} is a hot key and may not be a resolver or pauser`);
-    if (a === getAddress(deployer)) fail(`${a} is the deployer and may not hold a role`);
+    if (!dev && a === deployer) fail(`${a} is the deployer and may not hold a role`);
   }
   const recipient = checkedAddress("CORE_FEE_RECIPIENT", core.feeRecipient);
-  if (recipient === getAddress(deployer) || hot.has(recipient)) fail(`the fee recipient ${recipient} is the deployer or a forbidden key`);
-  if (MAINNETS.has(hre.network.name)) {
-    if (!core.adminConfirm || getAddress(core.adminConfirm) !== admin) {
-      fail(`set CORE_ADMIN_CONFIRM to the admin (${admin}) to deploy on ${hre.network.name}`);
-    }
-  }
+  if (recipient === deployer || hot.has(recipient)) fail(`the fee recipient ${recipient} is the deployer or a forbidden key`);
+  const confirm = { label: "deploy/core", owner: admin, confirm: core.adminConfirm, deployerAddr: deployer, ownerVar: "the admin", confirmVar: "CORE_ADMIN_CONFIRM", allowDeployerOwner: dev };
+  if (MAINNETS.has(hre.network.name)) assertOwnerConfirm(confirm);
+  else if (!dev && admin === deployer) fail("the admin is the deployer: a deploy key must never hold the admin role");
   return { admin, resolvers, pausers };
 }
 
@@ -117,15 +132,17 @@ async function deployProxy(name, fqn, args, constructorArgs) {
   return { contract: proxy, address, impl };
 }
 
+/** The admin holds every role; unless the deployer is the admin (dev), the deployer holds none. */
 async function assertRoles(label, c, roles, admin, deployer) {
   const ADMIN = await c.DEFAULT_ADMIN_ROLE();
   if (getAddress(await c.defaultAdmin()) !== admin) fail(`${label}: defaultAdmin is not ${admin}`);
+  const deployerMayHold = admin === deployer;
   for (const r of roles) {
     const role = await c[r]();
     if (!(await c.hasRole(role, admin))) fail(`${label}: admin lacks ${r}`);
-    if (await c.hasRole(role, deployer)) fail(`${label}: deployer holds ${r}`);
+    if (!deployerMayHold && (await c.hasRole(role, deployer))) fail(`${label}: deployer holds ${r}`);
   }
-  if (await c.hasRole(ADMIN, deployer)) fail(`${label}: deployer holds DEFAULT_ADMIN_ROLE`);
+  if (!deployerMayHold && (await c.hasRole(ADMIN, deployer))) fail(`${label}: deployer holds DEFAULT_ADMIN_ROLE`);
 }
 
 async function verify(address, label) {
@@ -147,12 +164,14 @@ async function main() {
   const [signer] = await ethers.getSigners();
   const deployer = getAddress(signer.address);
   const net = await ethers.provider.getNetwork();
-  const { admin, resolvers, pausers } = checkRoles(core, deployer);
+  const dev = process.env.CORE_DEV === "1";
+  const LEDGER = ledgerNames(dev);
+  const { admin, resolvers, pausers } = checkRoles(core, deployer, { dev });
   const feeRecipient = checkedAddress("CORE_FEE_RECIPIENT", core.feeRecipient);
   const forwarder = core.forwarder ? checkedAddress("CORE_FORWARDER", core.forwarder) : ZeroAddress;
   const initial = buildInitialConfig(cfg);
 
-  console.log(`core set on ${hre.network.name} (chain ${net.chainId}), deployer ${deployer}`);
+  console.log(`core ${dev ? "DEV set (deployer is admin; not for production)" : "set"} on ${hre.network.name} (chain ${net.chainId}), deployer ${deployer}`);
   console.log(`  admin ${admin}, fee recipient ${feeRecipient}, forwarder ${forwarder}`);
   console.log(`  resolvers [${resolvers.join(", ")}], pausers [${pausers.join(", ")}]`);
   initial.features.forEach((f, i) =>
@@ -184,16 +203,25 @@ async function main() {
     return;
   }
 
-  const out = {};
-  const prior = reuseFromLedger(hre, LEDGER.feeConfig, null);
-  if (prior) fail(`${LEDGER.feeConfig} is already recorded (${prior.proxy}); set FORCE_REDEPLOY=1 to deploy a new set`);
+  for (const name of Object.values(LEDGER)) {
+    const prior = reuseFromLedger(hre, name, null);
+    if (prior) fail(`${name} is already recorded (${prior.proxy}); set FORCE_REDEPLOY=1 to deploy a new set`);
+  }
 
+  // Each proxy is recorded the moment it exists, so a run that dies part-way leaves every live
+  // contract in the ledger (and the guard above refuses a blind re-run) instead of orphaning it.
+  // `readBack` turns true only once the whole set has been checked.
+  const record = (key, d) => writeLedger(hre.network.name, LEDGER[key], { proxy: d.address, impl: d.impl, admin, dev, readBack: false });
+  const out = {};
   out.feeConfig = await deployProxy("FeeConfig", "FeeConfig", [admin, feeRecipient, initial], []);
+  record("feeConfig", out.feeConfig);
   const fc = out.feeConfig.address;
   if (core.order) {
     out.order = await deployProxy("OrderEscrow", "OrderEscrow", [admin, resolvers, pausers], [forwarder, fc]);
+    record("order", out.order);
   }
-  out.p2p = await deployProxy("P2PEscrow", P2P_FQN, [admin, resolvers, pausers], [forwarder, fc]);
+  out.p2p = await deployProxy("P2PTradeEscrow", P2P_FQN, [admin, resolvers, pausers], [forwarder, fc]);
+  record("p2p", out.p2p);
 
   // Read everything back before recording it.
   await assertRoles("FeeConfig", out.feeConfig.contract, ["CONFIG_ROLE", "UPGRADER_ROLE"], admin, deployer);
@@ -206,7 +234,7 @@ async function main() {
     const l = await out.feeConfig.contract.limitsFor(initial.limitTokens[i]);
     if (l.maxPerOrder !== initial.limits[i].maxPerOrder || l.maxOwed !== initial.limits[i].maxOwed) fail(`FeeConfig limits ${i} mismatch`);
   }
-  for (const [key, label] of [["order", "OrderEscrow"], ["p2p", "P2PEscrow"]]) {
+  for (const [key, label] of [["order", "OrderEscrow"], ["p2p", "P2PTradeEscrow"]]) {
     if (!out[key]) continue;
     const c = out[key].contract;
     await assertRoles(label, c, ["UPGRADER_ROLE", "PAUSER_ROLE", "RESCUER_ROLE", "RESOLVER_ROLE"], admin, deployer);
@@ -215,15 +243,15 @@ async function main() {
     for (const r of resolvers) if (!(await c.hasRole(await c.RESOLVER_ROLE(), r))) fail(`${label}: resolver ${r} missing`);
     for (const p of pausers) if (!(await c.hasRole(await c.PAUSER_ROLE(), p))) fail(`${label}: pauser ${p} missing`);
   }
-  console.log("  read-back OK: admin holds every role, the deployer holds none");
+  console.log(`  read-back OK: admin holds every role${dev ? "" : ", the deployer holds none"}`);
 
-  writeLedger(hre.network.name, LEDGER.feeConfig, { proxy: fc, impl: out.feeConfig.impl });
-  if (out.order) writeLedger(hre.network.name, LEDGER.order, { proxy: out.order.address, impl: out.order.impl });
-  writeLedger(hre.network.name, LEDGER.p2p, { proxy: out.p2p.address, impl: out.p2p.impl });
+  for (const key of Object.keys(LEDGER)) {
+    if (out[key]) writeLedger(hre.network.name, LEDGER[key], { proxy: out[key].address, impl: out[key].impl, admin, dev, readBack: true });
+  }
 
   await verify(fc, "FeeConfig");
   if (out.order) await verify(out.order.address, "OrderEscrow");
-  await verify(out.p2p.address, "P2PEscrow");
+  await verify(out.p2p.address, "P2PTradeEscrow");
   return out;
 }
 
@@ -231,4 +259,4 @@ if (require.main === module) {
   main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { main, buildInitialConfig, checkRoles };
+module.exports = { main, buildInitialConfig, checkRoles, ledgerNames };

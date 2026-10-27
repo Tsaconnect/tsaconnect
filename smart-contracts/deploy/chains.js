@@ -92,7 +92,7 @@ function liquidityPool() {
 }
 
 // Audit-ready core set (deploy/core.js; spec docs/specs/2026-10-27-contracts-audit-ready-redesign.md).
-// FeeConfig + OrderEscrow (Sonic) + P2PEscrow. Everything here is applied at initialization, so the
+// FeeConfig + OrderEscrow (Sonic) + P2PTradeEscrow. Everything here is applied at initialization, so the
 // admin owns the contracts from their first block and the deployer never holds a role.
 // Rates mirror what the live contracts charge today (Sonic FeeManager has no rows: the escrows run
 // on their legacy fallback of 2% + $0.10 for orders and 0.5% for P2P; BSC charges 1.9% p2p_platform).

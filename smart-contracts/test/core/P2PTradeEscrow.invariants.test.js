@@ -2,7 +2,7 @@ const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
-// Stateful invariant fuzzing for P2PEscrow (same approach as OrderEscrow.invariants.test.js).
+// Stateful invariant fuzzing for P2PTradeEscrow (same approach as OrderEscrow.invariants.test.js).
 // After EVERY random step:
 //   P1  owed[token] == Σ available + Σ locked + Σ claimable, and balanceOf(escrow) >= owed
 //   P2  locked[seller] == Σ amount of that seller's open trades (Pending / Paid / Disputed)
@@ -18,7 +18,7 @@ const GAS = ethers.encodeBytes32String("p2p_gas");
 const DAY = 24 * 60 * 60;
 const S = { None: 0, Pending: 1, Paid: 2, Released: 3, Cancelled: 4, Disputed: 5, Resolved: 6 };
 const OPEN = new Set([S.Pending, S.Paid, S.Disputed]);
-const P2P = "contracts/core/P2PEscrow.sol:P2PEscrow";
+const P2P = "contracts/core/P2PTradeEscrow.sol:P2PTradeEscrow";
 
 function prng(seed) {
   let x = seed >>> 0 || 1;
@@ -33,7 +33,7 @@ function prng(seed) {
 const RUNS = process.env.SEED ? 1 : Number(process.env.INVARIANT_RUNS || 10);
 const STEPS = Number(process.env.INVARIANT_STEPS || 60);
 
-describe("P2PEscrow invariants (stateful fuzz)", function () {
+describe("P2PTradeEscrow invariants (stateful fuzz)", function () {
   this.timeout(15 * 60 * 1000);
 
   for (let run = 0; run < RUNS; run++) {

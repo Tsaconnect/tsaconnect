@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { buildInitialConfig, checkRoles } = require("../../deploy/core");
+const { buildInitialConfig, checkRoles, ledgerNames } = require("../../deploy/core");
 const { chains, CANONICAL_HOT_KEYS } = require("../../deploy/chains");
 
 // deploy/core.js pure parts: the initial FeeConfig rows/limits and the role checks.
@@ -40,5 +40,23 @@ describe("deploy/core.js", () => {
     expect(() => checkRoles({ ...base, feeRecipient: deployer }, deployer)).to.throw(/fee recipient/);
     expect(() => checkRoles({ ...base, feeRecipient: CANONICAL_HOT_KEYS.treasury }, deployer)).to.throw(/fee recipient/);
     expect(checkRoles(base, deployer).admin).to.equal(ethers.getAddress(base.admin));
+  });
+
+  it("a dev set makes the deployer the admin, resolver and pauser, but still refuses hot keys", () => {
+    const base = { ...chains.sonicMainnet.core, adminConfirm: null, resolvers: [], pausers: [], forbidden: [] };
+    const deployer = ethers.getAddress(ethers.Wallet.createRandom().address);
+    const roles = checkRoles(base, deployer, { dev: true });
+    expect(roles.admin).to.equal(deployer);
+    expect(roles.resolvers).to.deep.equal([deployer]);
+    expect(roles.pausers).to.deep.equal([deployer]);
+    const resolver = ethers.Wallet.createRandom().address;
+    expect(checkRoles({ ...base, resolvers: [resolver] }, deployer, { dev: true }).resolvers).to.deep.equal([ethers.getAddress(resolver)]);
+    expect(() => checkRoles(base, CANONICAL_HOT_KEYS.operator, { dev: true })).to.throw(/hot key/);
+    expect(() => checkRoles({ ...base, feeRecipient: deployer }, deployer, { dev: true })).to.throw(/fee recipient/);
+  });
+
+  it("a dev set never shares ledger names with production", () => {
+    const prod = Object.values(ledgerNames(false));
+    for (const name of Object.values(ledgerNames(true))) expect(prod).to.not.include(name);
   });
 });
