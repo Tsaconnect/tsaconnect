@@ -172,8 +172,8 @@ func TestDirectBSC_SystemWallets_ListsTheDirectEscrow(t *testing.T) {
 	}, "2")
 	got := reg.SystemWallets()
 	want := []FeeSinkStatus{
-		{ChainID: 56, ChainKey: "bsc", Contract: bsc.contractAddress, SystemWallet: treasury},
-		{ChainID: 146, ChainKey: "sonic", Contract: sonic.contractAddress, SystemWallet: treasury},
+		{Label: "P2P escrow", ChainID: 56, ChainKey: "bsc", Contract: bsc.contractAddress, SystemWallet: treasury, Source: FeeSinkSourceSystemWallet},
+		{Label: "P2P escrow", ChainID: 146, ChainKey: "sonic", Contract: sonic.contractAddress, SystemWallet: treasury, Source: FeeSinkSourceSystemWallet},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("SystemWallets = %+v, want %+v", got, want)
