@@ -91,6 +91,68 @@ function liquidityPool() {
   };
 }
 
+// Audit-ready core set (deploy/core.js; spec docs/specs/2026-10-27-contracts-audit-ready-redesign.md).
+// FeeConfig + OrderEscrow (Sonic) + P2PTradeEscrow. Everything here is applied at initialization, so the
+// admin owns the contracts from their first block and the deployer never holds a role.
+// Rates mirror what the live contracts charge today (Sonic FeeManager has no rows: the escrows run
+// on their legacy fallback of 2% + $0.10 for orders and 0.5% for P2P; BSC charges 1.9% p2p_platform).
+// Limits are the pre-audit value caps (decision D7): $1,000 per order/trade, $20,000 owed per contract.
+// Amounts are in each token's base units: Sonic stables have 6 decimals, BSC stables and MCGP 18.
+//   CORE_ADMIN / CORE_ADMIN_CONFIRM — the admin (default: the PM), typed twice on mainnets.
+//   CORE_FEE_RECIPIENT              — default: the system fee wallet.
+//   CORE_RESOLVERS / CORE_PAUSERS   — comma lists, granted at initialization.
+//   CORE_FORWARDER                  — overrides the chain's forwarder (must be a TSAForwarder).
+//   CORE_FORBIDDEN                  — comma list of extra addresses that may hold no role and may
+//                                     not be the fee recipient (e.g. the relayer key).
+const SYSTEM_FEE_WALLET = "0xaF326D5D242C9A55590540f14658adDDd3586A8d";
+const units = (n, decimals) => (BigInt(n) * 10n ** BigInt(decimals)).toString();
+function coreBlock({ chainId, stableDecimals, forwarder, forwarderName = null, order, p2p }) {
+  const stableLimits = { maxPerOrder: units(1000, stableDecimals), maxOwed: units(20000, stableDecimals) };
+  return {
+    chainId, // asserted against the RPC before anything is sent
+    decimals: { USDT: stableDecimals, USDC: stableDecimals, MCGP: 18 }, // asserted against each token
+    forbidden: addressList(process.env.CORE_FORBIDDEN),
+    admin: process.env.CORE_ADMIN || DETERMINISTIC_ROLES.owner,
+    adminConfirm: process.env.CORE_ADMIN_CONFIRM || null,
+    feeRecipient: process.env.CORE_FEE_RECIPIENT || SYSTEM_FEE_WALLET,
+    resolvers: addressList(process.env.CORE_RESOLVERS),
+    pausers: addressList(process.env.CORE_PAUSERS),
+    forwarder: process.env.CORE_FORWARDER || forwarder,
+    // The EIP-712 name the forwarder was deployed with (TSAForwarder's constructor argument);
+    // deploy/core.js refuses a forwarder that does not report it.
+    forwarderName: process.env.CORE_FORWARDER_NAME || forwarderName,
+    order, // { SYMBOL: { bps, flat } } or null when the chain has no OrderEscrow
+    p2p, //   { SYMBOL: { platformBps, gasBps } }
+    limits: {
+      USDT: stableLimits,
+      USDC: stableLimits,
+      // MCGP at its $0.10 OTC price: 10,000 MCGP ≈ $1,000, 200,000 MCGP ≈ $20,000.
+      MCGP: { maxPerOrder: units(10000, 18), maxOwed: units(200000, 18) },
+    },
+  };
+}
+const sonicCore = ({ chainId, forwarder, forwarderName = null }) =>
+  coreBlock({
+    chainId,
+    stableDecimals: 6,
+    forwarder,
+    forwarderName,
+    order: {
+      USDT: { bps: 200, flat: "100000" }, // 2% merchant fee (seller pays) + $0.10 flat (buyer)
+      USDC: { bps: 200, flat: "100000" },
+      MCGP: { bps: 0, flat: "0" }, // MCGP orders were fee-exempt
+    },
+    p2p: { USDT: { platformBps: 0, gasBps: 50 }, USDC: { platformBps: 0, gasBps: 50 } }, // MCGP not in P2P (2026-09-28)
+  });
+const bscCore = ({ chainId }) =>
+  coreBlock({
+    chainId,
+    stableDecimals: 18,
+    forwarder: null, // the direct escrow never had a forwarder (decision Q12)
+    order: null,
+    p2p: { USDT: { platformBps: 190, gasBps: 0 }, USDC: { platformBps: 190, gasBps: 0 } },
+  });
+
 // Public on-chain addresses only — deployer keys stay in .env.
 // Defaults migrated from the legacy scripts; env vars still override.
 const chains = {
@@ -105,6 +167,7 @@ const chains = {
     owner: process.env.OWNER_ADDRESS || null,        // null → deployer at runtime
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
+    core: sonicCore({ chainId: 146, forwarder: "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4", forwarderName: "TSAConnectForwarder" }),
   },
   sonicTestnet: {
     tokens: {
@@ -117,6 +180,7 @@ const chains = {
     owner: process.env.OWNER_ADDRESS || null,
     admins: (process.env.ADMIN_ADDRESSES || "").split(",").filter(Boolean),
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
+    core: sonicCore({ chainId: 14601, forwarder: null }),
   },
   bscMainnet: {
     tokens: {
@@ -131,6 +195,7 @@ const chains = {
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
     liquidityPool: liquidityPool(),
     direct: directBlock(),
+    core: bscCore({ chainId: 56 }),
   },
   bscTestnet: {
     tokens: {
@@ -145,8 +210,9 @@ const chains = {
     systemWallet: process.env.SYSTEM_WALLET_ADDRESS || null,
     liquidityPool: liquidityPool(),
     direct: directBlock(),
+    core: bscCore({ chainId: 97 }),
   },
 };
 
 
-module.exports = { chains, CANONICAL_PERMIT2, CANONICAL_HOT_KEYS, DETERMINISTIC_ROLES };
+module.exports = { chains, CANONICAL_PERMIT2, CANONICAL_HOT_KEYS, DETERMINISTIC_ROLES, SYSTEM_FEE_WALLET };
