@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
@@ -137,9 +139,14 @@ func (h *Handlers) GetServiceSlots(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "to must be on or after from")
 		return
 	}
-	// Cap the range to 31 days to bound work.
+	// Cap the range to 31 days to bound work, and stop at the booking horizon: nothing past it
+	// can be booked. A day of slack covers service zones ahead of UTC; bookableSlot filters exactly.
 	if to.Sub(from) > 31*24*time.Hour {
 		to = from.Add(31 * 24 * time.Hour)
+	}
+	now := bookingNow()
+	if last := bookingHorizon(now).Truncate(24*time.Hour).AddDate(0, 0, 1); to.After(last) {
+		to = last
 	}
 
 	var profile models.ServiceProfile
@@ -191,6 +198,9 @@ func (h *Handlers) GetServiceSlots(c *gin.Context) {
 					continue
 				}
 				end := start.Add(time.Duration(slotMin) * time.Minute)
+				if !bookableSlot(start, end, now) {
+					continue // past, or beyond the booking lead time: checkout would refuse it
+				}
 				b := booked[start.Unix()]
 				remaining := -1
 				if capacity > 0 {
@@ -240,4 +250,37 @@ func bookedBySlot(productID uuid.UUID, from, to time.Time) map[int64]int {
 // formatSlot is a tiny helper for slot error messages.
 func formatSlot(t time.Time) string {
 	return t.Format("2006-01-02 15:04")
+}
+
+// bookingNow is the clock slot listing and checkout judge bookability by; tests pin it.
+var bookingNow = time.Now
+
+// bookingDeliveryGrace is how long after a slot ends its order may still be delivered.
+const bookingDeliveryGrace = 2 * 24 * time.Hour
+
+// MaxBookingLead is how far ahead a slot booking may end (owner 2026-10-27). The order escrow
+// gives a seller at most services.EscrowWindow to deliver and a slot is delivered on the day, so
+// the slot has to end that window minus the delivery grace from now. Request-mode bookings
+// (flights, hotels) are not capped: they are delivered when the merchant issues the booking, not
+// on the travel date.
+const MaxBookingLead = services.EscrowWindow - bookingDeliveryGrace
+
+// MaxBookingLeadDays is MaxBookingLead in whole days, for messages.
+const MaxBookingLeadDays = int(MaxBookingLead / (24 * time.Hour))
+
+// bookingHorizon is the latest instant a slot booked now may end.
+func bookingHorizon(now time.Time) time.Time {
+	return now.UTC().Add(MaxBookingLead)
+}
+
+// bookableSlot reports whether a slot can be booked now: it starts in the future and ends inside
+// the booking lead time. Checkout and the slot list share it so the list never offers a slot
+// checkout would refuse.
+func bookableSlot(start, end, now time.Time) bool {
+	return start.After(now) && !end.After(bookingHorizon(now))
+}
+
+// bookingTooFarMessage is checkout's refusal for a slot beyond the booking lead time.
+func bookingTooFarMessage() string {
+	return fmt.Sprintf("Bookings can be made up to %d days ahead", MaxBookingLeadDays)
 }

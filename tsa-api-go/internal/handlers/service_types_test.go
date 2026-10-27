@@ -232,10 +232,10 @@ func TestOrderService_ResidentialDeliveryPriceable(t *testing.T) {
 
 // ---------- Booking type (slot-based) ----------
 
-// nextWeekdaySlot returns a slotStart for the given weekday at hour:00 in the future.
+// nextWeekdaySlot returns hour:00 UTC on the next Monday at least two days out: in the future and
+// inside the booking lead time (MaxBookingLeadDays).
 func nextWeekdaySlot(hour int) time.Time {
-	base := time.Date(2030, 1, 7, hour, 0, 0, 0, time.UTC) // 2030-01-07 is a Monday
-	return base
+	return nextWeekdayUTC(time.Now(), time.Monday, 2).Add(time.Duration(hour) * time.Hour)
 }
 
 func setupBookingService(t *testing.T, db *gorm.DB, sellerID uuid.UUID, capacity int) *models.Product {

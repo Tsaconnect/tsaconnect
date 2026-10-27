@@ -499,8 +499,12 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 	local := slotStart.In(profile.Location())
 
 	// Reject slots in the past (a booking must be for a future time).
-	if !slotStart.After(time.Now().UTC()) {
+	now := bookingNow()
+	if !slotStart.After(now) {
 		return nil, fmt.Sprintf("%s is in the past", formatSlot(local))
+	}
+	if !bookableSlot(slotStart, slotEnd, now) {
+		return nil, bookingTooFarMessage()
 	}
 
 	within, windowStart := slotWithinAvailability(tx, product.ID, local, duration)
