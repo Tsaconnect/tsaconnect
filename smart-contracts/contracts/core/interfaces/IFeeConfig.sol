@@ -5,10 +5,10 @@ pragma solidity 0.8.24;
 /// @notice What the escrows read from the per-chain FeeConfig: the fee for a (feature, token),
 ///         the value limits for a token, and where fees are paid.
 interface IFeeConfig {
-    /// @notice A fee row. `flat` is in the token's own base units (chains differ in decimals).
+    /// @notice A fee row. `flatFee` is in the token's own base units (chains differ in decimals).
     struct Rate {
         uint16 bps;
-        uint128 flat;
+        uint128 flatFee;
         bool active;
     }
 

@@ -6,7 +6,8 @@ const { time } = require("@nomicfoundation/hardhat-network-helpers");
 // this repo yet). Each run plays a seeded random sequence of actions by several buyers, sellers
 // and admins, and after EVERY step checks the invariants in the redesign spec §9:
 //   I1  token.balanceOf(escrow) >= owed[token]
-//   I2  owed[token] == Σ (product + shipping) of orders that are not terminal (ghost model)
+//   I2  owed[token] == Σ (product + shipping) of orders that are not terminal + Σ claimable payouts
+//       (the token can blacklist addresses, like USDC/USDT, so payouts are sometimes deferred)
 //   I3  conservation: no token is created or lost — the sum over every holder equals what was minted
 //   I4  only buyer, seller or the fee recipient ever receives tokens (strangers never gain)
 //   I5  terminal states are absorbing: every action on a terminal order reverts
@@ -44,20 +45,20 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
       const between = (lo, hi) => lo + Math.floor(rand() * (hi - lo + 1));
 
       const signers = await ethers.getSigners();
-      const [admin, resolver, pauser, stranger, feeA, feeB] = signers;
-      const buyers = signers.slice(6, 9);
-      const sellers = signers.slice(9, 12);
+      const [admin, resolver, pauser, stranger, feeA, feeB, claimDest] = signers;
+      const buyers = signers.slice(7, 10);
+      const sellers = signers.slice(10, 13);
 
-      const fc = await upgrades.deployProxy(await ethers.getContractFactory("FeeConfig"), [admin.address, feeA.address], { kind: "uups" });
+      const fc = await upgrades.deployProxy(await ethers.getContractFactory("FeeConfig"), [admin.address, feeA.address, { features: [], tokens: [], rates: [], limitTokens: [], limits: [] }], { kind: "uups" });
       const fwd = await (await ethers.getContractFactory("TSAForwarder")).deploy("TSAForwarder");
-      const escrow = await upgrades.deployProxy(await ethers.getContractFactory("OrderEscrow"), [admin.address], {
+      const escrow = await upgrades.deployProxy(await ethers.getContractFactory("OrderEscrow"), [admin.address, [], []], {
         kind: "uups",
         constructorArgs: [await fwd.getAddress(), await fc.getAddress()],
       });
-      const token = await (await ethers.getContractFactory("MockERC20")).deploy("USDC", "USDC", 6);
+      const token = await (await ethers.getContractFactory("BlacklistERC20")).deploy("USDC", "USDC", 6);
       const T = await token.getAddress();
       const E = await escrow.getAddress();
-      await fc.setRate(FEATURE, T, { bps: 200, flat: 100000n, active: true });
+      await fc.setRate(FEATURE, T, { bps: 200, flatFee: 100000n, active: true });
       await fc.setLimits(T, { maxPerOrder: 5_000_000_000n, maxOwed: 50_000_000_000n });
       await escrow.grantRole(await escrow.RESOLVER_ROLE(), resolver.address);
       await escrow.grantRole(await escrow.PAUSER_ROLE(), pauser.address);
@@ -69,12 +70,13 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
         await token.connect(b).approve(E, ethers.MaxUint256);
       }
 
-      const holders = [E, admin.address, resolver.address, pauser.address, stranger.address, feeA.address, feeB.address,
+      const holders = [E, admin.address, resolver.address, pauser.address, stranger.address, feeA.address, feeB.address, claimDest.address,
         ...buyers.map((b) => b.address), ...sellers.map((s) => s.address)];
       const strangerStart = await token.balanceOf(stranger.address);
 
       // Ghost model.
-      const orders = new Map(); // id -> { buyer, seller, gross, product, fee }
+      const orders = new Map(); // key -> { buyer, seller, gross, product, fee }
+      const payees = [...buyers, ...sellers, feeA, feeB];
       let nextId = 0;
       let paused = false;
 
@@ -97,6 +99,7 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
         expect(balance >= owedOnChain, `I1 ${stepLabel}`).to.equal(true);
         let expectedOwed = 0n;
         for (const k of open()) expectedOwed += orders.get(k).gross;
+        for (const p of payees) expectedOwed += await escrow.claimable(T, p.address);
         expect(owedOnChain, `I2 ${stepLabel}`).to.equal(expectedOwed);
         let total = 0n;
         for (const h of holders) total += await token.balanceOf(h);
@@ -108,17 +111,18 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
         async create() {
           if (paused) {
             const k = ethers.id(`p-${seed}-${nextId++}`);
-            const ok = await tryTx(escrow.connect(pick(buyers)).createOrder(k, sellers[0].address, T, 1_000_000n, 0, 14));
+            const ok = await tryTx(escrow.connect(pick(buyers)).createOrder(k, sellers[0].address, T, 1_000_000n, 0, 14, ethers.MaxUint256));
             expect(ok, "create must fail while paused").to.equal(false);
             return;
           }
-          const k = ethers.id(`o-${seed}-${nextId++}`);
+          const oid = ethers.id(`o-${seed}-${nextId++}`);
           const buyer = pick(buyers);
+          const k = await escrow.orderKey(buyer.address, oid);
           const seller = pick(sellers);
           const product = BigInt(between(1, 2_000)) * 1_000_000n;
           const shipping = BigInt(between(0, 50)) * 1_000_000n;
           const days = between(1, 30);
-          const ok = await tryTx(escrow.connect(buyer).createOrder(k, seller.address, T, product, shipping, days));
+          const ok = await tryTx(escrow.connect(buyer).createOrder(oid, seller.address, T, product, shipping, days, ethers.MaxUint256));
           if (!ok) return; // limits may refuse it; the invariants still hold
           const o = await escrow.getOrder(k);
           orders.set(k, { buyer, seller, gross: product + shipping, product, fee: o.merchantFee, state: Number(o.state) });
@@ -173,8 +177,18 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
           await tryTx(escrow.connect(admin).rescue(T));
         },
         async reconfigure() {
-          await fc.setRate(FEATURE, T, { bps: between(0, 300), flat: BigInt(between(0, 200_000)), active: true });
+          await fc.setRate(FEATURE, T, { bps: between(0, 300), flatFee: BigInt(between(0, 200_000)), active: true });
           await fc.setFeeRecipient(pick([feeA, feeB]).address);
+        },
+        async blacklist() {
+          const who = pick(payees);
+          await token.setBlacklisted(who.address, !(await token.blacklisted(who.address)));
+        },
+        async claim() {
+          const who = pick(payees);
+          if ((await escrow.claimable(T, who.address)) === 0n) return;
+          const to = (await token.blacklisted(who.address)) ? claimDest.address : who.address;
+          await escrow.connect(who).claim(T, to);
         },
         async terminalPoke() {
           const done = ids().filter((k) => TERMINAL.has(orders.get(k).state));
@@ -195,6 +209,7 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
       const weighted = [
         ["create", 6], ["deliver", 4], ["confirm", 3], ["cancel", 1], ["dispute", 2], ["resolve", 2],
         ["timeout", 3], ["wait", 3], ["pauseToggle", 1], ["stray", 1], ["rescue", 1], ["reconfigure", 1], ["terminalPoke", 2],
+        ["blacklist", 2], ["claim", 2],
       ];
       const bag = weighted.flatMap(([n, w]) => Array(w).fill(n));
 
@@ -212,7 +227,8 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
         console.log(`      seed ${seed} orders=${orders.size} states=${JSON.stringify(tally)}`);
       }
 
-      // I7: everything still open settles with no admin, even while paused.
+      // I7: everything still open settles with no admin, even while paused — and even with every
+      // payee still blacklisted, because payouts defer instead of reverting.
       if (!paused) { await escrow.connect(pauser).pause(); paused = true; }
       await time.increase(31 * DAY);
       for (const k of open()) {
@@ -225,6 +241,12 @@ describe("OrderEscrow invariants (stateful fuzz)", function () {
         }
       }
       expect(open().length, "I7 liveness").to.equal(0);
+      // Every deferred payout can be collected, to a fresh address if the payee is still blacklisted.
+      for (const p of payees) {
+        if ((await escrow.claimable(T, p.address)) === 0n) continue;
+        const to = (await token.blacklisted(p.address)) ? claimDest.address : p.address;
+        await escrow.connect(p).claim(T, to);
+      }
       expect(await escrow.owed(T)).to.equal(0n);
       await checkInvariants(`seed ${seed} drained`);
     });

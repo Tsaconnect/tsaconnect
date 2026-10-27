@@ -19,8 +19,12 @@ import {IFeeConfig} from "./interfaces/IFeeConfig.sol";
 /// @dev    Rules this base enforces for every escrow built on it:
 ///         - The forwarder and FeeConfig are immutables of the implementation. There is no setter:
 ///           a settable forwarder would let an admin impersonate any user.
-///         - `owed[token]` is the sum every open position can still pay out. Tokens above it are
-///           excess (stray transfers, rounding) and are the only tokens `rescue` can move.
+///         - `owed[token]` is the sum every open position can still pay out, plus payouts that could
+///           not be delivered and wait in `claimable`. Tokens above it are excess (stray transfers,
+///           rounding) and are the only tokens `rescue` can move.
+///         - A payout never reverts an exit: if the transfer fails (e.g. the stablecoin blacklisted
+///           the recipient), the amount is credited to `claimable` and the recipient can `claim` it
+///           to any address later. So no recipient can freeze another party's settlement.
 ///         - Pause blocks new exposure only (callers use `whenNotPaused` on create/deposit/open).
 ///           Exits never check it, so a pause cannot trap funds.
 abstract contract EscrowBase is
@@ -44,17 +48,21 @@ abstract contract EscrowBase is
     /// @custom:storage-location erc7201:tsa.storage.EscrowBase
     struct EscrowBaseStorage {
         mapping(address token => uint256) owed;
+        mapping(address token => mapping(address account => uint256)) claimable;
     }
 
     // keccak256(abi.encode(uint256(keccak256("tsa.storage.EscrowBase")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant BASE_STORAGE_SLOT = 0x1688fc8116c81ba80875796025d382dd29dbf2c0be00a4644edd67c5d918a500;
 
     event Rescued(address indexed token, address indexed to, uint256 amount);
+    event PayoutDeferred(address indexed token, address indexed account, uint256 amount);
+    event Claimed(address indexed token, address indexed account, address indexed to, uint256 amount);
 
     error ZeroAddress();
     error AmountMismatch(uint256 expected, uint256 received);
     error OwedLimitExceeded(address token, uint256 owed, uint256 limit);
     error NothingToRescue(address token);
+    error NothingToClaim(address token);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(address forwarder, IFeeConfig feeConfig_) ERC2771ContextUpgradeable(forwarder) {
@@ -63,14 +71,23 @@ abstract contract EscrowBase is
         _disableInitializers();
     }
 
-    /// @dev Grants `admin` every base role. Two-step admin transfer, no delay (owner decision D2).
-    function __EscrowBase_init(address admin) internal onlyInitializing {
+    /// @dev Grants `admin` every base role and `pausers` the pause role, all at initialization so
+    ///      the deployer never holds a role. Two-step admin transfer, no delay (owner decision D2).
+    function __EscrowBase_init(address admin, address[] calldata pausers) internal onlyInitializing {
         if (admin == address(0)) revert ZeroAddress();
         __AccessControlDefaultAdminRules_init(0, admin);
         __Pausable_init();
         _grantRole(UPGRADER_ROLE, admin);
         _grantRole(PAUSER_ROLE, admin);
         _grantRole(RESCUER_ROLE, admin);
+        _grantAll(PAUSER_ROLE, pausers);
+    }
+
+    function _grantAll(bytes32 role, address[] calldata accounts) internal {
+        for (uint256 i; i < accounts.length; ++i) {
+            if (accounts[i] == address(0)) revert ZeroAddress();
+            _grantRole(role, accounts[i]);
+        }
     }
 
     // ── Admin ──────────────────────────────────────────────────────────────────
@@ -96,9 +113,28 @@ abstract contract EscrowBase is
         emit Rescued(token, to, excess);
     }
 
-    /// @notice Total open obligations in `token`.
+    /// @notice Total open obligations in `token`, including undelivered payouts.
     function owed(address token) public view returns (uint256) {
         return _baseStorage().owed[token];
+    }
+
+    /// @notice A payout that could not be delivered to `account`, waiting to be claimed.
+    function claimable(address token, address account) external view returns (uint256) {
+        return _baseStorage().claimable[token][account];
+    }
+
+    /// @notice Collect your undelivered payouts in `token`, sent to `to` (any address you choose,
+    ///         e.g. a new wallet if the old one was blacklisted). Never paused.
+    function claim(address token, address to) external nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        address account = _msgSender();
+        EscrowBaseStorage storage s = _baseStorage();
+        uint256 amount = s.claimable[token][account];
+        if (amount == 0) revert NothingToClaim(token);
+        s.claimable[token][account] = 0;
+        s.owed[token] -= amount;
+        IERC20(token).safeTransfer(to, amount);
+        emit Claimed(token, account, to, amount);
     }
 
     // ── Token movement ───────────────────────────────────────────────────────────
@@ -111,8 +147,16 @@ abstract contract EscrowBase is
         if (received != amount) revert AmountMismatch(amount, received);
     }
 
+    /// @dev Pay out an amount already removed from `owed`. If the transfer fails, the amount goes
+    ///      back into `owed` as a claimable balance instead of reverting the caller's exit.
     function _push(address token, address to, uint256 amount) internal {
-        if (amount != 0) IERC20(token).safeTransfer(to, amount);
+        if (amount == 0) return;
+        if (!IERC20(token).trySafeTransfer(to, amount)) {
+            EscrowBaseStorage storage s = _baseStorage();
+            s.claimable[token][to] += amount;
+            s.owed[token] += amount;
+            emit PayoutDeferred(token, to, amount);
+        }
     }
 
     /// @dev Add an obligation, enforcing the FeeConfig owed limit for `token`.

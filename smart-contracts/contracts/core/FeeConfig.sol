@@ -43,14 +43,36 @@ contract FeeConfig is Initializable, UUPSUpgradeable, AccessControlDefaultAdminR
         _disableInitializers();
     }
 
-    /// @param admin         Holds every role (DEFAULT_ADMIN, CONFIG, UPGRADER).
-    /// @param recipient     The initial fee recipient.
-    function initialize(address admin, address recipient) external initializer {
-        if (admin == address(0) || recipient == address(0)) revert ZeroAddress();
+    /// @notice The configuration applied at initialization (same rules as the setters).
+    struct InitialConfig {
+        bytes32[] features;
+        address[] tokens;
+        Rate[] rates;
+        address[] limitTokens;
+        Limits[] limits;
+    }
+
+    /// @notice Set up roles and the initial configuration in one step, so the admin owns the
+    ///         contract from its first block and the deployer never holds a role.
+    /// @param admin     Holds every role (DEFAULT_ADMIN, CONFIG, UPGRADER).
+    /// @param recipient The initial fee recipient.
+    /// @param initial   Rate rows (feature, token, rate) and per-token limits.
+    function initialize(address admin, address recipient, InitialConfig calldata initial) external initializer {
+        if (admin == address(0)) revert ZeroAddress();
         __AccessControlDefaultAdminRules_init(0, admin);
         _grantRole(CONFIG_ROLE, admin);
         _grantRole(UPGRADER_ROLE, admin);
         _setFeeRecipient(recipient);
+        if (initial.features.length != initial.tokens.length || initial.tokens.length != initial.rates.length) {
+            revert LengthMismatch();
+        }
+        for (uint256 i; i < initial.features.length; ++i) {
+            _setRate(initial.features[i], initial.tokens[i], initial.rates[i]);
+        }
+        if (initial.limitTokens.length != initial.limits.length) revert LengthMismatch();
+        for (uint256 i; i < initial.limitTokens.length; ++i) {
+            _setLimits(initial.limitTokens[i], initial.limits[i]);
+        }
     }
 
     // ── Reads ──────────────────────────────────────────────────────────────────
@@ -95,10 +117,7 @@ contract FeeConfig is Initializable, UUPSUpgradeable, AccessControlDefaultAdminR
     }
 
     function setLimits(address token, Limits calldata l) external onlyRole(CONFIG_ROLE) {
-        if (token == address(0)) revert ZeroAddress();
-        if (l.maxPerOrder == 0 || l.maxOwed == 0) revert ZeroLimit();
-        _s().limits[token] = l;
-        emit LimitsSet(token, l.maxPerOrder, l.maxOwed);
+        _setLimits(token, l);
     }
 
     function setFeeRecipient(address recipient) external onlyRole(CONFIG_ROLE) {
@@ -111,7 +130,14 @@ contract FeeConfig is Initializable, UUPSUpgradeable, AccessControlDefaultAdminR
         if (token == address(0)) revert ZeroAddress();
         if (r.bps > MAX_BPS) revert RateTooHigh(r.bps);
         _s().rates[feature][token] = r;
-        emit RateSet(feature, token, r.bps, r.flat, r.active);
+        emit RateSet(feature, token, r.bps, r.flatFee, r.active);
+    }
+
+    function _setLimits(address token, Limits calldata l) private {
+        if (token == address(0)) revert ZeroAddress();
+        if (l.maxPerOrder == 0 || l.maxOwed == 0) revert ZeroLimit();
+        _s().limits[token] = l;
+        emit LimitsSet(token, l.maxPerOrder, l.maxOwed);
     }
 
     function _setFeeRecipient(address recipient) private {
