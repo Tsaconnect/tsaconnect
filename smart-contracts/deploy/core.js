@@ -145,16 +145,24 @@ async function assertRoles(label, c, roles, admin, deployer) {
   if (!deployerMayHold && (await c.hasRole(ADMIN, deployer))) fail(`${label}: deployer holds DEFAULT_ADMIN_ROLE`);
 }
 
-async function verify(address, label) {
+/**
+ * Verify the implementation with its constructor arguments first (the upgrades plugin's proxy
+ * verify passes none, so an implementation with immutables fails there), then the proxy.
+ */
+async function verify(d, label, constructorArguments = []) {
   if (hre.network.name === "hardhat" || hre.network.name === "localhost") return;
-  try {
-    await hre.run("verify:verify", { address });
-    console.log(`  verified ${label}`);
-  } catch (e) {
-    const msg = String(e.message || e);
-    if (/already verified/i.test(msg)) console.log(`  ${label}: already verified`);
-    else console.warn(`  ${label}: verification failed (${msg.split("\n")[0]}) — rerun: npx hardhat verify --network ${hre.network.name} ${address}`);
-  }
+  const attempt = async (address, args, what) => {
+    try {
+      await hre.run("verify:verify", { address, constructorArguments: args });
+      console.log(`  verified ${label} ${what}`);
+    } catch (e) {
+      const msg = String(e.message || e);
+      if (/already verified/i.test(msg)) console.log(`  ${label} ${what}: already verified`);
+      else console.warn(`  ${label} ${what}: verification failed (${msg.split("\n")[0]}) — rerun: npx hardhat verify --network ${hre.network.name} ${address} ${args.join(" ")}`);
+    }
+  };
+  await attempt(d.impl, constructorArguments, "implementation");
+  await attempt(d.address, [], "proxy");
 }
 
 async function main() {
@@ -249,9 +257,9 @@ async function main() {
     if (out[key]) writeLedger(hre.network.name, LEDGER[key], { proxy: out[key].address, impl: out[key].impl, admin, dev, readBack: true });
   }
 
-  await verify(fc, "FeeConfig");
-  if (out.order) await verify(out.order.address, "OrderEscrow");
-  await verify(out.p2p.address, "P2PTradeEscrow");
+  await verify(out.feeConfig, "FeeConfig");
+  if (out.order) await verify(out.order, "OrderEscrow", [forwarder, fc]);
+  await verify(out.p2p, "P2PTradeEscrow", [forwarder, fc]);
   return out;
 }
 
