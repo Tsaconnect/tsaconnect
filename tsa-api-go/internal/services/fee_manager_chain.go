@@ -238,6 +238,16 @@ type multiChainFeeManagerReader struct {
 // for that chain rather than crashing). Returns nil when no chain has a reachable
 // RPC, so callers leave the flow dormant.
 func NewMultiChainFeeManagerReaderFromClients(rpcByChain map[int64]FeeManagerRPCClient) FeeManagerChainReader {
+	byChain := feeChainReaders(rpcByChain)
+	if len(byChain) == 0 {
+		return nil
+	}
+	return &multiChainFeeManagerReader{byChain: byChain}
+}
+
+// feeChainReaders wraps each non-nil RPC client in a per-chain reader (shared by the FeeManager
+// and FeeConfig readers).
+func feeChainReaders(rpcByChain map[int64]FeeManagerRPCClient) map[int64]*evmFeeManagerChainReader {
 	byChain := map[int64]*evmFeeManagerChainReader{}
 	for chainID, caller := range rpcByChain {
 		if caller == nil {
@@ -245,10 +255,7 @@ func NewMultiChainFeeManagerReaderFromClients(rpcByChain map[int64]FeeManagerRPC
 		}
 		byChain[chainID] = &evmFeeManagerChainReader{caller: caller}
 	}
-	if len(byChain) == 0 {
-		return nil
-	}
-	return &multiChainFeeManagerReader{byChain: byChain}
+	return byChain
 }
 
 func (m *multiChainFeeManagerReader) RateFor(ctx context.Context, chainID int64, feeManager, feature, token string) (FeeManagerRate, error) {
