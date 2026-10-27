@@ -40,6 +40,19 @@ type Order struct {
 	// (set at prepare-escrow), so a wallet change afterwards cannot make a
 	// correct payment look like a mismatch.
 	EscrowSellerWallet string `gorm:"size:42" json:"-"`
+	// OrderEscrow (core contracts v2) mirror. Empty on orders escrowed in ProductEscrowV2, which
+	// EscrowContractAddress tells apart. EscrowOrderKey is the order's key on OrderEscrow
+	// (keccak256(buyer, orderId)); EscrowBuyerWallet is the wallet that created it there.
+	EscrowOrderKey    string `gorm:"size:66;index" json:"-"`
+	EscrowBuyerWallet string `gorm:"size:42" json:"-"`
+	// MerchantFee and FlatFee are what OrderEscrow fixed at createOrder (token base units).
+	MerchantFee string `gorm:"size:78" json:"merchantFee,omitempty"`
+	FlatFee     string `gorm:"size:78" json:"flatFee,omitempty"`
+	// DeliverBy, ConfirmBy and ResolveBy mirror the contract's deadlines: after each, anyone may
+	// settle the order with claimTimeout (refund, release, refund).
+	DeliverBy *time.Time `json:"deliverBy,omitempty"`
+	ConfirmBy *time.Time `json:"confirmBy,omitempty"`
+	ResolveBy *time.Time `json:"resolveBy,omitempty"`
 	// PayoutFee is the part of ShippingAmount that pays the offramp for a
 	// seller's bank payout (base units). The seller's own shipping is the rest.
 	PayoutFee              string     `gorm:"size:78" json:"payoutFee,omitempty"`

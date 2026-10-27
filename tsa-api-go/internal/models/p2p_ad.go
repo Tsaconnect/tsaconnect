@@ -11,7 +11,7 @@ import (
 
 // OptionalNumeric is a string-backed value for Postgres `numeric` columns
 // that are semantically optional. A plain `string` Go field can't represent
-// "absent" — an empty string serializes as the SQL literal `''`, which the
+// "absent" — an empty string serializes as the SQL literal `”`, which the
 // numeric type rejects with `invalid input syntax for type numeric: ""`.
 // This Valuer maps `""` → NULL on write, and the Scanner maps NULL → `""`
 // on read, so the rest of the codebase keeps treating the value as a plain
@@ -76,23 +76,26 @@ func (n *OptionalNumeric) Scan(value any) error {
 // Token amounts are stored as strings (numeric in DB) so we never lose
 // precision on USDT (6 dec), USDC (6 dec), or MCGP (18 dec).
 type P2PAd struct {
-	ID               uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	SellerID         uuid.UUID      `gorm:"type:uuid;not null;index" json:"sellerId"`
-	Side             string         `gorm:"size:8;not null;index;default:'sell'" json:"side"`
-	Token            string         `gorm:"size:16;not null;index" json:"token"`
-	ChainID          int64          `gorm:"not null;default:146" json:"chainId"`
-	Amount           string         `gorm:"type:numeric(78,0);not null" json:"amount"`
-	Remaining        string         `gorm:"type:numeric(78,0);not null" json:"remaining"`
-	Reserved         string         `gorm:"type:numeric(78,0);not null;default:'0'" json:"reserved"`
-	FiatCurrency     string         `gorm:"size:3;not null;index" json:"fiatCurrency"`
-	Rate             string         `gorm:"type:numeric(38,10);not null" json:"rate"`
-	RateType         string         `gorm:"size:8;not null;default:'fixed';index" json:"rateType"`
-	FloatOffsetBps   *int           `json:"floatOffsetBps,omitempty"`
-	FloatAnchor      string         `gorm:"size:16;not null;default:'bybit_sell'" json:"floatAnchor"`
-	MinLimit         OptionalNumeric `gorm:"type:numeric(78,0)" json:"minLimit,omitempty"`
-	MaxLimit         OptionalNumeric `gorm:"type:numeric(78,0)" json:"maxLimit,omitempty"`
+	ID       uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	SellerID uuid.UUID `gorm:"type:uuid;not null;index" json:"sellerId"`
+	Side     string    `gorm:"size:8;not null;index;default:'sell'" json:"side"`
+	Token    string    `gorm:"size:16;not null;index" json:"token"`
+	ChainID  int64     `gorm:"not null;default:146" json:"chainId"`
+	// EscrowAddress is the escrow the ad's voucher is signed for (vouchers are bound to one
+	// escrow). Empty: the chain's legacy escrow.
+	EscrowAddress    string                      `gorm:"size:42;index" json:"escrowAddress,omitempty"`
+	Amount           string                      `gorm:"type:numeric(78,0);not null" json:"amount"`
+	Remaining        string                      `gorm:"type:numeric(78,0);not null" json:"remaining"`
+	Reserved         string                      `gorm:"type:numeric(78,0);not null;default:'0'" json:"reserved"`
+	FiatCurrency     string                      `gorm:"size:3;not null;index" json:"fiatCurrency"`
+	Rate             string                      `gorm:"type:numeric(38,10);not null" json:"rate"`
+	RateType         string                      `gorm:"size:8;not null;default:'fixed';index" json:"rateType"`
+	FloatOffsetBps   *int                        `json:"floatOffsetBps,omitempty"`
+	FloatAnchor      string                      `gorm:"size:16;not null;default:'bybit_sell'" json:"floatAnchor"`
+	MinLimit         OptionalNumeric             `gorm:"type:numeric(78,0)" json:"minLimit,omitempty"`
+	MaxLimit         OptionalNumeric             `gorm:"type:numeric(78,0)" json:"maxLimit,omitempty"`
 	PaymentMethodIDs datatypes.JSONSlice[string] `gorm:"type:jsonb;not null" json:"paymentMethodIds"`
-	Terms            string         `gorm:"type:text" json:"terms,omitempty"`
+	Terms            string                      `gorm:"type:text" json:"terms,omitempty"`
 	// ── On-chain identity (post-upgrade: voucher-based) ────────────────────
 	// SellerAddress is the EVM wallet that signed (or will sign) this ad's
 	// voucher. Captured at create-ad time so the voucher payload is fully
@@ -125,11 +128,11 @@ type P2PAd struct {
 	// P2P ad. This is the marketplace "PM"/automated filter key (design §4).
 	PMID *uuid.UUID `gorm:"type:uuid;index" json:"pmId,omitempty"`
 
-	Status           string         `gorm:"size:16;not null;default:'pending';index" json:"status"`
-	ExpiresAt        *time.Time     `gorm:"index" json:"expiresAt,omitempty"`
-	CreatedAt        time.Time      `json:"createdAt"`
-	UpdatedAt        time.Time      `json:"updatedAt"`
-	DeletedAt        *time.Time     `gorm:"index" json:"deletedAt,omitempty"`
+	Status    string     `gorm:"size:16;not null;default:'pending';index" json:"status"`
+	ExpiresAt *time.Time `gorm:"index" json:"expiresAt,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	DeletedAt *time.Time `gorm:"index" json:"deletedAt,omitempty"`
 
 	// FeeBps is the live on-chain fee a trade on this ad would snapshot (virtual,
 	// never persisted). Absent when the chain could not be read.

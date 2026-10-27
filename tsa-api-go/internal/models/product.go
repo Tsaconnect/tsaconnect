@@ -71,6 +71,9 @@ type Product struct {
 	// merchant-set distance fee. For products it is unused (0). For order/booking
 	// services it holds the residential-tier delivery/booking fee — the one tier
 	// PR #61 hard-coded to free. Defaults 0 → still free unless the merchant sets it.
+	// HandlingDays is how many days the seller has to deliver an order (OrderEscrow's deadline,
+	// 1-30). 0: the platform default.
+	HandlingDays          int     `gorm:"default:0" json:"handlingDays,omitempty"`
 	ShippingResidential   float64 `gorm:"default:0" json:"shippingResidential"`
 	ShippingSameCity      float64 `gorm:"default:0" json:"shippingSameCity"`
 	ShippingSameState     float64 `gorm:"default:0" json:"shippingSameState"`

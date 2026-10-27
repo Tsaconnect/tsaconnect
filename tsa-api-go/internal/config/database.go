@@ -429,6 +429,10 @@ func AutoMigrate() error {
 	}
 	// One LP account per wallet (shared pool, spec 2026-10-14 §5): a vault
 	// position must never be read or claimed through two accounts.
+	// One fee payment per service contact (contracts v2 slice 5 verifies the fee transfer by hash).
+	if err := MigrateServiceContactFeeTxIndex(DB); err != nil {
+		log.Printf("[Migrate] ALERT %s: %v — duplicate fee txs? find them with SELECT LOWER(pay_fee_tx_hash), count(*) FROM service_contact_payments WHERE pay_fee_tx_hash <> '' GROUP BY 1 HAVING count(*) > 1", ServiceContactFeeTxIndexName, err)
+	}
 	if err := MigrateLPWalletIndex(DB); err != nil {
 		log.Printf("[Migrate] ALERT %s: %v — duplicate LP wallets? find them with SELECT LOWER(operator_wallet_address), count(*) FROM payment_merchants WHERE kind = 'lp' AND operator_wallet_address <> '' GROUP BY 1 HAVING count(*) > 1", LPWalletIndexName, err)
 	}
@@ -711,6 +715,18 @@ func MigratePoolSliceIndexes(db *gorm.DB) error {
 	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pool_slice_per_order_gen_ad
 	    ON p2p_trades (it_intent_id, generation, ad_id)
 	    WHERE it_intent_id IS NOT NULL AND status <> 'cancelled'`).Error
+}
+
+// ServiceContactFeeTxIndexName keeps a service-contact fee tx from paying for two contacts.
+const ServiceContactFeeTxIndexName = "uq_service_contact_payments_fee_tx"
+
+// MigrateServiceContactFeeTxIndex builds the fee-tx index without locking out writes.
+func MigrateServiceContactFeeTxIndex(db *gorm.DB) error {
+	if uniqueIndexReady(db, "service_contact_payments", ServiceContactFeeTxIndexName) {
+		return nil
+	}
+	return buildUniqueIndex(db, ServiceContactFeeTxIndexName,
+		` ON service_contact_payments (LOWER(pay_fee_tx_hash)) WHERE pay_fee_tx_hash <> ''`)
 }
 
 // LPWalletIndexName keeps one LP row per wallet (case-insensitive).

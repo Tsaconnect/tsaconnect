@@ -111,7 +111,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 			generation INTEGER DEFAULT -1, amount_usd REAL, amount_tp REAL, created_at DATETIME
 		)`,
 		`CREATE TABLE p2p_ads (
-			id TEXT PRIMARY KEY, pm_id TEXT, seller_id TEXT, side TEXT, token TEXT, chain_id INTEGER,
+			id TEXT PRIMARY KEY, pm_id TEXT, seller_id TEXT, side TEXT, token TEXT, chain_id INTEGER, escrow_address TEXT,
 			amount TEXT, remaining TEXT, reserved TEXT, fiat_currency TEXT, rate TEXT,
 			rate_type TEXT DEFAULT 'fixed', float_offset_bps INTEGER, float_anchor TEXT DEFAULT 'bybit_sell',
 			min_limit TEXT, max_limit TEXT, payment_method_ids TEXT, terms TEXT,
@@ -122,7 +122,7 @@ func setupP2PFeeDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE p2p_trades (
 			id TEXT PRIMARY KEY, ad_id TEXT, buyer_id TEXT, seller_id TEXT, opener_id TEXT,
-			token TEXT, chain_id INTEGER, funding INTEGER DEFAULT 0,
+			token TEXT, chain_id INTEGER, escrow_address TEXT, funding INTEGER DEFAULT 0,
 			token_amount TEXT, fiat_amount TEXT, fiat_currency TEXT, rate TEXT,
 			payment_method_id TEXT, payment_ref TEXT, nomba_inbound_event_id TEXT, nomba_payout_id TEXT, payout_account_number TEXT, payout_bank TEXT, payout_account_name TEXT, on_chain_trade_id TEXT, open_tx_hash TEXT, release_tx_hash TEXT, release_reverted_at DATETIME,
 			status TEXT DEFAULT 'pending_payment', proof_image_url TEXT, cancel_reason TEXT,

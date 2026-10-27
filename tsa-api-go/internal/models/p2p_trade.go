@@ -75,8 +75,11 @@ type P2PTrade struct {
 	Rate            string    `gorm:"type:numeric(38,10);not null" json:"rate"`
 	PaymentMethodID uuid.UUID `gorm:"type:uuid;not null" json:"paymentMethodId"`
 	OnChainTradeID  string    `gorm:"size:66;uniqueIndex" json:"onChainTradeId,omitempty"`
-	OpenTxHash      string    `gorm:"size:66" json:"openTxHash,omitempty"`
-	ReleaseTxHash   string    `gorm:"size:66" json:"releaseTxHash,omitempty"`
+	// EscrowAddress is the escrow this trade lives on. Empty: the chain's legacy escrow (every
+	// trade before P2PTradeEscrow); trades in flight keep settling where they opened.
+	EscrowAddress string `gorm:"size:42;index" json:"escrowAddress,omitempty"`
+	OpenTxHash    string `gorm:"size:66" json:"openTxHash,omitempty"`
+	ReleaseTxHash string `gorm:"size:66" json:"releaseTxHash,omitempty"`
 	// ReleaseRevertedAt: the system release mined and REVERTED (at settle
 	// depth). The trade stays releasing for an operator: no sweep or
 	// reconciler rolls it back to paid (that would re-release it in a loop).

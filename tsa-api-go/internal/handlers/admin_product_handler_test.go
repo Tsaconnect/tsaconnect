@@ -51,6 +51,7 @@ func setupProductModerationDB(t *testing.T) *gorm.DB {
 			sales INTEGER DEFAULT 0,
 			rating TEXT,
 			metadata TEXT,
+			handling_days INTEGER DEFAULT 0,
 			shipping_residential REAL DEFAULT 0,
 			shipping_same_city REAL DEFAULT 0,
 			shipping_same_state REAL DEFAULT 0,
