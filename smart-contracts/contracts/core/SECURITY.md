@@ -32,6 +32,7 @@ never touch these contracts.
 | `RESCUER_ROLE` | escrows | `rescue(token)` | only `balanceOf(this) − owed[token]`, always paid to the fee recipient |
 | `RESOLVER_ROLE` | escrows | settle disputes | only the disputed order's or trade's own funds; OrderEscrow split bounded by the order total |
 | seller's releaser | P2PEscrow | release that seller's trades | opt-in per seller (`setReleaser`); no global release power exists |
+| trade releaser | P2PEscrow | release one buy-ad trade | named by the depositing user in `openTradeWithDeposit` (e.g. the platform key that pays the user out off-chain); never the receiving merchant |
 
 At deployment every role is granted in the initializers; the deployer holds none
 (`deploy/core.js` asserts this). The admin is the platform owner's wallet (business decision D2,

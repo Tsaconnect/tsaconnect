@@ -85,6 +85,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         uint16 platformFeeBps;
         uint16 gasFeeBps;
         bytes32 voucherHash;
+        address tradeReleaser; // set by the depositing user on a buy-ad trade; may release this trade only
     }
 
     bytes32 private constant AD_VOUCHER_TYPEHASH = keccak256(
@@ -122,6 +123,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     event TradeDisputed(bytes32 indexed tradeId, address indexed by);
     event TradeResolved(bytes32 indexed tradeId, bool releasedToBuyer, uint256 amountMoved, uint256 feeToSystem);
     event ReleaserSet(address indexed seller, address indexed releaser);
+    event TradeReleaserSet(bytes32 indexed tradeId, address indexed releaser);
     event AutoReleaseWindowSet(address indexed seller, uint40 window);
 
     error InvalidTradeId();
@@ -149,6 +151,7 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
     error AmountAboveLimit(uint256 amount, uint256 limit);
     error WindowOutOfBounds();
     error NotVoucherTaker();
+    error InvalidReleaser();
     error PaymentWindowClosed(uint40 at);
     error AutoReleaseDue(uint40 at);
     error FlatFeeNotSupported();
@@ -272,7 +275,10 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
 
     /// @notice A user sells to a merchant's buy-ad by depositing the crypto now. The caller is the
     ///         seller of the crypto and the merchant receives it on release.
-    function openTradeWithDeposit(bytes32 tradeId, address token, uint256 amount, address merchant)
+    /// @param releaser Optional (address(0) for none): an address the user lets release THIS trade,
+    ///                 e.g. the platform's release key, which releases once it has paid the user out
+    ///                 off-chain. It can never be the merchant receiving the crypto.
+    function openTradeWithDeposit(bytes32 tradeId, address token, uint256 amount, address merchant, address releaser)
         external
         nonReentrant
         whenNotPaused
@@ -281,10 +287,15 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         bytes32 key = _checkNewTrade(user, tradeId, amount);
         if (merchant == address(0)) revert ZeroAddress();
         if (merchant == user) revert SelfTrade();
+        if (releaser == merchant) revert InvalidReleaser();
 
         _addOwed(token, amount, feeConfig.limitsFor(token).maxOwed);
         _s().locked[user][token] += amount;
         _storeTrade(key, user, merchant, token, amount, Funding.DepositedByTaker, bytes32(0));
+        if (releaser != address(0)) {
+            _s().trades[key].tradeReleaser = releaser;
+            emit TradeReleaserSet(key, releaser);
+        }
         _pull(token, user, amount);
         emit TradeOpenedWithDeposit(key, user, merchant, token, amount);
     }
@@ -303,12 +314,15 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
         emit TradePaid(key);
     }
 
-    /// @notice The seller (or the seller's named releaser) releases the crypto to the buyer.
+    /// @notice The seller, the seller's named releaser, or the releaser the seller named for this
+    ///         trade releases the crypto to the buyer.
     function release(bytes32 key) external nonReentrant {
         Trade storage t = _trade(key);
         if (t.status != Status.Pending && t.status != Status.Paid) revert InvalidStatus(key, t.status);
         address caller = _msgSender();
-        if (caller != t.seller && caller != _s().releaser[t.seller]) revert NotReleaser();
+        if (caller != t.seller && caller != _s().releaser[t.seller] && (t.tradeReleaser == address(0) || caller != t.tradeReleaser)) {
+            revert NotReleaser();
+        }
         _releaseToBuyer(key, t, false);
     }
 
@@ -455,7 +469,8 @@ contract P2PEscrow is EscrowBase, EIP712Upgradeable {
             disputedAt: 0,
             platformFeeBps: p.bps,
             gasFeeBps: g.bps,
-            voucherHash: voucherHash
+            voucherHash: voucherHash,
+            tradeReleaser: address(0)
         });
     }
 

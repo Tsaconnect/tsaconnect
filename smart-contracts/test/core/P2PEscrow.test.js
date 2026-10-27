@@ -152,14 +152,14 @@ describe("P2PEscrow", () => {
 
     it("a buy-ad deposit trade releases to the merchant, or cancels back to the depositing user", async () => {
       const ctx = await setup();
-      await ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("bd"), ctx.T, usd(100), ctx.merchant.address);
+      await ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("bd"), ctx.T, usd(100), ctx.merchant.address, ethers.ZeroAddress);
       const k = keyOf(ctx.seller, "bd");
       expect(await ctx.escrow.owed(ctx.T)).to.equal(usd(100));
       await ctx.escrow.connect(ctx.merchant).markPaid(k);
       await ctx.escrow.connect(ctx.seller).release(k);
       expect(await bal(ctx, ctx.merchant)).to.equal(usd(98.5));
 
-      await ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("bd2"), ctx.T, usd(100), ctx.merchant.address);
+      await ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("bd2"), ctx.T, usd(100), ctx.merchant.address, ethers.ZeroAddress);
       const before = await bal(ctx, ctx.seller);
       await time.increase(30 * MIN);
       await expect(ctx.escrow.cancelByTimeout(keyOf(ctx.seller, "bd2"))).to.emit(ctx.escrow, "TradeCancelled").withArgs(keyOf(ctx.seller, "bd2"), usd(100), false);
@@ -417,6 +417,26 @@ describe("P2PEscrow", () => {
       await time.increase(60 * DAY + 1);
       await ctx.escrow.claimDisputeBackstop(keyOf(ctx.buyer, "c2"));
       expect(await ctx.escrow.voucherFilled(h)).to.equal(0);
+    });
+  });
+
+  describe("per-trade releaser on buy-ad trades (decision M1)", () => {
+    it("the depositing user can let one address release that trade only", async () => {
+      const ctx = await setup();
+      await ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("m1"), ctx.T, usd(100), ctx.merchant.address, ctx.releaser.address);
+      await ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("m2"), ctx.T, usd(50), ctx.merchant.address, ethers.ZeroAddress);
+      const k1 = keyOf(ctx.seller, "m1");
+      const k2 = keyOf(ctx.seller, "m2");
+      expect((await ctx.escrow.getTrade(k1)).tradeReleaser).to.equal(ctx.releaser.address);
+      await expect(ctx.escrow.connect(ctx.releaser).release(k2)).to.be.revertedWithCustomError(ctx.escrow, "NotReleaser");
+      await ctx.escrow.connect(ctx.merchant).markPaid(k1);
+      await expect(ctx.escrow.connect(ctx.releaser).release(k1)).to.emit(ctx.escrow, "TradeReleased").withArgs(k1, ctx.merchant.address, usd(98.5), usd(1.5));
+    });
+
+    it("the receiving merchant can never be named releaser", async () => {
+      const ctx = await setup();
+      await expect(ctx.escrow.connect(ctx.seller).openTradeWithDeposit(id("m3"), ctx.T, usd(10), ctx.merchant.address, ctx.merchant.address))
+        .to.be.revertedWithCustomError(ctx.escrow, "InvalidReleaser");
     });
   });
 });

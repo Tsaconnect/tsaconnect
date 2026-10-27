@@ -160,7 +160,7 @@ describe("P2PEscrow invariants (stateful fuzz)", function () {
           const m = pick(traders.filter((t) => t !== u));
           const tid = ethers.id(`d-${seed}-${nonce++}`);
           const amount = BigInt(between(1, 300)) * 1_000_000n;
-          if (await tryTx(escrow.connect(u).openTradeWithDeposit(tid, T, amount, m.address))) {
+          if (await tryTx(escrow.connect(u).openTradeWithDeposit(tid, T, amount, m.address, rand() < 0.5 ? releaser.address : ethers.ZeroAddress))) {
             const k = await escrow.tradeKey(u.address, tid);
             trades.set(k, { seller: u, buyer: m, amount, voucherHash: ethers.ZeroHash, status: S.Pending });
           }
