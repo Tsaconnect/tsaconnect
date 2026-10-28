@@ -516,6 +516,9 @@ func main() {
 	// A direct-audience escrow (BSC) is registered only if its boot gates pass,
 	// none of the hot keys below among its admins.
 	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg, directEscrowForbiddenAdmins(cfg))
+	// The core contract set (CORE_CONTRACTS; dormant = nil). Its gates run as the core-contracts-gates
+	// worker, so a slow RPC never holds boot; nothing reads the set yet.
+	coreRegistry := services.NewCoreRegistry(cfg, blockchainService, apiHotKeys(cfg))
 	if err := checkSliceLeftovers(config.DB); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 	}
@@ -579,6 +582,9 @@ func main() {
 	// internal/jobs/scheduler.go for the rationale and the Phase 2 migration
 	// path to River.
 	scheduler := jobs.NewScheduler()
+	if coreRegistry != nil {
+		scheduler.Register(coreGatesWorker{reg: coreRegistry}, jobs.AlertOnFailureStreak())
+	}
 	if mcgpSwapService.OperatorConfigured() {
 		scheduler.Register(operatorRoleProbe{swap: mcgpSwapService}, jobs.AlertOnFailureStreak())
 	}
@@ -741,8 +747,9 @@ func main() {
 	// escrow registry is passed so the panel can compare the assignment against
 	// what every deployed escrow actually pays, contract by contract.
 	// Product and service contracts pay fees too, so they are read alongside the
-	// P2P escrows; a nil client leaves them out rather than reporting a wrong answer.
-	feeSinks := services.CombinedFeeSinks{p2pEscrowRegistry}
+	// P2P escrows; a nil client leaves them out rather than reporting a wrong answer. A selected core
+	// set adds its FeeConfig's feeRecipient, which every core contract pays.
+	feeSinks := services.CombinedFeeSinks{p2pEscrowRegistry, coreRegistry}
 	if sonicClient != nil {
 		feeSinks = append(feeSinks, services.NewFeeSinks(
 			services.FeeSinkContract{Label: "Product escrow", ChainKey: "sonic", ChainID: sonicClient.ChainID().Int64(), Address: cfg.ProductEscrowAddress, Caller: sonicClient.Client},

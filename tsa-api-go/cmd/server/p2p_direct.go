@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -30,20 +32,29 @@ var knownHotKeys = map[string]string{
 // assertDistinctKey also reads, so a new hot key lands in both. Addresses are
 // derived from the keys; nothing here signs.
 func directEscrowForbiddenAdmins(cfg *config.Config) map[string]string {
+	out := apiHotKeys(cfg)
+	addHotKey(out, "PM_ADMIN_EOA_ADDRESS", cfg.PMAdminEOAAddress)
+	return out
+}
+
+// apiHotKeys is every signing key the API holds or is known to run (label → address): the
+// configured keys from signerKeysExcept plus knownHotKeys. None may hold a role on a core
+// contract (services.CheckCoreGates).
+func apiHotKeys(cfg *config.Config) map[string]string {
 	out := map[string]string{}
-	add := func(label, addr string) {
-		if common.IsHexAddress(addr) && common.HexToAddress(addr) != (common.Address{}) {
-			out[label] = common.HexToAddress(addr).Hex()
-		}
-	}
 	for name, key := range signerKeysExcept(cfg, "") {
-		add(name, signerAddress(key))
+		addHotKey(out, name, signerAddress(key))
 	}
-	add("PM_ADMIN_EOA_ADDRESS", cfg.PMAdminEOAAddress)
 	for label, addr := range knownHotKeys {
-		add(label, addr)
+		addHotKey(out, label, addr)
 	}
 	return out
+}
+
+func addHotKey(out map[string]string, label, addr string) {
+	if common.IsHexAddress(addr) && common.HexToAddress(addr) != (common.Address{}) {
+		out[label] = common.HexToAddress(addr).Hex()
+	}
 }
 
 // checkDirectUnconfigure is the direct-escrow rollback guard (plan p2p-bsc §6):
@@ -137,4 +148,16 @@ func dropUngatedDirectFeeManagers(cfg *config.Config, reg *services.P2PEscrowReg
 		delete(cfg.FeeManagerChains, id)
 		log.Printf("[config] ALERT p2p_direct_fee_manager_unregistered chain=%d fee_manager=%s — its direct escrow is not running (failed gate or no RPC); the admin fee flow and drift reconciler skip it until it is", id, fm.Address)
 	}
+}
+
+// coreGatesWorker gates the core contract set every minute (services.CoreRegistry.Gate): a chain
+// is ready only while its gates pass, and a set that stays shut fails the tick (failure-streak ALERT).
+type coreGatesWorker struct{ reg *services.CoreRegistry }
+
+func (w coreGatesWorker) Name() string            { return "core-contracts-gates" }
+func (w coreGatesWorker) Interval() time.Duration { return services.CoreGatesInterval }
+func (w coreGatesWorker) Run(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
+	defer cancel()
+	return w.reg.Gate(ctx)
 }

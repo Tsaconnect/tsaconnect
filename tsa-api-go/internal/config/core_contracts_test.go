@@ -61,7 +61,8 @@ func TestCoreContracts_DevSetOnSonicMainnet(t *testing.T) {
 		t.Fatalf("set=%q, no Sonic row: %v", cfg.CoreSet, cfg.CoreContracts)
 	}
 	if c.FeeConfig != "0x9aba9E3e3bCD5d609ef99C6dC5973386769e2572" || c.OrderEscrow != "0x91b85d83Ec8d9f8369c245297110a82882B7248E" ||
-		c.P2PEscrow != "0xDB4Ff053b677e9C65BD0988f74922329103FB2f3" || c.ChainKey != "sonic" || c.DeployBlock != 81691442 {
+		c.P2PEscrow != "0xDB4Ff053b677e9C65BD0988f74922329103FB2f3" || c.ChainKey != "sonic" || c.DeployBlock != 81691442 ||
+		c.Forwarder != "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4" {
 		t.Fatalf("dev Sonic row = %+v", c)
 	}
 }

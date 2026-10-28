@@ -12,6 +12,8 @@ import (
 const (
 	FeeSinkSourceSystemWallet = "systemWallet"
 	FeeSinkSourceOwner        = "owner"
+	// FeeSinkSourceFeeRecipient: a core set's FeeConfig.feeRecipient(), which every core contract pays.
+	FeeSinkSourceFeeRecipient = "feeRecipient"
 )
 
 // FeeSinkContract is a fee-collecting contract other than the P2P escrows.
