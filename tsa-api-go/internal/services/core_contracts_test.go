@@ -6,7 +6,9 @@ import (
 	"errors"
 	"math/big"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -30,6 +32,8 @@ type fakeCoreChain struct {
 	forwarder common.Address
 	window    int64
 	recipient common.Address
+	pending   common.Address
+	calls     atomic.Int64                               // the role reads run side by side
 	roles     map[common.Address]map[common.Address]bool // contract → holder → holds any role
 	noCode    bool
 	rpcDown   bool
@@ -44,11 +48,14 @@ func (f *fakeCoreChain) CallContract(_ context.Context, call ethereum.CallMsg, _
 	if f.rpcDown {
 		return nil, errors.New("503 Service Unavailable")
 	}
+	f.calls.Add(1)
 	m, fc := parsedCoreViewABI.Methods, parsedFeeConfigABI.Methods
 	sel := call.Data[:4]
 	switch {
 	case bytes.Equal(sel, m["defaultAdmin"].ID):
 		return m["defaultAdmin"].Outputs.Pack(f.admin)
+	case bytes.Equal(sel, m["pendingDefaultAdmin"].ID):
+		return m["pendingDefaultAdmin"].Outputs.Pack(f.pending, big.NewInt(0))
 	case bytes.Equal(sel, m["feeConfig"].ID):
 		return m["feeConfig"].Outputs.Pack(f.feeConfig)
 	case bytes.Equal(sel, m["trustedForwarder"].ID):
@@ -99,6 +106,7 @@ func TestCoreGates_EachGate(t *testing.T) {
 		{"chain_id", func(_ *CoreGatesConfig, f *fakeCoreChain) { f.chainID = 14601 }},
 		{"admin", func(_ *CoreGatesConfig, f *fakeCoreChain) { f.admin = operator }},
 		{"admin", func(c *CoreGatesConfig, _ *fakeCoreChain) { c.HotKeys["deployer"] = coreAdmin }},
+		{"admin", func(_ *CoreGatesConfig, f *fakeCoreChain) { f.pending = operator }},
 		{"hot_key_role", func(_ *CoreGatesConfig, f *fakeCoreChain) {
 			f.roles[common.HexToAddress(coreOrder)] = map[common.Address]bool{operator: true}
 		}},
@@ -142,27 +150,96 @@ func TestCoreGates_RPCDownIsUnread(t *testing.T) {
 	}
 }
 
+// A handover pending to an address that is not a hot key passes (the PM taking over is expected).
+func TestCoreGates_PendingHandoverToNonHotKeyPasses(t *testing.T) {
+	chain := healthyCoreChain()
+	chain.pending = common.HexToAddress(coreFees)
+	if fails := CheckCoreGates(context.Background(), healthyCoreGates(chain)); len(fails) != 0 {
+		t.Fatalf("fails = %v", fails)
+	}
+}
+
+// One address under two labels is read once per role, not twice.
+func TestCoreGates_HotKeysDeduplicated(t *testing.T) {
+	once := healthyCoreChain()
+	CheckCoreGates(context.Background(), healthyCoreGates(once))
+	twice := healthyCoreChain()
+	c := healthyCoreGates(twice)
+	c.HotKeys["operator 0x38cE (production)"] = directOperator
+	CheckCoreGates(context.Background(), c)
+	if once.calls.Load() != twice.calls.Load() {
+		t.Fatalf("calls %d with one label, %d with two for the same address", once.calls.Load(), twice.calls.Load())
+	}
+}
+
+func testCoreRegistry(chain *fakeCoreChain, now *time.Time) *CoreRegistry {
+	gates := healthyCoreGates(chain)
+	return &CoreRegistry{setName: "dev", fees: gates.Fees, now: func() time.Time { return *now },
+		chains: map[int64]*coreChain{146: {set: gates.Set, gates: gates}}}
+}
+
+// Ready follows the gates: a pass opens it, a wrong value found later closes it, an unread gate
+// changes nothing, and a ready chain is re-gated only every coreGatesReadyRecheck.
+func TestCoreRegistry_GateTransitions(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	chain := healthyCoreChain()
+	r := testCoreRegistry(chain, &now)
+	ready := func() bool { _, ok := r.Ready(146); return ok }
+
+	chain.rpcDown = true
+	if err := r.Gate(context.Background()); !errors.Is(err, ErrCoreSetNotReady) || ready() {
+		t.Fatalf("unread before any pass: err=%v ready=%v, want not ready", err, ready())
+	}
+	chain.rpcDown = false
+	if err := r.Gate(context.Background()); err != nil || !ready() {
+		t.Fatalf("healthy: err=%v ready=%v", err, ready())
+	}
+	chain.forwarder = common.HexToAddress(directOperator)
+	now = now.Add(time.Minute)
+	if err := r.Gate(context.Background()); err != nil || !ready() {
+		t.Fatalf("within the ready recheck window the chain is not re-gated: err=%v ready=%v", err, ready())
+	}
+	now = now.Add(coreGatesReadyRecheck)
+	if err := r.Gate(context.Background()); !errors.Is(err, ErrCoreSetNotReady) || ready() {
+		t.Fatalf("wrong value after ready: err=%v ready=%v, want out of service", err, ready())
+	}
+	chain.forwarder = common.Address{}
+	if err := r.Gate(context.Background()); err != nil || !ready() {
+		t.Fatalf("fixed on-chain: err=%v ready=%v, want ready again", err, ready())
+	}
+	chain.rpcDown = true
+	now = now.Add(coreGatesReadyRecheck)
+	if err := r.Gate(context.Background()); err != nil || !ready() {
+		t.Fatalf("an RPC blip must not close a ready set: err=%v ready=%v", err, ready())
+	}
+}
+
 // A nil (dormant) registry answers every call without panicking.
 func TestCoreRegistry_NilIsDormant(t *testing.T) {
 	var r *CoreRegistry
-	r.Start()
+	if err := r.Gate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := r.Ready(146); ok || r.Fees() != nil || r.SystemWallets() != nil {
 		t.Fatal("a nil registry must be dormant")
 	}
 }
 
-// The fee-wallet card reads each chain's feeRecipient, and says why when it cannot.
+// The fee-wallet card reads each ready chain's feeRecipient, and says why when it cannot.
 func TestCoreRegistry_SystemWallets(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
 	chain := healthyCoreChain()
-	gates := healthyCoreGates(chain)
-	r := &CoreRegistry{setName: "dev", fees: gates.Fees, chains: map[int64]*coreChain{146: {set: gates.Set, gates: gates}}}
+	r := testCoreRegistry(chain, &now)
+	if got := r.SystemWallets(); got[0].SystemWallet != "" || !strings.Contains(got[0].Reason, "gates") {
+		t.Fatalf("before the gates pass = %+v, want unverified", got[0])
+	}
+	if err := r.Gate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	got := r.SystemWallets()
 	if len(got) != 1 || got[0].SystemWallet != common.HexToAddress(coreFees).Hex() || got[0].Source != FeeSinkSourceFeeRecipient ||
 		got[0].Contract != coreFC || !strings.Contains(got[0].Label, "dev") {
 		t.Fatalf("SystemWallets = %+v", got)
-	}
-	if _, ok := r.Ready(146); ok {
-		t.Fatal("a chain is not ready before its gates pass")
 	}
 	chain.rpcDown = true
 	if got := r.SystemWallets(); got[0].SystemWallet != "" || got[0].Reason == "" {

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -146,4 +148,16 @@ func dropUngatedDirectFeeManagers(cfg *config.Config, reg *services.P2PEscrowReg
 		delete(cfg.FeeManagerChains, id)
 		log.Printf("[config] ALERT p2p_direct_fee_manager_unregistered chain=%d fee_manager=%s — its direct escrow is not running (failed gate or no RPC); the admin fee flow and drift reconciler skip it until it is", id, fm.Address)
 	}
+}
+
+// coreGatesWorker gates the core contract set every minute (services.CoreRegistry.Gate): a chain
+// is ready only while its gates pass, and a set that stays shut fails the tick (failure-streak ALERT).
+type coreGatesWorker struct{ reg *services.CoreRegistry }
+
+func (w coreGatesWorker) Name() string            { return "core-contracts-gates" }
+func (w coreGatesWorker) Interval() time.Duration { return services.CoreGatesInterval }
+func (w coreGatesWorker) Run(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
+	defer cancel()
+	return w.reg.Gate(ctx)
 }

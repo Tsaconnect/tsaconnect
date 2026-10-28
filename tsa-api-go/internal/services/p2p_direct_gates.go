@@ -77,27 +77,14 @@ func (f DirectGateFailure) String() string { return f.Gate + ": " + f.Reason }
 // CheckDirectEscrowGates runs every direct-escrow gate and returns the
 // failures; none means the escrow may be registered.
 func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []DirectGateFailure {
-	var fails []DirectGateFailure
-	fail := func(gate, reason string) {
-		fails = append(fails, DirectGateFailure{Gate: gate, Reason: RedactAlertText(reason)})
-	}
-	unread := func(gate, reason string) {
-		fails = append(fails, DirectGateFailure{Gate: gate, Reason: RedactAlertText(reason), Unread: true})
-	}
+	g := &gateRun{}
+	fail, unread := g.fail, g.unread
 	if c.Chain == nil {
 		unread("bytecode", "no chain client on "+c.ChainKey)
-		return fails
+		return g.fails
 	}
 	addrView := func(method string, args ...any) (common.Address, error) {
-		vals, err := callP2PView(ctx, c.Chain, c.Escrow, method, args...)
-		if err != nil {
-			return common.Address{}, err
-		}
-		a, ok := vals[0].(common.Address)
-		if !ok {
-			return common.Address{}, fmt.Errorf("decode %s: unexpected %T", method, vals[0])
-		}
-		return a, nil
+		return firstAddress(method)(callP2PView(ctx, c.Chain, c.Escrow, method, args...))
 	}
 	boolView := func(method string, args ...any) (bool, error) {
 		vals, err := callP2PView(ctx, c.Chain, c.Escrow, method, args...)
@@ -113,23 +100,12 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []Di
 
 	// Bytecode at the escrow and its FeeManager.
 	for _, a := range []struct{ label, addr string }{{"escrow", c.Escrow}, {"fee_manager", c.FeeManager}} {
-		if a.addr == "" {
-			continue // the fee_manager gate names a missing preset
-		}
-		code, err := c.Chain.CodeAt(ctx, common.HexToAddress(a.addr), nil)
-		switch {
-		case err != nil:
-			unread("bytecode", a.label+" unreadable: "+err.Error())
-		case len(code) == 0:
-			fail("bytecode", a.label+" has no code at "+a.addr)
+		if a.addr != "" { // the fee_manager gate names a missing preset
+			g.code(ctx, c.Chain, a.label, a.addr)
 		}
 	}
 	// eth_chainId is the configured chain (the EIP-712 domain uses it).
-	if id, err := c.Chain.ChainID(ctx); err != nil {
-		unread("chain_id", "eth_chainId unreadable: "+err.Error())
-	} else if id.Int64() != c.ChainID {
-		fail("chain_id", fmt.Sprintf("RPC reports %s, the preset is %d", id, c.ChainID))
-	}
+	g.chainID(ctx, c.Chain, c.ChainID)
 	// paymentWindow() is the 30 minutes every direct trade is stamped with.
 	if err := CheckPaymentWindow(c.Adapter, p2pPaymentWindow); errors.Is(err, errPaymentWindowUnread) {
 		unread("payment_window", err.Error())
@@ -208,17 +184,69 @@ func CheckDirectEscrowGates(ctx context.Context, c DirectEscrowGatesConfig) []Di
 		}
 	}
 	// The RPC serves receipts: every confirm reads one.
-	if c.Receipts == nil {
-		unread("receipts", "no RPC")
-	} else {
-		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := ProbeReceipts(pctx, c.Receipts)
-		cancel()
-		if err != nil {
-			unread("receipts", err.Error())
-		}
+	g.receipts(ctx, c.Receipts)
+	return g.fails
+}
+
+// gateRun collects one gate pass's failures; the direct-escrow and core-set gates share it.
+type gateRun struct{ fails []DirectGateFailure }
+
+func (g *gateRun) fail(gate, reason string) {
+	g.fails = append(g.fails, DirectGateFailure{Gate: gate, Reason: RedactAlertText(reason)})
+}
+
+func (g *gateRun) unread(gate, reason string) {
+	g.fails = append(g.fails, DirectGateFailure{Gate: gate, Reason: RedactAlertText(reason), Unread: true})
+}
+
+// code reports whether addr has bytecode, recording why not.
+func (g *gateRun) code(ctx context.Context, chain DirectChainReader, label, addr string) bool {
+	code, err := chain.CodeAt(ctx, common.HexToAddress(addr), nil)
+	switch {
+	case err != nil:
+		g.unread("bytecode", label+" unreadable: "+err.Error())
+		return false
+	case len(code) == 0:
+		g.fail("bytecode", label+" has no code at "+addr)
+		return false
 	}
-	return fails
+	return true
+}
+
+// chainID checks that the RPC reports want.
+func (g *gateRun) chainID(ctx context.Context, chain DirectChainReader, want int64) {
+	if id, err := chain.ChainID(ctx); err != nil {
+		g.unread("chain_id", "eth_chainId unreadable: "+err.Error())
+	} else if id.Int64() != want {
+		g.fail("chain_id", fmt.Sprintf("RPC reports %s, the config says %d", id, want))
+	}
+}
+
+// receipts checks that the RPC serves receipts.
+func (g *gateRun) receipts(ctx context.Context, rpc RawRPCCaller) {
+	if rpc == nil {
+		g.unread("receipts", "no RPC")
+		return
+	}
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := ProbeReceipts(pctx, rpc); err != nil {
+		g.unread("receipts", err.Error())
+	}
+}
+
+// firstAddress decodes a view's single address result.
+func firstAddress(method string) func([]any, error) (common.Address, error) {
+	return func(vals []any, err error) (common.Address, error) {
+		if err != nil {
+			return common.Address{}, err
+		}
+		a, ok := vals[0].(common.Address)
+		if !ok {
+			return common.Address{}, fmt.Errorf("decode %s: unexpected %T", method, vals[0])
+		}
+		return a, nil
+	}
 }
 
 // directGatesBootBudget bounds the direct gates at boot. Well inside the

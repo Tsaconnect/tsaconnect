@@ -134,8 +134,8 @@ func assembleCoreContracts(cfg *Config, sets map[string]map[string]coreRow) erro
 		}
 		contracts[chain.ChainID] = CoreContracts{ChainID: chain.ChainID, ChainKey: chainKey, Network: r.network,
 			FeeConfig: r.feeConfig, OrderEscrow: r.orderEscrow, P2PEscrow: r.p2pEscrow, Admin: r.admin, Forwarder: r.forwarder, DeployBlock: r.deployBlock}
-		log.Printf("[config] core contracts %s on %s(%d): FeeConfig=%s OrderEscrow=%s P2PTradeEscrow=%s admin=%s deployBlock=%d",
-			set, chainKey, chain.ChainID, r.feeConfig, r.orderEscrow, r.p2pEscrow, r.admin, r.deployBlock)
+		log.Printf("[config] core contracts %s on %s(%d): FeeConfig=%s OrderEscrow=%s P2PTradeEscrow=%s admin=%s forwarder=%s deployBlock=%d",
+			set, chainKey, chain.ChainID, r.feeConfig, r.orderEscrow, r.p2pEscrow, r.admin, r.forwarder, r.deployBlock)
 	}
 	cfg.CoreSet, cfg.CoreContracts = set, contracts
 	if set == CoreSetDev {

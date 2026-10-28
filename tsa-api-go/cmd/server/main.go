@@ -516,10 +516,9 @@ func main() {
 	// A direct-audience escrow (BSC) is registered only if its boot gates pass,
 	// none of the hot keys below among its admins.
 	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg, directEscrowForbiddenAdmins(cfg))
-	// The core contract set (CORE_CONTRACTS; dormant = nil). Its gates run in the background and
-	// nothing reads the set yet, so a slow RPC never holds boot.
+	// The core contract set (CORE_CONTRACTS; dormant = nil). Its gates run as the core-contracts-gates
+	// worker, so a slow RPC never holds boot; nothing reads the set yet.
 	coreRegistry := services.NewCoreRegistry(cfg, blockchainService, apiHotKeys(cfg))
-	coreRegistry.Start()
 	if err := checkSliceLeftovers(config.DB); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 	}
@@ -583,6 +582,9 @@ func main() {
 	// internal/jobs/scheduler.go for the rationale and the Phase 2 migration
 	// path to River.
 	scheduler := jobs.NewScheduler()
+	if coreRegistry != nil {
+		scheduler.Register(coreGatesWorker{reg: coreRegistry}, jobs.AlertOnFailureStreak())
+	}
 	if mcgpSwapService.OperatorConfigured() {
 		scheduler.Register(operatorRoleProbe{swap: mcgpSwapService}, jobs.AlertOnFailureStreak())
 	}
