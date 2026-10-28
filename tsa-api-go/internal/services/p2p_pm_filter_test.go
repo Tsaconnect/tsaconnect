@@ -18,7 +18,7 @@ func TestListAds_PMFilter(t *testing.T) {
 	// Raw DDL for p2p_ads (SQLite can't parse the numeric(78,0) types AutoMigrate
 	// would emit). Includes all columns the model writes on Create.
 	if err := db.Exec(`CREATE TABLE p2p_ads (
-		id TEXT PRIMARY KEY, seller_id TEXT, side TEXT, token TEXT, chain_id INTEGER,
+		id TEXT PRIMARY KEY, seller_id TEXT, side TEXT, token TEXT, chain_id INTEGER, escrow_address TEXT,
 		amount TEXT, remaining TEXT, reserved TEXT DEFAULT '0',
 		fiat_currency TEXT, rate TEXT, rate_type TEXT DEFAULT 'fixed',
 		float_offset_bps INTEGER, float_anchor TEXT DEFAULT 'bybit_sell',

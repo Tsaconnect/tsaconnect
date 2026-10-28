@@ -427,6 +427,11 @@ func AutoMigrate() error {
 	if err := MigratePaymentMerchantRoleIndex(DB); err != nil {
 		log.Printf("[Migrate] WARNING %s: %v — a second role cannot be added until it exists", PaymentMerchantRoleIndexName, err)
 	}
+	// One order per OrderEscrow key: the escrow watcher and claimTimeout settlement find the
+	// order by it, so two rows mirroring one on-chain order would settle the wrong one.
+	if err := MigrateOrderEscrowKeyIndex(DB); err != nil {
+		log.Printf("[Migrate] ALERT %s: %v — duplicate escrow keys? find them with SELECT escrow_order_key, count(*) FROM orders WHERE escrow_order_key <> '' GROUP BY 1 HAVING count(*) > 1", OrderEscrowKeyIndexName, err)
+	}
 	// One LP account per wallet (shared pool, spec 2026-10-14 §5): a vault
 	// position must never be read or claimed through two accounts.
 	if err := MigrateLPWalletIndex(DB); err != nil {
@@ -711,6 +716,17 @@ func MigratePoolSliceIndexes(db *gorm.DB) error {
 	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pool_slice_per_order_gen_ad
 	    ON p2p_trades (it_intent_id, generation, ad_id)
 	    WHERE it_intent_id IS NOT NULL AND status <> 'cancelled'`).Error
+}
+
+// OrderEscrowKeyIndexName keeps one order per OrderEscrow order key.
+const OrderEscrowKeyIndexName = "uq_orders_escrow_order_key"
+
+// MigrateOrderEscrowKeyIndex builds the escrow-key index without locking out writes.
+func MigrateOrderEscrowKeyIndex(db *gorm.DB) error {
+	if uniqueIndexReady(db, "orders", OrderEscrowKeyIndexName) {
+		return nil
+	}
+	return buildUniqueIndex(db, OrderEscrowKeyIndexName, ` ON orders (escrow_order_key) WHERE escrow_order_key <> ''`)
 }
 
 // LPWalletIndexName keeps one LP row per wallet (case-insensitive).

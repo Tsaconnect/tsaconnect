@@ -393,7 +393,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 		)`,
 		`CREATE TABLE p2p_ads (
 			id TEXT PRIMARY KEY, pm_id TEXT, seller_id TEXT NOT NULL,
-			side TEXT, token TEXT, chain_id INTEGER,
+			side TEXT, token TEXT, chain_id INTEGER, escrow_address TEXT,
 			amount TEXT, remaining TEXT, reserved TEXT,
 			fiat_currency TEXT, rate TEXT,
 			rate_type TEXT NOT NULL DEFAULT 'fixed',
@@ -411,7 +411,7 @@ func setupTradeDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE p2p_trades (
 			id TEXT PRIMARY KEY, ad_id TEXT NOT NULL,
 			buyer_id TEXT NOT NULL, seller_id TEXT NOT NULL, opener_id TEXT,
-			token TEXT, chain_id INTEGER,
+			token TEXT, chain_id INTEGER, escrow_address TEXT,
 			funding INTEGER NOT NULL DEFAULT 0,
 			token_amount TEXT, fiat_amount TEXT,
 			fiat_currency TEXT, rate TEXT,

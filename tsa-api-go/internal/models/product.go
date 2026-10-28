@@ -77,6 +77,9 @@ type Product struct {
 	ShippingSameCountry   float64 `gorm:"default:0" json:"shippingSameCountry"`
 	ShippingInternational float64 `gorm:"default:0" json:"shippingInternational"`
 	SellerVerified        bool    `gorm:"-" json:"sellerVerified"`
+	// HandlingDays is how many days the seller has to deliver an order (OrderEscrow's deadline,
+	// 1-30). 0: the platform default.
+	HandlingDays int `gorm:"default:0" json:"handlingDays,omitempty"`
 
 	// Admin moderation. Suspension is admin-only: a merchant can neither set nor
 	// clear it (see UpdateStatus), which is what distinguishes it from the
