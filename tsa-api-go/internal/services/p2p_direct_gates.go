@@ -283,7 +283,7 @@ func directGatesConfig(bs *BlockchainService, cc config.P2PChainConfig, e *chain
 	return gc
 }
 
-func logGateFailures(chainKey string, chainID int64, fails []DirectGateFailure) (wrong int) {
+func logGateFailures(metric, chainKey string, chainID int64, fails []DirectGateFailure) (wrong int) {
 	for _, f := range fails {
 		kind := "wrong"
 		if f.Unread {
@@ -291,7 +291,7 @@ func logGateFailures(chainKey string, chainID int64, fails []DirectGateFailure) 
 		} else {
 			wrong++
 		}
-		log.Printf("[config] ALERT p2p_direct_escrow_gate_failed chain=%s(%d) kind=%s %s", chainKey, chainID, kind, f)
+		log.Printf("[config] ALERT %s chain=%s(%d) kind=%s %s", metric, chainKey, chainID, kind, f)
 	}
 	return wrong
 }
@@ -306,7 +306,7 @@ func (r *P2PEscrowRegistry) applyDirectGates(chainID int64, chainKey string, fai
 		log.Printf("[config] P2P direct escrow gates OK chain=%s(%d)", chainKey, chainID)
 		return true
 	}
-	if logGateFailures(chainKey, chainID, fails) > 0 {
+	if logGateFailures("p2p_direct_escrow_gate_failed", chainKey, chainID, fails) > 0 {
 		delete(r.byChain, chainID)
 		log.Printf("[config] ALERT p2p_direct_escrow_dormant chain=%s(%d) failures=%d — the direct escrow is NOT registered; fix it and restart",
 			chainKey, chainID, len(fails))
@@ -328,7 +328,7 @@ func (r *P2PEscrowRegistry) recheckDirectGates(chainID int64, chainKey string, f
 		log.Printf("[config] P2P direct escrow gates OK on re-check chain=%s(%d) — open to new activity", chainKey, chainID)
 		return true
 	}
-	if logGateFailures(chainKey, chainID, fails) > 0 {
+	if logGateFailures("p2p_direct_escrow_gate_failed", chainKey, chainID, fails) > 0 {
 		log.Printf("[config] ALERT p2p_direct_escrow_wrong_on_recheck chain=%s(%d) — staying exits-only; fix it and restart", chainKey, chainID)
 	}
 	return false

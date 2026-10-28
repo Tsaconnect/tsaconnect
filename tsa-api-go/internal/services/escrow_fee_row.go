@@ -70,21 +70,26 @@ func readEscrowFeeRow(ctx context.Context, caller contractCaller, escrowAddr, to
 
 // callP2PView is one read-only call against a P2P escrow's own ABI.
 func callP2PView(ctx context.Context, caller contractCaller, escrowAddr, method string, args ...any) ([]any, error) {
+	return callABIView(ctx, parsedP2PEscrowABI, caller, escrowAddr, method, args...)
+}
+
+// callABIView is one read-only call of method on addr, packed and decoded with parsed.
+func callABIView(ctx context.Context, parsed abi.ABI, caller contractCaller, addr, method string, args ...any) ([]any, error) {
 	if caller == nil {
 		return nil, fmt.Errorf("blockchain client not available")
 	}
-	data, err := parsedP2PEscrowABI.Pack(method, args...)
+	data, err := parsed.Pack(method, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pack %s: %w", method, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	to := common.HexToAddress(escrowAddr)
+	to := common.HexToAddress(addr)
 	out, err := caller.CallContract(ctx, ethereum.CallMsg{To: &to, Data: data}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s call: %w", method, err)
 	}
-	vals, err := parsedP2PEscrowABI.Unpack(method, out)
+	vals, err := parsed.Unpack(method, out)
 	if err != nil || len(vals) == 0 {
 		return nil, fmt.Errorf("decode %s: %v", method, err)
 	}

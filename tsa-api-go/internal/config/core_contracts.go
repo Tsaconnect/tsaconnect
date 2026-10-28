@@ -40,6 +40,8 @@ type CoreContracts struct {
 	P2PEscrow   string // P2PTradeEscrow
 	// Admin is the set's DEFAULT_ADMIN (every role). A dev set's admin is a throwaway deployer.
 	Admin string
+	// Forwarder is the ERC-2771 forwarder the escrows trust (gasless calls); empty means none.
+	Forwarder string
 	// DeployBlock is where event indexers start (the set's first contract; Sonic's RPC returns no
 	// logs for whole-range queries, so they must not scan from 0).
 	DeployBlock uint64
@@ -51,6 +53,7 @@ type coreRow struct {
 	orderEscrow string
 	p2pEscrow   string
 	admin       string
+	forwarder   string // TSAForwarder; empty: none
 	deployBlock uint64
 }
 
@@ -64,6 +67,7 @@ var coreSets = map[string]map[string]coreRow{
 			orderEscrow: "0x91b85d83Ec8d9f8369c245297110a82882B7248E",
 			p2pEscrow:   "0xDB4Ff053b677e9C65BD0988f74922329103FB2f3",
 			admin:       "0xd963C3C596f692b4fD8e53bD9B60Ca1843400Da3",
+			forwarder:   "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4",
 			deployBlock: 81691442},
 	},
 	CoreSetProd: {},
@@ -129,7 +133,7 @@ func assembleCoreContracts(cfg *Config, sets map[string]map[string]coreRow) erro
 			return err
 		}
 		contracts[chain.ChainID] = CoreContracts{ChainID: chain.ChainID, ChainKey: chainKey, Network: r.network,
-			FeeConfig: r.feeConfig, OrderEscrow: r.orderEscrow, P2PEscrow: r.p2pEscrow, Admin: r.admin, DeployBlock: r.deployBlock}
+			FeeConfig: r.feeConfig, OrderEscrow: r.orderEscrow, P2PEscrow: r.p2pEscrow, Admin: r.admin, Forwarder: r.forwarder, DeployBlock: r.deployBlock}
 		log.Printf("[config] core contracts %s on %s(%d): FeeConfig=%s OrderEscrow=%s P2PTradeEscrow=%s admin=%s deployBlock=%d",
 			set, chainKey, chain.ChainID, r.feeConfig, r.orderEscrow, r.p2pEscrow, r.admin, r.deployBlock)
 	}
@@ -150,6 +154,7 @@ func (r coreRow) validate(label string) error {
 		{"OrderEscrow", r.orderEscrow, true},
 		{"P2PTradeEscrow", r.p2pEscrow, false},
 		{"admin", r.admin, false},
+		{"forwarder", r.forwarder, true},
 	} {
 		if f.optional && f.addr == "" {
 			continue

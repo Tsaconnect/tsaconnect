@@ -30,20 +30,29 @@ var knownHotKeys = map[string]string{
 // assertDistinctKey also reads, so a new hot key lands in both. Addresses are
 // derived from the keys; nothing here signs.
 func directEscrowForbiddenAdmins(cfg *config.Config) map[string]string {
+	out := apiHotKeys(cfg)
+	addHotKey(out, "PM_ADMIN_EOA_ADDRESS", cfg.PMAdminEOAAddress)
+	return out
+}
+
+// apiHotKeys is every signing key the API holds or is known to run (label → address): the
+// configured keys from signerKeysExcept plus knownHotKeys. None may hold a role on a core
+// contract (services.CheckCoreGates).
+func apiHotKeys(cfg *config.Config) map[string]string {
 	out := map[string]string{}
-	add := func(label, addr string) {
-		if common.IsHexAddress(addr) && common.HexToAddress(addr) != (common.Address{}) {
-			out[label] = common.HexToAddress(addr).Hex()
-		}
-	}
 	for name, key := range signerKeysExcept(cfg, "") {
-		add(name, signerAddress(key))
+		addHotKey(out, name, signerAddress(key))
 	}
-	add("PM_ADMIN_EOA_ADDRESS", cfg.PMAdminEOAAddress)
 	for label, addr := range knownHotKeys {
-		add(label, addr)
+		addHotKey(out, label, addr)
 	}
 	return out
+}
+
+func addHotKey(out map[string]string, label, addr string) {
+	if common.IsHexAddress(addr) && common.HexToAddress(addr) != (common.Address{}) {
+		out[label] = common.HexToAddress(addr).Hex()
+	}
 }
 
 // checkDirectUnconfigure is the direct-escrow rollback guard (plan p2p-bsc §6):
