@@ -42,12 +42,13 @@ type Order struct {
 	EscrowSellerWallet string `gorm:"size:42" json:"-"`
 	// OrderEscrow (core contracts v2) mirror. Empty on orders escrowed in ProductEscrowV2, which
 	// EscrowContractAddress tells apart. EscrowOrderKey is the order's key on OrderEscrow
-	// (keccak256(buyer, orderId)); EscrowBuyerWallet is the wallet that created it there.
-	EscrowOrderKey    string `gorm:"size:66;index" json:"-"`
+	// (keccak256(buyer, orderId), unique: uq_orders_escrow_order_key); EscrowBuyerWallet is the wallet that created it there.
+	EscrowOrderKey    string `gorm:"size:66" json:"-"`
 	EscrowBuyerWallet string `gorm:"size:42" json:"-"`
 	// MerchantFee and FlatFee are what OrderEscrow fixed at createOrder (token base units).
-	MerchantFee string `gorm:"size:78" json:"merchantFee,omitempty"`
-	FlatFee     string `gorm:"size:78" json:"flatFee,omitempty"`
+	// Seller-side, so never in the order payload a buyer reads.
+	MerchantFee string `gorm:"size:78" json:"-"`
+	FlatFee     string `gorm:"size:78" json:"-"`
 	// DeliverBy, ConfirmBy and ResolveBy mirror the contract's deadlines: after each, anyone may
 	// settle the order with claimTimeout (refund, release, refund).
 	DeliverBy *time.Time `json:"deliverBy,omitempty"`

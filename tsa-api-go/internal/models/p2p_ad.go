@@ -11,7 +11,7 @@ import (
 
 // OptionalNumeric is a string-backed value for Postgres `numeric` columns
 // that are semantically optional. A plain `string` Go field can't represent
-// "absent" — an empty string serializes as the SQL literal `”`, which the
+// "absent" — an empty string serializes as an empty SQL string literal, which the
 // numeric type rejects with `invalid input syntax for type numeric: ""`.
 // This Valuer maps `""` → NULL on write, and the Scanner maps NULL → `""`
 // on read, so the rest of the codebase keeps treating the value as a plain
@@ -83,7 +83,7 @@ type P2PAd struct {
 	ChainID  int64     `gorm:"not null;default:146" json:"chainId"`
 	// EscrowAddress is the escrow the ad's voucher is signed for (vouchers are bound to one
 	// escrow). Empty: the chain's legacy escrow.
-	EscrowAddress    string                      `gorm:"size:42;index" json:"escrowAddress,omitempty"`
+	EscrowAddress    string                      `gorm:"size:42" json:"escrowAddress,omitempty"`
 	Amount           string                      `gorm:"type:numeric(78,0);not null" json:"amount"`
 	Remaining        string                      `gorm:"type:numeric(78,0);not null" json:"remaining"`
 	Reserved         string                      `gorm:"type:numeric(78,0);not null;default:'0'" json:"reserved"`

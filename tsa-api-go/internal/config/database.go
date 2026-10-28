@@ -427,12 +427,13 @@ func AutoMigrate() error {
 	if err := MigratePaymentMerchantRoleIndex(DB); err != nil {
 		log.Printf("[Migrate] WARNING %s: %v — a second role cannot be added until it exists", PaymentMerchantRoleIndexName, err)
 	}
+	// One order per OrderEscrow key: the escrow watcher and claimTimeout settlement find the
+	// order by it, so two rows mirroring one on-chain order would settle the wrong one.
+	if err := MigrateOrderEscrowKeyIndex(DB); err != nil {
+		log.Printf("[Migrate] ALERT %s: %v — duplicate escrow keys? find them with SELECT escrow_order_key, count(*) FROM orders WHERE escrow_order_key <> '' GROUP BY 1 HAVING count(*) > 1", OrderEscrowKeyIndexName, err)
+	}
 	// One LP account per wallet (shared pool, spec 2026-10-14 §5): a vault
 	// position must never be read or claimed through two accounts.
-	// One fee payment per service contact (contracts v2 slice 5 verifies the fee transfer by hash).
-	if err := MigrateServiceContactFeeTxIndex(DB); err != nil {
-		log.Printf("[Migrate] ALERT %s: %v — duplicate fee txs? find them with SELECT LOWER(pay_fee_tx_hash), count(*) FROM service_contact_payments WHERE pay_fee_tx_hash <> '' GROUP BY 1 HAVING count(*) > 1", ServiceContactFeeTxIndexName, err)
-	}
 	if err := MigrateLPWalletIndex(DB); err != nil {
 		log.Printf("[Migrate] ALERT %s: %v — duplicate LP wallets? find them with SELECT LOWER(operator_wallet_address), count(*) FROM payment_merchants WHERE kind = 'lp' AND operator_wallet_address <> '' GROUP BY 1 HAVING count(*) > 1", LPWalletIndexName, err)
 	}
@@ -717,16 +718,15 @@ func MigratePoolSliceIndexes(db *gorm.DB) error {
 	    WHERE it_intent_id IS NOT NULL AND status <> 'cancelled'`).Error
 }
 
-// ServiceContactFeeTxIndexName keeps a service-contact fee tx from paying for two contacts.
-const ServiceContactFeeTxIndexName = "uq_service_contact_payments_fee_tx"
+// OrderEscrowKeyIndexName keeps one order per OrderEscrow order key.
+const OrderEscrowKeyIndexName = "uq_orders_escrow_order_key"
 
-// MigrateServiceContactFeeTxIndex builds the fee-tx index without locking out writes.
-func MigrateServiceContactFeeTxIndex(db *gorm.DB) error {
-	if uniqueIndexReady(db, "service_contact_payments", ServiceContactFeeTxIndexName) {
+// MigrateOrderEscrowKeyIndex builds the escrow-key index without locking out writes.
+func MigrateOrderEscrowKeyIndex(db *gorm.DB) error {
+	if uniqueIndexReady(db, "orders", OrderEscrowKeyIndexName) {
 		return nil
 	}
-	return buildUniqueIndex(db, ServiceContactFeeTxIndexName,
-		` ON service_contact_payments (LOWER(pay_fee_tx_hash)) WHERE pay_fee_tx_hash <> ''`)
+	return buildUniqueIndex(db, OrderEscrowKeyIndexName, ` ON orders (escrow_order_key) WHERE escrow_order_key <> ''`)
 }
 
 // LPWalletIndexName keeps one LP row per wallet (case-insensitive).
