@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -123,6 +124,12 @@ func (h *Handlers) GetCategoryByID(c *gin.Context) {
 	models.VisibleToPublic(config.DB.Model(&models.Product{}).Where("category_id = ?", categoryID)).
 		Count(&productCount)
 
+	resolved, err := models.ResolveCategoryConfig(config.DB, category)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to resolve category configuration")
+		return
+	}
+
 	utils.SuccessResponse(c, http.StatusOK, "Category fetched successfully", gin.H{
 		"id":             category.ID,
 		"title":          category.Title,
@@ -130,6 +137,14 @@ func (h *Handlers) GetCategoryByID(c *gin.Context) {
 		"type":           category.Type,
 		"serviceFeeMode": category.ServiceFeeMode,
 		"serviceType":    category.ServiceType,
+		"slug":           category.Slug,
+		// The category's own config (null = inherits); resolvedConfig is what
+		// applies, each value with the category it came from.
+		"bookingMode":    category.BookingMode,
+		"priceUnits":     category.PriceUnits,
+		"listingFields":  category.ListingFields,
+		"bookingFields":  category.BookingFields,
+		"resolvedConfig": resolved,
 		"parentCategory": category.ParentCategoryID,
 		"icon":           category.Icon,
 		"color":          category.Color,
@@ -189,6 +204,25 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 			return
 		}
 		parentCategoryID = &parentOID
+	}
+
+	cfgUpdates, err := parseCategoryConfigForm(c, config.DB)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	slug := strings.TrimSpace(c.PostForm("slug"))
+	if slug != "" {
+		if !models.ValidSlug(slug) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "slug must be lowercase letters, digits and single hyphens")
+			return
+		}
+		if slugTaken(config.DB, slug, nil) {
+			utils.ErrorResponseWithCode(c, http.StatusConflict, "Category slug already exists", "slug_taken")
+			return
+		}
+	} else {
+		slug = models.UniqueSlug(models.Slugify(title), func(s string) bool { return slugTaken(config.DB, s, nil) })
 	}
 
 	// Handle icon upload
@@ -252,6 +286,7 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		Type:             catType,
 		ServiceFeeMode:   serviceFeeMode,
 		ServiceType:      serviceType,
+		Slug:             &slug,
 		ParentCategoryID: parentCategoryID,
 		Icon:             iconURL,
 		Image:            imageURL,
@@ -262,10 +297,20 @@ func (h *Handlers) CreateCategory(c *gin.Context) {
 		UpdatedAt:        now,
 	}
 
-	if err := config.DB.Create(&category).Error; err != nil {
+	err = config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&category).Error; err != nil {
+			return err
+		}
+		if len(cfgUpdates) == 0 {
+			return nil
+		}
+		return tx.Model(&category).Updates(cfgUpdates).Error
+	})
+	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create category")
 		return
 	}
+	config.DB.First(&category, "id = ?", category.ID)
 
 	utils.SuccessResponse(c, http.StatusCreated, "Category created successfully", category)
 }
@@ -295,7 +340,22 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		return
 	}
 
-	updates := map[string]interface{}{}
+	updates, err := parseCategoryConfigForm(c, config.DB)
+	if err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if slug := strings.TrimSpace(c.PostForm("slug")); slug != "" {
+		if !models.ValidSlug(slug) {
+			utils.ErrorResponse(c, http.StatusBadRequest, "slug must be lowercase letters, digits and single hyphens")
+			return
+		}
+		if slugTaken(config.DB, slug, &categoryID) {
+			utils.ErrorResponseWithCode(c, http.StatusConflict, "Category slug already exists", "slug_taken")
+			return
+		}
+		updates["slug"] = slug
+	}
 
 	if title := c.PostForm("title"); title != "" {
 		if title != category.Title {
@@ -338,8 +398,11 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 	}
 
 	// Handle parent category
+	// "null" makes it a root category again.
 	parentCategoryStr := c.PostForm("parentCategory")
-	if parentCategoryStr != "" {
+	if parentCategoryStr == formNull {
+		updates["parent_category_id"] = gorm.Expr("NULL")
+	} else if parentCategoryStr != "" {
 		if parentCategoryStr == categoryID.String() {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Category cannot be its own parent")
 			return
@@ -352,6 +415,16 @@ func (h *Handlers) UpdateCategory(c *gin.Context) {
 		var parent models.Category
 		if err := config.DB.First(&parent, "id = ?", parentOID).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusNotFound, "Parent category not found")
+			return
+		}
+		// Config inherits up the tree; a loop would make it unresolvable.
+		cycle, err := models.ParentWouldCycle(config.DB, categoryID, parentOID)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to check the category tree")
+			return
+		}
+		if cycle {
+			utils.ErrorResponseWithCode(c, http.StatusBadRequest, "A category cannot be placed under its own subcategory", "category_cycle")
 			return
 		}
 		updates["parent_category_id"] = parentOID

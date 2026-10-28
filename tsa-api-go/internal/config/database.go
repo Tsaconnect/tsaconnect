@@ -82,6 +82,42 @@ func migrateCategoryServiceType(db *gorm.DB) error {
 	})
 }
 
+// backfillCategorySlugs gives every category without a slug one derived from
+// its title, de-duplicated against every slug already taken. It only ever
+// fills NULLs, so it is safe on every boot and never rewrites a slug an admin
+// set; it also catches a category an older release created mid-deploy.
+func backfillCategorySlugs(db *gorm.DB) error {
+	var missing []models.Category
+	if err := db.Select("id", "title").Where("slug IS NULL OR slug = ''").
+		Order("created_at ASC, id ASC").Find(&missing).Error; err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var existing []string
+	if err := db.Model(&models.Category{}).Where("slug IS NOT NULL AND slug <> ''").
+		Pluck("slug", &existing).Error; err != nil {
+		return err
+	}
+	taken := make(map[string]bool, len(existing)+len(missing))
+	for _, s := range existing {
+		taken[s] = true
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, c := range missing {
+			slug := models.UniqueSlug(models.Slugify(c.Title), func(s string) bool { return taken[s] })
+			taken[slug] = true
+			if err := tx.Model(&models.Category{}).Where("id = ? AND (slug IS NULL OR slug = '')", c.ID).
+				UpdateColumn("slug", slug).Error; err != nil {
+				return err
+			}
+		}
+		log.Printf("[Migrate] categories.slug backfilled for %d categor(ies)", len(missing))
+		return nil
+	})
+}
+
 func AutoMigrate() error {
 	// fee_configs gained a nullable chain_id column and the unique index moved
 	// from (feature, token_symbol) → (feature, token_symbol, chain_id) so a
@@ -132,6 +168,8 @@ func AutoMigrate() error {
 		&models.DeliveryAddress{},
 		&models.Category{},
 		&models.CategoryBookingFee{},
+		// Field catalogue for category listing/booking forms; seeded below.
+		&models.FieldDef{},
 		// Three service types (booking/order/contact) — per-service config, menus,
 		// availability windows and reserved slots. Additive; only services use them.
 		&models.ServiceProfile{},
@@ -297,6 +335,15 @@ func AutoMigrate() error {
 		&models.WalletLinkChallenge{},
 	); err != nil {
 		return err
+	}
+
+	// Field catalogue seed: per row, never overwritten (an admin's edit to a
+	// system field survives every boot).
+	if err := models.SeedFieldDefs(DB); err != nil {
+		return fmt.Errorf("field_defs seed: %w", err)
+	}
+	if err := backfillCategorySlugs(DB); err != nil {
+		return fmt.Errorf("categories.slug backfill: %w", err)
 	}
 
 	// A TSA Pay payment expires only when its merchant set an expiry (owner,

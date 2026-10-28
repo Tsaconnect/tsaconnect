@@ -74,3 +74,37 @@ func TestAutoMigrate_RunsTheCategoryServiceTypeStepFirst(t *testing.T) {
 		t.Fatal("the every-boot service_type backfill is back; it reverts admins' contact choices")
 	}
 }
+
+func TestBackfillCategorySlugs_FillsOnlyMissingAndDedupes(t *testing.T) {
+	db := openPayMigrateDB(t)
+	if err := db.Exec(`CREATE TABLE categories (id TEXT PRIMARY KEY, title TEXT, slug TEXT, created_at DATETIME)`).Error; err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`INSERT INTO categories (id, title, slug, created_at) VALUES
+		('00000000-0000-0000-0000-00000000000a', 'Rides', NULL, '2026-01-01'),
+		('00000000-0000-0000-0000-00000000000b', 'rides!', NULL, '2026-01-02'),
+		('00000000-0000-0000-0000-00000000000c', 'Hostels', 'rides-2', '2026-01-03'),
+		('00000000-0000-0000-0000-00000000000d', 'Salon', 'beauty', '2026-01-04')`)
+
+	if err := backfillCategorySlugs(db); err != nil {
+		t.Fatal(err)
+	}
+	slug := func(id string) string {
+		var s string
+		db.Raw(`SELECT slug FROM categories WHERE id = ?`, id).Scan(&s)
+		return s
+	}
+	if slug("00000000-0000-0000-0000-00000000000a") != "rides" || slug("00000000-0000-0000-0000-00000000000b") != "rides-3" {
+		t.Fatalf("dedupe wrong: a=%q b=%q", slug("00000000-0000-0000-0000-00000000000a"), slug("00000000-0000-0000-0000-00000000000b"))
+	}
+	if slug("00000000-0000-0000-0000-00000000000c") != "rides-2" || slug("00000000-0000-0000-0000-00000000000d") != "beauty" {
+		t.Fatal("an existing slug was rewritten")
+	}
+	db.Exec(`UPDATE categories SET slug = 'cars' WHERE id = '00000000-0000-0000-0000-00000000000a'`)
+	if err := backfillCategorySlugs(db); err != nil {
+		t.Fatal(err)
+	}
+	if slug("00000000-0000-0000-0000-00000000000a") != "cars" {
+		t.Fatal("a later boot rewrote an admin-set slug")
+	}
+}

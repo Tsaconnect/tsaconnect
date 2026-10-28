@@ -109,7 +109,7 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid timezone. Use an IANA name such as Africa/Lagos")
 		return
 	}
-	if err := models.ValidateFieldConfig(req.FieldConfig); err != nil {
+	if err := models.ValidateFieldConfigAgainst(req.FieldConfig, loadFieldCatalog(config.DB)); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}

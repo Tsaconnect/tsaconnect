@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 // Category represents a product/service category.
@@ -35,9 +36,19 @@ type Category struct {
 	// current pay-to-reveal behaviour; the booking backfill maps legacy fare
 	// categories (see config/database.go). Supersedes ServiceFeeMode for the new
 	// flows, which is retained for legacy standard/booking pricing fallbacks.
-	ServiceType string    `gorm:"default:'contact'" json:"serviceType"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ServiceType string `gorm:"default:'contact'" json:"serviceType"`
+	// Slug is the stable identifier (titles change). Unique; backfilled from
+	// the title at boot for rows that lack one (config.backfillCategorySlugs).
+	Slug *string `gorm:"size:80;uniqueIndex" json:"slug"`
+	// Configuration — each NULL means "inherit from the parent"; resolve with
+	// EffectiveCategoryConfig (category_config.go), never read these directly
+	// to decide behaviour.
+	BookingMode   *string        `gorm:"size:16" json:"bookingMode"`
+	PriceUnits    datatypes.JSON `gorm:"type:jsonb" json:"priceUnits"`    // []string
+	ListingFields datatypes.JSON `gorm:"type:jsonb" json:"listingFields"` // []CategoryFieldRef
+	BookingFields datatypes.JSON `gorm:"type:jsonb" json:"bookingFields"` // []CategoryFieldRef
+	CreatedAt     time.Time      `json:"createdAt"`
+	UpdatedAt     time.Time      `json:"updatedAt"`
 }
 
 // TableName overrides the default table name.

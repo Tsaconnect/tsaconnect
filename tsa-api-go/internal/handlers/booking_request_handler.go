@@ -95,7 +95,8 @@ func (ch *CheckoutHandler) CreateBookingRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "This service accepts instant bookings — check out directly")
 		return
 	}
-	if err := models.ValidateAnswers(profile.GetFieldConfig(), req.Answers); err != nil {
+	form, _ := serviceBookingForm(config.DB, &product, &profile)
+	if err := models.ValidateAnswers(form, req.Answers); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}

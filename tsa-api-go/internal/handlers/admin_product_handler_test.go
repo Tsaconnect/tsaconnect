@@ -118,6 +118,7 @@ func setupProductModerationDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE IF NOT EXISTS categories (
 			id TEXT PRIMARY KEY,
 			title TEXT,
+			parent_category_id TEXT, slug TEXT, booking_mode TEXT, price_units TEXT, listing_fields TEXT, booking_fields TEXT,
 			product_count INTEGER DEFAULT 0,
 			created_at DATETIME,
 			updated_at DATETIME
