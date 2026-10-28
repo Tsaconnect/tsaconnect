@@ -667,6 +667,11 @@ type Config struct {
 	// like the BSC P2P escrow).
 	FeeManagerChains map[int64]FeeManagerChainConfig
 
+	// CoreSet / CoreContracts are the selected audit-ready core contract set (CORE_CONTRACTS) and
+	// its contracts per chainID (core_contracts.go). Empty while the set is off, the default.
+	CoreSet       string
+	CoreContracts map[int64]CoreContracts
+
 	// p2pNetworks is each preset chain's selected network (<CHAIN>_NETWORK),
 	// chosen once by assembleP2PChains so every later reader agrees and an
 	// unknown value alerts once (review M4).
@@ -1604,6 +1609,9 @@ func Load() *Config {
 		log.Fatalf("[config] %v", err)
 	}
 	assembleFeeManagerChains(cfg)
+	if err := assembleCoreContracts(cfg, coreSets); err != nil {
+		log.Fatalf("[config] %v", err)
+	}
 	if err := assembleLiquidityPool(cfg, liquidityPoolPresets); err != nil {
 		log.Fatalf("[config] %v", err)
 	}
