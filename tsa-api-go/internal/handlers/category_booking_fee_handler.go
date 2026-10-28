@@ -55,6 +55,17 @@ type upsertBookingFeesRequest struct {
 // (admin only). Replaces the full six-tier fare schedule for a booking-mode
 // category. Unknown tier keys are rejected; negative amounts are clamped to 0.
 func (h *Handlers) UpsertCategoryBookingFees(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if !hasAdminPrivilege(c, user) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
+		return
+	}
+
 	categoryID, err := uuid.Parse(c.Param("categoryId"))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid category ID")

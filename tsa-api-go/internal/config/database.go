@@ -51,6 +51,37 @@ func migratePayMerchantLiveSwitch(db *gorm.DB) error {
 	})
 }
 
+// migrateCategoryServiceType adds categories.service_type and, in the same
+// transaction, moves legacy booking-fare categories (service_fee_mode
+// 'booking') to service type 'booking' so they keep their reserve-a-slot flow;
+// every other category takes the column default 'contact'.
+//
+// It runs only while the column is missing, like migratePayMerchantLiveSwitch.
+// The column default is 'contact', so a backfill run on every boot could not
+// tell a never-classified category from one an admin later set to 'contact',
+// and kept flipping the admin's choice back to 'booking'.
+func migrateCategoryServiceType(db *gorm.DB) error {
+	m := db.Migrator()
+	if !m.HasTable(&models.Category{}) || m.HasColumn(&models.Category{}, "service_type") {
+		return nil
+	}
+	hasFeeMode := m.HasColumn(&models.Category{}, "service_fee_mode")
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Migrator().AddColumn(&models.Category{}, "ServiceType"); err != nil {
+			return err
+		}
+		if !hasFeeMode {
+			return nil // no fee-mode column, so no booking-fare category to carry over
+		}
+		res := tx.Exec(`UPDATE categories SET service_type = 'booking' WHERE service_fee_mode = 'booking'`)
+		if res.Error != nil {
+			return res.Error
+		}
+		log.Printf("[Migrate] categories.service_type added; %d booking-fare categor(ies) set to booking", res.RowsAffected)
+		return nil
+	})
+}
+
 func AutoMigrate() error {
 	// fee_configs gained a nullable chain_id column and the unique index moved
 	// from (feature, token_symbol) → (feature, token_symbol, chain_id) so a
@@ -71,6 +102,10 @@ func AutoMigrate() error {
 
 	if err := migratePayMerchantLiveSwitch(DB); err != nil {
 		return fmt.Errorf("pay_merchants.live_enabled: %w", err)
+	}
+
+	if err := migrateCategoryServiceType(DB); err != nil {
+		return fmt.Errorf("categories.service_type: %w", err)
 	}
 
 	if err := DB.AutoMigrate(
@@ -655,15 +690,6 @@ func AutoMigrate() error {
 	    WHERE status NOT IN ('approved','rejected','lapsed','cancelled')`).Error; err != nil {
 		log.Printf("[Migrate] WARNING could not build uq_user_name_changes_one_open: %v — a user most likely holds MORE THAN ONE open name change. The service check still runs; close the duplicates and migrate again.", err)
 	}
-
-	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
-	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot
-	// flow. All other Service categories default to 'contact' (the AutoMigrate
-	// column default), preserving their pay-to-reveal behaviour. Idempotent —
-	// only touches rows still on the default.
-	DB.Exec(`UPDATE categories SET service_type = 'booking'
-	         WHERE service_fee_mode = 'booking'
-	           AND (service_type IS NULL OR service_type = '' OR service_type = 'contact')`)
 
 	// Booking timezone backfill: availability windows were always wall-clock in
 	// the merchant's own zone, but were read as UTC, so every slot surfaced an

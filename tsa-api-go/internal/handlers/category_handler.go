@@ -457,6 +457,17 @@ func (h *Handlers) DeleteCategory(c *gin.Context) {
 
 // ReorderCategories handles PATCH /api/products/category/reorder - bulk reorder categories (admin only).
 func (h *Handlers) ReorderCategories(c *gin.Context) {
+	user := getUserFromContext(c)
+	if user == nil {
+		utils.ErrorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if !hasAdminPrivilege(c, user) {
+		utils.ErrorResponse(c, http.StatusForbidden, "Access denied. Admin only.")
+		return
+	}
+
 	var body struct {
 		Orders []struct {
 			ID    uuid.UUID `json:"id" binding:"required"`
