@@ -71,7 +71,7 @@ func (n *InboundHoldNotifier) NotifyP2P(_ context.Context, a P2PAlert) error {
 	case P2PAlertExpiredWithProof:
 		subject = "P2P trade expired with payment proof — " + size
 		title = "An expired P2P trade has payment proof but no on-chain mark-paid"
-		todo = "The buyer saved payment proof but her on-chain mark-paid never landed, so it was not auto-cancelled. Check the proof and chat: the buyer can still mark paid or dispute; either party can cancel by timeout."
+		todo = "The buyer saved payment proof but her on-chain mark-paid never landed, so it was not auto-cancelled. Past the payment window she can no longer mark paid or dispute on-chain: only the seller's release or a cancel by timeout (which returns the crypto to the seller) remains. Check the proof and chat, and ask the seller to release if the payment is real."
 	case P2PAlertDisputeUnresolved:
 		subject = fmt.Sprintf("P2P dispute open %s — %s", a.Age.Round(time.Hour), size)
 		title = "A P2P dispute is still unresolved"
