@@ -2145,7 +2145,8 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 		return
 	}
 	if err := config.DB.Model(order).Updates(map[string]interface{}{"escrow_seller_wallet": sellerAddr,
-		"escrow_buyer_wallet": common.HexToAddress(user.WalletAddress).Hex(), "escrow_order_key": common.Hash(key).Hex()}).Error; err != nil {
+		"escrow_buyer_wallet": common.HexToAddress(user.WalletAddress).Hex(), "escrow_order_key": common.Hash(key).Hex(),
+		"escrow_handling_days": int(handlingDays)}).Error; err != nil {
 		log.Printf("Failed to record escrow seller wallet for order %s: %v", order.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare escrow transaction")
 		return
@@ -2298,9 +2299,16 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	// The funding wallet is the one OrderCreated names: a buyer may pay from any account of their
-	// wallet, and what they pay from it is theirs (refunds go back to it). Seller, token, amounts
-	// and the delivery window are what bind the escrow to this order.
+	// The escrow keys the order by the wallet that funded it, and only that wallet can confirm or
+	// dispute it: it must be the one prepare-escrow recorded (and built the tx from), so the key the
+	// expiry sweep and every later call read is this order's. Money paid from another wallet is
+	// still that wallet's (claimTimeout after the delivery deadline returns it).
+	if order.EscrowBuyerWallet != "" && !strings.EqualFold(created.Buyer.Hex(), order.EscrowBuyerWallet) {
+		log.Printf("[checkout] ALERT escrow_wrong_wallet=1 order=%s funded_by=%s prepared_for=%s", order.ID, created.Buyer.Hex(), order.EscrowBuyerWallet)
+		utils.ErrorResponseWithCode(c, http.StatusConflict,
+			"This payment came from a different wallet than the order was prepared for. Contact support — do not pay again.", "escrow_wrong_wallet")
+		return
+	}
 	if !ch.requireEscrowFundsOrder(c, &order, created.Key, created.Buyer.Hex()) {
 		return
 	}
@@ -2385,7 +2393,7 @@ func (ch *CheckoutHandler) requireEscrowFundsOrder(c *gin.Context, order *models
 		sellerWallet = seller.WalletAddress
 	}
 	// The window the escrow gave the seller must be the order's own (the buyer chose handlingDays).
-	handlingDays, err := services.OrderHandlingDays(config.DB, order, onChain.CreatedAt)
+	handlingDays, err := services.EscrowHandlingDays(config.DB, order, onChain.CreatedAt)
 	if err != nil {
 		log.Printf("[checkout] handling days for order %s: %v", order.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to verify your payment")
@@ -2943,7 +2951,7 @@ func (ch *CheckoutHandler) PrepareConfirm(c *gin.Context) {
 		return
 	}
 
-	confirmTxBytes, err := ch.EscrowService.PrepareConfirmReceipt(services.OrderKeyOf(&order), user.WalletAddress, ch.orderEscrowContract(&order))
+	confirmTxBytes, err := ch.EscrowService.PrepareConfirmReceipt(services.OrderKeyOf(&order), escrowBuyer(&order, user), ch.orderEscrowContract(&order))
 	if err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare confirm transaction")
 		return
@@ -3114,6 +3122,15 @@ func (ch *CheckoutHandler) RequestRefund(c *gin.Context) {
 	}
 }
 
+// escrowBuyer is the wallet the order's escrow names as buyer — the only one OrderEscrow lets confirm
+// or dispute — else (an order not yet on OrderEscrow) the account's registered wallet.
+func escrowBuyer(order *models.Order, user *models.User) string {
+	if order.EscrowBuyerWallet != "" {
+		return order.EscrowBuyerWallet
+	}
+	return user.WalletAddress
+}
+
 // prepareBuyerExit answers a buyer's refund request with the OrderEscrow call that applies now:
 // dispute(key) while a delivered order's confirm window is open, claimTimeout(key) once the
 // delivery deadline passed with nothing delivered, otherwise a 409 naming when a refund becomes
@@ -3129,9 +3146,9 @@ func (ch *CheckoutHandler) prepareBuyerExit(c *gin.Context, order *models.Order,
 	key, escrowAddr := services.OrderKeyOf(order), ch.orderEscrowContract(order)
 	switch {
 	case onChain.State == services.OrderStateDelivered && !now.After(onChain.ConfirmBy):
-		txBytes, err = ch.EscrowService.PrepareDispute(key, user.WalletAddress, escrowAddr)
+		txBytes, err = ch.EscrowService.PrepareDispute(key, escrowBuyer(order, user), escrowAddr)
 	case onChain.State == services.OrderStateFunded && now.After(onChain.DeliverBy):
-		txBytes, err = ch.EscrowService.PrepareClaimTimeout(key, user.WalletAddress, escrowAddr)
+		txBytes, err = ch.EscrowService.PrepareClaimTimeout(key, escrowBuyer(order, user), escrowAddr)
 	case onChain.State == services.OrderStateFunded:
 		utils.ErrorResponseWithCode(c, http.StatusConflict, fmt.Sprintf(
 			"The seller has until %s to deliver. After that you can claim a full refund here, or ask the seller to cancel now.",

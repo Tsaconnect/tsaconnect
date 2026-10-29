@@ -45,6 +45,9 @@ type Order struct {
 	// (keccak256(buyer, orderId), unique: uq_orders_escrow_order_key); EscrowBuyerWallet is the wallet that created it there.
 	EscrowOrderKey    string `gorm:"size:66" json:"-"`
 	EscrowBuyerWallet string `gorm:"size:42" json:"-"`
+	// EscrowHandlingDays is the delivery window the createOrder tx was prepared with, so the check
+	// at submit does not move if the listing or booking changes in between. Nil: recompute.
+	EscrowHandlingDays *int `json:"-"`
 	// MerchantFee and FlatFee are what OrderEscrow fixed at createOrder (token base units). The
 	// merchant fee is the seller's (also reported as platformFee); the flat fee is the buyer's own,
 	// paid on top of totalAmount, so their receipt shows it.

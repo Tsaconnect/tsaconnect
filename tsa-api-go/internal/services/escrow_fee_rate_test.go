@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 const (
@@ -183,5 +184,15 @@ func TestFindOrderCreated(t *testing.T) {
 	}
 	if _, err := findOrderCreated([]*types.Log{mine}, common.HexToAddress(testFeeManager), id); err == nil {
 		t.Fatal("an OrderCreated from another contract must not pay this order")
+	}
+}
+
+// The window recorded at prepare wins: a listing or booking edited before submit must not make the
+// buyer's correct payment look like a mismatch.
+func TestEscrowHandlingDays_RecordedWindowWins(t *testing.T) {
+	days := 3
+	got, err := EscrowHandlingDays(nil, &models.Order{EscrowHandlingDays: &days}, time.Now())
+	if err != nil || got != 3 {
+		t.Fatalf("got %d, %v", got, err)
 	}
 }

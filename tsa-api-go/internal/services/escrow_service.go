@@ -252,6 +252,15 @@ func OrderKeyOf(o *models.Order) [32]byte {
 	return common.HexToHash(o.EscrowOrderKey)
 }
 
+// EscrowHandlingDays is the delivery window order's escrow was prepared with (recorded at
+// prepare-escrow), else OrderHandlingDays as of at.
+func EscrowHandlingDays(db *gorm.DB, order *models.Order, at time.Time) (uint8, error) {
+	if order.EscrowHandlingDays != nil && *order.EscrowHandlingDays > 0 && *order.EscrowHandlingDays <= 255 {
+		return uint8(*order.EscrowHandlingDays), nil
+	}
+	return OrderHandlingDays(db, order, at)
+}
+
 // OrderHandlingDays is the delivery window order must get on the escrow: its booking's slot end
 // plus the grace, else its listing's handling days, as of at (the order's escrow time — the
 // prepare for a new order, the escrow's createdAt when checking one).

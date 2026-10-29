@@ -335,7 +335,7 @@ func (s *UnpaidOrderExpiryService) reconcilePaid(ctx context.Context, o *staleOr
 	if s.tokens != nil {
 		tokenAddr = s.tokens.TokenAddress("sonic", o.Token)
 	}
-	handlingDays, err := OrderHandlingDays(s.db.WithContext(ctx), &o.Order, onChain.CreatedAt)
+	handlingDays, err := EscrowHandlingDays(s.db.WithContext(ctx), &o.Order, onChain.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("handling days for order %s: %w", o.ID, err)
 	}

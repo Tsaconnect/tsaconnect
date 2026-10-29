@@ -496,3 +496,15 @@ func TestAdminResolve_OnOrderEscrow(t *testing.T) {
 		}
 	})
 }
+
+// Buyer-signed escrow calls come from the wallet the escrow names (only it may confirm or dispute),
+// not whatever the account is linked to now.
+func TestEscrowBuyer_IsTheFundingWallet(t *testing.T) {
+	user := &models.User{WalletAddress: proofSellerWallet}
+	if got := escrowBuyer(&models.Order{EscrowBuyerWallet: proofBuyerWallet}, user); got != proofBuyerWallet {
+		t.Fatalf("escrowBuyer = %s, want the escrow's buyer", got)
+	}
+	if got := escrowBuyer(&models.Order{}, user); got != proofSellerWallet {
+		t.Fatalf("an order not on OrderEscrow yet uses the account wallet, got %s", got)
+	}
+}
