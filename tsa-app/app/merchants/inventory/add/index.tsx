@@ -25,6 +25,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
+import { appendListingLocation } from '@/utils/location';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
@@ -48,6 +49,9 @@ import {
   PricingCurrencySelect,
   ShippingRatesFields,
 } from '@/components/products/MerchantPricingFields';
+import { SchemaFields } from '@/components/forms/SchemaFields';
+import { useCategoryListingFields } from '@/hooks/useCategoryListingFields';
+import { cleanSchemaAnswers, validateSchemaAnswers } from '@/utils/schemaFields';
 
 const CategoryAvatar = ({ category }: { category: any }) => {
   const { radius } = useTheme();
@@ -79,6 +83,7 @@ const AddProduct = () => {
   const [categoryId, setCategoryId] = useState('');
   const [categoryName, setCategoryName] = useState('');
   const [location, setLocation] = useState({ country: "", state: "", city: "" });
+  const [area, setArea] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -90,6 +95,10 @@ const AddProduct = () => {
   const [categorySearch, setCategorySearch] = useState('');
 
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Answers to the chosen category's listing fields (brand, …).
+  const [listingValues, setListingValues] = useState<Record<string, any>>({});
+  const [listingErrors, setListingErrors] = useState<Record<string, string>>({});
+  const { fields: listingFields } = useCategoryListingFields(categoryId || null);
 
   const maxDescriptionLength = 500;
 
@@ -220,8 +229,11 @@ const AddProduct = () => {
       if (!attr.value.trim()) newErrors[`attr_value_${index}`] = 'Attribute value is required';
     });
 
+    const listingProblems = validateSchemaAnswers(listingFields, listingValues);
+    setListingErrors(listingProblems);
+
     setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    return Object.keys(newErrors).length === 0 && Object.keys(listingProblems).length === 0;
   };
 
   const createProduct = async () => {
@@ -251,7 +263,7 @@ const AddProduct = () => {
       formData.append('description', description);
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
-      formData.append('location', [location.city, location.state, location.country].filter(Boolean).join(', '));
+      appendListingLocation(formData, location, area);
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
@@ -259,6 +271,9 @@ const AddProduct = () => {
       promotion.append(formData);
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
+      }
+      if (listingFields.length > 0) {
+        formData.append('listingValues', JSON.stringify(cleanSchemaAnswers(listingFields, listingValues)));
       }
 
       const response = await api.createProduct(formData);
@@ -291,11 +306,14 @@ const AddProduct = () => {
     setCategoryId('');
     setCategoryName('');
     setLocation({ country: "", state: "", city: "" });
+    setArea('');
     setPhoneNumber('');
     setEmail('');
     setCompanyName('');
     setProductImages([]);
     setAttributes([]);
+    setListingValues({});
+    setListingErrors({});
     setErrors({});
   };
 
@@ -489,6 +507,24 @@ const AddProduct = () => {
             )}
           </View>
 
+          {/* The category's own listing fields (set by admins per category). */}
+          {listingFields.length > 0 && (
+            <View style={{ marginBottom: spacing.lg, gap: spacing.md }}>
+              <Text variant="bodyMed" weight="700">
+                {categoryName || 'Category'} details
+              </Text>
+              <SchemaFields
+                fields={listingFields}
+                answers={listingValues}
+                errors={listingErrors}
+                onChange={(key, value) => {
+                  setListingValues((prev) => ({ ...prev, [key]: value }));
+                  setListingErrors((prev) => (prev[key] ? { ...prev, [key]: '' } : prev));
+                }}
+              />
+            </View>
+          )}
+
           <View style={{ marginBottom: spacing.lg }}>
             <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
               Description *
@@ -588,6 +624,13 @@ const AddProduct = () => {
                 {errors.location}
               </Text>
             )}
+            <Input
+              label="Area or neighbourhood"
+              value={area}
+              onChangeText={setArea}
+              placeholder="e.g. Odenigbo, Kubwa, Yaba"
+              containerStyle={{ marginTop: spacing.md }}
+            />
           </View>
 
           <Input

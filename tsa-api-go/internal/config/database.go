@@ -51,6 +51,73 @@ func migratePayMerchantLiveSwitch(db *gorm.DB) error {
 	})
 }
 
+// migrateCategoryServiceType adds categories.service_type and, in the same
+// transaction, moves legacy booking-fare categories (service_fee_mode
+// 'booking') to service type 'booking' so they keep their reserve-a-slot flow;
+// every other category takes the column default 'contact'.
+//
+// It runs only while the column is missing, like migratePayMerchantLiveSwitch.
+// The column default is 'contact', so a backfill run on every boot could not
+// tell a never-classified category from one an admin later set to 'contact',
+// and kept flipping the admin's choice back to 'booking'.
+func migrateCategoryServiceType(db *gorm.DB) error {
+	m := db.Migrator()
+	if !m.HasTable(&models.Category{}) || m.HasColumn(&models.Category{}, "service_type") {
+		return nil
+	}
+	hasFeeMode := m.HasColumn(&models.Category{}, "service_fee_mode")
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Migrator().AddColumn(&models.Category{}, "ServiceType"); err != nil {
+			return err
+		}
+		if !hasFeeMode {
+			return nil // no fee-mode column, so no booking-fare category to carry over
+		}
+		res := tx.Exec(`UPDATE categories SET service_type = 'booking' WHERE service_fee_mode = 'booking'`)
+		if res.Error != nil {
+			return res.Error
+		}
+		log.Printf("[Migrate] categories.service_type added; %d booking-fare categor(ies) set to booking", res.RowsAffected)
+		return nil
+	})
+}
+
+// backfillCategorySlugs gives every category without a slug one derived from
+// its title, de-duplicated against every slug already taken. It only ever
+// fills NULLs, so it is safe on every boot and never rewrites a slug an admin
+// set; it also catches a category an older release created mid-deploy.
+func backfillCategorySlugs(db *gorm.DB) error {
+	var missing []models.Category
+	if err := db.Select("id", "title").Where("slug IS NULL OR slug = ''").
+		Order("created_at ASC, id ASC").Find(&missing).Error; err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var existing []string
+	if err := db.Model(&models.Category{}).Where("slug IS NOT NULL AND slug <> ''").
+		Pluck("slug", &existing).Error; err != nil {
+		return err
+	}
+	taken := make(map[string]bool, len(existing)+len(missing))
+	for _, s := range existing {
+		taken[s] = true
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, c := range missing {
+			slug := models.UniqueSlug(models.Slugify(c.Title), func(s string) bool { return taken[s] })
+			taken[slug] = true
+			if err := tx.Model(&models.Category{}).Where("id = ? AND (slug IS NULL OR slug = '')", c.ID).
+				UpdateColumn("slug", slug).Error; err != nil {
+				return err
+			}
+		}
+		log.Printf("[Migrate] categories.slug backfilled for %d categor(ies)", len(missing))
+		return nil
+	})
+}
+
 func AutoMigrate() error {
 	// fee_configs gained a nullable chain_id column and the unique index moved
 	// from (feature, token_symbol) → (feature, token_symbol, chain_id) so a
@@ -71,6 +138,10 @@ func AutoMigrate() error {
 
 	if err := migratePayMerchantLiveSwitch(DB); err != nil {
 		return fmt.Errorf("pay_merchants.live_enabled: %w", err)
+	}
+
+	if err := migrateCategoryServiceType(DB); err != nil {
+		return fmt.Errorf("categories.service_type: %w", err)
 	}
 
 	if err := DB.AutoMigrate(
@@ -97,6 +168,8 @@ func AutoMigrate() error {
 		&models.DeliveryAddress{},
 		&models.Category{},
 		&models.CategoryBookingFee{},
+		// Field catalogue for category listing/booking forms; seeded below.
+		&models.FieldDef{},
 		// Three service types (booking/order/contact) — per-service config, menus,
 		// availability windows and reserved slots. Additive; only services use them.
 		&models.ServiceProfile{},
@@ -265,6 +338,20 @@ func AutoMigrate() error {
 		return err
 	}
 
+	// Field catalogue seed: per row, never overwritten (an admin's edit to a
+	// system field survives every boot).
+	if err := models.SeedFieldDefs(DB); err != nil {
+		return fmt.Errorf("field_defs seed: %w", err)
+	}
+	if err := backfillCategorySlugs(DB); err != nil {
+		return fmt.Errorf("categories.slug backfill: %w", err)
+	}
+	if n, err := models.BackfillListingLocations(DB); err != nil {
+		return fmt.Errorf("products location backfill: %w", err)
+	} else if n > 0 {
+		log.Printf("[Migrate] products location backfilled for %d listing(s)", n)
+	}
+
 	// A TSA Pay payment expires only when its merchant set an expiry (owner,
 	// 2026-10-09), so expires_at is NULL on one that never does. AutoMigrate
 	// does not relax an existing NOT NULL; this does, and is idempotent.
@@ -305,6 +392,11 @@ func AutoMigrate() error {
 	// scan once the table grows. Partial: only rows the leaderboard can return.
 	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_users_tp_balance
 		ON users (tp_balance DESC) WHERE deleted_at IS NULL`)
+
+	// Category search filters match listing values by JSON containment
+	// (listing_values @> {...}); GIN keeps that off a sequential scan.
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_products_listing_values
+		ON products USING GIN (listing_values) WHERE listing_values IS NOT NULL`)
 
 	// P2P trade integrity constraints — buyer cannot equal seller. AutoMigrate
 	// doesn't emit CHECK constraints, so this is added explicitly. IF NOT
@@ -666,15 +758,6 @@ func AutoMigrate() error {
 	    WHERE status NOT IN ('approved','rejected','lapsed','cancelled')`).Error; err != nil {
 		log.Printf("[Migrate] WARNING could not build uq_user_name_changes_one_open: %v — a user most likely holds MORE THAN ONE open name change. The service check still runs; close the duplicates and migrate again.", err)
 	}
-
-	// Service-type backfill: legacy booking-fare categories (ServiceFeeMode
-	// 'booking') become ServiceType 'booking' so they keep their reserve-a-slot
-	// flow. All other Service categories default to 'contact' (the AutoMigrate
-	// column default), preserving their pay-to-reveal behaviour. Idempotent —
-	// only touches rows still on the default.
-	DB.Exec(`UPDATE categories SET service_type = 'booking'
-	         WHERE service_fee_mode = 'booking'
-	           AND (service_type IS NULL OR service_type = '' OR service_type = 'contact')`)
 
 	// Booking timezone backfill: availability windows were always wall-clock in
 	// the merchant's own zone, but were read as UTC, so every slot surfaced an

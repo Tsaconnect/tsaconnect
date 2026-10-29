@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
+	"github.com/ojimcy/tsa-api-go/internal/jobs"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"gorm.io/gorm"
@@ -148,4 +150,32 @@ func (w pmReleaserWorker) Interval() time.Duration { return 15 * time.Minute }
 func (w pmReleaserWorker) Run(ctx context.Context) error {
 	_, err := w.trades.AlertMissingPMReleasers(ctx)
 	return err
+}
+
+// orderTimeoutWorker sweeps OrderEscrow orders whose deadline passed (services.OrderTimeoutClaimer).
+type orderTimeoutWorker struct{ c *services.OrderTimeoutClaimer }
+
+func (w orderTimeoutWorker) Name() string            { return "order-timeout-claimer" }
+func (w orderTimeoutWorker) Interval() time.Duration { return 5 * time.Minute }
+func (w orderTimeoutWorker) Run(ctx context.Context) error {
+	claimed, settled, err := w.c.Sweep(ctx)
+	if claimed+settled > 0 {
+		log.Printf("[order-timeout] claimed=%d settled=%d", claimed, settled)
+	}
+	return err
+}
+
+// registerOrderTimeouts runs the deadline sweep whenever orders escrow in an OrderEscrow. Without a
+// release key it still records orders the escrow paid out, but claims nothing.
+func registerOrderTimeouts(scheduler *jobs.Scheduler, escrow *services.EscrowService, settler services.OrderSettler,
+	release services.ChainSender, sonic *blockchain.EVMClient) {
+	if escrow == nil || escrow.CurrentEscrowAddress() == "" || sonic == nil {
+		log.Printf("[order-timeout] dormant: no OrderEscrow on Sonic")
+		return
+	}
+	if release == nil {
+		log.Printf("[order-timeout] WARNING no release key: overdue orders are recorded but not claimed")
+	}
+	scheduler.Register(orderTimeoutWorker{services.NewOrderTimeoutClaimer(config.DB, escrow, settler, release, sonic.ChainID().Int64())},
+		jobs.AlertOnFailureStreak())
 }

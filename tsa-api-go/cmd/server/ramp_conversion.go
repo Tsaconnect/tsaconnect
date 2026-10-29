@@ -245,8 +245,8 @@ func buildTreasuryLanes(cfg *config.Config, chains *services.BlockchainService, 
 		tl := &services.TreasuryLane{SponsorLane: lane, ChainID: chainID, Routers: routers}
 		// The marketplace escrow is on Sonic: the treasury calls it as the
 		// seller of payout orders (markDelivered, cancelOrder), and only it.
-		if spec.needRouters && chain == "sonic" && common.IsHexAddress(cfg.ProductEscrowAddress) {
-			tl.CallTargets = []common.Address{common.HexToAddress(cfg.ProductEscrowAddress)}
+		if orderEscrow := services.OrderEscrowAddress(cfg); spec.needRouters && chain == "sonic" && common.IsHexAddress(orderEscrow) {
+			tl.CallTargets = []common.Address{common.HexToAddress(orderEscrow)}
 		}
 		lanes[chain] = tl
 	}

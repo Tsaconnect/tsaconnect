@@ -26,7 +26,8 @@ import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
-import LocationPicker, { LocationValue } from "../common/LocationPicker";
+import LocationPicker from "../common/LocationPicker";
+import { appendListingLocation, listingLocation, LocationValue } from "@/utils/location";
 import { useTheme } from "@/theme";
 import {
   Button,
@@ -63,6 +64,10 @@ import {
   UsdStorageNote,
 } from "@/components/products/MerchantPricingFields";
 import AvailabilityEditor from "./AvailabilityEditor";
+import { SchemaFields } from "@/components/forms/SchemaFields";
+import { useCategoryListingFields } from "@/hooks/useCategoryListingFields";
+import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields";
+import { categoryPathLabels } from "@/utils/categoryTree";
 import BookingConfigBuilder from "./BookingConfigBuilder";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
@@ -89,11 +94,15 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const [phoneNumber, setPhoneNumber] = useState("");
   const [email, setEmail] = useState("");
   const [location, setLocation] = useState<LocationValue>({ country: '', state: '', city: '' });
+  const [area, setArea] = useState('');
   const [category, setCategory] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [categories, setCategories] = useState<
-    { id: string; title: string; serviceType?: ServiceType }[]
+    { id: string; title: string; serviceType?: ServiceType; parentCategory?: string }[]
   >([]);
+  // Answers to the chosen category's listing fields (institution, gender, …).
+  const [listingValues, setListingValues] = useState<Record<string, any>>({});
+  const [listingErrors, setListingErrors] = useState<Record<string, string>>({});
   const [categorySheetVisible, setCategorySheetVisible] = useState(false);
 
   // Standard fixed price (order/contact optional).
@@ -130,6 +139,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
   // The chosen category's serviceType drives the whole form shape.
   const selectedCategory = categories.find((c) => c.id === category);
+  const { fields: listingFields } = useCategoryListingFields(category || null);
   const serviceType: ServiceType = selectedCategory?.serviceType ?? "contact";
   const isContact = serviceType === "contact";
   const isOrder = serviceType === "order";
@@ -162,6 +172,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                 id: c.id ?? c._id,
                 title: c.title,
                 serviceType: c.serviceType,
+                parentCategory: c.parentCategory ?? undefined,
               }))
             : []
         );
@@ -190,6 +201,10 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           setPhoneNumber(p.phoneNumber ?? "");
           setCompanyName(p.companyName ?? "");
           setCategory(typeof p.category === "string" ? p.category : p.category?.id ?? "");
+          const saved = listingLocation(p);
+          setLocation(saved.value);
+          setArea(saved.area);
+          if (p.listingValues && typeof p.listingValues === "object") setListingValues(p.listingValues);
           if (p.price) setPrice(String(p.price));
           loadSavedAmounts({
             shippingResidential: p.shippingResidential,
@@ -266,14 +281,22 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       return;
     }
 
+    // A selectionLimit of 0 means unlimited, so a full set stops here.
+    if (productImages.length >= 10) {
+      Alert.alert("Limit reached", "You can add up to 10 photos.");
+      return;
+    }
+
     let result = await ImagePicker.launchImageLibraryAsync({
       aspect: [4, 3],
       quality: 0.8,
       allowsMultipleSelection: true,
+      selectionLimit: 10 - productImages.length,
     });
 
     if (!result.canceled) {
-      setProductImages(result.assets.map((asset) => asset.uri));
+      const picked = result.assets.map((asset) => asset.uri);
+      setProductImages((prev) => [...prev, ...picked].slice(0, 10));
     }
   };
 
@@ -367,12 +390,23 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       Alert.alert("One moment", "Exchange rates are still loading. Try again in a moment.");
       return;
     }
+    const listingProblems = validateSchemaAnswers(listingFields, listingValues);
+    setListingErrors(listingProblems);
+    if (Object.keys(listingProblems).length > 0) {
+      Alert.alert("Missing details", "Please fill in the required category details.");
+      return;
+    }
     setLoading(true);
     const formData = new FormData();
-    // On create we always send local URIs. On edit, only newly-picked local
-    // URIs (file://) are appended; existing remote URLs are left as-is server-side.
+    // Saved photos are remote URLs; picked ones are local files to upload.
+    // On edit the API keeps only the saved photos listed in existingImages,
+    // so a removed photo is dropped and the rest survive a new upload.
+    const isRemote = (uri: string) => /^https?:/.test(uri);
+    if (isEdit) {
+      formData.append("existingImages", JSON.stringify(productImages.filter(isRemote)));
+    }
     productImages.forEach((uri, index) => {
-      if (isEdit && /^https?:/.test(uri)) return;
+      if (isRemote(uri)) return;
       //@ts-ignore
       formData.append("images", {
         uri,
@@ -383,7 +417,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
     formData.append("name", productName);
     formData.append("description", description);
-    formData.append("location", [location.city, location.state, location.country].filter(Boolean).join(', '));
+    appendListingLocation(formData, location, area);
     formData.append("type", "Service");
     formData.append("email", email);
 
@@ -417,6 +451,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     formData.append("phoneNumber", phoneNumber);
     formData.append("category", category);
     formData.append("companyName", companyName);
+    if (listingFields.length > 0) {
+      formData.append("listingValues", JSON.stringify(cleanSchemaAnswers(listingFields, listingValues)));
+    }
 
     try {
       const authHeader = token?.startsWith('Bearer ') ? token : `Bearer ${token}`;
@@ -460,9 +497,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const resetForm = () => {
     setPhoneNumber("");
     setCategory("");
+    setListingValues({});
+    setListingErrors({});
     setDescription("");
     setEmail("");
     setLocation({ country: '', state: '', city: '' });
+    setArea('');
     setProductImages([]);
     setProductName("");
     setCompanyName("");
@@ -682,6 +722,24 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
             />
           </Card>
 
+          {/* The category's own listing fields (set by admins per category). */}
+          {listingFields.length > 0 && (
+            <>
+              {sectionTitle(`${selectedCategory?.title ?? "Category"} details`)}
+              <Card padding="lg" style={{ gap: spacing.lg }}>
+                <SchemaFields
+                  fields={listingFields}
+                  answers={listingValues}
+                  errors={listingErrors}
+                  onChange={(key, value) => {
+                    setListingValues((prev) => ({ ...prev, [key]: value }));
+                    setListingErrors((prev) => (prev[key] ? { ...prev, [key]: "" } : prev));
+                  }}
+                />
+              </Card>
+            </>
+          )}
+
           {/* Type-specific sections. Only shown once a category is chosen. */}
           {category ? (
             <>
@@ -839,6 +897,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
               onChange={setLocation}
               required={["country", "state"]}
             />
+            <Input
+              label="Area or neighbourhood"
+              value={area}
+              onChangeText={setArea}
+              placeholder="e.g. Odenigbo, Kubwa, Yaba"
+            />
 
             <Input
               label="Phone Number *"
@@ -881,7 +945,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
         visible={categorySheetVisible}
         onClose={() => setCategorySheetVisible(false)}
         title="Select a category"
-        items={categories.map((item) => ({ id: item.id, label: item.title }))}
+        items={categoryPathLabels(categories).map((item) => ({ id: item.id, label: item.path }))}
         selectedId={category || undefined}
         onSelect={(item) => {
           setCategory(item.id);

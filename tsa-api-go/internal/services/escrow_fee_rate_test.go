@@ -5,12 +5,17 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
 const (
@@ -53,10 +58,6 @@ func (f *fakeEscrowChain) CallContract(_ context.Context, call ethereum.CallMsg,
 	return nil, errors.New("unexpected call")
 }
 
-func newFeeTestEscrow(chain *fakeEscrowChain) *EscrowService {
-	return &EscrowService{escrowAddress: testEscrow, caller: chain}
-}
-
 func withFeeManager(rates map[string][4]interface{}) fakeEscrowChain {
 	return fakeEscrowChain{feeManager: common.HexToAddress(testFeeManager), symbol: "USDC", rates: rates}
 }
@@ -65,171 +66,133 @@ func row(bps uint16, flat uint64, exempt, active bool) [4]interface{} {
 	return [4]interface{}{bps, flat, exempt, active}
 }
 
-// Every branch of ProductEscrowV2._calculatePlatformFee (MCGP aside, which the
-// caller zeroes), so the backend charges exactly what createOrder pulls.
-func TestPlatformFeeBPS_MirrorsContract(t *testing.T) {
-	cases := []struct {
-		name    string
-		chain   fakeEscrowChain
-		want    int
-		wantErr error
-	}{
-		{"no FeeManager → built-in 2%", fakeEscrowChain{}, 200, nil},
-		{"row not active → built-in 2%", withFeeManager(map[string][4]interface{}{"product_merchant": row(150, 0, false, false)}), 200, nil},
-		{"active row → its bps", withFeeManager(map[string][4]interface{}{"product_merchant": row(150, 0, false, true)}), 150, nil},
-		{"exempt row → 0, whatever the token", withFeeManager(map[string][4]interface{}{"product_merchant": row(150, 0, true, true)}), 0, nil},
-		{"at the contract max → allowed", withFeeManager(map[string][4]interface{}{"product_merchant": row(300, 0, false, true)}), 300, nil},
-		{"above the contract max → escrow reverts", withFeeManager(map[string][4]interface{}{"product_merchant": row(301, 0, false, true)}), 0, ErrEscrowFeeAboveMax},
+// newOrderTestEscrow is an EscrowService over chain whose OrderEscrow and FeeConfig are set.
+func newOrderTestEscrow(chain *FakeEscrowChain) *EscrowService {
+	return &EscrowService{escrowAddress: testEscrow, feeConfig: testFeeManager, chainID: 146, caller: chain, receipts: chain,
+		fees: NewFeeConfigReader(map[int64]FeeManagerRPCClient{146: chain})}
+}
+
+// Pricing reads FeeConfig's order row: the merchant fee (refused above MAX_FEE_BPS), the flat fee
+// and maxPerOrder; an inactive row or missing limits mean the token cannot be checked out in.
+func TestOrderRates_ReadFeeConfig(t *testing.T) {
+	ctx := context.Background()
+	chain := NewFakeEscrowChain()
+	es := newOrderTestEscrow(chain)
+	bps, err := es.PlatformFeeBPS(ctx, testUSDC)
+	flat, err2 := es.GasFeeWei(ctx, testUSDC)
+	max, err3 := es.MaxOrderAmount(ctx, testUSDC)
+	if err != nil || err2 != nil || err3 != nil || bps != 200 || flat.Int64() != 100_000 || max.Int64() != 1_000_000_000 {
+		t.Fatalf("rates = %d %v %v (%v %v %v)", bps, flat, max, err, err2, err3)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			chain := c.chain
-			got, err := newFeeTestEscrow(&chain).PlatformFeeBPS(context.Background(), testUSDC)
-			if !errors.Is(err, c.wantErr) || got != c.want {
-				t.Fatalf("got %d, %v; want %d, %v", got, err, c.want, c.wantErr)
-			}
-		})
+
+	for name, set := range map[string]func(*FakeEscrowChain){
+		"inactive row": func(c *FakeEscrowChain) { c.Rate.Active = false },
+		"no limits":    func(c *FakeEscrowChain) { c.Limits = nil },
+	} {
+		c := NewFakeEscrowChain()
+		set(c)
+		if _, err := newOrderTestEscrow(c).PlatformFeeBPS(ctx, testUSDC); !errors.Is(err, ErrOrderFeeNotConfigured) {
+			t.Errorf("%s: err = %v, want ErrOrderFeeNotConfigured", name, err)
+		}
+	}
+	high := NewFakeEscrowChain()
+	high.Rate.BPS = MaxOrderFeeBPS + 1
+	if _, err := newOrderTestEscrow(high).PlatformFeeBPS(ctx, testUSDC); !errors.Is(err, ErrEscrowFeeAboveMax) {
+		t.Fatalf("over the cap: err = %v", err)
+	}
+	if _, err := (&EscrowService{}).PlatformFeeBPS(ctx, testUSDC); !errors.Is(err, ErrOrderEscrowUnavailable) {
+		t.Fatalf("no order escrow: err = %v", err)
 	}
 }
 
-// Every branch of ProductEscrowV2._gasFee.
-func TestGasFeeWei_MirrorsContract(t *testing.T) {
-	cases := []struct {
-		name  string
-		chain fakeEscrowChain
-		want  int64
-	}{
-		{"no FeeManager → GAS_FEE", fakeEscrowChain{}, DefaultEscrowGasFee},
-		{"row not active → GAS_FEE", withFeeManager(map[string][4]interface{}{"product": row(0, 50000, false, false)}), DefaultEscrowGasFee},
-		{"active row → its flat", withFeeManager(map[string][4]interface{}{"product": row(0, 50000, false, true)}), 50000},
-		{"exempt row → 0", withFeeManager(map[string][4]interface{}{"product": row(0, 50000, true, true)}), 0},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			chain := c.chain
-			got, err := newFeeTestEscrow(&chain).GasFeeWei(context.Background(), testUSDC)
-			if err != nil || got.Int64() != c.want {
-				t.Fatalf("got %v, %v; want %d", got, err, c.want)
-			}
-		})
-	}
-}
-
-// The contract keys rateFor by ITS tokenSymbol for the address — not by our
-// name for the token, and never the "*" wildcard.
-func TestPlatformFeeBPS_AsksForTheEscrowsOwnSymbol(t *testing.T) {
-	chain := withFeeManager(map[string][4]interface{}{"product_merchant": row(100, 0, false, true)})
-	chain.symbol = "USDC.e"
-	if _, err := newFeeTestEscrow(&chain).PlatformFeeBPS(context.Background(), testUSDC); err != nil {
+// A read is cached for a minute and survives a short RPC blip; past the stale bound it errors.
+func TestOrderRates_CacheAndStaleBound(t *testing.T) {
+	ctx := context.Background()
+	chain := NewFakeEscrowChain()
+	es := newOrderTestEscrow(chain)
+	if _, err := es.PlatformFeeBPS(ctx, testUSDC); err != nil {
 		t.Fatal(err)
 	}
-	if len(chain.askedFor) != 1 || chain.askedFor[0][0] != "product_merchant" || chain.askedFor[0][1] != "USDC.e" {
-		t.Fatalf("rateFor asked with %v, want [product_merchant USDC.e]", chain.askedFor)
+	chain.Err = errors.New("rpc down")
+	entry, _ := es.rates.Load(strings.ToLower(testUSDC))
+	e := entry.(rateEntry)
+	e.readAt = time.Now().Add(-2 * time.Minute) // past the TTL, inside the stale bound
+	es.rates.Store(strings.ToLower(testUSDC), e)
+	if bps, err := es.PlatformFeeBPS(ctx, testUSDC); err != nil || bps != 200 {
+		t.Fatalf("blip: %d %v, want the cached read", bps, err)
+	}
+	e.readAt = time.Now().Add(-escrowRateMaxStale - time.Minute)
+	es.rates.Store(strings.ToLower(testUSDC), e)
+	if _, err := es.PlatformFeeBPS(ctx, testUSDC); err == nil {
+		t.Fatal("a read older than the stale bound must not stand in")
 	}
 }
 
-func ageCachedRate(es *EscrowService, feature string, by time.Duration) {
-	key := feature + "|0x29219dd400f2bf60e5a23d13be72b486d4038894"
-	v, _ := es.rates.Load(key)
-	entry := v.(rateEntry)
-	entry.readAt = entry.readAt.Add(-by)
-	es.rates.Store(key, entry)
-}
-
-func TestEscrowRate_CachesAndSurvivesAShortRPCBlip(t *testing.T) {
-	chain := withFeeManager(map[string][4]interface{}{"product_merchant": row(150, 0, false, true)})
-	es := newFeeTestEscrow(&chain)
-	if got, _ := es.PlatformFeeBPS(context.Background(), testUSDC); got != 150 {
-		t.Fatalf("first read = %d", got)
-	}
-	reads := chain.calls
-	if got, _ := es.PlatformFeeBPS(context.Background(), testUSDC); got != 150 || chain.calls != reads {
-		t.Fatalf("within TTL: got %d with %d extra calls, want cached 150", got, chain.calls-reads)
-	}
-
-	// Past the TTL and the RPC is down: the previous read stands in, no error.
-	ageCachedRate(es, "product_merchant", 2*escrowRateTTL)
-	chain.fail = true
-	if got, err := es.PlatformFeeBPS(context.Background(), testUSDC); got != 150 || err != nil {
-		t.Fatalf("stale fallback = %d, %v; want 150, nil", got, err)
+// OrderKey matches OrderEscrow.orderKey: keccak256(abi.encode(buyer, orderId)).
+func TestOrderKey_MatchesTheContract(t *testing.T) {
+	id := GenerateOrderID(uuid.MustParse("6f1c2e1a-0000-4000-8000-000000000001"))
+	addrT, _ := abi.NewType("address", "", nil)
+	b32, _ := abi.NewType("bytes32", "", nil)
+	enc, _ := abi.Arguments{{Type: addrT}, {Type: b32}}.Pack(common.HexToAddress(testBuyerWallet), id)
+	if want := crypto.Keccak256Hash(enc); OrderKey(testBuyerWallet, id) != [32]byte(want) {
+		t.Fatalf("key = %x, want %x", OrderKey(testBuyerWallet, id), want)
 	}
 }
 
-// A long outage must not keep serving an old rate forever.
-func TestEscrowRate_StaleReadExpires(t *testing.T) {
-	chain := withFeeManager(map[string][4]interface{}{"product_merchant": row(150, 0, false, true)})
-	es := newFeeTestEscrow(&chain)
-	if _, err := es.PlatformFeeBPS(context.Background(), testUSDC); err != nil {
-		t.Fatal(err)
-	}
-	ageCachedRate(es, "product_merchant", escrowRateMaxStale+time.Second)
-	chain.fail = true
-	if _, err := es.PlatformFeeBPS(context.Background(), testUSDC); err == nil {
-		t.Fatal("expected an error once the last read is older than escrowRateMaxStale")
-	}
-}
-
-func TestEscrowRate_ErrorsWithNothingToFallBackOn(t *testing.T) {
-	if _, err := newFeeTestEscrow(&fakeEscrowChain{fail: true}).PlatformFeeBPS(context.Background(), testUSDC); err == nil {
-		t.Fatal("expected an error with no prior read")
-	}
-	if _, err := (&EscrowService{escrowAddress: testEscrow}).GasFeeWei(context.Background(), testUSDC); err == nil {
-		t.Fatal("expected an error without an RPC client")
-	}
-	if _, err := newFeeTestEscrow(&fakeEscrowChain{}).PlatformFeeBPS(context.Background(), ""); err == nil {
-		t.Fatal("expected an error for an unconfigured token address")
+// The delivery window: the listing's handling days (default 7), a booking's slot end + 2 days,
+// always inside the contract's 1–30.
+func TestHandlingDaysFor(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { t := now.Add(d); return &t }
+	for _, tc := range []struct {
+		days    int
+		slotEnd *time.Time
+		want    uint8
+	}{
+		{0, nil, DefaultOrderHandlingDays},
+		{3, nil, 3},
+		{45, nil, MaxOrderHandlingDays},
+		{0, at(3 * time.Hour), 3},                      // slot today: 2 days grace + part of a day
+		{0, at(10 * 24 * time.Hour), 12},               // 10 days out + 2
+		{0, at(28 * 24 * time.Hour), 30},               // the booking lead cap lands on the contract max
+		{0, at(-72 * time.Hour), MinOrderHandlingDays}, // a past slot still gets a day
+	} {
+		if got := HandlingDaysFor(tc.days, tc.slotEnd, now); got != tc.want {
+			t.Errorf("HandlingDaysFor(%d, %v) = %d, want %d", tc.days, tc.slotEnd, got, tc.want)
+		}
 	}
 }
 
-func orderCreatedLog(t *testing.T, orderID [32]byte, product, shipping, fee int64) *types.Log {
-	t.Helper()
-	event := parsedEscrowABI.Events["OrderCreated"]
-	data, err := event.Inputs.NonIndexed().Pack(common.HexToAddress(testUSDC), big.NewInt(product), big.NewInt(shipping), big.NewInt(fee))
+// OrderCreated is matched on this order's id and decoded field by field.
+func TestFindOrderCreated(t *testing.T) {
+	id, other := GenerateOrderID(uuid.New()), GenerateOrderID(uuid.New())
+	buyer, seller, token := common.HexToAddress(testBuyerWallet), common.HexToAddress(testSellerWallet), common.HexToAddress(testUSDC)
+	deliverBy := time.Unix(1_800_000_000, 0).UTC()
+	mine := OrderCreatedLog(testEscrow, id, buyer, seller, token, big.NewInt(78400), big.NewInt(500), big.NewInt(1568), big.NewInt(100_000), deliverBy)
+	theirs := OrderCreatedLog(testEscrow, other, buyer, seller, token, big.NewInt(1), big.NewInt(0), big.NewInt(0), big.NewInt(0), deliverBy)
+	got, err := findOrderCreated([]*types.Log{theirs, mine}, common.HexToAddress(testEscrow), id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &types.Log{
-		Address: common.HexToAddress(testEscrow),
-		Topics: []common.Hash{
-			event.ID,
-			common.Hash(orderID),
-			common.BytesToHash(common.HexToAddress("0x00000000000000000000000000000000000000b1").Bytes()),
-			common.BytesToHash(common.HexToAddress("0x00000000000000000000000000000000000000a1").Bytes()),
-		},
-		Data: data,
+	if got.Key != OrderKey(testBuyerWallet, id) || got.Buyer != buyer || got.Seller != seller || got.Token != token ||
+		got.ProductAmount.Int64() != 78400 || got.ShippingAmount.Int64() != 500 || got.MerchantFee.Int64() != 1568 ||
+		got.FlatFee.Int64() != 100_000 || !got.DeliverBy.Equal(deliverBy) {
+		t.Fatalf("decoded %+v", got)
+	}
+	if _, err := findOrderCreated([]*types.Log{theirs}, common.HexToAddress(testEscrow), id); err == nil {
+		t.Fatal("another order's OrderCreated must not pay this order")
+	}
+	if _, err := findOrderCreated([]*types.Log{mine}, common.HexToAddress(testFeeManager), id); err == nil {
+		t.Fatal("an OrderCreated from another contract must not pay this order")
 	}
 }
 
-// A buyer must not be able to mark order A paid with order B's escrow tx.
-func TestFindOrderCreated_MatchesOnlyThisOrder(t *testing.T) {
-	var mine, other [32]byte
-	mine[0], other[0] = 1, 2
-	escrow := common.HexToAddress(testEscrow)
-
-	logs := []*types.Log{orderCreatedLog(t, other, 1000, 0, 20)}
-	if _, err := findOrderCreated(logs, escrow, mine); err == nil {
-		t.Fatal("another order's OrderCreated was accepted for this order")
-	}
-
-	logs = append(logs, orderCreatedLog(t, mine, 19607844, 10000000, 392156))
-	got, err := findOrderCreated(logs, escrow, mine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ProductAmount.Int64() != 19607844 || got.ShippingAmount.Int64() != 10000000 || got.PlatformFee.Int64() != 392156 {
-		t.Fatalf("decoded %v / %v / %v", got.ProductAmount, got.ShippingAmount, got.PlatformFee)
-	}
-	if got.Buyer != common.HexToAddress("0x00000000000000000000000000000000000000b1") {
-		t.Fatalf("buyer = %s", got.Buyer.Hex())
-	}
-}
-
-func TestFindOrderCreated_IgnoresOtherContracts(t *testing.T) {
-	var mine [32]byte
-	mine[0] = 1
-	l := orderCreatedLog(t, mine, 1000, 0, 20)
-	l.Address = common.HexToAddress("0x0000000000000000000000000000000000000bad")
-	if _, err := findOrderCreated([]*types.Log{l}, common.HexToAddress(testEscrow), mine); err == nil {
-		t.Fatal("an OrderCreated from another contract was accepted")
+// The window recorded at prepare wins: a listing or booking edited before submit must not make the
+// buyer's correct payment look like a mismatch.
+func TestEscrowHandlingDays_RecordedWindowWins(t *testing.T) {
+	days := 3
+	got, err := EscrowHandlingDays(nil, &models.Order{EscrowHandlingDays: &days}, time.Now())
+	if err != nil || got != 3 {
+		t.Fatalf("got %d, %v", got, err)
 	}
 }

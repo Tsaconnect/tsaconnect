@@ -34,6 +34,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api, { Product } from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
+import { appendListingLocation, listingLocation } from '@/utils/location';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
@@ -53,6 +54,9 @@ import {
 import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
 import PromotionFields from '@/components/promotion/PromotionFields';
 import { usePromotion } from '@/components/promotion/promoForm';
+import { SchemaFields } from '@/components/forms/SchemaFields';
+import { useCategoryListingFields } from '@/hooks/useCategoryListingFields';
+import { cleanSchemaAnswers, validateSchemaAnswers } from '@/utils/schemaFields';
 import {
   appendUsdAmounts,
   PriceInput,
@@ -83,6 +87,7 @@ const EditProduct = () => {
   const [categoryId, setCategoryId] = useState('');
   const [categoryName, setCategoryName] = useState('');
   const [location, setLocation] = useState({ country: '', state: '', city: '' });
+  const [area, setArea] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -96,6 +101,11 @@ const EditProduct = () => {
 
   const [actualProductId, setActualProductId] = useState<string>('');
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Answers to the category's listing fields; their own errors so field keys
+  // can never collide with this form's error keys.
+  const [listingValues, setListingValues] = useState<Record<string, any>>({});
+  const [listingErrors, setListingErrors] = useState<Record<string, string>>({});
+  const { fields: listingFields } = useCategoryListingFields(categoryId || null);
   const maxDescriptionLength = 500;
 
   const descriptionRef = useRef<TextInput>(null);
@@ -133,12 +143,9 @@ const EditProduct = () => {
         setProductName(product.name || '');
         setDescription(product.description || '');
         setStock(product.stock?.toString() || '0');
-        const parts = (product.location || '').split(', ');
-        setLocation({
-          city: parts.length >= 3 ? parts[0] : '',
-          state: parts.length >= 2 ? parts[parts.length - 2] : '',
-          country: parts.length >= 1 ? parts[parts.length - 1] : '',
-        });
+        const saved = listingLocation(product as any);
+        setLocation(saved.value);
+        setArea(saved.area);
         setPhoneNumber(product.phoneNumber || '');
         setEmail(product.email || '');
         setCompanyName(product.companyName || '');
@@ -167,6 +174,9 @@ const EditProduct = () => {
             .map((img: any) => img.url);
           setExistingImageUrls(urls);
         }
+
+        const values = (product as any).listingValues;
+        if (values && typeof values === 'object') setListingValues(values);
 
         // Attributes
         if (product.attributes?.length) {
@@ -294,8 +304,11 @@ const EditProduct = () => {
       if (!attr.value.trim()) newErrors[`attr_value_${index}`] = 'Required';
     });
 
+    const listingProblems = validateSchemaAnswers(listingFields, listingValues);
+    setListingErrors(listingProblems);
+
     setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    return Object.keys(newErrors).length === 0 && Object.keys(listingProblems).length === 0;
   };
 
   const updateProduct = async () => {
@@ -326,7 +339,7 @@ const EditProduct = () => {
       formData.append('description', description);
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
-      formData.append('location', [location.city, location.state, location.country].filter(Boolean).join(', '));
+      appendListingLocation(formData, location, area);
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
@@ -334,6 +347,9 @@ const EditProduct = () => {
       promotion.append(formData);
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
+      }
+      if (listingFields.length > 0) {
+        formData.append('listingValues', JSON.stringify(cleanSchemaAnswers(listingFields, listingValues)));
       }
 
       const updateId = actualProductId || (productId as string);
@@ -592,6 +608,12 @@ const EditProduct = () => {
                   </Text>
                 ) : null}
               </View>
+              <Input
+                label="Area or neighbourhood"
+                value={area}
+                onChangeText={setArea}
+                placeholder="e.g. Odenigbo, Kubwa, Yaba"
+              />
 
               <Input
                 label="Phone Number *"
@@ -702,6 +724,24 @@ const EditProduct = () => {
               </View>
             )}
           </Card>
+
+          {/* The category's own listing fields (set by admins per category). */}
+          {listingFields.length > 0 && (
+            <Card style={{ marginBottom: spacing.lg }}>
+              <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.md }}>
+                {categoryName || 'Category'} details
+              </Text>
+              <SchemaFields
+                fields={listingFields}
+                answers={listingValues}
+                errors={listingErrors}
+                onChange={(key, value) => {
+                  setListingValues((prev) => ({ ...prev, [key]: value }));
+                  setListingErrors((prev) => (prev[key] ? { ...prev, [key]: '' } : prev));
+                }}
+              />
+            </Card>
+          )}
 
           {/* Attributes */}
           <Card style={{ marginBottom: spacing.lg }}>

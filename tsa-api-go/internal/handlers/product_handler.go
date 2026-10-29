@@ -18,6 +18,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -106,11 +107,11 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	name := c.PostForm("name")
 	description := c.PostForm("description")
 	priceStr := c.PostForm("price")
-	location := c.PostForm("location")
+	listingLocation, locationDisplay, hasLocation := listingLocationForm(c)
 	phoneNumber := c.PostForm("phoneNumber")
 	email := c.PostForm("email")
 
-	if name == "" || description == "" || priceStr == "" || location == "" || phoneNumber == "" || email == "" {
+	if name == "" || description == "" || priceStr == "" || !hasLocation || phoneNumber == "" || email == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Missing required fields")
 		return
 	}
@@ -160,6 +161,22 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		}
 		categoryID = &catOID
 		categoryName = cat.Title
+	}
+
+	// Answers to the category's listing fields, checked before any upload so a
+	// bad answer leaves nothing behind.
+	var listingValues datatypes.JSON
+	if values, present, err := listingValuesForm(c); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	} else if present {
+		// Only an app that knows the category's form sends listingValues, so
+		// required fields are enforced from then on; older versions still list.
+		listingValues, err = encodeListingValues(config.DB, categoryID, values)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	// Handle image uploads
@@ -240,7 +257,6 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		Stock:                  stock,
 		CategoryID:             categoryID,
 		CategoryName:           categoryName,
-		Location:               location,
 		PhoneNumber:            phoneNumber,
 		Email:                  strings.ToLower(strings.TrimSpace(email)),
 		CompanyName:            companyName,
@@ -261,6 +277,8 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	}
 	product.SetImages(uploadedImages)
 	product.SetAttributes(parsedAttributes)
+	product.ListingValues = listingValues
+	product.SetListingLocation(listingLocation, locationDisplay)
 
 	if err := config.DB.Create(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create product")
@@ -286,6 +304,35 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 
 	product.PromoDiscountPercent = product.DiscountPercent()
 	utils.SuccessResponse(c, http.StatusCreated, "Product created successfully", product)
+}
+
+// productSortColumns maps a caller's sortBy (JSON name or column name) to the
+// column it orders by. Only these ever reach SQL.
+var productSortColumns = map[string]string{
+	"createdAt":      "created_at",
+	"created_at":     "created_at",
+	"updatedAt":      "updated_at",
+	"updated_at":     "updated_at",
+	"price":          "price",
+	"name":           "name",
+	"views":          "views",
+	"sales":          "sales",
+	"rating.average": "rating->>'average'",
+}
+
+// productOrderClause builds an ORDER BY from query input. sortBy and sortOrder
+// are caller-supplied, so both are allow-listed: an unknown column falls back
+// to created_at and anything but "asc" orders DESC.
+func productOrderClause(sortBy, sortOrder string) string {
+	column, ok := productSortColumns[sortBy]
+	if !ok {
+		column = "created_at"
+	}
+	direction := "DESC"
+	if strings.EqualFold(strings.TrimSpace(sortOrder), "asc") {
+		direction = "ASC"
+	}
+	return column + " " + direction
 }
 
 // GetUserProducts handles GET /api/products/ - returns paginated products for the authenticated user.
@@ -333,20 +380,7 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 		return
 	}
 
-	// Map JSON field names to DB column names
-	sortFieldMap := map[string]string{
-		"createdAt": "created_at",
-		"updatedAt": "updated_at",
-		"price":     "price",
-		"name":      "name",
-		"views":     "views",
-		"sales":     "sales",
-	}
-	if mapped, ok := sortFieldMap[sortBy]; ok {
-		sortBy = mapped
-	}
-
-	orderClause := sortBy + " " + strings.ToUpper(sortOrder)
+	orderClause := productOrderClause(sortBy, sortOrder)
 	offset := (page - 1) * limit
 
 	var products []models.Product
@@ -459,8 +493,12 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 			updates["stock"] = s
 		}
 	}
-	if location := c.PostForm("location"); location != "" {
-		updates["location"] = location
+	// A location sent replaces every part of it, so a parsed or blank part never
+	// leaves a stale one behind.
+	if loc, display, ok := listingLocationForm(c); ok {
+		for column, value := range models.ListingLocationColumns(loc, display) {
+			updates[column] = value
+		}
 	}
 	if phone := c.PostForm("phoneNumber"); phone != "" {
 		updates["phone_number"] = phone
@@ -512,10 +550,30 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 	}
 
 	// Handle category update
+	targetCategory := product.CategoryID
 	if catStr := c.PostForm("category"); catStr != "" {
 		catOID, err := uuid.Parse(catStr)
 		if err == nil {
 			updates["category_id"] = catOID
+			targetCategory = &catOID
+		}
+	}
+
+	// Listing values are checked against the category the listing ends up in.
+	// Not sent → left as they are, so older app versions keep working.
+	if values, present, err := listingValuesForm(c); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	} else if present {
+		encoded, err := encodeListingValues(config.DB, targetCategory, values)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		if encoded == nil {
+			updates["listing_values"] = gorm.Expr("NULL")
+		} else {
+			updates["listing_values"] = encoded
 		}
 	}
 
@@ -1055,12 +1113,17 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	if categoryIDStr != "" {
 		if catOID, err := uuid.Parse(categoryIDStr); err == nil {
 			query = query.Where("category_id = ?", catOID)
+			var ok bool
+			if query, ok = applyListingValueFilter(c, config.DB, query, catOID); !ok {
+				return
+			}
 		}
 	}
 
 	if productType != "" && (productType == "Product" || productType == "Service") {
 		query = query.Where("type = ?", productType)
 	}
+	query = applyLocationFilter(c, query)
 
 	// The status param is caller-supplied on a public endpoint, so it is limited
 	// to publicly listable statuses. Anything else — including `suspended`, which
@@ -1102,28 +1165,10 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 		}
 	}
 
-	// Map JSON sort field names to DB column names
-	sortFieldMap := map[string]string{
-		"createdAt":      "created_at",
-		"updatedAt":      "updated_at",
-		"price":          "price",
-		"name":           "name",
-		"views":          "views",
-		"sales":          "sales",
-		"rating.average": "rating->>'average'",
-	}
-	if mapped, ok := sortFieldMap[sortBy]; ok {
-		sortBy = mapped
-	}
-	if sortBy != "created_at" && sortBy != "updated_at" && sortBy != "price" &&
-		sortBy != "name" && sortBy != "views" && sortBy != "sales" && sortBy != "rating->>'average'" {
-		sortBy = "created_at"
-	}
-
 	var total int64
 	query.Count(&total)
 
-	orderClause := sortBy + " " + strings.ToUpper(sortOrder)
+	orderClause := productOrderClause(sortBy, sortOrder)
 	offset := (page - 1) * limit
 
 	var products []models.Product
@@ -1271,7 +1316,7 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 	}
 
 	// Get products
-	query := models.VisibleToPublic(config.DB.Where("category_id IN ?", categoryIDs))
+	query := applyLocationFilter(c, models.VisibleToPublic(config.DB.Where("category_id IN ?", categoryIDs)))
 	if typeFilter == models.ProductTypeProduct || typeFilter == models.ProductTypeService {
 		query = query.Where("type = ?", typeFilter)
 	}
@@ -1357,6 +1402,10 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	if category != "" {
 		if catOID, err := uuid.Parse(category); err == nil {
 			query = query.Where("category_id = ?", catOID)
+			var ok bool
+			if query, ok = applyListingValueFilter(c, config.DB, query, catOID); !ok {
+				return
+			}
 		} else {
 			// Search by category name
 			var cats []models.Category
@@ -1384,6 +1433,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	if location != "" {
 		query = query.Where("location ILIKE ?", "%"+location+"%")
 	}
+	query = applyLocationFilter(c, query)
 
 	if minPriceStr != "" {
 		if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {

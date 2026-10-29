@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/events"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -41,7 +42,7 @@ var ErrOrderNotPayable = errors.New("order is not awaiting payment")
 // escrowOrderReader reads the escrow's record of an order. *EscrowService
 // fills it.
 type escrowOrderReader interface {
-	EscrowedOrder(ctx context.Context, orderId [32]byte) (*OnChainOrder, error)
+	EscrowedOrder(ctx context.Context, key [32]byte) (*OnChainOrder, error)
 	CurrentEscrowAddress() string
 }
 
@@ -119,20 +120,48 @@ func cancelPending(tx *gorm.DB, order *models.Order, idleBefore *time.Time) (boo
 	return true, nil
 }
 
-// EscrowedOrderUpdates is the order record of a verified escrow: the amounts
-// the escrow actually holds (fee settlement and every later screen read
-// these, not the ones we asked for), where it holds them, and until when.
-func EscrowedOrderUpdates(contractOrderID [32]byte, product, shipping, fee *big.Int, escrowAddress string, expires time.Time) map[string]interface{} {
-	return map[string]interface{}{
+// EscrowRecord is what a verified OrderEscrow holds for an order.
+type EscrowRecord struct {
+	OrderID, Key [32]byte
+	Buyer        common.Address
+	// Product and shipping are what the buyer escrowed; MerchantFee is what the seller pays at
+	// release. FlatFee is what createOrder charged the buyer on top (nil when read back from
+	// getOrder, which does not store it: the order then keeps the flat fee it was priced at).
+	ProductAmount, ShippingAmount, MerchantFee, FlatFee *big.Int
+	DeliverBy                                           time.Time
+	EscrowAddress                                       string
+}
+
+// EscrowRecordFromCreated is the record an OrderCreated event proves.
+func EscrowRecordFromCreated(c *EscrowCreated, escrowAddress string) EscrowRecord {
+	return EscrowRecord{OrderID: c.OrderID, Key: c.Key, Buyer: c.Buyer, ProductAmount: c.ProductAmount,
+		ShippingAmount: c.ShippingAmount, MerchantFee: c.MerchantFee, FlatFee: c.FlatFee,
+		DeliverBy: c.DeliverBy, EscrowAddress: escrowAddress}
+}
+
+// EscrowedOrderUpdates is the order record of a verified escrow: the amounts the escrow actually
+// holds (fee settlement and every later screen read these, not the ones we asked for), its key
+// and buyer, where it holds them, and its delivery deadline (escrow_expires_at, which the screens
+// read, is that deadline: past it the buyer's refund is claimable).
+func EscrowedOrderUpdates(r EscrowRecord) map[string]interface{} {
+	updates := map[string]interface{}{
 		"status":                  models.OrderStatusEscrowed,
-		"contract_order_id":       fmt.Sprintf("0x%x", contractOrderID),
-		"product_amount":          product.String(),
-		"shipping_amount":         shipping.String(),
-		"platform_fee":            fee.String(),
-		"total_amount":            new(big.Int).Add(new(big.Int).Add(product, shipping), fee).String(),
-		"escrow_contract_address": escrowAddress,
-		"escrow_expires_at":       expires,
+		"contract_order_id":       fmt.Sprintf("0x%x", r.OrderID),
+		"escrow_order_key":        common.Hash(r.Key).Hex(),
+		"escrow_buyer_wallet":     r.Buyer.Hex(),
+		"product_amount":          r.ProductAmount.String(),
+		"shipping_amount":         r.ShippingAmount.String(),
+		"platform_fee":            r.MerchantFee.String(),
+		"merchant_fee":            r.MerchantFee.String(),
+		"total_amount":            new(big.Int).Add(r.ProductAmount, r.ShippingAmount).String(),
+		"escrow_contract_address": r.EscrowAddress,
+		"deliver_by":              r.DeliverBy,
+		"escrow_expires_at":       r.DeliverBy,
 	}
+	if r.FlatFee != nil {
+		updates["flat_fee"] = r.FlatFee.String()
+	}
+	return updates
 }
 
 // MarkOrderEscrowed applies updates (EscrowedOrderUpdates) to an order still
@@ -270,8 +299,14 @@ func (s *UnpaidOrderExpiryService) settle(ctx context.Context, o *staleOrder, cu
 	// nothing there to reconcile — and an escrow record under its id is not a
 	// payment we accept for it.
 	if !o.IsSpendableMCGP() {
-		onChain, err := s.escrow.EscrowedOrder(ctx, GenerateOrderID(o.ID))
-		if err != nil {
+		// The key is the funding wallet's: the one recorded at prepare-escrow, else the buyer's own.
+		onChain, err := s.escrow.EscrowedOrder(ctx, OrderKey(firstNonEmpty(o.EscrowBuyerWallet, o.BuyerWallet), GenerateOrderID(o.ID)))
+		switch {
+		case errors.Is(err, ErrOrderEscrowUnavailable) && o.EscrowOrderKey == "":
+			// No OrderEscrow is configured and this order was never prepared on one: nothing can
+			// hold its money, so it expires (and its stock comes back) like any unpaid order.
+			onChain, err = nil, nil
+		case err != nil:
 			return false, fmt.Errorf("escrow read for order %s: %w", o.ID, err)
 		}
 		if onChain != nil {
@@ -305,15 +340,21 @@ func (s *UnpaidOrderExpiryService) reconcilePaid(ctx context.Context, o *staleOr
 	if s.tokens != nil {
 		tokenAddr = s.tokens.TokenAddress("sonic", o.Token)
 	}
-	if !OrderMatchesEscrow(&o.Order, o.SellerWallet, o.BuyerWallet, tokenAddr, onChain) {
+	handlingDays, err := EscrowHandlingDays(s.db.WithContext(ctx), &o.Order, onChain.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("handling days for order %s: %w", o.ID, err)
+	}
+	if !OrderMatchesEscrow(&o.Order, o.SellerWallet, firstNonEmpty(o.EscrowBuyerWallet, o.BuyerWallet), tokenAddr, handlingDays, onChain) {
 		log.Printf("[unpaid-order-expiry] ALERT unpaid_order_escrow_mismatch=1 order=%s: escrow holds an order under its id that does not match it", o.ID)
 		return nil
 	}
 
-	expires := onChain.CreatedAt.Add(EscrowWindow)
-	updates := EscrowedOrderUpdates(GenerateOrderID(o.ID), onChain.ProductAmount, onChain.ShippingAmount,
-		onChain.PlatformFee, s.escrow.CurrentEscrowAddress(), expires)
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	expires := onChain.DeliverBy
+	id := GenerateOrderID(o.ID)
+	updates := EscrowedOrderUpdates(EscrowRecord{OrderID: id, Key: OrderKey(onChain.Buyer.Hex(), id), Buyer: onChain.Buyer,
+		ProductAmount: onChain.ProductAmount, ShippingAmount: onChain.ShippingAmount, MerchantFee: onChain.MerchantFee,
+		DeliverBy: onChain.DeliverBy, EscrowAddress: s.escrow.CurrentEscrowAddress()})
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return MarkOrderEscrowed(tx, o.ID, updates)
 	})
 	if errors.Is(err, ErrOrderNotPayable) {

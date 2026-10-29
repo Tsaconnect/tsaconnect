@@ -79,12 +79,12 @@ func (f *fakeReleaseProver) ReadOrder(context.Context, string, [32]byte) (*OnCha
 // releaseLog is the OrderReleased the escrow emits: paid to seller, amount.
 func releaseLog(t *testing.T, orderID [32]byte, seller string, amount *big.Int) *types.Log {
 	t.Helper()
-	data, err := parsedEscrowABI.Events["OrderReleased"].Inputs.NonIndexed().Pack(amount, big.NewInt(2_000000), big.NewInt(0), big.NewInt(0))
+	data, err := parsedOrderEscrowABI.Events["OrderReleased"].Inputs.NonIndexed().Pack(amount, big.NewInt(2_000000), common.Address{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &types.Log{
-		Topics: []common.Hash{parsedEscrowABI.Events["OrderReleased"].ID, common.Hash(orderID), common.BytesToHash(common.HexToAddress(seller).Bytes())},
+		Topics: []common.Hash{parsedOrderEscrowABI.Events["OrderReleased"].ID, common.Hash(orderID), common.BytesToHash(common.HexToAddress(seller).Bytes())},
 		Data:   data,
 	}
 }
@@ -159,7 +159,7 @@ func newPayoutRig(t *testing.T) *payoutRig {
 	if err := db.Create(r.payout).Error; err != nil {
 		t.Fatal(err)
 	}
-	r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), r.treasury.Address(), big.NewInt(100_000000))
+	r.escrow.log = releaseLog(t, OrderKeyOf(&r.order), r.treasury.Address(), big.NewInt(100_000000))
 	return r
 }
 
@@ -301,10 +301,10 @@ func TestSellerPayout_ProvesTheReleaseBeforeBelievingIt(t *testing.T) {
 		"node unreadable":           {func(r *payoutRig) { r.escrow.log, r.escrow.err = nil, errors.New("rpc down") }, models.SellerPayoutAwaitingRelease},
 		"no release for this order": {func(r *payoutRig) { r.escrow.log, r.escrow.err = nil, ErrOrderEventNotFound }, models.SellerPayoutNeedsReview},
 		"released to someone else": {func(r *payoutRig) {
-			r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), sponsorTestUser, big.NewInt(100_000000))
+			r.escrow.log = releaseLog(t, OrderKeyOf(&r.order), sponsorTestUser, big.NewInt(100_000000))
 		}, models.SellerPayoutNeedsReview},
 		"released a different amount": {func(r *payoutRig) {
-			r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), r.treasury.Address(), big.NewInt(150_000000))
+			r.escrow.log = releaseLog(t, OrderKeyOf(&r.order), r.treasury.Address(), big.NewInt(150_000000))
 		}, models.SellerPayoutNeedsReview},
 		"transfer not mined yet":               {func(r *payoutRig) { r.sonicTx.err = errors.New("not found") }, models.SellerPayoutAwaitingRelease},
 		"transfer paid someone else":           {func(r *payoutRig) { r.sonicTx.err = ErrTransferWrongRecipient }, models.SellerPayoutNeedsReview},
@@ -338,7 +338,7 @@ func TestSellerPayout_AnOverCreditedTransactionDoesNotEnlargeThePayout(t *testin
 func TestSellerPayout_LooksTheReleaseUpOnTheOrdersOwnEscrow(t *testing.T) {
 	r := newPayoutRig(t)
 	r.mustStep()
-	if r.escrow.event != "OrderReleased" || r.escrow.addr != "0xescrow" || r.escrow.orderID != GenerateOrderID(r.order.ID) {
+	if r.escrow.event != "OrderReleased" || r.escrow.addr != "0xescrow" || r.escrow.orderID != OrderKeyOf(&r.order) {
 		t.Fatalf("lookup = %s %s %x", r.escrow.event, r.escrow.addr, r.escrow.orderID)
 	}
 }
@@ -513,7 +513,7 @@ func TestSellerPayout_AcceptsAReleaseWithinTheDriftTheyAbsorb(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newPayoutRig(t)
-			r.escrow.log = releaseLog(t, GenerateOrderID(r.order.ID), r.treasury.Address(), big.NewInt(tc.released))
+			r.escrow.log = releaseLog(t, OrderKeyOf(&r.order), r.treasury.Address(), big.NewInt(tc.released))
 			r.sonicTx.amount = big.NewInt(tc.released)
 			r.mustStep()
 			got := r.wantStatus(tc.want)
@@ -764,7 +764,7 @@ func TestSellerPayout_AnOrderTheEscrowResolvedUnrecordedIsFlagged(t *testing.T) 
 	r := newPayoutRig(t)
 	r.db.Exec(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`, models.OrderStatusDelivered, r.clock.Add(-30*time.Hour), r.order.ID.String())
 
-	r.escrow.onChain = &OnChainOrder{Resolved: false}
+	r.escrow.onChain = &OnChainOrder{State: OrderStateFunded}
 	if err := r.svc.Tick(context.Background(), 10); err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +781,7 @@ func TestSellerPayout_AnOrderTheEscrowResolvedUnrecordedIsFlagged(t *testing.T) 
 	}
 
 	r.clock = r.clock.Add(7 * time.Hour)
-	r.escrow.onChain = &OnChainOrder{Resolved: true}
+	r.escrow.onChain = &OnChainOrder{State: OrderStateReleased}
 	if err := r.svc.Tick(context.Background(), 10); err != nil {
 		t.Fatal(err)
 	}

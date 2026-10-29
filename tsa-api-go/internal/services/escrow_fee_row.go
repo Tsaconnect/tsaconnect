@@ -3,12 +3,40 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 )
+
+// legacyEscrowFeeABI is the feeManager()/tokenSymbol() pair the V2/V3 escrows share. Only the P2P
+// fee view still reads a FeeManager through its escrow (until P2P moves to P2PTradeEscrow); orders
+// read FeeConfig directly.
+const legacyEscrowFeeABIJSON = `[
+	{"inputs":[],"name":"feeManager","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"name":"token","type":"address"}],"name":"tokenSymbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"}
+]`
+
+var parsedEscrowABI = func() abi.ABI {
+	parsed, err := abi.JSON(strings.NewReader(legacyEscrowFeeABIJSON))
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse the legacy escrow fee ABI: %v", err))
+	}
+	return parsed
+}()
+
+// escrowRate is one FeeManager row as a V2/V3 escrow resolves it.
+type escrowRate struct {
+	noFeeManager bool
+	bps          int
+	flatUSD      uint64 // 1e6 units
+	exempt       bool
+	active       bool
+	feeManager   common.Address
+	symbol       string // the escrow's own tokenSymbol for the token, which rateFor is keyed by
+}
 
 // readEscrowFeeRow is the one chain read of "what fee would this escrow charge
 // for feature on this token": escrow.feeManager() → escrow.tokenSymbol(token)

@@ -22,6 +22,10 @@ import { baseUrl } from "../../constants/api/apiClient";
 import { useTheme } from "@/theme";
 import PromotionFields from "@/components/promotion/PromotionFields";
 import { usePromotion } from "@/components/promotion/promoForm";
+import { SchemaFields } from "@/components/forms/SchemaFields";
+import { useCategoryListingFields } from "@/hooks/useCategoryListingFields";
+import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields";
+import { categoryPathLabels } from "@/utils/categoryTree";
 import {
   Button,
   Card,
@@ -54,7 +58,11 @@ const AddProduct = () => {
   const [promoError, setPromoError] = useState<string | null>(null);
   const [attributes, setAttributes] = useState<{ name: string; value: string }[]>([]);
   const { setLoading, loading } = useAuth();
-  const [categories, setCategories] = useState<{ id: string; title: string }[]>([]);
+  const [categories, setCategories] = useState<{ id: string; title: string; parentCategory?: string }[]>([]);
+  // Answers to the chosen category's listing fields (brand, …).
+  const [listingValues, setListingValues] = useState<Record<string, any>>({});
+  const [listingErrors, setListingErrors] = useState<Record<string, string>>({});
+  const { fields: listingFields } = useCategoryListingFields(category || null);
   const maxDescriptionLength = 500;
   // Sheet visibility for the category picker (replaces the inline RN Picker).
   const [categoryPickerOpen, setCategoryPickerOpen] = useState(false);
@@ -86,14 +94,22 @@ const AddProduct = () => {
       return;
     }
 
+    // A selectionLimit of 0 means unlimited, so a full set stops here.
+    if (productImages.length >= 10) {
+      Alert.alert("Limit reached", "You can add up to 10 photos.");
+      return;
+    }
+
     let result = await ImagePicker.launchImageLibraryAsync({
       aspect: [4, 3],
       quality: 0.8,
       allowsMultipleSelection: true,
+      selectionLimit: 10 - productImages.length,
     });
 
     if (!result.canceled) {
-      setProductImages(result.assets.map((asset) => asset.uri));
+      const picked = result.assets.map((asset) => asset.uri);
+      setProductImages((prev) => [...prev, ...picked].slice(0, 10));
     }
   };
 
@@ -110,6 +126,12 @@ const AddProduct = () => {
     setPromoError(invalidPromo);
     if (invalidPromo) {
       Alert.alert("Promotion", invalidPromo);
+      return;
+    }
+    const listingProblems = validateSchemaAnswers(listingFields, listingValues);
+    setListingErrors(listingProblems);
+    if (Object.keys(listingProblems).length > 0) {
+      Alert.alert("Missing details", "Please fill in the required category details.");
       return;
     }
     setLoading(true);
@@ -131,6 +153,9 @@ const AddProduct = () => {
     formData.append("phoneNumber", phoneNumber);
     formData.append("category", category);
     formData.append("companyName", companyName);
+    if (listingFields.length > 0) {
+      formData.append("listingValues", JSON.stringify(cleanSchemaAnswers(listingFields, listingValues)));
+    }
     //@ts-ignore
     formData.append("price", parseInt(price));
     //@ts-ignore
@@ -161,6 +186,8 @@ const AddProduct = () => {
   const resetForm = () => {
     setPhoneNumber("");
     setCategory("");
+    setListingValues({});
+    setListingErrors({});
     setDescription("");
     setEmail("");
     setLocation("");
@@ -188,9 +215,9 @@ const AddProduct = () => {
     setAttributes(updated);
   };
 
-  const categoryItems: PickerItem[] = categories.map((item) => ({
+  const categoryItems: PickerItem[] = categoryPathLabels(categories).map((item) => ({
     id: item.id,
-    label: item.title,
+    label: item.path,
   }));
   const selectedCategoryLabel = categories.find((c) => c.id === category)?.title;
 
@@ -388,6 +415,24 @@ const AddProduct = () => {
             currencySymbol="$"
             error={promoError}
           />
+
+          {/* The category's own listing fields (set by admins per category). */}
+          {listingFields.length > 0 && (
+            <>
+              <Text variant="title3" weight="600" style={{ marginTop: spacing.lg, marginBottom: spacing.md }}>
+                {selectedCategoryLabel ?? "Category"} details
+              </Text>
+              <SchemaFields
+                fields={listingFields}
+                answers={listingValues}
+                errors={listingErrors}
+                onChange={(key, value) => {
+                  setListingValues((prev) => ({ ...prev, [key]: value }));
+                  setListingErrors((prev) => (prev[key] ? { ...prev, [key]: "" } : prev));
+                }}
+              />
+            </>
+          )}
 
           {/* Attributes */}
           <Text variant="title3" weight="600" style={{ marginTop: spacing.lg }}>

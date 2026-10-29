@@ -154,6 +154,13 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		adminGroup.GET("/stats", h.GetAdminStats)
 
+		// Field catalogue for category forms. The handlers re-check
+		// hasAdminPrivilege: adminAuth alone also admits merchant/support.
+		adminGroup.GET("/field-defs", h.AdminListFieldDefs)
+		adminGroup.POST("/field-defs", h.CreateFieldDef)
+		adminGroup.PUT("/field-defs/:id", h.UpdateFieldDef)
+		adminGroup.DELETE("/field-defs/:id", h.DeleteFieldDef)
+
 		// Account-deletion review queue. The handlers re-check for a true admin
 		// role on top of adminAuth (which also admits merchant/support) because
 		// restoring an account is a security-sensitive action.
@@ -369,7 +376,10 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		categoryGroup.GET("/all", h.GetCategories)
 		categoryGroup.GET("/tree", h.GetCategoryTree)
+		// Active field catalogue (pickers) and a category's resolved forms.
+		categoryGroup.GET("/field-defs", h.ListFieldDefs)
 		categoryGroup.GET("/:categoryId", h.GetCategoryByID)
+		categoryGroup.GET("/:categoryId/fields", h.GetCategoryFields)
 		// Public read of a booking-mode category's per-area fare schedule (buyer checkout).
 		categoryGroup.GET("/:categoryId/booking-fees", h.GetCategoryBookingFees)
 		categoryGroup.POST("", adminAuth, h.CreateCategory)

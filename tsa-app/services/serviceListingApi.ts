@@ -5,6 +5,7 @@
 // owning merchant's auth token. See the Go backend service_* handlers.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
+import type { SchemaFieldType } from '@/utils/schemaFields';
 
 export interface ApiResponse<T = any> {
   success: boolean;
@@ -16,16 +17,8 @@ export interface ApiResponse<T = any> {
 export type BookingType = 'instant' | 'request';
 export type PricingMethod = 'fixed' | 'on_request';
 
-export type BookingFieldType =
-  | 'location'
-  | 'date'
-  | 'time'
-  | 'datetime'
-  | 'counter'
-  | 'select'
-  | 'text'
-  | 'textarea'
-  | 'number';
+// The booking form and category listing fields share one field vocabulary.
+export type BookingFieldType = SchemaFieldType;
 
 export interface BookingField {
   key: string;
@@ -177,6 +170,25 @@ export async function getBookingFormSchema(
     return await handleResponse(res);
   } catch (e: any) {
     return { success: false, message: e.message || 'Failed to load form schema' };
+  }
+}
+
+// A category's resolved listing fields (inherited from its parents unless it
+// overrides them): what merchants answer when they list in it, and — for the
+// ones marked filterable — what buyers can filter by.
+export interface CategoryListingFields {
+  categoryId: string;
+  listingFields: (BookingField & { filterable?: boolean })[];
+}
+
+export async function getCategoryListingFields(
+  categoryId: string
+): Promise<ApiResponse<CategoryListingFields>> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/products/category/${categoryId}/fields`, { method: 'GET' });
+    return await handleResponse(res);
+  } catch (e: any) {
+    return { success: false, message: e.message || 'Failed to load category fields' };
   }
 }
 

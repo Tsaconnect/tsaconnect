@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
@@ -99,6 +98,9 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			category_name TEXT,
 			images TEXT,
 			attributes TEXT,
+			listing_values TEXT,
+			country TEXT, state TEXT, city TEXT, area TEXT,
+			country_key TEXT, state_key TEXT, city_key TEXT,
 			status TEXT DEFAULT 'active',
 			type TEXT DEFAULT 'Product',
 			is_featured INTEGER DEFAULT 0,
@@ -149,7 +151,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			shipping_street TEXT,
 			contract_order_id TEXT,
 			escrow_contract_address TEXT,
-			escrow_seller_wallet TEXT, escrow_order_key TEXT, escrow_buyer_wallet TEXT, merchant_fee TEXT, flat_fee TEXT, deliver_by DATETIME, confirm_by DATETIME, resolve_by DATETIME,
+			escrow_seller_wallet TEXT, escrow_order_key TEXT, escrow_buyer_wallet TEXT, escrow_handling_days INTEGER, merchant_fee TEXT, flat_fee TEXT, deliver_by DATETIME, confirm_by DATETIME, resolve_by DATETIME,
 			payout_fee TEXT,
 			escrow_tx_hash TEXT,
 			approve_tx_hash TEXT,
@@ -206,6 +208,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			type TEXT,
 			service_fee_mode TEXT DEFAULT 'standard',
 			service_type TEXT DEFAULT 'contact',
+			slug TEXT, booking_mode TEXT, price_units TEXT, listing_fields TEXT, booking_fields TEXT,
 			parent_category_id TEXT,
 			icon TEXT,
 			image TEXT,
@@ -365,14 +368,20 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+// testOrderEscrow is the OrderEscrow the test handler's core set names.
+const testOrderEscrow = "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d"
+
 func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 	t.Helper()
 	cfg := &config.Config{
 		ProductEscrowAddress:   "0x6c96B6EB227D1254247cD5015Bfc3e8Ade94415d",
 		ServiceContractAddress: "0x3d761F72f4369e072767E830eE8Ce4c3A2144e6f",
-		USDCTokenAddress:       "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
-		MCGPTokenAddress:       "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
-		Chains:                 map[string]config.ChainConfig{},
+		// The core set's OrderEscrow, where every order escrows (contracts v2).
+		CoreContracts: map[int64]config.CoreContracts{146: {ChainID: 146, ChainKey: "sonic", Network: "mainnet",
+			OrderEscrow: testOrderEscrow, FeeConfig: "0x00000000000000000000000000000000000FC001"}},
+		USDCTokenAddress: "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
+		MCGPTokenAddress: "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
+		Chains:           map[string]config.ChainConfig{},
 		TokenAddresses: map[string]string{
 			"sonic:USDC": "0x9f8AfF2706F52Ddb02921E245ec95Ade96767379",
 			"sonic:MCGP": "0xF0EE975DB8BbD79f3e8346f6304599061E4f32A7",
@@ -395,7 +404,10 @@ func setupCheckoutHandler(t *testing.T) *CheckoutHandler {
 	bs := services.NewBlockchainService(cfg)
 	es := services.NewEscrowService(nil, cfg)
 	otc := services.NewOTCService(nil, cfg)
-	return NewCheckoutHandler(cfg, bs, es, events.NewBus(), otc)
+	ch := NewCheckoutHandler(cfg, bs, es, events.NewBus(), otc)
+	// FeeConfig's order row as the dev set deployed it: 2% merchant fee, 0.10 flat fee.
+	ch.feeRates = fakeEscrowRates{bps: 200, gas: 100000}
+	return ch
 }
 
 func createTestProduct(t *testing.T, db *gorm.DB, sellerID uuid.UUID, price float64) *models.Product {
@@ -546,19 +558,23 @@ func TestDetectShippingZone_StateSuffixNormalization(t *testing.T) {
 // fee_config replica, pinned to the 2% product_merchant rate and $0.10 gas.
 // If the configured rates change, these SHOULD fail: that is a product
 // decision, not an incidental refactor.
-func TestResolvePricingRates_FallsBackToFeeConfig(t *testing.T) {
+// FeeConfig is the only record of an order fee (owner 2026-10-28): its rates price checkout, and
+// with no way to read them checkout stops rather than guessing from the database.
+func TestResolvePricingRates_ReadsFeeConfigOnly(t *testing.T) {
 	setupCheckoutTestDB(t)
 	ch := setupCheckoutHandler(t)
-	ch.feeRates = nil
-
 	for _, token := range []string{"USDC", "usdt"} {
 		r, perr := ch.resolvePricingRates(context.Background(), token)
 		if perr != nil {
 			t.Fatalf("%s: %v", token, perr.msg)
 		}
-		if r.feeBPS != 200 || r.gasFee.String() != "100000" || r.decimals != 6 || r.pricePerMCGP != nil {
-			t.Errorf("%s: fee %d gas %s decimals %d, want 200 / 100000 / 6", token, r.feeBPS, r.gasFee, r.decimals)
+		if r.feeBPS != 200 || r.gasFee.String() != "100000" || r.decimals != 6 || r.pricePerMCGP != nil || r.maxOrder == nil {
+			t.Errorf("%s: fee %d gas %s decimals %d max %v", token, r.feeBPS, r.gasFee, r.decimals, r.maxOrder)
 		}
+	}
+	ch.feeRates = nil
+	if _, perr := ch.resolvePricingRates(context.Background(), "USDC"); perr == nil || perr.status != http.StatusServiceUnavailable {
+		t.Fatalf("no FeeConfig reader: %+v, want 503", perr)
 	}
 }
 
@@ -1473,82 +1489,6 @@ func TestSubmitConfirm_WrongStatus(t *testing.T) {
 }
 
 // ---------- RequestRefund tests (T3) ----------
-
-func TestRequestRefund_Escrowed(t *testing.T) {
-	db := setupCheckoutTestDB(t)
-	ch := setupCheckoutHandler(t)
-
-	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
-	setUserWallet(t, db, buyer, "0x0000000000000000000000000000000000000001")
-	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
-	product := createTestProduct(t, db, seller.ID, 10.0)
-	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusEscrowed, "USDC")
-
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Set("user", buyer)
-	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
-	c.Request, _ = http.NewRequest("POST", "/", nil)
-
-	ch.RequestRefund(c)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected %d for escrowed refund, got %d: %s", http.StatusOK, w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	data := resp["data"].(map[string]interface{})
-	if data["refundTx"] == nil {
-		t.Error("expected refundTx in response for escrowed order")
-	}
-}
-
-func TestRequestRefund_Delivered(t *testing.T) {
-	db := setupCheckoutTestDB(t)
-	ch := setupCheckoutHandler(t)
-
-	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
-	setUserWallet(t, db, buyer, "0x0000000000000000000000000000000000000001")
-	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
-	product := createTestProduct(t, db, seller.ID, 10.0)
-	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusDelivered, "USDC")
-
-	// Delivered before the seller's mark was on-chain: the escrow would refund
-	// at once, so this stays a database request for admin review.
-	chain := services.NewFakeEscrowChain()
-	chain.SetOrder(services.GenerateOrderID(order.ID), services.OnChainOrder{Buyer: common.HexToAddress("0x0000000000000000000000000000000000000001")})
-	ch.EscrowService = services.NewEscrowServiceWithBackend(ch.Config, chain, chain)
-
-	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Set("user", buyer)
-	c.Params = gin.Params{{Key: "id", Value: order.ID.String()}}
-	c.Request, _ = http.NewRequest("POST", "/", nil)
-
-	ch.RequestRefund(c)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected %d for delivered refund, got %d: %s", http.StatusOK, w.Code, w.Body.String())
-	}
-
-	// Should update status to refund_requested
-	var resp map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	data := resp["data"].(map[string]interface{})
-	if data["status"] != models.OrderStatusRefundRequested {
-		t.Errorf("expected status %s, got %v", models.OrderStatusRefundRequested, data["status"])
-	}
-
-	// Verify DB was updated
-	var updated models.Order
-	config.DB.First(&updated, "id = ?", order.ID)
-	if updated.Status != models.OrderStatusRefundRequested {
-		t.Errorf("expected DB status %s, got %s", models.OrderStatusRefundRequested, updated.Status)
-	}
-}
 
 func TestRequestRefund_WrongStatus(t *testing.T) {
 	db := setupCheckoutTestDB(t)

@@ -34,6 +34,8 @@ export interface Order {
   payout?: SellerPayoutStage;
   platformFee: string;
   totalAmount: string;
+  /** The flat network fee the buyer paid on top of totalAmount (OrderEscrow orders). */
+  flatFee?: string;
   shippingZone: string;
   contractOrderId?: string;
   escrowTxHash?: string;
@@ -68,6 +70,14 @@ export interface Order {
   sellerShippedAt?: string;
   sellerDeliveredAt?: string;
   escrowExpiresAt?: string;
+  /**
+   * The escrow's own deadlines (OrderEscrow): the seller delivers by deliverBy (else the buyer can
+   * claim a full refund), the buyer confirms or disputes by confirmBy (else the seller is paid), and
+   * a dispute is decided by resolveBy (else the buyer is refunded).
+   */
+  deliverBy?: string;
+  confirmBy?: string;
+  resolveBy?: string;
   notes?: string;
   // Buyer's chosen product specs (colour/size/other) for a product order, so the
   // merchant knows how to arrange the purchase. Carried from the cart at checkout.
