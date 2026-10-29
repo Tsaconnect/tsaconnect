@@ -132,25 +132,36 @@ func TestSubmitContactFee_ReusedFeeTxIs409(t *testing.T) {
 	paid := createTestService(t, db, seller.ID, &cat.ID, 20.0, 3.0)
 	other := createTestService(t, db, seller.ID, &cat.ID, 20.0, 3.0)
 	if err := db.Create(&models.ServiceContactPayment{ID: uuid.New(), CallerID: buyer.ID, ServiceProviderID: seller.ID,
-		ServiceID: paid.ID, Token: "USDC", FeeAmount: "100000", PayFeeTxHash: "0xABC", CreatedAt: time.Now()}).Error; err != nil {
+		ServiceID: paid.ID, Token: "USDC", FeeAmount: "100000", PayFeeTxHash: "0x" + strings.Repeat("ab", 32), CreatedAt: time.Now()}).Error; err != nil {
 		t.Fatal(err)
 	}
+	submit := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Set("user", buyer)
+		c.Params = gin.Params{{Key: "id", Value: other.ID.String()}}
+		c.Request, _ = http.NewRequest("POST", "/", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.SubmitContactFee(c)
+		return w
+	}
+	approve := "0x" + strings.Repeat("01", 32)
 
 	gin.SetMode(gin.TestMode)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Set("user", buyer)
-	c.Params = gin.Params{{Key: "id", Value: other.ID.String()}}
-	c.Request, _ = http.NewRequest("POST", "/", strings.NewReader(`{"approveTxHash":"0x1","payFeeTxHash":"0xabc"}`))
-	c.Request.Header.Set("Content-Type", "application/json")
-	h.SubmitContactFee(c)
-	if w.Code != http.StatusConflict {
+	// The same tx in another case is the same payment.
+	if w := submit(`{"approveTxHash":"` + approve + `","payFeeTxHash":" 0x` + strings.Repeat("AB", 32) + ` "}`); w.Code != http.StatusConflict {
 		t.Fatalf("reused fee tx: %d %s, want 409", w.Code, w.Body.String())
+	}
+	// Spellings HexToHash would read as the same tx (no prefix, short, padded) are refused outright.
+	for _, h := range []string{strings.Repeat("ab", 32), "0xabc", "0x00" + strings.Repeat("ab", 32)} {
+		if w := submit(`{"approveTxHash":"` + approve + `","payFeeTxHash":"` + h + `"}`); w.Code != http.StatusBadRequest {
+			t.Fatalf("hash %q: %d %s, want 400", h, w.Code, w.Body.String())
+		}
 	}
 
 	// The index is the backstop when two submits race past the pre-check.
 	dup := models.ServiceContactPayment{ID: uuid.New(), CallerID: buyer.ID, ServiceProviderID: seller.ID,
-		ServiceID: other.ID, PayFeeTxHash: "0xAbC", CreatedAt: time.Now()}
+		ServiceID: other.ID, PayFeeTxHash: "0x" + strings.Repeat("AB", 32), CreatedAt: time.Now()}
 	if err := db.Create(&dup).Error; err == nil || !isDuplicateKeyErr(err) {
 		t.Fatalf("second row for one fee tx: err=%v, want a unique violation", err)
 	}

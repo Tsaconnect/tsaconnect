@@ -106,6 +106,8 @@ type ContactFeeEvent struct {
 	Caller          common.Address
 	ServiceProvider common.Address
 	Token           common.Address
+	// Amount is what the contract charged (nil when the event data could not be decoded).
+	Amount *big.Int
 }
 
 // VerifyContactFeePaid fetches the receipt and validates the ContactFeePaid event
@@ -148,11 +150,11 @@ func (s *ServiceContactService) VerifyContactFeePaid(txHash, expectedCaller, exp
 			return nil, fmt.Errorf("on-chain provider %s does not match expected provider %s", provider.Hex(), expectedProvider)
 		}
 
-		return &ContactFeeEvent{
-			Caller:          caller,
-			ServiceProvider: provider,
-			Token:           token,
-		}, nil
+		ev := &ContactFeeEvent{Caller: caller, ServiceProvider: provider, Token: token}
+		if vals, err := parsedServiceContactABI.Events["ContactFeePaid"].Inputs.NonIndexed().Unpack(l.Data); err == nil && len(vals) > 0 {
+			ev.Amount, _ = vals[0].(*big.Int)
+		}
+		return ev, nil
 	}
 
 	// Diagnostic dump: when the event is missing, log every log entry we *did*

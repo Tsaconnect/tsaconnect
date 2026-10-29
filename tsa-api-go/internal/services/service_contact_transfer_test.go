@@ -19,19 +19,28 @@ const (
 	scToken     = "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
 )
 
-// scReceipts serves fixed receipts; a missing hash is "not mined".
+// scReceipts serves fixed receipts (a missing hash is "not mined"); every block is mined at scMinedAt.
 type scReceipts map[common.Hash]*types.Receipt
+
+var scMinedAt = time.Unix(1_800_000_000, 0)
 
 func (r scReceipts) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
 	if rc, ok := r[h]; ok {
+		if rc.BlockNumber == nil {
+			rc.BlockNumber = big.NewInt(1)
+		}
 		return rc, nil
 	}
 	return nil, ethereum.NotFound
 }
 
+func (r scReceipts) HeaderByNumber(context.Context, *big.Int) (*types.Header, error) {
+	return &types.Header{Time: uint64(scMinedAt.Unix())}, nil
+}
+
 func scIntent(amount string) models.ServiceContactIntent {
 	return models.ServiceContactIntent{ChainID: 146, TokenSymbol: "USDC", TokenAddress: scToken,
-		FeeRecipient: scRecipient, PayerWallet: scPayer, Amount: amount, CreatedAt: time.Now()}
+		FeeRecipient: scRecipient, PayerWallet: scPayer, Amount: amount, CreatedAt: scMinedAt.Add(-time.Minute)}
 }
 
 func TestServiceContactTransfer_Match(t *testing.T) {
@@ -44,7 +53,7 @@ func TestServiceContactTransfer_Match(t *testing.T) {
 		wrongToken: {Status: types.ReceiptStatusSuccessful, Logs: []*types.Log{transferLog(coreUSDT, scPayer, scRecipient, big.NewInt(100_000))}},
 		reverted:   {Status: types.ReceiptStatusFailed},
 	}
-	tr := &ServiceContactTransfer{chainID: 146, verifier: NewLogTransferVerifier(rpc)}
+	tr := &ServiceContactTransfer{chainID: 146, rpc: rpc, verifier: NewLogTransferVerifier(rpc)}
 
 	// The quote it paid is found, even when a later quote (a fee change) differs.
 	in, err := tr.Match(context.Background(), ok.Hex(), []models.ServiceContactIntent{scIntent("120000"), scIntent("100000")})
@@ -60,6 +69,12 @@ func TestServiceContactTransfer_Match(t *testing.T) {
 	if _, err := tr.Match(context.Background(), common.HexToHash("0x99").Hex(), []models.ServiceContactIntent{scIntent("100000")}); err == nil ||
 		errors.Is(err, ErrContactTransferUnproven) {
 		t.Fatalf("unmined: err = %v, want a retryable error", err)
+	}
+	// A transfer mined before the contact was quoted is some other payment to the shared recipient.
+	later := scIntent("100000")
+	later.CreatedAt = scMinedAt.Add(contactQuoteSkew + time.Minute)
+	if _, err := tr.Match(context.Background(), ok.Hex(), []models.ServiceContactIntent{later}); !errors.Is(err, ErrContactTransferUnproven) {
+		t.Fatalf("mined before the quote: err = %v, want unproven", err)
 	}
 	// A quote for another chain is never matched.
 	cross := scIntent("100000")

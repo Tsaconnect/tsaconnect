@@ -18,9 +18,12 @@ type ServiceContactPayment struct {
 	PayFeeTxHash      string    `json:"payFeeTxHash"`
 	// ChainID and FeeRecipient are set on a payment made as a plain transfer to the core set's
 	// FeeConfig fee recipient (contracts v2 slice 5); both are empty on a ServiceContact payment.
-	ChainID      int64     `json:"chainId,omitempty"`
-	FeeRecipient string    `gorm:"size:42" json:"feeRecipient,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ChainID      int64  `json:"chainId,omitempty"`
+	FeeRecipient string `gorm:"size:42" json:"feeRecipient,omitempty"`
+	// ProviderUSD is the provider's fee-earnings share credited when a transfer payment settled
+	// (a transfer has no on-chain provider split); 0 on the contract path.
+	ProviderUSD float64   `gorm:"default:0" json:"providerUsd,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
 // ServiceContactIntent is what a caller was asked to pay for a contact reveal: the exact token,

@@ -61,6 +61,10 @@ func NewServiceContactHandler(cfg *config.Config, bs *services.BlockchainService
 	}
 }
 
+// contactIntentsMatched bounds how many of a caller's latest quotes for one service a submit checks
+// (each is one receipt read): a caller who reopens the pay sheet many times cannot make it costly.
+const contactIntentsMatched = 10
+
 type submitContactFeeRequest struct {
 	ApproveTxHash string `json:"approveTxHash" binding:"required"`
 	PayFeeTxHash  string `json:"payFeeTxHash" binding:"required"`
@@ -320,6 +324,14 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "approveTxHash and payFeeTxHash are required")
 		return
 	}
+	// One spelling per transaction from here on: the reuse check and the unique index compare strings.
+	var okApprove, okPay bool
+	req.ApproveTxHash, okApprove = services.CanonicalEVMTxHash(req.ApproveTxHash)
+	req.PayFeeTxHash, okPay = services.CanonicalEVMTxHash(req.PayFeeTxHash)
+	if !okApprove || !okPay {
+		utils.ErrorResponse(c, http.StatusBadRequest, "approveTxHash and payFeeTxHash must be 0x-prefixed 32-byte transaction hashes")
+		return
+	}
 
 	// Look up the service advert (Fix #5: proper error handling)
 	var service models.Product
@@ -363,7 +375,7 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 	// One fee tx unlocks one contact (uq_service_contact_payments_fee_tx is the backstop).
 	var reused int64
 	if err := config.DB.Model(&models.ServiceContactPayment{}).
-		Where("LOWER(pay_fee_tx_hash) = ?", strings.ToLower(strings.TrimSpace(req.PayFeeTxHash))).
+		Where("LOWER(pay_fee_tx_hash) = ?", req.PayFeeTxHash).
 		Count(&reused).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Database error")
 		return
@@ -406,29 +418,33 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 	}
 
 	// A contact quoted as a plain transfer is proven against its quotes, whatever the core set's
-	// state now: the caller already paid the recipient they were given.
+	// state now: the caller already paid the recipient they were given. A tx that pays none of them
+	// may still be a ServiceContact payment (the set fell out of service between two prepares), so
+	// it falls through to the contract check.
 	var intents []models.ServiceContactIntent
-	if h.Transfer != nil {
-		if err := config.DB.Where("caller_id = ? AND service_id = ?", user.ID, serviceID).
-			Order("created_at DESC").Find(&intents).Error; err != nil {
-			utils.ErrorResponse(c, http.StatusInternalServerError, "Database error")
-			return
-		}
+	if err := config.DB.Where("caller_id = ? AND service_id = ?", user.ID, serviceID).
+		Order("created_at DESC").Limit(contactIntentsMatched).Find(&intents).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Database error")
+		return
 	}
+	var transferErr error
 	if len(intents) > 0 {
-		in, err := h.Transfer.Match(c.Request.Context(), req.PayFeeTxHash, intents)
-		if errors.Is(err, services.ErrContactTransferUnproven) {
-			log.Printf("[ContactFee] transfer not proven tx=%s caller=%s: %v", req.PayFeeTxHash, user.ID, err)
-			utils.ErrorResponse(c, http.StatusBadRequest, "Contact fee payment verification failed: "+err.Error())
+		if h.Transfer == nil {
+			log.Printf("[ContactFee] ALERT contact_transfer_unverifiable caller=%s tx=%s: quotes exist but no Sonic client is wired", user.ID, req.PayFeeTxHash)
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the contact fee right now — try again later")
 			return
 		}
-		if err != nil {
+		in, err := h.Transfer.Match(c.Request.Context(), req.PayFeeTxHash, intents)
+		switch {
+		case err == nil:
+			h.recordContactPayment(c, user, &provider, &service, req, in.TokenSymbol, in.Amount, in.ChainID, in.FeeRecipient)
+			return
+		case !errors.Is(err, services.ErrContactTransferUnproven):
 			log.Printf("[ContactFee] transfer unreadable tx=%s: %v", req.PayFeeTxHash, err)
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Blockchain unavailable — try again later")
 			return
 		}
-		h.recordContactPayment(c, user, &provider, &service, req, in.TokenSymbol, in.Amount, in.ChainID, in.FeeRecipient)
-		return
+		transferErr = err
 	}
 
 	// Fix #1: Verify ContactFeePaid event with caller/provider address validation
@@ -440,6 +456,11 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		if strings.Contains(errMsg, "failed to get receipt") || strings.Contains(errMsg, "blockchain client not available") {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Blockchain unavailable — try again later")
 			return
+		}
+		if transferErr != nil {
+			// The caller was quoted a transfer: that is the reason worth showing.
+			log.Printf("[ContactFee] transfer not proven tx=%s caller=%s: %v", req.PayFeeTxHash, user.ID, transferErr)
+			errMsg = transferErr.Error()
 		}
 		utils.ErrorResponse(c, http.StatusBadRequest, "Contact fee payment verification failed: "+errMsg)
 		return
@@ -456,7 +477,12 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		}
 	}
 
-	h.recordContactPayment(c, user, &provider, &service, req, tokenSymbol, h.ServiceContactService.GetFeeAmount().String(), 0, "")
+	// What the contract actually charged, not what the fee row says now.
+	feeAmount := h.ServiceContactService.GetFeeAmount()
+	if event.Amount != nil && event.Amount.Sign() > 0 {
+		feeAmount = event.Amount
+	}
+	h.recordContactPayment(c, user, &provider, &service, req, tokenSymbol, feeAmount.String(), 0, "")
 }
 
 // recordContactPayment records a proven contact fee, settles its fee earnings and reveals the
@@ -475,6 +501,10 @@ func (h *ServiceContactHandler) recordContactPayment(c *gin.Context, user, provi
 		ChainID:           chainID,
 		FeeRecipient:      feeRecipient,
 		CreatedAt:         time.Now(),
+	}
+	if chainID != 0 {
+		// Recorded with the payment, so a later split change never rewrites what was credited.
+		payment.ProviderUSD = weiToUSDFloat(feeAmount, tokenSymbol) * h.FeeService.RewardRatesFor(models.FeatureServiceContact).Provider
 	}
 
 	if err := config.DB.Create(&payment).Error; err != nil {
@@ -614,7 +644,7 @@ func (h *ServiceContactHandler) GetServiceContact(c *gin.Context) {
 // contract — 25% of every contact fee is transferred directly to the
 // service provider on the same tx that records the payment. A contact paid by
 // plain transfer (ChainID set) has no on-chain split: the provider's share is
-// the fee-earnings one (FeeDistributionService.RewardRatesFor).
+// the fee-earnings one, recorded on the payment when it settled (ProviderUSD).
 const providerSplitBPS = 2500
 
 // ListContactPayments handles GET /api/services/contact-payments
@@ -715,13 +745,12 @@ func (h *ServiceContactHandler) ListContactPayments(c *gin.Context) {
 		}
 	}
 
-	providerShare := h.FeeService.RewardRatesFor(models.FeatureServiceContact).Provider
 	items := make([]gin.H, 0, len(payments))
 	for _, p := range payments {
 		feeUSD := weiToUSDFloat(p.FeeAmount, p.Token)
 		providerUSD := feeUSD * float64(providerSplitBPS) / 10000.0
 		if p.ChainID != 0 {
-			providerUSD = feeUSD * providerShare
+			providerUSD = p.ProviderUSD
 		}
 
 		var counterpartyID uuid.UUID

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -18,19 +20,30 @@ import (
 // ErrContactTransferUnproven: the tx is mined but did not pay any of the caller's quoted intents.
 var ErrContactTransferUnproven = errors.New("contact fee transfer does not match the quote")
 
+// ContactChainReader reads a fee tx's receipt and its block on the contact chain; *ethclient.Client is one.
+type ContactChainReader interface {
+	ethLogReader
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
+}
+
+// contactQuoteSkew is how much earlier than its quote a transfer's block may be: block timestamps
+// and our clock differ by seconds, and a quote's row is written just after the user saw it.
+const contactQuoteSkew = 2 * time.Minute
+
 // ServiceContactTransfer prepares and proves contact-fee transfers on one chain.
 type ServiceContactTransfer struct {
 	core     *CoreRegistry
 	chainID  int64
+	rpc      ContactChainReader
 	verifier ERC20SourcedTransferVerifier
 }
 
 // NewServiceContactTransfer returns nil when no core set is selected. rpc reads receipts on chainID.
-func NewServiceContactTransfer(core *CoreRegistry, chainID int64, rpc ethLogReader) *ServiceContactTransfer {
+func NewServiceContactTransfer(core *CoreRegistry, chainID int64, rpc ContactChainReader) *ServiceContactTransfer {
 	if core == nil || rpc == nil {
 		return nil
 	}
-	return &ServiceContactTransfer{core: core, chainID: chainID, verifier: NewLogTransferVerifier(rpc)}
+	return &ServiceContactTransfer{core: core, chainID: chainID, rpc: rpc, verifier: NewLogTransferVerifier(rpc)}
 }
 
 // Active reports whether contact fees are paid by transfer now: the core set on the contact chain
@@ -62,22 +75,37 @@ func (t *ServiceContactTransfer) Recipient(ctx context.Context) (common.Address,
 	return r, nil
 }
 
-// Match returns the intent txHash paid: a successful tx whose Transfer logs moved at least the
-// intent's amount of its token from its payer to its recipient. TransferUnproven answers (not
-// mined, unreadable) come back as the verifier's error so the caller can ask again later; a tx
-// that is mined and pays none of the intents is ErrContactTransferUnproven.
+// Match returns the intent txHash paid: a successful tx, mined no earlier than the intent was
+// quoted, whose Transfer logs moved at least the intent's amount of its token from its payer to its
+// recipient. Binding the tx to the quote's time means an older transfer to the shared fee recipient
+// can never be passed off as this payment. Not mined or unreadable comes back as an error to retry;
+// a tx that is mined and pays none of the intents is ErrContactTransferUnproven.
 func (t *ServiceContactTransfer) Match(ctx context.Context, txHash string, intents []models.ServiceContactIntent) (*models.ServiceContactIntent, error) {
 	if len(intents) == 0 {
 		return nil, fmt.Errorf("%w: no quote for this contact", ErrContactTransferUnproven)
 	}
-	var lastErr error
+	receipt, err := t.rpc.TransactionReceipt(ctx, common.HexToHash(txHash))
+	if err != nil {
+		return nil, fmt.Errorf("read receipt: %w", err)
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return nil, fmt.Errorf("%w: the tx reverted", ErrContactTransferUnproven)
+	}
+	header, err := t.rpc.HeaderByNumber(ctx, receipt.BlockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("read block %s: %w", receipt.BlockNumber, err)
+	}
+	minedAt := time.Unix(int64(header.Time), 0)
+
+	lastErr := fmt.Errorf("%w: no quote on chain %d", ErrContactTransferUnproven, t.chainID)
 	for i := range intents {
 		in := &intents[i]
-		if in.ChainID != t.chainID {
+		want, ok := new(big.Int).SetString(in.Amount, 10)
+		if in.ChainID != t.chainID || !ok {
 			continue
 		}
-		want, ok := new(big.Int).SetString(in.Amount, 10)
-		if !ok {
+		if minedAt.Before(in.CreatedAt.Add(-contactQuoteSkew)) {
+			lastErr = fmt.Errorf("%w: the tx was mined before this contact was quoted", ErrContactTransferUnproven)
 			continue
 		}
 		paid, err := t.verifier.VerifyTransferFrom(ctx, txHash, in.TokenAddress, in.PayerWallet, in.FeeRecipient)
@@ -90,15 +118,11 @@ func (t *ServiceContactTransfer) Match(ctx context.Context, txHash string, inten
 		case TransferRefuted:
 			return nil, fmt.Errorf("%w: %v", ErrContactTransferUnproven, err)
 		default:
-			if errors.Is(err, ErrTransferNoMatch) {
-				lastErr = fmt.Errorf("%w: %v", ErrContactTransferUnproven, err)
-				continue
+			if !errors.Is(err, ErrTransferNoMatch) {
+				return nil, err // unreadable: ask again later
 			}
-			return nil, err // not mined or unreadable: ask again later
+			lastErr = fmt.Errorf("%w: %v", ErrContactTransferUnproven, err)
 		}
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("%w: no quote on chain %d", ErrContactTransferUnproven, t.chainID)
 	}
 	return nil, lastErr
 }

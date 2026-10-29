@@ -236,6 +236,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			pay_fee_tx_hash TEXT,
 			chain_id INTEGER DEFAULT 0,
 			fee_recipient TEXT,
+			provider_usd REAL DEFAULT 0,
 			created_at DATETIME,
 			UNIQUE(caller_id, service_id)
 		)`,
