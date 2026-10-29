@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,8 +10,11 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
+	"golang.org/x/sync/errgroup"
 )
 
 // core_fee_admin.go — fee authoring on a core set's FeeConfig (slice 4 of
@@ -26,7 +30,21 @@ var coreFeeTokens = []string{"USDC", "USDT"}
 
 var coreFeeFeatures = []string{FeeConfigFeatureOrder, FeeConfigFeatureP2PPlatform, FeeConfigFeatureP2PGas}
 
-// CoreFeeToken is one token a set prices, with the decimals the API's amount math assumes.
+// limitsNotConfiguredSelector is IFeeConfig.LimitsNotConfigured(address): the one revert that
+// means "this token has no limits yet". Any other revert is a chain problem, never "unset".
+var limitsNotConfiguredSelector = crypto.Keccak256([]byte("LimitsNotConfigured(address)"))[:4]
+
+const erc20DecimalsABIJSON = `[{"type":"function","name":"decimals","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"uint8"}]}]`
+
+var parsedERC20DecimalsABI = func() abi.ABI {
+	parsed, err := abi.JSON(strings.NewReader(erc20DecimalsABIJSON))
+	if err != nil {
+		panic(fmt.Sprintf("core fees: parse ABI: %v", err))
+	}
+	return parsed
+}()
+
+// CoreFeeToken is one token a set prices, with its decimals as read from the token.
 type CoreFeeToken struct {
 	Symbol   string `json:"symbol"`
 	Address  string `json:"address"`
@@ -64,6 +82,10 @@ type CoreFeeState struct {
 	Tokens       []CoreFeeToken  `json:"tokens"`
 	Rates        []CoreFeeRate   `json:"rates"`
 	Limits       []CoreFeeLimits `json:"limits"`
+
+	// The rows as read, in base units, for Plan's comparison.
+	rawRates  map[rateKey]FeeConfigRate
+	rawLimits map[common.Address]FeeConfigLimits
 }
 
 // CoreFeeChange is what the admin wants: only the rows named change; the rest stay as they are.
@@ -121,49 +143,98 @@ func (a *CoreFeeAdmin) Chains() []CoreFeeChain {
 	return out
 }
 
-func (a *CoreFeeAdmin) tokens(chainID int64) []CoreFeeToken {
+// tokens are the set's priced tokens on chainID with their decimals read from each token. A token
+// whose decimals differ from what the rest of the API's amount math assumes is refused: every
+// amount the admin types would be scaled wrong here, and every charge wrong elsewhere.
+func (a *CoreFeeAdmin) tokens(ctx context.Context, chainID int64) ([]CoreFeeToken, error) {
+	caller := a.reg.chains[chainID].gates.Chain
 	var out []CoreFeeToken
 	for _, sym := range coreFeeTokens {
-		if addr := a.tokenAddr(chainID, sym); common.IsHexAddress(addr) && common.HexToAddress(addr) != (common.Address{}) {
-			out = append(out, CoreFeeToken{Symbol: sym, Address: common.HexToAddress(addr).Hex(), Decimals: tokenDecimalsFor(chainID, sym)})
+		addr := a.tokenAddr(chainID, sym)
+		if !common.IsHexAddress(addr) || common.HexToAddress(addr) == (common.Address{}) {
+			continue
 		}
+		vals, err := callABIView(ctx, parsedERC20DecimalsABI, caller, addr, "decimals")
+		if err != nil {
+			return nil, fmt.Errorf("%s decimals: %w", sym, err)
+		}
+		d, _ := vals[0].(uint8)
+		if want := tokenDecimalsFor(chainID, sym); int(d) != want {
+			return nil, fmt.Errorf("%s at %s has %d decimals on-chain, the API assumes %d", sym, addr, d, want)
+		}
+		out = append(out, CoreFeeToken{Symbol: sym, Address: common.HexToAddress(addr).Hex(), Decimals: int(d)})
 	}
-	return out
+	return out, nil
 }
 
-// State reads chainID's live FeeConfig. Only a set that passed its gates is authored on.
+// State reads chainID's live FeeConfig, every row side by side. Only a set that passed its gates
+// is authored on.
 func (a *CoreFeeAdmin) State(ctx context.Context, chainID int64) (*CoreFeeState, error) {
 	set, ok := a.reg.Ready(chainID)
 	if !ok {
 		return nil, fmt.Errorf("chain %d: %w", chainID, ErrCoreSetNotReady)
 	}
-	fees := a.reg.Fees()
-	st := &CoreFeeState{ChainID: chainID, ChainKey: set.ChainKey, Set: a.reg.setName, FeeConfig: set.FeeConfig,
-		Admin: set.Admin, MaxBPS: FeeConfigMaxBPS, Tokens: a.tokens(chainID)}
-	recipient, err := fees.FeeRecipient(ctx, chainID, set.FeeConfig)
+	tokens, err := a.tokens(ctx, chainID)
 	if err != nil {
 		return nil, err
 	}
-	st.FeeRecipient = recipient.Hex()
-	for _, t := range st.Tokens {
+	fees := a.reg.Fees()
+	st := &CoreFeeState{ChainID: chainID, ChainKey: set.ChainKey, Set: a.reg.setName, FeeConfig: set.FeeConfig,
+		Admin: set.Admin, MaxBPS: FeeConfigMaxBPS, Tokens: tokens,
+		Rates: make([]CoreFeeRate, len(tokens)*len(coreFeeFeatures)), Limits: make([]CoreFeeLimits, len(tokens)),
+		rawRates: map[rateKey]FeeConfigRate{}, rawLimits: map[common.Address]FeeConfigLimits{}}
+	raw := make([]FeeConfigRate, len(st.Rates))
+	rawLimits := make([]*FeeConfigLimits, len(tokens))
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		r, err := fees.FeeRecipient(gctx, chainID, set.FeeConfig)
+		st.FeeRecipient = r.Hex()
+		return err
+	})
+	for ti, t := range tokens {
 		addr := common.HexToAddress(t.Address)
-		for _, f := range coreFeeFeatures {
-			r, err := fees.RawRate(ctx, chainID, set.FeeConfig, f, addr)
-			if err != nil {
-				return nil, err
-			}
-			st.Rates = append(st.Rates, CoreFeeRate{Feature: f, Token: t.Symbol, BPS: r.BPS,
-				Flat: BaseUnitsToDecimal(r.FlatFee, t.Decimals), Active: r.Active})
+		for fi, f := range coreFeeFeatures {
+			i := ti*len(coreFeeFeatures) + fi
+			g.Go(func() error {
+				r, err := fees.RawRate(gctx, chainID, set.FeeConfig, f, addr)
+				raw[i] = r
+				return err
+			})
 		}
-		l, err := fees.LimitsFor(ctx, chainID, set.FeeConfig, addr)
-		switch {
-		case errors.Is(err, ErrFeeConfigReverted):
-			st.Limits = append(st.Limits, CoreFeeLimits{Token: t.Symbol, MaxPerOrder: "0", MaxOwed: "0"})
-		case err != nil:
-			return nil, err
-		default:
-			st.Limits = append(st.Limits, CoreFeeLimits{Token: t.Symbol, Configured: true,
-				MaxPerOrder: BaseUnitsToDecimal(l.MaxPerOrder, t.Decimals), MaxOwed: BaseUnitsToDecimal(l.MaxOwed, t.Decimals)})
+		g.Go(func() error {
+			l, err := fees.LimitsFor(gctx, chainID, set.FeeConfig, addr)
+			if errors.Is(err, ErrFeeConfigReverted) {
+				if data := revertData(err); data != nil && bytes.Equal(data[:4], limitsNotConfiguredSelector) {
+					return nil // unset: rawLimits[ti] stays nil
+				}
+			}
+			if err == nil {
+				rawLimits[ti] = &l
+			}
+			return err
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	for ti, t := range tokens {
+		addr := common.HexToAddress(t.Address)
+		for fi, f := range coreFeeFeatures {
+			r := raw[ti*len(coreFeeFeatures)+fi]
+			if r.FlatFee == nil {
+				r.FlatFee = new(big.Int)
+			}
+			st.rawRates[rateKey{f, addr}] = r
+			st.Rates[ti*len(coreFeeFeatures)+fi] = CoreFeeRate{Feature: f, Token: t.Symbol, BPS: r.BPS,
+				Flat: BaseUnitsToDecimal(r.FlatFee, t.Decimals), Active: r.Active}
+		}
+		if l := rawLimits[ti]; l != nil {
+			st.rawLimits[addr] = *l
+			st.Limits[ti] = CoreFeeLimits{Token: t.Symbol, Configured: true,
+				MaxPerOrder: BaseUnitsToDecimal(l.MaxPerOrder, t.Decimals), MaxOwed: BaseUnitsToDecimal(l.MaxOwed, t.Decimals)}
+		} else {
+			st.Limits[ti] = CoreFeeLimits{Token: t.Symbol, MaxPerOrder: "0", MaxOwed: "0"}
 		}
 	}
 	return st, nil
@@ -203,6 +274,7 @@ func (a *CoreFeeAdmin) resolve(st *CoreFeeState, change CoreFeeChange) (*coreFee
 		return units, nil
 	}
 	out := &coreFeeTarget{limits: map[common.Address]FeeConfigLimits{}}
+	seen := map[rateKey]bool{}
 	for _, r := range change.Rates {
 		t, err := token(r.Token)
 		if err != nil {
@@ -211,6 +283,12 @@ func (a *CoreFeeAdmin) resolve(st *CoreFeeState, change CoreFeeChange) (*coreFee
 		if _, err := FeeConfigFeatureKey(r.Feature); err != nil {
 			return nil, bad("%v", err)
 		}
+		// Two rows for one key: whichever the chain ends up with, Verify would report the other.
+		k := rateKey{r.Feature, common.HexToAddress(t.Address)}
+		if seen[k] {
+			return nil, bad("%s %s is given twice", r.Feature, t.Symbol)
+		}
+		seen[k] = true
 		if int(r.BPS) > FeeConfigMaxBPS {
 			return nil, bad("%s %s: %d bps is above the %d bps cap", r.Feature, t.Symbol, r.BPS, FeeConfigMaxBPS)
 		}
@@ -226,7 +304,7 @@ func (a *CoreFeeAdmin) resolve(st *CoreFeeState, change CoreFeeChange) (*coreFee
 		if r.Feature != FeeConfigFeatureOrder && flat.Sign() != 0 {
 			return nil, bad("%s has no flat fee", r.Feature)
 		}
-		out.rates = append(out.rates, FeeConfigRateRow{Feature: r.Feature, Token: common.HexToAddress(t.Address),
+		out.rates = append(out.rates, FeeConfigRateRow{Feature: r.Feature, Token: k.token,
 			Rate: FeeConfigRate{BPS: r.BPS, FlatFee: flat, Active: r.Active}})
 	}
 	for _, l := range change.Limits {
@@ -244,6 +322,10 @@ func (a *CoreFeeAdmin) resolve(st *CoreFeeState, change CoreFeeChange) (*coreFee
 		}
 		if perOrder.Sign() <= 0 || owed.Sign() <= 0 {
 			return nil, bad("%s limits must both be above zero", t.Symbol)
+		}
+		// One order alone is owed by the escrow: a per-order cap above the owed cap can never be used.
+		if perOrder.Cmp(owed) > 0 {
+			return nil, bad("%s max per order (%s) is above max owed (%s)", t.Symbol, l.MaxPerOrder, l.MaxOwed)
 		}
 		addr := common.HexToAddress(t.Address)
 		if _, dup := out.limits[addr]; dup {
@@ -281,10 +363,9 @@ func (a *CoreFeeAdmin) Plan(ctx context.Context, chainID int64, change CoreFeeCh
 	tx := func(data []byte, summary string) {
 		plan.Txs = append(plan.Txs, CoreFeeTx{ChainID: chainID, To: st.FeeConfig, Data: hexutil.Encode(data), Summary: summary})
 	}
-	live := liveRates(st)
 	var rows []FeeConfigRateRow
 	for _, r := range target.rates {
-		cur := live[rateKey{r.Feature, r.Token}]
+		cur := st.rawRates[rateKey{r.Feature, r.Token}]
 		if cur.BPS == r.Rate.BPS && cur.FlatFee.Cmp(r.Rate.FlatFee) == 0 && cur.Active == r.Rate.Active {
 			continue
 		}
@@ -300,10 +381,9 @@ func (a *CoreFeeAdmin) Plan(ctx context.Context, chainID int64, change CoreFeeCh
 		}
 		tx(data, fmt.Sprintf("setRates (%d rows)", len(rows)))
 	}
-	liveLimits := liveLimitsByAddress(st)
 	for _, addr := range slices.SortedFunc(maps.Keys(target.limits), func(x, y common.Address) int { return strings.Compare(x.Hex(), y.Hex()) }) {
 		l, t := target.limits[addr], st.tokenByAddress(addr)
-		if cur, ok := liveLimits[addr]; ok && cur.MaxPerOrder.Cmp(l.MaxPerOrder) == 0 && cur.MaxOwed.Cmp(l.MaxOwed) == 0 {
+		if cur, ok := st.rawLimits[addr]; ok && cur.MaxPerOrder.Cmp(l.MaxPerOrder) == 0 && cur.MaxOwed.Cmp(l.MaxOwed) == 0 {
 			continue
 		}
 		data, err := PackFeeConfigSetLimits(addr, l)
@@ -325,51 +405,36 @@ func (a *CoreFeeAdmin) Plan(ctx context.Context, chainID int64, change CoreFeeCh
 	return plan, nil
 }
 
-// Verify re-reads chainID and lists every part of change the chain does not hold yet (empty: applied).
-func (a *CoreFeeAdmin) Verify(ctx context.Context, chainID int64, change CoreFeeChange) ([]string, error) {
+// ErrCoreFeeTxUnproven: a tx hash given to Verify is not a mined, successful call to the set's
+// FeeConfig on that chain.
+var ErrCoreFeeTxUnproven = errors.New("fee tx not proven")
+
+// Verify re-reads chainID and lists every part of change the chain does not hold yet (empty:
+// applied). txHashes must each be a successful call to this FeeConfig; a change is recorded as
+// applied only on that evidence, so an unchanged request with made-up hashes proves nothing.
+func (a *CoreFeeAdmin) Verify(ctx context.Context, chainID int64, change CoreFeeChange, txHashes []string) ([]string, error) {
 	plan, err := a.Plan(ctx, chainID, change)
 	if err != nil {
 		return nil, err
 	}
-	return plan.Changes, nil
+	if len(plan.Changes) > 0 {
+		return plan.Changes, nil
+	}
+	set, _ := a.reg.Ready(chainID)
+	if len(txHashes) == 0 {
+		return nil, fmt.Errorf("%w: no tx hashes", ErrCoreFeeTxUnproven)
+	}
+	for _, h := range txHashes {
+		if err := a.reg.Fees().TxCalled(ctx, chainID, h, set.FeeConfig); err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrCoreFeeTxUnproven, h, err)
+		}
+	}
+	return nil, nil
 }
 
 type rateKey struct {
 	feature string
 	token   common.Address
-}
-
-func liveRates(st *CoreFeeState) map[rateKey]FeeConfigRate {
-	out := map[rateKey]FeeConfigRate{}
-	for _, r := range st.Rates {
-		t := st.tokenBySymbol(r.Token)
-		flat, _ := DecimalToBaseUnits(r.Flat, t.Decimals)
-		out[rateKey{r.Feature, common.HexToAddress(t.Address)}] = FeeConfigRate{BPS: r.BPS, FlatFee: flat, Active: r.Active}
-	}
-	return out
-}
-
-func liveLimitsByAddress(st *CoreFeeState) map[common.Address]FeeConfigLimits {
-	out := map[common.Address]FeeConfigLimits{}
-	for _, l := range st.Limits {
-		if !l.Configured {
-			continue
-		}
-		t := st.tokenBySymbol(l.Token)
-		perOrder, _ := DecimalToBaseUnits(l.MaxPerOrder, t.Decimals)
-		owed, _ := DecimalToBaseUnits(l.MaxOwed, t.Decimals)
-		out[common.HexToAddress(t.Address)] = FeeConfigLimits{MaxPerOrder: perOrder, MaxOwed: owed}
-	}
-	return out
-}
-
-func (st *CoreFeeState) tokenBySymbol(sym string) CoreFeeToken {
-	for _, t := range st.Tokens {
-		if t.Symbol == sym {
-			return t
-		}
-	}
-	return CoreFeeToken{}
 }
 
 func (st *CoreFeeState) tokenByAddress(addr common.Address) CoreFeeToken {
@@ -381,13 +446,15 @@ func (st *CoreFeeState) tokenByAddress(addr common.Address) CoreFeeToken {
 	return CoreFeeToken{}
 }
 
+// describeRate says what a row charges; an inactive row still shows its stored values, so an edit
+// to one is never shown as "off → off".
 func describeRate(r FeeConfigRate, t CoreFeeToken) string {
-	if !r.Active {
-		return "off"
-	}
 	s := fmt.Sprintf("%d bps", r.BPS)
 	if r.FlatFee != nil && r.FlatFee.Sign() > 0 {
 		s += " + " + BaseUnitsToDecimal(r.FlatFee, t.Decimals) + " " + t.Symbol
+	}
+	if !r.Active {
+		s = "off (" + s + ")"
 	}
 	return s
 }

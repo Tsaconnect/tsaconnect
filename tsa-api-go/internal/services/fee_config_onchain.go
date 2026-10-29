@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
 // fee_config_onchain.go — the on-chain FeeConfig (smart-contracts/contracts/core/FeeConfig.sol),
@@ -174,7 +175,7 @@ func (r *FeeConfigReader) read(ctx context.Context, chainID int64, feeConfig, wh
 	}
 	out, err := c.call(ctx, feeConfig, data)
 	if isRevert(err) {
-		return nil, fmt.Errorf("%s: %w: %v", what, ErrFeeConfigReverted, err)
+		return nil, fmt.Errorf("%s: %w: %w", what, ErrFeeConfigReverted, err) // err keeps its revert data
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s call: %w", what, err)
@@ -254,6 +255,29 @@ func (r *FeeConfigReader) TxSucceeded(ctx context.Context, chainID int64, txHash
 		return false, err
 	}
 	return c.txSucceeded(ctx, txHash)
+}
+
+// TxCalled proves txHash on chainID is a mined, successful call that changed feeConfig: every
+// CONFIG_ROLE setter emits an event from it (RateSet, LimitsSet, FeeRecipientSet), so a success
+// with no log from feeConfig did not touch it.
+func (r *FeeConfigReader) TxCalled(ctx context.Context, chainID int64, txHash, feeConfig string) error {
+	c, err := r.chain(chainID)
+	if err != nil {
+		return err
+	}
+	receipt, err := c.receipt(ctx, txHash)
+	if err != nil {
+		return err
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return errors.New("the tx reverted")
+	}
+	for _, l := range receipt.Logs {
+		if l.Address == common.HexToAddress(feeConfig) {
+			return nil
+		}
+	}
+	return fmt.Errorf("the tx emitted nothing from FeeConfig %s", feeConfig)
 }
 
 // FeeConfigRateRow is one row of a setRates batch.

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 )
@@ -37,6 +39,9 @@ type fakeCoreChain struct {
 	roles     map[common.Address]map[common.Address]bool // contract → holder → holds any role
 	rates     map[rateKey]feeConfigRateTuple
 	limits    map[common.Address]feeConfigLimitsTuple
+	decimals  uint8
+	limitsErr error // limitsFor's error for a token with no limits (default: LimitsNotConfigured)
+	receipts  map[common.Hash]*types.Receipt
 	noCode    bool
 	rpcDown   bool
 }
@@ -44,7 +49,8 @@ type fakeCoreChain struct {
 func healthyCoreChain() *fakeCoreChain {
 	return &fakeCoreChain{chainID: 146, admin: common.HexToAddress(coreAdmin), feeConfig: common.HexToAddress(coreFC),
 		window: 1800, recipient: common.HexToAddress(coreFees), roles: map[common.Address]map[common.Address]bool{},
-		rates: map[rateKey]feeConfigRateTuple{}, limits: map[common.Address]feeConfigLimitsTuple{}}
+		rates: map[rateKey]feeConfigRateTuple{}, limits: map[common.Address]feeConfigLimitsTuple{}, decimals: 6,
+		receipts: map[common.Hash]*types.Receipt{}}
 }
 
 func (f *fakeCoreChain) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
@@ -68,6 +74,8 @@ func (f *fakeCoreChain) CallContract(_ context.Context, call ethereum.CallMsg, _
 	case bytes.Equal(sel, m["hasRole"].ID):
 		args, _ := m["hasRole"].Inputs.Unpack(call.Data[4:])
 		return m["hasRole"].Outputs.Pack(f.roles[*call.To][args[1].(common.Address)])
+	case bytes.Equal(sel, parsedERC20DecimalsABI.Methods["decimals"].ID):
+		return parsedERC20DecimalsABI.Methods["decimals"].Outputs.Pack(f.decimals)
 	case bytes.Equal(sel, fc["feeRecipient"].ID):
 		return fc["feeRecipient"].Outputs.Pack(f.recipient)
 	case bytes.Equal(sel, fc["rawRate"].ID):
@@ -82,15 +90,25 @@ func (f *fakeCoreChain) CallContract(_ context.Context, call ethereum.CallMsg, _
 		args, _ := fc["limitsFor"].Inputs.Unpack(call.Data[4:])
 		l, ok := f.limits[args[0].(common.Address)]
 		if !ok {
-			return nil, errors.New("execution reverted: LimitsNotConfigured")
+			if f.limitsErr != nil {
+				return nil, f.limitsErr
+			}
+			data, _ := abi.Arguments{{Type: addressType}}.Pack(args[0])
+			return nil, revertDataErr{data: hexutil.Encode(append(append([]byte{}, limitsNotConfiguredSelector...), data...))}
 		}
 		return fc["limitsFor"].Outputs.Pack(l)
 	}
 	return nil, errors.New("fakeCoreChain: unexpected call")
 }
-func (f *fakeCoreChain) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
-	return nil, errors.New("not used")
+func (f *fakeCoreChain) TransactionReceipt(_ context.Context, h common.Hash) (*types.Receipt, error) {
+	if r, ok := f.receipts[h]; ok {
+		return r, nil
+	}
+	return nil, errors.New("not found")
 }
+
+var addressType, _ = abi.NewType("address", "", nil)
+
 func (f *fakeCoreChain) CodeAt(context.Context, common.Address, *big.Int) ([]byte, error) {
 	if f.noCode {
 		return nil, nil

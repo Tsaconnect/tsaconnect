@@ -1,17 +1,13 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
-	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
@@ -50,6 +46,8 @@ func (h *CoreFeeHandler) fail(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, services.ErrCoreFeeInvalid):
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+	case errors.Is(err, services.ErrCoreFeeTxUnproven):
+		utils.ErrorResponse(c, http.StatusConflict, err.Error())
 	case errors.Is(err, services.ErrCoreSetNotReady):
 		utils.ErrorResponse(c, http.StatusServiceUnavailable, "The core set on this chain has not passed its boot gates")
 	default:
@@ -103,13 +101,14 @@ func (h *CoreFeeHandler) Plan(c *gin.Context) {
 		return
 	}
 	if len(plan.Txs) > 0 {
-		h.audit(c, "fee_config.planned", id, map[string]any{"changes": plan.Changes})
+		writeAdminAudit(c, h.DB, "fee_config.planned", map[string]any{"chainId": id, "changes": plan.Changes})
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Fee change planned", plan)
 }
 
 // Verify handles POST /api/admin/fees/core/:chainId/verify {change, txHashes} — re-reads the
-// chain; pending lists what it does not hold yet. The hashes are recorded, never trusted.
+// chain; pending lists what it does not hold yet. With nothing pending, each hash must be a
+// successful call that changed this FeeConfig (409 otherwise) before "applied" is recorded.
 func (h *CoreFeeHandler) Verify(c *gin.Context) {
 	if !h.ready(c) {
 		return
@@ -126,29 +125,13 @@ func (h *CoreFeeHandler) Verify(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Body must be {change, txHashes}")
 		return
 	}
-	pending, err := h.Admin.Verify(c.Request.Context(), id, req.Change)
+	pending, err := h.Admin.Verify(c.Request.Context(), id, req.Change, req.TxHashes)
 	if err != nil {
 		h.fail(c, err)
 		return
 	}
 	if len(pending) == 0 {
-		h.audit(c, "fee_config.applied", id, map[string]any{"change": req.Change, "txHashes": req.TxHashes})
+		writeAdminAudit(c, h.DB, "fee_config.applied", map[string]any{"chainId": id, "change": req.Change, "txHashes": req.TxHashes})
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Fee change verified", gin.H{"applied": len(pending) == 0, "pending": pending})
-}
-
-// audit writes the shared admin trail row (p2p_audit_logs).
-func (h *CoreFeeHandler) audit(c *gin.Context, action string, chainID int64, extra map[string]any) {
-	meta := map[string]any{"chainId": chainID}
-	for k, v := range extra {
-		meta[k] = v
-	}
-	raw, _ := json.Marshal(meta)
-	row := models.P2PAuditLog{ID: uuid.New(), Action: action, Metadata: datatypes.JSON(raw)}
-	if u := getUserFromContext(c); u != nil {
-		row.ActorID = &u.ID
-	}
-	if h.DB != nil {
-		_ = h.DB.WithContext(c.Request.Context()).Create(&row).Error
-	}
 }

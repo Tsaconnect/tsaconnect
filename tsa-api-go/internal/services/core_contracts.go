@@ -215,6 +215,8 @@ type coreChain struct {
 }
 
 // CoreRegistry is the selected core set, one entry per chain. A nil registry is a dormant set.
+// chains (and each entry's set and gates) is fixed at construction and read without mu; mu
+// guards only each entry's gate verdict (ready, checkedAt, lastFails).
 type CoreRegistry struct {
 	setName string
 	fees    *FeeConfigReader

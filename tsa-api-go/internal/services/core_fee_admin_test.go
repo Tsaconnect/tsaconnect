@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
 const (
@@ -99,9 +100,43 @@ func TestCoreFeeAdmin_PlanOnlyChanges(t *testing.T) {
 	chain.rates[rateKey{FeeConfigFeatureP2PPlatform, usdt}] = feeConfigRateTuple{Bps: 50, FlatFee: new(big.Int), Active: true}
 	chain.limits[common.HexToAddress(coreUSDC)] = feeConfigLimitsTuple{MaxPerOrder: big.NewInt(5_000_000_000), MaxOwed: big.NewInt(50_000_000_000)}
 	chain.recipient = common.HexToAddress("0x00000000000000000000000000000000005E5799")
-	pending, err := a.Verify(context.Background(), 146, change)
+	if _, err := a.Verify(context.Background(), 146, change, nil); !errors.Is(err, ErrCoreFeeTxUnproven) {
+		t.Fatalf("verify with no hashes: err=%v, want unproven", err)
+	}
+	fake := common.HexToHash("0xbad")
+	chain.receipts[fake] = &types.Receipt{Status: types.ReceiptStatusSuccessful}
+	if _, err := a.Verify(context.Background(), 146, change, []string{fake.Hex()}); !errors.Is(err, ErrCoreFeeTxUnproven) {
+		t.Fatalf("verify with a tx that did not touch FeeConfig: err=%v, want unproven", err)
+	}
+	real := common.HexToHash("0x600d")
+	chain.receipts[real] = &types.Receipt{Status: types.ReceiptStatusSuccessful, Logs: []*types.Log{{Address: common.HexToAddress(coreFC)}}}
+	pending, err := a.Verify(context.Background(), 146, change, []string{real.Hex()})
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("verify after apply: pending=%v err=%v", pending, err)
+	}
+}
+
+// An edit to an inactive row is described with its values, never as "off → off".
+func TestCoreFeeAdmin_InactiveRowChangeIsDescribed(t *testing.T) {
+	a := readyCoreFeeAdmin(t, healthyCoreChain())
+	plan, err := a.Plan(context.Background(), 146, CoreFeeChange{Rates: []CoreFeeRate{{Feature: FeeConfigFeatureP2PGas, Token: "USDC", BPS: 25}}})
+	if err != nil || len(plan.Changes) != 1 || plan.Changes[0] != "p2p_gas USDC: off (0 bps) → off (25 bps)" {
+		t.Fatalf("plan = %+v err=%v", plan, err)
+	}
+}
+
+// Only LimitsNotConfigured means "unset"; any other revert is a chain problem, and a token whose
+// decimals differ from the API's is refused.
+func TestCoreFeeAdmin_StateRefusesWhatItCannotTrust(t *testing.T) {
+	chain := healthyCoreChain()
+	chain.limitsErr = revertDataErr{data: "0x08c379a0"}
+	if _, err := readyCoreFeeAdmin(t, chain).State(context.Background(), 146); err == nil {
+		t.Fatal("an unknown limitsFor revert must not read as unconfigured")
+	}
+	chain = healthyCoreChain()
+	chain.decimals = 18
+	if _, err := readyCoreFeeAdmin(t, chain).State(context.Background(), 146); err == nil || !strings.Contains(err.Error(), "decimals") {
+		t.Fatalf("err = %v, want the decimals refusal", err)
 	}
 }
 
@@ -116,8 +151,11 @@ func TestCoreFeeAdmin_PlanRefusals(t *testing.T) {
 		"zero limit":        {Limits: []CoreFeeLimits{{Token: "USDT", MaxPerOrder: "0", MaxOwed: "10"}}},
 		"limits twice": {Limits: []CoreFeeLimits{{Token: "USDT", MaxPerOrder: "1", MaxOwed: "10"},
 			{Token: "usdt", MaxPerOrder: "2", MaxOwed: "10"}}},
-		"bad recipient":     {FeeRecipient: "0x1234"},
-		"hot-key recipient": {FeeRecipient: directOperator},
+		"rate twice": {Rates: []CoreFeeRate{{Feature: FeeConfigFeatureOrder, Token: "USDT", BPS: 200, Active: true},
+			{Feature: FeeConfigFeatureOrder, Token: "usdt", BPS: 300, Active: true}}},
+		"per order over owed": {Limits: []CoreFeeLimits{{Token: "USDT", MaxPerOrder: "50000", MaxOwed: "5000"}}},
+		"bad recipient":       {FeeRecipient: "0x1234"},
+		"hot-key recipient":   {FeeRecipient: directOperator},
 	} {
 		if _, err := a.Plan(context.Background(), 146, change); !errors.Is(err, ErrCoreFeeInvalid) {
 			t.Errorf("%s: err = %v, want ErrCoreFeeInvalid", name, err)
