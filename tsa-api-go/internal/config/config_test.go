@@ -43,8 +43,7 @@ func TestValidateFeeManagerAddress(t *testing.T) {
 }
 
 // P2P runs only on a core set (slice 8 hard switch): without one every chain is dormant; with the
-// dev set Sonic runs its P2PTradeEscrow (EIP-712 "3") and BSC, which the set has no row for, stays
-// dormant.
+// dev set Sonic (PM) and BSC (direct) each run the set's P2PTradeEscrow (EIP-712 "3").
 func TestLoad_P2POnlyOnTheCoreSet(t *testing.T) {
 	t.Setenv("SONIC_NETWORK", "mainnet")
 	t.Setenv("CORE_CONTRACTS", "")
@@ -68,8 +67,9 @@ func TestLoad_P2POnlyOnTheCoreSet(t *testing.T) {
 	if got := cfg.P2PChains[146]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sonic = %+v\nwant %+v", got, want)
 	}
-	if _, bsc := cfg.P2PChains[56]; bsc {
-		t.Fatal("the dev set has no BSC row: BSC P2P must be dormant")
+	bsc := cfg.P2PChains[56]
+	if bsc.EscrowAddress != coreSets[CoreSetDev]["bsc"].p2pEscrow || bsc.Audience != P2PAudienceDirect || bsc.EIP712Version != CoreP2PEIP712Version {
+		t.Fatalf("bsc = %+v, want the dev set's direct P2PTradeEscrow", bsc)
 	}
 }
 

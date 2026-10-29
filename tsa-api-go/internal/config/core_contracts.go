@@ -69,6 +69,14 @@ var coreSets = map[string]map[string]coreRow{
 			admin:       "0xd963C3C596f692b4fD8e53bD9B60Ca1843400Da3",
 			forwarder:   "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4",
 			deployBlock: 81691442},
+		// Deployed 2026-10-29 with CORE_DEV=1 (same throwaway deployer, so the escrow proxy happens to
+		// share its address with Sonic's FeeConfig — different chain). Direct P2P only: no OrderEscrow,
+		// no forwarder (decision Q12), 1.9% p2p_platform.
+		"bsc": {network: "mainnet",
+			feeConfig:   "0xa855BeB1D59b6d15e92571010Bd92a46aef6Af47",
+			p2pEscrow:   "0x9aba9E3e3bCD5d609ef99C6dC5973386769e2572",
+			admin:       "0xd963C3C596f692b4fD8e53bD9B60Ca1843400Da3",
+			deployBlock: 130498364},
 	},
 	CoreSetProd: {},
 }

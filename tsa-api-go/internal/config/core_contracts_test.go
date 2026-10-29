@@ -8,10 +8,10 @@ import (
 func coreTestConfig(sonicNetwork string) *Config {
 	return &Config{
 		Networks: map[string]NetworkConfig{
-			"mainnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 146}}},
-			"testnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 14601}}},
+			"mainnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 146}, "bsc": {ChainID: 56}}},
+			"testnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 14601}, "bsc": {ChainID: 97}}},
 		},
-		p2pNetworks: map[string]string{"sonic": sonicNetwork},
+		p2pNetworks: map[string]string{"sonic": sonicNetwork, "bsc": "mainnet"},
 	}
 }
 
@@ -64,6 +64,11 @@ func TestCoreContracts_DevSetOnSonicMainnet(t *testing.T) {
 		c.P2PEscrow != "0xDB4Ff053b677e9C65BD0988f74922329103FB2f3" || c.ChainKey != "sonic" || c.DeployBlock != 81691442 ||
 		c.Forwarder != "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4" {
 		t.Fatalf("dev Sonic row = %+v", c)
+	}
+	b, ok := cfg.CoreContracts[56]
+	if !ok || b.FeeConfig != "0xa855BeB1D59b6d15e92571010Bd92a46aef6Af47" || b.P2PEscrow != "0x9aba9E3e3bCD5d609ef99C6dC5973386769e2572" ||
+		b.OrderEscrow != "" || b.Forwarder != "" || b.ChainKey != "bsc" || b.DeployBlock != 130498364 {
+		t.Fatalf("dev BSC row = %+v", b)
 	}
 }
 
