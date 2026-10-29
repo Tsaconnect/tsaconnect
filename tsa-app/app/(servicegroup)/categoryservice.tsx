@@ -15,12 +15,17 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
 import { useTheme } from "@/theme";
 import { EmptyState, PressableScale, Spinner, Text } from "@/components/ui";
+import { ListingFilters } from "@/components/forms/ListingFilters";
 
 const Services = () => {
   const { colors, spacing } = useTheme();
   const { value } = useLocalSearchParams<{ value?: string }>();
   const [services, setServices] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  // The category's listing-field filters (institution, gender, …).
+  const [filters, setFilters] = useState<Record<string, string>>({});
+  const filtersKey = JSON.stringify(filters);
+  const filtering = Object.values(filters).some((v) => v !== "");
   const { setAppService } = useAuth();
   const insets = useSafeAreaInsets();
 
@@ -30,10 +35,12 @@ const Services = () => {
       return;
     }
     let cancelled = false;
+    setLoading(true);
     (async () => {
       const response = await api.getProductsByCategory({
         categoryId: value,
         type: "Service",
+        attr: JSON.parse(filtersKey),
       });
       if (cancelled) return;
       if (response.success && Array.isArray(response.data?.products)) {
@@ -47,7 +54,7 @@ const Services = () => {
     return () => {
       cancelled = true;
     };
-  }, [value]);
+  }, [value, filtersKey]);
 
   const handleRegister = () => {
     setAppService("Register your service");
@@ -56,6 +63,7 @@ const Services = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      <ListingFilters categoryId={value} value={filters} onChange={setFilters} />
       {loading ? (
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <Spinner size="large" />
@@ -64,8 +72,12 @@ const Services = () => {
         <View style={{ flex: 1, justifyContent: "center", paddingBottom: 80 }}>
           <EmptyState
             icon="storefront"
-            title="No vendors yet"
-            subtitle="No registered vendor merchants in this category at the moment."
+            title={filtering ? "No matches" : "No vendors yet"}
+            subtitle={
+              filtering
+                ? "No vendors match these filters. Try setting one back to Any."
+                : "No registered vendor merchants in this category at the moment."
+            }
           />
         </View>
       ) : (

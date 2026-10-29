@@ -7,7 +7,6 @@ const ProfileLayout = () => {
     <Stack screenOptions={screenOptions}>
       <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="edit" options={{ title: "Edit Profile" }} />
-      <Stack.Screen name="edit-advert" options={{ title: "Edit Advert" }} />
       <Stack.Screen name="advert-details" options={{ title: "Advert Details" }} />
       {/* <Verify> brings its own header row and heading. */}
       <Stack.Screen name="verify-email" options={{ headerShown: false }} />

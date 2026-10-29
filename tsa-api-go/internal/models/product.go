@@ -60,13 +60,18 @@ type Product struct {
 	CategoryName string         `json:"categoryName,omitempty"`
 	Images       datatypes.JSON `gorm:"type:jsonb" json:"images,omitempty"`
 	Attributes   datatypes.JSON `gorm:"type:jsonb" json:"attributes,omitempty"`
-	Status       string         `json:"status"`
-	Type         string         `json:"type"`
-	IsFeatured   bool           `json:"isFeatured"`
-	Views        int            `json:"views"`
-	Sales        int            `json:"sales"`
-	Rating       datatypes.JSON `gorm:"type:jsonb" json:"rating"`
-	Metadata     datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	// ListingValues holds the merchant's answers to the category's listing
+	// fields, keyed by catalogue key ({"institution": "UNN", "amenities": [...]}).
+	// Attributes above stays the free-form name/value spec list the app already
+	// shows; these are the structured values search filters match on.
+	ListingValues datatypes.JSON `gorm:"type:jsonb" json:"listingValues,omitempty"`
+	Status        string         `json:"status"`
+	Type          string         `json:"type"`
+	IsFeatured    bool           `json:"isFeatured"`
+	Views         int            `json:"views"`
+	Sales         int            `json:"sales"`
+	Rating        datatypes.JSON `gorm:"type:jsonb" json:"rating"`
+	Metadata      datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
 	// ShippingResidential is the "same residential area/street" tier of a
 	// merchant-set distance fee. For products it is unused (0). For order/booking
 	// services it holds the residential-tier delivery/booking fee — the one tier

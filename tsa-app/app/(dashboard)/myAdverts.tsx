@@ -241,18 +241,14 @@ const MyAdvertsScreen = () => {
               onPress={() =>
                 // Services go to the service form, which is the only editor
                 // that can see fees, hours, policies and booking fields. The
-                // advert editor covers the base product columns only, so it
-                // stays the destination for products and for anything whose
-                // type the merchant never set.
+                // product editor covers products and anything whose type the
+                // merchant never set.
                 item?.type === ADVERT_TYPE_SERVICE
                   ? router.push({
                       pathname: `/serviceaction`,
                       params: { index: 1, productId: item?.id ?? item?._id },
                     } as any)
-                  : router.push({
-                      pathname: `/profile/edit-advert`,
-                      params: { id: item?.id ?? item?._id },
-                    })
+                  : router.push(`/merchants/inventory/edit/${item?.id ?? item?._id}`)
               }
             />
             <IconButton

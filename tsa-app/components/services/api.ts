@@ -1314,14 +1314,20 @@ class APIService {
     search?: string;
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
+    /** Category listing-field filters, sent as attr[key]=value. */
+    attr?: Record<string, string>;
   }): Promise<ApiResponse<{ products: Product[]; category: any; pagination: any; filters: any }>> {
     try {
       const queryParams = new URLSearchParams();
       if (params) {
-        Object.entries(params).forEach(([key, value]) => {
+        const { attr, ...rest } = params;
+        Object.entries(rest).forEach(([key, value]) => {
           if (value !== undefined && value !== null) {
             queryParams.append(key, value.toString());
           }
+        });
+        Object.entries(attr ?? {}).forEach(([key, value]) => {
+          if (value !== '') queryParams.append(`attr[${key}]`, value);
         });
       }
 

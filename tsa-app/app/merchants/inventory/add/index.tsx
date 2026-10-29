@@ -48,6 +48,9 @@ import {
   PricingCurrencySelect,
   ShippingRatesFields,
 } from '@/components/products/MerchantPricingFields';
+import { SchemaFields } from '@/components/forms/SchemaFields';
+import { useCategoryListingFields } from '@/hooks/useCategoryListingFields';
+import { cleanSchemaAnswers, validateSchemaAnswers } from '@/utils/schemaFields';
 
 const CategoryAvatar = ({ category }: { category: any }) => {
   const { radius } = useTheme();
@@ -90,6 +93,10 @@ const AddProduct = () => {
   const [categorySearch, setCategorySearch] = useState('');
 
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Answers to the chosen category's listing fields (brand, …).
+  const [listingValues, setListingValues] = useState<Record<string, any>>({});
+  const [listingErrors, setListingErrors] = useState<Record<string, string>>({});
+  const { fields: listingFields } = useCategoryListingFields(categoryId || null);
 
   const maxDescriptionLength = 500;
 
@@ -220,8 +227,11 @@ const AddProduct = () => {
       if (!attr.value.trim()) newErrors[`attr_value_${index}`] = 'Attribute value is required';
     });
 
+    const listingProblems = validateSchemaAnswers(listingFields, listingValues);
+    setListingErrors(listingProblems);
+
     setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    return Object.keys(newErrors).length === 0 && Object.keys(listingProblems).length === 0;
   };
 
   const createProduct = async () => {
@@ -260,6 +270,9 @@ const AddProduct = () => {
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
       }
+      if (listingFields.length > 0) {
+        formData.append('listingValues', JSON.stringify(cleanSchemaAnswers(listingFields, listingValues)));
+      }
 
       const response = await api.createProduct(formData);
 
@@ -296,6 +309,8 @@ const AddProduct = () => {
     setCompanyName('');
     setProductImages([]);
     setAttributes([]);
+    setListingValues({});
+    setListingErrors({});
     setErrors({});
   };
 
@@ -488,6 +503,24 @@ const AddProduct = () => {
               />
             )}
           </View>
+
+          {/* The category's own listing fields (set by admins per category). */}
+          {listingFields.length > 0 && (
+            <View style={{ marginBottom: spacing.lg, gap: spacing.md }}>
+              <Text variant="bodyMed" weight="700">
+                {categoryName || 'Category'} details
+              </Text>
+              <SchemaFields
+                fields={listingFields}
+                answers={listingValues}
+                errors={listingErrors}
+                onChange={(key, value) => {
+                  setListingValues((prev) => ({ ...prev, [key]: value }));
+                  setListingErrors((prev) => (prev[key] ? { ...prev, [key]: '' } : prev));
+                }}
+              />
+            </View>
+          )}
 
           <View style={{ marginBottom: spacing.lg }}>
             <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>

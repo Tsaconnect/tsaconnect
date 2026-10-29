@@ -34,6 +34,7 @@ import {
   Sheet,
   Spinner,
 } from '@/components/ui';
+import { ListingDetails } from '@/components/forms/ListingDetails';
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
@@ -148,6 +149,8 @@ const ServiceDetail = () => {
   // AddService. The detail card only shows the hero; "See Catalogue" opens
   // a modal with the rest of the gallery.
   const [catalogueImages, setCatalogueImages] = useState<string[]>([]);
+  // The listing's answers to its category's listing fields, and that category.
+  const [listing, setListing] = useState<{ categoryId?: string; values?: Record<string, unknown> }>({});
   const [showCatalogue, setShowCatalogue] = useState(false);
   // Service pricing sheet (price + call-out / booking fare → escrow checkout).
   // Gated in ServiceDetailCard: contact-type still requires the contact fee
@@ -211,6 +214,10 @@ const ServiceDetail = () => {
       // order/booking (which don't require the contact fee). Prefer an embedded
       // category object; else look the category up by id. Default: 'contact'.
       const cat = res.data?.category as any;
+      setListing({
+        categoryId: typeof cat === 'string' ? cat : cat?.id,
+        values: (res.data as any)?.listingValues,
+      });
       const embedded =
         cat && typeof cat === 'object' && typeof cat.serviceType === 'string'
           ? (cat.serviceType as string)
@@ -387,6 +394,11 @@ const ServiceDetail = () => {
           onPricingPress={() => setShowPricing(true)}
           serviceType={serviceType}
           serviceTypeResolved={serviceTypeResolved}
+        />
+        <ListingDetails
+          categoryId={listing.categoryId}
+          values={listing.values}
+          style={{ marginTop: spacing.lg }}
         />
       </ScrollView>
 

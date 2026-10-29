@@ -16,6 +16,7 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
 import { useTheme } from "@/theme";
 import { EmptyState, PressableScale, Spinner, Text } from "@/components/ui";
+import { ListingFilters } from "@/components/forms/ListingFilters";
 
 const Products = () => {
   const { colors, spacing } = useTheme();
@@ -23,6 +24,10 @@ const Products = () => {
   const { value } = useLocalSearchParams<{ value?: string }>();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  // The category's listing-field filters (brand, …).
+  const [filters, setFilters] = useState<Record<string, string>>({});
+  const filtersKey = JSON.stringify(filters);
+  const filtering = Object.values(filters).some((v) => v !== "");
 
   useEffect(() => {
     if (!value) {
@@ -34,6 +39,7 @@ const Products = () => {
       const response = await api.getProductsByCategory({
         categoryId: value,
         type: "Product",
+        attr: JSON.parse(filtersKey),
       });
       if (cancelled) return;
       if (response.success && Array.isArray(response.data?.products)) {
@@ -47,7 +53,7 @@ const Products = () => {
     return () => {
       cancelled = true;
     };
-  }, [value]);
+  }, [value, filtersKey]);
 
   const registerCta = (
     <PressableScale
@@ -63,7 +69,9 @@ const Products = () => {
     </PressableScale>
   );
 
-  if (loading) {
+  // Full-screen spinner only on the first load: a filter change keeps the
+  // filters on screen while the list refreshes.
+  if (loading && !filtering && products.length === 0) {
     return (
       <SafeAreaView
         style={{ flex: 1, backgroundColor: colors.background }}
@@ -84,6 +92,7 @@ const Products = () => {
       edges={["top"]}
     >
       <GestureHandlerRootView style={{ flex: 1 }}>
+        <ListingFilters categoryId={value} value={filters} onChange={setFilters} />
         {products.length > 0 ? (
           <FlatList
             data={products}
@@ -115,8 +124,12 @@ const Products = () => {
           <View style={{ flex: 1, justifyContent: "center" }}>
             <EmptyState
               icon="storefront"
-              title="No vendors yet"
-              subtitle="No registered available vendor merchant at the moment."
+              title={filtering ? "No matches" : "No vendors yet"}
+              subtitle={
+                filtering
+                  ? "No products match these filters. Try setting one back to Any."
+                  : "No registered available vendor merchant at the moment."
+              }
             />
             {registerCta}
           </View>
