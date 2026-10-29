@@ -53,6 +53,9 @@ import {
 import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
 import PromotionFields from '@/components/promotion/PromotionFields';
 import { usePromotion } from '@/components/promotion/promoForm';
+import { SchemaFields } from '@/components/forms/SchemaFields';
+import { useCategoryListingFields } from '@/hooks/useCategoryListingFields';
+import { cleanSchemaAnswers, validateSchemaAnswers } from '@/utils/schemaFields';
 import {
   appendUsdAmounts,
   PriceInput,
@@ -96,6 +99,11 @@ const EditProduct = () => {
 
   const [actualProductId, setActualProductId] = useState<string>('');
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Answers to the category's listing fields; their own errors so field keys
+  // can never collide with this form's error keys.
+  const [listingValues, setListingValues] = useState<Record<string, any>>({});
+  const [listingErrors, setListingErrors] = useState<Record<string, string>>({});
+  const { fields: listingFields } = useCategoryListingFields(categoryId || null);
   const maxDescriptionLength = 500;
 
   const descriptionRef = useRef<TextInput>(null);
@@ -167,6 +175,9 @@ const EditProduct = () => {
             .map((img: any) => img.url);
           setExistingImageUrls(urls);
         }
+
+        const values = (product as any).listingValues;
+        if (values && typeof values === 'object') setListingValues(values);
 
         // Attributes
         if (product.attributes?.length) {
@@ -294,8 +305,11 @@ const EditProduct = () => {
       if (!attr.value.trim()) newErrors[`attr_value_${index}`] = 'Required';
     });
 
+    const listingProblems = validateSchemaAnswers(listingFields, listingValues);
+    setListingErrors(listingProblems);
+
     setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    return Object.keys(newErrors).length === 0 && Object.keys(listingProblems).length === 0;
   };
 
   const updateProduct = async () => {
@@ -334,6 +348,9 @@ const EditProduct = () => {
       promotion.append(formData);
       if (attributes.length > 0) {
         formData.append('attributes', JSON.stringify(attributes));
+      }
+      if (listingFields.length > 0) {
+        formData.append('listingValues', JSON.stringify(cleanSchemaAnswers(listingFields, listingValues)));
       }
 
       const updateId = actualProductId || (productId as string);
@@ -702,6 +719,24 @@ const EditProduct = () => {
               </View>
             )}
           </Card>
+
+          {/* The category's own listing fields (set by admins per category). */}
+          {listingFields.length > 0 && (
+            <Card style={{ marginBottom: spacing.lg }}>
+              <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.md }}>
+                {categoryName || 'Category'} details
+              </Text>
+              <SchemaFields
+                fields={listingFields}
+                answers={listingValues}
+                errors={listingErrors}
+                onChange={(key, value) => {
+                  setListingValues((prev) => ({ ...prev, [key]: value }));
+                  setListingErrors((prev) => (prev[key] ? { ...prev, [key]: '' } : prev));
+                }}
+              />
+            </Card>
+          )}
 
           {/* Attributes */}
           <Card style={{ marginBottom: spacing.lg }}>

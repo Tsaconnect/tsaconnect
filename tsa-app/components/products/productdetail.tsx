@@ -28,6 +28,7 @@ import {
   PressableScale,
   Text,
 } from "@/components/ui";
+import { ListingDetails } from "@/components/forms/ListingDetails";
 
 //@ts-ignore
 const ProductDetail = ({ item }) => {
@@ -216,6 +217,12 @@ const ProductDetail = ({ item }) => {
             </PressableScale>
           )}
         </View>
+
+        {/* The category's listing fields — always shown: they are what buyers filter on. */}
+        <ListingDetails
+          categoryId={typeof item.category === "string" ? item.category : (item.category as any)?.id}
+          values={(item as any).listingValues}
+        />
 
         {/* Attributes (revealed with description) */}
         {isMore && (

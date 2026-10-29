@@ -63,6 +63,10 @@ import {
   UsdStorageNote,
 } from "@/components/products/MerchantPricingFields";
 import AvailabilityEditor from "./AvailabilityEditor";
+import { SchemaFields } from "@/components/forms/SchemaFields";
+import { useCategoryListingFields } from "@/hooks/useCategoryListingFields";
+import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields";
+import { categoryPathLabels } from "@/utils/categoryTree";
 import BookingConfigBuilder from "./BookingConfigBuilder";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
@@ -92,8 +96,11 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const [category, setCategory] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [categories, setCategories] = useState<
-    { id: string; title: string; serviceType?: ServiceType }[]
+    { id: string; title: string; serviceType?: ServiceType; parentCategory?: string }[]
   >([]);
+  // Answers to the chosen category's listing fields (institution, gender, …).
+  const [listingValues, setListingValues] = useState<Record<string, any>>({});
+  const [listingErrors, setListingErrors] = useState<Record<string, string>>({});
   const [categorySheetVisible, setCategorySheetVisible] = useState(false);
 
   // Standard fixed price (order/contact optional).
@@ -130,6 +137,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
   // The chosen category's serviceType drives the whole form shape.
   const selectedCategory = categories.find((c) => c.id === category);
+  const { fields: listingFields } = useCategoryListingFields(category || null);
   const serviceType: ServiceType = selectedCategory?.serviceType ?? "contact";
   const isContact = serviceType === "contact";
   const isOrder = serviceType === "order";
@@ -162,6 +170,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                 id: c.id ?? c._id,
                 title: c.title,
                 serviceType: c.serviceType,
+                parentCategory: c.parentCategory ?? undefined,
               }))
             : []
         );
@@ -190,6 +199,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           setPhoneNumber(p.phoneNumber ?? "");
           setCompanyName(p.companyName ?? "");
           setCategory(typeof p.category === "string" ? p.category : p.category?.id ?? "");
+          if (p.listingValues && typeof p.listingValues === "object") setListingValues(p.listingValues);
           if (p.price) setPrice(String(p.price));
           loadSavedAmounts({
             shippingResidential: p.shippingResidential,
@@ -367,6 +377,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       Alert.alert("One moment", "Exchange rates are still loading. Try again in a moment.");
       return;
     }
+    const listingProblems = validateSchemaAnswers(listingFields, listingValues);
+    setListingErrors(listingProblems);
+    if (Object.keys(listingProblems).length > 0) {
+      Alert.alert("Missing details", "Please fill in the required category details.");
+      return;
+    }
     setLoading(true);
     const formData = new FormData();
     // On create we always send local URIs. On edit, only newly-picked local
@@ -417,6 +433,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     formData.append("phoneNumber", phoneNumber);
     formData.append("category", category);
     formData.append("companyName", companyName);
+    if (listingFields.length > 0) {
+      formData.append("listingValues", JSON.stringify(cleanSchemaAnswers(listingFields, listingValues)));
+    }
 
     try {
       const authHeader = token?.startsWith('Bearer ') ? token : `Bearer ${token}`;
@@ -460,6 +479,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const resetForm = () => {
     setPhoneNumber("");
     setCategory("");
+    setListingValues({});
+    setListingErrors({});
     setDescription("");
     setEmail("");
     setLocation({ country: '', state: '', city: '' });
@@ -682,6 +703,24 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
             />
           </Card>
 
+          {/* The category's own listing fields (set by admins per category). */}
+          {listingFields.length > 0 && (
+            <>
+              {sectionTitle(`${selectedCategory?.title ?? "Category"} details`)}
+              <Card padding="lg" style={{ gap: spacing.lg }}>
+                <SchemaFields
+                  fields={listingFields}
+                  answers={listingValues}
+                  errors={listingErrors}
+                  onChange={(key, value) => {
+                    setListingValues((prev) => ({ ...prev, [key]: value }));
+                    setListingErrors((prev) => (prev[key] ? { ...prev, [key]: "" } : prev));
+                  }}
+                />
+              </Card>
+            </>
+          )}
+
           {/* Type-specific sections. Only shown once a category is chosen. */}
           {category ? (
             <>
@@ -881,7 +920,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
         visible={categorySheetVisible}
         onClose={() => setCategorySheetVisible(false)}
         title="Select a category"
-        items={categories.map((item) => ({ id: item.id, label: item.title }))}
+        items={categoryPathLabels(categories).map((item) => ({ id: item.id, label: item.path }))}
         selectedId={category || undefined}
         onSelect={(item) => {
           setCategory(item.id);
