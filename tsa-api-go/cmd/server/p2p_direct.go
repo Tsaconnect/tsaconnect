@@ -52,7 +52,8 @@ func addHotKey(out map[string]string, label, addr string) {
 //   - an active or paused sell-ad (not a retired LP stock ad) whose voucher was signed for another
 //     escrow: it can still be opened there, and its seller can no longer cancel it here.
 //
-// Settle them on the old escrow first (or keep CORE_CONTRACTS on the set they belong to). A chain
+// Settle them on the old escrow first. With no core set selected it only alerts: P2P is dormant then,
+// and a refusal would crash-loop a deploy that changes nothing for these rows. A chain
 // with no P2P after the switch counts too: its live rows are just as stranded. Sellers' deposited
 // (not locked) balances on an old escrow do not block boot — no row says who holds one — but they
 // must withdraw() there themselves. Pending (unsigned) and buy-ads are not counted: a pending
@@ -112,6 +113,13 @@ func checkP2PEscrowMove(db *gorm.DB, cfg *config.Config) error {
 		return nil
 	}
 	slices.Sort(stranded)
+	// With no core set selected (what prod runs until cutover) P2P is dormant everywhere and nothing
+	// moves: refusing would crash-loop a deploy that changes nothing for these rows. Alert instead.
+	if cfg.CoreSet == "" || cfg.CoreSet == config.CoreSetOff {
+		log.Printf("[config] ALERT p2p_escrow_move_pending %s — P2P is dormant until a core set is selected; settle these before it is",
+			strings.Join(stranded, "; "))
+		return nil
+	}
 	return fmt.Errorf("p2p_escrow_move_refused: %s — settle them on their escrow (trades) or cancel them (ads) before P2P moves to the core set", strings.Join(stranded, "; "))
 }
 

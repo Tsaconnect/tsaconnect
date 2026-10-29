@@ -76,7 +76,7 @@ func TestCheckP2PEscrowMove(t *testing.T) {
 	const core = "0x00000000000000000000000000000000000E5C03"
 	const v3 = "0xD16c1597EA3be8D2017698CC5d6Bf53b595EEb03"
 	db := escrowMoveDB(t)
-	cfg := &config.Config{P2PChains: map[int64]config.P2PChainConfig{56: {ChainID: 56, EscrowAddress: core}}}
+	cfg := &config.Config{CoreSet: config.CoreSetDev, P2PChains: map[int64]config.P2PChainConfig{56: {ChainID: 56, EscrowAddress: core}}}
 	trade := func(chain int, status, escrow string, slice bool) {
 		var intent any
 		if slice {
@@ -108,6 +108,15 @@ func TestCheckP2PEscrowMove(t *testing.T) {
 	err := checkP2PEscrowMove(db, cfg)
 	if err == nil || !strings.Contains(err.Error(), "trades on chain 146 at the pre-switch escrow") {
 		t.Fatalf("a live trade on a chain without P2P: %v", err)
+	}
+
+	// No core set (prod before cutover): P2P is dormant, so the same rows only alert.
+	buf := directLog(t)
+	if err := checkP2PEscrowMove(db, &config.Config{}); err != nil {
+		t.Fatalf("dormant P2P must boot: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ALERT p2p_escrow_move_pending") {
+		t.Fatalf("no alert:\n%s", buf.String())
 	}
 }
 
