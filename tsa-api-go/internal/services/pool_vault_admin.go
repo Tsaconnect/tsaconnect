@@ -515,7 +515,7 @@ func recordPayPending(tx *gorm.DB, adminID uuid.UUID, op, hash string, meta map[
 // (payPendingAuditOp), checked in Go by every reader.
 func payPendingAudits(db *gorm.DB, op string) *gorm.DB {
 	return db.Model(&models.P2PAuditLog{}).Where("action = ?", poolAuditPayPending).
-		Where(`CAST(metadata AS TEXT) LIKE ? ESCAPE '\'`, "%"+likeLiteral(op)+"%")
+		Where(`CAST(metadata AS TEXT) LIKE ? ESCAPE '\'`, "%"+LikeLiteral(op)+"%")
 }
 
 // payPendingAuditOp is the operation key an audit row records ("" when its

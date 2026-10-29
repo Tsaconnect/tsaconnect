@@ -346,6 +346,11 @@ func AutoMigrate() error {
 	if err := backfillCategorySlugs(DB); err != nil {
 		return fmt.Errorf("categories.slug backfill: %w", err)
 	}
+	if n, err := models.BackfillListingLocations(DB); err != nil {
+		return fmt.Errorf("products location backfill: %w", err)
+	} else if n > 0 {
+		log.Printf("[Migrate] products location backfilled for %d listing(s)", n)
+	}
 
 	// A TSA Pay payment expires only when its merchant set an expiry (owner,
 	// 2026-10-09), so expires_at is NULL on one that never does. AutoMigrate

@@ -494,7 +494,7 @@ func (s *PayPaymentService) List(ctx context.Context, f PayListFilter) ([]models
 		q = payBetween(q, "created_at", f.From, f.To)
 		if term := strings.ToLower(strings.TrimSpace(f.Query)); term != "" {
 			// What she typed is matched literally: % and _ are not wildcards.
-			esc := likeLiteral(term)
+			esc := LikeLiteral(term)
 			// One group, so the ORs never widen the merchant/mode/status filter.
 			match := s.db.Where(`LOWER(reference) LIKE ? ESCAPE '\'`, "%"+esc+"%").
 				Or(`LOWER(description) LIKE ? ESCAPE '\'`, "%"+esc+"%").

@@ -46,11 +46,21 @@ type ProductMetadata struct {
 
 // Product represents a product or service listing.
 type Product struct {
-	ID           uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	UserID       uuid.UUID      `gorm:"type:uuid;index" json:"userId"`
-	Name         string         `json:"name,omitempty"`
-	Description  string         `json:"description,omitempty"`
-	Location     string         `json:"location,omitempty"`
+	ID          uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	UserID      uuid.UUID `gorm:"type:uuid;index" json:"userId"`
+	Name        string    `json:"name,omitempty"`
+	Description string    `json:"description,omitempty"`
+	Location    string    `json:"location,omitempty"`
+	// The structured place behind Location (see ListingLocation). The *_key
+	// columns hold LocationKey of each part and are what search matches on, so
+	// "Enugu" finds a listing stored as "Enugu State".
+	Country      string         `gorm:"size:120" json:"country,omitempty"`
+	State        string         `gorm:"size:120" json:"state,omitempty"`
+	City         string         `gorm:"size:200" json:"city,omitempty"`
+	Area         string         `gorm:"size:200" json:"area,omitempty"`
+	CountryKey   string         `gorm:"size:120;index:idx_products_location_keys,priority:1" json:"-"`
+	StateKey     string         `gorm:"size:120;index:idx_products_location_keys,priority:2" json:"-"`
+	CityKey      string         `gorm:"size:200;index:idx_products_location_keys,priority:3" json:"-"`
 	PhoneNumber  string         `json:"phoneNumber,omitempty"`
 	Email        string         `json:"email,omitempty"`
 	CompanyName  string         `json:"companyName,omitempty"`

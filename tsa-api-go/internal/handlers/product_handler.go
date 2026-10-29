@@ -107,11 +107,11 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	name := c.PostForm("name")
 	description := c.PostForm("description")
 	priceStr := c.PostForm("price")
-	location := c.PostForm("location")
+	listingLocation, locationDisplay, hasLocation := listingLocationForm(c)
 	phoneNumber := c.PostForm("phoneNumber")
 	email := c.PostForm("email")
 
-	if name == "" || description == "" || priceStr == "" || location == "" || phoneNumber == "" || email == "" {
+	if name == "" || description == "" || priceStr == "" || !hasLocation || phoneNumber == "" || email == "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Missing required fields")
 		return
 	}
@@ -257,7 +257,6 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		Stock:                  stock,
 		CategoryID:             categoryID,
 		CategoryName:           categoryName,
-		Location:               location,
 		PhoneNumber:            phoneNumber,
 		Email:                  strings.ToLower(strings.TrimSpace(email)),
 		CompanyName:            companyName,
@@ -279,6 +278,7 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	product.SetImages(uploadedImages)
 	product.SetAttributes(parsedAttributes)
 	product.ListingValues = listingValues
+	product.SetListingLocation(listingLocation, locationDisplay)
 
 	if err := config.DB.Create(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create product")
@@ -493,8 +493,12 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 			updates["stock"] = s
 		}
 	}
-	if location := c.PostForm("location"); location != "" {
-		updates["location"] = location
+	// A location sent replaces every part of it, so a parsed or blank part never
+	// leaves a stale one behind.
+	if loc, display, ok := listingLocationForm(c); ok {
+		for column, value := range models.ListingLocationColumns(loc, display) {
+			updates[column] = value
+		}
 	}
 	if phone := c.PostForm("phoneNumber"); phone != "" {
 		updates["phone_number"] = phone
@@ -1119,6 +1123,7 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	if productType != "" && (productType == "Product" || productType == "Service") {
 		query = query.Where("type = ?", productType)
 	}
+	query = applyLocationFilter(c, query)
 
 	// The status param is caller-supplied on a public endpoint, so it is limited
 	// to publicly listable statuses. Anything else — including `suspended`, which
@@ -1311,7 +1316,7 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 	}
 
 	// Get products
-	query := models.VisibleToPublic(config.DB.Where("category_id IN ?", categoryIDs))
+	query := applyLocationFilter(c, models.VisibleToPublic(config.DB.Where("category_id IN ?", categoryIDs)))
 	if typeFilter == models.ProductTypeProduct || typeFilter == models.ProductTypeService {
 		query = query.Where("type = ?", typeFilter)
 	}
@@ -1428,6 +1433,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	if location != "" {
 		query = query.Where("location ILIKE ?", "%"+location+"%")
 	}
+	query = applyLocationFilter(c, query)
 
 	if minPriceStr != "" {
 		if v, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
