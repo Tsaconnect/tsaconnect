@@ -43,7 +43,7 @@ export const ErrorState: React.FC<ErrorStateProps> = ({
         </Text>
       )}
       {onRetry && (
-        <Button title={retryLabel} onPress={onRetry} variant="secondary" leftIcon="refresh" fullWidth={false} size="sm" style={{ marginTop: spacing.sm }} />
+        <Button title={retryLabel} onPress={onRetry} variant="secondary" leftIcon="refresh" fullWidth={false} size="sm" style={{ marginTop: spacing.sm, alignSelf: 'center' }} />
       )}
     </View>
   );
