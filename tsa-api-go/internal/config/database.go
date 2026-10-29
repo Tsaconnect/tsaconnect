@@ -114,6 +114,7 @@ func AutoMigrate() error {
 		&models.Order{},
 		&models.Deposit{},
 		&models.ServiceContactPayment{},
+		&models.ServiceContactIntent{},
 		&models.MerchantRequest{},
 		// Self-service account deletion audit trail (Apple 5.1.1(v)).
 		&models.AccountDeletionRequest{},
@@ -427,6 +428,11 @@ func AutoMigrate() error {
 	if err := MigratePaymentMerchantRoleIndex(DB); err != nil {
 		log.Printf("[Migrate] WARNING %s: %v — a second role cannot be added until it exists", PaymentMerchantRoleIndexName, err)
 	}
+	// One fee payment per service contact: a contact paid by a plain transfer (contracts v2 slice 5)
+	// is proven by its tx, so one tx must never unlock two contacts.
+	if err := MigrateServiceContactFeeTxIndex(DB); err != nil {
+		log.Printf("[Migrate] ALERT %s: %v — duplicate fee txs? find them with SELECT LOWER(pay_fee_tx_hash), count(*) FROM service_contact_payments WHERE pay_fee_tx_hash <> '' GROUP BY 1 HAVING count(*) > 1", ServiceContactFeeTxIndexName, err)
+	}
 	// One order per OrderEscrow key: the escrow watcher and claimTimeout settlement find the
 	// order by it, so two rows mirroring one on-chain order would settle the wrong one.
 	if err := MigrateOrderEscrowKeyIndex(DB); err != nil {
@@ -716,6 +722,18 @@ func MigratePoolSliceIndexes(db *gorm.DB) error {
 	return db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pool_slice_per_order_gen_ad
 	    ON p2p_trades (it_intent_id, generation, ad_id)
 	    WHERE it_intent_id IS NOT NULL AND status <> 'cancelled'`).Error
+}
+
+// ServiceContactFeeTxIndexName keeps one fee tx from paying for two contacts.
+const ServiceContactFeeTxIndexName = "uq_service_contact_payments_fee_tx"
+
+// MigrateServiceContactFeeTxIndex builds the fee-tx index without locking out writes.
+func MigrateServiceContactFeeTxIndex(db *gorm.DB) error {
+	if uniqueIndexReady(db, "service_contact_payments", ServiceContactFeeTxIndexName) {
+		return nil
+	}
+	return buildUniqueIndex(db, ServiceContactFeeTxIndexName,
+		` ON service_contact_payments (LOWER(pay_fee_tx_hash)) WHERE pay_fee_tx_hash <> ''`)
 }
 
 // OrderEscrowKeyIndexName keeps one order per OrderEscrow order key.

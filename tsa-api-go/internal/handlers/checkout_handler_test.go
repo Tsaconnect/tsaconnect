@@ -234,6 +234,24 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			fee_amount TEXT,
 			approve_tx_hash TEXT,
 			pay_fee_tx_hash TEXT,
+			chain_id INTEGER DEFAULT 0,
+			fee_recipient TEXT,
+			provider_usd REAL DEFAULT 0,
+			created_at DATETIME,
+			UNIQUE(caller_id, service_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_service_contact_payments_fee_tx
+			ON service_contact_payments (LOWER(pay_fee_tx_hash)) WHERE pay_fee_tx_hash <> ''`,
+		`CREATE TABLE IF NOT EXISTS service_contact_intents (
+			id TEXT PRIMARY KEY,
+			caller_id TEXT NOT NULL,
+			service_id TEXT NOT NULL,
+			chain_id INTEGER NOT NULL,
+			token_symbol TEXT NOT NULL,
+			token_address TEXT NOT NULL,
+			fee_recipient TEXT NOT NULL,
+			payer_wallet TEXT NOT NULL,
+			amount TEXT NOT NULL,
 			created_at DATETIME
 		)`,
 		`CREATE TABLE IF NOT EXISTS carts (

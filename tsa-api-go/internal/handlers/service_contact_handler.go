@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -45,6 +47,9 @@ type ServiceContactHandler struct {
 	// FeeService is the fee/TP engine (SP3). Optional/nil-safe: wired from
 	// main.go. Used via settleFeeEarnings.
 	FeeService *services.FeeDistributionService
+	// Transfer pays contact fees as a plain transfer to the core set's fee recipient once that set
+	// is ready (contracts v2 slice 5). Nil, or not Active, keeps the ServiceContact contract path.
+	Transfer *services.ServiceContactTransfer
 }
 
 // NewServiceContactHandler creates a new ServiceContactHandler.
@@ -55,6 +60,10 @@ func NewServiceContactHandler(cfg *config.Config, bs *services.BlockchainService
 		ServiceContactService: scs,
 	}
 }
+
+// contactIntentsMatched bounds how many of a caller's latest quotes for one service a submit checks
+// (each is one receipt read): a caller who reopens the pay sheet many times cannot make it costly.
+const contactIntentsMatched = 10
 
 type submitContactFeeRequest struct {
 	ApproveTxHash string `json:"approveTxHash" binding:"required"`
@@ -214,24 +223,34 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 		log.Printf("[ContactFee] balance check failed for %s/%s: %v — proceeding without pre-flight", user.WalletAddress, tokenSymbol, berr)
 	}
 
-	approveTxBytes, err := client.PrepareERC20Approve(tokenAddr, user.WalletAddress, h.Config.ServiceContractAddress, feeAmount)
-	if err != nil {
-		log.Printf("Failed to prepare approve tx: %v", err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
-		return
-	}
+	var approveTxBytes, payFeeTxBytes []byte
+	mode := "contract"
+	if h.Transfer.Active() {
+		mode = "transfer"
+		approveTxBytes, payFeeTxBytes, err = h.prepareTransfer(c, client, user, serviceID, tokenSymbol, tokenAddr, feeAmount)
+		if err != nil {
+			return // prepareTransfer answered
+		}
+	} else {
+		approveTxBytes, err = client.PrepareERC20Approve(tokenAddr, user.WalletAddress, h.Config.ServiceContractAddress, feeAmount)
+		if err != nil {
+			log.Printf("Failed to prepare approve tx: %v", err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
+			return
+		}
 
-	// Prepare payContactFee tx
-	payFeeTxBytes, err := h.ServiceContactService.PreparePayContactFee(
-		user.WalletAddress,
-		provider.WalletAddress,
-		upline,
-		tokenAddr,
-	)
-	if err != nil {
-		log.Printf("Failed to prepare payContactFee tx: %v", err)
-		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare contact fee transaction")
-		return
+		// Prepare payContactFee tx
+		payFeeTxBytes, err = h.ServiceContactService.PreparePayContactFee(
+			user.WalletAddress,
+			provider.WalletAddress,
+			upline,
+			tokenAddr,
+		)
+		if err != nil {
+			log.Printf("Failed to prepare payContactFee tx: %v", err)
+			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare contact fee transaction")
+			return
+		}
 	}
 
 	var approveTx, payFeeTx map[string]interface{}
@@ -249,7 +268,41 @@ func (h *ServiceContactHandler) PrepareContactFee(c *gin.Context) {
 		"payFeeTx":  payFeeTx,
 		"feeAmount": feeAmount.String(),
 		"token":     tokenSymbol,
+		"mode":      mode,
 	})
+}
+
+// prepareTransfer quotes a contact fee as a plain transfer to the core set's fee recipient and
+// records the quote as an intent. approveTx is a zero approve to the recipient: it moves nothing,
+// and keeps app builds that sign and submit two txs working unchanged. On error it has answered.
+func (h *ServiceContactHandler) prepareTransfer(c *gin.Context, client *blockchain.EVMClient, user *models.User,
+	serviceID uuid.UUID, tokenSymbol, tokenAddr string, feeAmount *big.Int) (approveTx, payFeeTx []byte, err error) {
+	recipient, err := h.Transfer.Recipient(c.Request.Context())
+	if err != nil {
+		log.Printf("[ContactFee] fee recipient unreadable: %v", err)
+		utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to prepare the contact fee right now — try again later")
+		return nil, nil, err
+	}
+	if approveTx, err = client.PrepareERC20Approve(tokenAddr, user.WalletAddress, recipient.Hex(), big.NewInt(0)); err != nil {
+		log.Printf("Failed to prepare zero approve tx: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare approve transaction")
+		return nil, nil, err
+	}
+	if payFeeTx, err = client.PrepareERC20Transfer(tokenAddr, user.WalletAddress, recipient.Hex(), feeAmount); err != nil {
+		log.Printf("Failed to prepare contact fee transfer: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare contact fee transaction")
+		return nil, nil, err
+	}
+	intent := models.ServiceContactIntent{ID: uuid.New(), CallerID: user.ID, ServiceID: serviceID,
+		ChainID: h.Transfer.ChainID(), TokenSymbol: tokenSymbol, TokenAddress: common.HexToAddress(tokenAddr).Hex(),
+		FeeRecipient: recipient.Hex(), PayerWallet: common.HexToAddress(user.WalletAddress).Hex(),
+		Amount: feeAmount.String(), CreatedAt: time.Now()}
+	if err = config.DB.Create(&intent).Error; err != nil {
+		log.Printf("Failed to record contact fee intent: %v", err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare contact fee transaction")
+		return nil, nil, err
+	}
+	return approveTx, payFeeTx, nil
 }
 
 // SubmitContactFee handles POST /api/services/:id/submit-contact-fee
@@ -269,6 +322,14 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 	var req submitContactFeeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.ErrorResponse(c, http.StatusBadRequest, "approveTxHash and payFeeTxHash are required")
+		return
+	}
+	// One spelling per transaction from here on: the reuse check and the unique index compare strings.
+	var okApprove, okPay bool
+	req.ApproveTxHash, okApprove = services.CanonicalEVMTxHash(req.ApproveTxHash)
+	req.PayFeeTxHash, okPay = services.CanonicalEVMTxHash(req.PayFeeTxHash)
+	if !okApprove || !okPay {
+		utils.ErrorResponse(c, http.StatusBadRequest, "approveTxHash and payFeeTxHash must be 0x-prefixed 32-byte transaction hashes")
 		return
 	}
 
@@ -311,6 +372,19 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		return
 	}
 
+	// One fee tx unlocks one contact (uq_service_contact_payments_fee_tx is the backstop).
+	var reused int64
+	if err := config.DB.Model(&models.ServiceContactPayment{}).
+		Where("LOWER(pay_fee_tx_hash) = ?", req.PayFeeTxHash).
+		Count(&reused).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Database error")
+		return
+	}
+	if reused > 0 {
+		utils.ErrorResponse(c, http.StatusConflict, "This fee transaction has already paid for a contact")
+		return
+	}
+
 	// Verify approve tx
 	approveReceipt := h.BlockchainService.GetTransactionReceipt(req.ApproveTxHash, "sonic")
 	switch approveReceipt.Status {
@@ -343,6 +417,36 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		return
 	}
 
+	// A contact quoted as a plain transfer is proven against its quotes, whatever the core set's
+	// state now: the caller already paid the recipient they were given. A tx that pays none of them
+	// may still be a ServiceContact payment (the set fell out of service between two prepares), so
+	// it falls through to the contract check.
+	var intents []models.ServiceContactIntent
+	if err := config.DB.Where("caller_id = ? AND service_id = ?", user.ID, serviceID).
+		Order("created_at DESC").Limit(contactIntentsMatched).Find(&intents).Error; err != nil {
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Database error")
+		return
+	}
+	var transferErr error
+	if len(intents) > 0 {
+		if h.Transfer == nil {
+			log.Printf("[ContactFee] ALERT contact_transfer_unverifiable caller=%s tx=%s: quotes exist but no Sonic client is wired", user.ID, req.PayFeeTxHash)
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Unable to verify the contact fee right now — try again later")
+			return
+		}
+		in, err := h.Transfer.Match(c.Request.Context(), req.PayFeeTxHash, intents)
+		switch {
+		case err == nil:
+			h.recordContactPayment(c, user, &provider, &service, req, in.TokenSymbol, in.Amount, in.ChainID, in.FeeRecipient)
+			return
+		case !errors.Is(err, services.ErrContactTransferUnproven):
+			log.Printf("[ContactFee] transfer unreadable tx=%s: %v", req.PayFeeTxHash, err)
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Blockchain unavailable — try again later")
+			return
+		}
+		transferErr = err
+	}
+
 	// Fix #1: Verify ContactFeePaid event with caller/provider address validation
 	// Fix #9: Separate blockchain error (503) from verification failure (400)
 	event, err := h.ServiceContactService.VerifyContactFeePaid(req.PayFeeTxHash, user.WalletAddress, provider.WalletAddress)
@@ -352,6 +456,11 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		if strings.Contains(errMsg, "failed to get receipt") || strings.Contains(errMsg, "blockchain client not available") {
 			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Blockchain unavailable — try again later")
 			return
+		}
+		if transferErr != nil {
+			// The caller was quoted a transfer: that is the reason worth showing.
+			log.Printf("[ContactFee] transfer not proven tx=%s caller=%s: %v", req.PayFeeTxHash, user.ID, transferErr)
+			errMsg = transferErr.Error()
 		}
 		utils.ErrorResponse(c, http.StatusBadRequest, "Contact fee payment verification failed: "+errMsg)
 		return
@@ -368,31 +477,51 @@ func (h *ServiceContactHandler) SubmitContactFee(c *gin.Context) {
 		}
 	}
 
-	// Record the payment
+	// What the contract actually charged, not what the fee row says now.
 	feeAmount := h.ServiceContactService.GetFeeAmount()
+	if event.Amount != nil && event.Amount.Sign() > 0 {
+		feeAmount = event.Amount
+	}
+	h.recordContactPayment(c, user, &provider, &service, req, tokenSymbol, feeAmount.String(), 0, "")
+}
+
+// recordContactPayment records a proven contact fee, settles its fee earnings and reveals the
+// contact. chainID and feeRecipient are set for a plain transfer, empty for the contract path.
+func (h *ServiceContactHandler) recordContactPayment(c *gin.Context, user, provider *models.User, service *models.Product,
+	req submitContactFeeRequest, tokenSymbol, feeAmount string, chainID int64, feeRecipient string) {
 	payment := models.ServiceContactPayment{
 		ID:                uuid.New(),
 		CallerID:          user.ID,
 		ServiceProviderID: service.UserID,
-		ServiceID:         serviceID,
+		ServiceID:         service.ID,
 		Token:             tokenSymbol,
-		FeeAmount:         feeAmount.String(),
+		FeeAmount:         feeAmount,
 		ApproveTxHash:     req.ApproveTxHash,
 		PayFeeTxHash:      req.PayFeeTxHash,
+		ChainID:           chainID,
+		FeeRecipient:      feeRecipient,
 		CreatedAt:         time.Now(),
+	}
+	if chainID != 0 {
+		// Recorded with the payment, so a later split change never rewrites what was credited.
+		payment.ProviderUSD = weiToUSDFloat(feeAmount, tokenSymbol) * h.FeeService.RewardRatesFor(models.FeatureServiceContact).Provider
 	}
 
 	if err := config.DB.Create(&payment).Error; err != nil {
+		if isDuplicateKeyErr(err) {
+			// Lost a race with the same tx or the same contact: either way it is already paid.
+			utils.ErrorResponse(c, http.StatusConflict, "Contact fee already paid")
+			return
+		}
 		log.Printf("Failed to record contact fee payment: %v", err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to record payment")
 		return
 	}
 
-	// System fee for TP distribution = the $0.10 contact fee, read from the
-	// service_contact fee_config row (seeded to FlatAmountUSD = 0.10).
-	// Fee settlement (see settleFeeEarnings).
-	// Documented-GLOBAL (chainID nil) — Sonic-only service-contact flow (§6).
-	contactFeeUSD, _ := services.FeeFlatUSD(models.FeatureServiceContact, tokenSymbol, nil)
+	// System fee for TP distribution = the contact fee this payment actually paid (the
+	// service_contact fee_config row's flat, as quoted at prepare). Fee settlement (see
+	// settleFeeEarnings). Sonic-only service-contact flow (§6).
+	contactFeeUSD := weiToUSDFloat(feeAmount, tokenSymbol)
 	providerID := provider.ID
 	if err := settleFeeEarnings(h.FeeService, services.FeeEvent{
 		Feature:    models.FeatureServiceContact,
@@ -513,7 +642,9 @@ func (h *ServiceContactHandler) GetServiceContact(c *gin.Context) {
 
 // providerSplitBPS mirrors ServiceContact.PROVIDER_BPS in the on-chain
 // contract — 25% of every contact fee is transferred directly to the
-// service provider on the same tx that records the payment.
+// service provider on the same tx that records the payment. A contact paid by
+// plain transfer (ChainID set) has no on-chain split: the provider's share is
+// the fee-earnings one, recorded on the payment when it settled (ProviderUSD).
 const providerSplitBPS = 2500
 
 // ListContactPayments handles GET /api/services/contact-payments
@@ -618,6 +749,9 @@ func (h *ServiceContactHandler) ListContactPayments(c *gin.Context) {
 	for _, p := range payments {
 		feeUSD := weiToUSDFloat(p.FeeAmount, p.Token)
 		providerUSD := feeUSD * float64(providerSplitBPS) / 10000.0
+		if p.ChainID != 0 {
+			providerUSD = p.ProviderUSD
+		}
 
 		var counterpartyID uuid.UUID
 		if role == "provider" {
@@ -646,17 +780,17 @@ func (h *ServiceContactHandler) ListContactPayments(c *gin.Context) {
 		}
 
 		items = append(items, gin.H{
-			"id":             p.ID,
-			"serviceId":      p.ServiceID,
-			"service":        serviceSummary,
-			"counterparty":   counterparty,
-			"token":          p.Token,
-			"feeAmount":      p.FeeAmount,
-			"feeUSD":         feeUSD,
-			"providerUSD":    providerUSD,
-			"approveTxHash":  p.ApproveTxHash,
-			"payFeeTxHash":   p.PayFeeTxHash,
-			"createdAt":      p.CreatedAt,
+			"id":            p.ID,
+			"serviceId":     p.ServiceID,
+			"service":       serviceSummary,
+			"counterparty":  counterparty,
+			"token":         p.Token,
+			"feeAmount":     p.FeeAmount,
+			"feeUSD":        feeUSD,
+			"providerUSD":   providerUSD,
+			"approveTxHash": p.ApproveTxHash,
+			"payFeeTxHash":  p.PayFeeTxHash,
+			"createdAt":     p.CreatedAt,
 		})
 	}
 

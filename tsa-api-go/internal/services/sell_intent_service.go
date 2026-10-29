@@ -428,12 +428,18 @@ func swapHashForChain(chainID int64, hash string) (string, bool) {
 	case "solana":
 		return hash, solanaTxSigRe.MatchString(hash)
 	case "evm":
-		// Hex is case-insensitive but the unique index is not: one casing, so
-		// the same swap cannot be recorded twice under two spellings.
-		hash = strings.ToLower(hash)
-		return hash, evmTxHashRe.MatchString(hash)
+		return CanonicalEVMTxHash(hash)
 	}
 	return hash, false
+}
+
+// CanonicalEVMTxHash is the one spelling of an EVM tx hash: trimmed, 0x-prefixed, 64 hex digits,
+// lower case. ok is false for anything else. Hex is case-insensitive and HexToHash also accepts a
+// missing prefix or extra leading zeros, but a unique index is not: every hash that dedupes a
+// payment must go through this, or one transaction could be recorded under two spellings.
+func CanonicalEVMTxHash(hash string) (string, bool) {
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	return hash, evmTxHashRe.MatchString(hash)
 }
 
 // RecordSwap attaches the transaction she broadcast to her sale.

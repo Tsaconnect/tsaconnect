@@ -720,6 +720,11 @@ func main() {
 		log.Printf("[config] MCGP checkout unavailable: no MCGP operator signer")
 	}
 	sch := handlers.NewServiceContactHandler(cfg, blockchainService, serviceContactService)
+	// Contact fees become a plain transfer to the core set's fee recipient once that set is ready on
+	// Sonic (contracts v2 slice 5); until then, and with no set selected, the contract path stays.
+	if sonicClient != nil && sonicClient.Client != nil {
+		sch.Transfer = services.NewServiceContactTransfer(coreRegistry, sonicClient.ChainID().Int64(), sonicClient.Client)
+	}
 
 	// Wire the fee/TP engine (SP3) into the fiat/on-chain fee-settled handlers.
 	// Each site routes through handlers.settleFeeEarnings. GATED on the v2
