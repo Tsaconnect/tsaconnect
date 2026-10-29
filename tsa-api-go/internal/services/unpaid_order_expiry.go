@@ -301,7 +301,12 @@ func (s *UnpaidOrderExpiryService) settle(ctx context.Context, o *staleOrder, cu
 	if !o.IsSpendableMCGP() {
 		// The key is the funding wallet's: the one recorded at prepare-escrow, else the buyer's own.
 		onChain, err := s.escrow.EscrowedOrder(ctx, OrderKey(firstNonEmpty(o.EscrowBuyerWallet, o.BuyerWallet), GenerateOrderID(o.ID)))
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrOrderEscrowUnavailable) && o.EscrowOrderKey == "":
+			// No OrderEscrow is configured and this order was never prepared on one: nothing can
+			// hold its money, so it expires (and its stock comes back) like any unpaid order.
+			onChain, err = nil, nil
+		case err != nil:
 			return false, fmt.Errorf("escrow read for order %s: %w", o.ID, err)
 		}
 		if onChain != nil {

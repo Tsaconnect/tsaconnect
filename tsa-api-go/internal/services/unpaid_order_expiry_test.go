@@ -106,11 +106,15 @@ func testKey(id uuid.UUID) [32]byte { return OrderKey(testBuyerWallet, GenerateO
 type fakeOrderEscrow struct {
 	held map[[32]byte]*OnChainOrder
 	fail bool
+	none bool // no OrderEscrow configured
 }
 
 func (f *fakeOrderEscrow) EscrowedOrder(_ context.Context, id [32]byte) (*OnChainOrder, error) {
 	if f.fail {
 		return nil, errors.New("rpc down")
+	}
+	if f.none {
+		return nil, ErrOrderEscrowUnavailable
 	}
 	return f.held[id], nil
 }
@@ -294,6 +298,27 @@ func TestExpireUnpaidOrders_UnreadableEscrowCancelsNothing(t *testing.T) {
 	if n != 0 || orderStatus(t, db, order) != models.OrderStatusPendingPayment || productStock(t, db, product) != 0 {
 		t.Fatalf("an unreadable escrow must not release stock: n=%d status=%s stock=%d",
 			n, orderStatus(t, db, order), productStock(t, db, product))
+	}
+}
+
+// With no OrderEscrow configured, an order never prepared on one still expires and gives its stock
+// back; one that was prepared on one waits, since its money may be there.
+func TestExpireUnpaidOrders_NoOrderEscrowConfigured(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0)
+	unprepared := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
+	prepared := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, 2*time.Hour, 2*time.Hour)
+	db.Exec(`UPDATE orders SET escrow_order_key = ? WHERE id = ?`, "0x01", prepared.String())
+
+	_, err := newSweep(db, &fakeOrderEscrow{none: true}, nil).ExpireUnpaidOrders(context.Background())
+	if err == nil {
+		t.Fatal("the prepared order's unreadable escrow must still be reported")
+	}
+	if orderStatus(t, db, unprepared) != models.OrderStatusCancelled {
+		t.Fatalf("unprepared order = %s, want cancelled", orderStatus(t, db, unprepared))
+	}
+	if orderStatus(t, db, prepared) != models.OrderStatusPendingPayment {
+		t.Fatalf("prepared order = %s, want left pending", orderStatus(t, db, prepared))
 	}
 }
 
