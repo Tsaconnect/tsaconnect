@@ -16,7 +16,14 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
 import { useTheme } from "@/theme";
 import { EmptyState, ErrorState, PressableScale, Spinner, Text } from "@/components/ui";
-import { ListingFilters } from "@/components/forms/ListingFilters";
+import {
+  EMPTY_LISTING_FILTERS,
+  isFiltering,
+  listingFilterParams,
+  ListingFilters,
+  type ListingFilterValue,
+} from "@/components/forms/ListingFilters";
+import { locationLabel } from "@/utils/location";
 
 const Products = () => {
   const { colors, spacing } = useTheme();
@@ -27,10 +34,10 @@ const Products = () => {
   const [loadFailed, setLoadFailed] = useState(false);
   // Bumped by "Try again" to re-run the load.
   const [attempt, setAttempt] = useState(0);
-  // The category's listing-field filters (brand, …).
-  const [filters, setFilters] = useState<Record<string, string>>({});
-  const filtersKey = JSON.stringify(filters);
-  const filtering = Object.values(filters).some((v) => v !== "");
+  // Where, plus the category's listing-field filters (brand, …).
+  const [filters, setFilters] = useState<ListingFilterValue>(EMPTY_LISTING_FILTERS);
+  const filtersKey = JSON.stringify(listingFilterParams(filters));
+  const filtering = isFiltering(filters);
 
   useEffect(() => {
     if (!value) {
@@ -43,7 +50,7 @@ const Products = () => {
       const response = await api.getProductsByCategory({
         categoryId: value,
         type: "Product",
-        attr: JSON.parse(filtersKey),
+        ...JSON.parse(filtersKey),
       });
       if (cancelled) return;
       if (response.success && Array.isArray(response.data?.products)) {
@@ -118,7 +125,7 @@ const Products = () => {
                   id: item.id || (item as any)._id,
                   name: item.name,
                   companyName: item.companyName ?? "",
-                  location: item.location,
+                  location: locationLabel(item as any),
                   price: item.price,
                   averageRating: (item as any).rating?.average ?? 0,
                   images: (item.images || [])

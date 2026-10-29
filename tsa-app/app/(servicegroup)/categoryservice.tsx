@@ -15,7 +15,14 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
 import { useTheme } from "@/theme";
 import { EmptyState, ErrorState, PressableScale, Spinner, Text } from "@/components/ui";
-import { ListingFilters } from "@/components/forms/ListingFilters";
+import {
+  EMPTY_LISTING_FILTERS,
+  isFiltering,
+  listingFilterParams,
+  ListingFilters,
+  type ListingFilterValue,
+} from "@/components/forms/ListingFilters";
+import { locationLabel } from "@/utils/location";
 
 const Services = () => {
   const { colors, spacing } = useTheme();
@@ -25,10 +32,10 @@ const Services = () => {
   const [loadFailed, setLoadFailed] = useState(false);
   // Bumped by "Try again" to re-run the load.
   const [attempt, setAttempt] = useState(0);
-  // The category's listing-field filters (institution, gender, …).
-  const [filters, setFilters] = useState<Record<string, string>>({});
-  const filtersKey = JSON.stringify(filters);
-  const filtering = Object.values(filters).some((v) => v !== "");
+  // Where, plus the category's listing-field filters (institution, gender, …).
+  const [filters, setFilters] = useState<ListingFilterValue>(EMPTY_LISTING_FILTERS);
+  const filtersKey = JSON.stringify(listingFilterParams(filters));
+  const filtering = isFiltering(filters);
   const { setAppService } = useAuth();
   const insets = useSafeAreaInsets();
 
@@ -44,7 +51,7 @@ const Services = () => {
       const response = await api.getProductsByCategory({
         categoryId: value,
         type: "Service",
-        attr: JSON.parse(filtersKey),
+        ...JSON.parse(filtersKey),
       });
       if (cancelled) return;
       if (response.success && Array.isArray(response.data?.products)) {
@@ -107,7 +114,7 @@ const Services = () => {
               id={item.id || (item as any)._id}
               title={item.name}
               description={item.description}
-              location={item.location}
+              location={locationLabel(item as any)}
               image={item.images?.[0]?.url || (item.images?.[0] as any) || ""}
             />
           ))}

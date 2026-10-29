@@ -34,7 +34,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api, { Product } from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
-import { formatLocation, parseLocation } from '@/utils/location';
+import { appendListingLocation, listingLocation } from '@/utils/location';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
@@ -87,6 +87,7 @@ const EditProduct = () => {
   const [categoryId, setCategoryId] = useState('');
   const [categoryName, setCategoryName] = useState('');
   const [location, setLocation] = useState({ country: '', state: '', city: '' });
+  const [area, setArea] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
@@ -142,7 +143,9 @@ const EditProduct = () => {
         setProductName(product.name || '');
         setDescription(product.description || '');
         setStock(product.stock?.toString() || '0');
-        setLocation(parseLocation(product.location));
+        const saved = listingLocation(product as any);
+        setLocation(saved.value);
+        setArea(saved.area);
         setPhoneNumber(product.phoneNumber || '');
         setEmail(product.email || '');
         setCompanyName(product.companyName || '');
@@ -336,7 +339,7 @@ const EditProduct = () => {
       formData.append('description', description);
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
-      formData.append('location', formatLocation(location));
+      appendListingLocation(formData, location, area);
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);
@@ -605,6 +608,12 @@ const EditProduct = () => {
                   </Text>
                 ) : null}
               </View>
+              <Input
+                label="Area or neighbourhood"
+                value={area}
+                onChangeText={setArea}
+                placeholder="e.g. Odenigbo, Kubwa, Yaba"
+              />
 
               <Input
                 label="Phone Number *"
