@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -35,7 +34,7 @@ func newGasNeedFixture(t *testing.T) *gasNeedFixture {
 		146: {Escrow: esc, ChainKey: "sonic", Assets: []string{"USDT"}},
 	}, "1"), &mockRates{}, &mockBus{}, 146)
 	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
-	svc = svc.WithClock(fixedClock{t: now})
+	svc = bindSvcEscrows(svc.WithClock(fixedClock{t: now}))
 	svc.SetTokenResolver(func(_ int64, symbol string) string {
 		if symbol == "USDT" {
 			return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
@@ -64,7 +63,7 @@ func (f *gasNeedFixture) seedTrade(t *testing.T, status string, expiresIn time.D
 	t.Helper()
 	id := uuid.New()
 	tr := &models.P2PTrade{
-		ID: id, OnChainTradeID: fmt.Sprintf("0x%x", id[:]), AdID: f.adID, BuyerID: f.buyer, SellerID: f.seller, Token: "USDT", ChainID: chainID,
+		ID: id, OnChainTradeID: HashIDHex(id), AdID: f.adID, BuyerID: f.buyer, SellerID: f.seller, Token: "USDT", ChainID: chainID,
 		TokenAmount: "10", FiatAmount: "15000", FiatCurrency: "NGN", Rate: "1500", PaymentMethodID: uuid.New(),
 		Status: status, ExpiresAt: f.now.Add(expiresIn), CreatedAt: f.now, UpdatedAt: f.now, OpenTxHash: "0xopen",
 	}
@@ -116,7 +115,8 @@ func TestP2PGasNeed_TradeActions(t *testing.T) {
 		{"cancel before expiry", f.buyer, P2PGasCancelTrade, pending, ErrP2PGasNotNeeded},
 		{"cancel stranger", stranger, P2PGasCancelTrade, expired, ErrP2PGasNotNeeded},
 		{"dispute buyer paid", f.buyer, P2PGasDispute, paid, nil},
-		{"dispute seller pending", f.seller, P2PGasDispute, pending, nil},
+		{"dispute seller paid", f.seller, P2PGasDispute, paid, nil},
+		{"dispute before paid", f.seller, P2PGasDispute, pending, ErrP2PGasNotNeeded},
 		{"dispute stranger", stranger, P2PGasDispute, paid, ErrP2PGasNotNeeded},
 		{"dispute released", f.buyer, P2PGasDispute, released, ErrP2PGasNotNeeded},
 		{"not on sonic", f.buyer, P2PGasMarkPaid, bsc, ErrP2PGasNotNeeded},

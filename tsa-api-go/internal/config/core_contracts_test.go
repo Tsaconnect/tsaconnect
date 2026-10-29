@@ -8,10 +8,10 @@ import (
 func coreTestConfig(sonicNetwork string) *Config {
 	return &Config{
 		Networks: map[string]NetworkConfig{
-			"mainnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 146}}},
-			"testnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 14601}}},
+			"mainnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 146}, "bsc": {ChainID: 56}}},
+			"testnet": {Chains: map[string]ChainConfig{"sonic": {ChainID: 14601}, "bsc": {ChainID: 97}}},
 		},
-		p2pNetworks: map[string]string{"sonic": sonicNetwork},
+		p2pNetworks: map[string]string{"sonic": sonicNetwork, "bsc": "mainnet"},
 	}
 }
 
@@ -33,7 +33,6 @@ func TestCoreContracts_UnusableSelectorsStayDormant(t *testing.T) {
 	for _, tc := range []struct{ set, allowDev string }{
 		{"off", ""}, {"false", ""}, {"0", ""}, {"none", ""},
 		{"staging", ""},  // unknown
-		{"prod", ""},     // not deployed yet
 		{"dev", ""},      // no allow switch
 		{"dev", "false"}, // allow switch off
 	} {
@@ -46,6 +45,40 @@ func TestCoreContracts_UnusableSelectorsStayDormant(t *testing.T) {
 		if cfg.CoreSet != CoreSetOff || len(cfg.CoreContracts) != 0 {
 			t.Fatalf("%+v: set=%q contracts=%v, want dormant", tc, cfg.CoreSet, cfg.CoreContracts)
 		}
+	}
+}
+
+// A set with no rows yet (how prod looked before its deploy) stays dormant too.
+func TestCoreContracts_EmptySetStaysDormant(t *testing.T) {
+	t.Setenv("CORE_CONTRACTS", "prod")
+	cfg := coreTestConfig("mainnet")
+	if err := assembleCoreContracts(cfg, map[string]map[string]coreRow{CoreSetProd: {}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CoreSet != CoreSetOff || len(cfg.CoreContracts) != 0 {
+		t.Fatalf("set=%q contracts=%v, want dormant", cfg.CoreSet, cfg.CoreContracts)
+	}
+}
+
+// The prod set needs no allow switch and is administered by the PM wallet on both chains; only
+// Sonic has an OrderEscrow and a forwarder.
+func TestCoreContracts_ProdSetOnMainnet(t *testing.T) {
+	t.Setenv("CORE_CONTRACTS", "prod")
+	t.Setenv(coreDevAllowEnv, "")
+	cfg := coreTestConfig("mainnet")
+	if err := assembleCoreContracts(cfg, coreSets); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CoreSet != CoreSetProd || len(cfg.CoreContracts) != 2 {
+		t.Fatalf("set=%q contracts=%v, want prod on two chains", cfg.CoreSet, cfg.CoreContracts)
+	}
+	const pm = "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96"
+	sonic, bsc := cfg.CoreContracts[146], cfg.CoreContracts[56]
+	if sonic.Admin != pm || bsc.Admin != pm {
+		t.Fatalf("admins sonic=%s bsc=%s, want %s", sonic.Admin, bsc.Admin, pm)
+	}
+	if sonic.OrderEscrow == "" || sonic.Forwarder == "" || bsc.OrderEscrow != "" || bsc.Forwarder != "" {
+		t.Fatalf("sonic=%+v bsc=%+v: only Sonic has an OrderEscrow and a forwarder", sonic, bsc)
 	}
 }
 
@@ -64,6 +97,11 @@ func TestCoreContracts_DevSetOnSonicMainnet(t *testing.T) {
 		c.P2PEscrow != "0xDB4Ff053b677e9C65BD0988f74922329103FB2f3" || c.ChainKey != "sonic" || c.DeployBlock != 81691442 ||
 		c.Forwarder != "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4" {
 		t.Fatalf("dev Sonic row = %+v", c)
+	}
+	b, ok := cfg.CoreContracts[56]
+	if !ok || b.FeeConfig != "0xa855BeB1D59b6d15e92571010Bd92a46aef6Af47" || b.P2PEscrow != "0x9aba9E3e3bCD5d609ef99C6dC5973386769e2572" ||
+		b.OrderEscrow != "" || b.Forwarder != "" || b.ChainKey != "bsc" || b.DeployBlock != 130498364 {
+		t.Fatalf("dev BSC row = %+v", b)
 	}
 }
 
@@ -103,5 +141,28 @@ func TestCoreContracts_RefusesABadRow(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("err = %v, want the %s refusal", err, want)
 		}
+	}
+}
+
+// The hard switch: a P2P chain the set covers takes its P2PTradeEscrow and drops the legacy
+// escrow's FeeManager and owner; one it does not (and every one while dormant) goes dormant.
+func TestBindP2PChainsToCore(t *testing.T) {
+	cfg := &Config{
+		CoreSet:       CoreSetDev,
+		CoreContracts: map[int64]CoreContracts{146: {ChainID: 146, P2PEscrow: "0x00000000000000000000000000000000000E5C03"}},
+		P2PChains: map[int64]P2PChainConfig{
+			146: {ChainID: 146, ChainKey: "sonic", EscrowAddress: "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324", EIP712Version: "2", Audience: P2PAudiencePM},
+			56: {ChainID: 56, ChainKey: "bsc", EscrowAddress: "0xD16c1597EA3be8D2017698CC5d6Bf53b595EEb03", EIP712Version: "2",
+				Audience: P2PAudienceDirect, FeeManager: "0xe760018f5b3fE4E8EF52DC029898545ed03d74ac"},
+		},
+	}
+	bindP2PChainsToCore(cfg)
+	sonic := cfg.P2PChains[146]
+	if sonic.EscrowAddress != "0x00000000000000000000000000000000000E5C03" || sonic.EIP712Version != "3" || sonic.Audience != P2PAudiencePM {
+		t.Fatalf("sonic = %+v", sonic)
+	}
+	if _, ok := cfg.P2PChains[56]; ok || len(cfg.DormantP2PChains) != 1 || cfg.DormantP2PChains[0].ChainID != 56 ||
+		cfg.DormantP2PChains[0].Audience != P2PAudienceDirect {
+		t.Fatalf("BSC must go dormant: chains=%+v dormant=%+v", cfg.P2PChains, cfg.DormantP2PChains)
 	}
 }

@@ -20,12 +20,12 @@ type selectorCaller struct {
 
 func (s selectorCaller) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
 	for name := range s.failing {
-		if string(call.Data[:4]) == string(parsedP2PEscrowABI.Methods[name].ID) {
+		if string(call.Data[:4]) == string(parsedFeeSinkABI.Methods[name].ID) {
 			return nil, errors.New("context deadline exceeded")
 		}
 	}
 	for name, addr := range s.answers {
-		if string(call.Data[:4]) == string(parsedP2PEscrowABI.Methods[name].ID) {
+		if string(call.Data[:4]) == string(parsedFeeSinkABI.Methods[name].ID) {
 			return common.LeftPadBytes(addr.Bytes(), 32), nil
 		}
 	}
@@ -77,7 +77,7 @@ func TestFeeSinks_UnconfiguredAddressKeepsRowWithReason(t *testing.T) {
 func TestCombinedFeeSinks_ConcatenatesInOrder(t *testing.T) {
 	a := NewFeeSinks(FeeSinkContract{Label: "A"})
 	b := NewFeeSinks(FeeSinkContract{Label: "B"})
-	var nilRegistry *P2PEscrowRegistry
+	var nilRegistry *CoreRegistry
 	got := CombinedFeeSinks{nilRegistry, a, b}.SystemWallets()
 	if len(got) != 2 || got[0].Label != "A" || got[1].Label != "B" {
 		t.Fatalf("got %+v", got)
@@ -101,7 +101,7 @@ func TestFeeSinks_ReadsContractsConcurrentlyInOrder(t *testing.T) {
 func TestFeeSinkSelectors(t *testing.T) {
 	for method, sig := range map[string]string{"systemWallet": "systemWallet()", "owner": "owner()"} {
 		want := crypto.Keccak256([]byte(sig))[:4]
-		if got := parsedP2PEscrowABI.Methods[method].ID; string(got) != string(want) {
+		if got := parsedFeeSinkABI.Methods[method].ID; string(got) != string(want) {
 			t.Errorf("%s selector = %x, want %x", method, got, want)
 		}
 	}

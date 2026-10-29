@@ -2,47 +2,22 @@ package services
 
 import (
 	"context"
-	"math/big"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/ethereum/go-ethereum"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
-// countingFeeChain counts every chain read and, when hang is set, blocks each one
-// until the test ends: a fee read that must never happen, or one that is slow.
-type countingFeeChain struct {
-	inner *feeViewChain
-	hang  chan struct{}
-	calls atomic.Int32
-}
-
-func (c *countingFeeChain) CallContract(ctx context.Context, call ethereum.CallMsg, n *big.Int) ([]byte, error) {
-	c.calls.Add(1)
-	if c.hang != nil {
-		<-c.hang
-	}
-	return c.inner.CallContract(ctx, call, n)
-}
-
-func newCountingFeeView(t *testing.T, hang bool) (*P2PFeeView, *countingFeeChain) {
+// newCountingFeeView is a fee view whose FeeConfig counts every read and, when hang is set, blocks
+// each one until the test ends: a fee read that must never happen, or one that is slow.
+func newCountingFeeView(t *testing.T, hang bool) (*P2PFeeView, *fakeP2PRates) {
 	t.Helper()
-	cc := &countingFeeChain{inner: &feeViewChain{feeManager: true, rates: map[string][4]interface{}{
-		"p2p_platform": {uint16(50), uint64(0), false, true},
-		"p2p":          {uint16(10), uint64(0), false, true},
-	}}}
+	rates := feeRows(50, 10)
 	if hang {
-		cc.hang = make(chan struct{})
-		t.Cleanup(func() { close(cc.hang) })
+		rates.hang = make(chan struct{})
+		t.Cleanup(func() { close(rates.hang) })
 	}
-	v := NewP2PFeeView(
-		func(int64) (contractCaller, string, error) { return cc, feeViewEscrow, nil },
-		func(int64, string) string { return feeViewToken },
-	)
-	return v, cc
+	return newFeeViewOn(rates), rates
 }
 
 // Plain ad reads (cancel, express matching, the open path) never wait on the chain.

@@ -10,7 +10,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 )
 
@@ -25,54 +24,63 @@ const (
 	// An ad screen waits at most this long for fees; a slower read leaves the
 	// field unset (it still lands in the cache for the next request).
 	p2pAdFeeBudget = 2 * time.Second
-	// Contract ceilings (P2PEscrowV3 MAX_*_FEE_BPS). A rate above them is one
+	// Contract ceilings (P2PTradeEscrow MAX_*_FEE_BPS). A rate above them is one
 	// the escrow reverts on at open, so it is never shown as the fee.
 	p2pMaxPlatformFeeBps = 300
 	p2pMaxGasFeeBps      = 300
 	p2pMaxTotalFeeBps    = 500
 )
 
+// P2P fee features in FeeConfig (P2PTradeEscrow.FEATURE_PLATFORM / FEATURE_GAS).
+const (
+	p2pFeatureP2PPlatform = "p2p_platform"
+	p2pFeatureP2PGas      = "p2p_gas"
+)
+
+// p2pRateReader reads one FeeConfig row (active or not) for a chain's core set.
+type p2pRateReader func(ctx context.Context, chainID int64, feature string, token common.Address) (FeeConfigRate, error)
+
 // P2PFeeView answers "what fee would a P2P trade of this token on this chain
-// snapshot right now", straight from the chain, so the app never hardcodes a
-// rate and follows the owner's setRates without a release. It mirrors
-// P2PEscrowV3._snapshotFeeBps; the fee comes out of the crypto receiver.
+// snapshot right now", straight from the chain's FeeConfig, so the app never
+// hardcodes a rate and follows the owner's setRates without a release. It mirrors
+// P2PTradeEscrow._storeTrade; the fee comes out of the crypto receiver.
 type P2PFeeView struct {
-	chain     func(chainID int64) (caller contractCaller, escrowAddr string, err error)
+	rate      p2pRateReader
 	tokenAddr func(chainID int64, symbol string) string
 	cache     *cachedReader[int]
 	now       func() time.Time
 }
 
-// NewP2PFeeView builds the view over a per-chain chain-read resolver and a
-// (chain, symbol) → token address resolver.
-func NewP2PFeeView(chain func(int64) (contractCaller, string, error), tokenAddr func(int64, string) string) *P2PFeeView {
+// NewP2PFeeView builds the view over a FeeConfig row reader and a (chain, symbol) → token address
+// resolver.
+func NewP2PFeeView(rate p2pRateReader, tokenAddr func(int64, string) string) *P2PFeeView {
 	return &P2PFeeView{
-		chain:     chain,
+		rate:      rate,
 		tokenAddr: tokenAddr,
 		cache:     newCachedReader[int](p2pFeeViewTTL, p2pFeeViewFailTTL),
 		now:       time.Now,
 	}
 }
 
-// NewP2PFeeViewForConfig reads each chain through its configured RPC client and
-// its cfg.P2PChains escrow address.
-func NewP2PFeeViewForConfig(bs *BlockchainService, cfg *config.Config) *P2PFeeView {
+// NewP2PFeeViewForCore reads each chain's rows from its core set's FeeConfig. A chain whose set
+// has not passed its gates has no fee to show.
+func NewP2PFeeViewForCore(core *CoreRegistry, tokenAddr func(int64, string) string) *P2PFeeView {
 	return NewP2PFeeView(
-		func(chainID int64) (contractCaller, string, error) {
-			cc, ok := cfg.P2PChains[chainID]
-			client, _ := bs.ClientForChainID(chainID)
-			if !ok || client == nil {
-				return nil, "", fmt.Errorf("p2p: no escrow client for chain %d", chainID)
+		func(ctx context.Context, chainID int64, feature string, token common.Address) (FeeConfigRate, error) {
+			set, ok := core.Ready(chainID)
+			if !ok {
+				return FeeConfigRate{}, fmt.Errorf("%w on chain %d", ErrCoreSetNotReady, chainID)
 			}
-			return client.Client, cc.EscrowAddress, nil
+			return core.Fees().RawRate(ctx, chainID, set.FeeConfig, feature, token)
 		},
-		bs.TokenAddressForChainID,
+		tokenAddr,
 	)
 }
 
 // LiveFeeBps is the total (platform + gas) fee bps a trade of token on chainID
-// would snapshot. An error means the chain could not be read: callers omit the
-// field rather than guess.
+// would snapshot. An error means the chain could not be read, or a trade could not open (a row
+// missing, inactive, carrying a flat fee or above the ceilings): callers omit the field rather
+// than guess.
 func (v *P2PFeeView) LiveFeeBps(ctx context.Context, chainID int64, token string) (int, error) {
 	if v == nil {
 		return 0, fmt.Errorf("fee view not configured")
@@ -90,79 +98,33 @@ func (v *P2PFeeView) LiveFeeBps(ctx context.Context, chainID int64, token string
 }
 
 func (v *P2PFeeView) read(ctx context.Context, chainID int64, sym string) (int, error) {
-	caller, escrow, err := v.chain(chainID)
-	if err != nil {
-		return 0, err
-	}
 	tokenAddr := v.tokenAddr(chainID, sym)
 	if !common.IsHexAddress(tokenAddr) {
 		return 0, fmt.Errorf("%w: %s", ErrUnsupportedToken, sym)
 	}
-	platform, err := readEscrowFeeRow(ctx, caller, escrow, tokenAddr, "p2p_platform")
-	if err != nil {
-		return 0, err
-	}
-	isMcgp, err := v.isMcgp(ctx, caller, escrow, tokenAddr)
-	if err != nil {
-		return 0, err
-	}
-	legacy := 0
-	if !isMcgp {
-		vals, err := callP2PView(ctx, caller, escrow, "feeBps")
+	token := common.HexToAddress(tokenAddr)
+	var bps [2]int
+	for i, feature := range []string{p2pFeatureP2PPlatform, p2pFeatureP2PGas} {
+		r, err := v.rate(ctx, chainID, feature, token)
 		if err != nil {
 			return 0, err
 		}
-		b, _ := vals[0].(uint16)
-		legacy = int(b)
+		// The escrow's rateFor reverts on an inactive row and _storeTrade on a flat fee: no trade opens.
+		if !r.Active {
+			return 0, fmt.Errorf("%s has no active %s rate on chain %d", sym, feature, chainID)
+		}
+		if r.FlatFee != nil && r.FlatFee.Sign() != 0 {
+			return 0, fmt.Errorf("%s %s rate on chain %d carries a flat fee", sym, feature, chainID)
+		}
+		bps[i] = int(r.BPS)
 	}
-	if platform.noFeeManager {
-		return legacy, nil
-	}
-	gas, err := readEscrowFeeRow(ctx, caller, escrow, tokenAddr, "p2p")
-	if err != nil {
-		return 0, err
-	}
-	if platform.bps > p2pMaxPlatformFeeBps || gas.bps > p2pMaxGasFeeBps {
+	if bps[0] > p2pMaxPlatformFeeBps || bps[1] > p2pMaxGasFeeBps || bps[0]+bps[1] > p2pMaxTotalFeeBps {
 		return 0, fmt.Errorf("fee rate above the contract ceiling")
 	}
-	pBps, gBps := legacy, 0
-	if platform.active {
-		pBps = platform.bps
-		if isMcgp && platform.exempt {
-			pBps = 0
-		}
-	}
-	if gas.active {
-		gBps = gas.bps
-		if isMcgp && gas.exempt {
-			gBps = 0
-		}
-	}
-	if pBps+gBps > p2pMaxTotalFeeBps {
-		return 0, fmt.Errorf("fee rate above the contract ceiling")
-	}
-	return pBps + gBps, nil
+	return bps[0] + bps[1], nil
 }
 
-func (v *P2PFeeView) isMcgp(ctx context.Context, caller contractCaller, escrow, tokenAddr string) (bool, error) {
-	vals, err := callP2PView(ctx, caller, escrow, "mcgpToken")
-	if err != nil {
-		return false, err
-	}
-	mcgp, _ := vals[0].(common.Address)
-	return mcgp != (common.Address{}) && mcgp == common.HexToAddress(tokenAddr), nil
-}
-
-// feeBpsFromSnapshot is a trade's total snapshotted fee bps; ok=false when the
-// snapshot could not be read (the column is then left unset, never guessed).
-func feeBpsFromSnapshot(platformBps, gasBps uint16, found bool) (int, bool) {
-	if !found {
-		return 0, false
-	}
-	return int(platformBps) + int(gasBps), true
-}
-
-// SplitFee is P2PEscrowV3._splitFee: fee = floor(amount·bps/10000), the
+// SplitFee is P2PTradeEscrow._payOut's split: fee = floor(amount·bps/10000), the
 // receiver nets the rest. Amounts are token base units.
 func SplitFee(amountBase string, bps int) (fee, net string, err error) {
 	amt, ok := new(big.Int).SetString(strings.TrimSpace(amountBase), 10)

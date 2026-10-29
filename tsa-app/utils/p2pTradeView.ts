@@ -101,7 +101,8 @@ export function tradeActions(
     openUnconfirmed: pending && !openRecorded,
     confirmingTx,
     canCancel: expired && pending && !confirmingTx,
-    canDispute: (pending || trade.status === 'paid') && !confirmingTx,
+    // The escrow disputes only a trade the buyer marked paid; before that it times out.
+    canDispute: trade.status === 'paid' && !confirmingTx,
   };
 }
 

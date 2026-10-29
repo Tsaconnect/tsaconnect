@@ -35,8 +35,8 @@ func newAudienceRig(t *testing.T) *audienceRig {
 		bscDirectChain: {Escrow: bsc, ChainKey: "bsc", Purpose: config.P2PPurposeP2P, Assets: []string{"USDT", "USDC"},
 			Decimals: map[string]int{"USDT": 18, "USDC": 18}, Audience: config.P2PAudienceDirect},
 	}, "2")
-	svc := NewP2PTradeService(db, reg, &mockRates{}, &mockBus{}, 146).
-		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
+	svc := bindSvcEscrows(NewP2PTradeService(db, reg, &mockRates{}, &mockBus{}, 146).
+		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}))
 	svc.SetTokenResolver(func(int64, string) string { return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894" })
 	svc.SetPMService(NewPMService(db))
 	sonic.balance = OnChainBalance{Available: big.NewInt(1_000_000_000), Locked: big.NewInt(0)}

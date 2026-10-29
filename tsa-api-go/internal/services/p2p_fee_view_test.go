@@ -1,7 +1,6 @@
 package services
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -9,108 +8,72 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 )
 
-const (
-	feeViewEscrow = "0x00000000000000000000000000000000000000e1"
-	feeViewMcgp   = "0x00000000000000000000000000000000000000c9"
-	feeViewToken  = "0x00000000000000000000000000000000000000a1"
-)
+const feeViewToken = "0x00000000000000000000000000000000000000a1"
 
-// feeViewChain answers the reads P2PFeeView makes: the escrow's feeManager(),
-// tokenSymbol(), feeBps(), mcgpToken() and the FeeManager's rateFor().
-type feeViewChain struct {
-	feeManager bool
-	rates      map[string][4]interface{} // feature → bps, flat, exempt, active
-	legacy     uint16
-	fail       bool
-	calls      atomic.Int32
+// fakeP2PRates is a chain's FeeConfig as P2PFeeView reads it: one row per feature (missing =
+// never set, inactive). fail makes every read an RPC error; hang blocks each read until the test
+// ends; seen records the read context.
+type fakeP2PRates struct {
+	rows  map[string]FeeConfigRate
+	fail  bool
+	calls atomic.Int32
+	hang  chan struct{}
+	seen  *ctxSeen
 }
 
-func (f *feeViewChain) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
+func (f *fakeP2PRates) read(ctx context.Context, _ int64, feature string, _ common.Address) (FeeConfigRate, error) {
 	f.calls.Add(1)
+	if f.seen != nil {
+		_, hasDeadline := ctx.Deadline()
+		*f.seen = ctxSeen{err: ctx.Err(), hasDeadline: hasDeadline}
+	}
+	if f.hang != nil {
+		<-f.hang
+	}
 	if f.fail {
-		return nil, errors.New("rpc down")
+		return FeeConfigRate{}, errors.New("rpc down")
 	}
-	sel := call.Data[:4]
-	switch {
-	case bytes.Equal(sel, parsedEscrowABI.Methods["feeManager"].ID):
-		fm := common.Address{}
-		if f.feeManager {
-			fm = common.HexToAddress(testFeeManager)
-		}
-		return parsedEscrowABI.Methods["feeManager"].Outputs.Pack(fm)
-	case bytes.Equal(sel, parsedEscrowABI.Methods["tokenSymbol"].ID):
-		return parsedEscrowABI.Methods["tokenSymbol"].Outputs.Pack("SYM")
-	case bytes.Equal(sel, parsedP2PEscrowABI.Methods["feeBps"].ID):
-		return parsedP2PEscrowABI.Methods["feeBps"].Outputs.Pack(f.legacy)
-	case bytes.Equal(sel, parsedP2PEscrowABI.Methods["mcgpToken"].ID):
-		return parsedP2PEscrowABI.Methods["mcgpToken"].Outputs.Pack(common.HexToAddress(feeViewMcgp))
-	case bytes.Equal(sel, parsedFeeManagerABI.Methods["rateFor"].ID):
-		args, _ := parsedFeeManagerABI.Methods["rateFor"].Inputs.Unpack(call.Data[4:])
-		r, ok := f.rates[args[0].(string)]
-		if !ok {
-			r = [4]interface{}{uint16(0), uint64(0), false, false}
-		}
-		return parsedFeeManagerABI.Methods["rateFor"].Outputs.Pack(r[:]...)
-	}
-	return nil, errors.New("unexpected call")
+	return f.rows[feature], nil
 }
 
-func newFeeViewOn(chain *feeViewChain) *P2PFeeView {
-	return NewP2PFeeView(
-		func(int64) (contractCaller, string, error) { return chain, feeViewEscrow, nil },
-		func(_ int64, sym string) string {
-			if sym == "MCGP" {
-				return feeViewMcgp
-			}
-			return feeViewToken
-		},
-	)
+// feeRows is a FeeConfig with both P2P rows active at these bps.
+func feeRows(platformBps, gasBps int) *fakeP2PRates {
+	return &fakeP2PRates{rows: map[string]FeeConfigRate{
+		p2pFeatureP2PPlatform: {BPS: uint16(platformBps), FlatFee: big.NewInt(0), Active: true},
+		p2pFeatureP2PGas:      {BPS: uint16(gasBps), FlatFee: big.NewInt(0), Active: true},
+	}}
 }
 
-func newFeeViewWithFakes(t *testing.T, feeManager, pActive bool, pBps int, gActive bool, gBps int, legacy int) *P2PFeeView {
-	t.Helper()
-	return newFeeViewOn(&feeViewChain{
-		feeManager: feeManager,
-		legacy:     uint16(legacy),
-		rates: map[string][4]interface{}{
-			"p2p_platform": {uint16(pBps), uint64(0), false, pActive},
-			"p2p":          {uint16(gBps), uint64(0), false, gActive},
-		},
-	})
+func newFeeViewOn(r *fakeP2PRates) *P2PFeeView {
+	return NewP2PFeeView(r.read, func(int64, string) string { return feeViewToken })
 }
 
 func newFeeViewFailing(t *testing.T) *P2PFeeView {
 	t.Helper()
-	return newFeeViewOn(&feeViewChain{fail: true})
+	return newFeeViewOn(&fakeP2PRates{fail: true})
 }
 
-func TestLiveFeeBps_MirrorsContractSnapshot(t *testing.T) {
-	cases := []struct {
-		name       string
-		feeManager bool
-		pActive    bool
-		pBps       int
-		gActive    bool
-		gBps       int
-		legacy     int
-		token      string
-		want       int
+// ctxSeen is the read context's state at the moment of the chain call.
+type ctxSeen struct {
+	err         error
+	hasDeadline bool
+}
+
+func TestLiveFeeBps_SumsThePlatformAndGasRows(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		platform, gas int
+		want          int
 	}{
-		{"no fee manager → legacy", false, false, 0, false, 0, 50, "USDT", 50},
-		{"rates unset (today) → legacy", true, false, 0, false, 0, 50, "USDT", 50},
-		{"platform set, gas unset", true, true, 190, false, 0, 50, "USDC", 190},
-		{"both set", true, true, 150, true, 40, 50, "USDC", 190},
-		{"MCGP legacy is zero", false, false, 0, false, 0, 50, "MCGP", 0},
-		{"gas set, platform unset → legacy + gas", true, false, 0, true, 40, 50, "USDT", 90},
-	}
-	for _, c := range cases {
+		{"BSC direct: platform only", 190, 0, 190},
+		{"Sonic: gas only", 0, 50, 50},
+		{"both", 150, 40, 190},
+	} {
 		t.Run(c.name, func(t *testing.T) {
-			v := newFeeViewWithFakes(t, c.feeManager, c.pActive, c.pBps, c.gActive, c.gBps, c.legacy)
-			got, err := v.LiveFeeBps(context.Background(), 146, c.token)
+			got, err := newFeeViewOn(feeRows(c.platform, c.gas)).LiveFeeBps(context.Background(), 146, "USDT")
 			if err != nil || got != c.want {
 				t.Fatalf("got %d, %v; want %d", got, err, c.want)
 			}
@@ -118,31 +81,43 @@ func TestLiveFeeBps_MirrorsContractSnapshot(t *testing.T) {
 	}
 }
 
-func TestLiveFeeBps_ExemptMcgpIsZero(t *testing.T) {
-	chain := &feeViewChain{feeManager: true, legacy: 50, rates: map[string][4]interface{}{
-		"p2p_platform": {uint16(190), uint64(0), true, true},
-		"p2p":          {uint16(40), uint64(0), true, true},
-	}}
-	v := newFeeViewOn(chain)
-	if got, err := v.LiveFeeBps(context.Background(), 146, "MCGP"); err != nil || got != 0 {
-		t.Fatalf("exempt MCGP = %d, %v; want 0", got, err)
-	}
-	if got, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err != nil || got != 230 {
-		t.Fatalf("exempt flag must only spare MCGP: got %d, %v; want 230", got, err)
+// Every row the escrow would refuse at open is an error, never a fee shown: a trade cannot open.
+func TestLiveFeeBps_RowsTheEscrowRefusesAreErrors(t *testing.T) {
+	for name, mutate := range map[string]func(r *fakeP2PRates){
+		"platform row missing": func(r *fakeP2PRates) { delete(r.rows, p2pFeatureP2PPlatform) },
+		"gas row inactive": func(r *fakeP2PRates) {
+			r.rows[p2pFeatureP2PGas] = FeeConfigRate{BPS: 10, FlatFee: big.NewInt(0)}
+		},
+		"flat fee": func(r *fakeP2PRates) {
+			r.rows[p2pFeatureP2PPlatform] = FeeConfigRate{BPS: 10, FlatFee: big.NewInt(1), Active: true}
+		},
+		"platform above 300": func(r *fakeP2PRates) { r.rows[p2pFeatureP2PPlatform] = FeeConfigRate{BPS: 301, Active: true} },
+		"gas above 300":      func(r *fakeP2PRates) { r.rows[p2pFeatureP2PGas] = FeeConfigRate{BPS: 301, Active: true} },
+		"sum above 500": func(r *fakeP2PRates) {
+			r.rows[p2pFeatureP2PPlatform] = FeeConfigRate{BPS: 300, Active: true}
+			r.rows[p2pFeatureP2PGas] = FeeConfigRate{BPS: 201, Active: true}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := feeRows(100, 50)
+			mutate(r)
+			if got, err := newFeeViewOn(r).LiveFeeBps(context.Background(), 146, "USDT"); err == nil {
+				t.Fatalf("got %d, want an error", got)
+			}
+		})
 	}
 }
 
-func TestLiveFeeBps_AboveContractCeilingIsAnError(t *testing.T) {
-	// The escrow reverts SnapshotFeeTooHigh above MAX_FEE_BPS (500) in total.
-	v := newFeeViewWithFakes(t, true, true, 300, true, 300, 50)
-	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err == nil {
-		t.Fatal("want error: a rate the escrow would revert on is not a rate to show")
+func TestLiveFeeBps_UnknownTokenIsAnError(t *testing.T) {
+	v := NewP2PFeeView(feeRows(100, 0).read, func(int64, string) string { return "" })
+	if _, err := v.LiveFeeBps(context.Background(), 146, "DOGE"); !errors.Is(err, ErrUnsupportedToken) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestLiveFeeBps_CachesPerChainAndToken(t *testing.T) {
-	chain := &feeViewChain{legacy: 50}
-	v := newFeeViewOn(chain)
+	rates := feeRows(50, 0)
+	v := newFeeViewOn(rates)
 	now := time.Now()
 	v.now = func() time.Time { return now }
 	for i := 0; i < 3; i++ {
@@ -150,29 +125,30 @@ func TestLiveFeeBps_CachesPerChainAndToken(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first := chain.calls.Load()
-	if first == 0 {
-		t.Fatal("expected chain reads")
+	first := rates.calls.Load()
+	if first != 2 {
+		t.Fatalf("calls = %d, want one read per row", first)
 	}
 	now = now.Add(61 * time.Second)
 	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err != nil {
 		t.Fatal(err)
 	}
-	if chain.calls.Load() == first {
+	if rates.calls.Load() == first {
 		t.Fatal("cache must expire after 60s so a setRates is followed")
 	}
 }
 
 // A failed read is retried after ~10s, not the 60s success TTL.
 func TestLiveFeeBps_FailureCachedBriefly(t *testing.T) {
-	chain := &feeViewChain{legacy: 50, fail: true}
-	v := newFeeViewOn(chain)
+	rates := feeRows(50, 0)
+	rates.fail = true
+	v := newFeeViewOn(rates)
 	now := time.Now()
 	v.now = func() time.Time { return now }
 	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err == nil {
 		t.Fatal("want error on unreadable chain")
 	}
-	chain.fail = false
+	rates.fail = false
 	now = now.Add(5 * time.Second)
 	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err == nil {
 		t.Fatal("a failure is still served from cache within its short TTL")
@@ -186,13 +162,10 @@ func TestLiveFeeBps_FailureCachedBriefly(t *testing.T) {
 // The shared read does not inherit the first caller's cancellation: a client
 // that hung up must not fail (and cache a failure for) everyone else.
 func TestLiveFeeBps_ReadSurvivesCallerCancel(t *testing.T) {
-	v := newFeeViewOn(&feeViewChain{legacy: 50})
 	var seen ctxSeen
-	inner := v.chain
-	v.chain = func(id int64) (contractCaller, string, error) {
-		c, addr, err := inner(id)
-		return ctxRecorder{c, &seen}, addr, err
-	}
+	rates := feeRows(50, 0)
+	rates.seen = &seen
+	v := newFeeViewOn(rates)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if bps, err := v.LiveFeeBps(ctx, 146, "USDT"); err != nil || bps != 50 {
@@ -206,21 +179,12 @@ func TestLiveFeeBps_ReadSurvivesCallerCancel(t *testing.T) {
 	}
 }
 
-// ctxSeen is the read context's state at the moment of the chain call.
-type ctxSeen struct {
-	err         error
-	hasDeadline bool
-}
-
-type ctxRecorder struct {
-	contractCaller
-	seen *ctxSeen
-}
-
-func (r ctxRecorder) CallContract(ctx context.Context, call ethereum.CallMsg, n *big.Int) ([]byte, error) {
-	_, hasDeadline := ctx.Deadline()
-	*r.seen = ctxSeen{err: ctx.Err(), hasDeadline: hasDeadline}
-	return r.contractCaller.CallContract(ctx, call, n)
+// A chain whose core set has not passed its gates shows no fee.
+func TestNewP2PFeeViewForCore_NotReadyIsAnError(t *testing.T) {
+	v := NewP2PFeeViewForCore(nil, func(int64, string) string { return feeViewToken })
+	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); !errors.Is(err, ErrCoreSetNotReady) {
+		t.Fatalf("err = %v", err)
+	}
 }
 
 func TestSplitFee_FloorsLikeContract(t *testing.T) {
@@ -240,21 +204,5 @@ func TestSplitFee_FloorsLikeContract(t *testing.T) {
 	}
 	if _, _, err := SplitFee("abc", 50); err == nil {
 		t.Fatal("want error on a non-numeric amount")
-	}
-}
-
-func TestLiveFeeBps_ChainErrorIsReturnedNotGuessed(t *testing.T) {
-	v := newFeeViewFailing(t)
-	if _, err := v.LiveFeeBps(context.Background(), 146, "USDT"); err == nil {
-		t.Fatal("want error on unreadable chain")
-	}
-}
-
-func TestTradeFeeSnapshotBps_SumsAndRejectsUnknown(t *testing.T) {
-	if got, ok := feeBpsFromSnapshot(190, 40, true); !ok || got != 230 {
-		t.Fatalf("got %d, %v", got, ok)
-	}
-	if _, ok := feeBpsFromSnapshot(0, 0, false); ok {
-		t.Fatal("a failed read must yield no value")
 	}
 }

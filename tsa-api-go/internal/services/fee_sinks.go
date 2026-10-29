@@ -2,11 +2,29 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 )
+
+// FeeSinkStatus is one escrow's answer to "where do your fees go?".
+// Reason is set when the read could not be made; SystemWallet is then empty.
+type FeeSinkStatus struct {
+	// Label names the contract's role ("P2P escrow", "Product escrow", ...).
+	Label    string `json:"label"`
+	ChainID  int64  `json:"chainId"`
+	ChainKey string `json:"chainKey"`
+	Contract string `json:"contract"`
+	// SystemWallet is the address this contract pays fees to.
+	SystemWallet string `json:"systemWallet,omitempty"`
+	// Source is where SystemWallet was read from: "systemWallet" (the contract's
+	// own fee wallet) or "owner" (a contract with no fee wallet pays its owner).
+	Source string `json:"source,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
 
 // Where a FeeSinkStatus.SystemWallet was read from.
 const (
@@ -24,6 +42,18 @@ type FeeSinkContract struct {
 	Address  string
 	Caller   contractCaller
 }
+
+// parsedFeeSinkABI is the two fee-destination views ProductEscrowV2 and ServiceContactV2 share.
+var parsedFeeSinkABI = func() abi.ABI {
+	parsed, err := abi.JSON(strings.NewReader(`[
+		{"inputs":[],"name":"systemWallet","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
+		{"inputs":[],"name":"owner","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"}
+	]`))
+	if err != nil {
+		panic(fmt.Sprintf("fee sinks: parse ABI: %v", err))
+	}
+	return parsed
+}()
 
 // FeeSinks reports where ProductEscrowV2 and ServiceContactV2 pay their fees.
 // A contract that predates setSystemWallet reverts on systemWallet(); it pays
@@ -73,10 +103,8 @@ func readFeeDestination(c FeeSinkContract) (addr, source, reason string) {
 	if c.Address == "" {
 		return "", "", "contract address not configured"
 	}
-	// callP2PView packs against the P2P ABI; systemWallet() and owner() share
-	// their selectors across the escrows (pinned by TestFeeSinkSelectors).
 	ctx := context.Background()
-	vals, err := callP2PView(ctx, c.Caller, c.Address, "systemWallet")
+	vals, err := callABIView(ctx, parsedFeeSinkABI, c.Caller, c.Address, "systemWallet")
 	switch {
 	case err == nil:
 		if a, ok := vals[0].(common.Address); ok && a != (common.Address{}) {
@@ -85,7 +113,7 @@ func readFeeDestination(c FeeSinkContract) (addr, source, reason string) {
 	case !isRevert(err):
 		return "", "", err.Error()
 	}
-	vals, err = callP2PView(ctx, c.Caller, c.Address, "owner")
+	vals, err = callABIView(ctx, parsedFeeSinkABI, c.Caller, c.Address, "owner")
 	if err != nil {
 		return "", "", err.Error()
 	}
@@ -98,7 +126,7 @@ func readFeeDestination(c FeeSinkContract) (addr, source, reason string) {
 
 // CombinedFeeSinks concatenates several readers into one, in order. Readers
 // must tolerate a nil receiver: the nil check below does not catch a typed nil
-// pointer stored in the interface (the P2P registry is one).
+// pointer stored in the interface (the core registry is one).
 type CombinedFeeSinks []interface{ SystemWallets() []FeeSinkStatus }
 
 func (c CombinedFeeSinks) SystemWallets() []FeeSinkStatus {

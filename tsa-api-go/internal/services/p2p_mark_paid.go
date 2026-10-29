@@ -49,7 +49,7 @@ func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID 
 	if !common.IsHexAddress(payerAddress) {
 		return nil, nil, fmt.Errorf("%w: invalid payer address", ErrInvalidParams)
 	}
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -57,7 +57,7 @@ func (s *P2PTradeService) PrepareMarkPaid(ctx context.Context, tradeID, payerID 
 		return nil, nil, err
 	}
 	// Build the tx before saving anything so a refused prepare changes nothing.
-	unsignedTx, err := escrow.PrepareMarkPaid(HashID(trade.ID), payerAddress)
+	unsignedTx, err := escrow.PrepareMarkPaid(key, payerAddress)
 	if err != nil {
 		log.Printf("[p2p PrepareMarkPaid] prepare failed: trade=%s payer=%s err=%v", trade.ID, payerAddress, err)
 		if isChainRevert(err) {
@@ -107,11 +107,11 @@ func (s *P2PTradeService) ConfirmMarkPaid(ctx context.Context, tradeID, payerID 
 	default:
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := escrow.VerifyTradePaid(txHash, HashID(trade.ID)); err != nil {
+	if _, err := escrow.VerifyTradePaid(txHash, key); err != nil {
 		return nil, fmt.Errorf("verify on-chain markPaid: %w", err)
 	}
 	// Defence in depth: the prepare already required a recorded open, but the

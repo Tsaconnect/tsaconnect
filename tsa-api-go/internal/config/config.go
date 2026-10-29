@@ -312,7 +312,6 @@ type Config struct {
 	ProductEscrowAddress   string
 	ServiceContractAddress string
 	OTCMarketplaceAddress  string
-	P2PEscrowAddress       string
 
 	// OTCMarketplaceDeployBlock is where the OTC sell cap starts reading the
 	// desk's Bought/Sold logs. 0 = scan from genesis (correct, just slower);
@@ -644,10 +643,6 @@ type Config struct {
 	// admin publish endpoint errors clearly, user claim-data returns empty). On
 	// Sonic, same chain as MCGP.
 	RewardDistributorAddress string
-	// P2PEscrowEIP712Version is the voucher domain `version` matching the
-	// deployed P2PEscrow (see chainPreset.eip712Version). Stamped into the
-	// typed-data the app signs.
-	P2PEscrowEIP712Version string
 
 	// P2PChains is the per-chain P2P deployment registry keyed by chainID,
 	// assembled in Load(). Sonic is always present; BSC is present only when
@@ -1286,12 +1281,6 @@ func Load() *Config {
 	}
 	// SP6 reward distributor — UNSET keeps root-publishing dormant.
 	cfg.RewardDistributorAddress = strings.TrimSpace(getEnv("REWARD_DISTRIBUTOR_ADDRESS", ""))
-	// P2PEscrow proxy address — preset by SONIC_NETWORK; override via env if
-	// you need to point at a hot-fix deployment.
-	cfg.P2PEscrowAddress = strings.TrimSpace(getEnv("P2P_ESCROW_ADDRESS", preset.p2pEscrow))
-	// Must match the deployed contract's EIP-712 domain version (moves in
-	// lockstep with P2P_ESCROW_ADDRESS; override only when overriding the addr).
-	cfg.P2PEscrowEIP712Version = getEnv("P2P_ESCROW_EIP712_VERSION", preset.eip712Version)
 
 	// Mailjet email service
 	cfg.MailjetAPIKey = os.Getenv("MAILJET_API_KEY")

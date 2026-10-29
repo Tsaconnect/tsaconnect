@@ -21,33 +21,32 @@ import (
 // from it. Same convention as release_tx_hash = "reconciled".
 const openTxReconciled = "reconciled"
 
-// openDeadlineFromChain is the contract's cancelByTimeout deadline:
-// on-chain createdAt + paymentWindow. False when createdAt is unknown.
+// openDeadlineFromChain is the contract's cancelByTimeout deadline, the expiresAt it snapshotted
+// at open. False when it is unknown.
 func openDeadlineFromChain(onchain *OnChainP2PTrade) (time.Time, bool) {
-	if onchain == nil || onchain.CreatedAt == nil || onchain.CreatedAt.Sign() <= 0 {
+	if onchain == nil || onchain.ExpiresAt == nil || onchain.ExpiresAt.Sign() <= 0 {
 		return time.Time{}, false
 	}
-	return time.Unix(onchain.CreatedAt.Int64(), 0).UTC().Add(p2pPaymentWindow), true
+	return time.Unix(onchain.ExpiresAt.Int64(), 0).UTC(), true
 }
 
 // openRecordUpdates is the column set written when a trade's on-chain open is
 // recorded — by ConfirmOpenTrade (real tx hash) and by the backfill (marker).
-// The off-chain deadline is re-anchored to the on-chain createdAt because
+// The off-chain deadline is re-anchored to the on-chain expiresAt because
 // expires_at was set at intent time and drifts early if the open mined late,
 // which would nudge a timeout-cancel the contract reverts. With no on-chain
-// createdAt the intent-time deadline is kept.
+// expiresAt the intent-time deadline is kept.
 //
 // fee_bps is the trade's snapshotted platform+gas bps (the fee the escrow takes
 // at release), stored with its platform and gas legs, all from the trade read
-// the caller already made; a read with no snapshot (pre-V3) leaves them unset.
+// the caller already made.
 func (s *P2PTradeService) openRecordUpdates(openTxHash string, t *models.P2PTrade, onchain *OnChainP2PTrade) map[string]any {
 	updates := map[string]any{"open_tx_hash": openTxHash, "updated_at": s.clock.Now()}
 	if onchain != nil {
-		if bps, ok := feeBpsFromSnapshot(onchain.PlatformFeeBps, onchain.GasFeeBps, onchain.FeeSnapshotFound); ok {
-			platform, gas := int(onchain.PlatformFeeBps), int(onchain.GasFeeBps)
-			updates["fee_bps"], updates["fee_platform_bps"], updates["fee_gas_bps"] = bps, platform, gas
-			t.FeeBps, t.FeePlatformBps, t.FeeGasBps = &bps, &platform, &gas
-		}
+		platform, gas := int(onchain.PlatformFeeBps), int(onchain.GasFeeBps)
+		bps := platform + gas
+		updates["fee_bps"], updates["fee_platform_bps"], updates["fee_gas_bps"] = bps, platform, gas
+		t.FeeBps, t.FeePlatformBps, t.FeeGasBps = &bps, &platform, &gas
 	}
 	if deadline, ok := openDeadlineFromChain(onchain); ok {
 		updates["expires_at"] = deadline
@@ -55,7 +54,7 @@ func (s *P2PTradeService) openRecordUpdates(openTxHash string, t *models.P2PTrad
 	return updates
 }
 
-// onChainOpenMatches decides whether the escrow's trade under HashID(t.ID) is
+// onChainOpenMatches decides whether the escrow's trade under t's key is
 // the open we prepared for t on ad. The contract lets the opener choose the
 // token (any accepted one) and, on openTradeWithDeposit, the merchant (the
 // on-chain buyer) freely — so an opener naming their own second wallet as
@@ -74,7 +73,12 @@ func (s *P2PTradeService) openRecordUpdates(openTxHash string, t *models.P2PTrad
 // voucher (or any wallet, on a buy-ad) can open under our trade id first and
 // would otherwise be recorded — and later paid — as the counterparty. A row
 // with no stored opener (prepared before the column existed) is refused.
-func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, onchain *OnChainP2PTrade) error {
+//
+// A payment merchant's buy-ad trade must also name the platform release key as its releaser
+// (`releaseKey`): the platform pays the user naira first and then releases, and openTradeWithDeposit
+// takes the releaser from the user's own tx, so an open that named anyone else would leave the
+// platform unable to release after paying out — while the user cancels by timeout and keeps both.
+func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, onchain *OnChainP2PTrade, releaseKey common.Address) error {
 	mismatch := func(what string) error {
 		return fmt.Errorf("%w: on-chain trade does not match this trade's %s", ErrInvalidTransition, what)
 	}
@@ -108,6 +112,10 @@ func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, 
 	if funding.OnChainOpener(onchain) != common.HexToAddress(t.OpenerAddress) {
 		return mismatch("opener")
 	}
+	if ad.PMID != nil && funding.JIT() &&
+		(releaseKey == (common.Address{}) || onchain.TradeReleaser != releaseKey) {
+		return mismatch("releaser")
+	}
 	return nil
 }
 
@@ -129,7 +137,7 @@ func (s *P2PTradeService) verifyOpenOnChain(ctx context.Context, path string, t 
 	if err != nil {
 		return err
 	}
-	if err := onChainOpenMatches(t, ad, tokenAddr, onchain); err != nil {
+	if err := onChainOpenMatches(t, ad, tokenAddr, onchain, common.HexToAddress(s.releaseAddress)); err != nil {
 		if onchain != nil && onchain.Exists {
 			log.Printf("[p2p] ALERT p2p_open_backfill_mismatch_total=1 path=%s trade=%s err=%v chainAmount=%v dbAmount=%s chainFunding=%d dbFunding=%d chainToken=%s token=%s chainSeller=%s chainBuyer=%s opener=%q",
 				path, t.ID, err, onchain.Amount, t.TokenAmount, onchain.Funding, t.Funding,
@@ -182,7 +190,11 @@ func (s *P2PTradeService) openRecorded(ctx context.Context, t *models.P2PTrade, 
 	if t.OpenRecorded() {
 		return true, nil
 	}
-	onchain, err := escrow.ReadTrade(HashID(t.ID))
+	key, err := tradeKeyOf(t)
+	if err != nil {
+		return false, err
+	}
+	onchain, err := escrow.ReadTrade(key)
 	if err != nil {
 		return false, fmt.Errorf("%w: read on-chain trade: %v", ErrChainUnavailable, err)
 	}

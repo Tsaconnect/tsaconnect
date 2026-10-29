@@ -23,13 +23,12 @@ func directLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// Every hot key the API holds, the PM admin EOA and the known production
-// operator and treasury are forbidden direct-escrow admins; unset and
-// malformed keys are skipped.
-func TestDirectEscrowForbiddenAdmins_EveryKnownHotKey(t *testing.T) {
-	cfg := &config.Config{PMReleasePrivateKey: testKeyA, RelayerPrivateKey: "0x" + testKeyB,
-		RampTreasuryPrivateKey: "not-a-key", PMAdminEOAAddress: "0x00000000000000000000000000000000000038cE"}
-	got := directEscrowForbiddenAdmins(cfg)
+// Every hot key the API holds and the known production operator and treasury may hold no role on
+// a core contract; unset and malformed keys are skipped.
+func TestAPIHotKeys_EveryKnownHotKey(t *testing.T) {
+	cfg := &config.Config{PMReleasePrivateKey: testKeyA, RelayerPrivateKey: "0x" + testKeyB, RampTreasuryPrivateKey: "not-a-key",
+		PMAdminEOAAddress: "0x00000000000000000000000000000000000038cE"}
+	got := apiHotKeys(cfg)
 	want := map[string]string{
 		"PM_RELEASE_PRIVATE_KEY": signerAddress(testKeyA),
 		// IT operator and gas sponsor fall back to the operator key.
@@ -49,111 +48,92 @@ func TestDirectEscrowForbiddenAdmins_EveryKnownHotKey(t *testing.T) {
 			t.Fatalf("%s = %q, want %q (all: %v)", k, got[k], v, got)
 		}
 	}
-	if n := len(directEscrowForbiddenAdmins(&config.Config{})); n != len(knownHotKeys) {
+	if n := len(apiHotKeys(&config.Config{})); n != len(knownHotKeys) {
 		t.Fatalf("no keys configured: %d addresses, want only the %d known hot keys", n, len(knownHotKeys))
 	}
 }
 
-func directGuardDB(t *testing.T) *gorm.DB {
+func escrowMoveDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Exec(`CREATE TABLE p2p_trades (id TEXT PRIMARY KEY, chain_id INTEGER, status TEXT, it_intent_id TEXT)`).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Exec(`CREATE TABLE p2p_ads (id TEXT PRIMARY KEY, chain_id INTEGER, status TEXT, pm_id TEXT)`).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Exec(`CREATE TABLE payment_merchants (id TEXT PRIMARY KEY, kind TEXT)`).Error; err != nil {
-		t.Fatal(err)
+	for _, ddl := range []string{
+		`CREATE TABLE p2p_trades (id TEXT PRIMARY KEY, chain_id INTEGER, status TEXT, it_intent_id TEXT, escrow_address TEXT)`,
+		`CREATE TABLE p2p_ads (id TEXT PRIMARY KEY, chain_id INTEGER, status TEXT, side TEXT, pm_id TEXT, escrow_address TEXT)`,
+		`CREATE TABLE payment_merchants (id TEXT PRIMARY KEY, kind TEXT)`,
+	} {
+		if err := db.Exec(ddl).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	return db
 }
 
-// Plan p2p-bsc §6 rollback: emptying the direct row while direct trades or
-// ads are live refuses boot; terminal rows and retired slices do not; a
-// configured row whose escrow is not running only warns.
-func TestCheckDirectUnconfigure(t *testing.T) {
-	db := directGuardDB(t)
-	emptied := &config.Config{DormantP2PChains: []config.P2PChainConfig{{ChainID: 56, ChainKey: "bsc", Audience: config.P2PAudienceDirect}}}
-	none := services.NewP2PEscrowRegistryFromMap(nil, "2")
-	trade := func(status string, slice bool) {
+// The hard switch: boot refuses while a live trade or an openable sell-ad sits on any escrow but
+// its chain's P2PTradeEscrow. Terminal rows, retired slices, LP stock ads, buy-ads and unsigned
+// ads do not count; nor does case.
+func TestCheckP2PEscrowMove(t *testing.T) {
+	const core = "0x00000000000000000000000000000000000E5C03"
+	const v3 = "0xD16c1597EA3be8D2017698CC5d6Bf53b595EEb03"
+	db := escrowMoveDB(t)
+	cfg := &config.Config{CoreSet: config.CoreSetDev, P2PChains: map[int64]config.P2PChainConfig{56: {ChainID: 56, EscrowAddress: core}}}
+	trade := func(chain int, status, escrow string, slice bool) {
 		var intent any
 		if slice {
 			intent = uuid.NewString()
 		}
-		db.Exec(`INSERT INTO p2p_trades (id, chain_id, status, it_intent_id) VALUES (?, 56, ?, ?)`, uuid.NewString(), status, intent)
+		db.Exec(`INSERT INTO p2p_trades (id, chain_id, status, it_intent_id, escrow_address) VALUES (?, ?, ?, ?, ?)`, uuid.NewString(), chain, status, intent, escrow)
 	}
-	trade(models.P2PTradeStatusReleased, false)
-	trade(models.P2PTradeStatusCancelled, false)
-	trade(models.P2PTradeStatusPendingPayment, true) // a retired slice: checkSliceLeftovers' business
-	db.Exec(`INSERT INTO p2p_ads (id, chain_id, status) VALUES (?, 56, ?)`, uuid.NewString(), models.P2PAdStatusCancelled)
+	ad := func(chain int, status, side, escrow string, pm any) {
+		db.Exec(`INSERT INTO p2p_ads (id, chain_id, status, side, pm_id, escrow_address) VALUES (?, ?, ?, ?, ?, ?)`, uuid.NewString(), chain, status, side, pm, escrow)
+	}
+	trade(56, models.P2PTradeStatusReleased, "", false)
+	trade(56, models.P2PTradeStatusPendingPayment, "", true)
+	trade(56, models.P2PTradeStatusPaid, strings.ToLower(core), false)
+	ad(56, models.P2PAdStatusActive, models.P2PAdSideBuy, "", nil)
+	ad(56, models.P2PAdStatusPending, models.P2PAdSideSell, "", nil)
+	ad(56, models.P2PAdStatusActive, models.P2PAdSideSell, core, nil)
 	lp := uuid.NewString()
 	db.Exec(`INSERT INTO payment_merchants (id, kind) VALUES (?, ?)`, lp, models.PaymentMerchantKindLP)
-	db.Exec(`INSERT INTO p2p_ads (id, chain_id, status, pm_id) VALUES (?, 56, ?, ?)`, uuid.NewString(), models.P2PAdStatusActive, lp)
-	if err := checkDirectUnconfigure(db, emptied, none); err != nil {
-		t.Fatalf("only terminal rows and a retired LP stock ad: %v", err)
-	}
-	db.Exec(`INSERT INTO p2p_ads (id, chain_id, status) VALUES (?, 56, ?)`, uuid.NewString(), models.P2PAdStatusPaused)
-	if err := checkDirectUnconfigure(db, emptied, none); err == nil || !strings.Contains(err.Error(), "p2p_direct_unconfigure_refused") {
-		t.Fatalf("a live direct ad on an emptied row: %v", err)
-	}
-	trade(models.P2PTradeStatusPaid, false)
-	if err := checkDirectUnconfigure(db, emptied, none); err == nil || !strings.Contains(err.Error(), "trades and ads") {
-		t.Fatalf("live trades and ads: %v", err)
+	ad(56, models.P2PAdStatusActive, models.P2PAdSideSell, "", lp)
+	if err := checkP2PEscrowMove(db, cfg); err != nil {
+		t.Fatalf("nothing live on another escrow: %v", err)
 	}
 
+	ad(56, models.P2PAdStatusPaused, models.P2PAdSideSell, v3, nil)
+	if err := checkP2PEscrowMove(db, cfg); err == nil || !strings.Contains(err.Error(), "p2p_escrow_move_refused") || !strings.Contains(err.Error(), "sell-ads on chain 56") {
+		t.Fatalf("a paused V3 sell-ad: %v", err)
+	}
+	trade(146, models.P2PTradeStatusPendingPayment, "", false) // a chain with no P2P after the switch
+	err := checkP2PEscrowMove(db, cfg)
+	if err == nil || !strings.Contains(err.Error(), "trades on chain 146 at the pre-switch escrow") {
+		t.Fatalf("a live trade on a chain without P2P: %v", err)
+	}
+
+	// No core set (prod before cutover): P2P is dormant, so the same rows only alert.
 	buf := directLog(t)
-	configured := &config.Config{P2PChains: map[int64]config.P2PChainConfig{56: {ChainID: 56, Audience: config.P2PAudienceDirect}}}
-	if err := checkDirectUnconfigure(db, configured, none); err != nil {
-		t.Fatalf("a configured row whose escrow is not running must boot: %v", err)
+	if err := checkP2PEscrowMove(db, &config.Config{}); err != nil {
+		t.Fatalf("dormant P2P must boot: %v", err)
 	}
-	if !strings.Contains(buf.String(), "WARN p2p_direct_chain_not_running chain=56") {
-		t.Fatalf("no warning:\n%s", buf.String())
-	}
-	// Sonic rows (audience all/pm) are not this guard's.
-	if err := checkDirectUnconfigure(db, &config.Config{}, none); err != nil {
-		t.Fatalf("no direct row anywhere: %v", err)
+	if !strings.Contains(buf.String(), "ALERT p2p_escrow_move_pending") {
+		t.Fatalf("no alert:\n%s", buf.String())
 	}
 }
 
 // A read error is an ALERT, never a refusal.
-func TestCheckDirectUnconfigure_ReadErrorAlertsAndBoots(t *testing.T) {
+func TestCheckP2PEscrowMove_ReadErrorAlertsAndBoots(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{}) // no tables
 	if err != nil {
 		t.Fatal(err)
 	}
 	buf := directLog(t)
-	cfg := &config.Config{DormantP2PChains: []config.P2PChainConfig{{ChainID: 56, Audience: config.P2PAudienceDirect}}}
-	if err := checkDirectUnconfigure(db, cfg, services.NewP2PEscrowRegistryFromMap(nil, "2")); err != nil {
+	if err := checkP2PEscrowMove(db, &config.Config{}); err != nil {
 		t.Fatalf("a read error refused boot: %v", err)
 	}
-	if !strings.Contains(buf.String(), "ALERT p2p_direct_unconfigure_unchecked") {
+	if !strings.Contains(buf.String(), "ALERT p2p_escrow_move_unchecked") {
 		t.Fatalf("no alert:\n%s", buf.String())
-	}
-}
-
-// A direct row's FeeManager is dropped when its escrow is not running; a
-// running one, and Sonic's, are kept.
-func TestDropUngatedDirectFeeManagers(t *testing.T) {
-	const fm = "0x00000000000000000000000000000000000FEE01"
-	cfg := &config.Config{
-		P2PChains: map[int64]config.P2PChainConfig{56: {ChainID: 56, Audience: config.P2PAudienceDirect, FeeManager: fm}},
-		FeeManagerChains: map[int64]config.FeeManagerChainConfig{
-			56: {ChainID: 56, ChainKey: "bsc", Address: fm}, 146: {ChainID: 146, ChainKey: "sonic", Address: "0x00000000000000000000000000000000000FEE02"}},
-	}
-	dropUngatedDirectFeeManagers(cfg, services.NewP2PEscrowRegistryFromMap(map[int64]services.P2PEscrowAdapter{56: nil}, "2"))
-	if len(cfg.FeeManagerChains) != 2 {
-		t.Fatalf("a running direct escrow lost its FeeManager: %v", cfg.FeeManagerChains)
-	}
-	dropUngatedDirectFeeManagers(cfg, services.NewP2PEscrowRegistryFromMap(nil, "2"))
-	if _, ok := cfg.FeeManagerChains[56]; ok {
-		t.Fatal("the gate-failed direct escrow's FeeManager must be unregistered")
-	}
-	if _, ok := cfg.FeeManagerChains[146]; !ok {
-		t.Fatal("Sonic's FeeManager must be kept")
 	}
 }
 

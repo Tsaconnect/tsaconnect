@@ -200,6 +200,8 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrDisputeAlreadyOpen),
 		errors.Is(err, services.ErrActiveTradeExists),
 		errors.Is(err, services.ErrSellerPoolInsufficient),
+		errors.Is(err, services.ErrRetiredEscrow),
+		errors.Is(err, services.ErrPMReleaserNotSet),
 		// The asset was delisted from P2P after this ad/pool existed. Creating
 		// an ad in it also carries ErrInvalidParams and maps to 400 above.
 		errors.Is(err, services.ErrAssetNotTradeable):
@@ -214,11 +216,6 @@ func mapServiceError(c *gin.Context, err error) bool {
 		errors.Is(err, services.ErrChainUnavailable),
 		errors.Is(err, services.ErrPoolClosed):
 		status = http.StatusServiceUnavailable
-	case errors.Is(err, services.ErrPhase2Migration):
-		// Legacy lock-on-publish surface invoked by a stale caller. Map to
-		// 410 Gone so the FE can distinguish "your client is out of date"
-		// from a generic server bug.
-		status = http.StatusGone
 	}
 	body := gin.H{"success": false, "message": err.Error()}
 	// The KYC refusal is the one error here the app routes on rather than just
@@ -234,6 +231,12 @@ func mapServiceError(c *gin.Context, err error) bool {
 	}
 	if errors.Is(err, services.ErrPMNotOnDirect) {
 		body["code"] = services.PMNotOnDirectCode
+	}
+	if errors.Is(err, services.ErrRetiredEscrow) {
+		body["code"] = "p2p_escrow_retired"
+	}
+	if errors.Is(err, services.ErrPMReleaserNotSet) {
+		body["code"] = "pm_releaser_not_set"
 	}
 	c.AbortWithStatusJSON(status, body)
 	return true
@@ -1944,4 +1947,62 @@ func isISO2Country(s string) bool {
 		}
 	}
 	return true
+}
+
+// ─── Payment-merchant releaser (setReleaser) ───────────────────────────────
+
+type pmReleaserRequest struct {
+	ChainID int64  `json:"chainId"` // 0: the default chain
+	TxHash  string `json:"txHash"`  // confirm only
+}
+
+// GetPMReleaser handles GET /p2p/pm/releaser?chainId= — whether the caller's PM maker wallet has
+// named the platform release key; until it has, its sell-ads cannot be signed or opened.
+func (h *P2PHandler) GetPMReleaser(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	chainID, _ := strconv.ParseInt(c.Query("chainId"), 10, 64)
+	st, err := h.trade.PMReleaser(c.Request.Context(), user.ID, chainID)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": st})
+}
+
+// PreparePMReleaser handles POST /p2p/pm/releaser — the maker wallet's unsigned setReleaser tx.
+func (h *P2PHandler) PreparePMReleaser(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	var req pmReleaserRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	raw, err := h.trade.PreparePMReleaser(c.Request.Context(), user.ID, req.ChainID)
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"unsignedTx": unsignedTxJSON(raw)}})
+}
+
+// ConfirmPMReleaser handles POST /p2p/pm/releaser/confirm {chainId, txHash}.
+func (h *P2PHandler) ConfirmPMReleaser(c *gin.Context) {
+	user, ok := h.require(c)
+	if !ok {
+		return
+	}
+	var req pmReleaserRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.TxHash) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "txHash is required"})
+		return
+	}
+	st, err := h.trade.ConfirmPMReleaser(c.Request.Context(), user.ID, req.ChainID, strings.TrimSpace(req.TxHash))
+	if mapServiceError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": st})
 }

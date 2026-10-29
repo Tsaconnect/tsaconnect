@@ -12,10 +12,10 @@ import (
 // core_contracts.go — the audit-ready core contract sets (FeeConfig, OrderEscrow, P2PTradeEscrow;
 // smart-contracts/deploy/core.js), slice 1 of docs/plans/2026-10-27-contracts-v2-migration.md.
 //
-// Nothing reads a set yet: this only makes the addresses known and checked at boot. CORE_CONTRACTS
+// Marketplace orders and P2P run on the selected set (P2P chains bind to it below). CORE_CONTRACTS
 // selects one: unset or "off" (the default, and what prod runs) keeps the core set dormant; "dev"
 // is the throwaway set whose admin is a test deployer and must never be selected in prod; "prod"
-// is the PM-owned set, which has no rows until it is deployed. Addresses live here, not in env
+// is the PM-owned set (deployed 2026-10-29). Addresses live here, not in env
 // (decision 17), so a set's contracts cannot drift apart.
 
 // Core contract set names (CORE_CONTRACTS).
@@ -69,8 +69,31 @@ var coreSets = map[string]map[string]coreRow{
 			admin:       "0xd963C3C596f692b4fD8e53bD9B60Ca1843400Da3",
 			forwarder:   "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4",
 			deployBlock: 81691442},
+		// Deployed 2026-10-29 with CORE_DEV=1 (same throwaway deployer, so the escrow proxy happens to
+		// share its address with Sonic's FeeConfig — different chain). Direct P2P only: no OrderEscrow,
+		// no forwarder (decision Q12), 1.9% p2p_platform.
+		"bsc": {network: "mainnet",
+			feeConfig:   "0xa855BeB1D59b6d15e92571010Bd92a46aef6Af47",
+			p2pEscrow:   "0x9aba9E3e3bCD5d609ef99C6dC5973386769e2572",
+			admin:       "0xd963C3C596f692b4fD8e53bD9B60Ca1843400Da3",
+			deployBlock: 130498364},
 	},
-	CoreSetProd: {},
+	// Deployed 2026-10-29 by the throwaway deployer 0xd963…0Da3, which holds no role (read back).
+	// Admin is the PM wallet on both chains; resolvers and pausers are the PM's to grant.
+	CoreSetProd: {
+		"sonic": {network: "mainnet",
+			feeConfig:   "0x4e4Dbb98e056D349b363F38cf5fbC6269Bae7C5d",
+			orderEscrow: "0x790914f874221FAb16a99E8A7E0AaDF08C8Aa0Fb",
+			p2pEscrow:   "0x08857a2EA9DE5C2c2646788e87e500e60Ba4dDfA",
+			admin:       "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",
+			forwarder:   "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4",
+			deployBlock: 81818117},
+		"bsc": {network: "mainnet",
+			feeConfig:   "0x53F943ba9c993fd2349Bcf68923B8d15c1F67bc8",
+			p2pEscrow:   "0xDC0395D331CBAf1c38F4542AA89301500Bb3062F",
+			admin:       "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",
+			deployBlock: 130533218},
+	},
 }
 
 // assembleCoreContracts fills cfg.CoreSet and cfg.CoreContracts from CORE_CONTRACTS. It runs after
@@ -81,6 +104,39 @@ var coreSets = map[string]map[string]coreRow{
 // deployed) alerts and stays dormant rather than failing boot: dormant is what prod runs, so a bad
 // value can never crash-loop it. A broken row in a set is a code bug and does fail boot.
 func assembleCoreContracts(cfg *Config, sets map[string]map[string]coreRow) error {
+	if err := selectCoreContracts(cfg, sets); err != nil {
+		return err
+	}
+	bindP2PChainsToCore(cfg)
+	return nil
+}
+
+// CoreP2PEIP712Version is the EIP-712 domain version P2PTradeEscrow initializes with
+// (`__EIP712_init("TSAConnectP2PEscrow", "3")`); the vouchers the app signs carry it.
+const CoreP2PEIP712Version = "3"
+
+// bindP2PChainsToCore is the P2P hard switch (slice 8): every P2P chain's escrow is the selected
+// core set's P2PTradeEscrow. A chain the set has no row for, and every chain while the set is
+// dormant, has no P2P (it moves to DormantP2PChains). The preset rows keep only the chain's
+// audience and assets; their legacy escrow, FeeManager and owner are not P2P's any more.
+func bindP2PChainsToCore(cfg *Config) {
+	for chainID, cc := range cfg.P2PChains {
+		set, ok := cfg.CoreContracts[chainID]
+		if !ok {
+			delete(cfg.P2PChains, chainID)
+			cfg.DormantP2PChains = append(cfg.DormantP2PChains,
+				P2PChainConfig{ChainID: chainID, ChainKey: cc.ChainKey, Network: cc.Network, Audience: cc.Audience})
+			log.Printf("[config] P2P %s(%d) dormant: core set %q has no P2PTradeEscrow on it", cc.ChainKey, chainID, cfg.CoreSet)
+			continue
+		}
+		cc.EscrowAddress, cc.EIP712Version = set.P2PEscrow, CoreP2PEIP712Version
+		cc.FeeManager, cc.ExpectedOwner = "", ""
+		cfg.P2PChains[chainID] = cc
+		log.Printf("[config] P2P %s(%d) on core set %s: P2PTradeEscrow=%s", cc.ChainKey, chainID, cfg.CoreSet, set.P2PEscrow)
+	}
+}
+
+func selectCoreContracts(cfg *Config, sets map[string]map[string]coreRow) error {
 	raw := strings.TrimSpace(getEnv("CORE_CONTRACTS", ""))
 	set := strings.ToLower(raw)
 	cfg.CoreSet = CoreSetOff

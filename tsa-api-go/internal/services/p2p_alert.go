@@ -21,6 +21,9 @@ const (
 	// P2PAlertExpiredWithProof: the expiry canceller did not refund an expired
 	// direct trade whose buyer saved payment proof without marking paid on-chain.
 	P2PAlertExpiredWithProof P2PAlertKind = "expired_with_proof"
+	// P2PAlertDisputeUnresolved: a dispute is still open (Age); BackstopIn is how long until anyone
+	// may close it on-chain in the seller's favour (P2PDisputeBackstop).
+	P2PAlertDisputeUnresolved P2PAlertKind = "dispute_unresolved"
 )
 
 const p2pAlertReasonMax = 300
@@ -35,7 +38,8 @@ type P2PAlert struct {
 	FromStatus               string
 	MarkedPaidAt             *time.Time
 	RaisedRole, Reason       string        // dispute_filed
-	Age                      time.Duration // paid_unreleased
+	Age                      time.Duration // paid_unreleased, dispute_unresolved
+	BackstopIn               time.Duration // dispute_unresolved
 }
 
 type P2PAlerter interface {
@@ -67,7 +71,11 @@ func (n *InboundHoldNotifier) NotifyP2P(_ context.Context, a P2PAlert) error {
 	case P2PAlertExpiredWithProof:
 		subject = "P2P trade expired with payment proof — " + size
 		title = "An expired P2P trade has payment proof but no on-chain mark-paid"
-		todo = "The buyer saved payment proof but her on-chain mark-paid never landed, so it was not auto-cancelled. Check the proof and chat: the buyer can still mark paid or dispute; either party can cancel by timeout."
+		todo = "The buyer saved payment proof but her on-chain mark-paid never landed, so it was not auto-cancelled. Past the payment window she can no longer mark paid or dispute on-chain: only the seller's release or a cancel by timeout (which returns the crypto to the seller) remains. Check the proof and chat, and ask the seller to release if the payment is real."
+	case P2PAlertDisputeUnresolved:
+		subject = fmt.Sprintf("P2P dispute open %s — %s", a.Age.Round(time.Hour), size)
+		title = "A P2P dispute is still unresolved"
+		todo = fmt.Sprintf("Resolve it in the console. In %s anyone can close it on-chain, which returns the crypto to the seller whatever the buyer paid.", a.BackstopIn.Round(time.Hour))
 	default:
 		subject = "P2P trade alert — " + size
 		title = "P2P trade alert"
@@ -88,7 +96,11 @@ func (n *InboundHoldNotifier) NotifyP2P(_ context.Context, a P2PAlert) error {
 		fmt.Fprintf(&b, "Reason: %s\n", capRunes(RedactAlertText(a.Reason), p2pAlertReasonMax))
 	}
 	if a.Age > 0 {
-		fmt.Fprintf(&b, "Paid for: %s\n", a.Age)
+		label := "Paid for"
+		if a.Kind == P2PAlertDisputeUnresolved {
+			label = "Disputed for"
+		}
+		fmt.Fprintf(&b, "%s: %s\n", label, a.Age)
 	}
 	if todo != "" {
 		b.WriteString("\n" + todo)
@@ -97,7 +109,7 @@ func (n *InboundHoldNotifier) NotifyP2P(_ context.Context, a P2PAlert) error {
 	ctaText, ctaURL := "", ""
 	if n.consoleBaseURL != "" {
 		switch a.Kind {
-		case P2PAlertDisputeFiled:
+		case P2PAlertDisputeFiled, P2PAlertDisputeUnresolved:
 			ctaText, ctaURL = "Open the dispute", n.consoleBaseURL+"/p2p-disputes/"+a.TradeID.String()
 		case P2PAlertPaidUnreleased, P2PAlertExpiredWithProof:
 			ctaText, ctaURL = "Open the trade", n.consoleBaseURL+"/p2p-trades/"+a.TradeID.String()

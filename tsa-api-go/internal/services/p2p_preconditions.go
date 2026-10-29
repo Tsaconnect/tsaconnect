@@ -95,8 +95,10 @@ func canDispute(userID uuid.UUID, t *models.P2PTrade) (string, error) {
 	default:
 		return "", refuse(ErrForbidden)
 	}
-	if t.Status != models.P2PTradeStatusPaid && t.Status != models.P2PTradeStatusPendingPayment {
-		return "", refuse(fmt.Errorf("%w: trade status=%s (only pending or paid trades can dispute)",
+	// P2PTradeEscrow disputes only a trade the buyer marked paid; before that the payer has nothing
+	// to prove and the trade simply times out (cancelByTimeout).
+	if t.Status != models.P2PTradeStatusPaid {
+		return "", refuse(fmt.Errorf("%w: trade status=%s (only a trade marked paid can be disputed)",
 			ErrInvalidTransition, t.Status))
 	}
 	return role, nil

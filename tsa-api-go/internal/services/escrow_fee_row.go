@@ -96,11 +96,6 @@ func readEscrowFeeRow(ctx context.Context, caller contractCaller, escrowAddr, to
 	return escrowRate{bps: int(bps), flatUSD: flat, exempt: exempt, active: active, feeManager: fm, symbol: symbol}, nil
 }
 
-// callP2PView is one read-only call against a P2P escrow's own ABI.
-func callP2PView(ctx context.Context, caller contractCaller, escrowAddr, method string, args ...any) ([]any, error) {
-	return callABIView(ctx, parsedP2PEscrowABI, caller, escrowAddr, method, args...)
-}
-
 // callABIView is one read-only call of method on addr, packed and decoded with parsed.
 func callABIView(ctx context.Context, parsed abi.ABI, caller contractCaller, addr, method string, args ...any) ([]any, error) {
 	if caller == nil {

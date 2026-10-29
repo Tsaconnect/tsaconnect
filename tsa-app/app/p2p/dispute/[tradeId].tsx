@@ -127,9 +127,9 @@ const DisputeWizardScreen: React.FC = () => {
     return null;
   }, [trade, user]);
 
-  // A dispute can only be raised by a participant on a live, mid-flight trade.
-  const canDispute =
-    !!role && (trade?.status === 'pending_payment' || trade?.status === 'paid');
+  // A dispute can only be raised by a participant on a trade the buyer marked paid (the escrow
+  // refuses one before that; an unpaid trade times out instead).
+  const canDispute = !!role && trade?.status === 'paid';
 
   // ─── Loading / gate states ────────────────────────────────────────────────
 

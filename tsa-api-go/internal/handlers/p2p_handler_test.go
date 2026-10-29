@@ -71,7 +71,7 @@ type handlerOpenTradeDepositArgs struct {
 
 func newMockEscrow() *mockEscrow {
 	return &mockEscrow{
-		contractAddress: "0xb5B073BF578fE24311ED50e540D9d632f1679261",
+		contractAddress: testEscrowAddress,
 		balance:         services.OnChainBalance{Available: big.NewInt(0), Locked: big.NewInt(0)},
 		allowance:       big.NewInt(0),
 		hashFn:          defaultHashVoucher,
@@ -106,7 +106,7 @@ func (m *mockEscrow) PrepareCancelVoucher(_ string, _ services.AdVoucher) ([]byt
 func (m *mockEscrow) PrepareOpenTradeWithVoucher(_ [32]byte, _ services.AdVoucher, _ []byte, _ string, _ *big.Int) ([]byte, error) {
 	return []byte(`{"tx":"openTrade"}`), nil
 }
-func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error) {
+func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, _, from string) ([]byte, error) {
 	m.lastOpenTradeDepositArgs = &handlerOpenTradeDepositArgs{
 		TradeID: tradeId, Token: token, Amount: new(big.Int).Set(amount),
 		Merchant: merchant, From: from,
@@ -131,8 +131,12 @@ func (m *mockEscrow) PrepareRaiseDispute(_ [32]byte, _ string) ([]byte, error) {
 func (m *mockEscrow) PrepareAdminResolve(_ [32]byte, _ bool, _ string) ([]byte, error) {
 	return []byte(`{"tx":"adminResolve"}`), nil
 }
-func (m *mockEscrow) PrepareAdminRelease(_ [32]byte, _ string) ([]byte, error) {
-	return []byte(`{"tx":"adminRelease"}`), nil
+func (m *mockEscrow) PrepareSetReleaser(_, _ string) ([]byte, error) {
+	return []byte(`{"tx":"setReleaser"}`), nil
+}
+func (m *mockEscrow) ReadReleaser(_ string) (common.Address, error) { return common.Address{}, nil }
+func (m *mockEscrow) VerifyReleaserSet(_ string, seller common.Address) (*services.P2PReleaserSetEvent, error) {
+	return &services.P2PReleaserSetEvent{Seller: seller}, nil
 }
 func (m *mockEscrow) VerifyDeposited(_ string, s, t common.Address) (*services.P2PDepositedEvent, error) {
 	if m.depositedEvent != nil {
@@ -197,9 +201,6 @@ func (m *mockEscrow) ReadTrade(_ [32]byte) (*services.OnChainP2PTrade, error) {
 		return m.onChainTrade, nil
 	}
 	return &services.OnChainP2PTrade{Status: services.OnChainP2PStatusNone}, nil
-}
-func (m *mockEscrow) ReadTradeFeeSnapshot(_ [32]byte) (uint16, uint16, bool) {
-	return 0, 0, false
 }
 func (m *mockEscrow) ReadBalance(_, _ string) (*services.OnChainBalance, error) {
 	avail := m.balance.Available
@@ -716,6 +717,7 @@ func TestCreateAd_ReturnsTypedDataAndPending(t *testing.T) {
 		{"maxPerTrade", "uint256"},
 		{"deadline", "uint256"},
 		{"nonce", "bytes32"},
+		{"taker", "address"},
 	}
 	if len(voucherFields) != len(wantFields) {
 		t.Fatalf("types.AdVoucher has %d fields, want %d: %v", len(voucherFields), len(wantFields), voucherFields)
@@ -1017,7 +1019,8 @@ func TestMapServiceError_StatusCodes(t *testing.T) {
 		{"AssetNotTradeable (open on a delisted ad)", services.ErrAssetNotTradeable, http.StatusConflict},
 		{"AssetNotTradeable on create stays 400", fmt.Errorf("%w: %w: MCGP", services.ErrInvalidParams, services.ErrAssetNotTradeable), http.StatusBadRequest},
 		{"RateStale", services.ErrRateStale, http.StatusServiceUnavailable},
-		{"Phase2Migration", services.ErrPhase2Migration, http.StatusGone},
+		{"RetiredEscrow", services.ErrRetiredEscrow, http.StatusConflict},
+		{"PMReleaserNotSet", services.ErrPMReleaserNotSet, http.StatusConflict},
 		{"unmapped defaults to 500", errors.New("untyped internal failure"), http.StatusInternalServerError},
 	}
 	for _, tc := range cases {
@@ -1512,6 +1515,9 @@ func TestAdResponses_NeverCarryVoucherSecrets(t *testing.T) {
 	}
 }
 
+// testEscrowAddress is the mock escrow every handler test's chain runs.
+const testEscrowAddress = "0xb5B073BF578fE24311ED50e540D9d632f1679261"
+
 // seedPayerTrade seeds a pending_payment trade whose fiat payer (BuyerID) is
 // the rig user and whose open is confirmed on-chain.
 func seedPayerTrade(t *testing.T, r *rig, buyerID uuid.UUID) uuid.UUID {
@@ -1521,7 +1527,7 @@ func seedPayerTrade(t *testing.T, r *rig, buyerID uuid.UUID) uuid.UUID {
 		Amount: "0", Remaining: "0", Reserved: "0", Rate: "1500", Status: "active"})
 	tradeID := uuid.New()
 	r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: buyerID, SellerID: uuid.New(), Token: "USDT",
-		ChainID: 146, OnChainTradeID: tradeID.String(), TokenAmount: "1000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500", OpenTxHash: "0xopen",
+		ChainID: 146, OnChainTradeID: services.HashIDHex(tradeID), EscrowAddress: testEscrowAddress, TokenAmount: "1000000", FiatAmount: "1500", FiatCurrency: "NGN", Rate: "1500", OpenTxHash: "0xopen",
 		ExpiresAt: time.Now().Add(time.Hour), Status: models.P2PTradeStatusPendingPayment})
 	return tradeID
 }
@@ -1601,7 +1607,7 @@ func seedSellAdTrade(t *testing.T, r *rig, status, openTx string) (tradeID, adID
 	}
 	tradeID = uuid.New()
 	if err := r.db.Create(&models.P2PTrade{ID: tradeID, AdID: adID, BuyerID: r.sellerID, SellerID: seller, Token: "USDT",
-		TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300", PaymentMethodID: pm, OpenTxHash: openTx,
+		OnChainTradeID: services.HashIDHex(tradeID), EscrowAddress: testEscrowAddress, TokenAmount: "1000000", FiatAmount: "1300", FiatCurrency: "NGN", Rate: "1300", PaymentMethodID: pm, OpenTxHash: openTx,
 		ExpiresAt: time.Now().Add(time.Hour), Status: status}).Error; err != nil {
 		t.Fatal(err)
 	}

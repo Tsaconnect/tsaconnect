@@ -35,7 +35,8 @@ func lostOpen(t *testing.T, amount int64) (*P2PTradeService, *mockEscrow, models
 	esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusPending, Funding: models.P2PTradeFundingDepositedByTaker,
 		Seller: common.HexToAddress(openTestUser), Buyer: common.HexToAddress(openTestMerchant),
 		Token:  common.HexToAddress(openTestUSDT),
-		Amount: big.NewInt(amount), CreatedAt: big.NewInt(created.Unix()), Exists: true}
+		Amount: big.NewInt(amount), CreatedAt: big.NewInt(created.Unix()),
+		ExpiresAt: big.NewInt(created.Add(30 * time.Minute).Unix()), Exists: true}
 	esc.openedDepositEvent = &P2PTradeOpenedWithDepositEvent{TradeID: HashID(tradeID),
 		Seller: common.HexToAddress(openTestUser), Buyer: common.HexToAddress(openTestMerchant),
 		Token: common.HexToAddress(openTestUSDT), Amount: big.NewInt(amount)}
@@ -210,7 +211,7 @@ func TestOnChainOpenMatches_TokenCaseInsensitive(t *testing.T) {
 	_, esc, tr, db := lostPooledOpen(t)
 	var ad models.P2PAd
 	db.First(&ad, "id = ?", tr.AdID)
-	if err := onChainOpenMatches(&tr, &ad, strings.ToLower(openTestUSDT), esc.onChainTrade); err != nil {
+	if err := onChainOpenMatches(&tr, &ad, strings.ToLower(openTestUSDT), esc.onChainTrade, testReleaseKey); err != nil {
 		t.Fatalf("lowercase token address refused: %v", err)
 	}
 }
@@ -295,7 +296,8 @@ func TestPrepareMarkPaid_RefusesWhenOpenNotOnChain(t *testing.T) {
 }
 
 func TestPrepareRaiseDispute_AcceptsOpenConfirmedOnChain(t *testing.T) {
-	svc, _, tr, _, _ := lostOpen(t, 30)
+	svc, _, tr, db, _ := lostOpen(t, 30)
+	markTradePaid(t, db, tr.ID)
 	if _, err := svc.PrepareRaiseDispute(context.Background(), tr.ID, tr.SellerID, "0xa", "no fiat", nil); err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -432,7 +434,7 @@ func intPtrIs(p *int, want int) bool { return p != nil && *p == want }
 func TestOpenRecord_StoresSnapshottedFeeBps(t *testing.T) {
 	t.Run("confirm", func(t *testing.T) {
 		svc, esc, tr, db, _ := lostOpen(t, 30)
-		esc.onChainTrade.PlatformFeeBps, esc.onChainTrade.GasFeeBps, esc.onChainTrade.FeeSnapshotFound = 150, 40, true
+		esc.onChainTrade.PlatformFeeBps, esc.onChainTrade.GasFeeBps = 150, 40
 		if _, err := confirmAsOpener(svc, tr); err != nil {
 			t.Fatal(err)
 		}
@@ -440,13 +442,10 @@ func TestOpenRecord_StoresSnapshottedFeeBps(t *testing.T) {
 		if !intPtrIs(row.FeeBps, 190) || !intPtrIs(row.FeePlatformBps, 150) || !intPtrIs(row.FeeGasBps, 40) {
 			t.Fatalf("fee = %v / %v / %v, want 190 / 150 / 40", row.FeeBps, row.FeePlatformBps, row.FeeGasBps)
 		}
-		if esc.feeSnapshotReads != 0 {
-			t.Fatalf("confirm made %d extra snapshot reads", esc.feeSnapshotReads)
-		}
 	})
 	t.Run("backfill", func(t *testing.T) {
 		svc, esc, tr, db, _ := lostOpen(t, 30)
-		esc.onChainTrade.PlatformFeeBps, esc.onChainTrade.FeeSnapshotFound = 50, true
+		esc.onChainTrade.PlatformFeeBps = 50
 		if _, err := svc.ReconcileTrade(context.Background(), tr.ID); err != nil {
 			t.Fatal(err)
 		}
@@ -454,27 +453,14 @@ func TestOpenRecord_StoresSnapshottedFeeBps(t *testing.T) {
 		if !intPtrIs(row.FeeBps, 50) || !intPtrIs(row.FeePlatformBps, 50) || !intPtrIs(row.FeeGasBps, 0) {
 			t.Fatalf("fee = %v / %v / %v, want 50 / 50 / 0", row.FeeBps, row.FeePlatformBps, row.FeeGasBps)
 		}
-		if esc.feeSnapshotReads != 0 {
-			t.Fatalf("backfill made %d extra snapshot reads", esc.feeSnapshotReads)
-		}
 	})
 	t.Run("a zero snapshot is a real zero", func(t *testing.T) {
-		svc, esc, tr, db, _ := lostOpen(t, 30)
-		esc.onChainTrade.FeeSnapshotFound = true
+		svc, _, tr, db, _ := lostOpen(t, 30)
 		if _, err := confirmAsOpener(svc, tr); err != nil {
 			t.Fatal(err)
 		}
 		if got := feeBpsOf(t, db, tr.ID); got == nil || *got != 0 {
 			t.Fatalf("fee_bps = %v, want 0", got)
-		}
-	})
-	t.Run("unreadable snapshot leaves it unset", func(t *testing.T) {
-		svc, _, tr, db, _ := lostOpen(t, 30)
-		if _, err := confirmAsOpener(svc, tr); err != nil {
-			t.Fatal(err)
-		}
-		if got := feeBpsOf(t, db, tr.ID); got != nil {
-			t.Fatalf("fee_bps = %d, want unset", *got)
 		}
 	})
 }
@@ -492,7 +478,7 @@ func TestTradeAndAdFeeFields(t *testing.T) {
 	var ad models.P2PAd
 	db.First(&ad, "id = ?", tr.AdID)
 
-	svc.SetFeeView(newFeeViewOn(&feeViewChain{legacy: 50}))
+	svc.SetFeeView(newFeeViewOn(feeRows(50, 0)))
 	live, err := svc.GetAd(context.Background(), ad.ID)
 	svc.FillAdFees(context.Background(), live)
 	if err != nil || live.FeeBps == nil || *live.FeeBps != 50 {
@@ -507,7 +493,7 @@ func TestTradeAndAdFeeFields(t *testing.T) {
 }
 
 func TestChainsCarryLiveFeeBpsPerAsset(t *testing.T) {
-	svc := &P2PTradeService{feeView: newFeeViewOn(&feeViewChain{legacy: 50})}
+	svc := &P2PTradeService{feeView: newFeeViewOn(feeRows(50, 0))}
 	out := svc.withLiveFees(context.Background(), []P2PChainInfo{{ChainID: 146, Assets: []string{"USDT", "USDC"}}})
 	if out[0].FeeBps["USDT"] != 50 || out[0].FeeBps["USDC"] != 50 {
 		t.Fatalf("feeBps = %v", out[0].FeeBps)
@@ -594,7 +580,7 @@ func TestOnChainOpenMatches_OpenerCaseInsensitive(t *testing.T) {
 		var ad models.P2PAd
 		db.First(&ad, "id = ?", tr.AdID)
 		tr.OpenerAddress = "0x" + strings.ToUpper(openTestUser[2:])
-		if err := onChainOpenMatches(&tr, &ad, openTestUSDT, esc.onChainTrade); err != nil {
+		if err := onChainOpenMatches(&tr, &ad, openTestUSDT, esc.onChainTrade, testReleaseKey); err != nil {
 			t.Fatalf("pooled=%v: matching opener refused: %v", pooled, err)
 		}
 	}

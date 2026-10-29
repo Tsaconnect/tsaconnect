@@ -7,7 +7,6 @@ import (
 	"log"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
@@ -43,19 +42,20 @@ type chainEscrow struct {
 	// audience is who may start new activity on this escrow
 	// (config.P2PAudience*; empty reads as all).
 	audience string
-	// unverified: a direct escrow whose boot gates could not be read. Exits
-	// work; new activity is refused until a background re-check passes.
-	unverified atomic.Bool
 }
 
-// Unverified reports whether chainID's escrow is open for exits only while
-// its gates are re-checked (p2p_direct_gates.go).
+// Unverified reports whether chainID's escrow is open for exits only: its core set has not passed
+// (or no longer passes) its gates (CoreRegistry.Gate). A registry built without a core set (tests,
+// ops maps) is never unverified.
 func (r *P2PEscrowRegistry) Unverified(chainID int64) bool {
-	if r == nil || r.byChain == nil {
+	if r == nil || r.byChain == nil || r.core == nil {
 		return false
 	}
-	e, ok := r.byChain[chainID]
-	return ok && e.unverified.Load()
+	if _, ok := r.byChain[chainID]; !ok {
+		return false
+	}
+	_, ready := r.core.Ready(chainID)
+	return !ready
 }
 
 // P2PEscrowRegistry holds one escrow adapter per P2P-enabled chain, keyed by
@@ -64,6 +64,8 @@ func (r *P2PEscrowRegistry) Unverified(chainID int64) bool {
 // would orphan funds (see spec §8.5).
 type P2PEscrowRegistry struct {
 	byChain map[int64]*chainEscrow
+	// core is the selected core set whose P2PTradeEscrows these are; its gates decide readiness.
+	core *CoreRegistry
 }
 
 // For returns the escrow adapter for chainID, or an error if that chain is not
@@ -230,64 +232,6 @@ func (r *P2PEscrowRegistry) Chains() []P2PChainInfo {
 	return out
 }
 
-// systemWalletReader is the read an escrow adapter must support to be included
-// in SystemWallets. Adapters that don't (test mocks) are reported as unreadable
-// rather than skipped, so a caller never mistakes "not checked" for "agrees".
-type systemWalletReader interface {
-	ReadSystemWallet() (string, error)
-}
-
-// FeeSinkStatus is one escrow's answer to "where do your fees go?".
-// Reason is set when the read could not be made; SystemWallet is then empty.
-type FeeSinkStatus struct {
-	// Label names the contract's role ("P2P escrow", "Product escrow", ...).
-	Label    string `json:"label"`
-	ChainID  int64  `json:"chainId"`
-	ChainKey string `json:"chainKey"`
-	Contract string `json:"contract"`
-	// SystemWallet is the address this contract pays fees to.
-	SystemWallet string `json:"systemWallet,omitempty"`
-	// Source is where SystemWallet was read from: "systemWallet" (the contract's
-	// own fee wallet) or "owner" (a contract with no fee wallet pays its owner).
-	Source string `json:"source,omitempty"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// SystemWallets reads systemWallet() from every enabled P2P escrow, so the
-// admin fee-wallet panel can state per contract — not in aggregate — whether
-// fees actually land at the assigned address. A failed read yields a Reason
-// instead of dropping the row: an unread contract must stay visible, since
-// "we couldn't check" and "it matches" are very different answers.
-// Sorted by chainID for stable output.
-func (r *P2PEscrowRegistry) SystemWallets() []FeeSinkStatus {
-	if r == nil {
-		return nil
-	}
-	out := make([]FeeSinkStatus, 0, len(r.byChain))
-	for id, e := range r.byChain {
-		row := FeeSinkStatus{Label: "P2P escrow", ChainID: id, ChainKey: e.chainKey, Contract: e.service.ContractAddress()}
-		reader, ok := e.service.(systemWalletReader)
-		if !ok {
-			row.Reason = "escrow adapter cannot read systemWallet"
-			out = append(out, row)
-			continue
-		}
-		addr, err := reader.ReadSystemWallet()
-		switch {
-		case err != nil:
-			row.Reason = err.Error()
-		case addr == "":
-			row.Reason = "contract returned an empty systemWallet"
-		default:
-			row.SystemWallet = addr
-			row.Source = FeeSinkSourceSystemWallet
-		}
-		out = append(out, row)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ChainID < out[j].ChainID })
-	return out
-}
-
 // AssetAllowed reports whether symbol may be used for NEW P2P activity on
 // chainID (creating/publishing an ad, depositing into the pool, opening a
 // trade) per the per-chain curation. An empty allow-list means "allow all"
@@ -339,16 +283,14 @@ func (r *P2PEscrowRegistry) AssetDelisted(chainID int64, symbol string) bool {
 	return !r.AssetAllowed(chainID, symbol)
 }
 
-// NewP2PEscrowRegistry builds the per-chain escrow registry from cfg.P2PChains,
-// resolving each chain's client via bs.ClientForChainID. It also runs a boot
-// verification per chain (eth_chainId probe + escrow bytecode check) and logs
-// loudly on any mismatch so an operator can fix env before the first trade. A
-// chain whose client can't be resolved is skipped with a warning (For() will
-// then fail loud for it). A direct-audience escrow is registered only when
-// every direct gate passes (p2p_direct_gates.go); forbiddenAdmins (label →
-// address) are the hot keys the API knows, none of which may be its admin.
-func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config, forbiddenAdmins map[string]string) *P2PEscrowRegistry {
-	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{}}
+// NewP2PEscrowRegistry builds the per-chain escrow registry from cfg.P2PChains (each chain's
+// escrow is its core set's P2PTradeEscrow: config.bindP2PChainsToCore), resolving each chain's
+// client via bs.ClientForChainID. It also runs a boot verification per chain (eth_chainId probe +
+// escrow bytecode check) and logs loudly on any mismatch. A chain whose client can't be resolved is
+// skipped with a warning (For() will then fail loud for it). A registered chain takes new activity
+// only while core.Ready(chain) (Unverified); exits always work.
+func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config, core *CoreRegistry) *P2PEscrowRegistry {
+	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{}, core: core}
 	if cfg == nil || bs == nil {
 		return reg
 	}
@@ -369,9 +311,6 @@ func NewP2PEscrowRegistry(bs *BlockchainService, cfg *config.Config, forbiddenAd
 			purpose:       cc.Purpose,
 			decimals:      decimals,
 			audience:      cc.Audience,
-		}
-		if cc.Audience == config.P2PAudienceDirect {
-			reg.gateDirectAtBoot(bs, cc, forbiddenAdmins)
 		}
 	}
 	log.Printf("[config] P2P escrow registry: %d chain(s) enabled: %v", len(reg.byChain), reg.ChainIDs())

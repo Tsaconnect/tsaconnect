@@ -598,10 +598,10 @@ func (s *P2PTradeClaimSource) settleTrade(ctx context.Context, tradeID uuid.UUID
 // still `releasing`. Deferring that is right — the reconciler settles it against
 // on-chain truth — but it means a later Accept on the same trade (a replayed
 // credit, a manual bind) reaches AutoRelease, which skips its flip for a trade
-// already `releasing` and signs a SECOND adminRelease.
+// already `releasing` and signs a SECOND release.
 //
 // Nothing on this side stops that. The guard is the escrow's own
-// `require(status == Pending || Paid)` in adminRelease: a trade the contract has
+// the Pending/Paid status check in release(): a trade the contract has
 // already marked Released reverts the second attempt, so the broadcast costs gas
 // and returns an error instead of paying the buyer twice. Weakening that require
 // — or routing a release through anything that does not have it — makes this

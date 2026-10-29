@@ -514,33 +514,26 @@ func main() {
 		log.Printf("MCGP swap routes dormant: MCGP_SWAP_B_ADDRESS not set")
 	}
 
-	// Initialize the P2P escrow adapter (separate contract; safe to no-op
-	// when P2P_ESCROW_ADDRESS isn't set — service surfaces a clear error).
-	// Kept only for the on-chain owner log below; the trade service now resolves
-	// escrow per-chain via the registry.
-	p2pEscrowService := services.NewP2PEscrowService(p2pSonicClient, cfg)
-
-	// Per-chain escrow registry (Sonic + any enabled BSC). Boot verification
-	// (eth_chainId + bytecode per chain) runs inside the constructor. The trade
-	// service resolves escrow + EIP-712 domain per entity-chain from this registry.
-	// A direct-audience escrow (BSC) is registered only if its boot gates pass,
-	// none of the hot keys below among its admins.
-	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg, directEscrowForbiddenAdmins(cfg))
 	// The core contract set (CORE_CONTRACTS; dormant = nil). Its gates run as the core-contracts-gates
-	// worker, so a slow RPC never holds boot; nothing reads the set yet.
+	// worker, so a slow RPC never holds boot; none of the hot keys may hold a role on it.
 	coreRegistry := services.NewCoreRegistry(cfg, blockchainService, apiHotKeys(cfg))
 	if sonicClient != nil {
 		// New orders open only while the core set on Sonic passes its gates.
 		sonicID := sonicClient.ChainID().Int64()
 		escrowService.SetReadiness(func() bool { _, ok := coreRegistry.Ready(sonicID); return ok })
 	}
+
+	// Per-chain P2P escrow registry: each chain's escrow is its core set's P2PTradeEscrow (none
+	// while the set is dormant). Boot verification (eth_chainId + bytecode per chain) runs inside
+	// the constructor; a chain takes new activity only while its core set passes its gates. The
+	// trade service resolves escrow + EIP-712 domain per entity-chain from this registry.
+	p2pEscrowRegistry := services.NewP2PEscrowRegistry(blockchainService, cfg, coreRegistry)
 	if err := checkSliceLeftovers(config.DB); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 	}
-	if err := checkDirectUnconfigure(config.DB, cfg, p2pEscrowRegistry); err != nil {
+	if err := checkP2PEscrowMove(config.DB, cfg); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 	}
-	dropUngatedDirectFeeManagers(cfg, p2pEscrowRegistry)
 
 	// Initialize service contact service
 	serviceContactService := services.NewServiceContactService(sonicClient, cfg)
@@ -763,13 +756,11 @@ func main() {
 	// OTC listing controls — PM buy/sell kill-switches + listing metadata for
 	// the app's Easyswap "OTC" tab (DB-only; no on-chain interaction).
 	osh := handlers.NewOTCSettingsHandler(config.DB)
-	// Fee wallet — the admin-assigned destination for system fees. The per-chain
-	// escrow registry is passed so the panel can compare the assignment against
-	// what every deployed escrow actually pays, contract by contract.
-	// Product and service contracts pay fees too, so they are read alongside the
-	// P2P escrows; a nil client leaves them out rather than reporting a wrong answer. A selected core
-	// set adds its FeeConfig's feeRecipient, which every core contract pays.
-	feeSinks := services.CombinedFeeSinks{p2pEscrowRegistry, coreRegistry}
+	// Fee wallet — the admin-assigned destination for system fees, compared against what every
+	// deployed contract actually pays. A selected core set reports its FeeConfig's feeRecipient,
+	// which every core contract (P2P included) pays; the legacy product and service contracts are
+	// read alongside (a nil client leaves them out rather than reporting a wrong answer).
+	feeSinks := services.CombinedFeeSinks{coreRegistry}
 	if sonicClient != nil {
 		feeSinks = append(feeSinks, services.NewFeeSinks(
 			services.FeeSinkContract{Label: "Service contact", ChainKey: "sonic", ChainID: sonicClient.ChainID().Int64(), Address: cfg.ServiceContractAddress, Caller: sonicClient.Client},
@@ -1350,7 +1341,7 @@ func main() {
 		p2pMessageSvc *services.P2PMessageService
 		merchantStats *services.MerchantStatsService
 	)
-	if cfg.P2PEscrowAddress != "" && p2pSonicClient != nil {
+	if len(cfg.P2PChains) > 0 && p2pSonicClient != nil {
 		// The trade service resolves escrow + EIP-712 domain (chainId, version)
 		// per entity-chain from the registry, which probes eth_chainId per chain
 		// at boot (see NewP2PEscrowRegistry / verifyP2PChainAtBoot). cfg.SonicChainID
@@ -1365,7 +1356,7 @@ func main() {
 			log.Printf("[p2p tokenResolver] chainID=%d symbol=%s -> %s", chainID, symbol, addr)
 			return addr
 		})
-		p2pTradeSvc.SetFeeView(services.NewP2PFeeViewForConfig(blockchainService, cfg))
+		p2pTradeSvc.SetFeeView(services.NewP2PFeeViewForCore(coreRegistry, blockchainService.TokenAddressForChainID))
 		p2pTradeSvc.SetFloatOffsetMaxBps(cfg.P2PFloatOffsetMaxBps)
 		p2pTradeSvc.SetFixedRateBandBps(cfg.P2PFixedRateBandBps)
 		// Wire the fee/TP engine (SP3) — P2P is a fee-settled integration.
@@ -1391,6 +1382,8 @@ func main() {
 		scheduler.Register(jobs.NewChainReconciler(p2pTradeSvc), jobs.AlertOnFailureStreak())
 		// Operators hear once when a trade sits paid past the threshold.
 		scheduler.Register(jobs.NewP2PPaidUnreleasedAlerter(p2pTradeSvc, cfg.P2PPaidUnreleasedAlertAfter), jobs.AlertOnFailureStreak())
+		// ...and about disputes nobody resolves before the escrow's 60-day backstop returns the crypto.
+		scheduler.Register(jobs.NewP2PDisputeBackstopAlerter(p2pTradeSvc), jobs.AlertOnFailureStreak())
 		// Register the merchant-reputation reconciler — recomputes windowed
 		// stats nightly as a correctness backstop for the incremental path.
 		merchantStats = services.NewMerchantStatsService(config.DB, eventBus, services.TrustedThresholds{
@@ -1399,11 +1392,8 @@ func main() {
 			MinAgeDays:    cfg.P2PTrustedMinAgeDays,
 		})
 		scheduler.Register(jobs.NewMerchantReputationReconciler(merchantStats))
-		if owner, err := p2pEscrowService.Owner(); err == nil {
-			log.Printf("P2PEscrow contract owner (on-chain): %s", owner)
-		}
 	} else {
-		log.Printf("P2P trade routes dormant: P2P_ESCROW_ADDRESS not set or chain client unavailable")
+		log.Printf("P2P trade routes dormant: no P2P chain (CORE_CONTRACTS selects no set with a P2PTradeEscrow, or no Sonic client)")
 	}
 	p2pHandler := handlers.NewP2PHandler(config.DB, p2pTradeSvc, p2pMessageSvc, bankDirectory, merchantStats)
 	// Deliberately NOT wired here, even though ITService — the only holder of
@@ -1455,19 +1445,10 @@ func main() {
 	// One release key, one lock per P2P chain (spec S8/S39); refuses a key
 	// shared with any other signer (review I8).
 	releaseSigner := buildReleaseSigner(cfg, blockchainService)
-	if releaseSigner != nil && p2pEscrowService != nil {
-		// Sonic PM auto-release (adminRelease/adminResolve) needs the release
-		// key to be an escrow admin; cancelByTimeout does not. The BSC pool
-		// checks its own escrow in its gates.
-		ok, err := p2pEscrowService.IsAdmin(releaseSigner.Address())
-		switch {
-		case err != nil:
-			log.Printf("[pm] WARNING could not read isAdmin(%s) on the Sonic P2P escrow: %s — PM auto-release reverts if it is not an admin (PM-2: addAdmin)",
-				releaseSigner.Address(), services.RedactAlertText(err.Error()))
-		case !ok:
-			log.Printf("[pm] WARNING signer_role_missing=1 role=pm_release address=%s — not an admin on the Sonic P2P escrow: PM auto-release reverts until the PM calls addAdmin(%s) (PM-2)",
-				releaseSigner.Address(), releaseSigner.Address())
-		}
+	if releaseSigner != nil && p2pTradeSvc != nil {
+		// The release key is the releaser PMs name (setReleaser) and PM buy-ad opens pass (M1).
+		p2pTradeSvc.SetReleaseAddress(releaseSigner.Address())
+		scheduler.Register(pmReleaserWorker{trades: p2pTradeSvc}, jobs.AlertOnFailureStreak())
 	}
 
 	var (

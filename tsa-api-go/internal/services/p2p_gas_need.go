@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -34,8 +35,11 @@ import (
 //   - release: tradeId; she is the seller and it is pending_payment, paid or
 //     releasing (a retry), as PrepareRelease allows.
 //   - cancel_trade: tradeId; she is a party, pending_payment, past expiry.
-//   - dispute: tradeId; she is a party, pending_payment or paid, open on
-//     chain, and no live counterparty prepare or on-chain dispute exists.
+//   - dispute: tradeId; she is a party, paid, open on chain, and no live
+//     counterparty prepare or on-chain dispute exists.
+//   - set_releaser: she is an active payment merchant whose maker wallet (the
+//     proven wallet the drip goes to) has not yet named the release key on the
+//     chain (req.ChainID, 0 = default).
 //
 // Returns the chain the tx is on, ErrInvalidParams for a missing or unknown
 // id, ErrP2PGasNotNeeded when it is not her turn (or not on that chain), and
@@ -65,6 +69,22 @@ func (s *P2PTradeService) RequireP2PGasNeed(ctx context.Context, user *models.Us
 			return ad.ChainID, s.gasNeedCancelAd(ctx, user.ID, ad)
 		}
 		return ad.ChainID, s.gasNeedOpenTrade(ctx, user.ID, ad)
+	case P2PGasSetReleaser:
+		st, err := s.PMReleaser(ctx, user.ID, req.ChainID)
+		if errors.Is(err, ErrForbidden) {
+			return 0, gasNotNeeded(refuse(err), "set_releaser: not a payment merchant")
+		}
+		if err != nil {
+			return 0, err
+		}
+		if st.Set {
+			return 0, gasNotNeeded(refuse(ErrInvalidTransition), fmt.Sprintf("set_releaser on chain %d: already set", st.ChainID))
+		}
+		// setReleaser is signed by the maker wallet: gas sent anywhere else cannot pay for it.
+		if !strings.EqualFold(wallet, st.Wallet) {
+			return 0, gasNotNeeded(refuse(ErrInvalidTransition), "set_releaser: the proven wallet is not the maker wallet")
+		}
+		return st.ChainID, nil
 	case P2PGasMarkPaid, P2PGasRelease, P2PGasCancelTrade, P2PGasDispute:
 		trade, err := s.gasNeedTrade(ctx, req.TradeID, req.ChainID)
 		if err != nil {
@@ -180,7 +200,7 @@ func (s *P2PTradeService) gasNeedTradeTurn(ctx context.Context, userID uuid.UUID
 // gasNeedDisputeRow applies PrepareRaiseDispute's existing-row gate
 // (replaceableDisputeRow): no gas for a prepare that would be refused.
 func (s *P2PTradeService) gasNeedDisputeRow(ctx context.Context, userID uuid.UUID, t *models.P2PTrade) error {
-	escrow, _, _, err := s.resolve(t.ChainID)
+	escrow, _, err := s.tradeEscrow(t)
 	if err != nil {
 		return err
 	}
@@ -191,7 +211,7 @@ func (s *P2PTradeService) gasNeedDisputeRow(ctx context.Context, userID uuid.UUI
 // gasNeedOpenOnChain is requireOpenOnChain for the gas check: "not opened" (or
 // an on-chain trade that is not ours) is a refusal, a failed read is not.
 func (s *P2PTradeService) gasNeedOpenOnChain(ctx context.Context, t *models.P2PTrade) error {
-	escrow, _, _, err := s.resolve(t.ChainID)
+	escrow, _, err := s.tradeEscrow(t)
 	if err != nil {
 		return err
 	}

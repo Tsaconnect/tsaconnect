@@ -870,6 +870,11 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			p2pGroup.POST("/withdrawals", idem, p2p.PrepareWithdraw)
 			p2pGroup.POST("/withdrawals/confirm", idem, p2p.ConfirmWithdraw)
 
+			// A payment merchant lets the platform release key release its trades (setReleaser).
+			p2pGroup.GET("/pm/releaser", p2p.GetPMReleaser)
+			p2pGroup.POST("/pm/releaser", idem, p2p.PreparePMReleaser)
+			p2pGroup.POST("/pm/releaser/confirm", idem, p2p.ConfirmPMReleaser)
+
 			// Gas: S for the caller's next P2P tx on Sonic, to her proven wallet.
 			p2pGroup.POST("/gas/top-up", idem, p2p.GasTopUp)
 

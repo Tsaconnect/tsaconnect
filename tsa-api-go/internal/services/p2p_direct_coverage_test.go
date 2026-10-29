@@ -150,37 +150,3 @@ func TestDirectBSC_FeeDriftReconciler_ReadsTheDirectFeeManager(t *testing.T) {
 		t.Fatalf("BSC p2p replica = %d bps after reconcile, want 77 (chain wins)", bps)
 	}
 }
-
-// sinkEscrow is a mock escrow that answers systemWallet().
-type sinkEscrow struct {
-	*mockEscrow
-	sink string
-}
-
-func (e sinkEscrow) ReadSystemWallet() (string, error) { return e.sink, nil }
-
-// The admin fee-wallet panel lists the BSC direct escrow's fee sink beside
-// Sonic's, each against its own contract.
-func TestDirectBSC_SystemWallets_ListsTheDirectEscrow(t *testing.T) {
-	sonic, bsc := newMockEscrow(), newMockEscrow()
-	sonic.contractAddress = "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324"
-	bsc.contractAddress = "0x00000000000000000000000000000000000B5C56"
-	treasury := "0xA4120000000000000000000000000000000Ee205"
-	reg := NewP2PEscrowRegistryFromEntries(map[int64]P2PRegistryEntry{
-		146:            {Escrow: sinkEscrow{sonic, treasury}, ChainKey: "sonic", Purpose: config.P2PPurposeP2P, Audience: config.P2PAudiencePM},
-		bscDirectChain: {Escrow: sinkEscrow{bsc, treasury}, ChainKey: "bsc", Purpose: config.P2PPurposeP2P, Audience: config.P2PAudienceDirect},
-	}, "2")
-	got := reg.SystemWallets()
-	want := []FeeSinkStatus{
-		{Label: "P2P escrow", ChainID: 56, ChainKey: "bsc", Contract: bsc.contractAddress, SystemWallet: treasury, Source: FeeSinkSourceSystemWallet},
-		{Label: "P2P escrow", ChainID: 146, ChainKey: "sonic", Contract: sonic.contractAddress, SystemWallet: treasury, Source: FeeSinkSourceSystemWallet},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("SystemWallets = %+v, want %+v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("row %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}

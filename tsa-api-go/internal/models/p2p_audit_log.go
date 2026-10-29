@@ -40,32 +40,38 @@ func (P2PAuditLog) TableName() string {
 
 // Action names — keep stable; analytics dashboards index on these strings.
 const (
-	P2PAuditAdCreated         = "ad.created"
-	P2PAuditAdClosed          = "ad.closed"
-	P2PAuditAdPaused          = "ad.paused"
-	P2PAuditAdResumed         = "ad.resumed"
-	P2PAuditTradeOpened       = "trade.opened"
-	P2PAuditTradeMarkedPaid   = "trade.marked_paid"
-	P2PAuditTradeReleasing    = "trade.releasing"
-	P2PAuditTradeReleased     = "trade.released"
-	P2PAuditTradeCancelled    = "trade.cancelled"
-	P2PAuditTradeDisputed     = "trade.disputed"
-	P2PAuditTradeResolved     = "trade.resolved"
-	P2PAuditReconcilerDrift   = "reconciler.drift"
-	P2PAuditOperatorBroadcast = "operator.broadcast"
-	P2PAuditDepositPrepared      = "deposit.prepared"
-	P2PAuditDepositConfirmed     = "deposit.confirmed"
-	P2PAuditWithdrawPrepared     = "withdraw.prepared"
-	P2PAuditWithdrawConfirmed    = "withdraw.confirmed"
-	P2PAuditAdSigned             = "ad.signed"
+	P2PAuditAdCreated             = "ad.created"
+	P2PAuditPMReleaserSet         = "pm.releaser_set"
+	P2PAuditAdClosed              = "ad.closed"
+	P2PAuditAdPaused              = "ad.paused"
+	P2PAuditAdResumed             = "ad.resumed"
+	P2PAuditTradeOpened           = "trade.opened"
+	P2PAuditTradeMarkedPaid       = "trade.marked_paid"
+	P2PAuditTradeReleasing        = "trade.releasing"
+	P2PAuditTradeReleased         = "trade.released"
+	P2PAuditTradeCancelled        = "trade.cancelled"
+	P2PAuditTradeDisputed         = "trade.disputed"
+	P2PAuditTradeResolved         = "trade.resolved"
+	P2PAuditReconcilerDrift       = "reconciler.drift"
+	P2PAuditOperatorBroadcast     = "operator.broadcast"
+	P2PAuditDepositPrepared       = "deposit.prepared"
+	P2PAuditDepositConfirmed      = "deposit.confirmed"
+	P2PAuditWithdrawPrepared      = "withdraw.prepared"
+	P2PAuditWithdrawConfirmed     = "withdraw.confirmed"
+	P2PAuditAdSigned              = "ad.signed"
 	P2PAuditTradeDisputeConfirmed = "trade.dispute.confirmed"
-	P2PAuditTradeResolvePrepared = "trade.resolve.prepared"
+	P2PAuditTradeResolvePrepared  = "trade.resolve.prepared"
 	// P2PAuditAdRenewalDue: an LP stock ad's voucher is due for renewal and the
 	// LP was told (TSA Liquidity S28); it also spaces the notices.
 	P2PAuditAdRenewalDue = "ad.renewal_due"
 	// P2PAuditTradePaidStaleAlerted: operators were told this trade sat paid
 	// without release; its presence is the once-per-trade dedupe.
 	P2PAuditTradePaidStaleAlerted = "trade.paid_stale_alerted"
+	// P2PAuditTradeDisputeStaleAlerted / P2PAuditTradeDisputeBackstopAlerted: operators were told a
+	// dispute has sat unresolved, and again when the escrow's backstop (which returns the crypto
+	// to the seller) is near; each is a once-per-trade dedupe.
+	P2PAuditTradeDisputeStaleAlerted    = "trade.dispute_stale_alerted"
+	P2PAuditTradeDisputeBackstopAlerted = "trade.dispute_backstop_alerted"
 	// P2PAuditTradeExpiredProofAlerted: the expiry canceller left an expired
 	// direct trade alone because its buyer saved payment proof, and operators
 	// were told; its presence is the once-per-trade dedupe.

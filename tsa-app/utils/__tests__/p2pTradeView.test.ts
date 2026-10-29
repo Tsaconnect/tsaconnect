@@ -175,6 +175,13 @@ describe('tradeActions — mark-paid needs the open on chain', () => {
   });
 });
 
+describe('tradeActions — disputes', () => {
+  it('only a trade marked paid can be disputed (the escrow refuses one before that)', () => {
+    expect(tradeActions(t(), 'buyer', NOW).canDispute).toBe(false);
+    expect(tradeActions(t({ status: 'paid' }), 'seller', NOW).canDispute).toBe(true);
+  });
+});
+
 describe('tradeActions — a sent trade action still confirming', () => {
   const expired = { expiresAt: '2026-10-09T11:00:00Z' };
   it('hides the action buttons instead of re-offering them', () => {
