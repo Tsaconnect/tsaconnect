@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +118,40 @@ func TestGetServiceContact_Contact_NotShortCircuited(t *testing.T) {
 	}
 	if resp.Data.Contact == nil || resp.Data.Contact.Name == "" {
 		t.Errorf("expected provider contact details for contact service, got %s", w.Body.String())
+	}
+}
+
+// One fee tx unlocks one contact: a hash that already paid (in any case) is a 409 before any chain
+// read, so a caller cannot reuse someone else's — or their own — payment for another contact.
+func TestSubmitContactFee_ReusedFeeTxIs409(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	h := &ServiceContactHandler{}
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeContact)
+	paid := createTestService(t, db, seller.ID, &cat.ID, 20.0, 3.0)
+	other := createTestService(t, db, seller.ID, &cat.ID, 20.0, 3.0)
+	if err := db.Create(&models.ServiceContactPayment{ID: uuid.New(), CallerID: buyer.ID, ServiceProviderID: seller.ID,
+		ServiceID: paid.ID, Token: "USDC", FeeAmount: "100000", PayFeeTxHash: "0xABC", CreatedAt: time.Now()}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Params = gin.Params{{Key: "id", Value: other.ID.String()}}
+	c.Request, _ = http.NewRequest("POST", "/", strings.NewReader(`{"approveTxHash":"0x1","payFeeTxHash":"0xabc"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.SubmitContactFee(c)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("reused fee tx: %d %s, want 409", w.Code, w.Body.String())
+	}
+
+	// The index is the backstop when two submits race past the pre-check.
+	dup := models.ServiceContactPayment{ID: uuid.New(), CallerID: buyer.ID, ServiceProviderID: seller.ID,
+		ServiceID: other.ID, PayFeeTxHash: "0xAbC", CreatedAt: time.Now()}
+	if err := db.Create(&dup).Error; err == nil || !isDuplicateKeyErr(err) {
+		t.Fatalf("second row for one fee tx: err=%v, want a unique violation", err)
 	}
 }

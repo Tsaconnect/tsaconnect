@@ -825,6 +825,7 @@ func (s *FeeDistributionService) EnqueueFeeSettled(ev FeeEvent) {
 type RewardRates struct {
 	BuyerCashback  float64 // USD of cashback per $1 of fee
 	UplineCashback float64 // USD of upline cashback per $1 of fee
+	Provider       float64 // USD of the service provider's cashback per $1 of fee
 	BuyerTP        float64 // TP the transacting user earns per $1 of fee
 	USDPerTP       float64 // dollar value of one TP
 }
@@ -841,6 +842,7 @@ func (s *FeeDistributionService) RewardRatesFor(feature string) RewardRates {
 	return RewardRates{
 		BuyerCashback:  sp.BuyerCashbackUSD,
 		UplineCashback: sp.UplineCashbackUSD,
+		Provider:       sp.ProviderCashbackUSD,
 		BuyerTP:        kept * s.tpProgram.Current().UserPct * s.tpPerUSD,
 		USDPerTP:       1 / s.tpPerUSD,
 	}
