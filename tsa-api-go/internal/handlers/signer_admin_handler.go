@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"math/big"
 	"net/http"
@@ -9,11 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -173,12 +169,5 @@ func (h *SignerAdminHandler) audit(c *gin.Context, action string, req signerLane
 	for k, v := range extra {
 		meta[k] = v
 	}
-	raw, _ := json.Marshal(meta)
-	row := models.P2PAuditLog{ID: uuid.New(), Action: action, Metadata: datatypes.JSON(raw)}
-	if u := getUserFromContext(c); u != nil {
-		row.ActorID = &u.ID
-	}
-	if h.DB != nil {
-		_ = h.DB.WithContext(c.Request.Context()).Create(&row).Error
-	}
+	writeAdminAudit(c, h.DB, action, meta)
 }

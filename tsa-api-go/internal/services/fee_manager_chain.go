@@ -199,20 +199,29 @@ func (r *evmFeeManagerChainReader) rateFor(ctx context.Context, feeManager, feat
 }
 
 func (r *evmFeeManagerChainReader) txSucceeded(ctx context.Context, txHash string) (bool, error) {
+	receipt, err := r.receipt(ctx, txHash)
+	if err != nil {
+		return false, err
+	}
+	return receipt.Status == types.ReceiptStatusSuccessful, nil
+}
+
+// receipt is txHash's mined receipt (an error when it is not mined).
+func (r *evmFeeManagerChainReader) receipt(ctx context.Context, txHash string) (*types.Receipt, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	h := strings.TrimSpace(txHash)
 	if h == "" {
-		return false, fmt.Errorf("empty tx hash")
+		return nil, fmt.Errorf("empty tx hash")
 	}
 	receipt, err := r.caller.TransactionReceipt(ctx, common.HexToHash(h))
 	if err != nil {
-		return false, fmt.Errorf("fetch receipt for %s: %w", h, err)
+		return nil, fmt.Errorf("fetch receipt for %s: %w", h, err)
 	}
 	if receipt == nil {
-		return false, fmt.Errorf("nil receipt for %s (not mined?)", h)
+		return nil, fmt.Errorf("nil receipt for %s (not mined?)", h)
 	}
-	return receipt.Status == types.ReceiptStatusSuccessful, nil
+	return receipt, nil
 }
 
 // call performs a read-only eth_call against `to` with a short timeout.

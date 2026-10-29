@@ -1293,15 +1293,12 @@ var (
 	revertPanicSelector = []byte{0x4e, 0x48, 0x7b, 0x71} // Panic(uint256)
 )
 
-// decodeRevertReason turns the revert data a node attaches to a failed
-// eth_estimateGas / eth_call (rpc.DataError) into a human-readable reason:
-// Error(string) -> the string, Panic(uint256) -> "panic 0x..", a P2PEscrowV3
-// custom error -> "Name()", anything else -> the raw hex. Returns "" when the
-// error carries no revert data.
-func decodeRevertReason(err error) string {
+// revertData is the revert data a node attached to err (rpc.DataError), or nil when there is none
+// or it is shorter than a selector.
+func revertData(err error) []byte {
 	var de rpc.DataError
 	if !errors.As(err, &de) {
-		return ""
+		return nil
 	}
 	// geth (and BSC nodes) send the revert data as a hex string; Hardhat
 	// nests it as {"message": …, "data": "0x…"}.
@@ -1312,10 +1309,23 @@ func decodeRevertReason(err error) string {
 		}
 	}
 	if !ok {
-		return ""
+		return nil
 	}
-	data, decodeErr := hexutil.Decode(raw)
-	if decodeErr != nil || len(data) < 4 {
+	data, err := hexutil.Decode(raw)
+	if err != nil || len(data) < 4 {
+		return nil
+	}
+	return data
+}
+
+// decodeRevertReason turns the revert data a node attaches to a failed
+// eth_estimateGas / eth_call (rpc.DataError) into a human-readable reason:
+// Error(string) -> the string, Panic(uint256) -> "panic 0x..", a P2PEscrowV3
+// custom error -> "Name()", anything else -> the raw hex. Returns "" when the
+// error carries no revert data.
+func decodeRevertReason(err error) string {
+	data := revertData(err)
+	if data == nil {
 		return ""
 	}
 	switch {
@@ -1334,7 +1344,7 @@ func decodeRevertReason(err error) string {
 			return abiErr.Sig
 		}
 	}
-	return raw
+	return hexutil.Encode(data)
 }
 
 // withRevertReason appends the decoded revert reason to err (keeping err

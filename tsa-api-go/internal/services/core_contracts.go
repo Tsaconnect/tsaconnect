@@ -215,6 +215,8 @@ type coreChain struct {
 }
 
 // CoreRegistry is the selected core set, one entry per chain. A nil registry is a dormant set.
+// chains (and each entry's set and gates) is fixed at construction and read without mu; mu
+// guards only each entry's gate verdict (ready, checkedAt, lastFails).
 type CoreRegistry struct {
 	setName string
 	fees    *FeeConfigReader
@@ -380,4 +382,13 @@ func (r *CoreRegistry) SystemWallets() []FeeSinkStatus {
 	}
 	wg.Wait()
 	return out
+}
+
+// hotKeys are chainID's hot keys by address (fee authoring refuses one as the fee recipient).
+func (r *CoreRegistry) hotKeys(chainID int64) map[common.Address]string {
+	cc, ok := r.chains[chainID]
+	if !ok {
+		return nil
+	}
+	return distinctHotKeys(cc.gates.HotKeys)
 }
