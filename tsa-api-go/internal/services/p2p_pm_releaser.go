@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
@@ -171,10 +172,15 @@ func (s *P2PTradeService) MissingPMReleasers(ctx context.Context) ([]string, err
 	return missing, nil
 }
 
-// ReleaseKeyCanRelease reads t from its escrow and answers whether the release key may release it:
-// the trade names the key as its releaser (a PM buy-ad open), or its seller has (a PM's
-// setReleaser). Money the platform pays out before releasing (a PM sell payout) must check this
-// first: once paid, a trade the key cannot release goes back to the seller by timeout.
+// payoutReleaseMargin is the least time a trade's payment window must still have when the naira
+// is sent: past expiresAt anyone may cancel it by timeout, returning the crypto to the user.
+const payoutReleaseMargin = 10 * time.Minute
+
+// ReleaseKeyCanRelease reads t from its escrow and answers whether the release key is sure to be
+// able to release it after the platform pays the user out (a PM sell payout): the trade must still
+// be Pending with at least payoutReleaseMargin of its window left, and name the release key as its
+// own releaser. Only that per-trade releaser counts — it is fixed at open — never the seller's
+// releaserOf, which the seller (here the user being paid) can revoke after the payout.
 func (s *P2PTradeService) ReleaseKeyCanRelease(t *models.P2PTrade) error {
 	if s.releaseAddress == "" {
 		return fmt.Errorf("%w: payment-merchant settlement is not running", ErrChainUnavailable)
@@ -187,18 +193,13 @@ func (s *P2PTradeService) ReleaseKeyCanRelease(t *models.P2PTrade) error {
 	if err != nil {
 		return fmt.Errorf("%w: read trade: %v", ErrChainUnavailable, err)
 	}
-	if !onchain.Exists {
-		return fmt.Errorf("%w: trade not opened on-chain", ErrInvalidTransition)
+	if !onchain.Exists || onchain.Status != OnChainP2PStatusPending {
+		return fmt.Errorf("%w: trade %s is not pending on-chain", ErrInvalidTransition, t.ID)
 	}
-	want := common.HexToAddress(s.releaseAddress)
-	if onchain.TradeReleaser == want {
-		return nil
+	if onchain.ExpiresAt == nil || time.Unix(onchain.ExpiresAt.Int64(), 0).Sub(s.clock.Now()) < payoutReleaseMargin {
+		return fmt.Errorf("%w: trade %s is too close to its payment deadline to pay out", ErrInvalidTransition, t.ID)
 	}
-	got, err := escrow.ReadReleaser(onchain.Seller.Hex())
-	if err != nil {
-		return fmt.Errorf("%w: read releaser: %v", ErrChainUnavailable, err)
-	}
-	if got != want {
+	if onchain.TradeReleaser != common.HexToAddress(s.releaseAddress) {
 		return fmt.Errorf("%w: the release key cannot release trade %s", ErrPMReleaserNotSet, t.ID)
 	}
 	return nil

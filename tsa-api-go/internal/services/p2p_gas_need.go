@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
@@ -36,8 +37,9 @@ import (
 //   - cancel_trade: tradeId; she is a party, pending_payment, past expiry.
 //   - dispute: tradeId; she is a party, paid, open on chain, and no live
 //     counterparty prepare or on-chain dispute exists.
-//   - set_releaser: she is an active payment merchant whose maker wallet has
-//     not yet named the release key on the chain (req.ChainID, 0 = default).
+//   - set_releaser: she is an active payment merchant whose maker wallet (the
+//     proven wallet the drip goes to) has not yet named the release key on the
+//     chain (req.ChainID, 0 = default).
 //
 // Returns the chain the tx is on, ErrInvalidParams for a missing or unknown
 // id, ErrP2PGasNotNeeded when it is not her turn (or not on that chain), and
@@ -77,6 +79,10 @@ func (s *P2PTradeService) RequireP2PGasNeed(ctx context.Context, user *models.Us
 		}
 		if st.Set {
 			return 0, gasNotNeeded(refuse(ErrInvalidTransition), fmt.Sprintf("set_releaser on chain %d: already set", st.ChainID))
+		}
+		// setReleaser is signed by the maker wallet: gas sent anywhere else cannot pay for it.
+		if !strings.EqualFold(wallet, st.Wallet) {
+			return 0, gasNotNeeded(refuse(ErrInvalidTransition), "set_releaser: the proven wallet is not the maker wallet")
 		}
 		return st.ChainID, nil
 	case P2PGasMarkPaid, P2PGasRelease, P2PGasCancelTrade, P2PGasDispute:

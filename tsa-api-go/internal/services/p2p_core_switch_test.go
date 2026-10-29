@@ -313,15 +313,47 @@ func TestPMBuyAd_OpenWithoutTheReleaseKeyIsRefusedAndNotPaidOut(t *testing.T) {
 		t.Fatalf("confirm of an open without the release key: err = %v", err)
 	}
 
-	// Even with an open recorded, the payout re-reads the chain first.
+	// Even with an open recorded, the payout re-reads the chain first. The seller's own releaserOf
+	// does not count: the user being paid could revoke it after the payout.
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 	db.First(trade, "id = ?", trade.ID)
-	esc.defaultReleaser = common.Address{}
+	esc.onChainTrade.ExpiresAt = big.NewInt(svc.clock.Now().Add(25 * time.Minute).Unix())
+	esc.defaultReleaser = testReleaseKey
 	if err := svc.ReleaseKeyCanRelease(trade); !errors.Is(err, ErrPMReleaserNotSet) {
-		t.Fatalf("payout check: err = %v", err)
+		t.Fatalf("a revocable seller releaser must not count: err = %v", err)
 	}
 	esc.onChainTrade.TradeReleaser = testReleaseKey
 	if err := svc.ReleaseKeyCanRelease(trade); err != nil {
 		t.Fatalf("a trade naming the key: %v", err)
+	}
+	// Too close to the deadline, or no longer pending: no payout.
+	esc.onChainTrade.ExpiresAt = big.NewInt(svc.clock.Now().Add(5 * time.Minute).Unix())
+	if err := svc.ReleaseKeyCanRelease(trade); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("near the deadline: err = %v", err)
+	}
+	esc.onChainTrade.ExpiresAt = big.NewInt(svc.clock.Now().Add(25 * time.Minute).Unix())
+	esc.onChainTrade.Status = OnChainP2PStatusCancelled
+	if err := svc.ReleaseKeyCanRelease(trade); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("cancelled on-chain: err = %v", err)
+	}
+}
+
+// A set_releaser drip goes only to the maker wallet, the one that signs setReleaser.
+func TestGasNeed_SetReleaserOnlyForTheMakerWallet(t *testing.T) {
+	db := setupTradeDB(t)
+	svc, esc, _ := newService(t, db)
+	maker := "0x00000000000000000000000000000000000000Aa"
+	userID := seedPMUser(t, svc, maker)
+	esc.defaultReleaser = common.Address{}
+	user := &models.User{ID: userID}
+	if _, err := svc.RequireP2PGasNeed(context.Background(), user, maker, P2PGasRequest{Action: P2PGasSetReleaser}); err != nil {
+		t.Fatalf("maker wallet: %v", err)
+	}
+	if _, err := svc.RequireP2PGasNeed(context.Background(), user, "0x00000000000000000000000000000000000000Bb", P2PGasRequest{Action: P2PGasSetReleaser}); !errors.Is(err, ErrP2PGasNotNeeded) {
+		t.Fatalf("another wallet: err = %v", err)
+	}
+	esc.defaultReleaser = testReleaseKey
+	if _, err := svc.RequireP2PGasNeed(context.Background(), user, maker, P2PGasRequest{Action: P2PGasSetReleaser}); !errors.Is(err, ErrP2PGasNotNeeded) {
+		t.Fatalf("already set: err = %v", err)
 	}
 }

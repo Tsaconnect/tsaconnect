@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -65,11 +66,12 @@ func newPMAutomationServiceWithGateway(t *testing.T, db *gorm.DB, svc *P2PTradeS
 		addr: "0x1111111111111111111111111111111111111111",
 		hash: "0xrelease",
 	}
-	// Sell payouts re-read the trade first: by default it is open on-chain and, through the mock's
-	// default releaser, releasable by the release key.
+	// Sell payouts re-read the trade first: by default it is pending on-chain, inside its window, and
+	// names the release key as its releaser.
 	if esc, err := svc.escrows.For(146); err == nil {
 		if m, ok := esc.(*mockEscrow); ok && m.onChainTrade == nil {
-			m.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending}
+			m.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, TradeReleaser: testReleaseKey,
+				ExpiresAt: big.NewInt(svc.clock.Now().Add(25 * time.Minute).Unix())}
 		}
 	}
 	pmSvc := NewPMService(db)
