@@ -25,6 +25,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
+import { formatLocation } from '@/utils/location';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
@@ -261,7 +262,7 @@ const AddProduct = () => {
       formData.append('description', description);
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
-      formData.append('location', [location.city, location.state, location.country].filter(Boolean).join(', '));
+      formData.append('location', formatLocation(location));
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);

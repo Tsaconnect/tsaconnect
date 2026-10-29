@@ -94,14 +94,22 @@ const AddProduct = () => {
       return;
     }
 
+    // A selectionLimit of 0 means unlimited, so a full set stops here.
+    if (productImages.length >= 10) {
+      Alert.alert("Limit reached", "You can add up to 10 photos.");
+      return;
+    }
+
     let result = await ImagePicker.launchImageLibraryAsync({
       aspect: [4, 3],
       quality: 0.8,
       allowsMultipleSelection: true,
+      selectionLimit: 10 - productImages.length,
     });
 
     if (!result.canceled) {
-      setProductImages(result.assets.map((asset) => asset.uri));
+      const picked = result.assets.map((asset) => asset.uri);
+      setProductImages((prev) => [...prev, ...picked].slice(0, 10));
     }
   };
 

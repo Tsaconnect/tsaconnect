@@ -34,6 +34,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '@/AuthContext/AuthContext';
 import api, { Product } from '@/components/services/api';
 import LocationPicker from '../../../../components/common/LocationPicker';
+import { formatLocation, parseLocation } from '@/utils/location';
 import { useTheme } from '@/theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
@@ -141,12 +142,7 @@ const EditProduct = () => {
         setProductName(product.name || '');
         setDescription(product.description || '');
         setStock(product.stock?.toString() || '0');
-        const parts = (product.location || '').split(', ');
-        setLocation({
-          city: parts.length >= 3 ? parts[0] : '',
-          state: parts.length >= 2 ? parts[parts.length - 2] : '',
-          country: parts.length >= 1 ? parts[parts.length - 1] : '',
-        });
+        setLocation(parseLocation(product.location));
         setPhoneNumber(product.phoneNumber || '');
         setEmail(product.email || '');
         setCompanyName(product.companyName || '');
@@ -340,7 +336,7 @@ const EditProduct = () => {
       formData.append('description', description);
       formData.append('stock', parseInt(stock).toString());
       formData.append('category', categoryId);
-      formData.append('location', [location.city, location.state, location.country].filter(Boolean).join(', '));
+      formData.append('location', formatLocation(location));
       formData.append('phoneNumber', phoneNumber);
       formData.append('email', email);
       if (companyName.trim()) formData.append('companyName', companyName);

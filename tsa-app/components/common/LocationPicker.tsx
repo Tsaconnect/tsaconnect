@@ -16,14 +16,11 @@ import { useTheme } from '@/theme';
 import { Icon, Input, PickerSheet, PressableScale, SelectRow, Text } from '@/components/ui';
 import { countries } from '../../constants/api/statesConstants';
 import { fetchStates, fetchCities } from './locationApi';
+import type { LocationValue } from '@/utils/location';
 
 // --- Types ---
 
-export interface LocationValue {
-  country: string;
-  state: string;
-  city: string;
-}
+export type { LocationValue };
 
 export interface LocationPickerProps {
   value: LocationValue;
