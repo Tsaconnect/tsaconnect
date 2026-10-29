@@ -508,3 +508,20 @@ func TestEscrowBuyer_IsTheFundingWallet(t *testing.T) {
 		t.Fatalf("an order not on OrderEscrow yet uses the account wallet, got %s", got)
 	}
 }
+
+// A dispute OrderEscrow holds is settled on-chain: dismissing it in the DB alone would let the
+// deadline sweep refund the buyer anyway.
+func TestDismissRequest_RefusesAnOnChainDispute(t *testing.T) {
+	f := newProofFixture(t, models.OrderStatusRefundRequested)
+	now := time.Now()
+	f.db.Model(f.order).Update("disputed_at", now)
+	f.holdOrder(func(o *services.OnChainOrder) { o.State = services.OrderStateDisputed })
+	admin := createTestUserWithLocation(t, f.db, "Lagos", "Lagos", "Nigeria")
+	w := f.call(f.ch.DismissRequest, admin, gin.H{})
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "resolve_on_chain") {
+		t.Fatalf("got %d %s", w.Code, w.Body)
+	}
+	if got := f.status(t); got != models.OrderStatusRefundRequested {
+		t.Fatalf("a refused dismiss moved the order to %q", got)
+	}
+}

@@ -3966,6 +3966,20 @@ func (ch *CheckoutHandler) DismissRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Nothing to dismiss: order has no active request or dispute")
 		return
 	}
+	// A dispute on OrderEscrow is settled only on-chain: dismissing it here would leave the order
+	// Disputed there, the buyer unable to confirm, and the deadline sweep refunding the buyer at
+	// resolve_by. Resolve it instead (to the seller to keep the sale).
+	if (isDisputed || hasRefundRequest) && services.OrderKeyOf(&order) != ([32]byte{}) {
+		onChain, ok := ch.onChainOrder(c, &order)
+		if !ok {
+			return
+		}
+		if onChain.State == services.OrderStateDisputed {
+			utils.ErrorResponseWithCode(c, http.StatusConflict,
+				"This order is disputed on-chain. Resolve it (to the seller to keep the sale) instead of dismissing.", "resolve_on_chain")
+			return
+		}
+	}
 
 	// Determine reverted status for active requests.
 	var revertedStatus string
