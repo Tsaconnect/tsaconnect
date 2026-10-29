@@ -2087,6 +2087,8 @@ func main() {
 		log.Print(alert)
 	}
 	routes.RegisterSignerAdmin(router, cfg, &handlers.SignerAdminHandler{DB: config.DB, Registry: blockchainService.Signers()})
+	routes.RegisterCoreFees(router, cfg, handlers.NewCoreFeeHandler(config.DB,
+		services.NewCoreFeeAdmin(coreRegistry, blockchainService.TokenAddressForChainID)))
 	// Unavailable (503 payout_unavailable) while Paycrest is off: *PaycrestDirectory
 	// answers ErrPaycrestDisabled on a nil receiver.
 	// A nil *EmailService inside the interface would be non-nil: pass none at all.

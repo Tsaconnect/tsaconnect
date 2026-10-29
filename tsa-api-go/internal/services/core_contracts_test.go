@@ -35,13 +35,16 @@ type fakeCoreChain struct {
 	pending   common.Address
 	calls     atomic.Int64                               // the role reads run side by side
 	roles     map[common.Address]map[common.Address]bool // contract → holder → holds any role
+	rates     map[rateKey]feeConfigRateTuple
+	limits    map[common.Address]feeConfigLimitsTuple
 	noCode    bool
 	rpcDown   bool
 }
 
 func healthyCoreChain() *fakeCoreChain {
 	return &fakeCoreChain{chainID: 146, admin: common.HexToAddress(coreAdmin), feeConfig: common.HexToAddress(coreFC),
-		window: 1800, recipient: common.HexToAddress(coreFees), roles: map[common.Address]map[common.Address]bool{}}
+		window: 1800, recipient: common.HexToAddress(coreFees), roles: map[common.Address]map[common.Address]bool{},
+		rates: map[rateKey]feeConfigRateTuple{}, limits: map[common.Address]feeConfigLimitsTuple{}}
 }
 
 func (f *fakeCoreChain) CallContract(_ context.Context, call ethereum.CallMsg, _ *big.Int) ([]byte, error) {
@@ -67,6 +70,21 @@ func (f *fakeCoreChain) CallContract(_ context.Context, call ethereum.CallMsg, _
 		return m["hasRole"].Outputs.Pack(f.roles[*call.To][args[1].(common.Address)])
 	case bytes.Equal(sel, fc["feeRecipient"].ID):
 		return fc["feeRecipient"].Outputs.Pack(f.recipient)
+	case bytes.Equal(sel, fc["rawRate"].ID):
+		args, _ := fc["rawRate"].Inputs.Unpack(call.Data[4:])
+		key := args[0].([32]byte)
+		r := f.rates[rateKey{strings.TrimRight(string(key[:]), "\x00"), args[1].(common.Address)}]
+		if r.FlatFee == nil {
+			r.FlatFee = new(big.Int)
+		}
+		return fc["rawRate"].Outputs.Pack(r)
+	case bytes.Equal(sel, fc["limitsFor"].ID):
+		args, _ := fc["limitsFor"].Inputs.Unpack(call.Data[4:])
+		l, ok := f.limits[args[0].(common.Address)]
+		if !ok {
+			return nil, errors.New("execution reverted: LimitsNotConfigured")
+		}
+		return fc["limitsFor"].Outputs.Pack(l)
 	}
 	return nil, errors.New("fakeCoreChain: unexpected call")
 }

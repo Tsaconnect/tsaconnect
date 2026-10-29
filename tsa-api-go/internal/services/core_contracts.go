@@ -381,3 +381,12 @@ func (r *CoreRegistry) SystemWallets() []FeeSinkStatus {
 	wg.Wait()
 	return out
 }
+
+// hotKeys are chainID's hot keys by address (fee authoring refuses one as the fee recipient).
+func (r *CoreRegistry) hotKeys(chainID int64) map[common.Address]string {
+	cc, ok := r.chains[chainID]
+	if !ok {
+		return nil
+	}
+	return distinctHotKeys(cc.gates.HotKeys)
+}
