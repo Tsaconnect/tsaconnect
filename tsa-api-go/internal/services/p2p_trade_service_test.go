@@ -68,11 +68,12 @@ type mockEscrow struct {
 	readTradeCalls int
 	// releasers is releaserOf(seller), defaultReleaser the answer for any other seller;
 	// releaserSetEvent is what VerifyReleaserSet proves.
-	releasers         map[common.Address]common.Address
-	defaultReleaser   common.Address
-	readReleaserErr   error
-	releaserSetEvent  *P2PReleaserSetEvent
-	lastReleaseCaller string
+	releasers            map[common.Address]common.Address
+	defaultReleaser      common.Address
+	readReleaserErr      error
+	releaserSetEvent     *P2PReleaserSetEvent
+	verifyReleaserSetErr error
+	lastReleaseCaller    string
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -335,10 +336,13 @@ func (m *mockEscrow) ReadReleaser(seller string) (common.Address, error) {
 	return m.defaultReleaser, nil
 }
 func (m *mockEscrow) VerifyReleaserSet(txHash string, seller common.Address) (*P2PReleaserSetEvent, error) {
+	if m.verifyReleaserSetErr != nil {
+		return nil, m.verifyReleaserSetErr
+	}
 	if m.releaserSetEvent != nil {
 		return m.releaserSetEvent, nil
 	}
-	return nil, errors.New("ReleaserSet event not found")
+	return nil, errors.New("ReleaserSet event for seller not found in receipt")
 }
 func (m *mockEscrow) ReadBalance(seller, token string) (*OnChainBalance, error) {
 	if m.balanceErr != nil {

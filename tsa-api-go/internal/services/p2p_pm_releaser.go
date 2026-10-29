@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -121,8 +122,14 @@ func (s *P2PTradeService) ConfirmPMReleaser(ctx context.Context, userID uuid.UUI
 	}
 	wallet := common.HexToAddress(pm.OperatorWalletAddress)
 	ev, err := escrow.VerifyReleaserSet(txHash, wallet)
-	if err != nil {
+	switch {
+	case err == nil:
+	case strings.Contains(err.Error(), "not found in receipt"), strings.Contains(err.Error(), "reverted on chain"):
+		// A mined receipt that is not this wallet's setReleaser.
 		return nil, fmt.Errorf("%w: %v", ErrInvalidTransition, err)
+	default:
+		// No receipt yet, or the node could not be asked: retry.
+		return nil, fmt.Errorf("%w: %v", ErrChainUnavailable, err)
 	}
 	want := common.HexToAddress(s.releaseAddress)
 	if ev.Releaser != want {

@@ -177,6 +177,15 @@ func TestPMReleaser_StatusPrepareConfirm(t *testing.T) {
 	if _, err := svc.PreparePMReleaser(ctx, userID, 0); err != nil {
 		t.Fatal(err)
 	}
+	// A receipt the node cannot give yet is retryable; a mined one without the event is refused.
+	if _, err := svc.ConfirmPMReleaser(ctx, userID, 0, "0xtx"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("no event: err = %v", err)
+	}
+	esc.verifyReleaserSetErr = errors.New("get receipt: not found")
+	if _, err := svc.ConfirmPMReleaser(ctx, userID, 0, "0xtx"); !errors.Is(err, ErrChainUnavailable) {
+		t.Fatalf("no receipt yet: err = %v", err)
+	}
+	esc.verifyReleaserSetErr = nil
 	// A setReleaser that named anyone else is refused.
 	esc.releaserSetEvent = &P2PReleaserSetEvent{Seller: wallet, Releaser: common.HexToAddress("0x01")}
 	if _, err := svc.ConfirmPMReleaser(ctx, userID, 0, "0xtx"); !errors.Is(err, ErrInvalidTransition) {
