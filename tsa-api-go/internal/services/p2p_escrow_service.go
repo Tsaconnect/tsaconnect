@@ -46,7 +46,6 @@ const p2pEscrowABI = `[
 	{"inputs":[{"name":"seller","type":"address"}],"name":"releaserOf","outputs":[{"type":"address"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"name":"key","type":"bytes32"}],"name":"getTrade","outputs":[{"components":[{"name":"seller","type":"address"},{"name":"amount","type":"uint96"},{"name":"buyer","type":"address"},{"name":"createdAt","type":"uint40"},{"name":"expiresAt","type":"uint40"},{"name":"status","type":"uint8"},{"name":"funding","type":"uint8"},{"name":"token","type":"address"},{"name":"autoReleaseAt","type":"uint40"},{"name":"disputedAt","type":"uint40"},{"name":"platformFeeBps","type":"uint16"},{"name":"gasFeeBps","type":"uint16"},{"name":"autoReleaseWindow","type":"uint40"},{"name":"voucherHash","type":"bytes32"},{"name":"tradeReleaser","type":"address"}],"name":"","type":"tuple"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"components":[{"name":"seller","type":"address"},{"name":"token","type":"address"},{"name":"maxAmount","type":"uint256"},{"name":"minPerTrade","type":"uint256"},{"name":"maxPerTrade","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"nonce","type":"bytes32"},{"name":"taker","type":"address"}],"name":"v","type":"tuple"}],"name":"hashVoucher","outputs":[{"type":"bytes32"}],"stateMutability":"view","type":"function"},
-	{"inputs":[],"name":"paymentWindow","outputs":[{"type":"uint40"}],"stateMutability":"pure","type":"function"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Deposited","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"seller","type":"address"},{"indexed":true,"name":"token","type":"address"},{"indexed":false,"name":"amount","type":"uint256"}],"name":"Withdrawn","type":"event"},
 	{"anonymous":false,"inputs":[{"indexed":true,"name":"voucherHash","type":"bytes32"},{"indexed":true,"name":"seller","type":"address"}],"name":"VoucherCancelled","type":"event"},
@@ -511,31 +510,6 @@ func (s *P2PEscrowService) ReadReleaser(seller string) (common.Address, error) {
 		return common.Address{}, err
 	}
 	return vals[0].(common.Address), nil
-}
-
-// ReadPaymentWindow is the escrow's paymentWindow() (uint40 seconds).
-func (s *P2PEscrowService) ReadPaymentWindow() (time.Duration, error) {
-	vals, err := s.view("paymentWindow")
-	if err != nil {
-		return 0, err
-	}
-	return paymentWindowOf(vals)
-}
-
-// paymentWindowOf decodes paymentWindow()'s unpacked uint40.
-func paymentWindowOf(vals []any) (time.Duration, error) {
-	if len(vals) == 0 {
-		return 0, fmt.Errorf("decode paymentWindow: empty")
-	}
-	switch v := vals[0].(type) {
-	case *big.Int:
-		if v != nil && v.IsInt64() && v.Sign() >= 0 {
-			return time.Duration(v.Int64()) * time.Second, nil
-		}
-	case uint64:
-		return time.Duration(v) * time.Second, nil
-	}
-	return 0, fmt.Errorf("decode paymentWindow: unexpected %T %v", vals[0], vals[0])
 }
 
 // getTradeTuple is getTrade's Trade struct, in declaration order.

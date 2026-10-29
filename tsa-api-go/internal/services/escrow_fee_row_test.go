@@ -28,7 +28,7 @@ func TestReadEscrowFeeRow_NoFeeManager(t *testing.T) {
 }
 
 func TestP2PEscrowABI_HasThePoolViews(t *testing.T) {
-	for _, m := range []string{"getTrade", "paymentWindow", "releaserOf", "balanceOf", "hashVoucher"} {
+	for _, m := range []string{"getTrade", "releaserOf", "balanceOf", "hashVoucher"} {
 		if _, ok := parsedP2PEscrowABI.Methods[m]; !ok {
 			t.Fatalf("p2pEscrowABI lacks %s", m)
 		}
