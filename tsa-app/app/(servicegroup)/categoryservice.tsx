@@ -14,7 +14,7 @@ import ServiceCard from "../../components/services/ServiceCard";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
 import { useTheme } from "@/theme";
-import { EmptyState, PressableScale, Spinner, Text } from "@/components/ui";
+import { EmptyState, ErrorState, PressableScale, Spinner, Text } from "@/components/ui";
 import { ListingFilters } from "@/components/forms/ListingFilters";
 
 const Services = () => {
@@ -22,6 +22,9 @@ const Services = () => {
   const { value } = useLocalSearchParams<{ value?: string }>();
   const [services, setServices] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  // Bumped by "Try again" to re-run the load.
+  const [attempt, setAttempt] = useState(0);
   // The category's listing-field filters (institution, gender, …).
   const [filters, setFilters] = useState<Record<string, string>>({});
   const filtersKey = JSON.stringify(filters);
@@ -36,6 +39,7 @@ const Services = () => {
     }
     let cancelled = false;
     setLoading(true);
+    setLoadFailed(false);
     (async () => {
       const response = await api.getProductsByCategory({
         categoryId: value,
@@ -48,13 +52,14 @@ const Services = () => {
       } else {
         console.warn("Failed to load services:", response.message);
         setServices([]);
+        setLoadFailed(true);
       }
       setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [value, filtersKey]);
+  }, [value, filtersKey, attempt]);
 
   const handleRegister = () => {
     setAppService("Register your service");
@@ -68,6 +73,14 @@ const Services = () => {
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <Spinner size="large" />
         </View>
+      ) : loadFailed ? (
+        <View style={{ flex: 1, justifyContent: "center", paddingBottom: 80 }}>
+          <ErrorState
+            title="Couldn't load vendors"
+            subtitle="Check your connection and try again."
+            onRetry={() => setAttempt((n) => n + 1)}
+          />
+        </View>
       ) : services.length === 0 ? (
         <View style={{ flex: 1, justifyContent: "center", paddingBottom: 80 }}>
           <EmptyState
@@ -75,7 +88,7 @@ const Services = () => {
             title={filtering ? "No matches" : "No vendors yet"}
             subtitle={
               filtering
-                ? "No vendors match these filters. Try setting one back to Any."
+                ? "No vendors match these filters. Clear one to see more."
                 : "No registered vendor merchants in this category at the moment."
             }
           />
@@ -94,6 +107,7 @@ const Services = () => {
               id={item.id || (item as any)._id}
               title={item.name}
               description={item.description}
+              location={item.location}
               image={item.images?.[0]?.url || (item.images?.[0] as any) || ""}
             />
           ))}

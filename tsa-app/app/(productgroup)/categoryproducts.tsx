@@ -15,7 +15,7 @@ import ProductCard from "../../components/designs/productcard";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
 import { useTheme } from "@/theme";
-import { EmptyState, PressableScale, Spinner, Text } from "@/components/ui";
+import { EmptyState, ErrorState, PressableScale, Spinner, Text } from "@/components/ui";
 import { ListingFilters } from "@/components/forms/ListingFilters";
 
 const Products = () => {
@@ -24,6 +24,9 @@ const Products = () => {
   const { value } = useLocalSearchParams<{ value?: string }>();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  // Bumped by "Try again" to re-run the load.
+  const [attempt, setAttempt] = useState(0);
   // The category's listing-field filters (brand, …).
   const [filters, setFilters] = useState<Record<string, string>>({});
   const filtersKey = JSON.stringify(filters);
@@ -35,6 +38,7 @@ const Products = () => {
       return;
     }
     let cancelled = false;
+    setLoadFailed(false);
     (async () => {
       const response = await api.getProductsByCategory({
         categoryId: value,
@@ -47,13 +51,14 @@ const Products = () => {
       } else {
         console.warn("Failed to load products:", response.message);
         setProducts([]);
+        setLoadFailed(true);
       }
       setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [value, filtersKey]);
+  }, [value, filtersKey, attempt]);
 
   const registerCta = (
     <PressableScale
@@ -93,7 +98,18 @@ const Products = () => {
     >
       <GestureHandlerRootView style={{ flex: 1 }}>
         <ListingFilters categoryId={value} value={filters} onChange={setFilters} />
-        {products.length > 0 ? (
+        {loadFailed ? (
+          <View style={{ flex: 1, justifyContent: "center" }}>
+            <ErrorState
+              title="Couldn't load products"
+              subtitle="Check your connection and try again."
+              onRetry={() => {
+                setLoading(true);
+                setAttempt((n) => n + 1);
+              }}
+            />
+          </View>
+        ) : products.length > 0 ? (
           <FlatList
             data={products}
             renderItem={({ item }) => (
@@ -127,7 +143,7 @@ const Products = () => {
               title={filtering ? "No matches" : "No vendors yet"}
               subtitle={
                 filtering
-                  ? "No products match these filters. Try setting one back to Any."
+                  ? "No products match these filters. Clear one to see more."
                   : "No registered available vendor merchant at the moment."
               }
             />

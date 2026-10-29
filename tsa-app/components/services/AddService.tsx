@@ -26,7 +26,8 @@ import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
-import LocationPicker, { LocationValue } from "../common/LocationPicker";
+import LocationPicker from "../common/LocationPicker";
+import { formatLocation, LocationValue, parseLocation } from "@/utils/location";
 import { useTheme } from "@/theme";
 import {
   Button,
@@ -199,6 +200,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           setPhoneNumber(p.phoneNumber ?? "");
           setCompanyName(p.companyName ?? "");
           setCategory(typeof p.category === "string" ? p.category : p.category?.id ?? "");
+          setLocation(parseLocation(p.location));
           if (p.listingValues && typeof p.listingValues === "object") setListingValues(p.listingValues);
           if (p.price) setPrice(String(p.price));
           loadSavedAmounts({
@@ -276,14 +278,22 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       return;
     }
 
+    // A selectionLimit of 0 means unlimited, so a full set stops here.
+    if (productImages.length >= 10) {
+      Alert.alert("Limit reached", "You can add up to 10 photos.");
+      return;
+    }
+
     let result = await ImagePicker.launchImageLibraryAsync({
       aspect: [4, 3],
       quality: 0.8,
       allowsMultipleSelection: true,
+      selectionLimit: 10 - productImages.length,
     });
 
     if (!result.canceled) {
-      setProductImages(result.assets.map((asset) => asset.uri));
+      const picked = result.assets.map((asset) => asset.uri);
+      setProductImages((prev) => [...prev, ...picked].slice(0, 10));
     }
   };
 
@@ -385,10 +395,15 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     }
     setLoading(true);
     const formData = new FormData();
-    // On create we always send local URIs. On edit, only newly-picked local
-    // URIs (file://) are appended; existing remote URLs are left as-is server-side.
+    // Saved photos are remote URLs; picked ones are local files to upload.
+    // On edit the API keeps only the saved photos listed in existingImages,
+    // so a removed photo is dropped and the rest survive a new upload.
+    const isRemote = (uri: string) => /^https?:/.test(uri);
+    if (isEdit) {
+      formData.append("existingImages", JSON.stringify(productImages.filter(isRemote)));
+    }
     productImages.forEach((uri, index) => {
-      if (isEdit && /^https?:/.test(uri)) return;
+      if (isRemote(uri)) return;
       //@ts-ignore
       formData.append("images", {
         uri,
@@ -399,7 +414,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
     formData.append("name", productName);
     formData.append("description", description);
-    formData.append("location", [location.city, location.state, location.country].filter(Boolean).join(', '));
+    formData.append("location", formatLocation(location));
     formData.append("type", "Service");
     formData.append("email", email);
 

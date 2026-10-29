@@ -4,10 +4,10 @@
 // category listing fields — by mapping each field `type` to a TSA Signature
 // primitive. Controlled: the parent owns the answers and errors, and validates
 // with utils/schemaFields.
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
-import { Chip, IconButton, Input, RadioGroup, Text, Toggle } from '@/components/ui';
+import { Chip, IconButton, Input, PickerSheet, SelectRow, Text, Toggle } from '@/components/ui';
 import type { SchemaAnswers, SchemaField } from '@/utils/schemaFields';
 
 interface SchemaFieldsProps {
@@ -16,6 +16,9 @@ interface SchemaFieldsProps {
   errors?: Record<string, string>;
   onChange: (key: string, value: any) => void;
 }
+
+// A select with more options than this opens a picker sheet instead of chips.
+const MAX_CHIP_OPTIONS = 6;
 
 const placeholderFor = (type: SchemaField['type']): string | undefined => {
   switch (type) {
@@ -34,6 +37,9 @@ const placeholderFor = (type: SchemaField['type']): string | undefined => {
 
 export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaFieldsProps) {
   const { spacing } = useTheme();
+  // The long select whose picker sheet is open, if any.
+  const [pickerKey, setPickerKey] = useState<string | null>(null);
+  const pickerField = fields.find((f) => f.key === pickerKey);
 
   const labelled = (f: SchemaField, control: React.ReactNode) => (
     <View key={f.key} style={{ gap: spacing.xs }}>
@@ -51,10 +57,33 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
 
   const renderField = (f: SchemaField) => {
     if (f.type === 'select') {
-      const options = (f.options ?? []).map((o) => ({ value: o, label: o }));
+      const options = f.options ?? [];
+      const current: string = answers[f.key] ?? '';
+      if (options.length > MAX_CHIP_OPTIONS) {
+        return (
+          <SelectRow
+            key={f.key}
+            label={f.required ? `${f.label} *` : f.label}
+            value={current || undefined}
+            placeholder={`Select ${f.label.toLowerCase()}`}
+            error={errors[f.key]}
+            onPress={() => setPickerKey(f.key)}
+          />
+        );
+      }
       return labelled(
         f,
-        <RadioGroup options={options} value={answers[f.key] ?? ''} onChange={(v) => onChange(f.key, v)} />,
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+          {options.map((o) => (
+            <Chip
+              key={o}
+              label={o}
+              selected={current === o}
+              // An optional choice can be tapped again to clear it.
+              onPress={() => onChange(f.key, current === o && !f.required ? '' : o)}
+            />
+          ))}
+        </View>,
       );
     }
 
@@ -151,6 +180,18 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
           {items.map(renderField)}
         </View>
       ))}
+      <PickerSheet
+        visible={!!pickerField}
+        onClose={() => setPickerKey(null)}
+        title={pickerField?.label ?? ''}
+        items={(pickerField?.options ?? []).map((o) => ({ id: o, label: o }))}
+        selectedId={pickerField ? answers[pickerField.key] : undefined}
+        searchable
+        onSelect={(item) => {
+          if (pickerField) onChange(pickerField.key, item.id);
+          setPickerKey(null);
+        }}
+      />
     </View>
   );
 }
