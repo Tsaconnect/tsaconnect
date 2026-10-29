@@ -27,7 +27,7 @@ import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
 import { baseUrl } from "../../constants/api/apiClient";
 import LocationPicker from "../common/LocationPicker";
-import { formatLocation, LocationValue, parseLocation } from "@/utils/location";
+import { appendListingLocation, listingLocation, LocationValue } from "@/utils/location";
 import { useTheme } from "@/theme";
 import {
   Button,
@@ -94,6 +94,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   const [phoneNumber, setPhoneNumber] = useState("");
   const [email, setEmail] = useState("");
   const [location, setLocation] = useState<LocationValue>({ country: '', state: '', city: '' });
+  const [area, setArea] = useState('');
   const [category, setCategory] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [categories, setCategories] = useState<
@@ -200,7 +201,9 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           setPhoneNumber(p.phoneNumber ?? "");
           setCompanyName(p.companyName ?? "");
           setCategory(typeof p.category === "string" ? p.category : p.category?.id ?? "");
-          setLocation(parseLocation(p.location));
+          const saved = listingLocation(p);
+          setLocation(saved.value);
+          setArea(saved.area);
           if (p.listingValues && typeof p.listingValues === "object") setListingValues(p.listingValues);
           if (p.price) setPrice(String(p.price));
           loadSavedAmounts({
@@ -414,7 +417,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
     formData.append("name", productName);
     formData.append("description", description);
-    formData.append("location", formatLocation(location));
+    appendListingLocation(formData, location, area);
     formData.append("type", "Service");
     formData.append("email", email);
 
@@ -499,6 +502,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     setDescription("");
     setEmail("");
     setLocation({ country: '', state: '', city: '' });
+    setArea('');
     setProductImages([]);
     setProductName("");
     setCompanyName("");
@@ -892,6 +896,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
               value={location}
               onChange={setLocation}
               required={["country", "state"]}
+            />
+            <Input
+              label="Area or neighbourhood"
+              value={area}
+              onChangeText={setArea}
+              placeholder="e.g. Odenigbo, Kubwa, Yaba"
             />
 
             <Input

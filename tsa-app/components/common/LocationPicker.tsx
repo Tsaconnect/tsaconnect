@@ -51,6 +51,14 @@ interface SearchableDropdownProps {
   onFallbackTextChange?: (text: string) => void;
 }
 
+// Nearly every user is in Nigeria, so it leads the country list instead of
+// sitting between Niger and Niue.
+const PINNED_COUNTRIES = ['Nigeria'];
+const COUNTRY_OPTIONS = [
+  ...PINNED_COUNTRIES.filter((c) => countries.includes(c)),
+  ...countries.filter((c) => !PINNED_COUNTRIES.includes(c)),
+];
+
 const SearchableDropdown: React.FC<SearchableDropdownProps> = ({
   label,
   data,
@@ -243,7 +251,7 @@ const LocationPicker: React.FC<LocationPickerProps> = ({
       <View style={{ marginBottom: spacing.md }}>
         <SearchableDropdown
           label={showLabels ? `${countryLabel}${required.includes('country') ? ' *' : ''}` : undefined}
-          data={countries}
+          data={COUNTRY_OPTIONS}
           selectedItem={value.country}
           onSelect={handleCountryChange}
           placeholder={`Select ${countryLabel}`}

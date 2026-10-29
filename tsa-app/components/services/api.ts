@@ -1316,6 +1316,12 @@ class APIService {
     sortOrder?: 'asc' | 'desc';
     /** Category listing-field filters, sent as attr[key]=value. */
     attr?: Record<string, string>;
+    /** Where the listing is; matched on the API's location keys ("Enugu" finds "Enugu State"). */
+    country?: string;
+    state?: string;
+    city?: string;
+    /** A substring of the listing's area or location text. */
+    area?: string;
   }): Promise<ApiResponse<{ products: Product[]; category: any; pagination: any; filters: any }>> {
     try {
       const queryParams = new URLSearchParams();

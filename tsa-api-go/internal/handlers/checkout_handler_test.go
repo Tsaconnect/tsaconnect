@@ -100,6 +100,8 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			images TEXT,
 			attributes TEXT,
 			listing_values TEXT,
+			country TEXT, state TEXT, city TEXT, area TEXT,
+			country_key TEXT, state_key TEXT, city_key TEXT,
 			status TEXT DEFAULT 'active',
 			type TEXT DEFAULT 'Product',
 			is_featured INTEGER DEFAULT 0,

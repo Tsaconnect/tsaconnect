@@ -357,7 +357,7 @@ func (s *NameChangeService) IsNameChangeSession(ctx context.Context, sessionID s
 	}
 	// didit_session_ids is a JSON array of strings; matching its text for the
 	// quoted id works the same on PostgreSQL (jsonb) and SQLite (tests).
-	pattern := `%"` + likeLiteral(sessionID) + `"%`
+	pattern := `%"` + LikeLiteral(sessionID) + `"%`
 	var n int64
 	err := s.db.WithContext(ctx).Model(&models.UserNameChange{}).
 		Where(`didit_session_id = ? OR CAST(didit_session_ids AS TEXT) LIKE ? ESCAPE '\'`, sessionID, pattern).Count(&n).Error
