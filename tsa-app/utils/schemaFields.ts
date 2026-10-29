@@ -28,6 +28,14 @@ export function isEmptyAnswer(v: unknown): boolean {
   );
 }
 
+// A number field holds the typed text ("1.", "-") until submit; this is its
+// value, or NaN when the text is not a number.
+function numberAnswer(v: unknown): number {
+  if (typeof v === 'number') return v;
+  if (typeof v === 'string' && v.trim() !== '') return Number(v.trim());
+  return NaN;
+}
+
 // Errors keyed by field key; empty when the answers are acceptable.
 export function validateSchemaAnswers(fields: SchemaField[], answers: SchemaAnswers): Record<string, string> {
   const errors: Record<string, string> = {};
@@ -43,7 +51,7 @@ export function validateSchemaAnswers(fields: SchemaField[], answers: SchemaAnsw
       if (f.required) errors[f.key] = `${f.label} is required`;
       continue;
     }
-    if (f.type === 'number' && typeof v !== 'number') errors[f.key] = `${f.label} must be a number`;
+    if (f.type === 'number' && !Number.isFinite(numberAnswer(v))) errors[f.key] = `${f.label} must be a number`;
   }
   return errors;
 }
@@ -53,8 +61,13 @@ export function validateSchemaAnswers(fields: SchemaField[], answers: SchemaAnsw
 export function cleanSchemaAnswers(fields: SchemaField[], answers: SchemaAnswers): SchemaAnswers {
   const out: SchemaAnswers = {};
   for (const f of fields) {
-    const v = f.type === 'boolean' ? !!answers[f.key] : answers[f.key];
-    if (!isEmptyAnswer(v)) out[f.key] = v;
+    const raw = answers[f.key];
+    if (f.type === 'boolean') {
+      out[f.key] = !!raw;
+      continue;
+    }
+    if (isEmptyAnswer(raw)) continue;
+    out[f.key] = f.type === 'number' ? numberAnswer(raw) : raw;
   }
   return out;
 }

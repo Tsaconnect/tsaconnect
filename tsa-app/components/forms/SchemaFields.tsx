@@ -17,9 +17,6 @@ interface SchemaFieldsProps {
   onChange: (key: string, value: any) => void;
 }
 
-// Field types that store a numeric answer.
-const NUMERIC_TYPES = new Set(['counter', 'number']);
-
 const placeholderFor = (type: SchemaField['type']): string | undefined => {
   switch (type) {
     case 'date':
@@ -115,8 +112,9 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
       );
     }
 
-    // text | textarea | number | date | time | datetime | location → Input
-    const numeric = NUMERIC_TYPES.has(f.type);
+    // text | textarea | number | date | time | datetime | location → Input.
+    // A number stays as typed text; utils/schemaFields converts it on submit.
+    const numeric = f.type === 'number';
     return (
       <Input
         key={f.key}
@@ -125,8 +123,8 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
         value={answers[f.key] != null ? String(answers[f.key]) : ''}
         placeholder={placeholderFor(f.type)}
         multiline={f.type === 'textarea'}
-        keyboardType={numeric ? 'numeric' : 'default'}
-        onChangeText={(t) => onChange(f.key, numeric ? (t === '' ? '' : Number(t)) : t)}
+        keyboardType={numeric ? 'decimal-pad' : 'default'}
+        onChangeText={(t) => onChange(f.key, t)}
       />
     );
   };

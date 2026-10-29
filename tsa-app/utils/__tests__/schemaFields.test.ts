@@ -33,6 +33,25 @@ describe('validateSchemaAnswers', () => {
   });
 });
 
+describe('number answers', () => {
+  it('accepts typed text that is a number and rejects text that is not', () => {
+    expect(validateSchemaAnswers(fields, { institution: 'UNN', guests: 1, distance: '1.5' })).toEqual({});
+    expect(validateSchemaAnswers(fields, { institution: 'UNN', guests: 1, distance: '1.' })).toEqual({});
+    expect(validateSchemaAnswers(fields, { institution: 'UNN', guests: 1, distance: '-' })).toEqual({
+      distance: 'Distance must be a number',
+    });
+  });
+
+  it('sends typed text as a number', () => {
+    expect(cleanSchemaAnswers(fields, { institution: 'UNN', guests: 1, distance: ' 2.50 ' })).toEqual({
+      institution: 'UNN',
+      has_curfew: false,
+      guests: 1,
+      distance: 2.5,
+    });
+  });
+});
+
 describe('cleanSchemaAnswers', () => {
   it('keeps only form keys, drops empties and always sends booleans', () => {
     expect(
