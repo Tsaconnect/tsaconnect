@@ -65,6 +65,13 @@ func newPMAutomationServiceWithGateway(t *testing.T, db *gorm.DB, svc *P2PTradeS
 		addr: "0x1111111111111111111111111111111111111111",
 		hash: "0xrelease",
 	}
+	// Sell payouts re-read the trade first: by default it is open on-chain and, through the mock's
+	// default releaser, releasable by the release key.
+	if esc, err := svc.escrows.For(146); err == nil {
+		if m, ok := esc.(*mockEscrow); ok && m.onChainTrade == nil {
+			m.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending}
+		}
+	}
 	pmSvc := NewPMService(db)
 	return NewPMAutomationService(db, pmSvc, svc, signer, name, gw, "TSA Connect"), signer
 }

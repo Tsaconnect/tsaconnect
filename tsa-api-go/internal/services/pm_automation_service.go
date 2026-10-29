@@ -557,6 +557,14 @@ func (s *PMAutomationService) InitiateSellPayout(ctx context.Context, tradeID uu
 	if trade.PayoutAccountNumber == "" || trade.PayoutBank == "" {
 		return "", fmt.Errorf("%w: payout destination missing", ErrInvalidParams)
 	}
+	// The naira leaves before the crypto is released: refuse unless the release key can release it
+	// on-chain, or the user could cancel by timeout and keep both.
+	if s.trades != nil {
+		if err := s.trades.ReleaseKeyCanRelease(&trade); err != nil {
+			log.Printf("[pm automation] ALERT pm_payout_unreleasable trade=%s: %s", trade.ID, RedactAlertText(err.Error()))
+			return "", err
+		}
+	}
 
 	// Resolve the PM (nil for non-PM trades) to determine which Nomba account to debit.
 	pm, err := s.pmForTrade(ctx, tradeID)

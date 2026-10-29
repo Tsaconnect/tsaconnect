@@ -211,7 +211,7 @@ func TestOnChainOpenMatches_TokenCaseInsensitive(t *testing.T) {
 	_, esc, tr, db := lostPooledOpen(t)
 	var ad models.P2PAd
 	db.First(&ad, "id = ?", tr.AdID)
-	if err := onChainOpenMatches(&tr, &ad, strings.ToLower(openTestUSDT), esc.onChainTrade); err != nil {
+	if err := onChainOpenMatches(&tr, &ad, strings.ToLower(openTestUSDT), esc.onChainTrade, testReleaseKey); err != nil {
 		t.Fatalf("lowercase token address refused: %v", err)
 	}
 }
@@ -580,7 +580,7 @@ func TestOnChainOpenMatches_OpenerCaseInsensitive(t *testing.T) {
 		var ad models.P2PAd
 		db.First(&ad, "id = ?", tr.AdID)
 		tr.OpenerAddress = "0x" + strings.ToUpper(openTestUser[2:])
-		if err := onChainOpenMatches(&tr, &ad, openTestUSDT, esc.onChainTrade); err != nil {
+		if err := onChainOpenMatches(&tr, &ad, openTestUSDT, esc.onChainTrade, testReleaseKey); err != nil {
 			t.Fatalf("pooled=%v: matching opener refused: %v", pooled, err)
 		}
 	}

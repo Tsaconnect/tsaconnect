@@ -288,3 +288,40 @@ func TestAlertUnresolvedDisputes_StaleThenBackstopOncePerTrade(t *testing.T) {
 		t.Fatal("the stale dispute was not alerted")
 	}
 }
+
+// A PM buy-ad open must name the release key as the trade's releaser: one the user sent with any
+// other releaser is not recorded, and a sell payout is refused on a trade the key cannot release.
+func TestPMBuyAd_OpenWithoutTheReleaseKeyIsRefusedAndNotPaidOut(t *testing.T) {
+	svc, esc, _, _, adID, _, db := buyAdFixture(t)
+	markAdAsPM(t, svc, adID)
+	userID := seedVerifiedUser(t, db)
+	trade, _, err := svc.OpenTrade(context.Background(), adID, userID, coreSwitchBuyer, OpenTradeParams{
+		TokenAmount: "50000000", PaymentMethodID: seedPaymentMethod(t, db, userID, "NGN"),
+		PayoutAccountNumber: "0123456789", PayoutBank: "058",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ad models.P2PAd
+	db.First(&ad, "id = ?", adID)
+	amount, _ := new(big.Int).SetString(trade.TokenAmount, 10)
+	tokenAddr, _ := svc.resolveTokenAddress(trade.ChainID, trade.Token)
+	esc.onChainTrade = &OnChainP2PTrade{Exists: true, Status: OnChainP2PStatusPending, Funding: models.P2PTradeFundingDepositedByTaker,
+		Amount: amount, Token: common.HexToAddress(tokenAddr), Seller: common.HexToAddress(coreSwitchBuyer),
+		Buyer: common.HexToAddress(ad.SellerAddress)} // no releaser: the user swapped the prepared tx
+	if _, err := svc.ConfirmOpenTrade(context.Background(), trade.ID, userID, "0xopen"); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("confirm of an open without the release key: err = %v", err)
+	}
+
+	// Even with an open recorded, the payout re-reads the chain first.
+	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
+	db.First(trade, "id = ?", trade.ID)
+	esc.defaultReleaser = common.Address{}
+	if err := svc.ReleaseKeyCanRelease(trade); !errors.Is(err, ErrPMReleaserNotSet) {
+		t.Fatalf("payout check: err = %v", err)
+	}
+	esc.onChainTrade.TradeReleaser = testReleaseKey
+	if err := svc.ReleaseKeyCanRelease(trade); err != nil {
+		t.Fatalf("a trade naming the key: %v", err)
+	}
+}

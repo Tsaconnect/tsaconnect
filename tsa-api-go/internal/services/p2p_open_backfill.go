@@ -73,7 +73,12 @@ func (s *P2PTradeService) openRecordUpdates(openTxHash string, t *models.P2PTrad
 // voucher (or any wallet, on a buy-ad) can open under our trade id first and
 // would otherwise be recorded — and later paid — as the counterparty. A row
 // with no stored opener (prepared before the column existed) is refused.
-func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, onchain *OnChainP2PTrade) error {
+//
+// A payment merchant's buy-ad trade must also name the platform release key as its releaser
+// (`releaseKey`): the platform pays the user naira first and then releases, and openTradeWithDeposit
+// takes the releaser from the user's own tx, so an open that named anyone else would leave the
+// platform unable to release after paying out — while the user cancels by timeout and keeps both.
+func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, onchain *OnChainP2PTrade, releaseKey common.Address) error {
 	mismatch := func(what string) error {
 		return fmt.Errorf("%w: on-chain trade does not match this trade's %s", ErrInvalidTransition, what)
 	}
@@ -107,6 +112,10 @@ func onChainOpenMatches(t *models.P2PTrade, ad *models.P2PAd, tokenAddr string, 
 	if funding.OnChainOpener(onchain) != common.HexToAddress(t.OpenerAddress) {
 		return mismatch("opener")
 	}
+	if ad.PMID != nil && funding.JIT() &&
+		(releaseKey == (common.Address{}) || onchain.TradeReleaser != releaseKey) {
+		return mismatch("releaser")
+	}
 	return nil
 }
 
@@ -128,7 +137,7 @@ func (s *P2PTradeService) verifyOpenOnChain(ctx context.Context, path string, t 
 	if err != nil {
 		return err
 	}
-	if err := onChainOpenMatches(t, ad, tokenAddr, onchain); err != nil {
+	if err := onChainOpenMatches(t, ad, tokenAddr, onchain, common.HexToAddress(s.releaseAddress)); err != nil {
 		if onchain != nil && onchain.Exists {
 			log.Printf("[p2p] ALERT p2p_open_backfill_mismatch_total=1 path=%s trade=%s err=%v chainAmount=%v dbAmount=%s chainFunding=%d dbFunding=%d chainToken=%s token=%s chainSeller=%s chainBuyer=%s opener=%q",
 				path, t.ID, err, onchain.Amount, t.TokenAmount, onchain.Funding, t.Funding,

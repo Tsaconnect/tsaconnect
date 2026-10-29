@@ -170,3 +170,36 @@ func (s *P2PTradeService) MissingPMReleasers(ctx context.Context) ([]string, err
 	}
 	return missing, nil
 }
+
+// ReleaseKeyCanRelease reads t from its escrow and answers whether the release key may release it:
+// the trade names the key as its releaser (a PM buy-ad open), or its seller has (a PM's
+// setReleaser). Money the platform pays out before releasing (a PM sell payout) must check this
+// first: once paid, a trade the key cannot release goes back to the seller by timeout.
+func (s *P2PTradeService) ReleaseKeyCanRelease(t *models.P2PTrade) error {
+	if s.releaseAddress == "" {
+		return fmt.Errorf("%w: payment-merchant settlement is not running", ErrChainUnavailable)
+	}
+	escrow, key, err := s.tradeEscrow(t)
+	if err != nil {
+		return err
+	}
+	onchain, err := escrow.ReadTrade(key)
+	if err != nil {
+		return fmt.Errorf("%w: read trade: %v", ErrChainUnavailable, err)
+	}
+	if !onchain.Exists {
+		return fmt.Errorf("%w: trade not opened on-chain", ErrInvalidTransition)
+	}
+	want := common.HexToAddress(s.releaseAddress)
+	if onchain.TradeReleaser == want {
+		return nil
+	}
+	got, err := escrow.ReadReleaser(onchain.Seller.Hex())
+	if err != nil {
+		return fmt.Errorf("%w: read releaser: %v", ErrChainUnavailable, err)
+	}
+	if got != want {
+		return fmt.Errorf("%w: the release key cannot release trade %s", ErrPMReleaserNotSet, t.ID)
+	}
+	return nil
+}
