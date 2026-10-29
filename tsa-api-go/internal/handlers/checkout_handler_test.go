@@ -206,6 +206,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			type TEXT,
 			service_fee_mode TEXT DEFAULT 'standard',
 			service_type TEXT DEFAULT 'contact',
+			slug TEXT, booking_mode TEXT, price_units TEXT, listing_fields TEXT, booking_fields TEXT,
 			parent_category_id TEXT,
 			icon TEXT,
 			image TEXT,

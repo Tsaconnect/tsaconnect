@@ -1752,6 +1752,16 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		return
 	}
 
+	// Validate the booking-form answers against the form the buyer was served
+	// (listing config, else category booking_fields). With no form only the
+	// size limits apply.
+	form, _ := serviceBookingForm(tx, &product, &profile)
+	if err := models.ValidateAnswers(form, req.Answers); err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, rates, user, &seller, &product, serviceType, &profile,
 		token, req.ServiceTier, buyerCity, buyerState, buyerCountry,
@@ -1802,11 +1812,10 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	menuLines []menuLineRequest, slotReq *bookingSlotRequest, answers map[string]interface{},
 	priceOverrideUSD *float64,
 ) (*models.Order, string, int) {
-	// Validate the auto-generated booking-form answers against the merchant's
-	// field config (unified booking engine). No config → no validation (legacy).
-	if err := models.ValidateAnswers(profile.GetFieldConfig(), answers); err != nil {
-		return nil, err.Error(), http.StatusBadRequest
-	}
+	// Booking-form answers are validated by the caller, not here: inline checkout
+	// checks them against the live form, while an approved booking request was
+	// checked when it was submitted and must stay payable if the form changes
+	// afterwards.
 
 	origin := resolveShippingOrigin(product, seller)
 	detectedZone := DetectShippingZone(buyerCity, buyerState, buyerCountry, origin.City, origin.State, origin.Country)

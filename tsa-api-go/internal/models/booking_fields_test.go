@@ -85,3 +85,54 @@ func TestValidateAnswers_PayloadBounds(t *testing.T) {
 		t.Errorf("expected nil for small payload, got %v", err)
 	}
 }
+
+func TestValidateAnswers_BooleanAndMultiselect(t *testing.T) {
+	cfg := &BookingFieldConfig{Fields: []BookingField{
+		{Key: "parking", Type: BookingFieldBoolean, Label: "Parking", Required: true},
+		{Key: "amenities", Type: BookingFieldMultiselect, Label: "Amenities", Required: true, Options: []string{"wifi", "water"}},
+	}}
+	cases := []struct {
+		name    string
+		answers map[string]interface{}
+		wantErr bool
+	}{
+		{"valid", map[string]interface{}{"parking": false, "amenities": []interface{}{"wifi", "water"}}, false},
+		{"boolean as string", map[string]interface{}{"parking": "yes", "amenities": []interface{}{"wifi"}}, true},
+		{"multiselect not a list", map[string]interface{}{"parking": true, "amenities": "wifi"}, true},
+		{"multiselect unknown option", map[string]interface{}{"parking": true, "amenities": []interface{}{"pool"}}, true},
+		{"multiselect repeated option", map[string]interface{}{"parking": true, "amenities": []interface{}{"wifi", "wifi"}}, true},
+		{"required multiselect empty", map[string]interface{}{"parking": true, "amenities": []interface{}{}}, true},
+		{"required boolean missing", map[string]interface{}{"amenities": []interface{}{"wifi"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateAnswers(cfg, tc.answers); (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateFieldConfigAgainst_DBCatalogue(t *testing.T) {
+	catalog := BuiltinFieldCatalog()
+	catalog["pet_friendly"] = FieldDef{Key: "pet_friendly", Type: BookingFieldBoolean, Label: "Pets", Scope: FieldScopeBoth, IsActive: true}
+
+	// An admin-added catalogue key is a catalogue key, not "custom".
+	if err := ValidateFieldConfigAgainst(&BookingFieldConfig{Fields: []BookingField{
+		{Key: "pet_friendly", Type: BookingFieldBoolean, Label: "Pets"},
+	}}, catalog); err != nil {
+		t.Fatalf("DB-defined key rejected: %v", err)
+	}
+	// A listing-only field cannot sit on a booking form unless marked custom.
+	if err := ValidateFieldConfigAgainst(&BookingFieldConfig{Fields: []BookingField{
+		{Key: "brand", Type: BookingFieldText, Label: "Brand"},
+	}}, catalog); err == nil {
+		t.Fatal("listing-scope field accepted on a booking form")
+	}
+	// Multiselect needs options like select.
+	if err := ValidateFieldConfigAgainst(&BookingFieldConfig{Fields: []BookingField{
+		{Key: "extras", Type: BookingFieldMultiselect, Custom: true},
+	}}, catalog); err == nil {
+		t.Fatal("multiselect without options accepted")
+	}
+}
