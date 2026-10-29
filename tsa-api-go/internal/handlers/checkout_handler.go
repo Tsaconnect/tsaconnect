@@ -1749,13 +1749,13 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 	}
 
 	// Validate the booking-form answers against the form the buyer was served
-	// (listing config, else category booking_fields). No form → no validation.
-	if form, _ := serviceBookingForm(tx, &product, &profile); form != nil {
-		if err := models.ValidateAnswers(form, req.Answers); err != nil {
-			tx.Rollback()
-			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
-			return
-		}
+	// (listing config, else category booking_fields). With no form only the
+	// size limits apply.
+	form, _ := serviceBookingForm(tx, &product, &profile)
+	if err := models.ValidateAnswers(form, req.Answers); err != nil {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	order, errMsg, status := ch.placeServiceOrder(
