@@ -18,6 +18,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/middleware"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -162,6 +163,22 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 		categoryName = cat.Title
 	}
 
+	// Answers to the category's listing fields, checked before any upload so a
+	// bad answer leaves nothing behind.
+	var listingValues datatypes.JSON
+	if values, present, err := listingValuesForm(c); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	} else if present {
+		// Only an app that knows the category's form sends listingValues, so
+		// required fields are enforced from then on; older versions still list.
+		listingValues, err = encodeListingValues(config.DB, categoryID, values)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	// Handle image uploads
 	var uploadedImages []models.ProductImage
 	form, err := c.MultipartForm()
@@ -261,6 +278,7 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	}
 	product.SetImages(uploadedImages)
 	product.SetAttributes(parsedAttributes)
+	product.ListingValues = listingValues
 
 	if err := config.DB.Create(&product).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to create product")
@@ -528,10 +546,30 @@ func (h *Handlers) UpdateProduct(c *gin.Context) {
 	}
 
 	// Handle category update
+	targetCategory := product.CategoryID
 	if catStr := c.PostForm("category"); catStr != "" {
 		catOID, err := uuid.Parse(catStr)
 		if err == nil {
 			updates["category_id"] = catOID
+			targetCategory = &catOID
+		}
+	}
+
+	// Listing values are checked against the category the listing ends up in.
+	// Not sent → left as they are, so older app versions keep working.
+	if values, present, err := listingValuesForm(c); err != nil {
+		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	} else if present {
+		encoded, err := encodeListingValues(config.DB, targetCategory, values)
+		if err != nil {
+			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		if encoded == nil {
+			updates["listing_values"] = gorm.Expr("NULL")
+		} else {
+			updates["listing_values"] = encoded
 		}
 	}
 
@@ -1071,6 +1109,10 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	if categoryIDStr != "" {
 		if catOID, err := uuid.Parse(categoryIDStr); err == nil {
 			query = query.Where("category_id = ?", catOID)
+			var ok bool
+			if query, ok = applyListingValueFilter(c, config.DB, query, catOID); !ok {
+				return
+			}
 		}
 	}
 
@@ -1355,6 +1397,10 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	if category != "" {
 		if catOID, err := uuid.Parse(category); err == nil {
 			query = query.Where("category_id = ?", catOID)
+			var ok bool
+			if query, ok = applyListingValueFilter(c, config.DB, query, catOID); !ok {
+				return
+			}
 		} else {
 			// Search by category name
 			var cats []models.Category

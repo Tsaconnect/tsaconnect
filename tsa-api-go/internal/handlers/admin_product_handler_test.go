@@ -44,6 +44,7 @@ func setupProductModerationDB(t *testing.T) *gorm.DB {
 			category_name TEXT,
 			images TEXT,
 			attributes TEXT,
+			listing_values TEXT,
 			status TEXT DEFAULT 'active',
 			type TEXT DEFAULT 'Product',
 			is_featured INTEGER DEFAULT 0,

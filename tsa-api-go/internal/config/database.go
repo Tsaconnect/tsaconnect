@@ -387,6 +387,11 @@ func AutoMigrate() error {
 	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_users_tp_balance
 		ON users (tp_balance DESC) WHERE deleted_at IS NULL`)
 
+	// Category search filters match listing values by JSON containment
+	// (listing_values @> {...}); GIN keeps that off a sequential scan.
+	DB.Exec(`CREATE INDEX IF NOT EXISTS idx_products_listing_values
+		ON products USING GIN (listing_values) WHERE listing_values IS NOT NULL`)
+
 	// P2P trade integrity constraints — buyer cannot equal seller. AutoMigrate
 	// doesn't emit CHECK constraints, so this is added explicitly. IF NOT
 	// EXISTS keeps repeat boots idempotent.
