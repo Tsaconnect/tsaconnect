@@ -137,19 +137,15 @@ func (w coreGatesWorker) Run(ctx context.Context) error {
 	return w.reg.Gate(ctx)
 }
 
-// reportPMReleasers logs, once shortly after boot, every active payment merchant whose maker
-// wallet has not named the release key (setReleaser): its sell-ads stay unsignable and unopenable
-// until it does, from the app's merchant screen.
-func reportPMReleasers(trades *services.P2PTradeService) {
-	time.Sleep(30 * time.Second) // after the core gates' first pass; the reads do not need it
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	missing, err := trades.MissingPMReleasers(ctx)
-	if err != nil {
-		log.Printf("[pm] ALERT pm_releaser_check_failed err=%s", services.RedactAlertText(err.Error()))
-		return
-	}
-	for _, m := range missing {
-		log.Printf("[pm] ALERT pm_releaser_not_set %s — the PM must name the release key (setReleaser) before its sell-ads can trade", m)
-	}
+// pmReleaserWorker reports, every 15 minutes, each active payment merchant whose maker wallet has
+// not named the release key (setReleaser), or has since revoked it: its sell-ads cannot be signed
+// or opened, and trades already paid to it cannot be released by AutoRelease. Each PM is alerted
+// at most hourly (MissingPMReleasers' own dedupe); a failed check fails the tick.
+type pmReleaserWorker struct{ trades *services.P2PTradeService }
+
+func (w pmReleaserWorker) Name() string            { return "pm-releaser-check" }
+func (w pmReleaserWorker) Interval() time.Duration { return 15 * time.Minute }
+func (w pmReleaserWorker) Run(ctx context.Context) error {
+	_, err := w.trades.AlertMissingPMReleasers(ctx)
+	return err
 }

@@ -1433,7 +1433,7 @@ func main() {
 	if releaseSigner != nil && p2pTradeSvc != nil {
 		// The release key is the releaser PMs name (setReleaser) and PM buy-ad opens pass (M1).
 		p2pTradeSvc.SetReleaseAddress(releaseSigner.Address())
-		go reportPMReleasers(p2pTradeSvc)
+		scheduler.Register(pmReleaserWorker{trades: p2pTradeSvc}, jobs.AlertOnFailureStreak())
 	}
 
 	var (

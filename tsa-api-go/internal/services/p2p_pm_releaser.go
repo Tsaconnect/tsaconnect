@@ -142,6 +142,21 @@ func (s *P2PTradeService) ConfirmPMReleaser(ctx context.Context, userID uuid.UUI
 	return &PMReleaserStatus{ChainID: chainID, Wallet: wallet.Hex(), Releaser: want.Hex(), Expected: want.Hex(), Set: true}, nil
 }
 
+// AlertMissingPMReleasers logs `ALERT pm_releaser_not_set` for each entry of MissingPMReleasers, at
+// most hourly per entry, and returns how many there are.
+func (s *P2PTradeService) AlertMissingPMReleasers(ctx context.Context) (int, error) {
+	missing, err := s.MissingPMReleasers(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, m := range missing {
+		if reconcileAlerts.allow("pm_releaser:"+m, time.Hour) {
+			log.Printf("[pm] ALERT pm_releaser_not_set %s — the PM must name the release key (setReleaser): its sell-ads cannot trade and paid trades cannot be auto-released", m)
+		}
+	}
+	return len(missing), nil
+}
+
 // MissingPMReleasers lists each active payment merchant whose maker wallet has not named the
 // release key on a chain PMs trade on (audience pm or all) — their sell-ads cannot be signed or
 // opened until they do. A chain read that fails is reported as such, never as "set".
