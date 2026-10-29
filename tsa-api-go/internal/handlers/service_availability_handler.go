@@ -256,7 +256,7 @@ func formatSlot(t time.Time) string {
 var bookingNow = time.Now
 
 // bookingDeliveryGrace is how long after a slot ends its order may still be delivered.
-const bookingDeliveryGrace = 2 * 24 * time.Hour
+const bookingDeliveryGrace = services.BookingDeliveryGrace
 
 // MaxBookingLead is how far ahead a slot booking may end (owner 2026-10-27). The order escrow
 // gives a seller at most services.EscrowWindow to deliver and a slot is delivered on the day, so

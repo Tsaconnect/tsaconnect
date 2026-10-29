@@ -19,6 +19,15 @@ export const shippingWithoutPayoutFee = (shippingAmount: string, payoutFee?: str
 
 export const hasPayoutFee = (payoutFee?: string): boolean => big(payoutFee) > 0n;
 
+/** What the buyer paid: the escrowed total plus the flat network fee charged on top. */
+export const paidTotal = (totalAmount: string, flatFee?: string): string => (big(totalAmount) + big(flatFee)).toString();
+
+/** What the escrow releases to the seller: the order total less the platform fee they pay. */
+export const sellerNet = (totalAmount: string, platformFee?: string): string => {
+  const left = big(totalAmount) - big(platformFee);
+  return (left > 0n ? left : 0n).toString();
+};
+
 /** What a seller reads about their bank payout, by stage. */
 export const payoutStageText = (
   p: { stage: string; amountNgn: string; bank: string; accountLast4: string },

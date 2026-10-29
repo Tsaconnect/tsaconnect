@@ -41,7 +41,7 @@ import {
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
-import { payoutStageText, shippingWithoutPayoutFee } from '@/utils/payoutFee';
+import { payoutStageText, sellerNet, shippingWithoutPayoutFee } from '@/utils/payoutFee';
 import { signAndBroadcast } from '@/services/transaction';
 import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
 import api from '@/components/services/api';
@@ -646,19 +646,19 @@ const MerchantOrderDetail = () => {
             </View>
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
               <Text variant="bodySm" color="textSecondary">
-                Platform fee
+                Platform fee (paid by you)
               </Text>
               <Text variant="bodySm" numeric>
-                {formatTokenAmount(order.platformFee, order.token)}
+                −{formatTokenAmount(order.platformFee, order.token)}
               </Text>
             </View>
             <Divider spacing="sm" />
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.xs }}>
               <Text variant="bodyMed" weight="700">
-                Total
+                You receive
               </Text>
               <Text variant="bodyMed" weight="700" color="accent" numeric>
-                {formatTokenAmount(order.totalAmount, order.token)}
+                {formatTokenAmount(sellerNet(order.totalAmount, order.platformFee), order.token)}
               </Text>
             </View>
           </View>

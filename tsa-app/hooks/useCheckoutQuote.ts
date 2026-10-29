@@ -74,12 +74,10 @@ export function sumBase(...parts: string[]): string {
 }
 
 /**
- * What the buyer pays for the listings themselves. The escrow holds
- * productAmount for the seller and adds the platform fee on top, sized so the
- * two make the listing price — the seller absorbs the fee.
+ * What the buyer pays for the listings themselves: the escrowed productAmount, which is the listing
+ * price. OrderEscrow takes the platform fee from the seller at release, so it is never added here.
  */
-export const listingAmount = (a: { productAmount: string; platformFee: string }) =>
-  sumBase(a.productAmount, a.platformFee);
+export const listingAmount = (a: { productAmount: string; platformFee: string }) => a.productAmount;
 
 /** Base units → token units as a number (display only; never for money math). */
 export function quoteUnits(base: string, decimals: number): number {

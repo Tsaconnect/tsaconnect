@@ -94,16 +94,19 @@ func (s *OrderSpendablePaymentService) Fund(ctx context.Context, in OrderMcgpFun
 	// order open can do it, and it is caught afterwards: that app's
 	// submit-escrow for the now-spendable order is refused with an ALERT
 	// (order_mcgp_double_funded), and the escrow deposit stays in
-	// ProductEscrow, refundable to the buyer on-chain. Left to that alert
+	// OrderEscrow, refundable to the buyer on-chain. Left to that alert
 	// rather than a lock here.
 	if order.PaymentSource == "" && s.escrow != nil {
-		onChain, err := s.escrow.EscrowedOrder(ctx, GenerateOrderID(in.OrderID))
+		onChain, err := s.escrow.EscrowedOrder(ctx, OrderKey(firstNonEmpty(order.EscrowBuyerWallet, in.BuyerWallet), GenerateOrderID(in.OrderID)))
+		if errors.Is(err, ErrOrderEscrowUnavailable) {
+			onChain, err = nil, nil // no order escrow configured: nothing can be escrowed under it
+		}
 		if err != nil {
 			log.Printf("[order-mcgp] order=%s escrow read failed (%v); refusing to fund", in.OrderID, err)
 			return nil, ErrOrderMcgpEscrowUnknown
 		}
 		if onChain != nil {
-			log.Printf("[order-mcgp] ALERT order_mcgp_escrow_already_funded=1 order=%s — ProductEscrow holds a payment; not debiting Spendable MCGP", in.OrderID)
+			log.Printf("[order-mcgp] ALERT order_mcgp_escrow_already_funded=1 order=%s — OrderEscrow holds a payment; not debiting Spendable MCGP", in.OrderID)
 			return nil, ErrOrderNotPayable
 		}
 	}

@@ -381,7 +381,7 @@ func payoutGrossUp(net *big.Int, fee *big.Rat, bridgeBps int64) *big.Int {
 
 // Persist records the payout for order inside tx, in the same transaction as
 // the order itself. expected is what the escrow will credit the treasury:
-// productAmount + shippingAmount including the gross-up.
+// productAmount + shippingAmount (including the gross-up) less the merchant fee.
 func (p *SellerPayoutPlanner) Persist(tx *gorm.DB, order *models.Order, sellerWallet string, plan *PayoutPlan, expected *big.Int) error {
 	m := plan.Method
 	return tx.Create(&models.SellerPayoutOrder{
