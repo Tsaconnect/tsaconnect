@@ -45,10 +45,11 @@ type Order struct {
 	// (keccak256(buyer, orderId), unique: uq_orders_escrow_order_key); EscrowBuyerWallet is the wallet that created it there.
 	EscrowOrderKey    string `gorm:"size:66" json:"-"`
 	EscrowBuyerWallet string `gorm:"size:42" json:"-"`
-	// MerchantFee and FlatFee are what OrderEscrow fixed at createOrder (token base units).
-	// Seller-side, so never in the order payload a buyer reads.
+	// MerchantFee and FlatFee are what OrderEscrow fixed at createOrder (token base units). The
+	// merchant fee is the seller's (also reported as platformFee); the flat fee is the buyer's own,
+	// paid on top of totalAmount, so their receipt shows it.
 	MerchantFee string `gorm:"size:78" json:"-"`
-	FlatFee     string `gorm:"size:78" json:"-"`
+	FlatFee     string `gorm:"size:78" json:"flatFee,omitempty"`
 	// DeliverBy, ConfirmBy and ResolveBy mirror the contract's deadlines: after each, anyone may
 	// settle the order with claimTimeout (refund, release, refund).
 	DeliverBy *time.Time `json:"deliverBy,omitempty"`

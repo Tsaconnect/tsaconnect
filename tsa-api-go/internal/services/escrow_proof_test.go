@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -76,9 +77,10 @@ func TestOrderMatchesEscrow(t *testing.T) {
 		return &OnChainOrder{
 			Buyer: common.HexToAddress(buyer), Seller: common.HexToAddress(seller), Token: common.HexToAddress(testUSDC),
 			ProductAmount: big.NewInt(1000), ShippingAmount: big.NewInt(50), State: OrderStateFunded,
+			CreatedAt: time.Unix(1_800_000_000, 0), DeliverBy: time.Unix(1_800_000_000, 0).Add(7 * 24 * time.Hour),
 		}
 	}
-	if !OrderMatchesEscrow(order, seller, buyer, testUSDC, onChain()) {
+	if !OrderMatchesEscrow(order, seller, buyer, testUSDC, 7, onChain()) {
 		t.Fatal("the order as priced was refused")
 	}
 	cases := map[string]func(*OnChainOrder){
@@ -90,16 +92,18 @@ func TestOrderMatchesEscrow(t *testing.T) {
 		"already paid":   func(o *OnChainOrder) { o.State = OrderStateReleased },
 		// The fixed bug: the funding wallet is compared, not read back from the chain.
 		"another buyer": func(o *OnChainOrder) { o.Buyer = common.HexToAddress(mine) },
+		// The buyer signs createOrder: a 1-day window would let them claim a refund on day 2.
+		"a shorter delivery window": func(o *OnChainOrder) { o.DeliverBy = o.CreatedAt.Add(24 * time.Hour) },
 	}
 	for name, mutate := range cases {
 		o := onChain()
 		mutate(o)
-		if OrderMatchesEscrow(order, seller, buyer, testUSDC, o) {
+		if OrderMatchesEscrow(order, seller, buyer, testUSDC, 7, o) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if OrderMatchesEscrow(order, "", buyer, testUSDC, onChain()) || OrderMatchesEscrow(order, seller, buyer, "", onChain()) ||
-		OrderMatchesEscrow(order, seller, buyer, testUSDC, nil) {
+	if OrderMatchesEscrow(order, "", buyer, testUSDC, 7, onChain()) || OrderMatchesEscrow(order, seller, buyer, "", 7, onChain()) ||
+		OrderMatchesEscrow(order, seller, buyer, testUSDC, 7, nil) {
 		t.Error("an unknown seller, token or escrow record was accepted")
 	}
 }

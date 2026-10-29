@@ -389,6 +389,11 @@ func main() {
 	} else {
 		log.Printf("[config] ALERT order_escrow_unconfigured=1 — no core set names an OrderEscrow on Sonic: checkout is unavailable")
 	}
+	if ids, err := services.LegacyEscrowOrders(config.DB); err != nil {
+		log.Printf("[config] legacy escrow order check failed: %v", err)
+	} else if len(ids) > 0 {
+		log.Printf("[config] ALERT legacy_escrow_orders_open=%d — orders still escrowed in ProductEscrowV2 have no in-app exit after the OrderEscrow switch; settle them on V2: %v", len(ids), ids)
+	}
 
 	// Exchange-rate service (OER + Bybit P2P hybrid). Constructed early because IT
 	// pricing (below) converts MCGP's USD price to Naira against this feed.

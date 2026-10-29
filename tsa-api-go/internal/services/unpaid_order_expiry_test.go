@@ -35,7 +35,8 @@ func setupUnpaidOrderDB(t *testing.T) *gorm.DB {
 			approve_tx_hash TEXT, escrow_tx_hash TEXT, payment_source TEXT DEFAULT '',
 			created_at DATETIME, updated_at DATETIME)`,
 		orderMcgpPaymentsDDL,
-		`CREATE TABLE products (id TEXT PRIMARY KEY, stock INTEGER, deleted_at DATETIME)`,
+		`CREATE TABLE products (id TEXT PRIMARY KEY, stock INTEGER, handling_days INTEGER DEFAULT 0, deleted_at DATETIME)`,
+		`CREATE TABLE service_bookings (id TEXT PRIMARY KEY, order_id TEXT, slot_end DATETIME)`,
 		`CREATE TABLE users (id TEXT PRIMARY KEY, wallet_address TEXT)`,
 	} {
 		if err := db.Exec(ddl).Error; err != nil {

@@ -34,6 +34,8 @@ export interface Order {
   payout?: SellerPayoutStage;
   platformFee: string;
   totalAmount: string;
+  /** The flat network fee the buyer paid on top of totalAmount (OrderEscrow orders). */
+  flatFee?: string;
   shippingZone: string;
   contractOrderId?: string;
   escrowTxHash?: string;

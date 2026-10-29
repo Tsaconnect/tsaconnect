@@ -354,17 +354,31 @@ func (o *SellerPayoutOrchestrator) awaitRelease(ctx context.Context, p *models.S
 	// treasury in some transaction proves nothing about this order.
 	escrowAddr := firstNonEmpty(order.EscrowContractAddress, o.escrowAddr)
 	l, err := o.escrow.VerifyOrderEvent(order.ReleaseTxHash, escrowAddr, "OrderReleased", OrderKeyOf(&order))
+	var seller common.Address
+	var sellerAmount *big.Int
+	if errors.Is(err, ErrOrderEventNotFound) {
+		// A resolver's decision pays the seller through OrderResolved (the escrow's seller — the
+		// treasury for a payout order — gets toSeller). A split below the quote parks below.
+		if rl, rerr := o.escrow.VerifyOrderEvent(order.ReleaseTxHash, escrowAddr, "OrderResolved", OrderKeyOf(&order)); rerr == nil {
+			res, derr := DecodeOrderResolved(rl)
+			if derr != nil {
+				return o.parkSafe(ctx, p, derr.Error())
+			}
+			l, err, seller, sellerAmount = rl, nil, common.HexToAddress(o.treasuryAddr()), res.ToSeller
+		}
+	}
 	switch {
 	case errors.Is(err, ErrReceiptPending):
 		return nil
 	case errors.Is(err, ErrOrderEventNotFound):
-		return o.parkSafe(ctx, p, fmt.Sprintf("release %s holds no OrderReleased for this order: %v", order.ReleaseTxHash, err))
+		return o.parkSafe(ctx, p, fmt.Sprintf("release %s holds no OrderReleased or OrderResolved for this order: %v", order.ReleaseTxHash, err))
 	case err != nil:
 		return nil // unreadable now: the next tick looks again
 	}
-	seller, sellerAmount, err := OrderReleasedTo(l)
-	if err != nil {
-		return o.parkSafe(ctx, p, err.Error())
+	if sellerAmount == nil {
+		if seller, sellerAmount, err = OrderReleasedTo(l); err != nil {
+			return o.parkSafe(ctx, p, err.Error())
+		}
 	}
 	if !strings.EqualFold(seller.Hex(), common.HexToAddress(o.treasuryAddr()).Hex()) {
 		return o.parkSafe(ctx, p, fmt.Sprintf("the escrow released to %s, not the treasury", seller.Hex()))

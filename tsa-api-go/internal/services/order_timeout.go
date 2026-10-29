@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"gorm.io/gorm"
 )
@@ -36,8 +37,9 @@ type OrderTimeoutClaimer struct {
 // orderTimeoutBatch bounds one sweep (each order is one chain read, a due one a send).
 const orderTimeoutBatch = 100
 
-// orderOpenStatuses are the statuses an escrowed order holds until the escrow pays it out.
-var orderOpenStatuses = []string{
+// OrderOpenStatuses are the statuses an escrowed order holds until the escrow pays it out (the
+// statuses an on-chain payout can still move).
+var OrderOpenStatuses = []string{
 	models.OrderStatusEscrowed, models.OrderStatusShipped, models.OrderStatusDelivered,
 	models.OrderStatusRefundRequested, models.OrderStatusCancelRequested,
 }
@@ -51,10 +53,15 @@ func NewOrderTimeoutClaimer(db *gorm.DB, escrow *EscrowService, settler OrderSet
 // the last is returned so a sweep that keeps failing is alerted.
 func (c *OrderTimeoutClaimer) Sweep(ctx context.Context) (claimed, settled int, err error) {
 	now := c.now()
+	// Due in its current phase: the latest deadline the order has recorded has passed (a recorded
+	// confirm_by supersedes deliver_by, a resolve_by both). Least recently swept first, and every
+	// order read is touched, so one that is not settled yet never starves the ones behind it.
 	var orders []models.Order
 	if err := c.db.WithContext(ctx).
-		Where("escrow_order_key <> '' AND status IN ?", orderOpenStatuses).
-		Where("deliver_by < ? OR confirm_by < ? OR resolve_by < ?", now, now, now).
+		Where("escrow_order_key <> '' AND status IN ?", OrderOpenStatuses).
+		Where(`(resolve_by IS NOT NULL AND resolve_by < ?) OR
+			(resolve_by IS NULL AND confirm_by IS NOT NULL AND confirm_by < ?) OR
+			(resolve_by IS NULL AND confirm_by IS NULL AND deliver_by < ?)`, now, now, now).
 		Order("updated_at").Limit(orderTimeoutBatch).Find(&orders).Error; err != nil {
 		return 0, 0, err
 	}
@@ -64,6 +71,7 @@ func (c *OrderTimeoutClaimer) Sweep(ctx context.Context) (claimed, settled int, 
 			return claimed, settled, ctx.Err()
 		}
 		o := &orders[i]
+		c.db.WithContext(ctx).Model(&models.Order{}).Where("id = ?", o.ID).UpdateColumn("updated_at", now)
 		escrowAddr := firstNonEmpty(o.EscrowContractAddress, c.escrow.CurrentEscrowAddress())
 		oc, err := c.escrow.ReadOrder(ctx, escrowAddr, OrderKeyOf(o))
 		if err != nil {
@@ -96,6 +104,12 @@ func (c *OrderTimeoutClaimer) Sweep(ctx context.Context) (claimed, settled int, 
 		if err != nil && !errors.Is(err, ErrPendingBroadcast) {
 			lastErr = fmt.Errorf("claimTimeout %s: %s", o.ID, RedactAlertText(err.Error()))
 			continue
+		}
+		// The claim is the order's payout transaction: a payout order's bank leg proves the release
+		// from it once the sweep records the order completed.
+		if hash != "" {
+			c.db.WithContext(ctx).Model(&models.Order{}).Where("id = ? AND COALESCE(release_tx_hash, '') = ''", o.ID).
+				UpdateColumn("release_tx_hash", hash)
 		}
 		claimed++
 		log.Printf("[order-timeout] order=%s state=%d claimTimeout sent tx=%s", o.ID, oc.State, hash)
@@ -132,4 +146,15 @@ func (c *OrderTimeoutClaimer) syncDeadlines(ctx context.Context, o *models.Order
 	if err := c.db.WithContext(ctx).Model(&models.Order{}).Where("id = ?", o.ID).Updates(updates).Error; err != nil {
 		log.Printf("[order-timeout] sync deadlines for order %s: %v", o.ID, err)
 	}
+}
+
+// LegacyEscrowOrders lists open orders escrowed in ProductEscrowV2 (no OrderEscrow key, paid
+// on-chain). The hard switch speaks only OrderEscrow, so these have no in-app exit: they must be
+// settled on V2 before the release, and boot alerts while any remain.
+func LegacyEscrowOrders(db *gorm.DB) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := db.Model(&models.Order{}).
+		Where("COALESCE(escrow_order_key, '') = '' AND COALESCE(contract_order_id, '') <> '' AND COALESCE(payment_source, '') = '' AND status IN ?", OrderOpenStatuses).
+		Pluck("id", &ids).Error
+	return ids, err
 }

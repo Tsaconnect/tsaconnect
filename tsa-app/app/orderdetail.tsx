@@ -38,7 +38,7 @@ import {
   formatTokenAmount,
   Order,
 } from '@/services/orderApi';
-import { hasPayoutFee, shippingWithoutPayoutFee } from '@/utils/payoutFee';
+import { hasPayoutFee, paidTotal, shippingWithoutPayoutFee } from '@/utils/payoutFee';
 import { signAndBroadcast } from '@/services/transaction';
 import { MARKETPLACE_NETWORK } from '@/services/serviceCheckout';
 import { formatStatus, formatDate } from '@/constants/orderStatus';
@@ -381,7 +381,10 @@ const OrderDetailScreen = () => {
             {hasPayoutFee(order.payoutFee) && (
               <SummaryRow label="Payout fee" value={formatTokenAmount(order.payoutFee ?? '0', order.token)} />
             )}
-            <SummaryRow label="Total" value={formatTokenAmount(order.totalAmount, order.token)} total />
+            {hasPayoutFee(order.flatFee) && (
+              <SummaryRow label="Network fee" value={formatTokenAmount(order.flatFee ?? '0', order.token)} />
+            )}
+            <SummaryRow label="Total" value={formatTokenAmount(paidTotal(order.totalAmount, order.flatFee), order.token)} total />
           </SummaryCard>
         </Card>
 

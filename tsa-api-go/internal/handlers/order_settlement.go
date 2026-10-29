@@ -18,10 +18,7 @@ import (
 // order settled by anyone's claimTimeout gets the same fee settlement, stock and notices.
 
 // openEscrowStatuses are the order statuses an on-chain payout can still move.
-var openEscrowStatuses = []string{
-	models.OrderStatusEscrowed, models.OrderStatusShipped, models.OrderStatusDelivered,
-	models.OrderStatusRefundRequested, models.OrderStatusCancelRequested,
-}
+var openEscrowStatuses = services.OrderOpenStatuses
 
 // recordReleased marks order completed (the escrow paid the seller) and settles its fees. The move
 // is conditional on an open status, so of two recorders racing only one acts. moved is false when
@@ -74,7 +71,8 @@ func (ch *CheckoutHandler) recordRefunded(ctx context.Context, order *models.Ord
 }
 
 // SettleOrderFromChain records an order the escrow has already paid out — by anyone's claimTimeout,
-// or a call whose submit never reached the API. A resolver's split is recorded by its own submit;
+// or a call whose submit never reached the API. The sweep records its own claim's hash on the order
+// first, so recording it here keeps that hash. A resolver's split is recorded by its own submit;
 // one that never was is flagged for a person, since only its log says how it was split.
 func (ch *CheckoutHandler) SettleOrderFromChain(ctx context.Context, order *models.Order, state services.OrderState) (bool, error) {
 	switch state {

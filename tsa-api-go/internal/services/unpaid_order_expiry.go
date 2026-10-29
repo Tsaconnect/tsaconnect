@@ -335,7 +335,11 @@ func (s *UnpaidOrderExpiryService) reconcilePaid(ctx context.Context, o *staleOr
 	if s.tokens != nil {
 		tokenAddr = s.tokens.TokenAddress("sonic", o.Token)
 	}
-	if !OrderMatchesEscrow(&o.Order, o.SellerWallet, firstNonEmpty(o.EscrowBuyerWallet, o.BuyerWallet), tokenAddr, onChain) {
+	handlingDays, err := OrderHandlingDays(s.db.WithContext(ctx), &o.Order, onChain.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("handling days for order %s: %w", o.ID, err)
+	}
+	if !OrderMatchesEscrow(&o.Order, o.SellerWallet, firstNonEmpty(o.EscrowBuyerWallet, o.BuyerWallet), tokenAddr, handlingDays, onChain) {
 		log.Printf("[unpaid-order-expiry] ALERT unpaid_order_escrow_mismatch=1 order=%s: escrow holds an order under its id that does not match it", o.ID)
 		return nil
 	}
@@ -345,7 +349,7 @@ func (s *UnpaidOrderExpiryService) reconcilePaid(ctx context.Context, o *staleOr
 	updates := EscrowedOrderUpdates(EscrowRecord{OrderID: id, Key: OrderKey(onChain.Buyer.Hex(), id), Buyer: onChain.Buyer,
 		ProductAmount: onChain.ProductAmount, ShippingAmount: onChain.ShippingAmount, MerchantFee: onChain.MerchantFee,
 		DeliverBy: onChain.DeliverBy, EscrowAddress: s.escrow.CurrentEscrowAddress()})
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return MarkOrderEscrowed(tx, o.ID, updates)
 	})
 	if errors.Is(err, ErrOrderNotPayable) {

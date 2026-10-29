@@ -2009,6 +2009,21 @@ func repriceToEscrowFee(db *gorm.DB, order *models.Order, bps int) error {
 	if !ok1 || !ok2 || !ok3 {
 		return fmt.Errorf("order %s has non-numeric amounts", order.ID)
 	}
+	// An order priced before OrderEscrow (ProductEscrowV2's seller-fee split) carried the fee inside
+	// its total: product + shipping + fee. Its listing price is product + fee, which is what the
+	// buyer agreed to and now escrows whole.
+	if total, ok := new(big.Int).SetString(order.TotalAmount, 10); ok &&
+		storedFee.Sign() > 0 && total.Cmp(new(big.Int).Add(new(big.Int).Add(product, shipping), storedFee)) == 0 {
+		product.Add(product, storedFee)
+		updates := map[string]interface{}{"product_amount": product.String(),
+			"total_amount": new(big.Int).Add(product, shipping).String()}
+		if err := db.Model(order).Updates(updates).Error; err != nil {
+			return err
+		}
+		log.Printf("[checkout] re-priced order %s from the V2 split: product %s→%s", order.ID, order.ProductAmount, product)
+		order.ProductAmount, order.TotalAmount = updates["product_amount"].(string), updates["total_amount"].(string)
+		storedFee = new(big.Int).SetInt64(-1) // force the fee below to be rewritten
+	}
 	newFee := escrowFeeOn(product, bps)
 	if newFee.Cmp(storedFee) == 0 {
 		return nil
@@ -2116,7 +2131,7 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 	// submit read the same key the buyer is about to create.
 	contractOrderID := services.GenerateOrderID(order.ID)
 	key := services.OrderKey(user.WalletAddress, contractOrderID)
-	handlingDays, err := ch.orderHandlingDays(order)
+	handlingDays, err := services.OrderHandlingDays(config.DB, order, time.Now())
 	if err != nil {
 		log.Printf("Failed to resolve the delivery window for order %s: %v", order.ID, err)
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to prepare escrow transaction")
@@ -2170,24 +2185,6 @@ func (ch *CheckoutHandler) PrepareEscrow(c *gin.Context) {
 	})
 }
 
-// orderHandlingDays is the delivery window createOrder gets for order: its booking's slot end
-// plus the delivery grace, else its listing's handling days (0 = the platform default).
-func (ch *CheckoutHandler) orderHandlingDays(order *models.Order) (uint8, error) {
-	var product models.Product
-	if err := config.DB.Select("id", "handling_days").First(&product, "id = ?", order.ProductID).Error; err != nil {
-		return 0, err
-	}
-	var slotEnd *time.Time
-	var booking models.ServiceBooking
-	err := config.DB.Select("slot_end").Where("order_id = ?", order.ID).First(&booking).Error
-	switch {
-	case err == nil && !booking.SlotEnd.IsZero():
-		slotEnd = &booking.SlotEnd
-	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
-		return 0, err
-	}
-	return services.HandlingDaysFor(product.HandlingDays, slotEnd, time.Now()), nil
-}
 
 // SubmitEscrow handles POST /api/orders/:id/submit-escrow
 func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
@@ -2301,8 +2298,10 @@ func (ch *CheckoutHandler) SubmitEscrow(c *gin.Context) {
 		return
 	}
 
-	// The order is the one funded from the wallet recorded at prepare-escrow (else the buyer's own).
-	if !ch.requireEscrowFundsOrder(c, &order, created.Key, firstNonEmpty(order.EscrowBuyerWallet, user.WalletAddress)) {
+	// The funding wallet is the one OrderCreated names: a buyer may pay from any account of their
+	// wallet, and what they pay from it is theirs (refunds go back to it). Seller, token, amounts
+	// and the delivery window are what bind the escrow to this order.
+	if !ch.requireEscrowFundsOrder(c, &order, created.Key, created.Buyer.Hex()) {
 		return
 	}
 
@@ -2385,7 +2384,14 @@ func (ch *CheckoutHandler) requireEscrowFundsOrder(c *gin.Context, order *models
 	if sellerWallet == "" {
 		sellerWallet = seller.WalletAddress
 	}
-	if !services.OrderMatchesEscrow(order, sellerWallet, buyerWallet, tokenAddr, onChain) {
+	// The window the escrow gave the seller must be the order's own (the buyer chose handlingDays).
+	handlingDays, err := services.OrderHandlingDays(config.DB, order, onChain.CreatedAt)
+	if err != nil {
+		log.Printf("[checkout] handling days for order %s: %v", order.ID, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to verify your payment")
+		return false
+	}
+	if !services.OrderMatchesEscrow(order, sellerWallet, buyerWallet, tokenAddr, handlingDays, onChain) {
 		log.Printf("[checkout] ALERT escrow_order_mismatch=1 order=%s: the escrow holds an order under its id that is not this order as priced", order.ID)
 		utils.ErrorResponseWithCode(c, http.StatusConflict,
 			"Your payment does not match this order. Contact support — do not pay again.", "escrow_mismatch")

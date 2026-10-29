@@ -353,6 +353,29 @@ func TestRepriceToEscrowFee(t *testing.T) {
 	}
 }
 
+// A pending order priced before the switch carried the fee inside its total (V2's seller-fee
+// split): it is re-priced to escrow the listing price whole, and the buyer still pays the same.
+func TestRepriceToEscrowFee_ConvertsAV2SplitOrder(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
+	product := createTestProduct(t, db, seller.ID, 20.0)
+	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusPendingPayment, "USDC")
+	// $20 listing split at 2%: 19.607844 + 0.392156, $5 shipping, total 25.
+	db.Model(order).Updates(map[string]interface{}{
+		"product_amount": "19607844", "platform_fee": "392156", "shipping_amount": "5000000", "total_amount": "25000000",
+	})
+	order.ProductAmount, order.PlatformFee, order.ShippingAmount, order.TotalAmount = "19607844", "392156", "5000000", "25000000"
+	if err := repriceToEscrowFee(db, order, 200); err != nil {
+		t.Fatal(err)
+	}
+	var got models.Order
+	db.First(&got, "id = ?", order.ID)
+	if got.ProductAmount != "20000000" || got.PlatformFee != "400000" || got.TotalAmount != "25000000" {
+		t.Fatalf("re-priced to product %s fee %s total %s", got.ProductAmount, got.PlatformFee, got.TotalAmount)
+	}
+}
+
 func TestRepriceToEscrowFee_LeavesEscrowedOrdersAlone(t *testing.T) {
 	db := setupCheckoutTestDB(t)
 	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")

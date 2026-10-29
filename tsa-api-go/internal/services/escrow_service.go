@@ -20,6 +20,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
 )
 
 // escrow_service.go — marketplace orders on the core set's OrderEscrow (contracts v2, slices 6–7;
@@ -176,12 +177,16 @@ func orderEscrowSet(cfg *config.Config, chainID int64) (config.CoreContracts, bo
 // selected set has none: the one address every order money path (approve spender, treasury call
 // allowlist, payouts) names.
 func OrderEscrowAddress(cfg *config.Config) string {
+	found := ""
 	for _, set := range cfg.CoreContracts {
 		if set.ChainKey == "sonic" && set.OrderEscrow != "" {
-			return set.OrderEscrow
+			if found != "" && !strings.EqualFold(found, set.OrderEscrow) {
+				return "" // two Sonic sets: no one answer, so none
+			}
+			found = set.OrderEscrow
 		}
 	}
-	return ""
+	return found
 }
 
 // NewEscrowService builds the service over the Sonic client. With no core set naming an
@@ -245,6 +250,26 @@ func OrderKey(buyer string, orderID [32]byte) [32]byte {
 // OrderKeyOf is the key recorded on an escrowed order (orders.escrow_order_key), or the zero key.
 func OrderKeyOf(o *models.Order) [32]byte {
 	return common.HexToHash(o.EscrowOrderKey)
+}
+
+// OrderHandlingDays is the delivery window order must get on the escrow: its booking's slot end
+// plus the grace, else its listing's handling days, as of at (the order's escrow time — the
+// prepare for a new order, the escrow's createdAt when checking one).
+func OrderHandlingDays(db *gorm.DB, order *models.Order, at time.Time) (uint8, error) {
+	var product models.Product
+	if err := db.Select("id", "handling_days").First(&product, "id = ?", order.ProductID).Error; err != nil {
+		return 0, err
+	}
+	var slotEnd *time.Time
+	var booking models.ServiceBooking
+	err := db.Select("slot_end").Where("order_id = ?", order.ID).First(&booking).Error
+	switch {
+	case err == nil && !booking.SlotEnd.IsZero():
+		slotEnd = &booking.SlotEnd
+	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
+		return 0, err
+	}
+	return HandlingDaysFor(product.HandlingDays, slotEnd, at), nil
 }
 
 // BookingDeliveryGrace is how long after a booking's slot ends its order may still be delivered.
@@ -479,11 +504,14 @@ func DecodeOrderDeadline(event string, l *types.Log) (time.Time, error) {
 // OrderMatchesEscrow reports whether the escrow's record of an order is this order, funded as it
 // was priced: still held, this buyer paying this seller, in the order's token, the product and
 // shipping amounts it was priced at (checked apart: the buyer chooses the split, and the merchant
-// fee applies to the product alone).
-func OrderMatchesEscrow(o *models.Order, sellerWallet, buyerWallet, tokenAddr string, onChain *OnChainOrder) bool {
+// fee applies to the product alone), and a delivery window no shorter than the order's
+// handlingDays — the buyer signs createOrder, and a short window would make the seller miss a
+// deadline the buyer then claims a refund on.
+func OrderMatchesEscrow(o *models.Order, sellerWallet, buyerWallet, tokenAddr string, handlingDays uint8, onChain *OnChainOrder) bool {
 	product, okP := new(big.Int).SetString(o.ProductAmount, 10)
 	shipping, okS := new(big.Int).SetString(o.ShippingAmount, 10)
 	return !(!okP || !okS || tokenAddr == "" || sellerWallet == "" || buyerWallet == "" || onChain == nil || onChain.State.Settled() ||
+		onChain.DeliverBy.Sub(onChain.CreatedAt) < time.Duration(handlingDays)*24*time.Hour ||
 		onChain.Buyer != common.HexToAddress(buyerWallet) ||
 		onChain.Seller != common.HexToAddress(sellerWallet) ||
 		onChain.Token != common.HexToAddress(tokenAddr) ||
