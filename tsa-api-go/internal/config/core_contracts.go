@@ -15,7 +15,7 @@ import (
 // Marketplace orders and P2P run on the selected set (P2P chains bind to it below). CORE_CONTRACTS
 // selects one: unset or "off" (the default, and what prod runs) keeps the core set dormant; "dev"
 // is the throwaway set whose admin is a test deployer and must never be selected in prod; "prod"
-// is the PM-owned set, which has no rows until it is deployed. Addresses live here, not in env
+// is the PM-owned set (deployed 2026-10-29). Addresses live here, not in env
 // (decision 17), so a set's contracts cannot drift apart.
 
 // Core contract set names (CORE_CONTRACTS).
@@ -78,7 +78,22 @@ var coreSets = map[string]map[string]coreRow{
 			admin:       "0xd963C3C596f692b4fD8e53bD9B60Ca1843400Da3",
 			deployBlock: 130498364},
 	},
-	CoreSetProd: {},
+	// Deployed 2026-10-29 by the throwaway deployer 0xd963…0Da3, which holds no role (read back).
+	// Admin is the PM wallet on both chains; resolvers and pausers are the PM's to grant.
+	CoreSetProd: {
+		"sonic": {network: "mainnet",
+			feeConfig:   "0x4e4Dbb98e056D349b363F38cf5fbC6269Bae7C5d",
+			orderEscrow: "0x790914f874221FAb16a99E8A7E0AaDF08C8Aa0Fb",
+			p2pEscrow:   "0x08857a2EA9DE5C2c2646788e87e500e60Ba4dDfA",
+			admin:       "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",
+			forwarder:   "0x569F8a58dFCCaA600d92B641F1654dCEd2dA23e4",
+			deployBlock: 81818117},
+		"bsc": {network: "mainnet",
+			feeConfig:   "0x53F943ba9c993fd2349Bcf68923B8d15c1F67bc8",
+			p2pEscrow:   "0xDC0395D331CBAf1c38F4542AA89301500Bb3062F",
+			admin:       "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96",
+			deployBlock: 130533218},
+	},
 }
 
 // assembleCoreContracts fills cfg.CoreSet and cfg.CoreContracts from CORE_CONTRACTS. It runs after

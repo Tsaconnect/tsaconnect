@@ -33,7 +33,6 @@ func TestCoreContracts_UnusableSelectorsStayDormant(t *testing.T) {
 	for _, tc := range []struct{ set, allowDev string }{
 		{"off", ""}, {"false", ""}, {"0", ""}, {"none", ""},
 		{"staging", ""},  // unknown
-		{"prod", ""},     // not deployed yet
 		{"dev", ""},      // no allow switch
 		{"dev", "false"}, // allow switch off
 	} {
@@ -46,6 +45,40 @@ func TestCoreContracts_UnusableSelectorsStayDormant(t *testing.T) {
 		if cfg.CoreSet != CoreSetOff || len(cfg.CoreContracts) != 0 {
 			t.Fatalf("%+v: set=%q contracts=%v, want dormant", tc, cfg.CoreSet, cfg.CoreContracts)
 		}
+	}
+}
+
+// A set with no rows yet (how prod looked before its deploy) stays dormant too.
+func TestCoreContracts_EmptySetStaysDormant(t *testing.T) {
+	t.Setenv("CORE_CONTRACTS", "prod")
+	cfg := coreTestConfig("mainnet")
+	if err := assembleCoreContracts(cfg, map[string]map[string]coreRow{CoreSetProd: {}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CoreSet != CoreSetOff || len(cfg.CoreContracts) != 0 {
+		t.Fatalf("set=%q contracts=%v, want dormant", cfg.CoreSet, cfg.CoreContracts)
+	}
+}
+
+// The prod set needs no allow switch and is administered by the PM wallet on both chains; only
+// Sonic has an OrderEscrow and a forwarder.
+func TestCoreContracts_ProdSetOnMainnet(t *testing.T) {
+	t.Setenv("CORE_CONTRACTS", "prod")
+	t.Setenv(coreDevAllowEnv, "")
+	cfg := coreTestConfig("mainnet")
+	if err := assembleCoreContracts(cfg, coreSets); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CoreSet != CoreSetProd || len(cfg.CoreContracts) != 2 {
+		t.Fatalf("set=%q contracts=%v, want prod on two chains", cfg.CoreSet, cfg.CoreContracts)
+	}
+	const pm = "0x62bA9b24e72E4f1F93f50F2308aCE932066c1b96"
+	sonic, bsc := cfg.CoreContracts[146], cfg.CoreContracts[56]
+	if sonic.Admin != pm || bsc.Admin != pm {
+		t.Fatalf("admins sonic=%s bsc=%s, want %s", sonic.Admin, bsc.Admin, pm)
+	}
+	if sonic.OrderEscrow == "" || sonic.Forwarder == "" || bsc.OrderEscrow != "" || bsc.Forwarder != "" {
+		t.Fatalf("sonic=%+v bsc=%+v: only Sonic has an OrderEscrow and a forwarder", sonic, bsc)
 	}
 }
 
