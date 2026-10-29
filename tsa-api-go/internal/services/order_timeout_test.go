@@ -96,3 +96,34 @@ func TestOrderTimeoutClaimer_Sweep(t *testing.T) {
 		t.Fatalf("no signer: claimed=%d err=%v", claimed, err)
 	}
 }
+
+// A claim the sweep sent that did not settle the order (it lost to a resolve or a cancel and
+// reverted) is not kept as the order's payout proof; the claim that did settle it is.
+func TestOrderTimeoutClaimer_DropsAClaimHashThatDidNotSettle(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	chain := NewFakeEscrowChain()
+	es := &EscrowService{escrowAddress: testEscrow, caller: chain, receipts: chain, cfg: &config.Config{}}
+	settler := &timeoutSettler{settled: map[uuid.UUID]OrderState{}}
+	now := time.Now()
+	settle := func(hash string, mine func(string, [32]byte)) string {
+		id, key := writeEscrowedOrder(t, db, models.OrderStatusDelivered, now.Add(-time.Hour))
+		if err := db.Exec(`UPDATE orders SET release_tx_hash = ? WHERE id = ?`, hash, id).Error; err != nil {
+			t.Fatal(err)
+		}
+		chain.SetOrder(key, OnChainOrder{Buyer: common.HexToAddress(testBuyerWallet), State: OrderStateReleased,
+			ProductAmount: big.NewInt(1), ShippingAmount: big.NewInt(0), CreatedAt: now.Add(-48 * time.Hour)})
+		mine(hash, key)
+		if _, _, err := NewOrderTimeoutClaimer(db, es, settler, nil, 146).Sweep(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		var row struct{ ReleaseTxHash string }
+		db.Raw(`SELECT release_tx_hash FROM orders WHERE id = ?`, id).Scan(&row)
+		return row.ReleaseTxHash
+	}
+	if got := settle("0xlost", func(h string, _ [32]byte) { chain.MineFailed(h) }); got != "" {
+		t.Fatalf("a reverted claim stayed as the payout proof: %q", got)
+	}
+	if got := settle("0xwon", func(h string, k [32]byte) { chain.MineEvent(h, testEscrow, "OrderReleased", k, nil) }); got != "0xwon" {
+		t.Fatalf("the settling claim was dropped: %q", got)
+	}
+}
