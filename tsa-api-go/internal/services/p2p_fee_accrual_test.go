@@ -157,7 +157,7 @@ func newP2PFeeService(t *testing.T, db *gorm.DB) (*P2PTradeService, *mockEscrow,
 	t.Helper()
 	esc := newMockEscrow()
 	svc := NewP2PTradeService(db, NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: esc}, "1"), &mockRates{}, &mockBus{}, 146)
-	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
+	svc = bindSvcEscrows(svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}))
 	svc.SetTokenResolver(func(chainID int64, symbol string) string {
 		if symbol == "USDT" {
 			return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
@@ -356,7 +356,7 @@ func TestP2PFee_PlatformSnapshot_Accrues(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db)
 	// V3 escrow reports a 100-bps (1%) platform snapshot for the trade.
-	esc.feeSnapshotPlatform, esc.feeSnapshotFound = 100, true
+	esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusReleased, Exists: true, PlatformFeeBps: 100}
 
 	upline := mkP2PUser(t, db, "psupline", nil)
 	buyer := mkP2PUser(t, db, "psbuyer", &upline.ID) // buyer = gen0, upline = gen1
@@ -420,7 +420,7 @@ func TestP2PFee_PlatformBpsReadFromTheTradeRowFirst(t *testing.T) {
 			db := setupP2PFeeDB(t)
 			svc, esc, _ := newP2PFeeService(t, db)
 			// The chain would answer the opposite of the row.
-			esc.feeSnapshotPlatform, esc.feeSnapshotFound = uint16(100-tc.stored), true
+			esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusReleased, Exists: true, PlatformFeeBps: uint16(100 - tc.stored)}
 
 			buyer := mkP2PUser(t, db, "rowbuyer", nil)
 			seller := mkP2PUser(t, db, "rowseller", nil)
@@ -434,8 +434,8 @@ func TestP2PFee_PlatformBpsReadFromTheTradeRowFirst(t *testing.T) {
 			if got := waitForGuard(t, db, trade.ID, tc.wantRows); got != tc.wantRows {
 				t.Fatalf("guard rows = %d, want %d", got, tc.wantRows)
 			}
-			if esc.feeSnapshotReads != 0 {
-				t.Fatalf("read the chain %d times with the bps on the row", esc.feeSnapshotReads)
+			if esc.readTradeCalls != 0 {
+				t.Fatalf("read the chain %d times with the bps on the row", esc.readTradeCalls)
 			}
 		})
 	}
@@ -448,7 +448,7 @@ func TestP2PFee_PlatformBpsReadFromTheTradeRowFirst(t *testing.T) {
 func TestP2PFee_PlatformSnapshot_ReconcilerNoReAccrue(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db)
-	esc.feeSnapshotPlatform, esc.feeSnapshotFound = 100, true // 1% V3 snapshot
+	esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusReleased, Exists: true, PlatformFeeBps: 100} // 1% V3 snapshot
 
 	buyer := mkP2PUser(t, db, "rcpsbuyer", nil)
 	seller := mkP2PUser(t, db, "rcpsseller", nil)
@@ -458,7 +458,7 @@ func TestP2PFee_PlatformSnapshot_ReconcilerNoReAccrue(t *testing.T) {
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 	esc.onChainTrade = &OnChainP2PTrade{
 		Amount: tokenAmt, FeeBps: 50, Funding: models.P2PTradeFundingPooled,
-		Status: OnChainP2PStatusReleased, Exists: true,
+		Status: OnChainP2PStatusReleased, Exists: true, PlatformFeeBps: 100,
 	}
 
 	// First reconcile drives the release → accrues the platform fee once.

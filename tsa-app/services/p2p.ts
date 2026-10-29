@@ -808,10 +808,10 @@ export const tradesApi = {
 
 /** The gas sponsor sizes each action for one entity, so the id is required
  *  where the API needs it (POST /p2p/gas/top-up 400s without it):
- *  approve/deposit/withdraw take no id; open_trade and cancel_ad take adId;
+ *  approve/deposit/withdraw/set_releaser take no id; open_trade and cancel_ad take adId;
  *  mark_paid, release, cancel_trade and dispute take tradeId. */
 export type P2PGasTarget =
-  | { action: 'approve' | 'deposit' | 'withdraw'; adId?: undefined; tradeId?: undefined }
+  | { action: 'approve' | 'deposit' | 'withdraw' | 'set_releaser'; adId?: undefined; tradeId?: undefined }
   | { action: 'open_trade' | 'cancel_ad'; adId: string; tradeId?: undefined }
   | { action: 'mark_paid' | 'release' | 'cancel_trade' | 'dispute'; tradeId: string; adId?: undefined };
 
@@ -830,6 +830,25 @@ export interface P2PGasTopUp {
    *  older than the echo, which only ever funded Sonic mainnet (146). */
   chainId?: number;
 }
+
+/** A payment merchant's releaser on one chain's escrow: the platform release key settles its
+ *  trades only once its maker wallet names it (setReleaser). */
+export interface PMReleaserStatus {
+  chainId: number;
+  wallet: string;
+  releaser: string;
+  expected: string;
+  set: boolean;
+}
+
+export const pmReleaserApi = {
+  status: (chainId?: number) =>
+    request<PMReleaserStatus>('GET', '/p2p/pm/releaser', undefined, { query: chainId ? { chainId } : {} }),
+  prepare: (chainId?: number) =>
+    request<{ unsignedTx: UnsignedTx }>('POST', '/p2p/pm/releaser', chainId ? { chainId } : {}),
+  confirm: (txHash: string, chainId?: number) =>
+    request<PMReleaserStatus>('POST', '/p2p/pm/releaser/confirm', { txHash, ...(chainId ? { chainId } : {}) }),
+};
 
 export const gasApi = {
   /** Sends the chain's gas coin (S on Sonic, BNB on BSC) to the account's

@@ -3,7 +3,6 @@ package services
 import (
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"math/big"
 	"testing"
 
@@ -21,11 +20,7 @@ import (
 // lets us verify call data without standing up an RPC mock.
 func makeTestSvc(t *testing.T) *P2PEscrowService {
 	t.Helper()
-	cfg := &config.Config{
-		Env:              "development",
-		P2PEscrowAddress: "0xb5B073BF578fE24311ED50e540D9d632f1679261",
-	}
-	return NewP2PEscrowService(nil, cfg)
+	return NewP2PEscrowServiceForChain(nil, &config.Config{Env: "development"}, "0xb5B073BF578fE24311ED50e540D9d632f1679261")
 }
 
 func TestHashID_DeterministicAndUnique(t *testing.T) {
@@ -56,33 +51,6 @@ func TestHashIDHex_FormatAndLength(t *testing.T) {
 	}
 }
 
-// Legacy Prepare* methods are retained on the adapter for source-level
-// compatibility while the trade service is migrated (Phase 2B). They must
-// fail loudly so any remaining call site is caught at runtime.
-func TestPrepareCreateAd_NowReturnsMigrationError(t *testing.T) {
-	svc := makeTestSvc(t)
-	_, err := svc.PrepareCreateAd(HashID(uuid.New()), "0xa", "0xb", big.NewInt(1))
-	if !errors.Is(err, ErrPhase2Migration) {
-		t.Fatalf("expected ErrPhase2Migration, got %v", err)
-	}
-}
-
-func TestPrepareCloseAd_NowReturnsMigrationError(t *testing.T) {
-	svc := makeTestSvc(t)
-	_, err := svc.PrepareCloseAd(HashID(uuid.New()), "0xa")
-	if !errors.Is(err, ErrPhase2Migration) {
-		t.Fatalf("expected ErrPhase2Migration, got %v", err)
-	}
-}
-
-func TestPrepareOpenTrade_LegacySignature_NowReturnsMigrationError(t *testing.T) {
-	svc := makeTestSvc(t)
-	_, err := svc.PrepareOpenTrade(HashID(uuid.New()), HashID(uuid.New()), "0xd00d", big.NewInt(1))
-	if !errors.Is(err, ErrPhase2Migration) {
-		t.Fatalf("expected ErrPhase2Migration, got %v", err)
-	}
-}
-
 // PrepareOpenTradeWithVoucher is the pool-model replacement. Verify it packs
 // the (tradeId, voucher tuple, sig, amount) selector correctly.
 func TestPrepareOpenTradeWithVoucher_PacksCorrectSelector(t *testing.T) {
@@ -106,7 +74,7 @@ func TestPrepareOpenTradeWithVoucher_PacksCorrectSelector(t *testing.T) {
 		t.Fatalf("PrepareOpenTradeWithVoucher: %v", err)
 	}
 	data := mustDecodeHex(t, decodeUnsignedTx(t, raw).Data)
-	wantSelector := selectorFor(t, "openTrade(bytes32,(address,address,uint256,uint256,uint256,uint256,bytes32),bytes,uint256)")
+	wantSelector := selectorFor(t, "openTrade(bytes32,(address,address,uint256,uint256,uint256,uint256,bytes32,address),bytes,uint256)")
 	if !bytesEqual(data[:4], wantSelector) {
 		t.Fatalf("openTrade(voucher) selector mismatch: want %x got %x", wantSelector, data[:4])
 	}
@@ -116,22 +84,23 @@ func TestPrepareOpenTradeWithVoucher_PacksCorrectSelector(t *testing.T) {
 	}
 }
 
-// PrepareOpenTradeWithDeposit (v2 buy-ad / JIT path): pin the selector + that
-// the tradeId lands in slot 0 and the merchant address is the 4th arg.
+// PrepareOpenTradeWithDeposit (buy-ad / JIT path): pin the selector + that the tradeId lands in
+// slot 0, the merchant is the 4th arg and the trade's releaser the 5th.
 func TestPrepareOpenTradeWithDeposit_PacksCorrectSelector(t *testing.T) {
 	svc := makeTestSvc(t)
 	tradeID := HashID(uuid.New())
 	token := "0x000000000000000000000000000000000000feed"
 	merchant := "0x000000000000000000000000000000000000d00d"
 	from := "0x000000000000000000000000000000000000beef"
+	releaser := "0x00000000000000000000000000000000000000aa"
 	amount := big.NewInt(500_000)
 
-	raw, err := svc.PrepareOpenTradeWithDeposit(tradeID, token, amount, merchant, from)
+	raw, err := svc.PrepareOpenTradeWithDeposit(tradeID, token, amount, merchant, releaser, from)
 	if err != nil {
 		t.Fatalf("PrepareOpenTradeWithDeposit: %v", err)
 	}
 	data := mustDecodeHex(t, decodeUnsignedTx(t, raw).Data)
-	want := selectorFor(t, "openTradeWithDeposit(bytes32,address,uint256,address)")
+	want := selectorFor(t, "openTradeWithDeposit(bytes32,address,uint256,address,address)")
 	if !bytesEqual(data[:4], want) {
 		t.Fatalf("openTradeWithDeposit selector mismatch: want %x got %x", want, data[:4])
 	}
@@ -142,6 +111,29 @@ func TestPrepareOpenTradeWithDeposit_PacksCorrectSelector(t *testing.T) {
 	merchantSlot := data[4+3*32 : 4+4*32]
 	if !bytesEqual(merchantSlot[12:], common.HexToAddress(merchant).Bytes()) {
 		t.Fatalf("merchant address not in 4th arg slot: %x", merchantSlot)
+	}
+	if !bytesEqual(data[4+4*32+12:4+5*32], common.HexToAddress(releaser).Bytes()) {
+		t.Fatalf("releaser not in 5th arg slot")
+	}
+	// No releaser is the zero address.
+	raw, err = svc.PrepareOpenTradeWithDeposit(tradeID, token, amount, merchant, "", from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data = mustDecodeHex(t, decodeUnsignedTx(t, raw).Data); !bytesEqual(data[4+4*32:4+5*32], make([]byte, 32)) {
+		t.Fatalf("an empty releaser must encode as the zero address")
+	}
+}
+
+func TestPrepareSetReleaser_PacksTheReleaser(t *testing.T) {
+	releaser := "0x00000000000000000000000000000000000000aa"
+	raw, err := makeTestSvc(t).PrepareSetReleaser("0x000000000000000000000000000000000000beef", releaser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := mustDecodeHex(t, decodeUnsignedTx(t, raw).Data)
+	if !bytesEqual(data[:4], selectorFor(t, "setReleaser(address)")) || !bytesEqual(data[4+12:36], common.HexToAddress(releaser).Bytes()) {
+		t.Fatalf("setReleaser data = %x", data)
 	}
 }
 
@@ -193,13 +185,12 @@ func TestPrepareAdminResolve_EncodesBoolArg(t *testing.T) {
 }
 
 func TestPrepare_RequiresContractAddress(t *testing.T) {
-	cfg := &config.Config{Env: "development", P2PEscrowAddress: ""}
-	svc := NewP2PEscrowService(nil, cfg)
+	svc := NewP2PEscrowServiceForChain(nil, &config.Config{Env: "development"}, "")
 	// PrepareMarkPaid is the simplest still-functional Prepare* — exercise
 	// the contract-address guard via it.
 	_, err := svc.PrepareMarkPaid(HashID(uuid.New()), "0xbeef")
 	if err == nil {
-		t.Fatalf("expected error when P2PEscrowAddress empty")
+		t.Fatalf("expected error when the escrow address is empty")
 	}
 }
 
@@ -209,11 +200,7 @@ func TestPrepare_RequiresContractAddress(t *testing.T) {
 // Env is empty / unset.
 func TestBuildUnsignedTx_NonDevEnvFailsClosed(t *testing.T) {
 	for _, env := range []string{"", "dev", "staging", "production", "Development"} {
-		cfg := &config.Config{
-			Env:              env,
-			P2PEscrowAddress: "0xb5B073BF578fE24311ED50e540D9d632f1679261",
-		}
-		svc := NewP2PEscrowService(nil, cfg) // nil client
+		svc := NewP2PEscrowServiceForChain(nil, &config.Config{Env: env}, "0xb5B073BF578fE24311ED50e540D9d632f1679261") // nil client
 		_, err := svc.PrepareMarkPaid(
 			HashID(uuid.New()),
 			"0x000000000000000000000000000000000000beef",
@@ -239,17 +226,17 @@ func TestABIEventsHaveExpectedTopicIDs(t *testing.T) {
 	// canonical keccak256(signature). If a signature drifts, on-chain events
 	// won't decode — this test catches it at unit-test time.
 	cases := map[string]string{
-		"Deposited":        "Deposited(address,address,uint256)",
-		"Withdrawn":        "Withdrawn(address,address,uint256)",
-		"VoucherCancelled": "VoucherCancelled(bytes32,address)",
-		"TradeOpened":      "TradeOpened(bytes32,bytes32,address,address,address,uint256)",
+		"Deposited":              "Deposited(address,address,uint256)",
+		"Withdrawn":              "Withdrawn(address,address,uint256)",
+		"VoucherCancelled":       "VoucherCancelled(bytes32,address)",
+		"TradeOpened":            "TradeOpened(bytes32,bytes32,address,address,address,uint256)",
 		"TradeOpenedWithDeposit": "TradeOpenedWithDeposit(bytes32,address,address,address,uint256)",
-		"TradePaid":        "TradePaid(bytes32)",
-		"TradeReleased":    "TradeReleased(bytes32,address,uint256,uint256)",
-		"TradeAutoReleased": "TradeAutoReleased(bytes32,address,uint256,uint256)",
-		"TradeCancelled":   "TradeCancelled(bytes32,uint256,bool)",
-		"TradeDisputed":    "TradeDisputed(bytes32,address)",
-		"TradeResolved":    "TradeResolved(bytes32,bool,uint256,uint256)",
+		"TradePaid":              "TradePaid(bytes32)",
+		"TradeReleased":          "TradeReleased(bytes32,address,uint256,uint256)",
+		"TradeAutoReleased":      "TradeAutoReleased(bytes32,address,uint256,uint256)",
+		"TradeCancelled":         "TradeCancelled(bytes32,uint256,bool)",
+		"TradeDisputed":          "TradeDisputed(bytes32,address)",
+		"TradeResolved":          "TradeResolved(bytes32,bool,uint256,uint256)",
 	}
 	for name, sig := range cases {
 		ev, ok := parsedP2PEscrowABI.Events[name]
@@ -325,7 +312,6 @@ func TestPrepare_SingleArgFns_AllSelectorsCorrect(t *testing.T) {
 	}{
 		{"markPaid", "markPaid(bytes32)", func() ([]byte, error) { return svc.PrepareMarkPaid(tradeID, caller) }},
 		{"release", "release(bytes32)", func() ([]byte, error) { return svc.PrepareRelease(tradeID, caller) }},
-		{"adminRelease", "adminRelease(bytes32)", func() ([]byte, error) { return svc.PrepareAdminRelease(tradeID, caller) }},
 		{"cancelByTimeout", "cancelByTimeout(bytes32)", func() ([]byte, error) { return svc.PrepareCancelByTimeout(tradeID, caller) }},
 		{"raiseDispute", "raiseDispute(bytes32)", func() ([]byte, error) { return svc.PrepareRaiseDispute(tradeID, caller) }},
 	}
@@ -573,119 +559,6 @@ func TestParseTradeReleasedFromReceipt_AcceptsAutoReleased(t *testing.T) {
 	}
 	if got.Buyer != buyer || got.AmountToBuyer.Cmp(amountToBuyer) != 0 || got.FeeToSystem.Cmp(feeToSystem) != 0 {
 		t.Errorf("decoded auto-release fields mismatch: %+v", got)
-	}
-}
-
-// TestReadTrade_Decodes10FieldLayout guards the v2 getTrade field reorder. It
-// ABI-packs a 10-field output and confirms each field lands in the right slot
-// of OnChainP2PTrade — in particular voucherHash at index 9 (was 6 in v1),
-// funding at 6, feeBps(uint16) at 7, autoReleaseAt at 8.
-func TestReadTrade_Decodes10FieldLayout(t *testing.T) {
-	method, ok := parsedP2PEscrowABI.Methods["getTrade"]
-	if !ok {
-		t.Fatalf("getTrade not in parsed ABI")
-	}
-	seller := common.HexToAddress("0x000000000000000000000000000000000000beef")
-	buyer := common.HexToAddress("0x000000000000000000000000000000000000d00d")
-	token := common.HexToAddress("0x000000000000000000000000000000000000feed")
-	amount := big.NewInt(123_456)
-	createdAt := big.NewInt(1_700_000_000)
-	status := uint8(OnChainP2PStatusPaid)
-	funding := uint8(1) // DepositedByTaker
-	feeBps := uint16(50)
-	autoReleaseAt := big.NewInt(1_700_000_900)
-	voucherHash := HashID(uuid.New())
-
-	packed, err := method.Outputs.Pack(seller, buyer, token, amount, createdAt, status, funding, feeBps, autoReleaseAt, voucherHash)
-	if err != nil {
-		t.Fatalf("pack outputs: %v", err)
-	}
-	vals, err := method.Outputs.Unpack(packed)
-	if err != nil || len(vals) != 10 {
-		t.Fatalf("unpack: %v len=%d", err, len(vals))
-	}
-	// Decode in the same order ReadTrade does and assert field placement.
-	tr := &OnChainP2PTrade{
-		Seller:        vals[0].(common.Address),
-		Buyer:         vals[1].(common.Address),
-		Token:         vals[2].(common.Address),
-		Amount:        vals[3].(*big.Int),
-		CreatedAt:     vals[4].(*big.Int),
-		Status:        OnChainP2PTradeStatus(vals[5].(uint8)),
-		Funding:       vals[6].(uint8),
-		FeeBps:        vals[7].(uint16),
-		AutoReleaseAt: vals[8].(*big.Int),
-		VoucherHash:   vals[9].([32]byte),
-	}
-	if tr.Seller != seller || tr.Buyer != buyer || tr.Token != token {
-		t.Errorf("address fields mis-decoded: %+v", tr)
-	}
-	if tr.Amount.Cmp(amount) != 0 || tr.CreatedAt.Cmp(createdAt) != 0 {
-		t.Errorf("amount/createdAt mis-decoded: %+v", tr)
-	}
-	if uint8(tr.Status) != status {
-		t.Errorf("status = %d, want %d", tr.Status, status)
-	}
-	if tr.Funding != funding {
-		t.Errorf("funding = %d, want %d (index 6)", tr.Funding, funding)
-	}
-	if tr.FeeBps != feeBps {
-		t.Errorf("feeBps = %d, want %d (index 7, uint16)", tr.FeeBps, feeBps)
-	}
-	if tr.AutoReleaseAt.Cmp(autoReleaseAt) != 0 {
-		t.Errorf("autoReleaseAt = %s, want %s (index 8)", tr.AutoReleaseAt, autoReleaseAt)
-	}
-	if tr.VoucherHash != voucherHash {
-		t.Errorf("voucherHash mis-decoded — index drift (want slot 9): got %x", tr.VoucherHash)
-	}
-}
-
-// TestTradesGetter_DecodesV3SnapshotLayout guards the V3 public trades(bytes32)
-// getter decode used by ReadTradePlatformFeeBps. The struct getter returns the
-// fields in DECLARATION order — seller, buyer, token, amount, createdAt,
-// autoReleaseAt, status, funding, feeBps, platformFeeBpsSnapshot,
-// gasFeeBpsSnapshot, voucherHash — which DIFFERS from getTrade's order. A wrong
-// index would mis-read the platform snapshot (index 9). 12 fields total.
-func TestTradesGetter_DecodesV3SnapshotLayout(t *testing.T) {
-	method, ok := parsedP2PEscrowABI.Methods["trades"]
-	if !ok {
-		t.Fatalf("trades not in parsed ABI")
-	}
-	seller := common.HexToAddress("0x000000000000000000000000000000000000beef")
-	buyer := common.HexToAddress("0x000000000000000000000000000000000000d00d")
-	token := common.HexToAddress("0x000000000000000000000000000000000000feed")
-	amount := big.NewInt(123_456)         // uint96
-	createdAt := big.NewInt(1_700_000_000) // uint40
-	autoReleaseAt := big.NewInt(1_700_000_900)
-	status := uint8(OnChainP2PStatusReleased)
-	funding := uint8(1)
-	feeBps := uint16(0)               // V3 sets feeBps=0 for new trades
-	platformBps := uint16(100)        // 1% platform snapshot — what we read
-	gasBps := uint16(50)              // 0.5% gas snapshot
-	voucherHash := HashID(uuid.New())
-
-	packed, err := method.Outputs.Pack(seller, buyer, token, amount, createdAt, autoReleaseAt, status, funding, feeBps, platformBps, gasBps, voucherHash)
-	if err != nil {
-		t.Fatalf("pack trades outputs: %v", err)
-	}
-	vals, err := method.Outputs.Unpack(packed)
-	if err != nil || len(vals) != 12 {
-		t.Fatalf("unpack trades: %v len=%d", err, len(vals))
-	}
-	// Index 9 is the platform snapshot — the field ReadTradePlatformFeeBps reads.
-	got, ok := vals[9].(uint16)
-	if !ok {
-		t.Fatalf("platform snapshot not uint16: %T", vals[9])
-	}
-	if got != platformBps {
-		t.Errorf("platformFeeBpsSnapshot = %d, want %d (index 9)", got, platformBps)
-	}
-	// Sanity: index 8 is the (now-zero) legacy feeBps, index 10 the gas snapshot.
-	if vals[8].(uint16) != feeBps {
-		t.Errorf("feeBps = %d, want %d (index 8)", vals[8].(uint16), feeBps)
-	}
-	if vals[10].(uint16) != gasBps {
-		t.Errorf("gasFeeBpsSnapshot = %d, want %d (index 10)", vals[10].(uint16), gasBps)
 	}
 }
 

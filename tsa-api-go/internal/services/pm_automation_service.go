@@ -921,7 +921,7 @@ func (s *PMAutomationService) tradeUSDForCap(ctx context.Context, tradeID uuid.U
 }
 
 // ManualRelease lets an operator settle a manually-verified PM buy trade:
-// system markPaid (ref "manual:<adminID>") then adminRelease. adminID is the
+// system markPaid (ref "manual:<adminID>") then the release key's release. adminID is the
 // operator performing the release (for the ref/audit trail). ErrInvalidTransition
 // on markPaid is tolerated (already paid) and execution continues to release.
 func (s *PMAutomationService) ManualRelease(ctx context.Context, tradeID, adminID uuid.UUID) (*models.P2PTrade, error) {

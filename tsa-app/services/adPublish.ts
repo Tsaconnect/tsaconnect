@@ -5,6 +5,7 @@
 import { adsApi, type CreateAdInput, type P2PAd } from './p2p';
 import { signTypedData } from './wallet';
 import { P2PCopyError, p2pRefusalError, type P2PErrorLike } from './p2pErrors';
+import { ensurePMReleaser, PM_RELEASER_NOT_SET } from './pmReleaser';
 
 export async function createAndSignAd(p: {
   payload: CreateAdInput;
@@ -14,6 +15,8 @@ export async function createAndSignAd(p: {
    *  whole refusal, for copy that needs its code or data (rate_out_of_band's
    *  min/max). */
   statusError: (status?: number, message?: string, res?: P2PErrorLike) => string;
+  /** Shown when the setReleaser tx (payment merchants only) needs gas that could not be sponsored. */
+  onGasAlert?: (title: string, message: string) => void;
 }): Promise<P2PAd> {
   // The server creates the ad `pending` and returns the EIP-712 voucher.
   p.onStage?.('Building voucher…');
@@ -32,7 +35,14 @@ export async function createAndSignAd(p: {
   const signature = await signTypedData(typedData.domain, typedData.types, typedData.message, p.sellerAddress);
 
   p.onStage?.('Activating ad…');
-  const signRes = await adsApi.sign(ad.id, signature, p.sellerAddress);
+  let signRes = await adsApi.sign(ad.id, signature, p.sellerAddress);
+  // A payment merchant's sell-ad goes live only once the platform may settle its trades: name the
+  // release key (one tx, once per chain), then activate the same signed voucher again.
+  if (!signRes.success && signRes.code === PM_RELEASER_NOT_SET) {
+    await ensurePMReleaser({ walletAddress: p.sellerAddress, chainId: p.payload.chainId, onStage: p.onStage, onGasAlert: p.onGasAlert });
+    p.onStage?.('Activating ad…');
+    signRes = await adsApi.sign(ad.id, signature, p.sellerAddress);
+  }
   if (!signRes.success || !signRes.data) throw new P2PCopyError(p.statusError(signRes.status, signRes.message, signRes));
   // A 2xx is not proof the ad went live (a server regression could leave it
   // pending); confirm before the caller says it did.

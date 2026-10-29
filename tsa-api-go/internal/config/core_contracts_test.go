@@ -105,3 +105,26 @@ func TestCoreContracts_RefusesABadRow(t *testing.T) {
 		}
 	}
 }
+
+// The hard switch: a P2P chain the set covers takes its P2PTradeEscrow and drops the legacy
+// escrow's FeeManager and owner; one it does not (and every one while dormant) goes dormant.
+func TestBindP2PChainsToCore(t *testing.T) {
+	cfg := &Config{
+		CoreSet:       CoreSetDev,
+		CoreContracts: map[int64]CoreContracts{146: {ChainID: 146, P2PEscrow: "0x00000000000000000000000000000000000E5C03"}},
+		P2PChains: map[int64]P2PChainConfig{
+			146: {ChainID: 146, ChainKey: "sonic", EscrowAddress: "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324", EIP712Version: "2", Audience: P2PAudiencePM},
+			56: {ChainID: 56, ChainKey: "bsc", EscrowAddress: "0xD16c1597EA3be8D2017698CC5d6Bf53b595EEb03", EIP712Version: "2",
+				Audience: P2PAudienceDirect, FeeManager: "0xe760018f5b3fE4E8EF52DC029898545ed03d74ac"},
+		},
+	}
+	bindP2PChainsToCore(cfg)
+	sonic := cfg.P2PChains[146]
+	if sonic.EscrowAddress != "0x00000000000000000000000000000000000E5C03" || sonic.EIP712Version != "3" || sonic.Audience != P2PAudiencePM {
+		t.Fatalf("sonic = %+v", sonic)
+	}
+	if _, ok := cfg.P2PChains[56]; ok || len(cfg.DormantP2PChains) != 1 || cfg.DormantP2PChains[0].ChainID != 56 ||
+		cfg.DormantP2PChains[0].Audience != P2PAudienceDirect {
+		t.Fatalf("BSC must go dormant: chains=%+v dormant=%+v", cfg.P2PChains, cfg.DormantP2PChains)
+	}
+}

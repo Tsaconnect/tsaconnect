@@ -19,12 +19,12 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/blockchain"
 )
 
-// ReleaseSigner signs and broadcasts the unsigned adminRelease tx produced by
-// P2PEscrowService.PrepareAdminRelease with the ONE platform admin EOA key. The
+// ReleaseSigner signs and broadcasts the unsigned release tx produced by
+// P2PEscrowService.PrepareRelease with the ONE platform release key. The
 // key never lives in the DB. Prod = AWS KMS (release_signer_kms.go, later); dev
 // = LocalKeyReleaseSigner; tests = fakeReleaseSigner.
 type ReleaseSigner interface {
-	// Address is the admin EOA address — the `from` passed to PrepareAdminRelease.
+	// Address is the release key's address — the `from` passed to PrepareRelease.
 	Address() string
 	// SignAndBroadcast signs the JSON-encoded blockchain.UnsignedTx and broadcasts
 	// it, returning the tx hash.

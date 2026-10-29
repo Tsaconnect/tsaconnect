@@ -29,8 +29,8 @@ func newPoolRig(t *testing.T) *poolRig {
 		146: {Escrow: sonic, ChainKey: "sonic", Purpose: config.P2PPurposeP2P, Assets: []string{"USDT"}, Decimals: map[string]int{"USDT": 6}},
 	}, "2")
 	bus := &mockBus{}
-	svc := NewP2PTradeService(db, reg, &mockRates{}, bus, 146).
-		WithClock(fixedClock{t: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)})
+	svc := bindSvcEscrows(NewP2PTradeService(db, reg, &mockRates{}, bus, 146).
+		WithClock(fixedClock{t: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}))
 	svc.SetTokenResolver(func(int64, string) string { return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894" })
 	svc.SetPMService(NewPMService(db))
 	return &poolRig{db: db, svc: svc, sonic: sonic, bus: bus}

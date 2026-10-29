@@ -21,33 +21,32 @@ import (
 // from it. Same convention as release_tx_hash = "reconciled".
 const openTxReconciled = "reconciled"
 
-// openDeadlineFromChain is the contract's cancelByTimeout deadline:
-// on-chain createdAt + paymentWindow. False when createdAt is unknown.
+// openDeadlineFromChain is the contract's cancelByTimeout deadline, the expiresAt it snapshotted
+// at open. False when it is unknown.
 func openDeadlineFromChain(onchain *OnChainP2PTrade) (time.Time, bool) {
-	if onchain == nil || onchain.CreatedAt == nil || onchain.CreatedAt.Sign() <= 0 {
+	if onchain == nil || onchain.ExpiresAt == nil || onchain.ExpiresAt.Sign() <= 0 {
 		return time.Time{}, false
 	}
-	return time.Unix(onchain.CreatedAt.Int64(), 0).UTC().Add(p2pPaymentWindow), true
+	return time.Unix(onchain.ExpiresAt.Int64(), 0).UTC(), true
 }
 
 // openRecordUpdates is the column set written when a trade's on-chain open is
 // recorded — by ConfirmOpenTrade (real tx hash) and by the backfill (marker).
-// The off-chain deadline is re-anchored to the on-chain createdAt because
+// The off-chain deadline is re-anchored to the on-chain expiresAt because
 // expires_at was set at intent time and drifts early if the open mined late,
 // which would nudge a timeout-cancel the contract reverts. With no on-chain
-// createdAt the intent-time deadline is kept.
+// expiresAt the intent-time deadline is kept.
 //
 // fee_bps is the trade's snapshotted platform+gas bps (the fee the escrow takes
 // at release), stored with its platform and gas legs, all from the trade read
-// the caller already made; a read with no snapshot (pre-V3) leaves them unset.
+// the caller already made.
 func (s *P2PTradeService) openRecordUpdates(openTxHash string, t *models.P2PTrade, onchain *OnChainP2PTrade) map[string]any {
 	updates := map[string]any{"open_tx_hash": openTxHash, "updated_at": s.clock.Now()}
 	if onchain != nil {
-		if bps, ok := feeBpsFromSnapshot(onchain.PlatformFeeBps, onchain.GasFeeBps, onchain.FeeSnapshotFound); ok {
-			platform, gas := int(onchain.PlatformFeeBps), int(onchain.GasFeeBps)
-			updates["fee_bps"], updates["fee_platform_bps"], updates["fee_gas_bps"] = bps, platform, gas
-			t.FeeBps, t.FeePlatformBps, t.FeeGasBps = &bps, &platform, &gas
-		}
+		platform, gas := int(onchain.PlatformFeeBps), int(onchain.GasFeeBps)
+		bps := platform + gas
+		updates["fee_bps"], updates["fee_platform_bps"], updates["fee_gas_bps"] = bps, platform, gas
+		t.FeeBps, t.FeePlatformBps, t.FeeGasBps = &bps, &platform, &gas
 	}
 	if deadline, ok := openDeadlineFromChain(onchain); ok {
 		updates["expires_at"] = deadline
@@ -55,7 +54,7 @@ func (s *P2PTradeService) openRecordUpdates(openTxHash string, t *models.P2PTrad
 	return updates
 }
 
-// onChainOpenMatches decides whether the escrow's trade under HashID(t.ID) is
+// onChainOpenMatches decides whether the escrow's trade under t's key is
 // the open we prepared for t on ad. The contract lets the opener choose the
 // token (any accepted one) and, on openTradeWithDeposit, the merchant (the
 // on-chain buyer) freely — so an opener naming their own second wallet as
@@ -182,7 +181,11 @@ func (s *P2PTradeService) openRecorded(ctx context.Context, t *models.P2PTrade, 
 	if t.OpenRecorded() {
 		return true, nil
 	}
-	onchain, err := escrow.ReadTrade(HashID(t.ID))
+	key, err := tradeKeyOf(t)
+	if err != nil {
+		return false, err
+	}
+	onchain, err := escrow.ReadTrade(key)
 	if err != nil {
 		return false, fmt.Errorf("%w: read on-chain trade: %v", ErrChainUnavailable, err)
 	}

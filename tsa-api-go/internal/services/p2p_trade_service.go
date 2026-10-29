@@ -96,26 +96,29 @@ type P2PEscrowAdapter interface {
 	PrepareDeposit(seller, token string, amount *big.Int) ([]byte, error)
 	PrepareWithdraw(seller, token string, amount *big.Int) ([]byte, error)
 
-	// Voucher / trade lifecycle.
+	// PrepareSetReleaser is the seller's setReleaser(releaser) (a payment merchant names the
+	// platform release key so AutoRelease can release its sell-ad trades).
+	PrepareSetReleaser(seller, releaser string) ([]byte, error)
+
+	// Voucher / trade lifecycle. tradeId is key on the opens; every later call takes
+	// the trade's key, TradeKey(opener, tradeId) (tradeKeyOf).
 	PrepareCancelVoucher(seller string, voucher AdVoucher) ([]byte, error)
 	PrepareOpenTradeWithVoucher(tradeId [32]byte, voucher AdVoucher, sig []byte, buyer string, amount *big.Int) ([]byte, error)
-	// PrepareOpenTradeWithDeposit is the v2 buy-ad / JIT-funded path: the user
-	// deposits crypto at open time. `from` is the depositing user (on-chain
-	// seller), `merchant` is the ad poster (on-chain buyer/recipient).
-	PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error)
-	PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, error)
-	PrepareRelease(tradeId [32]byte, seller string) ([]byte, error)
-	PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]byte, error)
-	PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, error)
-	PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, admin string) ([]byte, error)
-	// PrepareAdminRelease builds the unsigned adminRelease tx sent by the
-	// platform admin EOA — the system-driven (PM-automation) release path.
-	PrepareAdminRelease(tradeId [32]byte, admin string) ([]byte, error)
+	// PrepareOpenTradeWithDeposit is the buy-ad / JIT-funded path: the user deposits crypto at
+	// open time. `from` is the depositing user (on-chain seller), `merchant` the ad poster
+	// (on-chain buyer/recipient), `releaser` who may release this trade besides the user ("" none).
+	PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, releaser, from string) ([]byte, error)
+	PrepareMarkPaid(key [32]byte, buyer string) ([]byte, error)
+	PrepareRelease(key [32]byte, caller string) ([]byte, error)
+	PrepareCancelByTimeout(key [32]byte, caller string) ([]byte, error)
+	PrepareRaiseDispute(key [32]byte, by string) ([]byte, error)
+	PrepareAdminResolve(key [32]byte, releaseToBuyer bool, resolver string) ([]byte, error)
 
 	// Receipt verification.
 	VerifyDeposited(txHash string, expectedSeller, expectedToken common.Address) (*P2PDepositedEvent, error)
 	VerifyWithdrawn(txHash string, expectedSeller, expectedToken common.Address) (*P2PWithdrawnEvent, error)
 	VerifyVoucherCancelled(txHash string, expectedVoucherHash [32]byte) (*P2PVoucherCancelledEvent, error)
+	VerifyReleaserSet(txHash string, expectedSeller common.Address) (*P2PReleaserSetEvent, error)
 	VerifyTradeOpened(txHash string, expectedTradeId [32]byte) (*P2PTradeOpenedEvent, error)
 	VerifyTradeOpenedWithDeposit(txHash string, expectedTradeId [32]byte) (*P2PTradeOpenedWithDepositEvent, error)
 	VerifyTradeReleased(txHash string, expectedTradeId [32]byte) (*P2PTradeReleasedEvent, error)
@@ -125,14 +128,9 @@ type P2PEscrowAdapter interface {
 	VerifyTradeResolved(txHash string, expectedTradeId [32]byte) (*P2PTradeResolvedEvent, error)
 
 	// Views — used by reconciler + voucher-state checks.
-	ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error)
-	// ReadTradeFeeSnapshot reads a trade's V3-snapshotted platform and gas fee
-	// bps; found=false when the read failed or the escrow predates V3. Only
-	// release accrual's fallback uses it (a trade recorded before
-	// p2p_trades.fee_platform_bps existed): ReadTrade already carries the
-	// snapshot on V3.
-	// A pool slice must read (0, 0) (spec §6.2, F15).
-	ReadTradeFeeSnapshot(tradeId [32]byte) (platformBps, gasBps uint16, found bool)
+	ReadTrade(key [32]byte) (*OnChainP2PTrade, error)
+	// ReadReleaser is releaserOf(seller).
+	ReadReleaser(seller string) (common.Address, error)
 	ReadBalance(seller, token string) (*OnChainBalance, error)
 	ReadVoucherFilled(voucherHash [32]byte) (*big.Int, error)
 	ReadVoucherCancelled(voucherHash [32]byte) (bool, error)
@@ -210,6 +208,10 @@ type P2PTradeService struct {
 
 	// alerter emails operators about P2P money events (p2p_alert.go). Nil-safe.
 	alerter P2PAlerter
+
+	// releaseAddress is the platform release key (SetReleaseAddress): the releaser a PM names and
+	// a PM buy-ad open passes as the trade's releaser. Empty: PM ads cannot be opened.
+	releaseAddress string
 }
 
 // defaultFloatOffsetMaxBps is the platform-wide cap applied when the service
@@ -439,15 +441,8 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 		return
 	}
 
-	// Resolve the escrow for the trade's chain (fail-loud — never Sonic fallback).
-	esc, _, _, err := s.resolve(trade.ChainID)
-	if err != nil || esc == nil {
-		log.Printf("[p2p accrue] trade=%s: resolve chain %d: %v", trade.ID, trade.ChainID, err)
-		return
-	}
-
-	// The V3-snapshotted platform-fee bps. 0 ⇒ pre-V3 / V2 trade ⇒ no-op.
-	platformBps, found := tradePlatformFeeBps(esc, trade)
+	// The platform-fee bps snapshotted at open. 0 ⇒ no platform fee ⇒ no-op.
+	platformBps, found := s.tradePlatformFeeBps(trade)
 	if !found || platformBps == 0 {
 		return
 	}
@@ -477,15 +472,23 @@ func (s *P2PTradeService) accrueP2PReleaseFee(trade *models.P2PTrade, feeBaseUni
 	})
 }
 
-// tradePlatformFeeBps is the trade's snapshotted platform-fee bps: the value
-// recorded at open, else (a trade recorded before the column existed, or whose
-// snapshot read failed then) one read of the escrow.
-func tradePlatformFeeBps(esc P2PEscrowAdapter, trade *models.P2PTrade) (int, bool) {
+// tradePlatformFeeBps is the trade's snapshotted platform-fee bps: the value recorded at open,
+// else (an open backfilled before the fee columns were written) one getTrade read.
+func (s *P2PTradeService) tradePlatformFeeBps(trade *models.P2PTrade) (int, bool) {
 	if trade.FeePlatformBps != nil {
 		return *trade.FeePlatformBps, true
 	}
-	p, _, found := esc.ReadTradeFeeSnapshot(HashID(trade.ID))
-	return int(p), found
+	esc, key, err := s.tradeEscrow(trade)
+	if err != nil {
+		log.Printf("[p2p accrue] trade=%s: %v", trade.ID, err)
+		return 0, false
+	}
+	onchain, err := esc.ReadTrade(key)
+	if err != nil || !onchain.Exists {
+		log.Printf("[p2p accrue] trade=%s: read fee snapshot: %v", trade.ID, err)
+		return 0, false
+	}
+	return int(onchain.PlatformFeeBps), true
 }
 
 // onChainTradeFee derives the platform fee (base units) from a view-read trade:
@@ -605,6 +608,7 @@ type VoucherTypedMessage struct {
 	MaxPerTrade string `json:"maxPerTrade"`
 	Deadline    string `json:"deadline"`
 	Nonce       string `json:"nonce"` // hex with 0x prefix
+	Taker       string `json:"taker"` // the only buyer allowed; the zero address = anyone
 }
 
 type ReleaseResult struct {
@@ -795,6 +799,7 @@ func (s *P2PTradeService) CreateAd(ctx context.Context, sellerID uuid.UUID, sell
 	dt := deadline
 	ad.VoucherDeadline = &dt
 	ad.VoucherHash = "0x" + common.Bytes2Hex(hash[:])
+	ad.EscrowAddress = escrow.ContractAddress() // the voucher is signed for this escrow only
 
 	// PM ad-tagging: if the creator is an active PM, stamp PMID and verify that
 	// the ad's seller address matches the PM's registered maker wallet.
@@ -919,6 +924,10 @@ func (s *P2PTradeService) createBuyAd(ctx context.Context, merchantID uuid.UUID,
 		Status:        models.P2PAdStatusActive,
 		SellerAddress: common.HexToAddress(merchantAddress).Hex(), // merchant = cryptoRecipient
 	}
+	// Informational: a buy-ad has no voucher, so its trades open on whatever escrow is current.
+	if escrow, err := s.escrows.For(chainID); err == nil {
+		ad.EscrowAddress = escrow.ContractAddress()
+	}
 
 	if rateType == models.P2PAdRateTypeFloat {
 		effective, err := s.ComputeEffectiveRate(ad)
@@ -1005,9 +1014,15 @@ func (s *P2PTradeService) SignAd(ctx context.Context, adID, sellerID uuid.UUID, 
 
 	// Resolve the ad's chain so the voucher hash (and the mismatch-log domain)
 	// match the contract the seller signed against — NOT a default chain.
-	escrow, domainChainID, _, err := s.resolve(ad.ChainID)
+	escrow, domainChainID, _, err := s.adEscrow(&ad)
 	if err != nil {
 		return nil, err
+	}
+	// A PM sell-ad goes live only once its trades can be released by the platform (setReleaser).
+	if ad.PMID != nil {
+		if err := s.requirePMReleaser(escrow, ad.SellerAddress); err != nil {
+			return nil, err
+		}
 	}
 	hash, err := escrow.HashVoucher(voucher)
 	if err != nil {
@@ -1090,7 +1105,7 @@ func (s *P2PTradeService) PrepareCancelAd(ctx context.Context, adID, sellerID uu
 	if err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(ad.ChainID)
+	escrow, _, _, err := s.adEscrow(&ad)
 	if err != nil {
 		return nil, err
 	}
@@ -1132,7 +1147,7 @@ func (s *P2PTradeService) ConfirmCancelAd(ctx context.Context, adID, sellerID uu
 		return nil, fmt.Errorf("%w: stored voucher hash is corrupt (%v)", ErrInvalidTransition, err)
 	}
 
-	escrow, _, _, err := s.resolve(ad.ChainID)
+	escrow, _, _, err := s.adEscrow(&ad)
 	if err != nil {
 		return nil, err
 	}
@@ -1342,9 +1357,6 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		Status:          models.P2PTradeStatusPendingPayment,
 		ExpiresAt:       s.clock.Now().Add(p2pPaymentWindow),
 	}
-	trade.OnChainTradeID = HashIDHex(trade.ID)
-	onChainTradeID := HashID(trade.ID)
-
 	// Build the voucher from the ad's stored fields + the seller wallet
 	// implied by the on-chain voucher signature. The voucher hash recomputed
 	// here must match ad.VoucherHash — a mismatch means the DB row drifted
@@ -1367,9 +1379,19 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: stored voucher signature is corrupt (%v)", ErrInvalidTransition, err)
 	}
-	escrow, _, _, err := s.resolve(ad.ChainID)
+	escrow, _, _, err := s.adEscrow(&ad)
 	if err != nil {
 		return nil, nil, err
+	}
+	// The escrow stores the trade under TradeKey(buyer, HashID(id)).
+	trade.EscrowAddress = escrow.ContractAddress()
+	trade.OnChainTradeID = newTradeKeyHex(buyerAddress, trade.ID)
+	if ad.PMID != nil {
+		// AutoRelease releases a PM's sell-ad trades with the release key, which only the PM can
+		// let do so (setReleaser): refuse the open rather than leave a paid buyer unreleasable.
+		if err := s.requirePMReleaser(escrow, ad.SellerAddress); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// Pre-check the maker's on-chain pool BEFORE the gas estimate. openTrade
@@ -1391,7 +1413,7 @@ func (s *P2PTradeService) OpenTrade(ctx context.Context, adID, buyerID uuid.UUID
 		}
 	}
 
-	unsignedTx, err := escrow.PrepareOpenTradeWithVoucher(onChainTradeID, voucher, sig, buyerAddress, tokenAmount)
+	unsignedTx, err := escrow.PrepareOpenTradeWithVoucher(HashID(trade.ID), voucher, sig, buyerAddress, tokenAmount)
 	if err != nil {
 		// Don't let an opaque prep failure surface as a generic 500. A revert
 		// means the on-chain openTrade would fail (bad voucher signature, or
@@ -1567,16 +1589,24 @@ func (s *P2PTradeService) openTradeWithDeposit(ctx context.Context, ad *models.P
 		trade.PayoutBank = payoutBank
 		trade.PayoutAccountName = payoutAccountName
 	}
-	trade.OnChainTradeID = HashIDHex(trade.ID)
-	onChainTradeID := HashID(trade.ID)
-
 	// from = opener wallet (depositor / on-chain seller); merchant = ad poster
-	// wallet (on-chain buyer / cryptoRecipient).
-	escrow, _, _, err := s.resolve(ad.ChainID)
+	// wallet (on-chain buyer / cryptoRecipient). The escrow stores the trade under
+	// TradeKey(opener, HashID(id)).
+	escrow, _, _, err := s.adEscrow(ad)
 	if err != nil {
 		return nil, nil, err
 	}
-	unsignedTx, err := escrow.PrepareOpenTradeWithDeposit(onChainTradeID, tokenAddr, tokenAmount, ad.SellerAddress, openerAddress)
+	trade.EscrowAddress = escrow.ContractAddress()
+	trade.OnChainTradeID = newTradeKeyHex(openerAddress, trade.ID)
+	// A PM pays the user out off-chain and the platform then releases (AutoRelease): the user names
+	// the release key as this trade's releaser (M1). It can never be the merchant receiving the crypto.
+	releaser := ""
+	if ad.PMID != nil {
+		if releaser = s.releaseAddress; releaser == "" {
+			return nil, nil, fmt.Errorf("%w: payment-merchant settlement is not running", ErrChainUnavailable)
+		}
+	}
+	unsignedTx, err := escrow.PrepareOpenTradeWithDeposit(HashID(trade.ID), tokenAddr, tokenAmount, ad.SellerAddress, releaser, openerAddress)
 	if err != nil {
 		// Map the opaque prep failure like the sell-ad path: a revert (e.g. the
 		// taker's wallet can't cover the deposit, token not accepted) → 422 with
@@ -1691,7 +1721,7 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 
 	// Resolve the trade's chain so the open receipt is verified against the
 	// escrow the trade was actually opened on — never a default chain.
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
@@ -1700,13 +1730,13 @@ func (s *P2PTradeService) ConfirmOpenTrade(ctx context.Context, tradeID, openerI
 	// token, funding, counterparty, and that the opener is the wallet this
 	// trade was prepared for) is checked against the escrow's view below, where
 	// every refusal ALERTs.
-	if err := funding.verifyOpen(escrow, txHash, HashID(trade.ID)); err != nil {
+	if err := funding.verifyOpen(escrow, txHash, key); err != nil {
 		return nil, err
 	}
 
 	// The receipt is mined, so the trade exists; a read that fails or doesn't
 	// see it yet is a lagging node — retryable, not a refusal.
-	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	onchain, err := escrow.ReadTrade(key)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read on-chain trade: %v", ErrChainUnavailable, err)
 	}
@@ -1746,7 +1776,7 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 
 	// Resolve the trade's chain BEFORE the status flip so an unconfigured chain
 	// fails loud without stranding the trade in `releasing`.
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
@@ -1790,7 +1820,7 @@ func (s *P2PTradeService) PrepareRelease(ctx context.Context, tradeID, sellerID 
 			Update("updated_at", s.clock.Now())
 	}
 
-	unsignedTx, err := escrow.PrepareRelease(HashID(trade.ID), sellerAddress)
+	unsignedTx, err := escrow.PrepareRelease(key, sellerAddress)
 	if err != nil {
 		// We flipped (Pending|Paid) → Releasing above; roll it back so a failed
 		// prepare doesn't strand the trade in `releasing` for the reconciler's
@@ -1826,11 +1856,11 @@ func (s *P2PTradeService) ConfirmRelease(ctx context.Context, tradeID, sellerID 
 	if trade.Status != models.P2PTradeStatusPaid && trade.Status != models.P2PTradeStatusReleasing {
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
-	ev, err := escrow.VerifyTradeReleased(txHash, HashID(trade.ID))
+	ev, err := escrow.VerifyTradeReleased(txHash, key)
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain release: %w", err)
 	}
@@ -1975,8 +2005,9 @@ func (s *P2PTradeService) SystemMarkPaid(ctx context.Context, tradeID uuid.UUID,
 	return &trade, nil
 }
 
-// AutoRelease settles a PM trade via the platform admin EOA: flip → releasing
-// (system-driven), build the unsigned adminRelease tx, sign+broadcast through
+// AutoRelease settles a PM trade with the release key: flip → releasing (system-driven), build
+// release(key) — the key may release because the PM named it releaser (setReleaser, sell-ads) or
+// the depositing user named it this trade's releaser (buy-ads) — sign+broadcast through
 // the signer's per-chain lock (ChainSender.Send), verify the on-chain event, and
 // confirm via confirmReleaseCore.
 func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, signer ChainSender) (*models.P2PTrade, error) {
@@ -2008,7 +2039,7 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 	if err := s.refuseDirectAutoRelease(&trade); err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
@@ -2050,12 +2081,12 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 				Update("status", priorStatus)
 		}
 	}
-	// Spec S8/S39: the nonce read in PrepareAdminRelease and the broadcast run
+	// Spec S8/S39: the nonce read in PrepareRelease and the broadcast run
 	// under this chain's release-key lock, shared with every other release-key job.
 	// The trade's release is the operation: a retry never gets a new nonce.
 	sendCtx := WithOperationRef(ctx, "p2p_release:"+trade.ID.String())
 	txHash, err := signer.Send(sendCtx, trade.ChainID, func() ([]byte, error) {
-		return escrow.PrepareAdminRelease(HashID(trade.ID), signer.Address())
+		return escrow.PrepareRelease(key, signer.Address())
 	})
 	if txHash == "" {
 		txHash = uncertainTxHash(err)
@@ -2066,7 +2097,7 @@ func (s *P2PTradeService) AutoRelease(ctx context.Context, tradeID uuid.UUID, si
 		if errors.Is(err, ErrTxNotBroadcast) || (!errors.Is(err, ErrPendingBroadcast) && !errors.Is(err, ErrSendOutcomeUnknown)) {
 			rollback()
 		}
-		return nil, fmt.Errorf("sign+broadcast admin release: %w", err)
+		return nil, fmt.Errorf("sign+broadcast system release: %w", err)
 	}
 	// Verified on whichever signing of the call mined (a speed-up during the
 	// wait is the release, not a failure).
@@ -2133,7 +2164,11 @@ func (s *P2PTradeService) verifyReleaseFollowing(ctx context.Context, escrow P2P
 			hash = mined
 		}
 	}
-	ev, err := escrow.VerifyTradeReleased(hash, HashID(trade.ID))
+	key, err := tradeKeyOf(trade)
+	if err != nil {
+		return nil, hash, err
+	}
+	ev, err := escrow.VerifyTradeReleased(hash, key)
 	return ev, hash, err
 }
 
@@ -2156,18 +2191,22 @@ func (s *P2PTradeService) PrepareCancel(ctx context.Context, tradeID, userID uui
 	if err := canCancelByTimeout(userID, &trade, s.clock.Now()); err != nil {
 		return nil, err
 	}
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
-	return escrow.PrepareCancelByTimeout(HashID(trade.ID), callerAddress)
+	return escrow.PrepareCancelByTimeout(key, callerAddress)
 }
 
 // cancelledOnChainElsewhere: when the chain already says Cancelled, reconcile
 // the trade (the same transition the reconciler applies) and return the
 // refreshed row; ok=false when the chain says otherwise or cannot be read.
 func (s *P2PTradeService) cancelledOnChainElsewhere(ctx context.Context, escrow P2PEscrowAdapter, trade *models.P2PTrade) (*models.P2PTrade, bool) {
-	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	key, err := tradeKeyOf(trade)
+	if err != nil {
+		return nil, false
+	}
+	onchain, err := escrow.ReadTrade(key)
 	if err != nil || onchain == nil || !onchain.Exists || onchain.Status != OnChainP2PStatusCancelled {
 		return nil, false
 	}
@@ -2248,11 +2287,11 @@ func (s *P2PTradeService) ConfirmCancel(ctx context.Context, tradeID, userID uui
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
-	ev, err := escrow.VerifyTradeCancelled(txHash, HashID(trade.ID))
+	ev, err := escrow.VerifyTradeCancelled(txHash, key)
 	if err != nil {
 		// Her cancel may have lost to another cancelByTimeout (the expiry
 		// canceller's, or the counterparty's) and reverted. The trade is still
@@ -2384,11 +2423,11 @@ func (s *P2PTradeService) PrepareAdminResolveDispute(ctx context.Context, tradeI
 
 	// Admin resolution MUST route by the disputed trade's chain, never a
 	// default — resolving on the wrong escrow would move the wrong funds.
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
-	unsignedTx, err := escrow.PrepareAdminResolve(HashID(trade.ID), refundBuyer, adminAddress)
+	unsignedTx, err := escrow.PrepareAdminResolve(key, refundBuyer, adminAddress)
 	if err != nil {
 		return nil, fmt.Errorf("prepare adminResolve: %w", err)
 	}
@@ -2442,11 +2481,11 @@ func (s *P2PTradeService) ConfirmAdminResolveDispute(ctx context.Context, tradeI
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
-	ev, err := escrow.VerifyTradeResolved(txHash, HashID(trade.ID))
+	ev, err := escrow.VerifyTradeResolved(txHash, key)
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain resolve: %w", err)
 	}
@@ -2663,11 +2702,11 @@ func (s *P2PTradeService) ReconcileTrade(ctx context.Context, tradeID uuid.UUID)
 	// Reconcile against the trade's own chain — fail-loud if it's unconfigured
 	// (§8.5: a wrong-chain ReadTrade would compare against the wrong escrow and
 	// could mis-correct DB state).
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("resolve escrow for trade chain %d: %w", trade.ChainID, err)
 	}
-	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	onchain, err := escrow.ReadTrade(key)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("read on-chain trade: %w", err)
 	}
@@ -4184,6 +4223,7 @@ func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher, contractAddress str
 				{Name: "maxPerTrade", Type: "uint256"},
 				{Name: "deadline", Type: "uint256"},
 				{Name: "nonce", Type: "bytes32"},
+				{Name: "taker", Type: "address"},
 			},
 		},
 		PrimaryType: "AdVoucher",
@@ -4201,6 +4241,7 @@ func (s *P2PTradeService) buildVoucherTypedData(v AdVoucher, contractAddress str
 			MaxPerTrade: v.MaxPerTrade.String(),
 			Deadline:    v.Deadline.String(),
 			Nonce:       "0x" + common.Bytes2Hex(v.Nonce[:]),
+			Taker:       v.Taker.Hex(),
 		},
 	}
 }

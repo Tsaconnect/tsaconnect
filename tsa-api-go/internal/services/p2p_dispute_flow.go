@@ -43,7 +43,11 @@ func (s *P2PTradeService) replaceableDisputeRow(ctx context.Context, trade *mode
 	if existing.RaisedBy != userID && s.clock.Now().Sub(existing.CreatedAt) <= disputePrepareStaleAfter {
 		return nil, refuse(ErrDisputeAlreadyOpen)
 	}
-	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	key, err := tradeKeyOf(trade)
+	if err != nil {
+		return nil, err
+	}
+	onchain, err := escrow.ReadTrade(key)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrChainUnavailable, err)
 	}
@@ -69,7 +73,11 @@ func (s *P2PTradeService) requireDisputeRaiserMatches(ctx context.Context, escro
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	onchain, err := escrow.ReadTrade(HashID(trade.ID))
+	key, err := tradeKeyOf(trade)
+	if err != nil {
+		return err
+	}
+	onchain, err := escrow.ReadTrade(key)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrChainUnavailable, err)
 	}
@@ -125,7 +133,7 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	}
 	// Resolve the trade's chain BEFORE persisting the dispute row so an
 	// unconfigured chain fails loud without leaving an orphan dispute.
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +151,7 @@ func (s *P2PTradeService) PrepareRaiseDispute(ctx context.Context, tradeID, user
 	// Build the unsigned tx BEFORE touching the row: a build failure (RPC nonce
 	// or gas) must not destroy a replaced dispute's reason/evidence or hand the
 	// replacer a fresh stale-lock.
-	unsignedTx, err := escrow.PrepareRaiseDispute(HashID(trade.ID), callerAddress)
+	unsignedTx, err := escrow.PrepareRaiseDispute(key, callerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("prepare raiseDispute: %w", err)
 	}
@@ -241,11 +249,11 @@ func (s *P2PTradeService) ConfirmRaiseDispute(ctx context.Context, tradeID, user
 		return nil, fmt.Errorf("%w: trade status=%s", ErrInvalidTransition, trade.Status)
 	}
 
-	escrow, _, _, err := s.resolve(trade.ChainID)
+	escrow, key, err := s.tradeEscrow(&trade)
 	if err != nil {
 		return nil, err
 	}
-	ev, err := escrow.VerifyTradeDisputed(txHash, HashID(trade.ID))
+	ev, err := escrow.VerifyTradeDisputed(txHash, key)
 	if err != nil {
 		return nil, fmt.Errorf("verify on-chain dispute: %w", err)
 	}

@@ -86,8 +86,10 @@ func (s *P2PTradeService) AdminTradeDetail(ctx context.Context, tradeID uuid.UUI
 		return nil, err
 	}
 	view := &AdminTradeView{Trade: &t, Side: side, Buyer: party(t.BuyerID), Seller: party(t.SellerID), Payee: payee, Dispute: dispute}
-	if esc, err := s.escrows.For(t.ChainID); err == nil && common.IsHexAddress(esc.ContractAddress()) {
-		view.EscrowAddress = common.HexToAddress(esc.ContractAddress()).Hex()
+	// The escrow the trade lives on, never the chain's current one: the console resolves the
+	// dispute against this address. Empty for a trade opened before escrows were recorded.
+	if common.IsHexAddress(t.EscrowAddress) {
+		view.EscrowAddress = common.HexToAddress(t.EscrowAddress).Hex()
 	}
 	return view, nil
 }

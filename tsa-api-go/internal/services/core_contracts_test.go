@@ -24,6 +24,8 @@ const (
 	coreP2P   = "0x00000000000000000000000000000000000E5C03"
 	coreAdmin = "0xd963C3C596f692b4fD8e53bD9B60Ca1843400Da3"
 	coreFees  = "0x00000000000000000000000000000000005E5701"
+	// directOperator is the production OPERATOR hot key.
+	directOperator = "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9"
 )
 
 // fakeCoreChain answers the core set's views on one chain.

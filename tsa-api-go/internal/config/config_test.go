@@ -42,29 +42,34 @@ func TestValidateFeeManagerAddress(t *testing.T) {
 	}
 }
 
-// Sonic is always in the registry; BSC is dormant when no escrow is configured.
-func TestLoad_SonicAlways_BSCDormantByDefault(t *testing.T) {
-	t.Setenv("SONIC_NETWORK", "testnet")
-	t.Setenv("P2P_ESCROW_ADDRESS_BSC", "") // BSC dormant
-
+// P2P runs only on a core set (slice 8 hard switch): without one every chain is dormant; with the
+// dev set Sonic runs its P2PTradeEscrow (EIP-712 "3") and BSC, which the set has no row for, stays
+// dormant.
+func TestLoad_P2POnlyOnTheCoreSet(t *testing.T) {
+	t.Setenv("SONIC_NETWORK", "mainnet")
+	t.Setenv("CORE_CONTRACTS", "")
 	cfg := Load()
+	if len(cfg.P2PChains) != 0 {
+		t.Fatalf("no core set: P2PChains = %+v, want none", cfg.P2PChains)
+	}
+	dormant := map[int64]bool{}
+	for _, cc := range cfg.DormantP2PChains {
+		dormant[cc.ChainID] = true
+	}
+	if !dormant[146] || !dormant[56] {
+		t.Fatalf("dormant = %+v, want Sonic and BSC", cfg.DormantP2PChains)
+	}
 
-	sonic, ok := cfg.P2PChains[14601]
-	if !ok {
-		t.Fatalf("expected Sonic testnet (14601) in P2PChains, got %+v", cfg.P2PChains)
+	t.Setenv("CORE_CONTRACTS", "dev")
+	t.Setenv(coreDevAllowEnv, "true")
+	cfg = Load()
+	want := P2PChainConfig{ChainID: 146, ChainKey: "sonic", EscrowAddress: coreSets[CoreSetDev]["sonic"].p2pEscrow,
+		EIP712Version: CoreP2PEIP712Version, Assets: []string{"USDT", "USDC"}, Purpose: P2PPurposeP2P, Network: "mainnet", Audience: P2PAudiencePM}
+	if got := cfg.P2PChains[146]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("sonic = %+v\nwant %+v", got, want)
 	}
-	if sonic.ChainKey != "sonic" || sonic.EIP712Version != "2" {
-		t.Errorf("sonic entry = %+v, want chainKey=sonic version=2", sonic)
-	}
-	if sonic.EscrowAddress == "" {
-		t.Errorf("sonic escrow should be the testnet preset, got empty")
-	}
-	// MCGP is no longer a P2P asset (owner decision 2026-09-28).
-	if !reflect.DeepEqual(sonic.Assets, []string{"USDT", "USDC"}) {
-		t.Errorf("sonic assets = %v, want [USDT USDC]", sonic.Assets)
-	}
-	if _, bsc := cfg.P2PChains[97]; bsc {
-		t.Errorf("BSC must be dormant when no escrow configured, but 97 present")
+	if _, bsc := cfg.P2PChains[56]; bsc {
+		t.Fatal("the dev set has no BSC row: BSC P2P must be dormant")
 	}
 }
 
@@ -85,37 +90,6 @@ func TestLoad_BSCUnknownNetworkFallsBackToMainnet(t *testing.T) {
 	t.Setenv("BSC_NETWORK", "garbage")
 	if got := p2pNetwork("bsc", bscPresets); got != "mainnet" {
 		t.Fatalf("network = %q, want mainnet", got)
-	}
-}
-
-// Review Focus 1: the refactor leaves Sonic exactly as it was.
-func TestLoad_SonicRowByteIdentical(t *testing.T) {
-	t.Setenv("SONIC_NETWORK", "mainnet")
-	cfg := Load()
-	want := P2PChainConfig{ChainID: 146, ChainKey: "sonic", EscrowAddress: "0x7dAdae104930da7B62EA185fa697fCFA7f9eC324",
-		EIP712Version: "2", Assets: []string{"USDT", "USDC"}, Purpose: P2PPurposeP2P, Network: "mainnet", Audience: P2PAudiencePM}
-	if got := cfg.P2PChains[146]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("sonic = %+v\nwant %+v", got, want)
-	}
-	t.Setenv("SONIC_NETWORK", "testnet")
-	t.Setenv("P2P_ESCROW_ADDRESS", "0x00000000000000000000000000000000005071C0")
-	cfg = Load()
-	if got := cfg.P2PChains[14601]; got.EscrowAddress != "0x00000000000000000000000000000000005071C0" || got.Network != "testnet" {
-		t.Fatalf("the P2P_ESCROW_ADDRESS alias must still apply to Sonic: %+v", got)
-	}
-}
-
-// The legacy scalar fields still mirror the Sonic entry (back-compat for
-// consumers not yet migrated to P2PChains).
-func TestLoad_LegacyScalarsMirrorSonic(t *testing.T) {
-	t.Setenv("SONIC_NETWORK", "mainnet")
-	cfg := Load()
-	sonic := cfg.P2PChains[146]
-	if cfg.P2PEscrowAddress != sonic.EscrowAddress {
-		t.Errorf("legacy P2PEscrowAddress %q != sonic entry %q", cfg.P2PEscrowAddress, sonic.EscrowAddress)
-	}
-	if cfg.P2PEscrowEIP712Version != sonic.EIP712Version {
-		t.Errorf("legacy version %q != sonic entry %q", cfg.P2PEscrowEIP712Version, sonic.EIP712Version)
 	}
 }
 

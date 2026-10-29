@@ -663,6 +663,7 @@ const CreateAdScreen: React.FC = () => {
         sellerAddress,
         onStage: setSubmitStage,
         statusError: createAdStatusError,
+        onGasAlert: (title, m) => Alert.alert(title, m),
       });
 
       Alert.alert('Ad published', `Your ad is now live in the marketplace.`, [

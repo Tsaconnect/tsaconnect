@@ -204,11 +204,11 @@ func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade
 	if at, ok := e.sentAt[tr.ID]; ok && now.Sub(at) < expiryResendAfter {
 		return false, nil // review M10: the last cancel may still mine (checked before any read)
 	}
-	escrow, _, _, err := e.c.Trades.resolve(tr.ChainID)
+	escrow, key, err := e.c.Trades.tradeEscrow(tr)
 	if err != nil {
 		return false, err
 	}
-	onchain, err := escrow.ReadTrade(HashID(tr.ID))
+	onchain, err := escrow.ReadTrade(key)
 	switch {
 	case err != nil:
 		return false, fmt.Errorf("read %s: %s", tr.ID, RedactAlertText(err.Error())) // review M-11: never silent
@@ -245,7 +245,7 @@ func (e *ExpiryCanceller) cancelOnChain(ctx context.Context, tr *models.P2PTrade
 		})
 	}
 	hash, err := e.c.Signer.Send(sendCtx, tr.ChainID, func() ([]byte, error) {
-		return escrow.PrepareCancelByTimeout(HashID(tr.ID), e.c.Signer.Address())
+		return escrow.PrepareCancelByTimeout(key, e.c.Signer.Address())
 	})
 	switch {
 	case errors.Is(err, errExpiryNotDecided):

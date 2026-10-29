@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -16,25 +15,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// knownHotKeys are production hot-key addresses that must never administer a
-// direct escrow, listed even when this process does not hold their key (a
+// knownHotKeys are production hot-key addresses that must never hold a role on a
+// core contract, listed even when this process does not hold their key (a
 // KMS signer, a box without the treasury key): the OPERATOR (PM release, pool
 // releases) and the TREASURY (signer consolidation 2026-10-13).
 var knownHotKeys = map[string]string{
 	"operator 0x38cE (production)": "0x38cE9a4C9190707829950B7Ae4Eed1d254c2e2c9",
 	"treasury 0xA412 (production)": "0xA4123022c84E66A5E955fd96C5468A78bE84e205",
-}
-
-// directEscrowForbiddenAdmins is every hot-key address the API knows at boot
-// (label → address): none may be an admin (or the owner) of a direct-audience
-// escrow, whose admins are dispute arbiters only (decisions 2026-10-12/13).
-// The configured keys come from signerKeysExcept, the one list
-// assertDistinctKey also reads, so a new hot key lands in both. Addresses are
-// derived from the keys; nothing here signs.
-func directEscrowForbiddenAdmins(cfg *config.Config) map[string]string {
-	out := apiHotKeys(cfg)
-	addHotKey(out, "PM_ADMIN_EOA_ADDRESS", cfg.PMAdminEOAAddress)
-	return out
 }
 
 // apiHotKeys is every signing key the API holds or is known to run (label → address): the
@@ -57,97 +44,75 @@ func addHotKey(out map[string]string, label, addr string) {
 	}
 }
 
-// checkDirectUnconfigure is the direct-escrow rollback guard (plan p2p-bsc §6):
-// boot refuses while, on a chain whose preset row no longer configures a
-// direct-audience escrow (the row exists, empty), there is
+// checkP2PEscrowMove is the P2P hard-switch guard (slice 8): every P2P chain's escrow is its core
+// set's P2PTradeEscrow, so boot refuses while, on any chain, there is
 //
-//   - a non-terminal trade (not a retired pool slice): the registry fails
-//     loud, so it could never finish; or
-//   - a pending, active or paused ad (not a retired LP stock ad): its voucher
-//     can still be opened on chain, and its seller can no longer cancel it here.
+//   - a non-terminal trade (not a retired pool slice) recorded on another escrow (or none: every
+//     trade before the switch): the API could never finish it; or
+//   - an active or paused sell-ad (not a retired LP stock ad) whose voucher was signed for another
+//     escrow: it can still be opened there, and its seller can no longer cancel it here.
 //
-// Restore the preset row until they are terminal. Sellers' deposited (not
-// locked) balances do not block boot — no row says who holds one — but the
-// API cannot build their withdraw without the row either: they need the row
-// restored, or must call withdraw() on the escrow themselves. A configured
-// escrow the registry is not running (RPC down, a failed gate) and a chain no
-// preset row names are warnings; a table it cannot read is an ALERT.
-func checkDirectUnconfigure(db *gorm.DB, cfg *config.Config, reg *services.P2PEscrowRegistry) error {
+// Settle them on the old escrow first (or keep CORE_CONTRACTS on the set they belong to). A chain
+// with no P2P after the switch counts too: its live rows are just as stranded. Sellers' deposited
+// (not locked) balances on an old escrow do not block boot — no row says who holds one — but they
+// must withdraw() there themselves. Pending (unsigned) and buy-ads are not counted: a pending
+// ad's signature is refused on the new escrow and a buy-ad has no voucher. A table it cannot read
+// is an ALERT, not a refusal.
+func checkP2PEscrowMove(db *gorm.DB, cfg *config.Config) error {
 	if db == nil || cfg == nil {
 		return nil
 	}
-	direct := map[int64]bool{}
-	for _, cc := range cfg.DormantP2PChains {
-		if cc.Audience == config.P2PAudienceDirect {
-			direct[cc.ChainID] = true
-		}
-	}
+	current := map[int64]string{}
 	for id, cc := range cfg.P2PChains {
-		if cc.Audience == config.P2PAudienceDirect {
-			direct[id] = true
-		}
+		current[id] = strings.ToLower(cc.EscrowAddress)
 	}
-	if len(direct) == 0 {
-		return nil
+	type row struct {
+		ChainID       int64
+		EscrowAddress string
+		N             int64
 	}
-	ids := slices.Sorted(maps.Keys(direct))
-	var tradeChains, adChains []int64
+	var trades, ads []row
 	err := db.Model(&models.P2PTrade{}).
-		Where("chain_id IN ? AND it_intent_id IS NULL AND status NOT IN ?", ids,
+		Select("chain_id, LOWER(COALESCE(escrow_address, '')) AS escrow_address, COUNT(*) AS n").
+		Where("it_intent_id IS NULL AND status NOT IN ?",
 			[]string{models.P2PTradeStatusReleased, models.P2PTradeStatusCancelled, models.P2PTradeStatusResolved}).
-		Distinct("chain_id").Pluck("chain_id", &tradeChains).Error
+		Group("chain_id, LOWER(COALESCE(escrow_address, ''))").Scan(&trades).Error
 	if err == nil {
 		err = db.Model(&models.P2PAd{}).
-			Where("chain_id IN ? AND status IN ?", ids,
-				[]string{models.P2PAdStatusPending, models.P2PAdStatusActive, models.P2PAdStatusPaused}).
-			// A retired slice pool's LP stock ad is no direct ad (as excludePoolAds).
+			Select("chain_id, LOWER(COALESCE(escrow_address, '')) AS escrow_address, COUNT(*) AS n").
+			Where("status IN ? AND COALESCE(side, '') <> ?",
+				[]string{models.P2PAdStatusActive, models.P2PAdStatusPaused}, models.P2PAdSideBuy).
+			// A retired slice pool's LP stock ad is no sell-ad anyone can open (as excludePoolAds).
 			Where("(pm_id IS NULL OR NOT EXISTS (SELECT 1 FROM payment_merchants pool_lp WHERE pool_lp.id = p2p_ads.pm_id AND pool_lp.kind = ?))",
 				models.PaymentMerchantKindLP).
-			Distinct("chain_id").Pluck("chain_id", &adChains).Error
+			Group("chain_id, LOWER(COALESCE(escrow_address, ''))").Scan(&ads).Error
 	}
 	if err != nil {
-		log.Printf("[config] ALERT p2p_direct_unconfigure_unchecked err=%s — boot goes on; re-check live direct trades and ads by hand",
+		log.Printf("[config] ALERT p2p_escrow_move_unchecked err=%s — boot goes on; re-check live P2P trades and ads on retired escrows by hand",
 			services.RedactAlertText(err.Error()))
 		return nil
 	}
-	live := map[int64][]string{}
-	for _, id := range tradeChains {
-		live[id] = append(live[id], "trades")
-	}
-	for _, id := range adChains {
-		live[id] = append(live[id], "ads")
-	}
-	for _, id := range slices.Sorted(maps.Keys(live)) {
-		what := strings.Join(live[id], " and ")
-		if _, ok := cfg.P2PChains[id]; ok {
-			if !reg.HasChain(id) {
-				log.Printf("[config] WARN p2p_direct_chain_not_running chain=%d: live direct %s, the direct escrow is configured but not registered (RPC down or a failed gate at boot) — they wait until it is back", id, what)
+	var stranded []string
+	for _, set := range []struct {
+		what string
+		rows []row
+	}{{"trades", trades}, {"sell-ads", ads}} {
+		for _, r := range set.rows {
+			if want, ok := current[r.ChainID]; ok && r.EscrowAddress == want {
+				continue
 			}
-			continue
+			escrow := r.EscrowAddress
+			if escrow == "" {
+				escrow = "the pre-switch escrow"
+			}
+			stranded = append(stranded, fmt.Sprintf("%d live %s on chain %d at %s", r.N, set.what, r.ChainID, escrow))
 		}
-		return fmt.Errorf("p2p_direct_unconfigure_refused: live direct %s on chain %d, whose direct escrow row is empty — restore the preset row until they are terminal (sellers' deposited balances also need the row, or an on-chain withdraw() of their own)", what, id)
 	}
-	return nil
-}
-
-// dropUngatedDirectFeeManagers unregisters a direct-audience row's FeeManager
-// from cfg.FeeManagerChains when its escrow did not pass the boot gates: the
-// admin fee flow and the drift reconciler must not drive a FeeManager whose
-// escrow the API does not run. Runs after the registry and before anything
-// reads FeeManagerChains.
-func dropUngatedDirectFeeManagers(cfg *config.Config, reg *services.P2PEscrowRegistry) {
-	if cfg == nil || reg == nil {
-		return
+	if len(stranded) == 0 {
+		return nil
 	}
-	for id, fm := range cfg.FeeManagerChains {
-		cc, ok := cfg.P2PChains[id]
-		if !ok || cc.Audience != config.P2PAudienceDirect || cc.FeeManager == "" ||
-			common.HexToAddress(fm.Address) != common.HexToAddress(cc.FeeManager) || reg.HasChain(id) {
-			continue
-		}
-		delete(cfg.FeeManagerChains, id)
-		log.Printf("[config] ALERT p2p_direct_fee_manager_unregistered chain=%d fee_manager=%s — its direct escrow is not running (failed gate or no RPC); the admin fee flow and drift reconciler skip it until it is", id, fm.Address)
-	}
+	slices.Sort(stranded)
+	return fmt.Errorf("p2p_escrow_move_refused: %s — settle them on their escrow (trades) or cancel them (ads) before P2P moves to the core set", strings.Join(stranded, "; "))
 }
 
 // coreGatesWorker gates the core contract set every minute (services.CoreRegistry.Gate): a chain
@@ -160,4 +125,21 @@ func (w coreGatesWorker) Run(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
 	defer cancel()
 	return w.reg.Gate(ctx)
+}
+
+// reportPMReleasers logs, once shortly after boot, every active payment merchant whose maker
+// wallet has not named the release key (setReleaser): its sell-ads stay unsignable and unopenable
+// until it does, from the app's merchant screen.
+func reportPMReleasers(trades *services.P2PTradeService) {
+	time.Sleep(30 * time.Second) // after the core gates' first pass; the reads do not need it
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	missing, err := trades.MissingPMReleasers(ctx)
+	if err != nil {
+		log.Printf("[pm] ALERT pm_releaser_check_failed err=%s", services.RedactAlertText(err.Error()))
+		return
+	}
+	for _, m := range missing {
+		log.Printf("[pm] ALERT pm_releaser_not_set %s — the PM must name the release key (setReleaser) before its sell-ads can trade", m)
+	}
 }

@@ -40,8 +40,8 @@ func delistTestService(t *testing.T) (svc *P2PTradeService, esc *mockEscrow, db 
 	reg := &P2PEscrowRegistry{byChain: map[int64]*chainEscrow{
 		146: {service: esc, eip712Version: "1", domainChainID: 146, assets: []string{"USDT", "USDC", "MCGP"}},
 	}}
-	svc = NewP2PTradeService(db, reg, &mockRates{}, &mockBus{}, 146).
-		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
+	svc = bindSvcEscrows(NewP2PTradeService(db, reg, &mockRates{}, &mockBus{}, 146).
+		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}))
 	svc.SetTokenResolver(func(chainID int64, symbol string) string {
 		switch symbol {
 		case "USDT":
@@ -420,7 +420,7 @@ func TestDelistedAsset_RegistryDelistedVsUnconfigured(t *testing.T) {
 func TestP2PFee_NonStableToken_NoAccrual(t *testing.T) {
 	db := setupP2PFeeDB(t)
 	svc, esc, _ := newP2PFeeService(t, db)
-	esc.feeSnapshotPlatform, esc.feeSnapshotFound = 100, true // V3 trade: a 1% platform fee WOULD accrue for a stable
+	esc.onChainTrade = &OnChainP2PTrade{Status: OnChainP2PStatusReleased, Exists: true, PlatformFeeBps: 100} // V3 trade: a 1% platform fee WOULD accrue for a stable
 
 	buyer := mkP2PUser(t, db, "mcgpbuyer", nil)
 	seller := mkP2PUser(t, db, "mcgpseller", nil)

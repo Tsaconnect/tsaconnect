@@ -28,9 +28,12 @@ const (
 	P2PGasRelease     P2PGasAction = "release"
 	P2PGasCancelTrade P2PGasAction = "cancel_trade"
 	P2PGasDispute     P2PGasAction = "dispute"
+	// P2PGasSetReleaser: a payment merchant naming the release key (setReleaser, slice 9).
+	P2PGasSetReleaser P2PGasAction = "set_releaser"
 )
 
-// p2pActionGas is a gas-unit ceiling per action on Sonic P2PEscrowV3. Every
+// p2pActionGas is a gas-unit ceiling per action on the P2P escrow (measured on P2PEscrowV3;
+// P2PTradeEscrow's calls are no heavier). Every
 // figure sits above the hardhat gas report's max (2026-10-09: approve 46k,
 // deposit 116k, withdraw 60k, cancelVoucher 62k, openTrade 251k, markPaid 47k,
 // release 106k, cancelByTimeout 59k, raiseDispute 43k) — adjust upward only:
@@ -45,6 +48,7 @@ var p2pActionGas = map[P2PGasAction]uint64{
 	P2PGasRelease:     250_000,
 	P2PGasCancelTrade: 200_000,
 	P2PGasDispute:     90_000,
+	P2PGasSetReleaser: 70_000, // one SSTORE + event, ~47k
 }
 
 // ParseP2PGasAction reads an action name from a request, ignoring case and

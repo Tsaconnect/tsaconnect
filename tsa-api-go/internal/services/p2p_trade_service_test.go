@@ -65,12 +65,14 @@ type mockEscrow struct {
 	disputedEvent  *P2PTradeDisputedEvent
 	resolvedEvent  *P2PTradeResolvedEvent
 	onChainTrade   *OnChainP2PTrade
-	// feeSnapshot*: what ReadTradeFeeSnapshot answers; feeSnapshotReads counts
-	// the calls.
-	feeSnapshotPlatform, feeSnapshotGas uint16
-	feeSnapshotFound                    bool
-	feeSnapshotReads                    int
-	readTradeCalls                      int
+	readTradeCalls int
+	// releasers is releaserOf(seller), defaultReleaser the answer for any other seller;
+	// releaserSetEvent is what VerifyReleaserSet proves.
+	releasers         map[common.Address]common.Address
+	defaultReleaser   common.Address
+	readReleaserErr   error
+	releaserSetEvent  *P2PReleaserSetEvent
+	lastReleaseCaller string
 
 	// Captured args for assertion in tests that need to verify the right
 	// values were threaded through to the adapter (not just that *something*
@@ -107,6 +109,7 @@ type openTradeDepositArgs struct {
 	Token    string
 	Amount   *big.Int
 	Merchant string
+	Releaser string
 	From     string
 }
 
@@ -172,11 +175,11 @@ func (m *mockEscrow) PrepareOpenTradeWithVoucher(tradeId [32]byte, v AdVoucher, 
 	}
 	return []byte(`{"tx":"openTrade"}`), nil
 }
-func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, from string) ([]byte, error) {
+func (m *mockEscrow) PrepareOpenTradeWithDeposit(tradeId [32]byte, token string, amount *big.Int, merchant, releaser, from string) ([]byte, error) {
 	m.preparedTxs = append(m.preparedTxs, "openTradeWithDeposit")
 	m.lastOpenTradeDepositArgs = openTradeDepositArgs{
 		TradeID: tradeId, Token: token, Amount: new(big.Int).Set(amount),
-		Merchant: merchant, From: from,
+		Merchant: merchant, Releaser: releaser, From: from,
 	}
 	return []byte(`{"tx":"openTradeWithDeposit"}`), nil
 }
@@ -186,8 +189,14 @@ func (m *mockEscrow) PrepareMarkPaid(tradeId [32]byte, buyer string) ([]byte, er
 	}
 	return []byte(`{"tx":"markPaid"}`), nil
 }
-func (m *mockEscrow) PrepareRelease(tradeId [32]byte, seller string) ([]byte, error) {
+func (m *mockEscrow) PrepareRelease(tradeId [32]byte, caller string) ([]byte, error) {
+	m.preparedTxs = append(m.preparedTxs, "release")
+	m.lastReleaseCaller = caller
 	return []byte(`{"tx":"release"}`), nil
+}
+func (m *mockEscrow) PrepareSetReleaser(seller, releaser string) ([]byte, error) {
+	m.preparedTxs = append(m.preparedTxs, "setReleaser")
+	return []byte(`{"tx":"setReleaser"}`), nil
 }
 func (m *mockEscrow) PrepareCancelByTimeout(tradeId [32]byte, caller string) ([]byte, error) {
 	return []byte(`{"tx":"cancelByTimeout"}`), nil
@@ -204,10 +213,6 @@ func (m *mockEscrow) PrepareRaiseDispute(tradeId [32]byte, by string) ([]byte, e
 }
 func (m *mockEscrow) PrepareAdminResolve(tradeId [32]byte, refundBuyer bool, admin string) ([]byte, error) {
 	return []byte(`{"tx":"adminResolve"}`), nil
-}
-func (m *mockEscrow) PrepareAdminRelease(tradeId [32]byte, admin string) ([]byte, error) {
-	m.preparedTxs = append(m.preparedTxs, "adminRelease")
-	return []byte(`{"tx":"adminRelease"}`), nil
 }
 
 func (m *mockEscrow) VerifyDeposited(txHash string, seller, token common.Address) (*P2PDepositedEvent, error) {
@@ -319,11 +324,21 @@ func (m *mockEscrow) ReadTrade(tradeId [32]byte) (*OnChainP2PTrade, error) {
 	return &OnChainP2PTrade{Status: OnChainP2PStatusNone}, nil
 }
 
-// ReadTradeFeeSnapshot returns the configured snapshot (feeSnapshotFound false
-// by default: a pre-V3 escrow, so no fee_bps is recorded).
-func (m *mockEscrow) ReadTradeFeeSnapshot(tradeId [32]byte) (uint16, uint16, bool) {
-	m.feeSnapshotReads++
-	return m.feeSnapshotPlatform, m.feeSnapshotGas, m.feeSnapshotFound
+// ReadReleaser answers releaserOf(seller): m.releasers[seller], else the zero address.
+func (m *mockEscrow) ReadReleaser(seller string) (common.Address, error) {
+	if m.readReleaserErr != nil {
+		return common.Address{}, m.readReleaserErr
+	}
+	if r, ok := m.releasers[common.HexToAddress(seller)]; ok {
+		return r, nil
+	}
+	return m.defaultReleaser, nil
+}
+func (m *mockEscrow) VerifyReleaserSet(txHash string, seller common.Address) (*P2PReleaserSetEvent, error) {
+	if m.releaserSetEvent != nil {
+		return m.releaserSetEvent, nil
+	}
+	return nil, errors.New("ReleaserSet event not found")
 }
 func (m *mockEscrow) ReadBalance(seller, token string) (*OnChainBalance, error) {
 	if m.balanceErr != nil {
@@ -477,18 +492,24 @@ func seedPaymentMethod(t *testing.T, db *gorm.DB, userID uuid.UUID, currency str
 	return pm.ID
 }
 
+// testReleaseKey is the platform release key in tests.
+var testReleaseKey = common.HexToAddress("0x0000000000000000000000000000000000E1EA5E")
+
 func newService(t *testing.T, db *gorm.DB) (*P2PTradeService, *mockEscrow, *mockBus) {
 	t.Helper()
 	esc := newMockEscrow()
 	bus := &mockBus{}
 	svc := NewP2PTradeService(db, NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: esc}, "1"), &mockRates{}, bus, 146)
-	svc = svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
+	svc = bindSvcEscrows(svc.WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}))
 	svc.SetTokenResolver(func(chainID int64, symbol string) string {
 		if symbol == "USDT" {
 			return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894"
 		}
 		return ""
 	})
+	// PM settlement runs, and every PM has named the release key unless a test says otherwise.
+	svc.SetReleaseAddress(testReleaseKey.Hex())
+	esc.defaultReleaser = testReleaseKey
 	return svc, esc, bus
 }
 
@@ -578,8 +599,8 @@ func TestCreateAd_RejectsStaleRate(t *testing.T) {
 	esc := newMockEscrow()
 	esc.balance = OnChainBalance{Available: big.NewInt(1_000_000_000)}
 	bus := &mockBus{}
-	svc := NewP2PTradeService(db, NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: esc}, "1"), &mockRates{stale: true}, bus, 146).
-		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)})
+	svc := bindSvcEscrows(NewP2PTradeService(db, NewP2PEscrowRegistryFromMap(map[int64]P2PEscrowAdapter{146: esc}, "1"), &mockRates{stale: true}, bus, 146).
+		WithClock(fixedClock{t: time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)}))
 	svc.SetTokenResolver(func(chainID int64, s string) string { return "0x29219dd400f2Bf60E5a23d13Be72B486D4038894" })
 	sellerID := uuid.New()
 	pmID := seedPaymentMethod(t, db, sellerID, "NGN")
@@ -1961,6 +1982,7 @@ func TestPrepareRaiseDispute_StoresEvidence(t *testing.T) {
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 
 	urls := []string{"https://res.cloudinary.com/tsa/image/upload/ev1.jpg", "https://res.cloudinary.com/tsa/image/upload/ev2.jpg"}
+	markTradePaid(t, db, trade.ID)
 	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, userID, "0xuser", "no crypto released", urls); err != nil {
 		t.Fatalf("PrepareRaiseDispute with evidence: %v", err)
 	}
@@ -1997,6 +2019,7 @@ func TestConfirmAdminResolveBuyAd_RefundToSeller_RestoresCapacity(t *testing.T) 
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
 	tokenAmt, _ := new(big.Int).SetString(trade.TokenAmount, 10)
 	// Drive trade → disputed (merchant raises).
+	markTradePaid(t, db, trade.ID)
 	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto", nil); err != nil {
 		t.Fatalf("PrepareRaiseDispute: %v", err)
 	}
@@ -2038,6 +2061,7 @@ func TestConfirmAdminResolve_RefusesAPoolSlice(t *testing.T) {
 		t.Fatalf("OpenTrade: %v", err)
 	}
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
+	markTradePaid(t, db, trade.ID)
 	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto", nil); err != nil {
 		t.Fatalf("PrepareRaiseDispute: %v", err)
 	}
@@ -2069,6 +2093,7 @@ func TestPrepareAdminResolve_RefusesAPoolSlice(t *testing.T) {
 		t.Fatalf("OpenTrade: %v", err)
 	}
 	db.Model(&models.P2PTrade{}).Where("id = ?", trade.ID).Update("open_tx_hash", "0xopen")
+	markTradePaid(t, db, trade.ID)
 	if _, err := svc.PrepareRaiseDispute(context.Background(), trade.ID, merchantID, "0xmerch", "no crypto", nil); err != nil {
 		t.Fatalf("PrepareRaiseDispute: %v", err)
 	}
@@ -2442,5 +2467,14 @@ func TestComputeEffectiveRate_StalenessIsolation(t *testing.T) {
 	_, err = svc.ComputeEffectiveRate(ghsAd)
 	if !errors.Is(err, ErrRateStale) {
 		t.Errorf("ComputeEffectiveRate(ghsAd) error = %v, want ErrRateStale", err)
+	}
+}
+
+// markTradePaid flips a trade to paid, as a confirmed markPaid would: P2PTradeEscrow disputes only
+// a trade marked paid.
+func markTradePaid(t *testing.T, db *gorm.DB, id uuid.UUID) {
+	t.Helper()
+	if err := db.Model(&models.P2PTrade{}).Where("id = ?", id).Update("status", models.P2PTradeStatusPaid).Error; err != nil {
+		t.Fatal(err)
 	}
 }

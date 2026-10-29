@@ -2,11 +2,9 @@ package services
 
 import (
 	"context"
-	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/google/uuid"
 )
 
 func TestReadEscrowFeeRow_ReturnsTheFeeManagerAndSymbol(t *testing.T) {
@@ -29,24 +27,8 @@ func TestReadEscrowFeeRow_NoFeeManager(t *testing.T) {
 	}
 }
 
-func TestDecodeTradeFeeSnapshot(t *testing.T) {
-	m := parsedP2PEscrowABI.Methods["trades"]
-	out, err := m.Outputs.Pack(common.Address{1}, common.Address{2}, common.Address{3}, big.NewInt(1), big.NewInt(2), big.NewInt(0),
-		uint8(1), uint8(0), uint16(0), uint16(7), uint16(3), HashID(uuid.New()))
-	if err != nil {
-		t.Fatalf("pack: %v", err)
-	}
-	tr, ok := decodeTradesGetter(out)
-	if !ok || tr.PlatformFeeBps != 7 || tr.GasFeeBps != 3 || !tr.FeeSnapshotFound {
-		t.Fatalf("snapshot = %+v, %v, want (7, 3)", tr, ok)
-	}
-	if _, ok := decodeTradesGetter([]byte{1, 2, 3}); ok {
-		t.Fatal("garbage must not decode")
-	}
-}
-
 func TestP2PEscrowABI_HasThePoolViews(t *testing.T) {
-	for _, m := range []string{"feeBps", "paymentWindow", "feeManager", "tokenSymbol", "isAdmin"} {
+	for _, m := range []string{"getTrade", "paymentWindow", "releaserOf", "balanceOf", "hashVoucher"} {
 		if _, ok := parsedP2PEscrowABI.Methods[m]; !ok {
 			t.Fatalf("p2pEscrowABI lacks %s", m)
 		}
