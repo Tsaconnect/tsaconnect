@@ -440,6 +440,19 @@ func (s *EscrowService) VerifyOrderEvent(txHash, escrowAddr, event string, key [
 	return findOrderEvent(receipt.Logs, common.HexToAddress(escrowAddr), event, key)
 }
 
+// OrderRefundReasonOf decodes an OrderRefunded log's reason (OrderRefund*).
+func OrderRefundReasonOf(l *types.Log) (uint8, error) {
+	vals, err := parsedOrderEscrowABI.Events["OrderRefunded"].Inputs.NonIndexed().Unpack(l.Data)
+	if err != nil || len(vals) != 2 {
+		return 0, fmt.Errorf("decode OrderRefunded: %v", err)
+	}
+	reason, ok := vals[1].(uint8)
+	if !ok {
+		return 0, fmt.Errorf("decode OrderRefunded reason: %T", vals[1])
+	}
+	return reason, nil
+}
+
 // findOrderEvent returns the log of event emitted by escrowAddr for key.
 func findOrderEvent(logs []*types.Log, escrowAddr common.Address, event string, key [32]byte) (*types.Log, error) {
 	ev, ok := parsedOrderEscrowABI.Events[event]

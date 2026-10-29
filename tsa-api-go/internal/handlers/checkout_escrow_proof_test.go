@@ -525,3 +525,20 @@ func TestDismissRequest_RefusesAnOnChainDispute(t *testing.T) {
 		t.Fatalf("a refused dismiss moved the order to %q", got)
 	}
 }
+
+// A refund for non-delivery (claimTimeout) is not the seller's cancellation: submitting its hash
+// as one must not record the order as seller-cancelled.
+func TestSubmitCancelOrder_OnlyTheSellersCancel(t *testing.T) {
+	f := newProofFixture(t, models.OrderStatusCancelRequested)
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.key, services.OrderRefundedData(big.NewInt(15000000), services.OrderRefundNotDelivered))
+	if w := f.call(f.ch.SubmitCancelOrder, f.seller, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusBadRequest {
+		t.Fatalf("a non-delivery refund as a cancel: got %d %s", w.Code, w.Body)
+	}
+	if got := f.status(t); got != models.OrderStatusCancelRequested {
+		t.Fatalf("status %q", got)
+	}
+	f.chain.MineEvent("0xbbb", f.escrow(), "OrderRefunded", f.key, services.OrderRefundedData(big.NewInt(15000000), services.OrderRefundCancelled))
+	if w := f.call(f.ch.SubmitCancelOrder, f.seller, gin.H{"txHash": "0xbbb"}); w.Code != http.StatusOK {
+		t.Fatalf("the seller's cancel: got %d %s", w.Code, w.Body)
+	}
+}

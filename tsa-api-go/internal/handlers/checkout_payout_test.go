@@ -36,7 +36,11 @@ func (f *fakeSellerCalls) do(fn string, event string, key [32]byte) (string, err
 		return "", f.err
 	}
 	f.hash = "0xtreasury" + fn
-	f.chain.MineEvent(f.hash, f.escrow, event, key, nil)
+	var data []byte
+	if event == "OrderRefunded" {
+		data = services.OrderRefundedData(big.NewInt(1), services.OrderRefundCancelled)
+	}
+	f.chain.MineEvent(f.hash, f.escrow, event, key, data)
 	return f.hash, nil
 }
 

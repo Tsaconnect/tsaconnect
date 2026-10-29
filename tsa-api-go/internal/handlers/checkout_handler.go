@@ -4293,11 +4293,32 @@ func (ch *CheckoutHandler) SubmitCancelOrder(c *gin.Context) {
 		return
 	}
 
-	if _, ok := ch.requireOrderEvent(c, &order, body.TxHash, "OrderRefunded"); !ok {
+	if !ch.requireSellerCancel(c, &order, body.TxHash) {
 		return
 	}
 
 	ch.finishSellerCancel(c, &order, body.TxHash)
+}
+
+// requireSellerCancel proves txHash refunded order because its seller cancelled it — not a refund
+// for non-delivery or the dispute backstop, which would record a missed deadline as the seller's
+// cancellation.
+func (ch *CheckoutHandler) requireSellerCancel(c *gin.Context, order *models.Order, txHash string) bool {
+	l, ok := ch.requireOrderEvent(c, order, txHash, "OrderRefunded")
+	if !ok {
+		return false
+	}
+	reason, err := services.OrderRefundReasonOf(l)
+	if err != nil {
+		log.Printf("[checkout] order=%s tx=%s: %v", order.ID, txHash, err)
+		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to verify the cancellation")
+		return false
+	}
+	if reason != services.OrderRefundCancelled {
+		utils.ErrorResponse(c, http.StatusBadRequest, "That transaction refunded the order for another reason, not the seller's cancellation")
+		return false
+	}
+	return true
 }
 
 // finishSellerCancel records a cancel the escrow has proven: the order is

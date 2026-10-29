@@ -140,7 +140,7 @@ func (ch *CheckoutHandler) cancelAsTreasury(c *gin.Context, user *models.User, o
 	if !ok {
 		return true
 	}
-	if _, ok := ch.requireOrderEvent(c, order, hash, "OrderRefunded"); !ok {
+	if !ch.requireSellerCancel(c, order, hash) {
 		return true
 	}
 	ch.finishSellerCancel(c, order, hash)
