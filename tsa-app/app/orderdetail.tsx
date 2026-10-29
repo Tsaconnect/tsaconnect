@@ -163,8 +163,8 @@ const OrderDetailScreen = () => {
       order?.status === 'escrowed'
         ? isSpendableOrder(order)
           ? 'This refunds the order now. The MCGP goes back to your Spendable balance.'
-          : 'This will initiate an on-chain refund request.'
-        : 'This will send your refund request for admin review.',
+          : 'If the seller has not delivered by the deadline, this claims your full refund from escrow.'
+        : 'This opens a dispute on-chain. An admin reviews it and decides; if nobody does in time, you are refunded.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -175,6 +175,10 @@ const OrderDetailScreen = () => {
             setActionLoading(true);
             try {
               const result = await requestRefund(order.id);
+              if (!result.success && (result.code === 'refund_not_yet_claimable' || result.code === 'dispute_window_closed')) {
+                Alert.alert('Not yet', result.message || 'A refund is not available yet.');
+                return;
+              }
               if (!result.success) {
                 throw new Error(result.message || 'Failed to request refund');
               }
@@ -188,10 +192,10 @@ const OrderDetailScreen = () => {
                   throw new Error(submitted.message || 'Failed to record the refund request');
                 }
                 Alert.alert(
-                  submitted.data?.status === 'refunded' ? 'Refunded' : 'Refund Requested',
+                  submitted.data?.status === 'refunded' ? 'Refunded' : 'Dispute opened',
                   submitted.data?.status === 'refunded'
                     ? 'Your payment has been refunded.'
-                    : 'Your refund request is with an admin for review.',
+                    : 'An admin will review your dispute and decide.',
                 );
               } else if (result.data?.status === 'refunded') {
                 Alert.alert('Refunded', 'The MCGP is back in your Spendable balance.');
@@ -377,7 +381,6 @@ const OrderDetailScreen = () => {
             {hasPayoutFee(order.payoutFee) && (
               <SummaryRow label="Payout fee" value={formatTokenAmount(order.payoutFee ?? '0', order.token)} />
             )}
-            <SummaryRow label="Platform Fee" value={formatTokenAmount(order.platformFee, order.token)} />
             <SummaryRow label="Total" value={formatTokenAmount(order.totalAmount, order.token)} total />
           </SummaryCard>
         </Card>
@@ -431,9 +434,13 @@ const OrderDetailScreen = () => {
           {order.buyerConfirmedAt && (
             <InfoRow label="Confirmed" value={formatDate(order.buyerConfirmedAt, true)} />
           )}
-          {order.escrowExpiresAt && (
-            <InfoRow label="Escrow Expires" value={formatDate(order.escrowExpiresAt, true)} />
+          {order.deliverBy ? (
+            <InfoRow label={isService ? 'Render by' : 'Deliver by'} value={formatDate(order.deliverBy, true)} />
+          ) : (
+            order.escrowExpiresAt && <InfoRow label="Escrow Expires" value={formatDate(order.escrowExpiresAt, true)} />
           )}
+          {order.confirmBy && <InfoRow label="Confirm or dispute by" value={formatDate(order.confirmBy, true)} />}
+          {order.resolveBy && <InfoRow label="Dispute decided by" value={formatDate(order.resolveBy, true)} />}
         </Card>
 
         {/* Action buttons */}

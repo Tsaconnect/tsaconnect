@@ -380,33 +380,6 @@ func TestSellerCancelAndApprovedCancel_RefundTheHold(t *testing.T) {
 	}
 }
 
-// ── legacy wallet-MCGP escrow orders keep their on-chain lifecycle ──────
-
-func TestLegacyEscrowMCGPOrder_KeepsItsOnChainLifecycle(t *testing.T) {
-	r := newSpendableRig(t)
-	escrowed := r.order(t, models.OrderStatusEscrowed, "")
-
-	w, resp := call(t, r.ch.RequestRefund, r.buyer, escrowed.ID, nil)
-	if w.Code != http.StatusOK || resp["data"].(map[string]interface{})["refundTx"] == nil {
-		t.Fatalf("legacy refund must still return a tx to sign: %d %s", w.Code, w.Body.String())
-	}
-	delivered := r.order(t, models.OrderStatusDelivered, "")
-	w, resp = call(t, r.ch.PrepareConfirm, r.buyer, delivered.ID, nil)
-	if w.Code != http.StatusOK || resp["data"].(map[string]interface{})["confirmTx"] == nil {
-		t.Fatalf("legacy confirm must still return a tx: %d %s", w.Code, w.Body.String())
-	}
-	w, resp = call(t, r.ch.CancelOrder, r.seller, escrowed.ID, nil)
-	if w.Code != http.StatusOK || resp["data"].(map[string]interface{})["cancelTx"] == nil {
-		t.Fatalf("legacy seller cancel must still return a tx: %d %s", w.Code, w.Body.String())
-	}
-	if len(r.payer.funded)+len(r.payer.released)+len(r.payer.refunded) != 0 {
-		t.Fatal("a legacy escrow order must never touch Spendable MCGP")
-	}
-	if got := r.reload(t, escrowed.ID); got.Status != models.OrderStatusEscrowed {
-		t.Fatalf("legacy order status changed off-chain: %s", got.Status)
-	}
-}
-
 // ── review fixes ─────────────────────────────────────────────────────────
 
 // A seller with no wallet could never be paid: the buyer's MCGP is not taken.

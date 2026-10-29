@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -29,22 +30,22 @@ type fakeSellerCalls struct {
 	hash   string
 }
 
-func (f *fakeSellerCalls) do(fn string, event string, orderID uuid.UUID) (string, error) {
+func (f *fakeSellerCalls) do(fn string, event string, key [32]byte) (string, error) {
 	f.calls = append(f.calls, fn)
 	if f.err != nil {
 		return "", f.err
 	}
 	f.hash = "0xtreasury" + fn
-	f.chain.MineEvent(f.hash, f.escrow, event, services.GenerateOrderID(orderID), nil)
+	f.chain.MineEvent(f.hash, f.escrow, event, key, nil)
 	return f.hash, nil
 }
 
-func (f *fakeSellerCalls) MarkDelivered(_ context.Context, id uuid.UUID, _ string) (string, error) {
-	return f.do("markDelivered", "DeliveryMarked", id)
+func (f *fakeSellerCalls) MarkDelivered(_ context.Context, _ uuid.UUID, key [32]byte, _ string) (string, error) {
+	return f.do("markDelivered", "OrderDelivered", key)
 }
 
-func (f *fakeSellerCalls) CancelOrder(_ context.Context, id uuid.UUID, _ string) (string, error) {
-	return f.do("cancelOrder", "OrderCancelled", id)
+func (f *fakeSellerCalls) CancelOrder(_ context.Context, _ uuid.UUID, key [32]byte, _ string) (string, error) {
+	return f.do("cancelOrder", "OrderRefunded", key)
 }
 
 // withPayout makes the fixture's order a payout order: the treasury is its
@@ -104,11 +105,11 @@ func TestPayoutOrder_DeliveryIsProvenBeforeTheStatusMoves(t *testing.T) {
 
 type wrongEventCaller struct{ f *fakeSellerCalls }
 
-func (w *wrongEventCaller) MarkDelivered(_ context.Context, id uuid.UUID, _ string) (string, error) {
-	return w.f.do("markDelivered", "OrderCancelled", id)
+func (w *wrongEventCaller) MarkDelivered(_ context.Context, _ uuid.UUID, key [32]byte, _ string) (string, error) {
+	return w.f.do("markDelivered", "OrderRefunded", key)
 }
-func (w *wrongEventCaller) CancelOrder(_ context.Context, id uuid.UUID, _ string) (string, error) {
-	return w.f.do("cancelOrder", "ReceiptConfirmed", id)
+func (w *wrongEventCaller) CancelOrder(_ context.Context, _ uuid.UUID, key [32]byte, _ string) (string, error) {
+	return w.f.do("cancelOrder", "OrderReleased", key)
 }
 
 func TestPayoutOrder_ATreasuryThatCannotSendLeavesTheOrderAlone(t *testing.T) {
@@ -283,8 +284,10 @@ func TestCreateServiceOrder_APayoutRidesOnTheShippingAmount(t *testing.T) {
 	if err != nil || row == nil {
 		t.Fatalf("payout row = %+v, %v", row, err)
 	}
-	// What the escrow will credit the treasury: the seller's product share (30 / 1.02) plus shipping with the payout fee.
-	if row.ExpectedAmount != "34317903" || row.SellerWallet != proofSellerWallet || row.AccountNumber != "0123456789" {
+	// What the escrow will credit the treasury: product + shipping (with the payout fee) less the
+	// merchant fee OrderEscrow takes from the seller at release.
+	want := new(big.Int).Sub(new(big.Int).Add(bigOf(t, order["productAmount"]), bigOf(t, order["shippingAmount"])), bigOf(t, order["platformFee"]))
+	if row.ExpectedAmount != want.String() || row.SellerWallet != proofSellerWallet || row.AccountNumber != "0123456789" {
 		t.Fatalf("payout = %+v", row)
 	}
 	var stored models.Order
@@ -358,16 +361,16 @@ func TestOrderDetail_OnlyTheSellerSeesThePayoutAndNoInternals(t *testing.T) {
 	}
 }
 
-// A fee-rate change re-splits a pending order at approve time; the payout it
-// carries must expect the figure the escrow will now release.
+// A fee-rate change re-prices a pending order at approve time; the payout it carries must expect
+// the figure the escrow will now release (product + shipping less the merchant fee).
 func TestRepricePayout_MovesTheExpectedAmountAndTheNaira(t *testing.T) {
 	f := newProofFixture(t, models.OrderStatusPendingPayment)
 	f.withPayout(t)
 	f.db.Exec(`UPDATE seller_payouts SET expected_amount = '100000000', fiat_target_kobo = 15000000, status = ? WHERE marketplace_order_id = ?`,
 		models.SellerPayoutAwaitingRelease, f.order.ID.String())
 
-	// The product share rose by 1 USDC at the new rate: the release is 101.
-	if err := repricePayout(f.db, f.order, big.NewInt(96_000000), big.NewInt(5_000000)); err != nil {
+	// The merchant fee fell by 1 USDC at the new rate: the release is 101.
+	if err := repricePayout(f.db, f.order, big.NewInt(101_000000)); err != nil {
 		t.Fatal(err)
 	}
 	row, err := services.PayoutForOrder(context.Background(), f.db, f.order.ID)
@@ -379,7 +382,7 @@ func TestRepricePayout_MovesTheExpectedAmountAndTheNaira(t *testing.T) {
 	}
 	// An ordinary order has no payout to move.
 	g := newProofFixture(t, models.OrderStatusPendingPayment)
-	if err := repricePayout(g.db, g.order, big.NewInt(1), big.NewInt(1)); err != nil {
+	if err := repricePayout(g.db, g.order, big.NewInt(2)); err != nil {
 		t.Fatalf("ordinary order: %v", err)
 	}
 }
@@ -405,4 +408,13 @@ func TestFinishSellerCancel_RestoresStockOnce(t *testing.T) {
 	if after.Stock != before.Stock+f.order.Quantity {
 		t.Fatalf("stock %d -> %d; want exactly one unit back", before.Stock, after.Stock)
 	}
+}
+
+func bigOf(t *testing.T, v interface{}) *big.Int {
+	t.Helper()
+	x, ok := new(big.Int).SetString(fmt.Sprint(v), 10)
+	if !ok {
+		t.Fatalf("not a number: %v", v)
+	}
+	return x
 }

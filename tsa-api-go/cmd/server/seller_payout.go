@@ -50,7 +50,7 @@ func wireSellerPayouts(cfg *config.Config, chains *services.BlockchainService, t
 		config.DB, treasury, &services.GormRampLegStore{DB: config.DB},
 		lifiQuotes,
 		services.NewLiFiStatusClient(cfg.LiFiBaseURL, cfg.LiFiAPIKey),
-		rampTransferVerifiers(chains, evmChainKeys(cfg)), orders, escrow, cfg.ProductEscrowAddress,
+		rampTransferVerifiers(chains, evmChainKeys(cfg)), orders, escrow, services.OrderEscrowAddress(cfg),
 		cfg.RampConversionRetryWindow, cfg.RampConversionLegCeiling, nil,
 	).WithEvents(bus).WithSwitch(sw).WithAlerts(alerts)
 	if companyPayer != nil {

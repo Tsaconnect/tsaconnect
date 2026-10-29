@@ -116,9 +116,9 @@ describe('useQuoteFormat', () => {
   });
 });
 
-it('shows the buyer the listing price: escrowed amount plus the seller-paid fee', () => {
-  // $20 listing: 19.607844 escrowed for the seller + 0.392156 fee.
-  expect(listingAmount({ productAmount: '19607844', platformFee: '392156' })).toBe('20000000');
+it('shows the buyer the listing price: the escrowed amount, never the seller-paid fee', () => {
+  // $20 listing: 20 escrowed; the seller pays the 0.40 fee at release.
+  expect(listingAmount({ productAmount: '20000000', platformFee: '400000' })).toBe('20000000');
   // 18-decimal MCGP amounts stay exact past Number precision.
   expect(listingAmount({ productAmount: '5000000000000000001', platformFee: '0' })).toBe('5000000000000000001');
 });

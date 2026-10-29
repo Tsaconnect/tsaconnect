@@ -354,6 +354,6 @@ func TestBookingRequestOnRequestQuote(t *testing.T) {
 	var order models.Order
 	db.Where("buyer_id = ?", buyer.ID).First(&order)
 	if got := listingPaid(t, order.ProductAmount, order.PlatformFee); got != "42000000" {
-		t.Errorf("expected the quoted 42000000 (productAmount + platformFee), got %s", got)
+		t.Errorf("expected the quoted 42000000 as productAmount, got %s", got)
 	}
 }

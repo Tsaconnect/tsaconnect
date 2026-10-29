@@ -381,9 +381,14 @@ func main() {
 	if p2pSonicClient != nil {
 		log.Printf("[config] P2P sonic client: network=%s chainID=%d", cfg.SonicNetwork, p2pSonicClient.ChainID())
 	}
+	// Marketplace orders escrow in the core set's OrderEscrow (contracts v2 hard switch,
+	// 2026-10-29). Without one, checkout answers 503 until a set with an OrderEscrow is selected.
 	escrowService := services.NewEscrowService(sonicClient, cfg)
-
-	verifyEscrowAdmin(escrowService)
+	if addr := escrowService.CurrentEscrowAddress(); addr != "" {
+		log.Printf("[config] marketplace orders escrow in OrderEscrow %s (FeeConfig %s)", addr, escrowService.FeeConfigAddress())
+	} else {
+		log.Printf("[config] ALERT order_escrow_unconfigured=1 — no core set names an OrderEscrow on Sonic: checkout is unavailable")
+	}
 
 	// Exchange-rate service (OER + Bybit P2P hybrid). Constructed early because IT
 	// pricing (below) converts MCGP's USD price to Naira against this feed.
@@ -519,6 +524,11 @@ func main() {
 	// The core contract set (CORE_CONTRACTS; dormant = nil). Its gates run as the core-contracts-gates
 	// worker, so a slow RPC never holds boot; nothing reads the set yet.
 	coreRegistry := services.NewCoreRegistry(cfg, blockchainService, apiHotKeys(cfg))
+	if sonicClient != nil {
+		// New orders open only while the core set on Sonic passes its gates.
+		sonicID := sonicClient.ChainID().Int64()
+		escrowService.SetReadiness(func() bool { _, ok := coreRegistry.Ready(sonicID); return ok })
+	}
 	if err := checkSliceLeftovers(config.DB); err != nil {
 		fatalf("[config] REFUSING TO START: %v", err)
 	}
@@ -757,7 +767,6 @@ func main() {
 	feeSinks := services.CombinedFeeSinks{p2pEscrowRegistry, coreRegistry}
 	if sonicClient != nil {
 		feeSinks = append(feeSinks, services.NewFeeSinks(
-			services.FeeSinkContract{Label: "Product escrow", ChainKey: "sonic", ChainID: sonicClient.ChainID().Int64(), Address: cfg.ProductEscrowAddress, Caller: sonicClient.Client},
 			services.FeeSinkContract{Label: "Service contact", ChainKey: "sonic", ChainID: sonicClient.ChainID().Int64(), Address: cfg.ServiceContractAddress, Caller: sonicClient.Client},
 		))
 	}
@@ -1967,6 +1976,7 @@ func main() {
 	// cancels expired ordinary P2P trades. A tick defers while the
 	// central-account statement is stale.
 	registerExpiryCanceller(scheduler, p2pTradeSvc, releaseSigner, statementFreshness(inboundPoller), poolAlerts)
+	registerOrderTimeouts(scheduler, escrowService, ch, releaseSigner, sonicClient)
 
 	// TSA Liquidity plan B: LP onboarding, the /liquidity reads and the voucher
 	// renewal job, live only with a pool chain (prod stays dormant until the
@@ -2249,16 +2259,6 @@ func workerFailureAlert(f jobs.WorkerFailure) services.WorkerFailureAlert {
 		FailingFor:          f.FailingFor,
 		LastError:           f.LastError,
 	}
-}
-
-// to validate statically here.
-func verifyEscrowAdmin(s *services.EscrowService) {
-	onchain, err := s.Owner()
-	if err != nil {
-		log.Printf("WARN: could not read escrow owner() on startup: %v", err)
-		return
-	}
-	log.Printf("Escrow contract owner (on-chain): %s", onchain)
 }
 
 // bigFromDecimal parses a decimal config string; empty or invalid yields nil,

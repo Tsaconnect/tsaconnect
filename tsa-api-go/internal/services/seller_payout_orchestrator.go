@@ -36,7 +36,7 @@ import (
 
 // releaseProver is the slice of EscrowService that proves a release.
 type releaseProver interface {
-	VerifyOrderEvent(txHash, escrowAddr, event string, orderID [32]byte) (*types.Log, error)
+	VerifyOrderEvent(txHash, escrowAddr, event string, key [32]byte) (*types.Log, error)
 	ReadOrder(ctx context.Context, escrowAddr string, orderID [32]byte) (*OnChainOrder, error)
 }
 
@@ -353,7 +353,7 @@ func (o *SellerPayoutOrchestrator) awaitRelease(ctx context.Context, p *models.S
 	// treasury, exactly what the order was priced to pay. A transfer to the
 	// treasury in some transaction proves nothing about this order.
 	escrowAddr := firstNonEmpty(order.EscrowContractAddress, o.escrowAddr)
-	l, err := o.escrow.VerifyOrderEvent(order.ReleaseTxHash, escrowAddr, "OrderReleased", GenerateOrderID(order.ID))
+	l, err := o.escrow.VerifyOrderEvent(order.ReleaseTxHash, escrowAddr, "OrderReleased", OrderKeyOf(&order))
 	switch {
 	case errors.Is(err, ErrReceiptPending):
 		return nil
@@ -369,8 +369,9 @@ func (o *SellerPayoutOrchestrator) awaitRelease(ctx context.Context, p *models.S
 	if !strings.EqualFold(seller.Hex(), common.HexToAddress(o.treasuryAddr()).Hex()) {
 		return o.parkSafe(ctx, p, fmt.Sprintf("the escrow released to %s, not the treasury", seller.Hex()))
 	}
-	// The escrow's own figure is the truth; it may differ a little from the
-	// quote (the fee rate was re-split at approve time). Within the drift the
+	// The escrow's own figure is the truth (product + shipping less the merchant fee it
+	// snapshotted at createOrder); it may differ a little from the quote if the fee rate changed
+	// before the buyer escrowed. Within the drift the
 	// platform absorbs it is accepted; a release far below the quote is not.
 	want, ok := new(big.Int).SetString(p.ExpectedAmount, 10)
 	floor := new(big.Int)
@@ -423,8 +424,8 @@ func (o *SellerPayoutOrchestrator) checkStale(ctx context.Context, p *models.Sel
 	next := o.now().Add(sellerPayoutStaleEvery)
 	o.db.WithContext(ctx).Model(&models.SellerPayoutOrder{}).Where("id = ?", p.ID).UpdateColumn("next_attempt_at", next)
 	p.NextAttemptAt = &next
-	onChain, err := o.escrow.ReadOrder(ctx, firstNonEmpty(order.EscrowContractAddress, o.escrowAddr), GenerateOrderID(order.ID))
-	if err != nil || onChain == nil || !onChain.Resolved {
+	onChain, err := o.escrow.ReadOrder(ctx, firstNonEmpty(order.EscrowContractAddress, o.escrowAddr), OrderKeyOf(order))
+	if err != nil || onChain == nil || !onChain.Resolved() {
 		return nil // unreadable now, or still open: asked again later
 	}
 	return o.parkSafe(ctx, p, "the escrow resolved this order on-chain but the app never recorded it: "+

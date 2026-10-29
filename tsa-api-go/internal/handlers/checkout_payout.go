@@ -40,7 +40,11 @@ func (ch *CheckoutHandler) planLinePayout(ctx context.Context, line *pricedCartL
 	if ch.payouts == nil {
 		return nil
 	}
+	// What the escrow will release to the seller: product + shipping less the merchant fee.
 	net := new(big.Int).Add(line.productAmount, line.shippingAmount)
+	if line.platformFee != nil {
+		net.Sub(net, line.platformFee)
+	}
 	plan, err := ch.payouts.Plan(ctx, line.seller.ID, token, net)
 	if err != nil {
 		// An unreadable payout method must not quietly divert the order to the
@@ -73,8 +77,8 @@ func escrowSellerFor(ctx context.Context, db *gorm.DB, order *models.Order, sell
 // sellerEscrowCaller makes the escrow calls only the order's on-chain seller
 // may make, for orders whose seller is the treasury (services.SellerEscrowCalls).
 type sellerEscrowCaller interface {
-	MarkDelivered(ctx context.Context, orderID uuid.UUID, escrowAddr string) (string, error)
-	CancelOrder(ctx context.Context, orderID uuid.UUID, escrowAddr string) (string, error)
+	MarkDelivered(ctx context.Context, orderID uuid.UUID, key [32]byte, escrowAddr string) (string, error)
+	CancelOrder(ctx context.Context, orderID uuid.UUID, key [32]byte, escrowAddr string) (string, error)
 }
 
 // WithSellerCalls lets payout orders be delivered and cancelled by the server.
@@ -131,12 +135,12 @@ func (ch *CheckoutHandler) cancelAsTreasury(c *gin.Context, user *models.User, o
 		return true
 	}
 	hash, ok := ch.callAsTreasurySeller(c, "cancel", func() (string, error) {
-		return ch.sellerCalls.CancelOrder(c.Request.Context(), order.ID, ch.orderEscrowContract(order))
+		return ch.sellerCalls.CancelOrder(c.Request.Context(), order.ID, services.OrderKeyOf(order), ch.orderEscrowContract(order))
 	})
 	if !ok {
 		return true
 	}
-	if _, ok := ch.requireOrderEvent(c, order, hash, "OrderCancelled"); !ok {
+	if _, ok := ch.requireOrderEvent(c, order, hash, "OrderRefunded"); !ok {
 		return true
 	}
 	ch.finishSellerCancel(c, order, hash)

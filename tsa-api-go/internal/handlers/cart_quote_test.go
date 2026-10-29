@@ -19,17 +19,17 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/services"
 )
 
-// listingPaid is what the buyer pays for the listing itself: the escrowed
-// productAmount plus the platform fee the contract adds on top of it. Because
-// the seller absorbs the fee, it must equal the listing price.
+// listingPaid is what the buyer pays for the listing itself: the escrowed productAmount. OrderEscrow
+// takes the platform (merchant) fee from the seller at release, so it is never added, and the
+// amount must equal the listing price.
 func listingPaid(t *testing.T, productAmount, platformFee interface{}) string {
 	t.Helper()
 	p, ok1 := new(big.Int).SetString(fmt.Sprint(productAmount), 10)
 	f, ok2 := new(big.Int).SetString(fmt.Sprint(platformFee), 10)
-	if !ok1 || !ok2 {
-		t.Fatalf("non-numeric amounts: %v / %v", productAmount, platformFee)
+	if !ok1 || !ok2 || f.Cmp(p) > 0 {
+		t.Fatalf("amounts: %v / %v", productAmount, platformFee)
 	}
-	return new(big.Int).Add(p, f).String()
+	return p.String()
 }
 
 // callOrderHandler runs a cart-order handler for buyer with a JSON body and
@@ -72,11 +72,11 @@ func TestQuoteCart_MatchesWhatTheOrderCharges(t *testing.T) {
 		t.Fatalf("quote: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 	totals := quote["totals"].(map[string]interface{})
-	// $20 of product, 2% of it absorbed by the seller: 19.607844 escrowed for the
-	// seller + 0.392156 fee = exactly $20. Then $10 shipping + $0.10 gas, at 6dp.
+	// $20 of product escrowed (the seller pays 2% of it, 0.40, at release), $10 shipping and the
+	// buyer's $0.10 flat fee, at 6dp.
 	want := map[string]string{
-		"productAmount": "19607844", "shippingAmount": "10000000",
-		"platformFee": "392156", "gasFee": "100000", "total": "30100000",
+		"productAmount": "20000000", "shippingAmount": "10000000",
+		"platformFee": "400000", "gasFee": "100000", "total": "30100000",
 	}
 	for k, v := range want {
 		if totals[k] != v {
@@ -148,60 +148,37 @@ func TestCreateOrderFromCart_DuplicateLinesCannotOversell(t *testing.T) {
 	}
 }
 
-// The buyer pays the listing price and no more; the seller nets price - fee.
-func TestSplitSellerFee(t *testing.T) {
-	cases := []struct {
-		price                string
-		bps                  int
-		wantProduct, wantFee string
-	}{
-		{"20000000", 200, "19607844", "392156"},                // $20: sums exactly
-		{"10000000", 200, "9803922", "196078"},                 // $10: sums exactly
-		{"60000", 200, "58824", "1176"},                        // $0.06: sums exactly
-		{"1", 200, "1", "0"},                                   // dust: fee rounds to 0
-		{"20000000", 150, "19704434", "295566"},                // an admin-set 1.5%
-		{"5000000000000000000", 0, "5000000000000000000", "0"}, // MCGP / exempt
-	}
-	for _, c := range cases {
-		price, _ := new(big.Int).SetString(c.price, 10)
-		p, f := splitSellerFee(price, c.bps)
-		if p.String() != c.wantProduct || f.String() != c.wantFee {
-			t.Errorf("%s @%d: got product %s fee %s, want %s / %s", c.price, c.bps, p, f, c.wantProduct, c.wantFee)
-		}
-		if sum := new(big.Int).Add(p, f); sum.Cmp(price) > 0 {
-			t.Errorf("%s @%d: buyer would pay %s, above the price", c.price, c.bps, sum)
-		}
-		// The fee the contract computes on the escrowed amount is the one recorded.
-		if escrowFeeOn(p, c.bps).Cmp(f) != 0 {
-			t.Errorf("%s @%d: recorded fee %s != contract fee %s", c.price, c.bps, f, escrowFeeOn(p, c.bps))
+// The merchant fee is the contract's: product * bps / 10000, rounded down, charged to the seller.
+func TestEscrowFeeOn(t *testing.T) {
+	for _, c := range []struct {
+		amount string
+		bps    int
+		want   string
+	}{{"20000000", 200, "400000"}, {"20000000", 150, "300000"}, {"1", 200, "0"}, {"5000000000000000000", 0, "0"}} {
+		amount, _ := new(big.Int).SetString(c.amount, 10)
+		if got := escrowFeeOn(amount, c.bps).String(); got != c.want {
+			t.Errorf("%s @%d = %s, want %s", c.amount, c.bps, got, c.want)
 		}
 	}
 }
 
-// Prices that do not divide evenly by 1.02 leave the buyer at most one base
-// unit under the price, never over.
-func TestSplitSellerFee_NeverOverchargesAcrossPrices(t *testing.T) {
-	setupCheckoutTestDB(t)
-	for v := int64(1); v <= 5000; v += 7 {
-		price := big.NewInt(v * 997)
-		p, f := splitSellerFee(price, 200)
-		diff := new(big.Int).Sub(price, new(big.Int).Add(p, f))
-		if diff.Sign() < 0 || diff.Cmp(big.NewInt(1)) > 0 {
-			t.Fatalf("price %s: product %s + fee %s is off by %s", price, p, f, diff)
-		}
-	}
-}
-
-// fakeEscrowRates stands in for the escrow's on-chain fee and gas.
+// fakeEscrowRates stands in for FeeConfig's order row and limit.
 type fakeEscrowRates struct {
-	bps    int
-	gas    int64
-	feeErr error
+	bps      int
+	gas      int64
+	maxOrder int64 // 0: no limit to speak of
+	feeErr   error
 }
 
 func (f fakeEscrowRates) PlatformFeeBPS(context.Context, string) (int, error) { return f.bps, f.feeErr }
 func (f fakeEscrowRates) GasFeeWei(context.Context, string) (*big.Int, error) {
 	return big.NewInt(f.gas), nil
+}
+func (f fakeEscrowRates) MaxOrderAmount(context.Context, string) (*big.Int, error) {
+	if f.maxOrder == 0 {
+		return new(big.Int).Lsh(big.NewInt(1), 127), nil
+	}
+	return big.NewInt(f.maxOrder), nil
 }
 
 type fakeMCGPPrice struct{ usd6 int64 } // USD (6dp) per 1 MCGP
@@ -235,8 +212,8 @@ func withToken(token string, extra map[string]interface{}) map[string]interface{
 	return body
 }
 
-// The quote uses the escrow's rates, not fee_config: a 1.5% on-chain fee and a
-// $0.05 on-chain gas fee show up in the amounts.
+// The quote uses FeeConfig's rates: a 1.5% merchant fee (the seller's, not added to the total)
+// and a $0.05 flat fee show up in the amounts.
 func TestQuoteCart_UsesTheEscrowsRates(t *testing.T) {
 	buyer := seedQuoteCart(t)
 	ch := setupCheckoutHandler(t)
@@ -247,12 +224,31 @@ func TestQuoteCart_UsesTheEscrowsRates(t *testing.T) {
 		t.Fatalf("quote: %d %s", w.Code, w.Body.String())
 	}
 	totals := quote["totals"].(map[string]interface{})
-	// $20 at 1.5% seller-paid: 19.704434 + 0.295566; $10 shipping; $0.05 gas.
-	want := map[string]string{"productAmount": "19704434", "platformFee": "295566", "gasFee": "50000", "total": "30050000"}
+	// $20 listing (the seller pays 1.5% of it at release); $10 shipping; $0.05 flat fee.
+	want := map[string]string{"productAmount": "20000000", "platformFee": "300000", "gasFee": "50000", "total": "30050000"}
 	for k, v := range want {
 		if totals[k] != v {
 			t.Errorf("totals.%s = %v, want %s", k, totals[k], v)
 		}
+	}
+}
+
+// An order above FeeConfig's maxPerOrder is refused before the buyer signs, and a token FeeConfig
+// does not price cannot be checked out in.
+func TestQuoteCart_RefusesWhatCreateOrderWouldRevert(t *testing.T) {
+	buyer := seedQuoteCart(t)
+	ch := setupCheckoutHandler(t)
+	ch.feeRates = fakeEscrowRates{bps: 200, gas: 50000, maxOrder: 29_000000} // $20 + $10 shipping is $30
+	if w, _ := callOrderHandler(t, ch.QuoteCart, buyer, withToken("USDC", nil)); w.Code != http.StatusBadRequest {
+		t.Fatalf("over the order limit: %d %s", w.Code, w.Body.String())
+	}
+	ch.feeRates = fakeEscrowRates{feeErr: services.ErrOrderFeeNotConfigured}
+	if w, _ := callOrderHandler(t, ch.QuoteCart, buyer, withToken("USDC", nil)); w.Code != http.StatusBadRequest {
+		t.Fatalf("token not priced: %d %s", w.Code, w.Body.String())
+	}
+	ch.feeRates = nil
+	if w, _ := callOrderHandler(t, ch.QuoteCart, buyer, withToken("USDC", nil)); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no FeeConfig reader: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -330,19 +326,19 @@ func TestRepriceToEscrowFee(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Ikeja", "Lagos", "Nigeria")
 	product := createTestProduct(t, db, seller.ID, 20.0)
 	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, models.OrderStatusPendingPayment, "USDC")
-	// A $20 service recorded at 0.5% on top: 20 + 0.1 fee, $5 shipping.
+	// A $20 order recorded at a 0.5% merchant fee, $5 shipping.
 	db.Model(order).Updates(map[string]interface{}{
-		"product_amount": "20000000", "platform_fee": "100000", "shipping_amount": "5000000", "total_amount": "25100000",
+		"product_amount": "20000000", "platform_fee": "100000", "shipping_amount": "5000000", "total_amount": "25000000",
 	})
-	order.ProductAmount, order.PlatformFee, order.ShippingAmount, order.TotalAmount = "20000000", "100000", "5000000", "25100000"
+	order.ProductAmount, order.PlatformFee, order.ShippingAmount, order.TotalAmount = "20000000", "100000", "5000000", "25000000"
 
 	if err := repriceToEscrowFee(db, order, 200); err != nil {
 		t.Fatal(err)
 	}
 	var got models.Order
 	db.First(&got, "id = ?", order.ID)
-	// 20.1 re-split at 2%: 19.705883 + 0.394117; the buyer's 25.1 is unchanged.
-	if got.ProductAmount != "19705883" || got.PlatformFee != "394117" || got.TotalAmount != "25100000" {
+	// At 2% the seller's fee is 0.4; what the buyer pays (product + shipping) is unchanged.
+	if got.ProductAmount != "20000000" || got.PlatformFee != "400000" || got.TotalAmount != "25000000" {
 		t.Fatalf("re-priced to %s + %s = %s", got.ProductAmount, got.PlatformFee, got.TotalAmount)
 	}
 

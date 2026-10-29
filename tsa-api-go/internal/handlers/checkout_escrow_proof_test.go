@@ -34,7 +34,7 @@ type proofFixture struct {
 	buyer   *models.User
 	seller  *models.User
 	order   *models.Order
-	orderID [32]byte
+	key     [32]byte // the order's key on OrderEscrow
 }
 
 func newProofFixture(t *testing.T, status string) *proofFixture {
@@ -42,7 +42,7 @@ func newProofFixture(t *testing.T, status string) *proofFixture {
 	db := setupCheckoutTestDB(t)
 	ch := setupCheckoutHandler(t)
 	chain := services.NewFakeEscrowChain()
-	ch.EscrowService = services.NewEscrowServiceWithBackend(ch.Config, chain, chain)
+	ch.EscrowService = services.NewEscrowServiceWithBackend(ch.Config, 146, chain, chain)
 
 	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	setUserWallet(t, db, buyer, proofBuyerWallet)
@@ -50,8 +50,11 @@ func newProofFixture(t *testing.T, status string) *proofFixture {
 	setUserWallet(t, db, seller, proofSellerWallet)
 	product := createTestProduct(t, db, seller.ID, 10.0)
 	order := createTestOrder(t, db, buyer.ID, seller.ID, product.ID, status, "USDC")
-	return &proofFixture{db: db, ch: ch, chain: chain, buyer: buyer, seller: seller, order: order,
-		orderID: services.GenerateOrderID(order.ID)}
+	// Funded from the buyer's wallet: the order's key on OrderEscrow.
+	key := services.OrderKey(proofBuyerWallet, services.GenerateOrderID(order.ID))
+	order.EscrowOrderKey = common.Hash(key).Hex()
+	db.Model(order).Update("escrow_order_key", order.EscrowOrderKey)
+	return &proofFixture{db: db, ch: ch, chain: chain, buyer: buyer, seller: seller, order: order, key: key}
 }
 
 // holdOrder makes the fake escrow hold this order as priced.
@@ -59,13 +62,13 @@ func (f *proofFixture) holdOrder(mutate func(*services.OnChainOrder)) {
 	o := services.OnChainOrder{
 		Buyer: common.HexToAddress(proofBuyerWallet), Seller: common.HexToAddress(proofSellerWallet),
 		Token:         common.HexToAddress(proofUSDC),
-		ProductAmount: big.NewInt(10000000), ShippingAmount: big.NewInt(5000000), PlatformFee: big.NewInt(1000000),
-		CreatedAt: time.Now(),
+		ProductAmount: big.NewInt(10000000), ShippingAmount: big.NewInt(5000000), MerchantFee: big.NewInt(200000),
+		State: services.OrderStateFunded, CreatedAt: time.Now(), DeliverBy: time.Now().Add(7 * 24 * time.Hour),
 	}
 	if mutate != nil {
 		mutate(&o)
 	}
-	f.chain.SetOrder(f.orderID, o)
+	f.chain.SetOrder(f.key, o)
 }
 
 func (f *proofFixture) call(h func(*gin.Context), user *models.User, body any) *httptest.ResponseRecorder {
@@ -90,18 +93,18 @@ func (f *proofFixture) status(t *testing.T) string {
 	return o.Status
 }
 
-func (f *proofFixture) escrow() string { return f.ch.Config.ProductEscrowAddress }
+func (f *proofFixture) escrow() string { return f.ch.EscrowService.CurrentEscrowAddress() }
 
 func TestSubmitConfirm_NeedsThisOrdersReceiptConfirmed(t *testing.T) {
 	f := newProofFixture(t, models.OrderStatusDelivered)
 	var other [32]byte
 	other[0] = 9
 
-	f.chain.MineEvent("0xaaa", f.escrow(), "ReceiptConfirmed", other, nil)
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderReleased", other, nil)
 	if w := f.call(f.ch.SubmitConfirm, f.buyer, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusBadRequest {
 		t.Fatalf("another order's confirm: got %d %s", w.Code, w.Body)
 	}
-	f.chain.MineEvent("0xbbb", f.escrow(), "OrderCancelled", f.orderID, nil)
+	f.chain.MineEvent("0xbbb", f.escrow(), "OrderRefunded", f.key, nil)
 	if w := f.call(f.ch.SubmitConfirm, f.buyer, gin.H{"txHash": "0xbbb"}); w.Code != http.StatusBadRequest {
 		t.Fatalf("a cancel as a confirm: got %d %s", w.Code, w.Body)
 	}
@@ -123,7 +126,7 @@ func TestSubmitConfirm_NeedsThisOrdersReceiptConfirmed(t *testing.T) {
 	}
 	f.chain.Err = nil
 
-	f.chain.MineEvent("0xeee", f.escrow(), "ReceiptConfirmed", f.orderID, nil)
+	f.chain.MineEvent("0xeee", f.escrow(), "OrderReleased", f.key, nil)
 	if w := f.call(f.ch.SubmitConfirm, f.buyer, gin.H{"txHash": "0xeee"}); w.Code != http.StatusOK {
 		t.Fatalf("this order's confirm: got %d %s", w.Code, w.Body)
 	}
@@ -137,11 +140,11 @@ func TestSubmitConfirm_UsesTheOrdersOwnEscrow(t *testing.T) {
 	older := "0x00000000000000000000000000000000000000c3"
 	f.db.Model(f.order).Update("escrow_contract_address", older)
 
-	f.chain.MineEvent("0xaaa", f.escrow(), "ReceiptConfirmed", f.orderID, nil)
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderReleased", f.key, nil)
 	if w := f.call(f.ch.SubmitConfirm, f.buyer, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusBadRequest {
 		t.Fatalf("a confirm from the current escrow for an order on an older one: got %d", w.Code)
 	}
-	f.chain.MineEvent("0xbbb", older, "ReceiptConfirmed", f.orderID, nil)
+	f.chain.MineEvent("0xbbb", older, "OrderReleased", f.key, nil)
 	if w := f.call(f.ch.SubmitConfirm, f.buyer, gin.H{"txHash": "0xbbb"}); w.Code != http.StatusOK {
 		t.Fatalf("a confirm from its own escrow: got %d %s", w.Code, w.Body)
 	}
@@ -149,7 +152,7 @@ func TestSubmitConfirm_UsesTheOrdersOwnEscrow(t *testing.T) {
 
 func TestSubmitCancelOrder_NeedsOrderCancelled(t *testing.T) {
 	f := newProofFixture(t, models.OrderStatusCancelRequested)
-	f.chain.MineEvent("0xaaa", f.escrow(), "ReceiptConfirmed", f.orderID, nil)
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderReleased", f.key, nil)
 	if w := f.call(f.ch.SubmitCancelOrder, f.seller, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusBadRequest {
 		t.Fatalf("a confirm as a cancel: got %d %s", w.Code, w.Body)
 	}
@@ -163,7 +166,7 @@ func TestSubmitAdminResolve_TakesTheDirectionFromTheChain(t *testing.T) {
 	f := newProofFixture(t, models.OrderStatusRefundRequested)
 	admin := createTestUserWithLocation(t, f.db, "Lagos", "Lagos", "Nigeria")
 
-	f.chain.MineEvent("0xaaa", f.escrow(), "DisputeResolved", f.orderID, services.DisputeResolvedData(true))
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderResolved", f.key, services.OrderResolvedData(big.NewInt(15000000), big.NewInt(0), big.NewInt(0)))
 	w := f.call(f.ch.SubmitAdminResolve, admin, gin.H{"txHash": "0xaaa", "refundBuyer": false})
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d %s", w.Code, w.Body)
@@ -176,7 +179,7 @@ func TestSubmitAdminResolve_TakesTheDirectionFromTheChain(t *testing.T) {
 func TestSubmitAdminResolve_RefusesAnUnrelatedTx(t *testing.T) {
 	f := newProofFixture(t, models.OrderStatusRefundRequested)
 	admin := createTestUserWithLocation(t, f.db, "Lagos", "Lagos", "Nigeria")
-	f.chain.MineEvent("0xaaa", f.escrow(), "ReceiptConfirmed", f.orderID, nil)
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderReleased", f.key, nil)
 	if w := f.call(f.ch.SubmitAdminResolve, admin, gin.H{"txHash": "0xaaa", "refundBuyer": true}); w.Code != http.StatusBadRequest {
 		t.Fatalf("got %d %s", w.Code, w.Body)
 	}
@@ -190,7 +193,7 @@ func TestRequireEscrowFundsOrder(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request, _ = http.NewRequest("POST", "/", nil)
-		if f.ch.requireEscrowFundsOrder(c, f.order) {
+		if f.ch.requireEscrowFundsOrder(c, f.order, f.key, proofBuyerWallet) {
 			return nil
 		}
 		return w
@@ -207,7 +210,13 @@ func TestRequireEscrowFundsOrder(t *testing.T) {
 		"another seller":   func(o *services.OnChainOrder) { o.Seller = common.HexToAddress(proofBuyerWallet) },
 		"another token":    func(o *services.OnChainOrder) { o.Token = common.HexToAddress(proofBuyerWallet) },
 		"a smaller price":  func(o *services.OnChainOrder) { o.ProductAmount = big.NewInt(1) },
-		"already paid out": func(o *services.OnChainOrder) { o.Resolved = true },
+		"already paid out": func(o *services.OnChainOrder) { o.State = services.OrderStateReleased },
+		// The buyer is compared with the funding wallet, not read back from the chain itself.
+		"another buyer": func(o *services.OnChainOrder) { o.Buyer = common.HexToAddress(proofSellerWallet) },
+		// Product and shipping are checked apart: the fee applies to the product alone.
+		"the split moved to shipping": func(o *services.OnChainOrder) {
+			o.ProductAmount, o.ShippingAmount = big.NewInt(9000000), big.NewInt(6000000)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newProofFixture(t, models.OrderStatusPendingPayment)
@@ -244,7 +253,7 @@ func TestMarkDelivered_NeedsTheOnChainMark(t *testing.T) {
 
 	t.Run("a DeliveryMarked hash", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusShipped)
-		f.chain.MineEvent("0xaaa", f.escrow(), "DeliveryMarked", f.orderID, nil)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderDelivered", f.key, nil)
 		if w := deliver(f, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusOK {
 			t.Fatalf("got %d %s", w.Code, w.Body)
 		}
@@ -254,7 +263,7 @@ func TestMarkDelivered_NeedsTheOnChainMark(t *testing.T) {
 	})
 	t.Run("another event is not a delivery", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusShipped)
-		f.chain.MineEvent("0xaaa", f.escrow(), "OrderCancelled", f.orderID, nil)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.key, nil)
 		if w := deliver(f, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusBadRequest {
 			t.Fatalf("got %d %s", w.Code, w.Body)
 		}
@@ -272,7 +281,7 @@ func TestMarkDelivered_NeedsTheOnChainMark(t *testing.T) {
 	})
 	t.Run("no hash, but the escrow already has it", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusShipped)
-		f.holdOrder(func(o *services.OnChainOrder) { o.SellerDelivered = true })
+		f.holdOrder(func(o *services.OnChainOrder) { o.State, o.ConfirmBy = services.OrderStateDelivered, time.Now().Add(7*24*time.Hour) })
 		if w := deliver(f, gin.H{}); w.Code != http.StatusOK {
 			t.Fatalf("got %d %s", w.Code, w.Body)
 		}
@@ -282,7 +291,7 @@ func TestMarkDelivered_NeedsTheOnChainMark(t *testing.T) {
 	})
 	t.Run("an order delivered before the mark was on-chain", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusDelivered)
-		f.chain.MineEvent("0xaaa", f.escrow(), "DeliveryMarked", f.orderID, nil)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderDelivered", f.key, nil)
 		if w := deliver(f, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusOK {
 			t.Fatalf("got %d %s", w.Code, w.Body)
 		}
@@ -313,7 +322,7 @@ func TestPrepareDeliver(t *testing.T) {
 	})
 	t.Run("already on-chain", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusShipped)
-		f.holdOrder(func(o *services.OnChainOrder) { o.SellerDelivered = true })
+		f.holdOrder(func(o *services.OnChainOrder) { o.State, o.ConfirmBy = services.OrderStateDelivered, time.Now().Add(7*24*time.Hour) })
 		w := f.call(f.ch.PrepareDeliver, f.seller, gin.H{})
 		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "delivery_on_chain") {
 			t.Fatalf("got %d %s", w.Code, w.Body)
@@ -340,7 +349,7 @@ func TestPrepareDeliver(t *testing.T) {
 func TestRequestRefund_AfterDelivery(t *testing.T) {
 	t.Run("delivery on-chain: the buyer signs the dispute, the status waits", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusDelivered)
-		f.holdOrder(func(o *services.OnChainOrder) { o.SellerDelivered = true })
+		f.holdOrder(func(o *services.OnChainOrder) { o.State, o.ConfirmBy = services.OrderStateDelivered, time.Now().Add(7*24*time.Hour) })
 		w := f.call(f.ch.RequestRefund, f.buyer, gin.H{})
 		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "refundTx") {
 			t.Fatalf("got %d %s", w.Code, w.Body)
@@ -349,22 +358,44 @@ func TestRequestRefund_AfterDelivery(t *testing.T) {
 			t.Fatalf("the status moved to %q before the transaction was proven", got)
 		}
 	})
-	t.Run("delivered before the mark was on-chain: admin review in the database", func(t *testing.T) {
+	t.Run("past the confirm window: no dispute, the release is due", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusDelivered)
-		f.holdOrder(nil)
-		if w := f.call(f.ch.RequestRefund, f.buyer, gin.H{}); w.Code != http.StatusOK {
+		f.holdOrder(func(o *services.OnChainOrder) { o.State, o.ConfirmBy = services.OrderStateDelivered, time.Now().Add(-time.Hour) })
+		w := f.call(f.ch.RequestRefund, f.buyer, gin.H{})
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "dispute_window_closed") {
 			t.Fatalf("got %d %s", w.Code, w.Body)
 		}
-		if got := f.status(t); got != models.OrderStatusRefundRequested {
-			t.Fatalf("status %q", got)
+	})
+}
+
+// Before delivery OrderEscrow has no instant refund (owner M3): the buyer is told the deadline, and
+// past it signs claimTimeout for the full refund.
+func TestRequestRefund_BeforeDelivery(t *testing.T) {
+	t.Run("inside the delivery window: the deadline, no transaction", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusEscrowed)
+		f.holdOrder(nil)
+		w := f.call(f.ch.RequestRefund, f.buyer, gin.H{})
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "refund_not_yet_claimable") {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+	})
+	t.Run("past the delivery deadline: the buyer claims the refund", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusEscrowed)
+		f.holdOrder(func(o *services.OnChainOrder) { o.DeliverBy = time.Now().Add(-time.Hour) })
+		w := f.call(f.ch.RequestRefund, f.buyer, gin.H{})
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "refundTx") {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+		if got := f.status(t); got != models.OrderStatusEscrowed {
+			t.Fatalf("the status moved to %q before the claim was proven", got)
 		}
 	})
 }
 
 func TestSubmitRefund(t *testing.T) {
-	t.Run("RefundRequested makes it a dispute", func(t *testing.T) {
+	t.Run("OrderDisputed makes it a dispute for a resolver", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusDelivered)
-		f.chain.MineEvent("0xaaa", f.escrow(), "RefundRequested", f.orderID, nil)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderDisputed", f.key, services.OrderDeadlineData("OrderDisputed", time.Now().Add(14*24*time.Hour)))
 		if w := f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusOK {
 			t.Fatalf("got %d %s", w.Code, w.Body)
 		}
@@ -372,9 +403,9 @@ func TestSubmitRefund(t *testing.T) {
 			t.Fatalf("status %q", got)
 		}
 	})
-	t.Run("OrderRefunded is the instant refund", func(t *testing.T) {
+	t.Run("OrderRefunded (a claim past the deadline) refunds", func(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusEscrowed)
-		f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.orderID, nil)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.key, nil)
 		if w := f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": "0xaaa"}); w.Code != http.StatusOK {
 			t.Fatalf("got %d %s", w.Code, w.Body)
 		}
@@ -386,9 +417,9 @@ func TestSubmitRefund(t *testing.T) {
 		f := newProofFixture(t, models.OrderStatusDelivered)
 		var other [32]byte
 		other[0] = 9
-		f.chain.MineEvent("0xaaa", f.escrow(), "ReceiptConfirmed", f.orderID, nil)
-		f.chain.MineEvent("0xbbb", f.escrow(), "RefundRequested", other, nil)
-		f.chain.MineEvent("0xccc", f.escrow(), "RefundRequested", f.orderID, nil)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderReleased", f.key, nil)
+		f.chain.MineEvent("0xbbb", f.escrow(), "OrderDisputed", other, services.OrderDeadlineData("OrderDisputed", time.Now()))
+		f.chain.MineEvent("0xccc", f.escrow(), "OrderDisputed", f.key, services.OrderDeadlineData("OrderDisputed", time.Now()))
 		for _, tx := range []string{"0xaaa", "0xbbb"} {
 			if w := f.call(f.ch.SubmitRefund, f.buyer, gin.H{"txHash": tx}); w.Code != http.StatusBadRequest {
 				t.Fatalf("%s: got %d %s", tx, w.Code, w.Body)
@@ -409,7 +440,7 @@ func TestSubmitRefund(t *testing.T) {
 // The same refund proof submitted twice at once restores the unit once.
 func TestSubmitRefund_RestoresStockOnce(t *testing.T) {
 	f := newProofFixture(t, models.OrderStatusEscrowed)
-	f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.orderID, nil)
+	f.chain.MineEvent("0xaaa", f.escrow(), "OrderRefunded", f.key, nil)
 	// In-memory SQLite is one database per connection; the goroutines still
 	// interleave their statements on the one connection.
 	sqlDB, err := f.db.DB()
@@ -438,4 +469,30 @@ func TestSubmitRefund_RestoresStockOnce(t *testing.T) {
 	if got := f.status(t); got != models.OrderStatusRefunded {
 		t.Fatalf("status %q", got)
 	}
+}
+
+// Only a dispute the chain holds is resolved, by a RESOLVER_ROLE wallet, with the split the admin
+// chose; the recorded outcome is the one the OrderResolved log reports.
+func TestAdminResolve_OnOrderEscrow(t *testing.T) {
+	t.Run("not disputed on-chain", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusRefundRequested)
+		f.holdOrder(nil) // Funded: a refund is a claim after the deadline, not a resolve
+		admin := createTestUserWithLocation(t, f.db, "Lagos", "Lagos", "Nigeria")
+		setUserWallet(t, f.db, admin, "0x00000000000000000000000000000000000000ad")
+		w := f.call(f.ch.AdminResolveDispute, admin, gin.H{"refundBuyer": true})
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "order_not_disputed_on_chain") {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+	})
+	t.Run("a split is recorded as completed, the stock kept", func(t *testing.T) {
+		f := newProofFixture(t, models.OrderStatusRefundRequested)
+		f.chain.MineEvent("0xaaa", f.escrow(), "OrderResolved", f.key,
+			services.OrderResolvedData(big.NewInt(5000000), big.NewInt(9800000), big.NewInt(200000)))
+		if w := f.call(f.ch.SubmitAdminResolve, f.buyer, gin.H{"txHash": "0xaaa", "refundBuyer": true}); w.Code != http.StatusOK {
+			t.Fatalf("got %d %s", w.Code, w.Body)
+		}
+		if got := f.status(t); got != models.OrderStatusCompleted {
+			t.Fatalf("status %q; a split paid the seller, so the order completed", got)
+		}
+	})
 }
