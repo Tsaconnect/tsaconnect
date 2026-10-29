@@ -288,6 +288,35 @@ func (h *Handlers) CreateProduct(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusCreated, "Product created successfully", product)
 }
 
+// productSortColumns maps a caller's sortBy (JSON name or column name) to the
+// column it orders by. Only these ever reach SQL.
+var productSortColumns = map[string]string{
+	"createdAt":      "created_at",
+	"created_at":     "created_at",
+	"updatedAt":      "updated_at",
+	"updated_at":     "updated_at",
+	"price":          "price",
+	"name":           "name",
+	"views":          "views",
+	"sales":          "sales",
+	"rating.average": "rating->>'average'",
+}
+
+// productOrderClause builds an ORDER BY from query input. sortBy and sortOrder
+// are caller-supplied, so both are allow-listed: an unknown column falls back
+// to created_at and anything but "asc" orders DESC.
+func productOrderClause(sortBy, sortOrder string) string {
+	column, ok := productSortColumns[sortBy]
+	if !ok {
+		column = "created_at"
+	}
+	direction := "DESC"
+	if strings.EqualFold(strings.TrimSpace(sortOrder), "asc") {
+		direction = "ASC"
+	}
+	return column + " " + direction
+}
+
 // GetUserProducts handles GET /api/products/ - returns paginated products for the authenticated user.
 func (h *Handlers) GetUserProducts(c *gin.Context) {
 	user := getUserFromContext(c)
@@ -333,20 +362,7 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 		return
 	}
 
-	// Map JSON field names to DB column names
-	sortFieldMap := map[string]string{
-		"createdAt": "created_at",
-		"updatedAt": "updated_at",
-		"price":     "price",
-		"name":      "name",
-		"views":     "views",
-		"sales":     "sales",
-	}
-	if mapped, ok := sortFieldMap[sortBy]; ok {
-		sortBy = mapped
-	}
-
-	orderClause := sortBy + " " + strings.ToUpper(sortOrder)
+	orderClause := productOrderClause(sortBy, sortOrder)
 	offset := (page - 1) * limit
 
 	var products []models.Product
@@ -1102,28 +1118,10 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 		}
 	}
 
-	// Map JSON sort field names to DB column names
-	sortFieldMap := map[string]string{
-		"createdAt":      "created_at",
-		"updatedAt":      "updated_at",
-		"price":          "price",
-		"name":           "name",
-		"views":          "views",
-		"sales":          "sales",
-		"rating.average": "rating->>'average'",
-	}
-	if mapped, ok := sortFieldMap[sortBy]; ok {
-		sortBy = mapped
-	}
-	if sortBy != "created_at" && sortBy != "updated_at" && sortBy != "price" &&
-		sortBy != "name" && sortBy != "views" && sortBy != "sales" && sortBy != "rating->>'average'" {
-		sortBy = "created_at"
-	}
-
 	var total int64
 	query.Count(&total)
 
-	orderClause := sortBy + " " + strings.ToUpper(sortOrder)
+	orderClause := productOrderClause(sortBy, sortOrder)
 	offset := (page - 1) * limit
 
 	var products []models.Product
