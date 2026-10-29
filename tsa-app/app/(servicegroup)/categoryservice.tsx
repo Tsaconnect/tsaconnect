@@ -9,7 +9,7 @@
 import React, { useState, useEffect } from "react";
 import { ScrollView, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { router, useLocalSearchParams } from "expo-router";
+import { router, Stack, useLocalSearchParams } from "expo-router";
 import ServiceCard from "../../components/services/ServiceCard";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
@@ -29,6 +29,9 @@ const Services = () => {
   const { value } = useLocalSearchParams<{ value?: string }>();
   const [services, setServices] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  // The category's own name for the header; the layout's title only knows
+  // the category when the user arrived from the category list.
+  const [categoryName, setCategoryName] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
   // Bumped by "Try again" to re-run the load.
   const [attempt, setAttempt] = useState(0);
@@ -56,6 +59,7 @@ const Services = () => {
       if (cancelled) return;
       if (response.success && Array.isArray(response.data?.products)) {
         setServices(response.data.products);
+        if (response.data.category?.title) setCategoryName(String(response.data.category.title).trim());
       } else {
         console.warn("Failed to load services:", response.message);
         setServices([]);
@@ -75,6 +79,7 @@ const Services = () => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      {categoryName ? <Stack.Screen options={{ title: categoryName }} /> : null}
       <ListingFilters categoryId={value} value={filters} onChange={setFilters} />
       {loading ? (
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
@@ -98,6 +103,8 @@ const Services = () => {
                 ? "No vendors match these filters. Clear one to see more."
                 : "No registered vendor merchants in this category at the moment."
             }
+            actionLabel={filtering ? "Clear filters" : undefined}
+            onAction={filtering ? () => setFilters(EMPTY_LISTING_FILTERS) : undefined}
           />
         </View>
       ) : (

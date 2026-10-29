@@ -10,7 +10,7 @@ import { FlatList, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import React, { useEffect, useState } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { router, useLocalSearchParams } from "expo-router";
+import { router, Stack, useLocalSearchParams } from "expo-router";
 import ProductCard from "../../components/designs/productcard";
 import { useAuth } from "../../AuthContext/AuthContext";
 import { api, Product } from "../../components/services/api";
@@ -31,6 +31,9 @@ const Products = () => {
   const { value } = useLocalSearchParams<{ value?: string }>();
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  // The category's own name for the header; the layout's title only knows
+  // the category when the user arrived from the category list.
+  const [categoryName, setCategoryName] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
   // Bumped by "Try again" to re-run the load.
   const [attempt, setAttempt] = useState(0);
@@ -55,6 +58,7 @@ const Products = () => {
       if (cancelled) return;
       if (response.success && Array.isArray(response.data?.products)) {
         setProducts(response.data.products);
+        if (response.data.category?.title) setCategoryName(String(response.data.category.title).trim());
       } else {
         console.warn("Failed to load products:", response.message);
         setProducts([]);
@@ -104,6 +108,7 @@ const Products = () => {
       edges={["top"]}
     >
       <GestureHandlerRootView style={{ flex: 1 }}>
+        {categoryName ? <Stack.Screen options={{ title: categoryName }} /> : null}
         <ListingFilters categoryId={value} value={filters} onChange={setFilters} />
         {loadFailed ? (
           <View style={{ flex: 1, justifyContent: "center" }}>
@@ -153,6 +158,8 @@ const Products = () => {
                   ? "No products match these filters. Clear one to see more."
                   : "No registered available vendor merchant at the moment."
               }
+              actionLabel={filtering ? "Clear filters" : undefined}
+              onAction={filtering ? () => setFilters(EMPTY_LISTING_FILTERS) : undefined}
             />
             {registerCta}
           </View>

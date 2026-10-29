@@ -143,7 +143,11 @@ export function ListingFilters({ categoryId, value, onChange }: ListingFiltersPr
             <Text variant="bodySm" weight="600">
               Location
             </Text>
-            <LocationPicker value={draft.place} onChange={(place) => setDraft((prev) => ({ ...prev, place }))} />
+            <LocationPicker
+              value={draft.place}
+              onChange={(place) => setDraft((prev) => ({ ...prev, place }))}
+              required={[]}
+            />
             <Input
               label="Area or neighbourhood"
               value={draft.area}

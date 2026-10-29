@@ -39,7 +39,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({ icon = 'empty', title, s
         </Text>
       )}
       {actionLabel && onAction && (
-        <Button title={actionLabel} onPress={onAction} variant="secondary" fullWidth={false} size="sm" style={{ marginTop: spacing.sm }} />
+        <Button title={actionLabel} onPress={onAction} variant="secondary" fullWidth={false} size="sm" style={{ marginTop: spacing.sm, alignSelf: 'center' }} />
       )}
     </View>
   );
