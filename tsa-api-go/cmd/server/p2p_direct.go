@@ -35,6 +35,8 @@ func apiHotKeys(cfg *config.Config) map[string]string {
 	for label, addr := range knownHotKeys {
 		addHotKey(out, label, addr)
 	}
+	// The PM admin EOA signs PM settlement: it must not resolve disputes or administer either.
+	addHotKey(out, "PM_ADMIN_EOA_ADDRESS", cfg.PMAdminEOAAddress)
 	return out
 }
 

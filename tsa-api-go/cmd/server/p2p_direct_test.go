@@ -26,7 +26,8 @@ func directLog(t *testing.T) *bytes.Buffer {
 // Every hot key the API holds and the known production operator and treasury may hold no role on
 // a core contract; unset and malformed keys are skipped.
 func TestAPIHotKeys_EveryKnownHotKey(t *testing.T) {
-	cfg := &config.Config{PMReleasePrivateKey: testKeyA, RelayerPrivateKey: "0x" + testKeyB, RampTreasuryPrivateKey: "not-a-key"}
+	cfg := &config.Config{PMReleasePrivateKey: testKeyA, RelayerPrivateKey: "0x" + testKeyB, RampTreasuryPrivateKey: "not-a-key",
+		PMAdminEOAAddress: "0x00000000000000000000000000000000000038cE"}
 	got := apiHotKeys(cfg)
 	want := map[string]string{
 		"PM_RELEASE_PRIVATE_KEY": signerAddress(testKeyA),
@@ -34,6 +35,7 @@ func TestAPIHotKeys_EveryKnownHotKey(t *testing.T) {
 		"IT_OPERATOR_PRIVATE_KEY":  signerAddress(testKeyA),
 		"RAMP_SPONSOR_PRIVATE_KEY": signerAddress(testKeyA),
 		"RELAYER_PRIVATE_KEY":      signerAddress(testKeyB),
+		"PM_ADMIN_EOA_ADDRESS":     "0x00000000000000000000000000000000000038cE",
 	}
 	for label, addr := range knownHotKeys {
 		want[label] = addr
