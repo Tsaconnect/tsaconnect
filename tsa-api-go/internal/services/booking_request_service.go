@@ -16,14 +16,14 @@ import (
 // buyer pays whatever that says whenever they get round to it — so the quote is
 // the thing with a shelf life, and two days is about as long as a service price
 // can be trusted without the provider re-confirming it.
-// approvalClock is when an approval was given: approved_at, or updated_at on
-// rows approved before approved_at existed.
-const approvalClock = "COALESCE(approved_at, updated_at)"
-
 const (
 	BookingRequestTTL         = 7 * 24 * time.Hour
 	BookingRequestApprovalTTL = 48 * time.Hour
 )
+
+// approvalClock is when an approval was given: approved_at, or updated_at on
+// rows approved before approved_at existed.
+const approvalClock = "COALESCE(approved_at, updated_at)"
 
 // BookingRequestService owns the off-chain booking-request lifecycle work that
 // no user action drives.
