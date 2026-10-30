@@ -73,6 +73,7 @@ func TestQuoteServiceOrder_QuantityAndQuote(t *testing.T) {
 
 	tickets := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
 	writePricedProfile(t, db, tickets.ID, models.BookingTypeInstant, models.PriceUnitPerTicket)
+	unlimitedPlaces(t, db, tickets.ID)
 	_, q := postQuote(t, ch, buyer, map[string]interface{}{"productId": tickets.ID.String(), "quantity": 4})
 	if q.Units != 4 || q.UnitPriceUSD != 5 || q.TotalUSD != 20 {
 		t.Errorf("tickets: unexpected quote %+v", q)

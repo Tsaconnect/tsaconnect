@@ -55,6 +55,18 @@ export function quantityLabel(unit?: string | null): string {
   return noun ? `${noun[0].toUpperCase()}${noun.slice(1)}s` : 'Number of people';
 }
 
+/**
+ * The capacity field of a seat/ticket listing without time slots: its places
+ * are counted per date when the booking form asks for one, else in total.
+ */
+export function placesCapacityCopy(unit: string | null | undefined, dated: boolean): { label: string; helper: string } {
+  const noun = unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
+  const places = noun ? `${noun[0].toUpperCase()}${noun.slice(1)}s` : 'Places';
+  return dated
+    ? { label: `${places} per date`, helper: 'How many can be booked for the same date. 0 means no limit.' }
+    : { label: `${places} available`, helper: 'How many can be booked in total. 0 means no limit.' };
+}
+
 /** The units a merchant may pick, from the category's allowed list. */
 export function listingPriceUnits(categoryUnits?: string[] | null): PriceUnit[] {
   const all = Object.keys(PRICE_UNIT_LABELS) as PriceUnit[];

@@ -616,13 +616,7 @@ func (ch *CheckoutHandler) resolveServicePricing(
 		}
 		priceUSD = fee + profile.AccessFeeUSD
 		calloutUSD = profile.CalloutFeeUSD
-		if bk.stay != nil {
-			b, berr := reserveStay(tx, buyerID, product, profile, bk.stay)
-			if berr != "" {
-				return 0, 0, zone, nil, nil, berr
-			}
-			booking = b
-		} else if profile.SlotDurationMinutes > 0 {
+		if profile.SlotDurationMinutes > 0 && bk.stay == nil {
 			if slotReq == nil || slotReq.SlotStart.IsZero() {
 				return 0, 0, zone, nil, nil, fmt.Sprintf("Pick a time slot for %s", product.Name)
 			}
@@ -631,6 +625,12 @@ func (ch *CheckoutHandler) resolveServicePricing(
 				slot.PartySize = bk.units
 			}
 			b, berr := ch.reserveBookingSlot(tx, buyerID, product, profile, slot)
+			if berr != "" {
+				return 0, 0, zone, nil, nil, berr
+			}
+			booking = b
+		} else {
+			b, berr := reserveUnslotted(tx, buyerID, product, profile, bk)
 			if berr != "" {
 				return 0, 0, zone, nil, nil, berr
 			}
@@ -1844,17 +1844,15 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	if priceOverrideUSD != nil {
 		// Provider-quoted price (price-on-request): the quote is the all-in
 		// service price for every unit; no tier call-out is added and there's no
-		// slot to reserve. A stay is still held: the quote prices the nights, it
-		// does not make room for them.
+		// slot to reserve. A stay's nights and seats/tickets are still held: the
+		// quote prices them, it does not make room for them.
 		priceUSD = *priceOverrideUSD
 		zone = detectedZone
-		if bk.stay != nil {
-			b, berr := reserveStay(tx, buyer.ID, product, profile, bk.stay)
-			if berr != "" {
-				return nil, berr, http.StatusBadRequest
-			}
-			booking = b
+		b, berr := reserveUnslotted(tx, buyer.ID, product, profile, bk)
+		if berr != "" {
+			return nil, berr, http.StatusBadRequest
 		}
+		booking = b
 	} else {
 		var perr string
 		priceUSD, calloutUSD, zone, menuSel, booking, perr = ch.resolveServicePricing(

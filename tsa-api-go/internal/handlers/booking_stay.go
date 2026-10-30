@@ -100,6 +100,10 @@ type bookingInput struct {
 	// months in date_range mode; 0 means one booking at the listing price.
 	units int
 	stay  *stayDates
+	// seatDay is the local day a capacity-limited seat/ticket booking without
+	// slots holds its places on: the form's date answer. nil books against the
+	// listing's whole run (a one-off event whose form asks no date).
+	seatDay *time.Time
 }
 
 // resolveBooking reads what a booking request buys from its category's mode:
@@ -121,6 +125,19 @@ func resolveBooking(db *gorm.DB, product *models.Product, profile *models.Servic
 			return in, fmt.Sprintf("You can book at most %d at a time", maxBookingUnits)
 		default:
 			in.units = quantity
+		}
+		if profile.SlotDurationMinutes <= 0 && profile.MaxCapacityPerSlot > 0 {
+			form, _ := serviceBookingForm(db, product, profile)
+			if key := seatDateKey(form); key != "" {
+				if answers == nil {
+					return in, fmt.Sprintf("Book %s from its page so you can pick a date", product.Name)
+				}
+				day, msg := parseSeatDay(form, key, answers, profile)
+				if msg != "" {
+					return in, msg
+				}
+				in.seatDay = &day
+			}
 		}
 	case models.BookingModeDateRange:
 		if answers == nil {
@@ -183,6 +200,47 @@ func parseStay(form *models.BookingFieldConfig, answers map[string]interface{}, 
 	return &stayDates{checkIn: in, checkOut: out}, ""
 }
 
+// seatDateKey is the answer a seat/ticket booking is dated by: the form's first
+// date field (a coach's travel date, an event's date), or "" when it asks none.
+func seatDateKey(form *models.BookingFieldConfig) string {
+	if form == nil {
+		return ""
+	}
+	for _, f := range form.Fields {
+		if f.Type == models.BookingFieldDate {
+			return f.Key
+		}
+	}
+	return ""
+}
+
+// parseSeatDay reads the day a seat/ticket booking is for, a local midnight in
+// the service's zone: today or later and, booked instantly, inside the booking
+// lead — the order's escrow runs to the end of that day plus the delivery grace,
+// as a slot's does, so a later day would let the buyer reclaim before it.
+func parseSeatDay(form *models.BookingFieldConfig, key string, answers map[string]interface{}, profile *models.ServiceProfile) (time.Time, string) {
+	label := key
+	for _, f := range form.Fields {
+		if f.Key == key {
+			label = answerLabel(f)
+		}
+	}
+	loc := profile.Location()
+	s, _ := answers[key].(string)
+	day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(s), loc)
+	if err != nil {
+		return time.Time{}, fmt.Sprintf("%s must be a date (YYYY-MM-DD)", label)
+	}
+	now := bookingNow().In(loc)
+	if day.Before(time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)) {
+		return time.Time{}, fmt.Sprintf("%s is in the past", label)
+	}
+	if profile.BookingType != models.BookingTypeRequest && day.AddDate(0, 0, 1).After(bookingHorizon(bookingNow())) {
+		return time.Time{}, fmt.Sprintf("Bookings made instantly must be for a date within %d days", MaxBookingLeadDays)
+	}
+	return day, ""
+}
+
 // answerLabel names a field in a message.
 func answerLabel(f models.BookingField) string {
 	if f.Label != "" {
@@ -242,6 +300,104 @@ func reserveStay(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profil
 		SlotStart: stay.checkIn.UTC(),
 		SlotEnd:   stay.checkOut.UTC(),
 		PartySize: 1,
+		Status:    models.ServiceBookingStatusReserved,
+	}, ""
+}
+
+// reserveUnslotted holds what a booking without a time slot takes: a stay's
+// nights, or seats/tickets against the listing's capacity. nil when the booking
+// holds nothing (no limit, or not a stay or quantity booking).
+func reserveUnslotted(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profile *models.ServiceProfile, bk bookingInput) (*models.ServiceBooking, string) {
+	switch {
+	case bk.stay != nil:
+		return reserveStay(tx, buyerID, product, profile, bk.stay)
+	case bk.mode == models.BookingModeQuantity && profile.SlotDurationMinutes <= 0:
+		return reserveSeats(tx, buyerID, product, profile, bk)
+	}
+	return nil, ""
+}
+
+// seatWindow is the slot range a seat/ticket hold is stored under: its day, or
+// zero times for an undated booking (a one-off event's whole run), which keeps
+// its escrow on the listing's handling days.
+func seatWindow(bk bookingInput) (start, end time.Time) {
+	if bk.seatDay == nil {
+		return time.Time{}, time.Time{}
+	}
+	return bk.seatDay.UTC(), bk.seatDay.AddDate(0, 0, 1).UTC()
+}
+
+// seatsUnavailable says why a seat/ticket booking without slots cannot have
+// its units — the listing's MaxCapacityPerSlot (0 = unlimited) already taken on
+// its day, or across every live undated booking — or "" when they fit. It fails
+// closed on an unreadable count.
+func seatsUnavailable(db *gorm.DB, product *models.Product, profile *models.ServiceProfile, bk bookingInput) string {
+	if profile.MaxCapacityPerSlot <= 0 {
+		return ""
+	}
+	start, end := seatWindow(bk)
+	held := liveServiceBookings(db, product.ID)
+	if bk.seatDay != nil {
+		held = held.Where("service_bookings.slot_start < ? AND service_bookings.slot_end > ?", end, start)
+	} else {
+		held = held.Where("service_bookings.slot_start = ?", start)
+	}
+	var taken int64
+	if err := held.Select("COALESCE(SUM(service_bookings.party_size),0)").Scan(&taken).Error; err != nil {
+		log.Printf("[booking] seat availability unreadable for service %s: %v", product.ID, err)
+		return "Could not check availability. Please try again."
+	}
+	if left := profile.MaxCapacityPerSlot - int(taken); max(bk.units, 1) > left {
+		on := ""
+		if bk.seatDay != nil {
+			on = " on " + bk.seatDay.Format("2 Jan 2006")
+		}
+		if left <= 0 {
+			return fmt.Sprintf("%s is sold out%s", product.Name, on)
+		}
+		return fmt.Sprintf("Only %d left for %s%s", left, product.Name, on)
+	}
+	return ""
+}
+
+// unslottedUnavailable is the availability check reserveUnslotted makes,
+// without holding anything: a request is checked when it is submitted so the
+// merchant is not asked to approve what is already full.
+func unslottedUnavailable(db *gorm.DB, product *models.Product, profile *models.ServiceProfile, bk bookingInput) string {
+	switch {
+	case bk.stay != nil:
+		return stayUnavailable(db, product, profile, bk.stay)
+	case bk.mode == models.BookingModeQuantity && profile.SlotDurationMinutes <= 0:
+		return seatsUnavailable(db, product, profile, bk)
+	}
+	return ""
+}
+
+// reserveSeats holds a seat/ticket booking's units, refusing them when they no
+// longer fit (seatsUnavailable).
+func reserveSeats(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profile *models.ServiceProfile, bk bookingInput) (*models.ServiceBooking, string) {
+	if profile.MaxCapacityPerSlot <= 0 {
+		return nil, ""
+	}
+	if tx.Dialector.Name() == "postgres" {
+		// The count must not race another booking into the same places.
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "svcseats:"+product.ID.String()).Error; err != nil {
+			log.Printf("[booking] seat lock failed for service %s: %v", product.ID, err)
+			return nil, "Could not check availability. Please try again."
+		}
+	}
+	if msg := seatsUnavailable(tx, product, profile, bk); msg != "" {
+		return nil, msg
+	}
+	start, end := seatWindow(bk)
+	units := max(bk.units, 1)
+	return &models.ServiceBooking{
+		ID:        uuid.New(),
+		ProductID: product.ID,
+		BuyerID:   buyerID,
+		SlotStart: start,
+		SlotEnd:   end,
+		PartySize: units,
 		Status:    models.ServiceBookingStatusReserved,
 	}, ""
 }
