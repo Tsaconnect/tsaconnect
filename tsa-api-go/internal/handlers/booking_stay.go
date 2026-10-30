@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -190,32 +191,49 @@ func answerLabel(f models.BookingField) string {
 	return f.Key
 }
 
-// reserveStay holds one unit (room, property, item) for every night of stay.
-// MaxCapacityPerSlot is the units available per night (0 = unlimited); a night
-// already holding that many live bookings refuses the stay.
+// stayUnavailable says why stay cannot be held — a night already holding the
+// listing's MaxCapacityPerSlot live bookings (units available per night,
+// 0 = unlimited) — or "" when every night has room. It fails closed: a failed
+// read refuses the stay rather than reading as empty nights.
+func stayUnavailable(db *gorm.DB, product *models.Product, profile *models.ServiceProfile, stay *stayDates) string {
+	if profile.MaxCapacityPerSlot <= 0 {
+		return ""
+	}
+	var held []models.ServiceBooking
+	if err := liveServiceBookings(db, product.ID).
+		Where("service_bookings.slot_start < ? AND service_bookings.slot_end > ?", stay.checkOut.UTC(), stay.checkIn.UTC()).
+		Select("service_bookings.slot_start, service_bookings.slot_end, service_bookings.party_size").
+		Find(&held).Error; err != nil {
+		log.Printf("[booking] stay availability unreadable for service %s: %v", product.ID, err)
+		return "Could not check availability. Please try again."
+	}
+	for night := stay.checkIn; night.Before(stay.checkOut); night = night.AddDate(0, 0, 1) {
+		taken := 0
+		for _, b := range held {
+			if b.SlotStart.Before(night.AddDate(0, 0, 1)) && b.SlotEnd.After(night) {
+				taken += b.PartySize
+			}
+		}
+		if taken+1 > profile.MaxCapacityPerSlot {
+			return fmt.Sprintf("%s is fully booked on %s", product.Name, night.Format("2 Jan 2006"))
+		}
+	}
+	return ""
+}
+
+// reserveStay holds one unit (room, property, item) for every night of stay,
+// refusing it when any night is full (stayUnavailable).
 func reserveStay(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profile *models.ServiceProfile, stay *stayDates) (*models.ServiceBooking, string) {
-	if profile.MaxCapacityPerSlot > 0 {
+	if profile.MaxCapacityPerSlot > 0 && tx.Dialector.Name() == "postgres" {
 		// Serialise stays of the same listing: the per-night check reads every
 		// overlapping booking and must not race another stay into the same nights.
-		if tx.Dialector.Name() == "postgres" {
-			tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "svcstay:"+product.ID.String())
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "svcstay:"+product.ID.String()).Error; err != nil {
+			log.Printf("[booking] stay lock failed for service %s: %v", product.ID, err)
+			return nil, "Could not check availability. Please try again."
 		}
-		var held []models.ServiceBooking
-		liveServiceBookings(tx, product.ID).
-			Where("service_bookings.slot_start < ? AND service_bookings.slot_end > ?", stay.checkOut.UTC(), stay.checkIn.UTC()).
-			Select("service_bookings.slot_start, service_bookings.slot_end, service_bookings.party_size").
-			Find(&held)
-		for night := stay.checkIn; night.Before(stay.checkOut); night = night.AddDate(0, 0, 1) {
-			taken := 0
-			for _, b := range held {
-				if b.SlotStart.Before(night.AddDate(0, 0, 1)) && b.SlotEnd.After(night) {
-					taken += b.PartySize
-				}
-			}
-			if taken+1 > profile.MaxCapacityPerSlot {
-				return nil, fmt.Sprintf("%s is fully booked on %s", product.Name, night.Format("2 Jan 2006"))
-			}
-		}
+	}
+	if msg := stayUnavailable(tx, product, profile, stay); msg != "" {
+		return nil, msg
 	}
 	return &models.ServiceBooking{
 		ID:        uuid.New(),
