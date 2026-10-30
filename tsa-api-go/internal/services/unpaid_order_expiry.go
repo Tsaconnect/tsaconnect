@@ -83,7 +83,8 @@ func RestoreOrderStock(tx *gorm.DB, order *models.Order) error {
 }
 
 // CancelUnpaidOrder cancels an order that is still awaiting payment and
-// returns its reserved stock, inside tx. It reports false, changing nothing,
+// returns its reserved stock, inside tx. A booking's slot, nights or seats are
+// released by the cancel itself. It reports false, changing nothing,
 // when the order has left pending_payment — a payment that landed first wins.
 func CancelUnpaidOrder(tx *gorm.DB, order *models.Order) (bool, error) {
 	return cancelPending(tx, order, nil)
@@ -118,6 +119,27 @@ func cancelPending(tx *gorm.DB, order *models.Order, idleBefore *time.Time) (boo
 		return false, err
 	}
 	return true, nil
+}
+
+// ReopenBookingRequest puts the booking request an unpaid order was paying
+// back to approved, so its buyer can pay again: a request converts when payment
+// starts, and would otherwise be stuck behind an order that was never paid.
+// Paying again places a new order, priced and held afresh. Called when the
+// order expires or its buyer cancels it, not when the seller does.
+func ReopenBookingRequest(tx *gorm.DB, order *models.Order) error {
+	if order.Kind != models.OrderKindService {
+		return nil
+	}
+	if err := tx.Model(&models.BookingRequest{}).
+		Where("order_id = ? AND status = ?", order.ID, models.BookingRequestConverted).
+		Updates(map[string]interface{}{
+			"status":     models.BookingRequestApproved,
+			"order_id":   nil,
+			"updated_at": time.Now(),
+		}).Error; err != nil {
+		return fmt.Errorf("reopen booking request: %w", err)
+	}
+	return nil
 }
 
 // EscrowRecord is what a verified OrderEscrow holds for an order.
@@ -218,13 +240,14 @@ func NotifyOrderEscrowed(bus *events.Bus, order *models.Order, expires time.Time
 	})
 }
 
-// UnpaidOrderExpiryService settles product orders nobody finished paying for.
+// UnpaidOrderExpiryService settles orders nobody finished paying for.
 //
 // Placing an order takes its stock before the buyer pays, and until now only
 // an explicit cancel gave it back — so a payment that failed or was abandoned
 // kept a 1-in-stock listing unbuyable for everyone else, indefinitely. And a
 // buyer whose app closed between the escrow tx and reporting it left a paid
-// order pending, the seller never told.
+// order pending, the seller never told. A booking order held its slot, nights
+// or seats the same way, and kept its booking request from being paid again.
 type UnpaidOrderExpiryService struct {
 	db     *gorm.DB
 	escrow escrowOrderReader
@@ -245,11 +268,10 @@ type staleOrder struct {
 	BuyerWallet  string
 }
 
-// ExpireUnpaidOrders visits every product order with no payment activity for
-// the TTL and settles it against the escrow: one the escrow holds, as this
-// order, is marked escrowed; one it does not hold is cancelled and its stock
-// returned. It returns how many it cancelled. Service orders are left alone:
-// they hold no stock, and one may back a converted booking request.
+// ExpireUnpaidOrders visits every order with no payment activity for the TTL
+// and settles it against the escrow: one the escrow holds, as this order, is
+// marked escrowed; one it does not hold is cancelled, its stock or booking hold
+// released and its booking request reopened. It returns how many it cancelled.
 //
 // An unreadable escrow skips the order until a later tick and is returned as
 // an error, so a persistent RPC failure is visible.
@@ -265,8 +287,8 @@ func (s *UnpaidOrderExpiryService) ExpireUnpaidOrders(ctx context.Context) (int6
 			Select("orders.*, COALESCE(NULLIF(orders.escrow_seller_wallet, ''), sellers.wallet_address) AS seller_wallet, buyers.wallet_address AS buyer_wallet").
 			Joins("LEFT JOIN users AS sellers ON sellers.id = orders.seller_id").
 			Joins("LEFT JOIN users AS buyers ON buyers.id = orders.buyer_id").
-			Where("orders.status = ? AND orders.kind <> ? AND orders.created_at >= ? AND orders.updated_at < ? AND orders.id > ?",
-				models.OrderStatusPendingPayment, models.OrderKindService, unpaidOrderExpiryFrom, cutoff, after).
+			Where("orders.status = ? AND orders.created_at >= ? AND orders.updated_at < ? AND orders.id > ?",
+				models.OrderStatusPendingPayment, unpaidOrderExpiryFrom, cutoff, after).
 			Order("orders.id").
 			Limit(unpaidOrderBatch).
 			Scan(&page).Error; err != nil {
@@ -318,7 +340,10 @@ func (s *UnpaidOrderExpiryService) settle(ctx context.Context, o *staleOrder, cu
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var err error
 		cancelled, err = cancelPending(tx, &o.Order, &cutoff)
-		return err
+		if err != nil || !cancelled {
+			return err
+		}
+		return ReopenBookingRequest(tx, &o.Order)
 	}); err != nil {
 		return false, fmt.Errorf("cancel order %s: %w", o.ID, err)
 	}
@@ -374,6 +399,12 @@ func (s *UnpaidOrderExpiryService) notifyExpired(order *models.Order) {
 		return
 	}
 	short := order.ID.String()[:8]
+	buyerMsg := fmt.Sprintf("Order #%s was cancelled because it was not paid within an hour. Nothing was charged; place it again to buy.", short)
+	sellerMsg := fmt.Sprintf("Order #%s was cancelled because the buyer did not pay within an hour. Its stock is back on sale.", short)
+	if order.Kind == models.OrderKindService {
+		buyerMsg = fmt.Sprintf("Booking #%s was cancelled because it was not paid within an hour. Nothing was charged; book again, or pay an approved request from Booking Requests.", short)
+		sellerMsg = fmt.Sprintf("Booking #%s was cancelled because the buyer did not pay within an hour. Its time, dates or places are free again.", short)
+	}
 	data := map[string]interface{}{
 		"orderId":     order.ID.String(),
 		"status":      models.OrderStatusCancelled,
@@ -383,14 +414,14 @@ func (s *UnpaidOrderExpiryService) notifyExpired(order *models.Order) {
 		Type:    events.OrderRefunded,
 		UserID:  order.BuyerID,
 		Title:   "Order Cancelled",
-		Message: fmt.Sprintf("Order #%s was cancelled because it was not paid within an hour. Nothing was charged; place it again to buy.", short),
+		Message: buyerMsg,
 		Data:    data,
 	})
 	s.bus.Publish(events.Event{
 		Type:    events.OrderRefunded,
 		UserID:  order.SellerID,
 		Title:   "Order Cancelled",
-		Message: fmt.Sprintf("Order #%s was cancelled because the buyer did not pay within an hour. Its stock is back on sale.", short),
+		Message: sellerMsg,
 		Data:    data,
 	})
 }

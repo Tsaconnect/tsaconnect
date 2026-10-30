@@ -3383,6 +3383,16 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusConflict, "This order is no longer awaiting payment")
 			return
 		}
+		// A buyer who drops an unpaid booking can still pay its request later
+		// (until the approval expires); a seller's cancel leaves it closed.
+		if isBuyer && !isSeller {
+			if err := services.ReopenBookingRequest(tx, &order); err != nil {
+				tx.Rollback()
+				log.Printf("CancelOrder error for order %s: %v", order.ID, err)
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel order")
+				return
+			}
+		}
 		if err := tx.Commit().Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")
 			return

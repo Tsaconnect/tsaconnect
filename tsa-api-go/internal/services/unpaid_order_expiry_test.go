@@ -38,6 +38,7 @@ func setupUnpaidOrderDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE products (id TEXT PRIMARY KEY, stock INTEGER, handling_days INTEGER DEFAULT 0, deleted_at DATETIME)`,
 		`CREATE TABLE service_bookings (id TEXT PRIMARY KEY, order_id TEXT, slot_end DATETIME)`,
 		`CREATE TABLE users (id TEXT PRIMARY KEY, wallet_address TEXT)`,
+		`CREATE TABLE booking_requests (id TEXT PRIMARY KEY, status TEXT, order_id TEXT, updated_at DATETIME)`,
 	} {
 		if err := db.Exec(ddl).Error; err != nil {
 			t.Fatalf("create table: %v", err)
@@ -135,7 +136,7 @@ func newSweep(db *gorm.DB, escrow escrowOrderReader, bus *events.Bus) *UnpaidOrd
 	return NewUnpaidOrderExpiryService(db, escrow, fakeTokens{}, bus)
 }
 
-func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *testing.T) {
+func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedOrders(t *testing.T) {
 	db := setupUnpaidOrderDB(t)
 	product := writeProduct(t, db, 0)
 	service := writeProduct(t, db, 5)
@@ -148,6 +149,10 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 	historical := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusPendingPayment, beforeLaunch, beforeLaunch)
 	paid := writeOrder(t, db, product, models.OrderKindProduct, models.OrderStatusEscrowed, h2, h2)
 	serviceOrder := writeOrder(t, db, service, models.OrderKindService, models.OrderStatusPendingPayment, h2, h2)
+	// The booking request the service order was paying for.
+	request := uuid.New()
+	db.Exec(`INSERT INTO booking_requests (id, status, order_id, updated_at) VALUES (?, ?, ?, ?)`,
+		request, models.BookingRequestConverted, serviceOrder, time.Now().Add(-h2))
 
 	bus := events.NewBus()
 	defer bus.Stop()
@@ -158,8 +163,8 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 	if err != nil {
 		t.Fatalf("expire: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("expected 1 order expired, got %d", n)
+	if n != 2 {
+		t.Fatalf("expected 2 orders expired, got %d", n)
 	}
 
 	want := map[uuid.UUID]string{
@@ -168,7 +173,7 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 		retriedNow:   models.OrderStatusPendingPayment, // the buyer is paying right now
 		historical:   models.OrderStatusPendingPayment, // placed before the sweep shipped
 		paid:         models.OrderStatusEscrowed,
-		serviceOrder: models.OrderStatusPendingPayment, // services hold no stock
+		serviceOrder: models.OrderStatusCancelled, // releases its booking hold
 	}
 	for id, status := range want {
 		if got := orderStatus(t, db, id); got != status {
@@ -178,11 +183,19 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 	if got := productStock(t, db, product); got != 1 {
 		t.Errorf("product stock %d, want 1 (only the abandoned order's unit returns)", got)
 	}
+	if got := productStock(t, db, service); got != 5 {
+		t.Errorf("service stock %d, want 5 (a service holds no stock)", got)
+	}
+	// Its request is payable again, with a new order.
+	var reqStatus string
+	var reqOrder *string
+	db.Raw(`SELECT status, order_id FROM booking_requests WHERE id = ?`, request).Row().Scan(&reqStatus, &reqOrder)
+	if reqStatus != models.BookingRequestApproved || reqOrder != nil {
+		t.Errorf("booking request: status %q order %v, want approved with no order", reqStatus, reqOrder)
+	}
 
-	var buyer, seller string
-	db.Raw(`SELECT buyer_id, seller_id FROM orders WHERE id = ?`, abandoned).Row().Scan(&buyer, &seller)
 	got := map[string]bool{}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 4; i++ {
 		select {
 		case id := <-notified:
 			got[id.String()] = true
@@ -190,8 +203,12 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedProductOrders(t *t
 			t.Fatal("buyer and seller must both be told the order was cancelled")
 		}
 	}
-	if !got[buyer] || !got[seller] {
-		t.Fatalf("notified %v, want buyer %s and seller %s", got, buyer, seller)
+	for _, id := range []uuid.UUID{abandoned, serviceOrder} {
+		var buyer, seller string
+		db.Raw(`SELECT buyer_id, seller_id FROM orders WHERE id = ?`, id).Row().Scan(&buyer, &seller)
+		if !got[buyer] || !got[seller] {
+			t.Fatalf("order %s: notified %v, want buyer %s and seller %s", id, got, buyer, seller)
+		}
 	}
 }
 

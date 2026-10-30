@@ -128,6 +128,65 @@ func TestBookingRequestLifecycle(t *testing.T) {
 	}
 }
 
+// A buyer who cancels the unpaid order of a booking request can pay the request
+// again; a seller's cancel leaves it closed.
+func TestBookingRequest_CancelledUnpaidOrderReopensForBuyer(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writeBookingProfile(t, db, svc.ID, models.BookingTypeRequest, models.PricingMethodFixed)
+
+	payRequest := func() (models.BookingRequest, uuid.UUID) {
+		t.Helper()
+		var r models.BookingRequest
+		db.Where("buyer_id = ?", buyer.ID).First(&r)
+		params := gin.Params{{Key: "reqId", Value: r.ID.String()}}
+		if r.Status == models.BookingRequestRequested {
+			if w := postJSON(t, seller, params, nil, ch.ApproveBookingRequest); w.Code != http.StatusOK {
+				t.Fatalf("approve: %d %s", w.Code, w.Body.String())
+			}
+		}
+		if w := postJSON(t, buyer, params, nil, ch.PayBookingRequest); w.Code != http.StatusCreated {
+			t.Fatalf("pay: expected 201, got %d: %s", w.Code, w.Body.String())
+		}
+		var paid models.BookingRequest
+		db.First(&paid, "id = ?", r.ID)
+		return paid, *paid.OrderID
+	}
+	cancel := func(by *models.User, orderID uuid.UUID) {
+		t.Helper()
+		if w := postJSON(t, by, gin.Params{{Key: "id", Value: orderID.String()}}, nil, ch.CancelOrder); w.Code != http.StatusOK {
+			t.Fatalf("cancel: expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	if w := postJSON(t, buyer, gin.Params{{Key: "id", Value: svc.ID.String()}}, map[string]interface{}{"token": "USDC"}, ch.CreateBookingRequest); w.Code != http.StatusCreated {
+		t.Fatalf("create request: %d %s", w.Code, w.Body.String())
+	}
+	req, first := payRequest()
+
+	cancel(buyer, first)
+	var reopened models.BookingRequest
+	db.First(&reopened, "id = ?", req.ID)
+	if reopened.Status != models.BookingRequestApproved || reopened.OrderID != nil {
+		t.Fatalf("after buyer cancel: status %q order %v, want approved with no order", reopened.Status, reopened.OrderID)
+	}
+
+	_, second := payRequest()
+	if second == first {
+		t.Fatal("paying again must place a new order")
+	}
+	cancel(seller, second)
+	var closed models.BookingRequest
+	db.First(&closed, "id = ?", req.ID)
+	if closed.Status != models.BookingRequestConverted {
+		t.Fatalf("after seller cancel: status %q, want converted (closed)", closed.Status)
+	}
+}
+
 // listedOrderStatus lists the buyer's booking requests and returns the one
 // row's orderStatus.
 func listedOrderStatus(t *testing.T, buyer *models.User, ch *CheckoutHandler) string {

@@ -21,7 +21,7 @@ import {
   type BookingRequest,
   type BookingRequestRow,
 } from '@/services/bookingRequestApi';
-import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
+import { payBookingRequestAndEscrow, resumeOrderPayment } from '@/services/serviceCheckout';
 import { getFieldCatalog } from '@/services/serviceListingApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useKeyedMessages } from '@/hooks/useKeyedMessages';
@@ -122,7 +122,9 @@ export default function BookingRequestsScreen() {
   const runPay = (request: BookingRequest) =>
     withBusy(request.id, async () => {
       try {
-        await payBookingRequestAndEscrow(request.id);
+        // A converted request already has its order: finish paying that one.
+        if (request.status === 'converted' && request.orderId) await resumeOrderPayment(request.orderId);
+        else await payBookingRequestAndEscrow(request.id);
         toast.show(isMcgp(request) ? 'Booking paid from your Spendable MCGP' : 'Booking paid & funded via escrow', 'success');
         load();
       } catch (e: any) {
@@ -219,6 +221,15 @@ export default function BookingRequestsScreen() {
                     </Text>
                   ) : null}
 
+                  {tab === 'buyer' && request.status === 'converted' && orderStatus === 'pending_payment' ? (
+                    <Button
+                      title="Finish payment"
+                      leftIcon="shield"
+                      onPress={() => handlePay(request)}
+                      loading={busyId === request.id}
+                      disabled={busyId === request.id}
+                    />
+                  ) : null}
                   {request.status === 'converted' && request.orderId ? (
                     <Button
                       title="View order"
