@@ -3,16 +3,12 @@
 // lets the user pick a new image (expo-image-picker), uploads it to Cloudinary,
 // and appends the returned URL to `value` via onChange.
 //
-// Reuses the app's existing image-upload mechanism — the same multipart
-// POST ${API_BASE_URL}/upload + getAuthHeaders() pattern used by the trade
-// chat/proof uploader in app/p2p/trade/[tradeId].tsx (its uploadImage() helper
-// is local/non-exported, so we call the same endpoint here directly).
+// Uploads through the shared uploadImageFile (services/imageUpload).
 import * as ImagePicker from 'expo-image-picker';
 import React, { useState } from 'react';
 import { Image, View } from 'react-native';
 import { useTheme } from '@/theme';
-import { API_BASE_URL } from '@/constants/api/config';
-import { getAuthHeaders } from '@/services/walletApi';
+import { uploadImageFile } from '@/services/imageUpload';
 import { Icon } from './Icon';
 import { PressableScale } from './PressableScale';
 import { Spinner } from './Spinner';
@@ -64,26 +60,11 @@ export const PhotoPickerTile: React.FC<PhotoPickerTileProps> = ({
 
       setUploading(true);
       const uri = result.assets[0].uri;
-      // Same wire shape as the trade screen's uploadImage(): multipart form,
-      // let RN set the multipart boundary (drop the JSON Content-Type header).
-      const form = new FormData();
-      form.append('image', {
-        uri,
-        name: `proof-${Date.now()}.jpg`,
-        type: 'image/jpeg',
-      } as any);
-      const headers = await getAuthHeaders();
-      delete headers['Content-Type'];
-      const res = await fetch(`${API_BASE_URL}/upload`, {
-        method: 'POST',
-        headers,
-        body: form as any,
-      });
-      const json = await res.json();
-      if (json?.success && json.data?.url) {
-        onChange([...value, json.data.url as string]);
+      const up = await uploadImageFile(uri, 'proof');
+      if ('url' in up) {
+        onChange([...value, up.url]);
       } else {
-        toast.error(json?.message || 'Upload failed. Please try again.');
+        toast.error(up.error);
       }
     } catch (err: any) {
       toast.error(err?.message || 'Upload failed. Please try again.');

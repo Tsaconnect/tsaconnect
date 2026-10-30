@@ -692,6 +692,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		svc.DELETE("/:id/menu/:itemId", auth, h.DeleteServiceMenuItem)
 		svc.PUT("/:id/availability", auth, h.ReplaceServiceAvailability)
 
+		// The customer's conversation with this service's provider (contact fee paid).
+		svc.POST("/:id/chat", auth, h.OpenServiceChat)
+
 		// Booking requests (unified booking engine, Phase 2 — request & approval).
 		// The literal "requests" paths coexist with the "/:id/..." param routes
 		// (same pattern as /contact-payments above).
@@ -702,6 +705,18 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// Cancel is open to either party (buyer withdraws, provider backs out).
 		svc.POST("/requests/:reqId/cancel", auth, ch.CancelBookingRequest)
 		svc.POST("/requests/:reqId/pay", auth, ch.PayBookingRequest)
+	}
+
+	// Conversations (services/chat_service.go). Every route is the caller's own:
+	// a thread they are not in answers 404.
+	chat := api.Group("/chat", auth)
+	{
+		chatSend := middleware.RateLimiterBy(60, time.Minute, perUserRateKey)
+		chat.GET("/threads", h.ListChatThreads)
+		chat.GET("/threads/:id", h.GetChatThread)
+		chat.GET("/threads/:id/messages", h.ListChatMessages)
+		chat.POST("/threads/:id/messages", chatSend, h.SendChatMessage)
+		chat.POST("/threads/:id/read", h.MarkChatRead)
 	}
 
 	// Notification routes (authenticated)

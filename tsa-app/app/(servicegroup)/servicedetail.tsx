@@ -13,7 +13,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { Modal, ScrollView, Image, Dimensions, FlatList, Alert, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import ServiceDetailCard from '../../components/services/ServiceDetail';
 import ServicePricingSheet from '../../components/services/ServicePricingSheet';
 import { useAuth } from '../../AuthContext/AuthContext';
@@ -36,6 +36,8 @@ import {
 } from '@/components/ui';
 import { ListingDetails } from '@/components/forms/ListingDetails';
 import { getServiceProfile } from '../../services/serviceListingApi';
+import { chatApi } from '@/services/chatApi';
+import { p2pErrorMessage } from '@/services/p2pErrors';
 import { contactServiceCharge, type ContactServiceCharge } from '@/utils/contactServiceCharge';
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
@@ -177,6 +179,16 @@ const ServiceDetail = () => {
   // What a contact provider charges on top of the contact fee. Null until known;
   // a provider who charges nothing has no checkout, so no Pay Now to dead-end on.
   const [providerCharge, setProviderCharge] = useState<ContactServiceCharge | null>(null);
+  const [openingChat, setOpeningChat] = useState(false);
+
+  const openChat = async () => {
+    if (!serviceId) return;
+    setOpeningChat(true);
+    const res = await chatApi.openForService(serviceId);
+    setOpeningChat(false);
+    if (res.success && res.data) router.push(`/chat/${res.data.id}`);
+    else Alert.alert('Chat unavailable', p2pErrorMessage(res));
+  };
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -415,6 +427,8 @@ const ServiceDetail = () => {
           loading={loading}
           onRevealPress={handleRevealPress}
           onCopyPress={handleCopy}
+          onChatPress={openChat}
+          chatLoading={openingChat}
           onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
           onPricingPress={
             serviceType === 'contact' && providerCharge && !providerCharge.payable

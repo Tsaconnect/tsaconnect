@@ -32,6 +32,9 @@ interface ServiceDetailCardProps {
   loading?: boolean;
   onRevealPress?: () => void;
   onCopyPress?: (value: string) => void;
+  /** Opens the in-app chat with the provider; shown once the contact is revealed. */
+  onChatPress?: () => void;
+  chatLoading?: boolean;
   /**
    * If provided, renders the "See Catalogue" link and triggers it on tap.
    * Pass undefined to hide the link entirely (e.g. when the merchant only
@@ -71,6 +74,8 @@ const ServiceDetailCard = ({
   loading,
   onRevealPress,
   onCopyPress,
+  onChatPress,
+  chatLoading,
   onCataloguePress,
   onPricingPress,
   serviceType = 'contact',
@@ -167,6 +172,17 @@ const ServiceDetailCard = ({
                 <ContactRow key={row.icon} icon={row.icon} value={row.value} showDivider={i > 0} />
               ));
             })()}
+            {onChatPress ? (
+              <Button
+                title="Chat with provider"
+                variant="secondary"
+                leftIcon="chat"
+                onPress={onChatPress}
+                loading={chatLoading}
+                disabled={chatLoading}
+                style={{ marginTop: spacing.md }}
+              />
+            ) : null}
           </AccentCard>
         ) : (
           <AccentCard padding="md" style={{ marginBottom: spacing.lg }}>

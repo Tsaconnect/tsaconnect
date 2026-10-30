@@ -329,6 +329,9 @@ const Layout = () => {
                 case "contact-requests":
                   iconName = focused ? "card-account-phone" : "card-account-phone-outline";
                   break;
+                case "messages":
+                  iconName = focused ? "message-text" : "message-text-outline";
+                  break;
                 case "referrals":
                   iconName = focused ? "account-multiple-plus" : "account-multiple-plus-outline";
                   break;
@@ -507,6 +510,13 @@ const Layout = () => {
           name="contact-requests"
           options={{
             title: "Contact Requests",
+            drawerActiveTintColor: colors.accent,
+          }}
+        />
+        <Drawer.Screen
+          name="messages"
+          options={{
+            title: "Messages",
             drawerActiveTintColor: colors.accent,
           }}
         />

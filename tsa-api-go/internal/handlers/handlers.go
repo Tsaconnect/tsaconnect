@@ -40,6 +40,10 @@ type Handlers struct {
 	// (optional/nil-safe; wired from main.go). Nil answers the user routes 503.
 	NameChanges *services.NameChangeService
 
+	// Chat runs customer–provider conversations (wired from main.go; nil
+	// answers the chat routes 503).
+	Chat *services.ChatService
+
 	// WebCodeMailer sends the TSA Connect web app's sign-in codes straight to
 	// the account's email. nil = web sign-in from a new browser is refused
 	// (a trusted browser still signs in).

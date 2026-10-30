@@ -30,16 +30,6 @@ import (
 	"gorm.io/gorm"
 )
 
-var (
-	ErrMessageEmpty    = errors.New("p2p chat: message body required")
-	ErrMessageTooLong  = errors.New("p2p chat: message exceeds maximum length")
-	ErrImageURLInvalid = errors.New("p2p chat: image must be uploaded in the app")
-)
-
-// maxBodyLen caps text messages to a sensible width. Larger payloads should
-// be uploads.
-const maxBodyLen = 4000
-
 type P2PMessageService struct {
 	db    *gorm.DB
 	bus   EventPublisher
@@ -61,14 +51,9 @@ func (m *P2PMessageService) WithClock(c Clock) *P2PMessageService {
 // SendText posts a buyer- or seller-authored text message to the trade
 // thread. Validates participant membership and length.
 func (m *P2PMessageService) SendText(ctx context.Context, tradeID, senderID uuid.UUID, body string) (*models.P2PMessage, error) {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return nil, ErrMessageEmpty
-	}
-	// Cap by rune count, not byte length — emojis and CJK are real input
-	// in P2P chats and shouldn't artificially halve the user-facing limit.
-	if utf8.RuneCountInString(body) > maxBodyLen {
-		return nil, ErrMessageTooLong
+	body, err := chatText(body)
+	if err != nil {
+		return nil, err
 	}
 	if err := m.assertParticipant(ctx, tradeID, senderID); err != nil {
 		return nil, err
@@ -91,14 +76,9 @@ func (m *P2PMessageService) SendText(ctx context.Context, tradeID, senderID uuid
 // SendImage posts an image message. ImageURL must point at the platform's
 // Cloudinary CDN — client uploads via /api/upload first.
 func (m *P2PMessageService) SendImage(ctx context.Context, tradeID, senderID uuid.UUID, imageURL string) (*models.P2PMessage, error) {
-	imageURL = strings.TrimSpace(imageURL)
-	if imageURL == "" {
-		return nil, ErrImageURLInvalid
-	}
-	// Only images from the platform's upload CDN: arbitrary hosts would be
-	// tracking pixels or worse in the counterparty's app.
-	if !isUploadedImageURL(imageURL) {
-		return nil, ErrImageURLInvalid
+	imageURL, err := chatImageURL(imageURL)
+	if err != nil {
+		return nil, err
 	}
 	if err := m.assertParticipant(ctx, tradeID, senderID); err != nil {
 		return nil, err
@@ -190,17 +170,11 @@ func (m *P2PMessageService) AdminList(ctx context.Context, tradeID uuid.UUID, f 
 // messages after f.Since in the given order. The id tiebreak keeps messages
 // written in the same instant in a stable order across pages.
 func (m *P2PMessageService) queryThread(ctx context.Context, tradeID uuid.UUID, f MessageFilter, order string) ([]models.P2PMessage, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-	q := m.db.WithContext(ctx).Model(&models.P2PMessage{}).
-		Where("trade_id = ?", tradeID).
-		Order(order).
-		Limit(limit)
+	q := m.db.WithContext(ctx).Model(&models.P2PMessage{}).Where("trade_id = ?", tradeID)
 	if f.Since != nil {
 		q = q.Where("created_at > ?", *f.Since)
 	}
+	q = messagePage(q, f, order)
 	var out []models.P2PMessage
 	if err := q.Find(&out).Error; err != nil {
 		return nil, err

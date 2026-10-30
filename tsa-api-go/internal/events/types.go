@@ -117,6 +117,10 @@ const (
 	ProductApproved = "product.approved"
 	ProductRejected = "product.rejected"
 
+	// Conversation events (services/chat_service.go): a new message for the
+	// other participant. Data: threadId, messageId, senderId.
+	ChatMessageNew = "chat.message.new"
+
 	// Wallet events
 	WalletWhitelistAdded = "wallet.whitelist_added"
 	WalletLimitChanged   = "wallet.limit_changed"

@@ -23,6 +23,10 @@ export function routeForNotification(data: NotificationData | null | undefined):
   if (type.startsWith('p2p.trade.') || type === 'p2p.message.new') {
     return data.tradeId ? `/p2p/trade/${data.tradeId}` : '/p2p/my-trades';
   }
+  // A message in a customer–provider conversation → that conversation.
+  if (type === 'chat.message.new') {
+    return isPaymentId(data.threadId) ? `/chat/${data.threadId}` : '/messages';
+  }
   // P2P capital movement → funding context (deposit) or reclaim screen (withdraw).
   if (type === 'p2p.deposit.confirmed') {
     return '/p2p/my-ads';

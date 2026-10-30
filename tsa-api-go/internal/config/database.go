@@ -241,6 +241,8 @@ func AutoMigrate() error {
 		&models.FiatLPWithdrawal{},
 		&models.LiquidityIndexCursor{},
 		&models.P2PMessage{},
+		&models.ChatThread{},
+		&models.ChatMessage{},
 		&models.P2PDispute{},
 		&models.P2PAuditLog{},
 		&models.P2PMerchantStats{},

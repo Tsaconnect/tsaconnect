@@ -156,6 +156,7 @@ var pushEvents = map[string]bool{
 	events.P2PTradeResolved:             true,
 	events.P2PTradeExpired:              true,
 	"p2p.message.new":                   true, // raw string in p2p_message_service.go (not a const)
+	events.ChatMessageNew:               true,
 	events.P2PDepositConfirmed:          true,
 	events.P2PWithdrawConfirmed:         true,
 	events.P2PDirectMoved:               true,

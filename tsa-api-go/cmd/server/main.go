@@ -2083,6 +2083,9 @@ func main() {
 	// Name change by re-verification — see buildNameChanges.
 	h.NameChanges = buildNameChanges(cfg, mcgpSwapService, rampTreasury, blockchainService, eventBus, scheduler)
 
+	// Customer–provider conversations (contact services today).
+	h.Chat = services.NewChatService(config.DB, eventBus)
+
 	// Setup all routes
 	if alert := netlifyProxyAlert(cfg); alert != "" {
 		log.Print(alert)

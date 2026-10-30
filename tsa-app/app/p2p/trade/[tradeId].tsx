@@ -35,11 +35,10 @@ import {
   Platform,
   RefreshControl,
   ScrollView,
-  TextInput,
   View,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -58,7 +57,6 @@ import { PayToCard } from '@/components/p2p/PayToCard';
 import { PaymentProof } from '@/components/p2p/PaymentProof';
 import { payToFromPayee, payToFromPm } from '@/utils/payInto';
 import { useAuth } from '../../../AuthContext/AuthContext';
-import { API_BASE_URL } from '../../../constants/api/config';
 import { MAINNET_CHAINS, TESTNET_CHAINS } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
 import { useTradeExpiryReminder } from '../../../hooks/useTradeExpiryReminder';
@@ -94,7 +92,9 @@ import {
   tradeFeeLines,
   type TradeActions,
 } from '../../../utils/p2pTradeView';
-import { getAuthHeaders } from '../../../services/walletApi';
+import { uploadImageFile } from '@/services/imageUpload';
+import { ChatComposer, type ChatOutgoing } from '@/components/chat/ChatComposer';
+import { ChatMessageBubble } from '@/components/chat/ChatMessageBubble';
 
 // Slow safety reconcile — the fast path is WS events (useTradeRealtime). This
 // only backstops dropped/missed events and system messages (which emit none).
@@ -108,7 +108,6 @@ const STAGES: { key: P2PTrade['status']; label: string }[] = [
 
 const TradeDetailScreen: React.FC = () => {
   const { colors, spacing } = useTheme();
-  const insets = useSafeAreaInsets();
   const { tradeId } = useLocalSearchParams<{ tradeId: string }>();
   const { currentUser } = useAuth();
   const user = currentUser as { id?: string } | null;
@@ -117,8 +116,6 @@ const TradeDetailScreen: React.FC = () => {
   const [messages, setMessages] = useState<P2PMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState<string>(''); // current action stage
-  const [composerText, setComposerText] = useState('');
-  const [composerImage, setComposerImage] = useState<string | null>(null);
   const [rated, setRated] = useState(false);
   // Dispute for this trade — fetched lazily on a resolved trade so we can show
   // the on-chain resolution tx (resolveTxHash lives on the dispute, not trade).
@@ -129,7 +126,6 @@ const TradeDetailScreen: React.FC = () => {
   const toast = useToast();
   const [refreshing, setRefreshing] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
-  const inputRef = useRef<TextInput>(null);
   // Chat is collapsed by default — it's secondary to the trade actions. The
   // header shows a count of counterparty messages that arrived while it was
   // closed (the docked composer only mounts while the chat is open).
@@ -501,52 +497,18 @@ const TradeDetailScreen: React.FC = () => {
       applyFollowUp(stashedConfirmFollowUp(r, rec), { toast, reload: load });
     });
 
-  const handleSendMessage = async () => {
-    if (composerImage) {
-      const url = await uploadImage(composerImage, startActing);
-      stopActing();
-      if (url) {
-        const res = await messagesApi.sendImage(trade.id, url);
-        if (res.success && res.data) {
-          setMessages((prev) => [...prev, res.data!]);
-        } else {
-          Alert.alert('Send failed', p2pErrorMessage(res));
-        }
-      }
-      setComposerImage(null);
-      return;
-    }
-    const text = composerText.trim();
-    if (!text) return;
-    setComposerText('');
-    const res = await messagesApi.sendText(trade.id, text);
+  const handleSendMessage = async (msg: ChatOutgoing): Promise<boolean> => {
+    const res =
+      'imageUrl' in msg
+        ? await messagesApi.sendImage(trade.id, msg.imageUrl)
+        : await messagesApi.sendText(trade.id, msg.text);
     if (res.success && res.data) {
       setMessages((prev) => [...prev, res.data!]);
-    } else {
-      Alert.alert('Send failed', p2pErrorMessage(res));
-      setComposerText(text); // restore so user doesn't lose their message
+      return true;
     }
+    Alert.alert('Send failed', p2pErrorMessage(res));
+    return false;
   };
-
-  const pickImage = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission required', 'Allow photo library access to attach images.');
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: false,
-      quality: 0.8,
-    });
-    if (!result.canceled && result.assets?.[0]) {
-      setComposerImage(result.assets[0].uri);
-    }
-  };
-
-  // ─── Render ───────────────────────────────────────────────────────────────
-
-  const canSend = !acting && (!!composerImage || !!composerText.trim());
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['top']}>
@@ -776,7 +738,7 @@ const TradeDetailScreen: React.FC = () => {
                 </Text>
               ) : (
                 messages.map((m) => (
-                  <MessageBubble key={m.id} message={m} isMine={m.senderId === user?.id} />
+                  <ChatMessageBubble key={m.id} message={m} isMine={m.senderId === user?.id} />
                 ))
               )}
             </View>
@@ -784,95 +746,7 @@ const TradeDetailScreen: React.FC = () => {
         </ScrollView>
 
         {!isTerminal && chatOpen && (
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'flex-end',
-              gap: spacing.sm,
-              paddingHorizontal: spacing.md,
-              paddingTop: spacing.sm,
-              // Add the bottom safe-area inset so the input clears the phone's
-              // gesture bar / nav buttons (the screen's SafeAreaView only insets
-              // the top, since the composer is docked outside the scroll area).
-              paddingBottom: spacing.sm + insets.bottom,
-              backgroundColor: colors.surface,
-              borderTopWidth: 1,
-              borderTopColor: colors.hairline,
-            }}
-          >
-            {composerImage ? (
-              <View style={{ flex: 1, position: 'relative' }}>
-                <Image
-                  source={{ uri: composerImage }}
-                  style={{ width: 80, height: 80, borderRadius: 8 }}
-                />
-                <PressableScale
-                  onPress={() => setComposerImage(null)}
-                  accessibilityLabel="Remove attached image"
-                  style={{
-                    position: 'absolute',
-                    top: 4,
-                    left: 60,
-                    backgroundColor: colors.overlay,
-                    borderRadius: 12,
-                    width: 24,
-                    height: 24,
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <Icon name="close" size={16} color={colors.textInverse} />
-                </PressableScale>
-              </View>
-            ) : (
-              <View
-                style={{
-                  flex: 1,
-                  maxHeight: 120,
-                  justifyContent: 'center',
-                  backgroundColor: colors.surfaceAlt,
-                  borderRadius: 20,
-                  paddingHorizontal: spacing.md,
-                }}
-              >
-                {/* minHeight on the TextInput (not the wrapper) makes the WHOLE
-                    pill a tap target — previously a centered, content-height
-                    input left only a thin tappable strip in the middle. */}
-                <TextInput
-                  ref={inputRef}
-                  value={composerText}
-                  onChangeText={setComposerText}
-                  placeholder="Type a message…"
-                  placeholderTextColor={colors.textMuted}
-                  multiline
-                  editable={!acting}
-                  style={{
-                    color: colors.textPrimary,
-                    fontSize: 14,
-                    minHeight: 40,
-                    paddingVertical: spacing.sm,
-                    textAlignVertical: 'center',
-                  }}
-                />
-              </View>
-            )}
-            <IconButton
-              icon="image"
-              accessibilityLabel="Attach image"
-              color={colors.accent}
-              disabled={!!acting}
-              onPress={pickImage}
-            />
-            <IconButton
-              icon="send"
-              variant="surface"
-              accessibilityLabel="Send message"
-              color={canSend ? colors.onAccent : colors.textMuted}
-              disabled={!canSend}
-              onPress={handleSendMessage}
-              style={{ backgroundColor: canSend ? colors.accent : colors.surfaceAlt }}
-            />
-          </View>
+          <ChatComposer onSend={handleSendMessage} disabled={!!acting} uploadName="p2p" />
         )}
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -1069,65 +943,6 @@ const ActionPanel: React.FC<{
   );
 };
 
-const MessageBubble: React.FC<{ message: P2PMessage; isMine: boolean }> = ({
-  message,
-  isMine,
-}) => {
-  const { colors, spacing, radius } = useTheme();
-  if (message.type === 'system' || message.type === 'bot') {
-    return (
-      <View
-        style={{
-          alignSelf: 'center',
-          backgroundColor: colors.surfaceAlt,
-          paddingHorizontal: spacing.md,
-          paddingVertical: spacing.xs,
-          borderRadius: radius.md,
-          maxWidth: '90%',
-          marginVertical: spacing.xs,
-        }}
-      >
-        <Text variant="caption" color="textSecondary" align="center" style={{ fontStyle: 'italic' }}>
-          {message.body}
-        </Text>
-      </View>
-    );
-  }
-  return (
-    <View
-      style={{
-        maxWidth: '85%',
-        paddingHorizontal: spacing.md,
-        paddingVertical: spacing.sm,
-        borderRadius: radius.lg,
-        alignSelf: isMine ? 'flex-end' : 'flex-start',
-        backgroundColor: isMine ? colors.accent : colors.surface,
-        borderWidth: isMine ? 0 : 1,
-        borderColor: colors.hairline,
-        borderBottomRightRadius: isMine ? radius.sm : radius.lg,
-        borderBottomLeftRadius: isMine ? radius.lg : radius.sm,
-      }}
-    >
-      {message.type === 'image' && message.imageUrl ? (
-        <Image
-          source={{ uri: message.imageUrl }}
-          style={{ width: 200, height: 200, borderRadius: radius.sm }}
-        />
-      ) : (
-        <Text variant="bodySm" style={{ color: isMine ? colors.onAccent : colors.textPrimary }}>
-          {message.body}
-        </Text>
-      )}
-      <Text
-        variant="caption"
-        style={{ marginTop: spacing.xs, color: isMine ? colors.onAccent : colors.textMuted }}
-      >
-        {formatTime(message.createdAt)}
-      </Text>
-    </View>
-  );
-};
-
 // On-chain settlement receipt: truncated tx hash that opens the block explorer
 // on tap, plus a copy affordance. Shown to BOTH parties on a released trade so
 // either can independently verify the released tokens on-chain.
@@ -1202,30 +1017,11 @@ async function uploadImage(
   uri: string,
   onStage: (s: string) => void
 ): Promise<string | null> {
-  try {
-    onStage('Uploading image…');
-    const form = new FormData();
-    // RN FormData accepts the file-descriptor object shape.
-    form.append('image', {
-      uri,
-      name: `p2p-${Date.now()}.jpg`,
-      type: 'image/jpeg',
-    } as any);
-    const headers = await getAuthHeaders();
-    delete headers['Content-Type']; // let RN set the multipart boundary
-    const res = await fetch(`${API_BASE_URL}/upload`, {
-      method: 'POST',
-      headers,
-      body: form as any,
-    });
-    const json = await res.json();
-    if (json?.success && json.data?.url) return json.data.url as string;
-    Alert.alert('Upload failed', json?.message || 'Cloudinary rejected the upload');
-    return null;
-  } catch (err) {
-    Alert.alert('Upload failed', errorMessage(err));
-    return null;
-  }
+  onStage('Uploading image…');
+  const up = await uploadImageFile(uri, 'p2p');
+  if ('url' in up) return up.url;
+  Alert.alert('Upload failed', up.error);
+  return null;
 }
 
 async function pickAndUploadImage(onStage: (s: string) => void): Promise<string | null> {
@@ -1268,9 +1064,5 @@ function formatRelative(iso: string): string {
   return `${Math.round(ms / 60_000)}m`;
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-}
 
 export default TradeDetailScreen;
