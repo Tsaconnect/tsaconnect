@@ -80,6 +80,7 @@ jest.mock('@/components/ui', () => {
     SegmentedControl: (props: any) => react.createElement(View, { testID: 'segmented', value: props.value }, props.segments.map((s: any) =>
       react.createElement(RNText, { key: s.key, accessibilityLabel: `segment:${s.key}`, onPress: () => props.onChange(s.key) }, s.label))),
     Sheet: (props: any) => (props.visible ? react.createElement(View, null, props.children) : null),
+    InlineMessage: (props: any) => (props.message ? react.createElement(RNText, null, props.message) : null),
     useToast: () => mockToast,
   };
 });
@@ -447,7 +448,7 @@ describe('A payment link', () => {
     await press('Confirm cancel link');
     // Nothing left to confirm: the sheet closes, she is told why, and the link shows as it now is.
     expect(text(tree)).not.toContain("This can't be undone");
-    expect(mockToast.error).toHaveBeenCalledWith("This link can't be cancelled — it's already being paid, paid, or closed");
+    expect(text(tree)).toContain("This link can't be cancelled — it's already being paid, paid, or closed");
     expect(text(tree)).toContain('Being paid');
   });
 

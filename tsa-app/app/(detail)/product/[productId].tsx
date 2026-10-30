@@ -45,6 +45,7 @@ import {
   EmptyState,
   Icon,
   type IconName,
+  InlineMessage,
   Input,
   PressableScale,
   Spinner,
@@ -91,6 +92,7 @@ export default function ProductDetailsScreen() {
   const [product, setProduct] = useState<Product | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [cartError, setCartError] = useState<string | null>(null);
   const { token } = useAuth();
   const { cartCount } = useCartCount();
   const { width: windowWidth } = useWindowDimensions();
@@ -318,6 +320,7 @@ export default function ProductDetailsScreen() {
     if (!product || inFlight.current) return false;
     inFlight.current = true;
     setPendingAction(action);
+    setCartError(null);
     try {
       const selectedAttributes = buildSelectedAttributes();
       const request: AddToCartRequest = {
@@ -329,7 +332,7 @@ export default function ProductDetailsScreen() {
       };
       const res = await cartService.addToCart(request);
       if (!res.success) {
-        toast.error(res.message || 'Could not update your cart. Try again.');
+        setCartError(res.message || 'Could not update your cart. Try again.');
         return false;
       }
       // The add returns the whole cart; it supersedes any read still in flight.
@@ -337,7 +340,7 @@ export default function ProductDetailsScreen() {
       applyCartItems(res.data?.items);
       return true;
     } catch (error: any) {
-      toast.error(error.message || 'Could not update your cart. Try again.');
+      setCartError(error.message || 'Could not update your cart. Try again.');
       return false;
     } finally {
       inFlight.current = false;
@@ -859,6 +862,7 @@ export default function ProductDetailsScreen() {
       <BottomActionBar>
         {isInStock ? (
           <>
+            <InlineMessage message={cartError} onDismiss={() => setCartError(null)} />
             {inCartQty > 0 && (
               <PressableScale
                 onPress={() => router.push('/cart')}

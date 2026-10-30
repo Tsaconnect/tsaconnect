@@ -75,3 +75,5 @@ export { HeaderBackButton, headerBackLeft } from './HeaderBackButton';
 export type { HeaderBackButtonProps } from './HeaderBackButton';
 export { Stepper } from './Stepper';
 export type { Step, StepState, StepperProps } from './Stepper';
+export { InlineMessage } from './InlineMessage';
+export type { InlineMessageProps, InlineMessageTone } from './InlineMessage';

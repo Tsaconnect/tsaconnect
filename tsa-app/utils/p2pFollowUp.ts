@@ -1,5 +1,6 @@
 // utils/p2pFollowUp.ts — the one place a P2P screen turns a follow-up
-// (services/p2pTx.P2PFollowUp) into UI: the KYC prompt, a toast, an alert,
+// (services/p2pTx.P2PFollowUp) into UI: the KYC prompt, a toast or inline
+// error, an alert,
 // navigation and the reload. Screens build the follow-up with p2pTxFollowUp
 // (or a helper over it) and hand it here, so every P2P action routes a KYC
 // refusal, offers "View trade" and reloads the same way.
@@ -9,6 +10,8 @@ import { promptKycRefusal } from '@/utils/kycRefusal';
 
 export interface FollowUpHandlers {
   toast?: { show: (message: string, type?: 'success' | 'error' | 'info') => void };
+  /** Shows an error inline on the screen instead of a toast that times out. */
+  onError?: (message: string) => void;
   reload?: () => void;
   /** Go to a trade (P2PFollowUp.navigate or the alert's "View trade"). */
   navigate?: (tradeId: string) => void;
@@ -16,7 +19,8 @@ export interface FollowUpHandlers {
 
 export function applyFollowUp(next: P2PFollowUp, h: FollowUpHandlers): void {
   if (next.kyc && promptKycRefusal(next.kyc.code, next.kyc.message, 'p2p')) return;
-  if (next.toast) h.toast?.show(next.toast.message, next.toast.type);
+  if (next.toast?.type === 'error' && h.onError) h.onError(next.toast.message);
+  else if (next.toast) h.toast?.show(next.toast.message, next.toast.type);
   const { alert, navigate } = next;
   if (alert) {
     let buttons: AlertButton[] | undefined;

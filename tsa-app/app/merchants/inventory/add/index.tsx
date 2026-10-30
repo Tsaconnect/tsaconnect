@@ -8,7 +8,7 @@
 // auto-fill math (now in useMerchantPricing), attribute
 // add/remove, the full validateForm() rule set, LocationPicker wiring, and the
 // reset + router.back() success flow. Only the chrome changed: legacy GOLD/
-// StyleSheet → tokens + primitives; the result Modal → useToast; the category
+// StyleSheet → tokens + primitives; the result Modal → InlineMessage (errors) + useToast (success); the category
 // Modal → a Sheet keeping the rich CategoryAvatar list.
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -32,6 +32,7 @@ import {
   Avatar,
   Button,
   Icon,
+  InlineMessage,
   Input,
   PressableScale,
   SelectRow,
@@ -73,6 +74,9 @@ const AddProduct = () => {
   const toast = useToast();
   const { token } = useAuth();
   const [loading, setLoading] = useState(false);
+  const [categoriesError, setCategoriesError] = useState<string | null>(null);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const pricing = useMerchantPricing();
   const promotion = usePromotion(pricing);
@@ -115,6 +119,7 @@ const AddProduct = () => {
 
   const fetchCategories = async () => {
     setCategoriesLoading(true);
+    setCategoriesError(null);
     try {
       const response = await api.getCategories({ type: 'Product', active: true });
       if (response.success && response.data) {
@@ -129,7 +134,7 @@ const AddProduct = () => {
         }
       }
     } catch (error) {
-      showModal('error', 'Failed to load categories');
+      setCategoriesError('Could not load categories. Check your connection and try again.');
     } finally {
       setCategoriesLoading(false);
     }
@@ -139,7 +144,7 @@ const AddProduct = () => {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        showModal('error', 'Permission to access media library denied!');
+        setImageError('Allow photo library access in Settings to add product photos.');
         return;
       }
 
@@ -151,12 +156,13 @@ const AddProduct = () => {
         selectionLimit: 10 - productImages.length,
       });
 
+      setImageError(null);
       if (!result.canceled && result.assets.length > 0) {
         const newImages = result.assets.map(asset => asset.uri);
         setProductImages(prev => [...prev, ...newImages].slice(0, 10));
       }
     } catch (error) {
-      showModal('error', 'Failed to pick images');
+      setImageError('Could not open your photos. Try again.');
     }
   };
 
@@ -168,7 +174,7 @@ const AddProduct = () => {
     try {
       const { status } = await ImagePicker.requestCameraPermissionsAsync();
       if (status !== 'granted') {
-        showModal('error', 'Camera permission denied!');
+        setImageError('Allow camera access in Settings to take a product photo.');
         return;
       }
 
@@ -178,11 +184,12 @@ const AddProduct = () => {
         quality: 0.8,
       });
 
+      setImageError(null);
       if (!result.canceled && result.assets[0]) {
         setProductImages(prev => [...prev, result.assets[0].uri].slice(0, 10));
       }
     } catch (error) {
-      showModal('error', 'Failed to take photo');
+      setImageError('Could not take the photo. Try again.');
     }
   };
 
@@ -238,10 +245,11 @@ const AddProduct = () => {
 
   const createProduct = async () => {
     if (!validateForm()) {
-      showModal('error', 'Please fix all errors before submitting');
+      setSubmitError('Some fields need attention. Fix the ones marked in red and publish again.');
       return;
     }
 
+    setSubmitError(null);
     setLoading(true);
 
     try {
@@ -279,7 +287,7 @@ const AddProduct = () => {
       const response = await api.createProduct(formData);
 
       if (response.success) {
-        showModal('success', 'Product created successfully!');
+        toast.success('Product created');
         resetForm();
         setTimeout(() => {
           if (router.canGoBack()) {
@@ -291,7 +299,7 @@ const AddProduct = () => {
       }
     } catch (error) {
       console.error('Create product error:', error);
-      showModal('error', (error as any).message || 'An error occurred while creating product');
+      setSubmitError((error as any).message || 'Could not create the product. Try again.');
     } finally {
       setLoading(false);
     }
@@ -315,12 +323,6 @@ const AddProduct = () => {
     setListingValues({});
     setListingErrors({});
     setErrors({});
-  };
-
-  // Result feedback now uses the toast system; signature is preserved so every
-  // call site (validation, permission denials, success, server error) is verbatim.
-  const showModal = (type: 'success' | 'error' | 'info', message: string) => {
-    toast.show(message, type);
   };
 
   const filteredCategories = categories.filter(
@@ -365,6 +367,7 @@ const AddProduct = () => {
               {errors.images}
             </Text>
           )}
+          <InlineMessage message={imageError} onDismiss={() => setImageError(null)} style={{ marginBottom: spacing.sm }} />
 
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <PressableScale
@@ -487,11 +490,15 @@ const AddProduct = () => {
                 <Text variant="bodySm" weight="600" color="textSecondary" style={{ marginBottom: spacing.xs }}>
                   Category *
                 </Text>
-                <PressableScale onPress={fetchCategories} style={{ paddingVertical: spacing.md }}>
-                  <Text variant="bodySm" color="textMuted">
-                    No categories found. Tap to retry.
-                  </Text>
-                </PressableScale>
+                {categoriesError ? (
+                  <InlineMessage message={categoriesError} actionLabel="Try again" onAction={fetchCategories} />
+                ) : (
+                  <PressableScale onPress={fetchCategories} style={{ paddingVertical: spacing.md }}>
+                    <Text variant="bodySm" color="textMuted">
+                      No categories found. Tap to retry.
+                    </Text>
+                  </PressableScale>
+                )}
               </View>
             ) : (
               <SelectRow
@@ -720,6 +727,7 @@ const AddProduct = () => {
             </View>
           )}
 
+          <InlineMessage message={submitError} style={{ marginTop: spacing['2xl'] }} />
           <Button
             title="Publish Product"
             leftIcon="cart"
@@ -727,7 +735,7 @@ const AddProduct = () => {
             disabled={loading}
             loading={loading}
             size="lg"
-            style={{ marginTop: spacing['2xl'] }}
+            style={{ marginTop: submitError ? spacing.md : spacing['2xl'] }}
           />
 
           <Text variant="caption" color="textMuted" align="center" style={{ marginTop: spacing.md }}>

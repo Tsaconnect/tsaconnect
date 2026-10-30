@@ -27,6 +27,7 @@ jest.mock('@/components/ui', () => {
     Card: box,
     EmptyState: () => null,
     Spinner: () => null,
+    InlineMessage: (props: any) => (props.message ? react.createElement(RNText, null, props.message) : null),
     useToast: () => mockToast,
   };
 });

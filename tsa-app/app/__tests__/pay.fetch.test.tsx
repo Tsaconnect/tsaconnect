@@ -48,6 +48,7 @@ jest.mock('@/components/ui', () => {
     Card: box,
     SummaryCard: box,
     SummaryRow: (props: any) => react.createElement(RNText, null, `${props.label}: ${props.value}`),
+    InlineMessage: (props: any) => (props.message ? react.createElement(RNText, null, props.message) : null),
     useToast: () => ({ error: jest.fn() }),
   };
 });

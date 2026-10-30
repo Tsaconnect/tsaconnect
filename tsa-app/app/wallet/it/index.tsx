@@ -24,7 +24,7 @@
 // currencies show Sell with no Buy. The legs come from the live order book via
 // rampLegsFor, so a leg that opens or closes at the provider is reflected
 // without shipping anything.
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
@@ -36,11 +36,11 @@ import {
   Card,
   Divider,
   Icon,
+  InlineMessage,
   PickerSheet,
   PressableScale,
   Skeleton,
   Text,
-  useToast,
 } from '@/components/ui';
 import ITActivityRow, { ACTIVITY_DIVIDER_INSET } from '@/components/it/ITActivityRow';
 import TokenAvatar from '@/components/wallet/TokenAvatar';
@@ -116,7 +116,6 @@ type AssetRow = {
 
 export default function ITHub() {
   const { colors, spacing } = useTheme();
-  const toast = useToast();
   const { formatPrice, allRates } = useCurrency();
   const symbolFor = useFiatSymbol();
   const { address, ready: walletReady } = useSignableWallet();
@@ -210,12 +209,17 @@ export default function ITHub() {
   // fresh object each call, and an unstable dependency would rebuild every row
   // on every render.
   const legs = useMemo(() => rampLegsFor(currencies, code), [currencies, code]);
+  // Why a tapped side is closed, shown under that asset's row until dismissed
+  // or the currency changes (which changes what is open).
+  const [closedNotice, setClosedNotice] = useState<{ token: string; message: string } | null>(null);
+  useEffect(() => setClosedNotice(null), [code]);
 
   const assets: AssetRow[] = useMemo(() => {
     // A side that trades opens its screen. A side closed for now keeps its
     // button and says why on a tap (see utils/rampRow.ts) — a button that
     // simply vanished read as a bug (owner, 2026-10-02).
     const rowAction = (
+      token: string,
       label: string,
       live: boolean,
       open: () => void,
@@ -223,7 +227,10 @@ export default function ITHub() {
     ): RowAction | undefined => {
       if (live) return { onPress: open };
       if (!closed) return undefined;
-      return { onPress: () => toast.info(closed), accessibilityLabel: `${label}, not available right now` };
+      return {
+        onPress: () => setClosedNotice({ token, message: closed }),
+        accessibilityLabel: `${label}, not available right now`,
+      };
     };
 
     // Until the wallet check resolves, no row knows its balance or what it may
@@ -263,8 +270,8 @@ export default function ITHub() {
 
       return {
         ...base,
-        buy: rowAction(`Buy ${token}`, actions.buy, () => router.push(route('buy') as never), actions.closed?.buy),
-        sell: rowAction(`Sell ${token}`, actions.sell, () => router.push(route('sell') as never), actions.closed?.sell),
+        buy: rowAction(token, `Buy ${token}`, actions.buy, () => router.push(route('buy') as never), actions.closed?.buy),
+        sell: rowAction(token, `Sell ${token}`, actions.sell, () => router.push(route('sell') as never), actions.closed?.sell),
       };
     };
     // MCGP needs a wallet this device can sign for, like the stablecoins, and
@@ -313,12 +320,14 @@ export default function ITHub() {
         : {
             ...anyTokenRow,
             buy: rowAction(
+              anyTokenRow.token,
               'Buy other tokens',
               anyTokenActions.buy,
               () => router.push(anyTokenRoute('buy') as never),
               anyTokenActions.closed?.buy,
             ),
             sell: rowAction(
+              anyTokenRow.token,
               'Sell other tokens',
               anyTokenActions.sell,
               () => router.push(anyTokenRoute('sell') as never),
@@ -338,7 +347,6 @@ export default function ITHub() {
     spendable,
     mcgpRateLine,
     swappedSellEnabled,
-    toast,
   ]);
 
   const activity = useMemo(
@@ -464,6 +472,14 @@ export default function ITHub() {
                   </View>
                 )}
               </View>
+              {closedNotice?.token === a.token ? (
+                <InlineMessage
+                  tone="info"
+                  message={closedNotice.message}
+                  onDismiss={() => setClosedNotice(null)}
+                  style={{ marginTop: spacing.sm }}
+                />
+              ) : null}
             </View>
           ))}
         </Card>

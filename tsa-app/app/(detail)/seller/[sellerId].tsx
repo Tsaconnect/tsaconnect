@@ -7,7 +7,7 @@
 // FlatList config are preserved verbatim — this is a visual / structural migration
 // only. The keyExtractor now coerces the (possibly-undefined) item key to a string,
 // keeping the prior behavior while clearing the pre-existing TS error.
-import React, { useCallback } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   View,
   FlatList,
@@ -35,11 +35,11 @@ import {
   ErrorState,
   Icon,
   IconButton,
+  InlineMessage,
   PressableScale,
   Spinner,
   Surface,
   Text,
-  useToast,
 } from '@/components/ui';
 
 export default function SellerCatalogueScreen() {
@@ -58,7 +58,7 @@ export default function SellerCatalogueScreen() {
   const router = useRouter();
   const { colors, spacing } = useTheme();
   const { currency, rate } = useCurrency();
-  const toast = useToast();
+  const [contactError, setContactError] = useState<string | null>(null);
 
   const fmtPrice = (usd: number) => formatPriceUtil(usd, { currency, rate });
 
@@ -113,10 +113,11 @@ export default function SellerCatalogueScreen() {
     const body = encodeURIComponent(
       `Hi ${sellerData.name ?? 'there'},\n\nI found your store on TSA Connect and would like to ask about your listings.\n\n`
     );
+    setContactError(null);
     Linking.openURL(`mailto:${sellerData.email}?subject=${subject}&body=${body}`).catch(() => {
-      toast.error('No email app is set up on this device');
+      setContactError(`No email app is set up on this device. You can email the seller at ${sellerData.email}.`);
     });
-  }, [sellerData, toast]);
+  }, [sellerData]);
 
   const handleShareSeller = useCallback(() => {
     if (!sellerData) return;
@@ -130,10 +131,11 @@ export default function SellerCatalogueScreen() {
   const handleCallSeller = useCallback(() => {
     if (!showCall || !sellerData?.phoneNumber) return;
     const digits = sellerData.phoneNumber.replace(/[^\d+]/g, '');
+    setContactError(null);
     Linking.openURL(`tel:${digits}`).catch(() => {
-      toast.error('Could not start the call');
+      setContactError(`Could not start the call. You can dial the seller on ${sellerData.phoneNumber}.`);
     });
-  }, [sellerData, showCall, toast]);
+  }, [sellerData, showCall]);
 
   const renderProduct = useCallback(({ item }: { item: any }) => (
     <PressableScale
@@ -275,6 +277,11 @@ export default function SellerCatalogueScreen() {
               </View>
             )}
           </View>
+          <InlineMessage
+            message={contactError}
+            onDismiss={() => setContactError(null)}
+            style={{ marginTop: spacing.md }}
+          />
         </Card>
 
         {/* Seller details */}
@@ -330,7 +337,7 @@ export default function SellerCatalogueScreen() {
         </View>
       </View>
     );
-  }, [sellerData, handleContactSeller, handleCallSeller, showCall, colors, spacing]);
+  }, [sellerData, handleContactSeller, handleCallSeller, showCall, contactError, colors, spacing]);
 
   const renderEmptyState = useCallback(() => (
     <View style={{ flex: 1, justifyContent: 'center' }}>

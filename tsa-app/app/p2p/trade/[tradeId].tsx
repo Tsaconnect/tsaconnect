@@ -47,6 +47,7 @@ import {
   Card,
   Icon,
   IconButton,
+  InlineMessage,
   PressableScale,
   Spinner,
   StatusPill,
@@ -949,6 +950,7 @@ const ActionPanel: React.FC<{
 const SettlementTxLink: React.FC<{ chainId: number; txHash: string }> = ({ chainId, txHash }) => {
   const { colors, spacing } = useTheme();
   const toast = useToast();
+  const [openError, setOpenError] = useState<string | null>(null);
   // Reconciler-repaired release: no real tx hash to show. Be honest rather than
   // render a broken link / copy a useless "reconciled" string.
   if (!isTxHash(txHash)) {
@@ -961,30 +963,42 @@ const SettlementTxLink: React.FC<{ chainId: number; txHash: string }> = ({ chain
   const url = explorerTxUrl(chainId, txHash);
   const short = `${txHash.slice(0, 6)}…${txHash.slice(-4)}`;
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-      <PressableScale
-        onPress={() => {
-          if (url) Linking.openURL(url).catch(() => toast.error('Could not open the explorer'));
-        }}
-        disabled={!url}
-        accessibilityRole="link"
-        accessibilityLabel="View release transaction on the block explorer"
-      >
-        <Text variant="bodySm" weight="600" color={url ? 'accent' : 'textSecondary'} numeric>
-          {short}
-        </Text>
-      </PressableScale>
-      <PressableScale
-        onPress={async () => {
-          await Clipboard.setStringAsync(txHash);
-          toast.success('Transaction hash copied');
-        }}
-        accessibilityRole="button"
-        accessibilityLabel="Copy transaction hash"
-        hitSlop={8}
-      >
-        <Icon name="copy" size={14} color={colors.textMuted} />
-      </PressableScale>
+    <View style={{ gap: spacing.sm }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
+        <PressableScale
+          onPress={() => {
+            if (!url) return;
+            setOpenError(null);
+            Linking.openURL(url).catch(() =>
+              setOpenError('Could not open the block explorer. Copy the hash to look it up yourself.'),
+            );
+          }}
+          disabled={!url}
+          accessibilityRole="link"
+          accessibilityLabel="View release transaction on the block explorer"
+        >
+          <Text variant="bodySm" weight="600" color={url ? 'accent' : 'textSecondary'} numeric>
+            {short}
+          </Text>
+        </PressableScale>
+        <PressableScale
+          onPress={async () => {
+            setOpenError(null);
+            try {
+              await Clipboard.setStringAsync(txHash);
+              toast.success('Transaction hash copied');
+            } catch {
+              setOpenError(`Could not copy the hash. It is ${txHash}`);
+            }
+          }}
+          accessibilityRole="button"
+          accessibilityLabel="Copy transaction hash"
+          hitSlop={8}
+        >
+          <Icon name="copy" size={14} color={colors.textMuted} />
+        </PressableScale>
+      </View>
+      <InlineMessage message={openError} onDismiss={() => setOpenError(null)} />
     </View>
   );
 };

@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  Button, Card, EmptyState, ErrorState, RadioGroup, Sheet, StatusPill, SummaryCard, SummaryRow, Text, useToast,
+  Button, Card, EmptyState, ErrorState, InlineMessage, RadioGroup, Sheet, StatusPill, SummaryCard, SummaryRow, Text, useToast,
 } from '@/components/ui';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { ScreenSpinner } from '@/components/pay/OwnPayMerchantGate';
@@ -65,6 +65,8 @@ function RefundDetail({ id }: { id: string }) {
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | undefined>();
+  // Why a cancel was refused once the sheet closed; stays until dismissed or the next attempt.
+  const [cancelNotice, setCancelNotice] = useState<string | null>(null);
   const [proving, setProving] = useState(false);
   const [proveError, setProveError] = useState<string | undefined>();
   // One send, cancel or wallet proof at a time: a double tap must not sign twice.
@@ -203,6 +205,7 @@ function RefundDetail({ id }: { id: string }) {
     busy.current = true;
     setCancelling(true);
     setCancelError(undefined);
+    setCancelNotice(null);
     try {
       const cancelled = await cancelPayRefund(id);
       seq.current += 1;
@@ -216,7 +219,7 @@ function RefundDetail({ id }: { id: string }) {
       if ((e as { status?: number } | null)?.status === 409) {
         // Sent (or cancelled) meanwhile: nothing left to confirm — show it as it now is.
         setConfirmingCancel(false);
-        toast.error(message);
+        setCancelNotice(message);
         void refresh();
       } else {
         setCancelError(message);
@@ -259,7 +262,8 @@ function RefundDetail({ id }: { id: string }) {
           <Text variant="title3" weight="700" numeric>{refundAmountLabel(refund)}</Text>
           <StatusPill kind="payRefund" status={refund.status} />
         </View>
-        {error ? <Text variant="bodySm" style={{ color: colors.danger }}>{error}</Text> : null}
+        <InlineMessage message={error} />
+        <InlineMessage message={cancelNotice} tone="warning" onDismiss={() => setCancelNotice(null)} />
 
         <Card>
           <SummaryCard>
@@ -280,14 +284,12 @@ function RefundDetail({ id }: { id: string }) {
             {unproven ? (
               <Card style={{ gap: spacing.sm }}>
                 <Text variant="bodySm">{unprovenWalletMessage}</Text>
-                {proveError ? <Text variant="bodySm" style={{ color: colors.danger }}>{proveError}</Text> : null}
+                <InlineMessage message={proveError} />
                 <Button title="Prove this wallet" variant="secondary" onPress={prove} loading={proving} disabled={proving} />
               </Card>
             ) : null}
             {wrongWallet ? (
-              <Card>
-                <Text variant="bodySm" style={{ color: colors.danger }}>{wrongWalletMessage(detail.fromAddress)}</Text>
-              </Card>
+              <InlineMessage message={wrongWalletMessage(detail.fromAddress)} />
             ) : null}
             {detail.options.length > 1 ? (
               <View style={{ gap: spacing.sm }}>
@@ -304,21 +306,20 @@ function RefundDetail({ id }: { id: string }) {
               </View>
             ) : null}
             {balanceFailed ? (
-              <Text variant="bodySm" style={{ color: colors.danger }}>Couldn&apos;t read your balance — pull to refresh.</Text>
+              <InlineMessage message="Couldn't read your balance — pull to refresh." />
             ) : (
               <FundingNote funding={funding} option={option} />
             )}
             {noGas ? (
-              <Text variant="bodySm" style={{ color: colors.danger }}>
-                {`You have no ${nativeSymbol} on ${option.chainName} for the network fee. Add a little ${nativeSymbol} to your TSA wallet first.`}
-              </Text>
+              <InlineMessage
+                tone="warning"
+                message={`You have no ${nativeSymbol} on ${option.chainName} for the network fee. Add a little ${nativeSymbol} to your TSA wallet first.`}
+              />
             ) : gas !== null ? (
               <Text variant="caption" color="textMuted">{`Network fee paid in ${nativeSymbol} · you have ${formatNativeAmount(gas)} ${nativeSymbol}`}</Text>
             ) : null}
-            {sendError ? <Text variant="bodySm" style={{ color: colors.danger }}>{sendError}</Text> : null}
-            {recheckFailed ? (
-              <Text variant="bodySm" style={{ color: colors.danger }}>Couldn&apos;t check the refund — pull to refresh.</Text>
-            ) : null}
+            <InlineMessage message={sendError} />
+            {recheckFailed ? <InlineMessage message="Couldn't check the refund — pull to refresh." /> : null}
             <Button title="Send refund" size="lg" onPress={() => authorize(option)} loading={sending} disabled={!canSend} />
           </>
         ) : (
@@ -341,7 +342,7 @@ function RefundDetail({ id }: { id: string }) {
           <Text variant="bodySm" color="textSecondary">
             Nothing has been sent. You can ask for a refund again from your dashboard on the web.
           </Text>
-          {cancelError ? <Text variant="bodySm" style={{ color: colors.danger }}>{cancelError}</Text> : null}
+          <InlineMessage message={cancelError} />
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Button title="Keep it" variant="secondary" onPress={() => setConfirmingCancel(false)} />

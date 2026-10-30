@@ -9,7 +9,7 @@ import React from 'react';
 import { Share, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useTheme } from '@/theme';
-import { AccentCard, Button, Card, Text, useToast, type IconName } from '@/components/ui';
+import { AccentCard, Button, Card, InlineMessage, Text, useToast, type IconName } from '@/components/ui';
 import { QrPanel } from '@/components/common/QrPanel';
 
 export function PayLinkShare({
@@ -29,13 +29,15 @@ export function PayLinkShare({
 }) {
   const { spacing } = useTheme();
   const toast = useToast();
+  const [copyError, setCopyError] = React.useState<string | null>(null);
 
   const copy = async () => {
+    setCopyError(null);
     try {
       await Clipboard.setStringAsync(url);
       toast.success('Link copied');
     } catch {
-      toast.error('Could not copy');
+      setCopyError('Could not copy. Press and hold the link above to copy it.');
     }
   };
 
@@ -70,6 +72,7 @@ export function PayLinkShare({
           <Button title="Copy link" variant="secondary" leftIcon="copy" onPress={copy} style={buttonStyle} />
         )}
       </View>
+      <InlineMessage message={copyError} onDismiss={() => setCopyError(null)} style={{ alignSelf: 'stretch' }} />
     </Card>
   );
 }

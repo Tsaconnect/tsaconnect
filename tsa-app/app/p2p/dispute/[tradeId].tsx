@@ -26,6 +26,7 @@ import {
   Card,
   EmptyState,
   Icon,
+  InlineMessage,
   Input,
   RadioGroup,
   SkeletonGroup,
@@ -100,6 +101,8 @@ const DisputeWizardScreen: React.FC = () => {
   const [otherText, setOtherText] = useState('');
   const [evidence, setEvidence] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  // Why the last submit was refused; the form stays open to fix it.
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Load the trade so we can gate on role + status and show context. Same
   // endpoint the trade screen uses (tradesApi.get).
@@ -215,10 +218,11 @@ const DisputeWizardScreen: React.FC = () => {
     if (submitting) return;
     const reasonStr = wireReason();
     if (!reasonStr) return;
+    setSubmitError(null);
 
     const safeEvidence = evidence.map(safeProofUrl);
     if (safeEvidence.some((u) => u === null)) {
-      toast.error('Some evidence images are not secure (https) links. Remove them and add them again.');
+      setSubmitError('Some evidence images are not secure (https) links. Remove them and add them again.');
       return;
     }
     const evidenceUrls = safeEvidence as string[];
@@ -241,10 +245,10 @@ const DisputeWizardScreen: React.FC = () => {
         stash: () => ({ mode: 'dispute', tradeId: trade.id, token: trade.token, amount: trade.tokenAmount }),
       });
 
-      applyFollowUp(disputeFollowUp(r, trade.id), { toast, navigate: leave });
+      applyFollowUp(disputeFollowUp(r, trade.id), { toast, navigate: leave, onError: setSubmitError });
     } catch (err) {
       // Only reached before anything is broadcast (no wallet, sign/broadcast failure).
-      applyFollowUp(disputeThrownFollowUp(err), { toast });
+      applyFollowUp(disputeThrownFollowUp(err), { toast, onError: setSubmitError });
     } finally {
       setSubmitting(false);
     }
@@ -373,6 +377,8 @@ const DisputeWizardScreen: React.FC = () => {
                 </View>
               </View>
             </AccentCard>
+
+            <InlineMessage message={submitError} />
 
             {submitting && (
               <View style={{ alignItems: 'center', paddingVertical: spacing.sm }}>
