@@ -34,18 +34,18 @@ export interface ChatMessage {
 export const chatApi = {
   /** The caller's conversation with a contact service's provider (fee paid). */
   openForService: (serviceId: string): Promise<ApiResponse<ChatThread>> =>
-    request<ChatThread>('POST', `/services/${serviceId}/chat`, undefined, { idempotent: false }),
+    request<ChatThread>('POST', `/services/${encodeURIComponent(serviceId)}/chat`, undefined, { idempotent: false }),
   threads: (): Promise<ApiResponse<ChatThread[]>> => request<ChatThread[]>('GET', '/chat/threads'),
   thread: (threadId: string): Promise<ApiResponse<ChatThread>> =>
-    request<ChatThread>('GET', `/chat/threads/${threadId}`),
+    request<ChatThread>('GET', `/chat/threads/${encodeURIComponent(threadId)}`),
   unreadCount: (): Promise<ApiResponse<{ count: number }>> =>
     request<{ count: number }>('GET', '/chat/unread-count'),
   messages: (threadId: string, since?: string): Promise<ApiResponse<ChatMessage[]>> =>
-    request<ChatMessage[]>('GET', `/chat/threads/${threadId}/messages`, undefined, { query: { since } }),
+    request<ChatMessage[]>('GET', `/chat/threads/${encodeURIComponent(threadId)}/messages`, undefined, { query: { since } }),
   sendText: (threadId: string, body: string): Promise<ApiResponse<ChatMessage>> =>
-    request<ChatMessage>('POST', `/chat/threads/${threadId}/messages`, { type: 'text', body }, { idempotent: false }),
+    request<ChatMessage>('POST', `/chat/threads/${encodeURIComponent(threadId)}/messages`, { type: 'text', body }, { idempotent: false }),
   sendImage: (threadId: string, imageUrl: string): Promise<ApiResponse<ChatMessage>> =>
-    request<ChatMessage>('POST', `/chat/threads/${threadId}/messages`, { type: 'image', imageUrl }, { idempotent: false }),
+    request<ChatMessage>('POST', `/chat/threads/${encodeURIComponent(threadId)}/messages`, { type: 'image', imageUrl }, { idempotent: false }),
   markRead: (threadId: string): Promise<ApiResponse<null>> =>
-    request<null>('POST', `/chat/threads/${threadId}/read`, undefined, { idempotent: false }),
+    request<null>('POST', `/chat/threads/${encodeURIComponent(threadId)}/read`, undefined, { idempotent: false }),
 };

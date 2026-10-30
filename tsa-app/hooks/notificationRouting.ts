@@ -25,7 +25,7 @@ export function routeForNotification(data: NotificationData | null | undefined):
   }
   // A message in a customer–provider conversation → that conversation.
   if (type === 'chat.message.new') {
-    return typeof data.threadId === 'string' && data.threadId ? `/chat/${data.threadId}` : '/messages';
+    return isPaymentId(data.threadId) ? `/chat/${data.threadId}` : '/messages';
   }
   // P2P capital movement → funding context (deposit) or reclaim screen (withdraw).
   if (type === 'p2p.deposit.confirmed') {
