@@ -13,7 +13,7 @@ import { Icon } from './Icon';
 import { PressableScale } from './PressableScale';
 import { Spinner } from './Spinner';
 import { Text } from './Text';
-import { useToast } from './Toast';
+import { InlineMessage } from './InlineMessage';
 
 export interface PhotoPickerTileProps {
   /** Uploaded image URLs. */
@@ -35,8 +35,9 @@ export const PhotoPickerTile: React.FC<PhotoPickerTileProps> = ({
   label,
 }) => {
   const { colors, radius, spacing } = useTheme();
-  const toast = useToast();
   const [uploading, setUploading] = useState(false);
+  // Stays under the tiles until the next pick or a dismiss.
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const canAdd = value.length < max;
 
@@ -46,10 +47,11 @@ export const PhotoPickerTile: React.FC<PhotoPickerTileProps> = ({
 
   const add = async () => {
     if (uploading) return;
+    setUploadError(null);
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
-        toast.error('Allow photo library access to attach images.');
+        setUploadError('Allow photo library access in Settings to attach images.');
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
@@ -64,10 +66,10 @@ export const PhotoPickerTile: React.FC<PhotoPickerTileProps> = ({
       if ('url' in up) {
         onChange([...value, up.url]);
       } else {
-        toast.error(up.error);
+        setUploadError(up.error);
       }
     } catch (err: any) {
-      toast.error(err?.message || 'Upload failed. Please try again.');
+      setUploadError(err?.message || 'Upload failed. Please try again.');
     } finally {
       setUploading(false);
     }
@@ -143,6 +145,8 @@ export const PhotoPickerTile: React.FC<PhotoPickerTileProps> = ({
           </PressableScale>
         ) : null}
       </View>
+
+      <InlineMessage message={uploadError} onDismiss={() => setUploadError(null)} />
 
       <Text variant="caption" color="textMuted">
         {value.length}/{max}

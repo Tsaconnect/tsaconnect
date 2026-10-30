@@ -11,7 +11,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  Button, Card, ErrorState, Sheet, StatusPill, SummaryCard, SummaryRow, Text, useToast,
+  Button, Card, ErrorState, InlineMessage, Sheet, StatusPill, SummaryCard, SummaryRow, Text, useToast,
 } from '@/components/ui';
 import { PayLinkShare, TestLinkBanner } from '@/components/pay/PayLinkShare';
 import { useFocusPolling } from '@/hooks/useFocusPolling';
@@ -51,6 +51,8 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | undefined>();
+  // Why a cancel was refused once the sheet closed; stays until dismissed or the next attempt.
+  const [cancelNotice, setCancelNotice] = useState<string | null>(null);
   // A double tap on Cancel link must send one cancel.
   const submitting = useRef(false);
 
@@ -79,6 +81,7 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
     submitting.current = true;
     setCancelling(true);
     setCancelError(undefined);
+    setCancelNotice(null);
     try {
       const cancelled = await cancelPayLink(mode, id);
       seq.current += 1;
@@ -91,7 +94,7 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
         // Someone has started paying it (or it closed): there is nothing left
         // to confirm — close the sheet and show the link as it now is.
         setConfirming(false);
-        toast.error(message);
+        setCancelNotice(message);
         void refresh();
       } else {
         setCancelError(message);
@@ -117,7 +120,8 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
           <Text variant="title3" weight="700" numeric>{formatKobo(String(link.amount))}</Text>
           <StatusPill kind="payLink" status={payLinkStatus(link)} />
         </View>
-        {error ? <Text variant="bodySm" style={{ color: colors.danger }}>{error}</Text> : null}
+        <InlineMessage message={error} />
+        <InlineMessage message={cancelNotice} tone="warning" onDismiss={() => setCancelNotice(null)} />
 
         <Card>
           <SummaryCard>
@@ -145,7 +149,7 @@ function LinkDetail({ id, mode, businessName }: { id: string; mode: PayLinkMode;
           <Text variant="bodySm" color="textSecondary">
             {"The link will stop working. This can't be undone."}
           </Text>
-          {cancelError ? <Text variant="bodySm" style={{ color: colors.danger }}>{cancelError}</Text> : null}
+          <InlineMessage message={cancelError} />
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Button title="Keep link" variant="secondary" onPress={() => setConfirming(false)} />

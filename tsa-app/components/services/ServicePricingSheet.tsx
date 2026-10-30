@@ -30,6 +30,7 @@ import {
   Button,
   CounterControl,
   Divider,
+  InlineMessage,
   RadioGroup,
   Sheet,
   Spinner,
@@ -118,6 +119,8 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   const [adding, setAdding] = useState(false);
   // Inline escrow checkout state for the order/booking/access-fee flows.
   const [checkingOut, setCheckingOut] = useState(false);
+  // Why the last cart / checkout / booking attempt failed; shown above the pinned CTA.
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Selections mirrored up from the hideSubmit pickers so the pinned footer
   // CTA can enable/disable and check out.
@@ -276,6 +279,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
 
   useEffect(() => {
     if (visible) load();
+    else setActionError(null);
   }, [visible, load]);
 
   const servicePrice = product?.price && product.price > 0 ? product.price : 0;
@@ -305,6 +309,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   const addToCart = useCallback(async (): Promise<boolean> => {
     if (!product) return false;
     setAdding(true);
+    setActionError(null);
     try {
       const productId = product.id || product._id || serviceId;
       const notes = encodeServiceNotes({
@@ -315,17 +320,17 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       });
       const res = await cartService.addToCart({ productId, quantity: quantitySpec ? quantity : 1, notes });
       if (!res.success) {
-        toast.show(res.message || 'Failed to add to cart', 'error');
+        setActionError(res.message || 'Could not add this service to your cart. Try again.');
         return false;
       }
       return true;
     } catch (e: any) {
-      toast.show(e.message || 'Failed to add to cart', 'error');
+      setActionError(e.message || 'Could not add this service to your cart. Try again.');
       return false;
     } finally {
       setAdding(false);
     }
-  }, [product, serviceId, resolvedTier, mode, servicePrice, calloutFee, quantitySpec, quantity, toast]);
+  }, [product, serviceId, resolvedTier, mode, servicePrice, calloutFee, quantitySpec, quantity]);
 
   const handleAddToCart = async () => {
     const ok = await addToCart();
@@ -358,6 +363,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       answers?: Record<string, any>;
     }) => {
       setCheckingOut(true);
+      setActionError(null);
       try {
         await runServiceCheckout({
           token: 'USDC',
@@ -374,7 +380,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
         onClose();
         router.push('/(dashboard)/orderlist');
       } catch (e: any) {
-        toast.show(e.message || 'Checkout failed', 'error');
+        setActionError(e.message || 'Checkout did not go through. Try again.');
       } finally {
         setCheckingOut(false);
       }
@@ -392,6 +398,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
         return;
       }
       setCheckingOut(true);
+      setActionError(null);
       try {
         const res = await createBookingRequest(productIdOf(), {
           token: 'USDC',
@@ -402,7 +409,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           answers,
         });
         if (!res.success) {
-          toast.show(res.message || 'Failed to submit request', 'error');
+          setActionError(res.message || 'Could not send the booking request. Try again.');
           return;
         }
         toast.show('Booking request sent — awaiting provider approval', 'success');
@@ -411,7 +418,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
         // regenerate on the next `expo start` and don't yet include this screen.
         router.push('/booking-requests' as any);
       } catch (e: any) {
-        toast.show(e.message || 'Failed to submit request', 'error');
+        setActionError(e.message || 'Could not send the booking request. Try again.');
       } finally {
         setCheckingOut(false);
       }
@@ -529,7 +536,18 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
     );
 
   return (
-    <Sheet visible={visible} onClose={onClose} title="Service Pricing" scrollable footer={footer}>
+    <Sheet
+      visible={visible}
+      onClose={onClose}
+      title="Service Pricing"
+      scrollable
+      footer={footer ? (
+        <>
+          <InlineMessage message={actionError} />
+          {footer}
+        </>
+      ) : null}
+    >
       <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.md, gap: spacing.lg }}>
         {!loading && !error && quantitySpec && (
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>

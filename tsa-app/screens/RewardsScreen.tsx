@@ -35,6 +35,7 @@ import {
   EmptyState,
   ErrorState,
   Icon,
+  InlineMessage,
   Spinner,
   SummaryRow,
   Text,
@@ -272,6 +273,13 @@ const RewardsScreen: React.FC = () => {
   const [claiming, setClaiming] = useState(false);
   const [claimStage, setClaimStage] = useState('');
   const [lastClaimHash, setLastClaimHash] = useState<{ hash: string; chainId: number } | null>(null);
+  // What went wrong with (or is still pending on) the last claim. Shown under the
+  // claim CTA until dismissed or the next claim, even as a refresh moves the CTA.
+  const [claimNotice, setClaimNotice] = useState<
+    { tone: 'error' | 'warning'; message: string; title?: string } | null
+  >(null);
+  // Kept apart from claimNotice so it never hides what the claim itself reported.
+  const [explorerError, setExplorerError] = useState<string | null>(null);
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -377,7 +385,7 @@ const RewardsScreen: React.FC = () => {
   // landed. We surface a soft notice but rely on the full-screen ErrorState /
   // pull-to-refresh for the worst case.
   const refreshAfterClaim = useCallback(
-    async (priorClaimableMcgp: number) => {
+    async (priorClaimableMcgp: number, confirmed: boolean) => {
       const summaryRes = await rewardsApi.summary();
       const earningsRes = await api.getTPEarnings(1, 15).catch(() => null);
 
@@ -391,13 +399,19 @@ const RewardsScreen: React.FC = () => {
         // reflects the post-claim reality even though the hero numbers are
         // momentarily out of date.
         await loadClaimState(priorClaimableMcgp);
-        toast.error('Claim processed, but we could not refresh your balance. Pull to refresh.');
+        // An unconfirmed claim keeps its own warning: it may not have landed at all.
+        if (confirmed) {
+          setClaimNotice({
+            tone: 'warning',
+            message: 'Claim processed, but we could not refresh your balance. Pull to refresh.',
+          });
+        }
       }
       if (earningsRes?.success && earningsRes.data?.earnings) {
         setEarnings(earningsRes.data.earnings as TPEarningRow[]);
       }
     },
-    [loadClaimState, toast],
+    [loadClaimState],
   );
 
   useEffect(() => {
@@ -429,6 +443,8 @@ const RewardsScreen: React.FC = () => {
     if (!claimTx || claiming) return;
     setClaiming(true);
     setClaimStage('');
+    setClaimNotice(null);
+    setExplorerError(null);
     try {
       const result = await broadcastRewardClaim(
         claimTx,
@@ -437,7 +453,7 @@ const RewardsScreen: React.FC = () => {
         (stage) => setClaimStage(stage),
         (title, message) => {
           // Gas guard fired — surface and bail (result will be null).
-          toast.error(`${title}: ${message}`);
+          setClaimNotice({ tone: 'error', title, message });
         },
       );
 
@@ -459,10 +475,11 @@ const RewardsScreen: React.FC = () => {
         // couldn't observe the receipt (timeout/RPC). Do NOT claim success —
         // tell the user it was submitted and the screen will catch up. The
         // refresh below reconciles the CTA against true on-chain state.
-        toast.error(
-          'Claim submitted but not yet confirmed. Check the transaction and refresh in a moment.',
-        );
-        await refreshAfterClaim(priorClaimable);
+        setClaimNotice({
+          tone: 'warning',
+          message: 'Claim submitted but not yet confirmed. Check the transaction and refresh in a moment.',
+        });
+        await refreshAfterClaim(priorClaimable, false);
         return;
       }
 
@@ -474,32 +491,32 @@ const RewardsScreen: React.FC = () => {
           : 'Reward claimed — MCGP is on its way to your wallet.',
       );
       // Refresh so claimable/claimed reflect the new on-chain state.
-      await refreshAfterClaim(priorClaimable);
+      await refreshAfterClaim(priorClaimable, true);
     } catch (err: any) {
       // Wrong wallet — the claim pays the registered account; tell the user to
       // switch to it (no broadcast happened).
       if (err instanceof WrongWalletError) {
-        toast.error(err.message);
+        setClaimNotice({ tone: 'error', message: err.message });
         return;
       }
       // estimateGas reverted — nothing left to claim. Do NOT broadcast a
       // guaranteed-revert tx; refresh so the CTA reflects the true state.
       if (err instanceof ClaimWouldRevertError) {
-        toast.error('Nothing left to claim — this reward was already claimed.');
+        setClaimNotice({ tone: 'error', message: 'Nothing left to claim — this reward was already claimed.' });
         await refreshAll();
         return;
       }
       const msg = String(err?.message || err);
       // Map a few common chain errors to friendlier copy.
       if (/insufficient funds/i.test(msg)) {
-        toast.error('Not enough gas to claim. Fund your wallet and try again.');
+        setClaimNotice({ tone: 'error', message: 'Not enough gas to claim. Fund your wallet and try again.' });
       } else if (/no active wallet|no private key/i.test(msg)) {
-        toast.error('Set up your wallet first to claim rewards.');
+        setClaimNotice({ tone: 'error', message: 'Set up your wallet first to claim rewards.' });
       } else if (/bad proof|already claimed|nothing/i.test(msg)) {
-        toast.error('This reward was already claimed or is no longer available.');
+        setClaimNotice({ tone: 'error', message: 'This reward was already claimed or is no longer available.' });
         await refreshAll();
       } else {
-        toast.error(msg);
+        setClaimNotice({ tone: 'error', message: msg });
       }
     } finally {
       setClaiming(false);
@@ -511,10 +528,11 @@ const RewardsScreen: React.FC = () => {
     if (!lastClaimHash) return;
     const chain = getChainByChainId(lastClaimHash.chainId);
     if (!chain) return;
+    setExplorerError(null);
     Linking.openURL(`${chain.explorerUrl}/tx/${lastClaimHash.hash}`).catch(() =>
-      toast.error('Could not open the explorer'),
+      setExplorerError(`Could not open the explorer. Transaction hash: ${lastClaimHash.hash}`),
     );
-  }, [lastClaimHash, toast]);
+  }, [lastClaimHash]);
 
   // ── Derived ───────────────────────────────────────────────────────────────
 
@@ -687,6 +705,16 @@ const RewardsScreen: React.FC = () => {
             {renderClaimCta()}
           </View>
 
+          {claimNotice && (
+            <InlineMessage
+              tone={claimNotice.tone}
+              title={claimNotice.title}
+              message={claimNotice.message}
+              onDismiss={() => setClaimNotice(null)}
+              style={{ marginTop: spacing.md }}
+            />
+          )}
+
           {lastClaimHash && (
             <Button
               title="View transaction"
@@ -697,6 +725,11 @@ const RewardsScreen: React.FC = () => {
               style={{ marginTop: spacing.sm }}
             />
           )}
+          <InlineMessage
+            message={explorerError}
+            onDismiss={() => setExplorerError(null)}
+            style={{ marginTop: spacing.sm }}
+          />
         </Card>
 
         {/* ── Prizes due ── */}

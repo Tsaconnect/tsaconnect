@@ -24,11 +24,11 @@ import {
   Card,
   ErrorState,
   Icon,
+  InlineMessage,
   Spinner,
   SummaryCard,
   SummaryRow,
   Text,
-  useToast,
 } from '@/components/ui';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 import { getCheckout, getPublicPayment, returnUrlFor, type PayCheckout, type PayStatus } from '@/services/payApi';
@@ -79,7 +79,8 @@ const DONE_LABEL: Record<PayStatus, string> = {
 
 export default function PayScreen() {
   const { colors, spacing } = useTheme();
-  const toast = useToast();
+  // A store or receipt link the device could not open.
+  const [openError, setOpenError] = useState<string | null>(null);
   const { id } = useLocalSearchParams<{ id?: string }>();
   const { isAuthenticated, isHydrated } = useAuth();
   const headerOptions = useDefaultScreenOptions({ backFallback: '/' });
@@ -185,12 +186,11 @@ export default function PayScreen() {
 
   useEffect(() => {
     if (!payTest.error) return;
-    toast.error(payTest.error);
     // A failed test-outcome (someone else took the payment, or it expired)
     // means our checkout state is stale — re-fetch so the screen reflects
     // reality instead of keeping the Approve/Decline buttons up.
     fetchCheckout();
-  }, [payTest.error, toast, fetchCheckout]);
+  }, [payTest.error, fetchCheckout]);
 
   const leaveToAuth = async (to: '/login' | '/signup') => {
     if (typeof id === 'string') {
@@ -205,19 +205,21 @@ export default function PayScreen() {
     if (!checkout) return;
     const url = returnUrlFor(checkout);
     if (!url) return;
+    setOpenError(null);
     try {
       await Linking.openURL(url);
     } catch {
-      toast.error('Could not open the store');
+      setOpenError(`Could not open ${checkout.merchantName}. Check that you have a browser installed and try again.`);
     }
   };
 
   // The receipt's own page prints and saves as a PDF in the browser: no native print module.
   const openReceipt = async (url: string) => {
+    setOpenError(null);
     try {
       await Linking.openURL(url);
     } catch {
-      toast.error('Could not open the receipt');
+      setOpenError('Could not open the receipt. Check that you have a browser installed and try again.');
     }
   };
   const receiptUrl = safeReceiptUrl(checkout?.receiptUrl);
@@ -267,6 +269,10 @@ export default function PayScreen() {
               <Button title="Create an account" variant="secondary" size="lg" onPress={() => void leaveToAuth('/signup')} />
             </View>
           )}
+
+          {/* Kept across the re-fetch it triggers: if someone else took the payment, the
+              screen moves to its final state and this still says why. */}
+          <InlineMessage message={payTest.error} />
 
           {(state.kind === 'payable' || state.kind === 'waiting' || state.kind === 'blocked') && (
             <>
@@ -394,6 +400,7 @@ export default function PayScreen() {
                   />
                 </View>
               )}
+              <InlineMessage message={openError} onDismiss={() => setOpenError(null)} style={{ width: '100%' }} />
               {returnUrlFor(state.checkout) && (
                 <Button
                   title={`Return to ${state.checkout.merchantName}`}

@@ -31,6 +31,15 @@ it('toast, alert and reload', () => {
   expect(h.reload).toHaveBeenCalled();
 });
 
+it('an error goes inline when the screen shows errors inline', () => {
+  const h = { ...handlers(), onError: jest.fn() };
+  applyFollowUp({ toast: { type: 'error', message: 'Refused' }, reload: false }, h);
+  expect(h.onError).toHaveBeenCalledWith('Refused');
+  expect(h.toast.show).not.toHaveBeenCalled();
+  applyFollowUp({ toast: { type: 'success', message: 'Done' }, reload: false }, h);
+  expect(h.toast.show).toHaveBeenCalledWith('Done', 'success');
+});
+
 it('navigate without an alert goes straight there', () => {
   const h = handlers();
   applyFollowUp({ toast: { type: 'info', message: 'n' }, navigate: 't1', reload: false }, h);

@@ -22,6 +22,7 @@ import {
   Button,
   Card,
   Divider,
+  InlineMessage,
   Input,
   PhotoPickerTile,
   RadioGroup,
@@ -147,6 +148,7 @@ export default function BillOrderDetail() {
   const [error, setError] = useState('');
 
   const [reporting, setReporting] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
   const [reason, setReason] = useState<ReportReason | null>(null);
   const [details, setDetails] = useState('');
   const [evidence, setEvidence] = useState<string[]>([]);
@@ -213,6 +215,7 @@ export default function BillOrderDetail() {
     const text = [REASON_SENTENCE[reason], details.trim()].filter(Boolean).join(' ');
     if (!text) return;
     setSubmitting(true);
+    setReportError(null);
     const r = await fileDispute({
       subjectType: 'bill_order',
       subjectId: order.id,
@@ -228,7 +231,7 @@ export default function BillOrderDetail() {
       setEvidence([]);
       toast.success('Report submitted — we’ll look into it');
     } else {
-      toast.error(r.message || 'Could not submit the report');
+      setReportError(r.message || 'Could not submit the report. Try again.');
     }
   }, [order, reason, details, evidence, toast]);
 
@@ -404,7 +407,7 @@ export default function BillOrderDetail() {
               variant="ghost"
               leftIcon="dispute"
               style={{ flex: 1 }}
-              onPress={() => setReporting(true)}
+              onPress={() => { setReportError(null); setReporting(true); }}
             />
           ) : null}
         </View>
@@ -431,6 +434,7 @@ export default function BillOrderDetail() {
             onChange={setEvidence}
             max={4}
           />
+          <InlineMessage message={reportError} />
           <Button
             title="Submit report"
             variant="primary"

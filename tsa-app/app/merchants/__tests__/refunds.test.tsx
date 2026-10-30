@@ -66,6 +66,7 @@ jest.mock('@/components/ui', () => {
       accessibilityLabel: props.accessibilityLabel, testID: props.testID, onPress: props.onPress,
     }, props.children),
     Sheet: (props: any) => (props.visible ? react.createElement(View, null, props.children) : null),
+    InlineMessage: (props: any) => (props.message ? react.createElement(RNText, null, props.message) : null),
     useToast: () => mockToast,
   };
 });
@@ -493,7 +494,7 @@ describe('Refund screen', () => {
     jest.mocked(getPayRefund).mockResolvedValue(sent());
     await press('button:Cancel request');
     await press('Confirm cancel request');
-    expect(mockToast.error).toHaveBeenCalledWith('This refund was already sent');
+    expect(text(tree)).toContain('This refund was already sent');
     // Only the re-read refund says this: the screen shows it as it now is.
     expect(text(tree)).toContain('Sent to Ada. Waiting for the network to confirm it.');
     expect(() => byLabel(tree, 'button:Cancel request')).toThrow();

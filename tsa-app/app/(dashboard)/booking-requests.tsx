@@ -10,7 +10,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { useTheme } from '@/theme';
-import { Badge, Button, Card, EmptyState, Spinner, Text, useToast } from '@/components/ui';
+import { Badge, Button, Card, EmptyState, InlineMessage, Spinner, Text, useToast } from '@/components/ui';
 import {
   listBookingRequests,
   approveBookingRequest,
@@ -21,6 +21,7 @@ import {
 } from '@/services/bookingRequestApi';
 import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
 import { useCurrency } from '@/contexts/CurrencyContext';
+import { useKeyedMessages } from '@/hooks/useKeyedMessages';
 import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
 import { LocalAmountInput, PricingCurrencySelect } from '@/components/products/MerchantPricingFields';
 import AuthorizationModal from '@/components/common/AuthorizationModal';
@@ -47,6 +48,9 @@ export default function BookingRequestsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Per request, so a failure stays on the card it belongs to until the next attempt.
+  const [rowErrors, setRowError] = useKeyedMessages();
+  const [priceErrors, setPriceError] = useKeyedMessages();
   // An MCGP request waiting for the buyer to authorize its Spendable MCGP hold.
   const [authorizeFor, setAuthorizeFor] = useState<BookingRequest | null>(null);
   // Sellers quote in their own currency; the quote is sent in USD.
@@ -73,6 +77,8 @@ export default function BookingRequestsScreen() {
 
   const withBusy = async (id: string, fn: () => Promise<void>) => {
     setBusyId(id);
+    setRowError(id);
+    setPriceError(id);
     try {
       await fn();
     } finally {
@@ -83,14 +89,17 @@ export default function BookingRequestsScreen() {
   const handleApprove = (id: string) =>
     withBusy(id, async () => {
       const raw = pricing.amount(quoteKey(id));
+      let priceError: string | undefined;
       if (raw.trim() !== '') {
         const typed = parseAmount(raw);
-        if (isNaN(typed) || typed <= 0) return toast.show('Enter a valid price', 'error');
-        if (!pricing.ready) return toast.show('Exchange rates are still loading. Try again in a moment.', 'error');
+        if (isNaN(typed) || typed <= 0) priceError = 'Enter a price above zero, or leave it blank';
+        else if (!pricing.ready) priceError = 'Exchange rates are still loading. Try again in a moment.';
       }
+      setPriceError(id, priceError);
+      if (priceError) return;
       const amount = pricing.usdFor(quoteKey(id));
       const res = await approveBookingRequest(id, amount);
-      if (!res.success) return toast.show(res.message || 'Failed to approve', 'error');
+      if (!res.success) return setRowError(id, res.message || 'Could not approve this request. Try again.');
       toast.show('Request approved', 'success');
       load();
     });
@@ -98,7 +107,7 @@ export default function BookingRequestsScreen() {
   const handleReject = (id: string) =>
     withBusy(id, async () => {
       const res = await rejectBookingRequest(id);
-      if (!res.success) return toast.show(res.message || 'Failed to decline', 'error');
+      if (!res.success) return setRowError(id, res.message || 'Could not decline this request. Try again.');
       toast.show('Request declined', 'success');
       load();
     });
@@ -112,7 +121,7 @@ export default function BookingRequestsScreen() {
         toast.show(isMcgp(request) ? 'Booking paid from your Spendable MCGP' : 'Booking paid & funded via escrow', 'success');
         load();
       } catch (e: any) {
-        toast.show(e.message || 'Payment failed', 'error');
+        setRowError(request.id, e.message || 'Payment did not go through. Try again.');
       }
     });
 
@@ -220,6 +229,7 @@ export default function BookingRequestsScreen() {
                         amountKey={quoteKey(request.id)}
                         label="Price"
                         helper="Leave blank for a fixed-price listing"
+                        error={priceErrors[request.id]}
                       />
                       <View style={{ flexDirection: 'row', gap: spacing.sm }}>
                         <Button
@@ -239,6 +249,7 @@ export default function BookingRequestsScreen() {
                       </View>
                     </View>
                   ) : null}
+                  <InlineMessage message={rowErrors[request.id]} />
                 </Card>
               );
             })

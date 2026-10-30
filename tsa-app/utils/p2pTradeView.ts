@@ -246,7 +246,7 @@ export function stashedConfirmFollowUp(
   }
 }
 
-/** The dispute form's follow-up. A refusal is a toast (the form stays open to
+/** The dispute form's follow-up. A refusal is an error shown inline (the form stays open to
  *  fix); once the dispute is recorded, or sent and still confirming, the user
  *  goes back to the trade (`navigate`) so the form can't invite a second
  *  submit — after the alert's OK in the confirming case. */

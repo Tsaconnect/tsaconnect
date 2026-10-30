@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams } from 'expo-router';
 import { useTheme } from '@/theme';
 import {
-  AccentCard, Button, Card, ErrorState, Input, SegmentedControl, Sheet, StatusPill, SummaryCard, SummaryRow, Text,
+  AccentCard, Button, Card, ErrorState, InlineMessage, Input, SegmentedControl, Sheet, StatusPill, SummaryCard, SummaryRow, Text,
   useToast,
 } from '@/components/ui';
 import { NairaField } from '@/components/pay/NairaField';
@@ -77,6 +77,7 @@ function LinkDetail({ id, mode, businessName, suspended }: {
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<'label' | 'min' | 'max', string>>>({});
   const [confirmingReplace, setConfirmingReplace] = useState(false);
   const [sheetError, setSheetError] = useState<string | undefined>();
+  const [activeError, setActiveError] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
   // A double tap must send one change.
   const submitting = useRef(false);
@@ -127,7 +128,8 @@ function LinkDetail({ id, mode, businessName, suspended }: {
   }
 
   const setActive = async (active: boolean) => {
-    if (await run(() => updateOpenLink(mode, link.id, { ...changeOf(link), active }, link.version), (m) => toast.error(m))) {
+    setActiveError(undefined);
+    if (await run(() => updateOpenLink(mode, link.id, { ...changeOf(link), active }, link.version), setActiveError)) {
       toast.success(active ? 'Link resumed' : 'Link paused');
     }
   };
@@ -205,6 +207,7 @@ function LinkDetail({ id, mode, businessName, suspended }: {
 
         {suspended ? null : (
           <>
+            <InlineMessage message={activeError} onDismiss={() => setActiveError(undefined)} />
             <Button
               title={link.active ? 'Pause' : 'Resume'}
               variant="secondary"
@@ -280,7 +283,7 @@ function LinkDetail({ id, mode, businessName, suspended }: {
                 onChange={(k) => edit({ paymentExpiresIn: Number(k) })}
               />
             </View>
-            {sheetError ? <Text variant="bodySm" style={{ color: colors.danger }}>{sheetError}</Text> : null}
+            <InlineMessage message={sheetError} />
             <View style={{ flexDirection: 'row', gap: spacing.md }}>
               <View style={{ flex: 1 }}>
                 <Button title="Cancel" variant="secondary" onPress={() => setForm(null)} />
@@ -298,7 +301,7 @@ function LinkDetail({ id, mode, businessName, suspended }: {
           <Text variant="bodySm" color="textSecondary">
             Your printed posters will stop working. Print the new one.
           </Text>
-          {sheetError ? <Text variant="bodySm" style={{ color: colors.danger }}>{sheetError}</Text> : null}
+          <InlineMessage message={sheetError} />
           <View style={{ flexDirection: 'row', gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Button title="Keep this one" variant="secondary" onPress={() => setConfirmingReplace(false)} />

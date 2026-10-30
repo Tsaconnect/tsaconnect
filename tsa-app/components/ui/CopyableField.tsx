@@ -1,6 +1,7 @@
 // Tap-to-copy value (bank account numbers, escrow address). Uses expo-clipboard
-// (already in the build) + a success toast.
-import React from 'react';
+// (already in the build): a success toast, but a failed copy stays inline so
+// the user knows to enter the value by hand.
+import React, { useState } from 'react';
 import { View, ViewStyle } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useTheme } from '@/theme';
@@ -8,6 +9,7 @@ import { PressableScale } from './PressableScale';
 import { Text } from './Text';
 import { Icon } from './Icon';
 import { useToast } from './Toast';
+import { InlineMessage } from './InlineMessage';
 
 export interface CopyableFieldProps {
   value: string;
@@ -15,6 +17,7 @@ export interface CopyableFieldProps {
   /** What to show (defaults to value; use for masked/formatted display). */
   display?: string;
   toastMessage?: string;
+  /** Applies to the outer container (the field plus any copy error below it). */
   style?: ViewStyle;
 }
 
@@ -27,44 +30,46 @@ export const CopyableField: React.FC<CopyableFieldProps> = ({
 }) => {
   const { colors, radius, spacing } = useTheme();
   const toast = useToast();
+  const [copyError, setCopyError] = useState<string | null>(null);
 
   const onCopy = async () => {
+    setCopyError(null);
     try {
       await Clipboard.setStringAsync(value);
       toast.success(toastMessage);
     } catch {
-      toast.error('Could not copy');
+      setCopyError('Could not copy. Enter it by hand instead.');
     }
   };
 
   return (
-    <PressableScale
-      onPress={onCopy}
-      accessibilityRole="button"
-      accessibilityLabel={`Copy ${label ?? value}`}
-      style={[
-        {
+    <View style={[{ gap: spacing.sm }, style]}>
+      <PressableScale
+        onPress={onCopy}
+        accessibilityRole="button"
+        accessibilityLabel={`Copy ${label ?? value}`}
+        style={{
           flexDirection: 'row',
           alignItems: 'center',
           gap: spacing.sm,
           padding: spacing.md,
           borderRadius: radius.md,
           backgroundColor: colors.surfaceAlt,
-        },
-        style,
-      ]}
-    >
-      <View style={{ flex: 1 }}>
-        {label && (
-          <Text variant="caption" color="textMuted">
-            {label}
+        }}
+      >
+        <View style={{ flex: 1 }}>
+          {label && (
+            <Text variant="caption" color="textMuted">
+              {label}
+            </Text>
+          )}
+          <Text variant="bodyMed" weight="600" numeric>
+            {display ?? value}
           </Text>
-        )}
-        <Text variant="bodyMed" weight="600" numeric>
-          {display ?? value}
-        </Text>
-      </View>
-      <Icon name="copy" size={18} color={colors.accent} />
-    </PressableScale>
+        </View>
+        <Icon name="copy" size={18} color={colors.accent} />
+      </PressableScale>
+      <InlineMessage message={copyError} onDismiss={() => setCopyError(null)} />
+    </View>
   );
 };

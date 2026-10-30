@@ -66,6 +66,7 @@ jest.mock('@/components/ui', () => {
       react.createElement(RNText, { onPress: props.disabled || props.loading ? undefined : props.onPress }, props.title),
     AccentCard: box, Badge: () => null, Avatar: () => null, BottomActionBar: box, Card: box, Chip: box, Divider: () => null,
     EmptyState: () => null, Icon: () => null, Input: () => null, PressableScale: pressable, Spinner: () => null,
+    InlineMessage: (props: any) => (props.message ? react.createElement(RNText, null, props.message) : null),
     useToast: () => ({ success: jest.fn(), error: jest.fn(), info: jest.fn() }),
   };
 });

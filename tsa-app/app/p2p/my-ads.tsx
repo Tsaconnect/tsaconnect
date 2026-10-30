@@ -19,6 +19,7 @@ import { runP2PTx, type P2PFollowUp } from '../../services/p2pTx';
 import { adCancelFollowUp, adCancelThrownFollowUp } from '../../utils/p2pAdCancel';
 import { applyFollowUp } from '../../utils/p2pFollowUp';
 import { getActiveWallet } from '../../services/wallet';
+import { useKeyedMessages } from '@/hooks/useKeyedMessages';
 import { useTheme } from '@/theme';
 import {
   AccentCard,
@@ -29,6 +30,7 @@ import {
   EmptyState,
   ErrorState,
   Icon,
+  InlineMessage,
   PressableScale,
   SkeletonGroup,
   StatusPill,
@@ -56,6 +58,8 @@ const MyAdsScreen: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [acting, setActing] = useState<string>(''); // adId currently undergoing an action
+  // Per ad, so a refused pause/cancel stays under the card it belongs to until the next attempt.
+  const [adErrors, setAdError] = useKeyedMessages();
   // Ads whose cancel was broadcast but not recorded yet: shown as sent, not
   // offered for cancel again until a later reload still shows them open.
   const [cancelSent, setCancelSent] = useState<ReadonlySet<string>>(new Set());
@@ -90,9 +94,10 @@ const MyAdsScreen: React.FC = () => {
   const onTogglePause = async (ad: P2PAd) => {
     if (acting) return;
     setActing(ad.id);
+    setAdError(ad.id);
     const res = ad.status === 'paused' ? await adsApi.resume(ad.id) : await adsApi.pause(ad.id);
     if (!res.success) {
-      toast.error(p2pErrorMessage(res, 'Server rejected the request'));
+      setAdError(ad.id, p2pErrorMessage(res, 'Server rejected the request'));
     } else {
       toast.success(ad.status === 'paused' ? 'Ad resumed' : 'Ad paused');
     }
@@ -120,6 +125,7 @@ const MyAdsScreen: React.FC = () => {
 
   const doCancel = async (ad: P2PAd) => {
     let next: P2PFollowUp = { reload: true };
+    setAdError(ad.id);
     try {
       const sellerAddress = await getActiveWallet();
       if (!sellerAddress) throw new Error('No wallet found');
@@ -139,7 +145,7 @@ const MyAdsScreen: React.FC = () => {
       next = adCancelThrownFollowUp(err);
     } finally {
       setActing('');
-      applyFollowUp(next, { toast, reload: load });
+      applyFollowUp(next, { toast, reload: load, onError: (m) => setAdError(ad.id, m) });
     }
   };
 
@@ -245,14 +251,16 @@ const MyAdsScreen: React.FC = () => {
         ) : (
           <View style={{ gap: spacing.md }}>
             {ads.map((ad) => (
-              <AdCard
-                key={ad.id}
-                ad={ad}
-                busy={acting === ad.id}
-                cancelSent={cancelSent.has(ad.id)}
-                onTogglePause={onTogglePause}
-                onCancel={onCancel}
-              />
+              <View key={ad.id} style={{ gap: spacing.sm }}>
+                <AdCard
+                  ad={ad}
+                  busy={acting === ad.id}
+                  cancelSent={cancelSent.has(ad.id)}
+                  onTogglePause={onTogglePause}
+                  onCancel={onCancel}
+                />
+                <InlineMessage message={adErrors[ad.id]} onDismiss={() => setAdError(ad.id)} />
+              </View>
             ))}
           </View>
         )}
