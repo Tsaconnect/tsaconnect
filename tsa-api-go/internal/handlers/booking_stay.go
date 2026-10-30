@@ -200,15 +200,23 @@ func parseStay(form *models.BookingFieldConfig, answers map[string]interface{}, 
 	return &stayDates{checkIn: in, checkOut: out}, ""
 }
 
-// seatDateKey is the answer a seat/ticket booking is dated by: the form's first
-// date field (a coach's travel date, an event's date), or "" when it asks none.
+// seatDateKeys are the answers a seat/ticket booking can be dated by, in
+// preference order. Named rather than "any date field": a form may also ask a
+// return date or a date of birth, which say nothing about the day the places
+// are for. Date-time fields are free text, so they cannot date a booking.
+var seatDateKeys = []string{"travel_date", "event_date", "date", "start_date"}
+
+// seatDateKey is the answer a seat/ticket booking is dated by, or "" when its
+// form asks none (the booking then counts against the listing's whole run).
 func seatDateKey(form *models.BookingFieldConfig) string {
 	if form == nil {
 		return ""
 	}
-	for _, f := range form.Fields {
-		if f.Type == models.BookingFieldDate {
-			return f.Key
+	for _, key := range seatDateKeys {
+		for _, f := range form.Fields {
+			if f.Key == key && f.Type == models.BookingFieldDate {
+				return key
+			}
 		}
 	}
 	return ""
@@ -227,6 +235,11 @@ func parseSeatDay(form *models.BookingFieldConfig, key string, answers map[strin
 	}
 	loc := profile.Location()
 	s, _ := answers[key].(string)
+	if strings.TrimSpace(s) == "" {
+		// The listing's places are counted per day, so the day is needed even
+		// when the form marks the field optional.
+		return time.Time{}, fmt.Sprintf("Pick a %s", strings.ToLower(label))
+	}
 	day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(s), loc)
 	if err != nil {
 		return time.Time{}, fmt.Sprintf("%s must be a date (YYYY-MM-DD)", label)

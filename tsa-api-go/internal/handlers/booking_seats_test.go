@@ -16,6 +16,16 @@ import (
 // booking form that asks a travel date.
 func seatListing(t *testing.T, capacity int, dated bool) (db *gorm.DB, ch *CheckoutHandler, svc *models.Product, buyers []*models.User) {
 	t.Helper()
+	var fields []models.BookingField
+	if dated {
+		fields = []models.BookingField{{Key: "travel_date", Type: models.BookingFieldDate, Label: "Travel date", Required: true}}
+	}
+	return seatListingWithForm(t, capacity, fields)
+}
+
+// seatListingWithForm is seatListing with the given booking form (none when empty).
+func seatListingWithForm(t *testing.T, capacity int, fields []models.BookingField) (db *gorm.DB, ch *CheckoutHandler, svc *models.Product, buyers []*models.User) {
+	t.Helper()
 	pinBookingNow(t, stayNow)
 	db = setupCheckoutTestDB(t)
 	ch = setupCheckoutHandler(t)
@@ -24,11 +34,9 @@ func seatListing(t *testing.T, capacity int, dated bool) (db *gorm.DB, ch *Check
 	svc = createTestService(t, db, seller.ID, &cat.ID, 0, 5)
 	writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, models.PriceUnitPerSeat)
 	updates := map[string]interface{}{"max_capacity_per_slot": capacity, "slot_duration_minutes": 0}
-	if dated {
+	if len(fields) > 0 {
 		var p models.ServiceProfile
-		p.SetFieldConfig(&models.BookingFieldConfig{Fields: []models.BookingField{
-			{Key: "travel_date", Type: models.BookingFieldDate, Label: "Travel date", Required: true},
-		}})
+		p.SetFieldConfig(&models.BookingFieldConfig{Fields: fields})
 		updates["field_config"] = p.FieldConfig
 	}
 	if err := db.Model(&models.ServiceProfile{}).Where("product_id = ?", svc.ID).Updates(updates).Error; err != nil {
@@ -117,4 +125,33 @@ func TestUpsertServiceProfile_CreateKeepsUnlimitedCapacity(t *testing.T) {
 	if p := loadProfile(t, db, svc.ID); p.MaxCapacityPerSlot != 0 {
 		t.Errorf("stored capacity = %d, want 0 (unlimited)", p.MaxCapacityPerSlot)
 	}
+}
+
+// A booking is dated only by a field that names its day: a return date or a
+// date of birth earlier in the form is not it, and a day-counted listing needs
+// its date even when the form marks it optional.
+func TestCreateServiceOrder_SeatDateField(t *testing.T) {
+	_, ch, svc, b := seatListingWithForm(t, 1, []models.BookingField{
+		{Key: "date_of_birth", Type: models.BookingFieldDate, Label: "Date of birth"},
+		{Key: "return_date", Type: models.BookingFieldDate, Label: "Return date"},
+		{Key: "travel_date", Type: models.BookingFieldDate, Label: "Travel date"},
+	})
+	book := func(buyer *models.User, answers map[string]interface{}) *httptest.ResponseRecorder {
+		return postServiceOrder(t, ch, buyer, map[string]interface{}{"productId": svc.ID.String(), "quantity": 1, "answers": answers})
+	}
+	expectRefused(t, book(b[0], map[string]interface{}{"date_of_birth": "1990-05-01"}), "Pick a travel date")
+	if w := book(b[0], map[string]interface{}{"date_of_birth": "1990-05-01", "travel_date": "2026-11-10"}); w.Code != http.StatusCreated {
+		t.Fatalf("dated by travel date: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	expectRefused(t, book(b[1], map[string]interface{}{"travel_date": "2026-11-10"}), "sold out on 10 Nov 2026")
+
+	// A form whose only date is not a booking day counts the listing's whole run.
+	_, ch2, svc2, b2 := seatListingWithForm(t, 1, []models.BookingField{
+		{Key: "date_of_birth", Type: models.BookingFieldDate, Label: "Date of birth"},
+	})
+	body := map[string]interface{}{"productId": svc2.ID.String(), "quantity": 1, "answers": map[string]interface{}{"date_of_birth": "1990-05-01"}}
+	if w := postServiceOrder(t, ch2, b2[0], body); w.Code != http.StatusCreated {
+		t.Fatalf("undated: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	expectRefused(t, postServiceOrder(t, ch2, b2[1], body), "sold out")
 }
