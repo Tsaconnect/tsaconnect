@@ -7,7 +7,7 @@
 import React, { useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
-import { Chip, IconButton, Input, PickerSheet, SelectRow, Text, Toggle } from '@/components/ui';
+import { Chip, CounterControl, Input, PickerSheet, SelectRow, Text, Toggle } from '@/components/ui';
 import type { SchemaAnswers, SchemaField } from '@/utils/schemaFields';
 
 interface SchemaFieldsProps {
@@ -119,26 +119,7 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
 
     if (f.type === 'counter') {
       const val = typeof answers[f.key] === 'number' ? answers[f.key] : 0;
-      return labelled(
-        f,
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-          <IconButton
-            icon="minus"
-            variant="surface"
-            onPress={() => onChange(f.key, Math.max(0, val - 1))}
-            accessibilityLabel={`Decrease ${f.label}`}
-          />
-          <Text variant="title3" weight="700" style={{ minWidth: 32, textAlign: 'center' }}>
-            {val}
-          </Text>
-          <IconButton
-            icon="plus"
-            variant="surface"
-            onPress={() => onChange(f.key, val + 1)}
-            accessibilityLabel={`Increase ${f.label}`}
-          />
-        </View>,
-      );
+      return labelled(f, <CounterControl value={val} onChange={(n) => onChange(f.key, n)} label={f.label} />);
     }
 
     // text | textarea | number | date | time | datetime | location → Input.

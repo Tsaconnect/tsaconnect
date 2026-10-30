@@ -1,29 +1,35 @@
-// A category's listing fields, fetched once per category per app session —
-// the add-listing form, the listing detail and the browse filters all ask for
-// the same category's fields.
+// A category's listing fields and allowed price units, fetched once per
+// category per app session — the add-listing form, the listing detail and the
+// browse filters all ask for the same category's fields.
 import { useEffect, useState } from 'react';
 import { getCategoryListingFields } from '@/services/serviceListingApi';
 import type { SchemaField } from '@/utils/schemaFields';
 
-const cache = new Map<string, SchemaField[]>();
-
-export function useCategoryListingFields(categoryId?: string | null): {
+interface CategoryForm {
   fields: SchemaField[];
+  // null = the category does not restrict price units.
+  priceUnits: string[] | null;
+}
+
+const EMPTY: CategoryForm = { fields: [], priceUnits: null };
+const cache = new Map<string, CategoryForm>();
+
+export function useCategoryListingFields(categoryId?: string | null): CategoryForm & {
   loading: boolean;
 } {
   const cached = categoryId ? cache.get(categoryId) : undefined;
-  const [fields, setFields] = useState<SchemaField[]>(cached ?? []);
+  const [form, setForm] = useState<CategoryForm>(cached ?? EMPTY);
   const [loading, setLoading] = useState(!!categoryId && !cached);
 
   useEffect(() => {
     if (!categoryId) {
-      setFields([]);
+      setForm(EMPTY);
       setLoading(false);
       return;
     }
     const hit = cache.get(categoryId);
     if (hit) {
-      setFields(hit);
+      setForm(hit);
       setLoading(false);
       return;
     }
@@ -32,9 +38,15 @@ export function useCategoryListingFields(categoryId?: string | null): {
     getCategoryListingFields(categoryId).then((res) => {
       if (!live) return;
       // An older API without the endpoint simply means no category fields.
-      const next = res.success && res.data ? (res.data.listingFields as SchemaField[]) ?? [] : [];
+      const next: CategoryForm =
+        res.success && res.data
+          ? {
+              fields: (res.data.listingFields as SchemaField[]) ?? [],
+              priceUnits: res.data.resolvedConfig?.priceUnits?.value ?? null,
+            }
+          : EMPTY;
       if (res.success) cache.set(categoryId, next);
-      setFields(next);
+      setForm(next);
       setLoading(false);
     });
     return () => {
@@ -42,5 +54,5 @@ export function useCategoryListingFields(categoryId?: string | null): {
     };
   }, [categoryId]);
 
-  return { fields, loading };
+  return { ...form, loading };
 }

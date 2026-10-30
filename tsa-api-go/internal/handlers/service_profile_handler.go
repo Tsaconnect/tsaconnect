@@ -8,6 +8,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
 
 // GetServiceProfile handles GET /api/services/:id/profile — public read of a
@@ -64,6 +65,8 @@ type serviceProfileRequest struct {
 	PricingMethod *string                    `json:"pricingMethod"`
 	BookingFeeUSD *float64                   `json:"bookingFeeUsd"`
 	FieldConfig   *models.BookingFieldConfig `json:"fieldConfig"`
+	// PriceUnit must be one of the category's price_units; "" clears it.
+	PriceUnit *string `json:"priceUnit"`
 }
 
 // derefOr returns the pointed-to value, or fallback when the field was omitted.
@@ -82,7 +85,8 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid service ID")
 		return
 	}
-	if ownedServiceProduct(c, productID) == nil {
+	product := ownedServiceProduct(c, productID)
+	if product == nil {
 		return
 	}
 	var req serviceProfileRequest
@@ -113,6 +117,10 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	if msg := checkPriceUnit(config.DB, product, derefOr(req.PriceUnit, "")); msg != "" {
+		utils.ErrorResponse(c, http.StatusBadRequest, msg)
+		return
+	}
 	var profile models.ServiceProfile
 	err = config.DB.Where("product_id = ?", productID).First(&profile).Error
 	isNew := err != nil
@@ -131,6 +139,7 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	profile.BookingRules = derefOr(req.BookingRules, profile.BookingRules)
 	profile.BookingFeeUSD = derefOr(req.BookingFeeUSD, profile.BookingFeeUSD)
 	profile.Timezone = derefOr(req.Timezone, profile.Timezone)
+	profile.PriceUnit = derefOr(req.PriceUnit, profile.PriceUnit)
 	if bt := derefOr(req.BookingType, ""); bt != "" {
 		profile.BookingType = bt
 	}
@@ -194,4 +203,26 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Profile saved successfully", profile)
+}
+
+// checkPriceUnit says why unit cannot price product, or "" when it can. Empty
+// is always allowed (no unit). A quote is not a unit: price-on-request is the
+// pricing method. A category with no price_units configured accepts any unit.
+func checkPriceUnit(db *gorm.DB, product *models.Product, unit string) string {
+	if unit == "" {
+		return ""
+	}
+	if !models.ValidPriceUnit(unit) || unit == models.PriceUnitOnRequest {
+		return "Invalid price unit"
+	}
+	cfg, ok := serviceCategoryConfig(db, product)
+	if !ok || cfg.PriceUnits.Value == nil {
+		return ""
+	}
+	for _, u := range cfg.PriceUnits.Value {
+		if u == unit {
+			return ""
+		}
+	}
+	return "This category does not offer that price unit"
 }

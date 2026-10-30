@@ -28,6 +28,7 @@ import { useTheme } from '@/theme';
 import { formatMicroPrice, isMicroPrice } from '@/utils/formatPrice';
 import {
   Button,
+  CounterControl,
   Divider,
   RadioGroup,
   Sheet,
@@ -60,6 +61,7 @@ import { createBookingRequest } from '../../services/bookingRequestApi';
 import MenuPicker from './MenuPicker';
 import SlotPicker from './SlotPicker';
 import BookingForm, { type BookingFormHandle } from './BookingForm';
+import { priceUnitSuffix, quantityLabel } from '@/utils/priceUnit';
 
 type FeeMode = 'standard' | 'booking';
 // The three marketplace service types drive which buyer flow the sheet shows.
@@ -105,6 +107,10 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // Booking workflow: 'instant' escrows immediately; others create a request the
   // merchant must approve before the buyer pays (Phase 2).
   const [bookingType, setBookingType] = useState<BookingType>('instant');
+  // Set when the category books by quantity (seats, tickets): the buyer picks
+  // how many, and perUnit says the price is paid for each one.
+  const [quantitySpec, setQuantitySpec] = useState<{ max: number; perUnit: boolean; unit?: string } | null>(null);
+  const [quantity, setQuantity] = useState(1);
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   // Inline escrow checkout state for the order/booking/access-fee flows.
@@ -214,6 +220,13 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       const schemaRes = await getBookingFormSchema(serviceId);
       setCustomFields(schemaRes.success && schemaRes.data ? schemaRes.data.fields || [] : []);
       setBookingType(schemaRes.success && schemaRes.data ? schemaRes.data.bookingType : 'instant');
+      const schema = schemaRes.success ? schemaRes.data : undefined;
+      setQuantitySpec(
+        schema?.serviceType === 'booking' && schema.bookingMode === 'quantity'
+          ? { max: schema.maxQuantity || 1, perUnit: !!schema.chargesPerUnit, unit: schema.priceUnit }
+          : null,
+      );
+      setQuantity(1);
 
       if (feeMode === 'booking' && catId) {
         const feeRes = await getCategoryBookingFees(catId);
@@ -268,7 +281,8 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   const { calloutFee, total, resolvedTier } = useMemo(() => {
     if (mode === 'booking') {
       const fare = bookingFees[bookingTier] || 0;
-      return { calloutFee: fare, total: fare, resolvedTier: bookingTier as BookingTier };
+      const units = quantitySpec?.perUnit ? quantity : 1;
+      return { calloutFee: fare, total: fare * units, resolvedTier: bookingTier as BookingTier };
     }
     const effectiveResidential = residential && residentialAllowed;
     const fee = effectiveResidential ? 0 : detectedCallout;
@@ -276,7 +290,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       ? 'residential'
       : zoneToBookingTier(detectedZone);
     return { calloutFee: fee, total: servicePrice + fee, resolvedTier: tier };
-  }, [mode, bookingFees, bookingTier, residential, residentialAllowed, detectedCallout, detectedZone, servicePrice]);
+  }, [mode, bookingFees, bookingTier, quantitySpec, quantity, residential, residentialAllowed, detectedCallout, detectedZone, servicePrice]);
 
   const canPay = total > 0;
 
@@ -291,7 +305,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
         fee: calloutFee,
         mode,
       });
-      const res = await cartService.addToCart({ productId, quantity: 1, notes });
+      const res = await cartService.addToCart({ productId, quantity: quantitySpec ? quantity : 1, notes });
       if (!res.success) {
         toast.show(res.message || 'Failed to add to cart', 'error');
         return false;
@@ -303,7 +317,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
     } finally {
       setAdding(false);
     }
-  }, [product, serviceId, resolvedTier, mode, servicePrice, calloutFee, toast]);
+  }, [product, serviceId, resolvedTier, mode, servicePrice, calloutFee, quantitySpec, quantity, toast]);
 
   const handleAddToCart = async () => {
     const ok = await addToCart();
@@ -345,6 +359,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           buyerCountry,
           menuSelections: extra.menuSelections,
           bookingSlot: extra.bookingSlot,
+          quantity: quantitySpec ? quantity : undefined,
           answers: extra.answers,
         });
         toast.show('Order placed & funded via escrow', 'success');
@@ -357,7 +372,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [buyerCity, buyerState, buyerCountry, toast, onClose, router],
+    [buyerCity, buyerState, buyerCountry, quantitySpec, quantity, toast, onClose, router],
   );
 
   // BookingForm submit — instant bookings escrow immediately; request/approval
@@ -375,6 +390,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           buyerCity,
           buyerState,
           buyerCountry,
+          quantity: quantitySpec ? quantity : undefined,
           answers,
         });
         if (!res.success) {
@@ -393,7 +409,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bookingType, buyerCity, buyerState, buyerCountry, toast, onClose, router, runInlineCheckout],
+    [bookingType, buyerCity, buyerState, buyerCountry, quantitySpec, quantity, toast, onClose, router, runInlineCheckout],
   );
 
   const handleMenuCheckout = (menuItems: { itemId: string; quantity: number }[]) =>
@@ -507,6 +523,25 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   return (
     <Sheet visible={visible} onClose={onClose} title="Service Pricing" scrollable footer={footer}>
       <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.md, gap: spacing.lg }}>
+        {!loading && !error && quantitySpec && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <View style={{ flex: 1 }}>
+              <Text variant="bodyMed" weight="600">
+                {quantityLabel(quantitySpec.unit)}
+              </Text>
+              <Text variant="caption" color="textSecondary">
+                {quantitySpec.perUnit ? 'The price is for each one.' : 'One price for the whole booking.'}
+              </Text>
+            </View>
+            <CounterControl
+              value={quantity}
+              onChange={setQuantity}
+              label={quantityLabel(quantitySpec.unit).toLowerCase()}
+              min={1}
+              max={quantitySpec.max}
+            />
+          </View>
+        )}
         {loading ? (
           <View style={{ paddingVertical: spacing['2xl'], alignItems: 'center' }}>
             <Spinner label="Loading pricing…" />
@@ -610,7 +645,10 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
               onChange={(v) => setBookingTier(v as BookingTier)}
             />
             <SummaryCard dividerBeforeLast>
-              <SummaryRow label="Booking fare" value={fmtUsd(calloutFee)} />
+              <SummaryRow
+                label={quantitySpec?.perUnit && quantity > 1 ? `Booking fare × ${quantity}` : 'Booking fare'}
+                value={`${fmtUsd(calloutFee)}${quantitySpec?.perUnit ? priceUnitSuffix(quantitySpec.unit) : ''}`}
+              />
               <SummaryRow label="Total" value={fmtUsd(total)} total valueColor="accent" />
             </SummaryCard>
           </>

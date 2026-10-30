@@ -1,0 +1,220 @@
+package handlers
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/ojimcy/tsa-api-go/internal/models"
+	"gorm.io/gorm"
+)
+
+// quantityCategory is a booking category in quantity mode allowing units.
+func quantityCategory(t *testing.T, db *gorm.DB, units ...string) *models.Category {
+	t.Helper()
+	cat := serviceCategory(t, db, models.ServiceTypeBooking)
+	mode := models.BookingModeQuantity
+	updates := map[string]interface{}{"booking_mode": mode}
+	if len(units) > 0 {
+		b, _ := json.Marshal(units)
+		updates["price_units"] = string(b)
+	}
+	if err := db.Model(cat).Updates(updates).Error; err != nil {
+		t.Fatalf("failed to configure category: %v", err)
+	}
+	return cat
+}
+
+func writePricedProfile(t *testing.T, db *gorm.DB, productID uuid.UUID, bookingType, priceUnit string) {
+	t.Helper()
+	profile := models.ServiceProfile{
+		ID:            uuid.New(),
+		ProductID:     productID,
+		BookingType:   bookingType,
+		PricingMethod: models.PricingMethodFixed,
+		PriceUnit:     priceUnit,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatalf("failed to create profile: %v", err)
+	}
+}
+
+// A quantity-mode booking charges the per-unit fare once per unit and records
+// the units on the order; fixed and slot-mode listings charge once.
+func TestCreateServiceOrder_QuantityPricing(t *testing.T) {
+	cases := []struct {
+		name      string
+		quantity  bool // category in quantity mode
+		unit      string
+		requested int
+		wantPaid  string // ProductAmount, USDC base units (fare 5)
+		wantQty   int
+	}{
+		{"per seat x3", true, models.PriceUnitPerSeat, 3, "15000000", 3},
+		{"no unit in quantity mode is per unit", true, "", 2, "10000000", 2},
+		{"fixed is a total", true, models.PriceUnitFixed, 4, "5000000", 4},
+		{"quantity defaults to one", true, models.PriceUnitPerSeat, 0, "5000000", 1},
+		{"slot mode ignores quantity", false, models.PriceUnitPerSeat, 3, "5000000", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupCheckoutTestDB(t)
+			ch := setupCheckoutHandler(t)
+			buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+			seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+			cat := serviceCategory(t, db, models.ServiceTypeBooking)
+			if tc.quantity {
+				cat = quantityCategory(t, db)
+			}
+			svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5) // same-city fare 5
+			writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, tc.unit)
+
+			w := postServiceOrder(t, ch, buyer, map[string]interface{}{"productId": svc.ID.String(), "quantity": tc.requested})
+			if w.Code != http.StatusCreated {
+				t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+			}
+			order := firstOrder(t, w)
+			if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != tc.wantPaid {
+				t.Errorf("productAmount = %s, want %s", got, tc.wantPaid)
+			}
+			if got := int(order["quantity"].(float64)); got != tc.wantQty {
+				t.Errorf("quantity = %d, want %d", got, tc.wantQty)
+			}
+		})
+	}
+}
+
+func TestCreateServiceOrder_QuantityOverMaxRefused(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, models.PriceUnitPerSeat)
+
+	w := postServiceOrder(t, ch, buyer, map[string]interface{}{"productId": svc.ID.String(), "quantity": maxBookingUnits + 1})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// The quantity asked for in a request is kept and charged when it is paid.
+func TestBookingRequest_QuantityChargedAtPay(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writePricedProfile(t, db, svc.ID, models.BookingTypeRequest, models.PriceUnitPerSeat)
+
+	idParams := gin.Params{{Key: "id", Value: svc.ID.String()}}
+	if w := postJSON(t, buyer, idParams, map[string]interface{}{"token": "USDC", "quantity": 3}, ch.CreateBookingRequest); w.Code != http.StatusCreated {
+		t.Fatalf("create request: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var r models.BookingRequest
+	db.Where("buyer_id = ?", buyer.ID).First(&r)
+	if r.Quantity != 3 {
+		t.Fatalf("request quantity = %d, want 3", r.Quantity)
+	}
+	reqParams := gin.Params{{Key: "reqId", Value: r.ID.String()}}
+	if w := postJSON(t, seller, reqParams, nil, ch.ApproveBookingRequest); w.Code != http.StatusOK {
+		t.Fatalf("approve: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	w := postJSON(t, buyer, reqParams, nil, ch.PayBookingRequest)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("pay: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	order := firstOrder(t, w)
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "15000000" {
+		t.Errorf("productAmount = %s, want 15000000", got)
+	}
+}
+
+func TestUpsertServiceProfile_PriceUnit(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db, models.PriceUnitPerSeat, models.PriceUnitOnRequest)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+
+	for _, tc := range []struct {
+		unit string
+		want int
+	}{
+		{models.PriceUnitPerNight, http.StatusBadRequest},  // not offered by the category
+		{models.PriceUnitOnRequest, http.StatusBadRequest}, // a quote is the pricing method
+		{"per_fortnight", http.StatusBadRequest},
+		{models.PriceUnitPerSeat, http.StatusOK},
+		{"", http.StatusOK},
+	} {
+		if w := putProfile(t, &Handlers{}, seller, svc.ID, map[string]interface{}{"priceUnit": tc.unit}); w.Code != tc.want {
+			t.Errorf("priceUnit %q: expected %d, got %d: %s", tc.unit, tc.want, w.Code, w.Body.String())
+		}
+	}
+
+	// A category with no price units configured accepts any unit.
+	open := serviceCategory(t, db, models.ServiceTypeBooking)
+	svc2 := createTestService(t, db, seller.ID, &open.ID, 0, 5)
+	if w := putProfile(t, &Handlers{}, seller, svc2.ID, map[string]interface{}{"priceUnit": models.PriceUnitPerHour}); w.Code != http.StatusOK {
+		t.Fatalf("unconfigured category: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if p := loadProfile(t, db, svc2.ID); p.PriceUnit != models.PriceUnitPerHour {
+		t.Errorf("stored priceUnit = %q, want per_hour", p.PriceUnit)
+	}
+}
+
+func TestGetBookingFormSchema_QuantityMode(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, models.PriceUnitPerSeat)
+
+	w := getFormSchema(t, &Handlers{}, svc.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			BookingMode    string `json:"bookingMode"`
+			PriceUnit      string `json:"priceUnit"`
+			ChargesPerUnit bool   `json:"chargesPerUnit"`
+			MaxQuantity    int    `json:"maxQuantity"`
+		} `json:"data"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	d := resp.Data
+	if d.BookingMode != models.BookingModeQuantity || d.PriceUnit != models.PriceUnitPerSeat || !d.ChargesPerUnit || d.MaxQuantity != maxBookingUnits {
+		t.Errorf("unexpected schema: %+v", d)
+	}
+}
+
+// The cart path takes a quantity-mode booking's units from the cart line.
+func TestCreateOrderFromCart_QuantityBooking(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, models.PriceUnitPerSeat)
+	createTestCart(t, db, buyer.ID, []models.CartItem{{ID: uuid.New(), Product: svc.ID, Seller: seller.ID, Quantity: 2, AddedAt: time.Now()}})
+
+	w := postServiceCheckout(t, ch, buyer, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	order := firstOrder(t, w)
+	if got := listingPaid(t, order["productAmount"], order["platformFee"]); got != "10000000" {
+		t.Errorf("productAmount = %s, want 10000000", got)
+	}
+	if got := int(order["quantity"].(float64)); got != 2 {
+		t.Errorf("quantity = %d, want 2", got)
+	}
+}

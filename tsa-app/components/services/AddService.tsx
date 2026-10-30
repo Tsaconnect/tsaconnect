@@ -21,7 +21,7 @@ import {
   KeyboardAvoidingView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
@@ -32,6 +32,7 @@ import { useTheme } from "@/theme";
 import {
   Button,
   Card,
+  Chip,
   Icon,
   Input,
   PickerSheet,
@@ -68,6 +69,7 @@ import { SchemaFields } from "@/components/forms/SchemaFields";
 import { useCategoryListingFields } from "@/hooks/useCategoryListingFields";
 import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields";
 import { categoryPathLabels } from "@/utils/categoryTree";
+import { listingPriceUnits, PRICE_UNIT_LABELS, type PriceUnit } from "@/utils/priceUnit";
 import BookingConfigBuilder from "./BookingConfigBuilder";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
@@ -127,6 +129,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   // Pricing: fixed (set up front) vs on_request (merchant names the price when
   // approving each request). on_request implies bookingType "request".
   const [pricingMethod, setPricingMethod] = useState<PricingMethod>("fixed");
+  // What the price buys (per seat, per night, …), from the category's units.
+  const [priceUnit, setPriceUnit] = useState<string>("");
 
   // Menu (order) + availability (order/booking).
   const [menuItems, setMenuItems] = useState<MenuDraft[]>([emptyMenuDraft()]);
@@ -139,7 +143,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
   // The chosen category's serviceType drives the whole form shape.
   const selectedCategory = categories.find((c) => c.id === category);
-  const { fields: listingFields } = useCategoryListingFields(category || null);
+  const { fields: listingFields, priceUnits: categoryPriceUnits } = useCategoryListingFields(category || null);
+  const priceUnitOptions = useMemo(() => listingPriceUnits(categoryPriceUnits), [categoryPriceUnits]);
   const serviceType: ServiceType = selectedCategory?.serviceType ?? "contact";
   const isContact = serviceType === "contact";
   const isOrder = serviceType === "order";
@@ -157,6 +162,16 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       setBookingType("request");
     }
   }, [pricingMethod, bookingType]);
+
+  // A unit the (new) category does not offer would be refused on save; fall
+  // back to the category's first one, or none when it does not restrict units.
+  useEffect(() => {
+    if (priceUnit && !priceUnitOptions.includes(priceUnit as PriceUnit)) {
+      setPriceUnit(categoryPriceUnits ? priceUnitOptions[0] ?? "" : "");
+    } else if (!priceUnit && categoryPriceUnits && priceUnitOptions.length) {
+      setPriceUnit(priceUnitOptions[0]);
+    }
+  }, [priceUnit, priceUnitOptions, categoryPriceUnits]);
 
   useEffect(() => {
     const fetchCategories = async () => {
@@ -240,6 +255,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           if (prof.fieldConfig?.fields?.length) setBookingFields(prof.fieldConfig.fields);
           if (prof.bookingType) setBookingType(prof.bookingType);
           if (prof.pricingMethod) setPricingMethod(prof.pricingMethod);
+          setPriceUnit(prof.priceUnit ?? "");
         }
 
         // Menu.
@@ -330,6 +346,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       profile.fieldConfig = bookingFields.length ? { fields: bookingFields } : null;
       profile.bookingType = bookingType;
       profile.pricingMethod = pricingMethod;
+      // A quoted price is a total, so it carries no unit.
+      profile.priceUnit = pricingMethod === "fixed" ? priceUnit : "";
     }
     if (serviceAddress) profile.serviceAddress = serviceAddress;
     if (coverageArea) profile.coverageArea = coverageArea;
@@ -841,6 +859,24 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                         ? "You set the price up front."
                         : "You name the price when you approve each request."}
                     </Text>
+                    {pricingMethod === "fixed" && priceUnitOptions.length > 0 && (
+                      <View style={{ gap: spacing.xs, marginTop: spacing.sm }}>
+                        <Text variant="bodyMed" weight="600">
+                          The price is
+                        </Text>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.xs }}>
+                          {priceUnitOptions.map((u) => (
+                            <Chip
+                              key={u}
+                              label={PRICE_UNIT_LABELS[u]}
+                              selected={priceUnit === u}
+                              // Tapping the chosen unit clears it unless the category requires one.
+                              onPress={() => setPriceUnit(priceUnit === u && !categoryPriceUnits ? "" : u)}
+                            />
+                          ))}
+                        </View>
+                      </View>
+                    )}
                   </Card>
 
                   {sectionTitle("Booking workflow")}

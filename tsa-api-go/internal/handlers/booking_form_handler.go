@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 
@@ -28,19 +29,8 @@ func serviceBookingForm(db *gorm.DB, product *models.Product, profile *models.Se
 	if cfg := profile.GetFieldConfig(); cfg != nil && len(cfg.Fields) > 0 {
 		return cfg, formSourceListing
 	}
-	if product.CategoryID == nil {
-		return nil, formSourceNone
-	}
-	var cat models.Category
-	if err := db.First(&cat, "id = ?", *product.CategoryID).Error; err != nil {
-		return nil, formSourceNone
-	}
-	resolved, err := models.ResolveCategoryConfig(db, cat)
-	if err != nil {
-		log.Printf("[booking-form] category %s config unresolved for service %s: %v", cat.ID, product.ID, err)
-		return nil, formSourceNone
-	}
-	if len(resolved.BookingFields.Value) == 0 {
+	resolved, ok := serviceCategoryConfig(db, product)
+	if !ok || len(resolved.BookingFields.Value) == 0 {
 		return nil, formSourceNone
 	}
 	fields := models.BookingFieldsOf(models.ExpandFieldRefs(resolved.BookingFields.Value, loadFieldCatalog(db)))
@@ -50,15 +40,69 @@ func serviceBookingForm(db *gorm.DB, product *models.Product, profile *models.Se
 	return &models.BookingFieldConfig{Fields: fields}, formSourceCategory
 }
 
+// maxBookingUnits caps the seats/tickets one booking can buy.
+const maxBookingUnits = 50
+
+// serviceCategoryConfig resolves a listing's category configuration; ok is
+// false when the listing has no category or it cannot be read.
+func serviceCategoryConfig(db *gorm.DB, product *models.Product) (models.CategoryConfig, bool) {
+	if product.CategoryID == nil {
+		return models.CategoryConfig{}, false
+	}
+	var cat models.Category
+	if err := db.First(&cat, "id = ?", *product.CategoryID).Error; err != nil {
+		return models.CategoryConfig{}, false
+	}
+	cfg, err := models.ResolveCategoryConfig(db, cat)
+	if err != nil {
+		log.Printf("[booking] category %s config unresolved for service %s: %v", cat.ID, product.ID, err)
+		return models.CategoryConfig{}, false
+	}
+	return cfg, true
+}
+
+// serviceBookingMode is the booking mode a listing's category resolves to,
+// slot when none is set.
+func serviceBookingMode(db *gorm.DB, product *models.Product) string {
+	if cfg, ok := serviceCategoryConfig(db, product); ok && cfg.BookingMode.Value != nil {
+		return *cfg.BookingMode.Value
+	}
+	return models.BookingModeSlot
+}
+
+// bookingUnits is how many units (seats, tickets) a booking buys. Only a
+// quantity-mode category books more than one; elsewhere it is 0 and the price
+// is charged once whatever the party size. A non-empty errMsg rejects the
+// booking.
+func bookingUnits(db *gorm.DB, product *models.Product, serviceType string, requested int) (int, string) {
+	if serviceType != models.ServiceTypeBooking || serviceBookingMode(db, product) != models.BookingModeQuantity {
+		return 0, ""
+	}
+	if requested <= 0 {
+		return 1, ""
+	}
+	if requested > maxBookingUnits {
+		return 0, fmt.Sprintf("You can book at most %d at a time", maxBookingUnits)
+	}
+	return requested, ""
+}
+
 // bookingFormSchema is the customer-facing schema the app renders the booking
 // form from: the enabled fields plus the workflow/pricing/payment dimensions and
 // the policy text. It is generated from the merchant's ServiceProfile config.
 type bookingFormSchema struct {
-	ProductID     uuid.UUID             `json:"productId"`
-	ServiceType   string                `json:"serviceType"`
-	BookingType   string                `json:"bookingType"`
-	PricingMethod string                `json:"pricingMethod"`
-	Fields        []models.BookingField `json:"fields"`
+	ProductID     uuid.UUID `json:"productId"`
+	ServiceType   string    `json:"serviceType"`
+	BookingType   string    `json:"bookingType"`
+	PricingMethod string    `json:"pricingMethod"`
+	// BookingMode is the category's booking mode (slot | date_range | quantity);
+	// in quantity mode the buyer picks a quantity up to MaxQuantity.
+	BookingMode string `json:"bookingMode"`
+	PriceUnit   string `json:"priceUnit"`
+	// ChargesPerUnit says the price is multiplied by the quantity picked.
+	ChargesPerUnit bool                  `json:"chargesPerUnit"`
+	MaxQuantity    int                   `json:"maxQuantity,omitempty"`
+	Fields         []models.BookingField `json:"fields"`
 	// FieldSource says where Fields came from: listing | category | none.
 	FieldSource string          `json:"fieldSource"`
 	Policies    bookingPolicies `json:"policies"`
@@ -110,6 +154,12 @@ func (h *Handlers) GetBookingFormSchema(c *gin.Context) {
 			Refund:       profile.RefundPolicy,
 			Rules:        profile.BookingRules,
 		},
+	}
+	schema.BookingMode = serviceBookingMode(config.DB, &product)
+	schema.PriceUnit = profile.PriceUnit
+	schema.ChargesPerUnit = models.ChargesPerUnit(schema.BookingMode, profile.PriceUnit)
+	if schema.BookingMode == models.BookingModeQuantity {
+		schema.MaxQuantity = maxBookingUnits
 	}
 	cfg, source := serviceBookingForm(config.DB, &product, &profile)
 	schema.FieldSource = source

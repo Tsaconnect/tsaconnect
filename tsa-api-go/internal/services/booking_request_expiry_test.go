@@ -31,6 +31,7 @@ func setupBookingRequestDB(t *testing.T) *gorm.DB {
 		buyer_city TEXT,
 		buyer_state TEXT,
 		buyer_country TEXT,
+		quantity INTEGER NOT NULL DEFAULT 0,
 		answers TEXT,
 		status TEXT NOT NULL,
 		reject_reason TEXT,

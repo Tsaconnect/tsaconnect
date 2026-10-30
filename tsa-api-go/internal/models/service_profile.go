@@ -59,6 +59,11 @@ type ServiceProfile struct {
 	PricingMethod string  `gorm:"default:'fixed'" json:"pricingMethod"` // fixed | on_request
 	BookingFeeUSD float64 `gorm:"default:0" json:"bookingFeeUsd"`       // merchant "booking fee"
 
+	// PriceUnit is what the listing price buys ("per_seat", "per_night", …), one
+	// of the category's price_units. Empty on listings that predate price units.
+	// A quoted price is set by PricingMethod, never here.
+	PriceUnit string `gorm:"size:16;not null;default:''" json:"priceUnit"`
+
 	// FieldConfig is the declarative set of enabled customer-form fields (a
 	// BookingFieldConfig). Null means "use the legacy per-serviceType flow" so the
 	// rollout is non-breaking. See booking_fields.go.

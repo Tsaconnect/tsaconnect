@@ -587,11 +587,13 @@ func serviceContactGatePaid(tx *gorm.DB, buyerID, productID uuid.UUID) bool {
 // resolved area zone, any recorded menu selections, and an unsaved booking to
 // attach after the order row is created. Shared by the cart checkout and the
 // single-service checkout so the pricing/capacity rules live in one place.
+// units is the booking's quantity from bookingUnits (0 outside quantity mode):
+// a per-unit fare is charged that many times and the slot holds that many places.
 // A non-empty errMsg means reject the order with 400.
 func (ch *CheckoutHandler) resolveServicePricing(
 	tx *gorm.DB, buyerID uuid.UUID, product *models.Product, serviceType string,
 	profile *models.ServiceProfile, detectedZone, declared string,
-	menuLines []menuLineRequest, slotReq *bookingSlotRequest,
+	menuLines []menuLineRequest, slotReq *bookingSlotRequest, units int,
 ) (priceUSD, calloutUSD float64, zone string, menuSel []models.OrderMenuSelection, booking *models.ServiceBooking, errMsg string) {
 	zone = resolveServiceTier(detectedZone, declared, serviceType == models.ServiceTypeBooking)
 
@@ -610,13 +612,20 @@ func (ch *CheckoutHandler) resolveServicePricing(
 		if fee <= 0 && product.CategoryID != nil {
 			fee = GetBookingFee(tx, *product.CategoryID, zone) // legacy admin fare
 		}
+		if units > 0 && models.ChargesPerUnit(models.BookingModeQuantity, profile.PriceUnit) {
+			fee *= float64(units)
+		}
 		priceUSD = fee + profile.AccessFeeUSD
 		calloutUSD = profile.CalloutFeeUSD
 		if profile.SlotDurationMinutes > 0 {
 			if slotReq == nil || slotReq.SlotStart.IsZero() {
 				return 0, 0, zone, nil, nil, fmt.Sprintf("Pick a time slot for %s", product.Name)
 			}
-			b, berr := ch.reserveBookingSlot(tx, buyerID, product, profile, *slotReq)
+			slot := *slotReq
+			if units > 0 {
+				slot.PartySize = units
+			}
+			b, berr := ch.reserveBookingSlot(tx, buyerID, product, profile, slot)
 			if berr != "" {
 				return 0, 0, zone, nil, nil, berr
 			}
@@ -1015,7 +1024,7 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 
 			if line.isService {
 				line.kind = models.OrderKindService
-				line.quantity = 1 // services have no inventory/quantity
+				line.quantity = 1 // no inventory; a quantity-mode booking sets its units below
 
 				serviceType, serviceProfile = resolveServiceTypeAndProfile(tx, &product)
 
@@ -1057,13 +1066,18 @@ func (ch *CheckoutHandler) priceCartItems(tx *gorm.DB, user *models.User, items 
 						slotReq = &s
 					}
 				}
+				units, uerr := bookingUnits(tx, &product, serviceType, item.Quantity)
+				if uerr != "" {
+					return nil, &cartPricingError{http.StatusBadRequest, uerr}
+				}
 				p, co, z, sel, booking, perr := ch.resolveServicePricing(
 					tx, user.ID, &product, serviceType, &serviceProfile,
-					detectedZone, declared, req.MenuSelections[product.ID.String()], slotReq,
+					detectedZone, declared, req.MenuSelections[product.ID.String()], slotReq, units,
 				)
 				if perr != "" {
 					return nil, &cartPricingError{http.StatusBadRequest, perr}
 				}
+				line.quantity = max(units, 1)
 				priceUSD, calloutUSD, line.zone, line.menuSelections, line.booking = p, co, z, sel, booking
 			} else {
 				// An unlocked promotion discounts ONE unit; any further units are
@@ -1630,6 +1644,9 @@ type createServiceOrderRequest struct {
 	ServiceTier    string              `json:"serviceTier"`
 	MenuSelections []menuLineRequest   `json:"menuSelections"`
 	BookingSlot    *bookingSlotRequest `json:"bookingSlot"`
+	// Quantity is the seats/tickets bought in a quantity-mode booking category;
+	// ignored elsewhere.
+	Quantity int `json:"quantity"`
 	// Answers are the buyer's auto-generated booking-form answers, keyed by the
 	// service's FieldConfig field keys (unified booking engine). Validated against
 	// the config and stored on the order for the merchant to fulfil.
@@ -1749,10 +1766,17 @@ func (ch *CheckoutHandler) CreateServiceOrder(c *gin.Context) {
 		return
 	}
 
+	units, uerr := bookingUnits(tx, &product, serviceType, req.Quantity)
+	if uerr != "" {
+		tx.Rollback()
+		utils.ErrorResponse(c, http.StatusBadRequest, uerr)
+		return
+	}
+
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, rates, user, &seller, &product, serviceType, &profile,
 		token, req.ServiceTier, buyerCity, buyerState, buyerCountry,
-		req.MenuSelections, req.BookingSlot, req.Answers, nil,
+		req.MenuSelections, req.BookingSlot, units, req.Answers, nil,
 	)
 	if errMsg != "" {
 		tx.Rollback()
@@ -1796,7 +1820,7 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	tx *gorm.DB, rates pricingRates, buyer, seller *models.User, product *models.Product,
 	serviceType string, profile *models.ServiceProfile,
 	token, serviceTier, buyerCity, buyerState, buyerCountry string,
-	menuLines []menuLineRequest, slotReq *bookingSlotRequest, answers map[string]interface{},
+	menuLines []menuLineRequest, slotReq *bookingSlotRequest, units int, answers map[string]interface{},
 	priceOverrideUSD *float64,
 ) (*models.Order, string, int) {
 	// Booking-form answers are validated by the caller, not here: inline checkout
@@ -1813,13 +1837,14 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	var booking *models.ServiceBooking
 	if priceOverrideUSD != nil {
 		// Provider-quoted price (price-on-request): the quote is the all-in
-		// service price; no tier call-out is added and there's no slot to reserve.
+		// service price for every unit; no tier call-out is added and there's no
+		// slot to reserve.
 		priceUSD = *priceOverrideUSD
 		zone = detectedZone
 	} else {
 		var perr string
 		priceUSD, calloutUSD, zone, menuSel, booking, perr = ch.resolveServicePricing(
-			tx, buyer.ID, product, serviceType, profile, detectedZone, serviceTier, menuLines, slotReq,
+			tx, buyer.ID, product, serviceType, profile, detectedZone, serviceTier, menuLines, slotReq, units,
 		)
 		if perr != "" {
 			return nil, perr, http.StatusBadRequest
@@ -1874,7 +1899,7 @@ func (ch *CheckoutHandler) placeServiceOrder(
 		SellerID:        product.UserID,
 		ProductID:       product.ID,
 		Kind:            models.OrderKindService,
-		Quantity:        1,
+		Quantity:        max(units, 1),
 		Token:           token,
 		ProductAmount:   productAmountWei.String(),
 		ShippingAmount:  shippingAmountWei.String(),

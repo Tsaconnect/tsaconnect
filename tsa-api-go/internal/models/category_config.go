@@ -44,6 +44,21 @@ var PriceUnits = []string{
 	PriceUnitPerSession, PriceUnitPerSeat, PriceUnitOnRequest,
 }
 
+// ValidPriceUnit reports whether s is a known price unit.
+func ValidPriceUnit(s string) bool { return containsString(PriceUnits, s) }
+
+// ChargesPerUnit reports whether a listing priced in unit is charged once per
+// booked unit (seat, ticket, session) in a category of booking mode. Only
+// quantity mode multiplies; there a listing that never chose a unit is per-unit
+// too, so a ticket listing set up before price units existed does not sell
+// three tickets for the price of one. Fixed and on-request prices are a total.
+func ChargesPerUnit(mode, unit string) bool {
+	if mode != BookingModeQuantity {
+		return false
+	}
+	return unit != PriceUnitFixed && unit != PriceUnitOnRequest
+}
+
 // ValidatePriceUnits checks a category's allowed price units: known, no repeats.
 // An empty list is valid and means "no units allowed" (an explicit override).
 func ValidatePriceUnits(units []string) error {
