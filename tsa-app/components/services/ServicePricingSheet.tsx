@@ -487,9 +487,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       });
       if (!live) return;
       setQuote(res.success && res.data ? res.data : null);
-      setQuoteRefusal(
-        bookingQuoteRefusal(res, { fields: customFields, answers: formAnswers, slotMissing: slottedForm && !slotSelection }),
-      );
+      setQuoteRefusal(bookingQuoteRefusal(res));
     }, 350);
     return () => {
       live = false;

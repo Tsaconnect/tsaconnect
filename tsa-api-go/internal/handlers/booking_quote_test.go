@@ -81,6 +81,7 @@ func TestQuoteServiceOrder_QuantityAndQuote(t *testing.T) {
 
 	quoted := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
 	writePricedProfile(t, db, quoted.ID, models.BookingTypeRequest, "")
+	unlimitedPlaces(t, db, quoted.ID)
 	db.Model(&models.ServiceProfile{}).Where("product_id = ?", quoted.ID).Update("pricing_method", models.PricingMethodOnRequest)
 	if _, q := postQuote(t, ch, buyer, map[string]interface{}{"productId": quoted.ID.String(), "quantity": 2}); !q.OnRequest || q.TotalUSD != 0 {
 		t.Errorf("quoted: expected onRequest with no price, got %+v", q)

@@ -10,6 +10,10 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/utils"
 )
 
+// bookingUnavailableCode marks a quote refused because the booking's nights or
+// places are already taken, as opposed to a form not yet filled in.
+const bookingUnavailableCode = "booking_unavailable"
+
 // serviceQuote is the price of a service booking as checkout would charge it
 // in USD, before the escrow's flat fee and any payout costs.
 type serviceQuote struct {
@@ -29,7 +33,9 @@ type serviceQuote struct {
 // pricing (resolveBooking + resolveServicePricing) inside a transaction that
 // is rolled back, so nothing is created or held. The booking sheet calls it as
 // the buyer fills the form; a 400 means the booking is not priceable yet
-// (missing dates, no slot, a full night) and carries the reason.
+// (missing dates, no slot) and carries the reason. One whose nights or places
+// are taken carries code booking_unavailable: that one is news to the buyer
+// (the sheet shows it), the rest is a form still being filled in.
 func (ch *CheckoutHandler) QuoteServiceOrder(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -69,6 +75,14 @@ func (ch *CheckoutHandler) QuoteServiceOrder(c *gin.Context) {
 	bk, msg := resolveBooking(tx, &product, &profile, serviceType, req.Quantity, answersOrEmpty(req.Answers))
 	if msg != "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, msg)
+		return
+	}
+	if msg := unslottedUnavailable(tx, &product, &profile, bk); msg != "" {
+		if msg == capacityUnreadable {
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, msg)
+		} else {
+			utils.ErrorResponseWithCode(c, http.StatusBadRequest, msg, bookingUnavailableCode)
+		}
 		return
 	}
 	q := serviceQuote{BookingMode: bk.mode, PriceUnit: profile.PriceUnit, Units: max(bk.units, 1)}
