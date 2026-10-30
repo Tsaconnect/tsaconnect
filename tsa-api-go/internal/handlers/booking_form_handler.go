@@ -149,9 +149,15 @@ func (h *Handlers) GetBookingFormSchema(c *gin.Context) {
 	}
 	schema.BookingMode = serviceBookingMode(config.DB, &product)
 	schema.PriceUnit = profile.PriceUnit
-	schema.ChargesPerUnit = models.ChargesPerUnit(schema.BookingMode, profile.PriceUnit)
+	// A quote is the provider's total, whatever the unit.
+	schema.ChargesPerUnit = schema.PricingMethod != models.PricingMethodOnRequest &&
+		models.ChargesPerUnit(schema.BookingMode, profile.PriceUnit)
 	if schema.BookingMode == models.BookingModeQuantity {
 		schema.MaxQuantity = maxBookingUnits
+		// A slotted listing cannot sell more places than one slot holds.
+		if profile.SlotDurationMinutes > 0 && profile.MaxCapacityPerSlot > 0 {
+			schema.MaxQuantity = min(schema.MaxQuantity, profile.MaxCapacityPerSlot)
+		}
 	}
 	cfg, source := serviceBookingForm(config.DB, &product, &profile)
 	schema.FieldSource = source

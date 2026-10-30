@@ -218,3 +218,35 @@ func TestCreateOrderFromCart_QuantityBooking(t *testing.T) {
 		t.Errorf("quantity = %d, want 2", got)
 	}
 }
+
+// A quote is a total and a slotted listing offers no more places than a slot holds.
+func TestGetBookingFormSchema_QuantityLimits(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db)
+	schemaOf := func(svc uuid.UUID) (bool, int) {
+		var resp struct {
+			Data struct {
+				ChargesPerUnit bool `json:"chargesPerUnit"`
+				MaxQuantity    int  `json:"maxQuantity"`
+			} `json:"data"`
+		}
+		json.Unmarshal(getFormSchema(t, &Handlers{}, svc).Body.Bytes(), &resp)
+		return resp.Data.ChargesPerUnit, resp.Data.MaxQuantity
+	}
+
+	quoted := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writePricedProfile(t, db, quoted.ID, models.BookingTypeRequest, "")
+	db.Model(&models.ServiceProfile{}).Where("product_id = ?", quoted.ID).Update("pricing_method", models.PricingMethodOnRequest)
+	if perUnit, _ := schemaOf(quoted.ID); perUnit {
+		t.Error("a quoted listing must not say it charges per unit")
+	}
+
+	slotted := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	writePricedProfile(t, db, slotted.ID, models.BookingTypeInstant, models.PriceUnitPerSeat)
+	db.Model(&models.ServiceProfile{}).Where("product_id = ?", slotted.ID).
+		Updates(map[string]interface{}{"slot_duration_minutes": 60, "max_capacity_per_slot": 8})
+	if _, limit := schemaOf(slotted.ID); limit != 8 {
+		t.Errorf("maxQuantity = %d, want the slot's capacity 8", limit)
+	}
+}
