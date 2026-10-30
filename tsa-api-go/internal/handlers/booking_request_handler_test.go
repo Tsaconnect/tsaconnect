@@ -129,7 +129,7 @@ func TestBookingRequestLifecycle(t *testing.T) {
 }
 
 // A buyer who cancels the unpaid order of a booking request can pay the request
-// again; a seller's cancel leaves it closed.
+// again, unless an escrow was prepared for it; a seller's cancel leaves it closed.
 func TestBookingRequest_CancelledUnpaidOrderReopensForBuyer(t *testing.T) {
 	db := setupCheckoutTestDB(t)
 	ch := setupCheckoutHandler(t)
@@ -179,7 +179,20 @@ func TestBookingRequest_CancelledUnpaidOrderReopensForBuyer(t *testing.T) {
 	if second == first {
 		t.Fatal("paying again must place a new order")
 	}
-	cancel(seller, second)
+	// Once an escrow was prepared it may have been funded unreported: the
+	// buyer's cancel no longer reopens (the unpaid sweep checks the escrow).
+	db.Model(&models.Order{}).Where("id = ?", second).Update("escrow_order_key", "0xprepared")
+	cancel(buyer, second)
+	var kept models.BookingRequest
+	db.First(&kept, "id = ?", req.ID)
+	if kept.Status != models.BookingRequestConverted {
+		t.Fatalf("after buyer cancel of a prepared escrow: status %q, want converted", kept.Status)
+	}
+	db.Model(&models.BookingRequest{}).Where("id = ?", req.ID).
+		Updates(map[string]interface{}{"status": models.BookingRequestApproved, "order_id": nil})
+
+	_, third := payRequest()
+	cancel(seller, third)
 	var closed models.BookingRequest
 	db.First(&closed, "id = ?", req.ID)
 	if closed.Status != models.BookingRequestConverted {

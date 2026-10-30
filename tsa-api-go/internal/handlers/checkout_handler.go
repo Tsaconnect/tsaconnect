@@ -3384,8 +3384,11 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			return
 		}
 		// A buyer who drops an unpaid booking can still pay its request later
-		// (until the approval expires); a seller's cancel leaves it closed.
-		if isBuyer && !isSeller {
+		// (until the approval expires); a seller's cancel leaves it closed. Only
+		// when no escrow was ever prepared: one that was may have been funded
+		// without being reported, and reopening would invite a second payment
+		// (the unpaid sweep reads the escrow before it reopens).
+		if isBuyer && !isSeller && order.EscrowOrderKey == "" {
 			if err := services.ReopenBookingRequest(tx, &order); err != nil {
 				tx.Rollback()
 				log.Printf("CancelOrder error for order %s: %v", order.ID, err)
