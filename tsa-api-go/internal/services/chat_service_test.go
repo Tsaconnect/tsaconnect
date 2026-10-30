@@ -217,8 +217,8 @@ func TestChat_ModerationClosesTheConversation(t *testing.T) {
 	if _, err := f.svc.SendText(ctx, th.ID, f.customer, "hello?"); !errors.Is(err, ErrChatClosed) {
 		t.Fatalf("send on a suspended listing: %v", err)
 	}
-	if _, err := f.svc.Open(ctx, f.customer, models.ChatSubjectServiceContact, f.service); !errors.Is(err, ErrChatClosed) {
-		t.Fatalf("open on a suspended listing: %v", err)
+	if again, err := f.svc.Open(ctx, f.customer, models.ChatSubjectServiceContact, f.service); err != nil || again.ID != th.ID {
+		t.Fatalf("an existing conversation must still open (history): %v", err)
 	}
 	if _, err := f.svc.List(ctx, th.ID, f.customer, MessageFilter{}); err != nil {
 		t.Fatalf("history should stay readable: %v", err)

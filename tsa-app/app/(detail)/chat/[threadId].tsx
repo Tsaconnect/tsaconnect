@@ -32,7 +32,9 @@ export default function ChatThreadScreen() {
   const [thread, setThread] = useState<ChatThread | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
-  const [missing, setMissing] = useState(false);
+  // 'missing': the server refused the thread (bad or not-yours id);
+  // 'failed': it could not be loaded at all (network/server) and none is shown.
+  const [loadError, setLoadError] = useState<'missing' | 'failed' | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
   messagesRef.current = messages;
@@ -42,17 +44,20 @@ export default function ChatThreadScreen() {
   const load = useCallback(async () => {
     if (!id) return;
     const [t, m] = await Promise.all([chatApi.thread(id), chatApi.messages(id)]);
-    // Only a refusal is "not found"; a network or server error keeps what is
-    // on screen and the next load retries.
+    // A refusal (4xx) is "not found"; a network or server error keeps what is
+    // already on screen, and the next load retries.
     if (t.success && t.data) {
       setThread(t.data);
-      setMissing(false);
-    } else if (t.status === 404) {
-      setMissing(true);
+      setLoadError(null);
+    } else {
+      const refused = (t.status ?? 0) >= 400 && (t.status ?? 0) < 500;
+      setLoadError((prev) => (refused ? 'missing' : prev === 'missing' ? prev : 'failed'));
     }
-    if (m.success && m.data) setMessages(m.data);
+    // Merge by id: a message pulled or sent while this request was in flight
+    // must not be dropped by the older snapshot.
+    if (m.success && m.data) setMessages((prev) => mergeById(m.data!, prev));
     setLoading(false);
-    chatApi.markRead(id);
+    if (t.success) chatApi.markRead(id);
   }, [id]);
 
   // Pull only what arrived after the last message we hold.
@@ -61,12 +66,12 @@ export default function ChatThreadScreen() {
     const list = messagesRef.current;
     const since = list.length ? list[list.length - 1].createdAt : undefined;
     const res = await chatApi.messages(id, since);
-    if (res.success && res.data?.length) {
-      setMessages((prev) => {
-        const seen = new Set(prev.map((m) => m.id));
-        const fresh = res.data!.filter((m) => !seen.has(m.id));
-        return fresh.length ? [...prev, ...fresh] : prev;
-      });
+    // since is inclusive, so the last message we hold comes back too: only
+    // genuinely new ones count, and only they mark the thread read.
+    const seen = new Set(messagesRef.current.map((m) => m.id));
+    const fresh = res.success && res.data ? res.data.filter((m) => !seen.has(m.id)) : [];
+    if (fresh.length) {
+      setMessages((prev) => mergeById(prev, fresh));
       chatApi.markRead(id);
     }
   }, [id]);
@@ -117,11 +122,21 @@ export default function ChatThreadScreen() {
       </View>
     );
   }
-  if (missing) {
+  if (loadError === 'missing' || (loadError === 'failed' && !thread)) {
     return (
       <View style={{ flex: 1, backgroundColor: colors.background, padding: spacing.lg }}>
         <Stack.Screen options={{ title }} />
-        <EmptyState icon="chat" title="Conversation not found" subtitle="It may have been removed, or it isn't yours." />
+        {loadError === 'missing' ? (
+          <EmptyState icon="chat" title="Conversation not found" subtitle="It may have been removed, or it isn't yours." />
+        ) : (
+          <EmptyState
+            icon="chat"
+            title="Couldn't load this conversation"
+            subtitle="Check your connection and try again."
+            actionLabel="Try again"
+            onAction={load}
+          />
+        )}
       </View>
     );
   }
@@ -169,4 +184,11 @@ export default function ChatThreadScreen() {
       <ChatComposer onSend={send} uploadName="chat" />
     </KeyboardAvoidingView>
   );
+}
+
+// Messages from both lists, each once, oldest first.
+function mergeById(a: ChatMessage[], b: ChatMessage[]): ChatMessage[] {
+  const byId = new Map<string, ChatMessage>();
+  for (const m of [...a, ...b]) byId.set(m.id, m);
+  return [...byId.values()].sort((x, y) => x.createdAt.localeCompare(y.createdAt) || x.id.localeCompare(y.id));
 }

@@ -129,6 +129,22 @@ func (s *ChatService) Open(ctx context.Context, customerID uuid.UUID, subjectTyp
 	if providerID == customerID {
 		return nil, ErrChatNotEntitled
 	}
+	var existing models.ChatThread
+	err = s.db.WithContext(ctx).
+		Where("subject_type = ? AND subject_id = ? AND customer_id = ?", subjectType, subjectID, customerID).
+		First(&existing).Error
+	if err == nil {
+		// An existing conversation always opens, so its history stays reachable
+		// after moderation closes it to new messages.
+		views, verr := s.views(ctx, customerID, []models.ChatThread{existing})
+		if verr != nil {
+			return nil, verr
+		}
+		return &views[0], nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
 	if err := subject.live(ctx, s.db, subjectID, providerID); err != nil {
 		return nil, err
 	}
