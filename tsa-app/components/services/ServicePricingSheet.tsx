@@ -61,7 +61,7 @@ import { createBookingRequest } from '../../services/bookingRequestApi';
 import MenuPicker from './MenuPicker';
 import SlotPicker from './SlotPicker';
 import BookingForm, { type BookingFormHandle } from './BookingForm';
-import { priceUnitSuffix, quantityLabel } from '@/utils/priceUnit';
+import { priceUnitSuffix, quantityLabel, stayUnitNoun } from '@/utils/priceUnit';
 
 type FeeMode = 'standard' | 'booking';
 // The three marketplace service types drive which buyer flow the sheet shows.
@@ -111,6 +111,9 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // how many, and perUnit says the price is paid for each one.
   const [quantitySpec, setQuantitySpec] = useState<{ max: number; perUnit: boolean; unit?: string } | null>(null);
   const [quantity, setQuantity] = useState(1);
+  // Set when the category books stays: the form asks for the dates, and the
+  // price is per night/day/month of the stay unless it is a fixed total.
+  const [stayPricing, setStayPricing] = useState<{ perUnit: boolean; unit?: string } | null>(null);
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   // Inline escrow checkout state for the order/booking/access-fee flows.
@@ -227,6 +230,11 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           : null,
       );
       setQuantity(1);
+      setStayPricing(
+        schema?.serviceType === 'booking' && schema.bookingMode === 'date_range'
+          ? { perUnit: !!schema.chargesPerUnit, unit: schema.priceUnit }
+          : null,
+      );
 
       if (feeMode === 'booking' && catId) {
         const feeRes = await getCategoryBookingFees(catId);
@@ -541,6 +549,13 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
               max={quantitySpec.max}
             />
           </View>
+        )}
+        {!loading && !error && stayPricing && (
+          <Text variant="bodySm" color="textSecondary">
+            {stayPricing.perUnit
+              ? `Pick your dates. The price is per ${stayUnitNoun(stayPricing.unit)} of your stay.`
+              : 'Pick your dates. The price covers the whole stay.'}
+          </Text>
         )}
         {loading ? (
           <View style={{ paddingVertical: spacing['2xl'], alignItems: 'center' }}>

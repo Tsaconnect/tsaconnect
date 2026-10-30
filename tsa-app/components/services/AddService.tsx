@@ -143,7 +143,13 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
   // The chosen category's serviceType drives the whole form shape.
   const selectedCategory = categories.find((c) => c.id === category);
-  const { fields: listingFields, priceUnits: categoryPriceUnits } = useCategoryListingFields(category || null);
+  const {
+    fields: listingFields,
+    priceUnits: categoryPriceUnits,
+    bookingMode,
+  } = useCategoryListingFields(category || null);
+  // A date-range category books stays (nights) instead of time slots.
+  const isStay = bookingMode === "date_range";
   const priceUnitOptions = useMemo(() => listingPriceUnits(categoryPriceUnits), [categoryPriceUnits]);
   const serviceType: ServiceType = selectedCategory?.serviceType ?? "contact";
   const isContact = serviceType === "contact";
@@ -334,7 +340,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       profile.calloutFeeUsd = pricing.usdFor("calloutFeeUsd") ?? 0;
     }
     if (isBooking) {
-      profile.slotDurationMinutes = num(slotDurationMinutes);
+      profile.slotDurationMinutes = isStay ? 0 : num(slotDurationMinutes);
       profile.maxCapacityPerSlot = num(maxCapacityPerSlot);
       profile.cancellationPolicy = policies.cancellationPolicy;
       profile.reschedulePolicy = policies.reschedulePolicy;
@@ -811,32 +817,52 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
                   {renderAccessFees()}
 
-                  {sectionTitle("Availability")}
-                  <AvailabilityEditor windows={availability} onChange={setAvailability} />
-
-                  {sectionTitle("Slot configuration")}
-                  <Card padding="lg" style={{ gap: spacing.lg }}>
-                    <View style={{ flexDirection: 'row', gap: spacing.md }}>
-                      <View style={{ flex: 1 }}>
+                  {isStay ? (
+                    <>
+                      {sectionTitle("Availability")}
+                      <Card padding="lg" style={{ gap: spacing.sm }}>
                         <Input
-                          label="Slot duration (min)"
-                          placeholder="e.g. 60"
-                          keyboardType="number-pad"
-                          value={slotDurationMinutes}
-                          onChangeText={setSlotDurationMinutes}
-                        />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Input
-                          label="Max per slot"
+                          label="Available per night"
                           placeholder="e.g. 1"
                           keyboardType="number-pad"
                           value={maxCapacityPerSlot}
                           onChangeText={setMaxCapacityPerSlot}
                         />
-                      </View>
-                    </View>
-                  </Card>
+                        <Text variant="caption" color="textSecondary">
+                          How many rooms or units guests can book for the same night. 0 means no limit.
+                        </Text>
+                      </Card>
+                    </>
+                  ) : (
+                    <>
+                      {sectionTitle("Availability")}
+                      <AvailabilityEditor windows={availability} onChange={setAvailability} />
+
+                      {sectionTitle("Slot configuration")}
+                      <Card padding="lg" style={{ gap: spacing.lg }}>
+                        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                          <View style={{ flex: 1 }}>
+                            <Input
+                              label="Slot duration (min)"
+                              placeholder="e.g. 60"
+                              keyboardType="number-pad"
+                              value={slotDurationMinutes}
+                              onChangeText={setSlotDurationMinutes}
+                            />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Input
+                              label="Max per slot"
+                              placeholder="e.g. 1"
+                              keyboardType="number-pad"
+                              value={maxCapacityPerSlot}
+                              onChangeText={setMaxCapacityPerSlot}
+                            />
+                          </View>
+                        </View>
+                      </Card>
+                    </>
+                  )}
 
                   {sectionTitle("Policies")}
                   <PolicyFields

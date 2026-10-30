@@ -188,7 +188,10 @@ export interface CategoryListingFields {
   categoryId: string;
   listingFields: (BookingField & { filterable?: boolean })[];
   // The category's settings after inheritance; value null = not configured.
-  resolvedConfig?: { priceUnits?: { value: string[] | null } };
+  resolvedConfig?: {
+    priceUnits?: { value: string[] | null };
+    bookingMode?: { value: 'slot' | 'date_range' | 'quantity' | null };
+  };
 }
 
 export async function getCategoryListingFields(

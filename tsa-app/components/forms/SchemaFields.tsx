@@ -9,6 +9,7 @@ import { View } from 'react-native';
 import { useTheme } from '@/theme';
 import { Chip, CounterControl, Input, PickerSheet, SelectRow, Text, Toggle } from '@/components/ui';
 import type { SchemaAnswers, SchemaField } from '@/utils/schemaFields';
+import { DateField } from './DateField';
 
 interface SchemaFieldsProps {
   fields: SchemaField[];
@@ -22,8 +23,6 @@ const MAX_CHIP_OPTIONS = 6;
 
 const placeholderFor = (type: SchemaField['type']): string | undefined => {
   switch (type) {
-    case 'date':
-      return 'YYYY-MM-DD';
     case 'time':
       return 'HH:MM';
     case 'datetime':
@@ -122,7 +121,19 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
       return labelled(f, <CounterControl value={val} onChange={(n) => onChange(f.key, n)} label={f.label} />);
     }
 
-    // text | textarea | number | date | time | datetime | location → Input.
+    if (f.type === 'date') {
+      return (
+        <DateField
+          key={f.key}
+          label={f.required ? `${f.label} *` : f.label}
+          value={answers[f.key] ?? ''}
+          error={errors[f.key]}
+          onChange={(v) => onChange(f.key, v)}
+        />
+      );
+    }
+
+    // text | textarea | number | time | datetime | location → Input.
     // A number stays as typed text; utils/schemaFields converts it on submit.
     const numeric = f.type === 'number';
     return (

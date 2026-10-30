@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 
@@ -25,7 +24,20 @@ const (
 // field catalogue, else none (legacy flow). It is the ONE resolver for both the
 // form a buyer is served (GetBookingFormSchema) and the one their answers are
 // validated against (booking request + checkout), so the two never differ.
+//
+// A date_range listing always asks for its stay: see withStayFields.
 func serviceBookingForm(db *gorm.DB, product *models.Product, profile *models.ServiceProfile) (*models.BookingFieldConfig, string) {
+	cfg, source := listingOrCategoryForm(db, product, profile)
+	if serviceBookingMode(db, product) == models.BookingModeDateRange {
+		if source == formSourceNone {
+			source = formSourceCategory
+		}
+		return withStayFields(cfg), source
+	}
+	return cfg, source
+}
+
+func listingOrCategoryForm(db *gorm.DB, product *models.Product, profile *models.ServiceProfile) (*models.BookingFieldConfig, string) {
 	if cfg := profile.GetFieldConfig(); cfg != nil && len(cfg.Fields) > 0 {
 		return cfg, formSourceListing
 	}
@@ -39,9 +51,6 @@ func serviceBookingForm(db *gorm.DB, product *models.Product, profile *models.Se
 	}
 	return &models.BookingFieldConfig{Fields: fields}, formSourceCategory
 }
-
-// maxBookingUnits caps the seats/tickets one booking can buy.
-const maxBookingUnits = 50
 
 // serviceCategoryConfig resolves a listing's category configuration; ok is
 // false when the listing has no category or it cannot be read.
@@ -68,23 +77,6 @@ func serviceBookingMode(db *gorm.DB, product *models.Product) string {
 		return *cfg.BookingMode.Value
 	}
 	return models.BookingModeSlot
-}
-
-// bookingUnits is how many units (seats, tickets) a booking buys. Only a
-// quantity-mode category books more than one; elsewhere it is 0 and the price
-// is charged once whatever the party size. A non-empty errMsg rejects the
-// booking.
-func bookingUnits(db *gorm.DB, product *models.Product, serviceType string, requested int) (int, string) {
-	if serviceType != models.ServiceTypeBooking || serviceBookingMode(db, product) != models.BookingModeQuantity {
-		return 0, ""
-	}
-	if requested <= 0 {
-		return 1, ""
-	}
-	if requested > maxBookingUnits {
-		return 0, fmt.Sprintf("You can book at most %d at a time", maxBookingUnits)
-	}
-	return requested, ""
 }
 
 // bookingFormSchema is the customer-facing schema the app renders the booking

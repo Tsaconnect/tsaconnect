@@ -101,7 +101,9 @@ func (ch *CheckoutHandler) CreateBookingRequest(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	units, uerr := bookingUnits(config.DB, &product, serviceType, req.Quantity)
+	// Checked now so the merchant is not asked to approve dates that cannot be
+	// booked; re-checked at pay, when the stay is reserved.
+	bk, uerr := resolveBooking(config.DB, &product, &profile, serviceType, req.Quantity, answersOrEmpty(req.Answers))
 	if uerr != "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, uerr)
 		return
@@ -114,7 +116,7 @@ func (ch *CheckoutHandler) CreateBookingRequest(c *gin.Context) {
 		SellerID:     product.UserID,
 		Token:        token,
 		ServiceTier:  req.ServiceTier,
-		Quantity:     units,
+		Quantity:     bookingRequestQuantity(bk),
 		BuyerCity:    firstNonEmpty(req.BuyerCity, user.City),
 		BuyerState:   firstNonEmpty(req.BuyerState, user.State),
 		BuyerCountry: firstNonEmpty(req.BuyerCountry, user.Country),
@@ -489,7 +491,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	serviceType, profile := resolveServiceTypeAndProfile(tx, &product)
 	// Re-resolved rather than trusted: the category's mode may have changed
 	// since the request, and the price must follow what the listing is now.
-	units, uerr := bookingUnits(tx, &product, serviceType, r.Quantity)
+	bk, uerr := resolveBooking(tx, &product, &profile, serviceType, r.Quantity, r.GetAnswers())
 	if uerr != "" {
 		tx.Rollback()
 		utils.ErrorResponse(c, http.StatusBadRequest, uerr)
@@ -499,7 +501,7 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	order, errMsg, status := ch.placeServiceOrder(
 		tx, rates, user, &seller, &product, serviceType, &profile,
 		r.Token, r.ServiceTier, r.BuyerCity, r.BuyerState, r.BuyerCountry,
-		nil, nil, units, r.GetAnswers(), r.QuotedAmountUSD,
+		nil, nil, bk, r.GetAnswers(), r.QuotedAmountUSD,
 	)
 	if errMsg != "" {
 		tx.Rollback()

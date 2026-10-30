@@ -1,4 +1,4 @@
-import { listingPriceUnits, priceUnitSuffix, quantityLabel } from '../priceUnit';
+import { listingPriceUnits, priceUnitSuffix, quantityLabel, stayUnitNoun } from '../priceUnit';
 
 describe('priceUnit', () => {
   it('suffixes per-unit prices only', () => {
@@ -20,5 +20,12 @@ describe('priceUnit', () => {
     expect(listingPriceUnits(null)).toContain('per_hour');
     expect(listingPriceUnits(null)).not.toContain('on_request');
     expect(listingPriceUnits([])).toEqual([]);
+  });
+
+  it('names what a stay is charged per', () => {
+    expect(stayUnitNoun('per_night')).toBe('night');
+    expect(stayUnitNoun('')).toBe('night');
+    expect(stayUnitNoun('per_day')).toBe('day');
+    expect(stayUnitNoun('per_month')).toBe('month');
   });
 });

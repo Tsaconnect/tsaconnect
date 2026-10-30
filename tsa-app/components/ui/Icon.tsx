@@ -34,6 +34,7 @@ const REGISTRY = {
   chevronDown: { set: 'ion', glyph: 'chevron-down' },
   arrowRight: { set: 'ion', glyph: 'arrow-forward' },
   clock: { set: 'ion', glyph: 'time-outline' },
+  calendar: { set: 'ion', glyph: 'calendar-outline' },
   shield: { set: 'ion', glyph: 'shield-outline' },
   lock: { set: 'ion', glyph: 'lock-closed' },
   dispute: { set: 'ion', glyph: 'alert-circle' },
