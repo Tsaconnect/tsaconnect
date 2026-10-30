@@ -145,7 +145,9 @@ export default function ChatThreadScreen() {
       ) : null}
       <ScrollView
         ref={scrollRef}
-        contentContainerStyle={{ padding: spacing.md, gap: spacing.sm, flexGrow: 1 }}
+        // Messages sit at the bottom, next to the box: Android pans the screen
+        // up for the keyboard, and the latest messages must stay in view.
+        contentContainerStyle={{ padding: spacing.md, gap: spacing.sm, flexGrow: 1, justifyContent: 'flex-end' }}
         keyboardShouldPersistTaps="handled"
       >
         {messages.length === 0 ? (
