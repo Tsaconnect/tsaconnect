@@ -473,6 +473,10 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       setQuoteRefusal(null);
       return;
     }
+    // What was shown belongs to the answers before this change: clear it now,
+    // not after the debounce and the round trip.
+    setQuote(null);
+    setQuoteRefusal(null);
     let live = true;
     const timer = setTimeout(async () => {
       const res = await quoteServiceOrder({
@@ -529,7 +533,8 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
         leftIcon="shield"
         onPress={() => bookingFormRef.current?.submit()}
         loading={checkingOut}
-        disabled={checkingOut}
+        // Booking what the server just refused only repeats the refusal.
+        disabled={checkingOut || !!quoteRefusal}
       />
     ) : serviceType === 'order' ? (
       <Button
