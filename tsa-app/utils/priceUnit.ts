@@ -1,7 +1,15 @@
 // Price units a service listing can be priced in (server: models.PriceUnits).
 // on_request is a category option only — on a listing a quote is the
 // pricing method, never a unit.
-export type PriceUnit = 'fixed' | 'per_hour' | 'per_day' | 'per_night' | 'per_month' | 'per_session' | 'per_seat';
+export type PriceUnit =
+  | 'fixed'
+  | 'per_hour'
+  | 'per_day'
+  | 'per_night'
+  | 'per_month'
+  | 'per_session'
+  | 'per_seat'
+  | 'per_ticket';
 
 const UNIT_NOUN: Record<Exclude<PriceUnit, 'fixed'>, string> = {
   per_hour: 'hour',
@@ -10,6 +18,7 @@ const UNIT_NOUN: Record<Exclude<PriceUnit, 'fixed'>, string> = {
   per_month: 'month',
   per_session: 'session',
   per_seat: 'seat',
+  per_ticket: 'ticket',
 };
 
 export const PRICE_UNIT_LABELS: Record<PriceUnit, string> = {
@@ -20,7 +29,19 @@ export const PRICE_UNIT_LABELS: Record<PriceUnit, string> = {
   per_month: 'Per month',
   per_session: 'Per session',
   per_seat: 'Per seat',
+  per_ticket: 'Per ticket',
 };
+
+/** What a service listing charges, as the API summarises it (models.ServicePriceSummary). */
+export interface ServicePriceSummary {
+  serviceType: 'contact' | 'order' | 'booking';
+  bookingMode?: 'slot' | 'date_range' | 'quantity';
+  bookingType?: 'instant' | 'request';
+  priceUnit?: string;
+  onRequest?: boolean;
+  fromUsd: number;
+  chargesPerUnit?: boolean;
+}
 
 /** "/ seat" for a per-unit price, "" for a fixed or unset one. */
 export function priceUnitSuffix(unit?: string | null): string {
@@ -28,10 +49,10 @@ export function priceUnitSuffix(unit?: string | null): string {
   return noun ? ` / ${noun}` : '';
 }
 
-/** What the buyer counts in a quantity booking: "Seats", "Sessions", … */
+/** What the buyer counts in a quantity booking: "Tickets", "Seats", … */
 export function quantityLabel(unit?: string | null): string {
   const noun = unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
-  return noun ? `${noun[0].toUpperCase()}${noun.slice(1)}s` : 'Quantity';
+  return noun ? `${noun[0].toUpperCase()}${noun.slice(1)}s` : 'Number of people';
 }
 
 /** The units a merchant may pick, from the category's allowed list. */
@@ -44,4 +65,37 @@ export function listingPriceUnits(categoryUnits?: string[] | null): PriceUnit[] 
 /** What a stay is charged per: "night" unless the listing prices by day or month. */
 export function stayUnitNoun(unit?: string | null): string {
   return unit === 'per_day' ? 'day' : unit === 'per_month' ? 'month' : 'night';
+}
+
+/** The unit a per-unit price is read in for the listing's booking mode. */
+function perUnitSuffix(s: ServicePriceSummary): string {
+  if (!s.chargesPerUnit) return '';
+  if (s.bookingMode === 'date_range') return ` / ${stayUnitNoun(s.priceUnit)}`;
+  return priceUnitSuffix(s.priceUnit) || ' each';
+}
+
+/**
+ * A listing's price for a card or detail view: "From $50.00 / night",
+ * "Price on request", or null when it is not known.
+ */
+export function servicePriceLabel(s: ServicePriceSummary | undefined, format: (usd: number) => string): string | null {
+  if (!s) return null;
+  if (s.onRequest) return 'Price on request';
+  if (!(s.fromUsd > 0)) return null;
+  // Order menus and per-area fares start at this price; a contact price is the price.
+  const from = s.serviceType === 'contact' ? '' : 'From ';
+  return `${from}${format(s.fromUsd)}${perUnitSuffix(s)}`;
+}
+
+/** The detail screen's call to action for a booking listing. */
+export function bookingActionLabel(s: ServicePriceSummary | undefined): string {
+  if (s?.bookingType === 'request' || s?.onRequest) return 'Request booking';
+  switch (s?.bookingMode) {
+    case 'date_range':
+      return 'Book your stay';
+    case 'quantity':
+      return s.priceUnit === 'per_ticket' ? 'Get tickets' : 'Book seats';
+    default:
+      return 'Book a slot';
+  }
 }

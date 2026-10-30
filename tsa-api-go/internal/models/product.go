@@ -126,6 +126,11 @@ type Product struct {
 	// everywhere else this is simply false.
 	IsDeleted bool `gorm:"-" json:"isDeleted"`
 
+	// ServicePrice is what a service listing charges, worked out for listings
+	// and detail views (a booking's fare lives in the per-area fee columns, not
+	// Price). Nil on products and wherever it was not populated.
+	ServicePrice *ServicePriceSummary `gorm:"-" json:"servicePrice,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }
@@ -242,4 +247,21 @@ func MarkDeletionFlags(products []Product) {
 	for i := range products {
 		products[i].MarkDeletionFlag()
 	}
+}
+
+// ServicePriceSummary is a service listing's price as buyers see it before
+// booking: the lowest price it can be booked from, what that price buys, and
+// how it is booked.
+type ServicePriceSummary struct {
+	ServiceType string `json:"serviceType"`           // contact | order | booking
+	BookingMode string `json:"bookingMode,omitempty"` // booking: slot | date_range | quantity
+	BookingType string `json:"bookingType,omitempty"` // booking: instant | request
+	PriceUnit   string `json:"priceUnit,omitempty"`
+	// OnRequest: the provider names the price when approving; FromUSD is 0.
+	OnRequest bool `json:"onRequest,omitempty"`
+	// FromUSD is the lowest price one booking/order starts at (the cheapest
+	// area fare, or menu item); 0 when unknown.
+	FromUSD float64 `json:"fromUsd"`
+	// ChargesPerUnit: FromUSD is per PriceUnit (seat, night, ...).
+	ChargesPerUnit bool `json:"chargesPerUnit,omitempty"`
 }

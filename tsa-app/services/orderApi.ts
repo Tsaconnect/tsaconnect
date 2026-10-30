@@ -292,6 +292,37 @@ export async function createServiceOrder(params: {
   }
 }
 
+// quoteServiceOrder prices the same body createServiceOrder takes, without
+// creating anything: what the booking would cost as filled in so far. A failed
+// result carries why it is not priceable yet (e.g. a missing date).
+export interface ServiceQuote {
+  onRequest: boolean;
+  bookingMode?: string;
+  priceUnit?: string;
+  chargesPerUnit: boolean;
+  units: number;
+  unitPriceUsd?: number;
+  priceUsd: number;
+  calloutUsd: number;
+  totalUsd: number;
+}
+
+export async function quoteServiceOrder(
+  params: Parameters<typeof createServiceOrder>[0],
+): Promise<ApiResponse<ServiceQuote>> {
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE_URL}/orders/service/quote`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(params),
+    });
+    return await handleResponse(response);
+  } catch (error: any) {
+    return { success: false, message: error.message || 'Failed to price the booking' };
+  }
+}
+
 export async function getOrders(params: {
   page?: number;
   limit?: number;

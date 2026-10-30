@@ -390,6 +390,7 @@ func (h *Handlers) GetUserProducts(c *gin.Context) {
 	}
 
 	populateSellerVerified(products)
+	populateServicePrices(config.DB, products)
 
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 
@@ -448,6 +449,9 @@ func (h *Handlers) GetProductByID(c *gin.Context) {
 	// The seller was already loaded for the visibility check above, so set the
 	// flag from it rather than making populateSellerVerified re-query the row.
 	product.SellerVerified = seller.VerificationStatus == models.VerificationStatusVerified
+	one := []models.Product{product}
+	populateServicePrices(config.DB, one)
+	product.ServicePrice = one[0].ServicePrice
 
 	utils.SuccessResponse(c, http.StatusOK, "Product fetched successfully", product)
 }
@@ -1178,6 +1182,7 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	}
 
 	populateSellerVerified(products)
+	populateServicePrices(config.DB, products)
 
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 
@@ -1325,6 +1330,7 @@ func (h *Handlers) GetProductsByCategoryTree(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category tree")
 		return
 	}
+	populateServicePrices(config.DB, products)
 
 	// Main category details
 	var mainCategory models.Category
@@ -1477,6 +1483,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	}
 
 	populateSellerVerified(products)
+	populateServicePrices(config.DB, products)
 
 	// Get featured products (same filters but featured only, limit 5)
 	featuredQuery := models.VisibleToPublic(config.DB.Model(&models.Product{})).Where("is_featured = ?", true)
@@ -1493,6 +1500,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 	featuredQuery.Limit(5).Find(&featuredProducts)
 
 	populateSellerVerified(featuredProducts)
+	populateServicePrices(config.DB, featuredProducts)
 
 	totalPages := int(math.Ceil(float64(total) / float64(limit)))
 

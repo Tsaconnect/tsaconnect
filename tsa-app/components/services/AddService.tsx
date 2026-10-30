@@ -71,6 +71,7 @@ import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields"
 import { categoryPathLabels } from "@/utils/categoryTree";
 import { listingPriceUnits, PRICE_UNIT_LABELS, type PriceUnit } from "@/utils/priceUnit";
 import BookingConfigBuilder from "./BookingConfigBuilder";
+import { fieldsMissingOptions } from "@/utils/bookingFieldOptions";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
 type ServiceType = "contact" | "order" | "booking";
@@ -147,6 +148,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     fields: listingFields,
     priceUnits: categoryPriceUnits,
     bookingMode,
+    bookingFields: categoryBookingFields,
   } = useCategoryListingFields(category || null);
   // A date-range category books stays (nights) instead of time slots.
   const isStay = bookingMode === "date_range";
@@ -418,6 +420,11 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     // one (the API refuses none: it would charge per seat or night).
     if (isBooking && pricingMethod === "fixed" && categoryPriceUnits && priceUnitOptions.length > 0 && !priceUnit) {
       Alert.alert("Missing details", "Choose what the price is for, under Pricing.");
+      return;
+    }
+    const choiceless = isBooking ? fieldsMissingOptions(bookingFields) : [];
+    if (choiceless.length > 0) {
+      Alert.alert("Missing details", `Add the choices customers pick from for: ${choiceless.join(", ")}.`);
       return;
     }
     const listingProblems = validateSchemaAnswers(listingFields, listingValues);
@@ -933,7 +940,36 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                   </Card>
 
                   {sectionTitle("Booking form")}
-                  <BookingConfigBuilder value={bookingFields} onChange={setBookingFields} />
+                  {/* With no form of its own the listing uses its category's, so
+                      say so instead of showing every field switched off — and
+                      switching one on would silently replace the whole form. */}
+                  {bookingFields.length === 0 && categoryBookingFields.length > 0 ? (
+                    <Card padding="lg" style={{ gap: spacing.sm }}>
+                      <Text variant="bodyMed" weight="600">
+                        Using the {selectedCategory?.title ?? "category"} form
+                      </Text>
+                      <Text variant="caption" color="textSecondary">
+                        Customers fill in:{" "}
+                        {categoryBookingFields.map((f) => (f.required ? `${f.label} *` : f.label)).join(", ")}
+                      </Text>
+                      <Button
+                        title="Customise for this listing"
+                        variant="secondary"
+                        onPress={() => setBookingFields(categoryBookingFields.map((f) => ({ ...f })))}
+                      />
+                    </Card>
+                  ) : (
+                    <>
+                      <BookingConfigBuilder value={bookingFields} onChange={setBookingFields} />
+                      {categoryBookingFields.length > 0 ? (
+                        <Button
+                          title={`Use the ${selectedCategory?.title ?? "category"} form instead`}
+                          variant="ghost"
+                          onPress={() => setBookingFields([])}
+                        />
+                      ) : null}
+                    </>
+                  )}
 
                   {renderCoverage(true)}
 

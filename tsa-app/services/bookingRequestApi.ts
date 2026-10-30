@@ -24,6 +24,8 @@ export interface BookingRequest {
   token: string;
   serviceTier?: string;
   answers?: Record<string, any>;
+  // Seats/tickets asked for in a quantity-mode category; 0 elsewhere.
+  quantity?: number;
   status: BookingRequestStatus;
   rejectReason?: string;
   orderId?: string;
@@ -36,6 +38,8 @@ export interface BookingRequest {
 export interface BookingRequestRow {
   request: BookingRequest;
   serviceName: string;
+  // The order's status once the request has converted (absent before then).
+  orderStatus?: string;
 }
 
 async function authHeaders(): Promise<Record<string, string>> {

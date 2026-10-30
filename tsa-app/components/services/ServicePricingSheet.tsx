@@ -42,7 +42,7 @@ import {
 } from '@/components/ui';
 import { api, type Category, type Product } from './api';
 import { cartService } from './cart';
-import { getShippingEstimate } from '../../services/orderApi';
+import { getShippingEstimate, quoteServiceOrder, type ServiceQuote } from '../../services/orderApi';
 import {
   getCategoryBookingFees,
   BOOKING_TIERS,
@@ -112,6 +112,10 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // how many, and perUnit says the price is paid for each one.
   const [quantitySpec, setQuantitySpec] = useState<{ max: number; perUnit: boolean; unit?: string } | null>(null);
   const [quantity, setQuantity] = useState(1);
+  // The booking form's answers as the buyer fills them, and what they cost
+  // (the server's quote; null while not priceable yet).
+  const [formAnswers, setFormAnswers] = useState<Record<string, any>>({});
+  const [quote, setQuote] = useState<ServiceQuote | null>(null);
   // Set when the category books stays: the form asks for the dates, and the
   // price is per night/day/month of the stay unless it is a fixed total.
   const [stayPricing, setStayPricing] = useState<{ perUnit: boolean; unit?: string } | null>(null);
@@ -233,6 +237,8 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
           : null,
       );
       setQuantity(1);
+      setFormAnswers({});
+      setQuote(null);
       setStayPricing(
         schema?.serviceType === 'booking' && schema.bookingMode === 'date_range'
           ? { perUnit: !!schema.chargesPerUnit, unit: schema.priceUnit }
@@ -394,7 +400,13 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   const handleBookingSubmit = useCallback(
     async (answers: Record<string, any>) => {
       if (bookingType === 'instant') {
-        await runInlineCheckout({ answers });
+        // A slotted listing books a time from the slot picker shown above its form.
+        const slotted = (profile?.slotDurationMinutes ?? 0) > 0;
+        if (slotted && !slotSelection) {
+          toast.show('Pick a time slot first', 'error');
+          return;
+        }
+        await runInlineCheckout({ answers, bookingSlot: slotted ? slotSelection ?? undefined : undefined });
         return;
       }
       setCheckingOut(true);
@@ -424,7 +436,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [bookingType, buyerCity, buyerState, buyerCountry, quantitySpec, quantity, toast, onClose, router, runInlineCheckout],
+    [bookingType, profile, slotSelection, buyerCity, buyerState, buyerCountry, quantitySpec, quantity, toast, onClose, router, runInlineCheckout],
   );
 
   const handleMenuCheckout = (menuItems: { itemId: string; quantity: number }[]) =>
@@ -447,6 +459,36 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // A booking service with a configured FieldConfig renders the schema-driven
   // BookingForm (which owns its own submit button) instead of the legacy flow.
   const usesBookingForm = serviceType === 'booking' && customFields.length > 0;
+  // A slotted listing with a form books a time AND answers the form.
+  const slottedForm = usesBookingForm && (profile?.slotDurationMinutes ?? 0) > 0;
+
+  // Price the booking as it is filled in — the server's own pricing, rolled
+  // back — so the buyer sees "$50.00 × 3 nights" before paying.
+  useEffect(() => {
+    if (!visible || loading || !usesBookingForm) {
+      setQuote(null);
+      return;
+    }
+    let live = true;
+    const timer = setTimeout(async () => {
+      const res = await quoteServiceOrder({
+        token: 'USDC',
+        productId: productIdOf(),
+        buyerCity,
+        buyerState,
+        buyerCountry,
+        quantity: quantitySpec ? quantity : undefined,
+        bookingSlot: slottedForm ? slotSelection ?? undefined : undefined,
+        answers: formAnswers,
+      });
+      if (live) setQuote(res.success && res.data ? res.data : null);
+    }, 350);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, loading, usesBookingForm, slottedForm, slotSelection, quantitySpec, quantity, formAnswers, buyerCity, buyerState, buyerCountry]);
 
   // Only offer the tiers the backend will actually honor for this buyer: the
   // detected coarse tier, plus a "residential" refinement when in the same city
@@ -587,17 +629,28 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
             <Button title="Retry" variant="secondary" onPress={load} />
           </View>
         ) : usesBookingForm ? (
-          /* BOOKING (configurable form) — schema-driven fields; checks out with
-             the collected answers. Takes priority over the legacy slot/fare flow
-             when the merchant has configured a FieldConfig. Phase 1: these are
-             non-slotted bookings (free date/time fields, no capacity grid); the
-             backend only requires a slot when slotDurationMinutes > 0. */
-          <BookingForm
-            ref={bookingFormRef}
-            fields={customFields}
-            hideSubmit
-            onSubmit={handleBookingSubmit}
-          />
+          /* BOOKING (configurable form) — schema-driven fields, from the listing
+             or its category; checks out with the collected answers. A slotted
+             listing also shows its slot picker (the backend requires a slot
+             whenever slotDurationMinutes > 0). The live quote follows. */
+          <>
+            {slottedForm ? (
+              <SlotPicker
+                productId={productIdOf()}
+                hideSubmit
+                onSelectionChange={setSlotSelection}
+                partySize={quantitySpec ? quantity : undefined}
+              />
+            ) : null}
+            <BookingForm
+              ref={bookingFormRef}
+              fields={customFields}
+              hideSubmit
+              onSubmit={handleBookingSubmit}
+              onChange={setFormAnswers}
+            />
+            {quote ? <BookingQuote quote={quote} /> : null}
+          </>
         ) : serviceType === 'order' ? (
           /* ORDER — menu picker; the pinned footer checks out menuSelections. */
           <MenuPicker
@@ -613,6 +666,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
               productId={productIdOf()}
               hideSubmit
               onSelectionChange={setSlotSelection}
+              partySize={quantitySpec ? quantity : undefined}
             />
             {(profile?.cancellationPolicy ||
               profile?.reschedulePolicy ||
@@ -744,3 +798,33 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
 };
 
 export default ServicePricingSheet;
+
+/** What the booking costs as filled in: "$50.00 × 3 nights", fees, total. */
+function BookingQuote({ quote }: { quote: ServiceQuote }) {
+  if (quote.onRequest) {
+    return (
+      <Text variant="bodySm" color="textSecondary">
+        The provider names the price when they accept your request.
+      </Text>
+    );
+  }
+  const units = quote.units;
+  const unitNoun =
+    quote.bookingMode === 'date_range'
+      ? `${stayUnitNoun(quote.priceUnit)}${units === 1 ? '' : 's'}`
+      : quantityLabel(quote.priceUnit).toLowerCase();
+  const perUnit = quote.chargesPerUnit && quote.unitPriceUsd ? quote.unitPriceUsd : 0;
+  const extra = quote.priceUsd - perUnit * units; // an access fee on top of the units
+  return (
+    <SummaryCard dividerBeforeLast>
+      {perUnit ? (
+        <SummaryRow label={`${fmtUsd(perUnit)} × ${units} ${unitNoun}`} value={fmtUsd(perUnit * units)} />
+      ) : (
+        <SummaryRow label="Price" value={fmtUsd(quote.priceUsd)} />
+      )}
+      {perUnit && extra > 0.005 ? <SummaryRow label="Access fee" value={fmtUsd(extra)} /> : null}
+      {quote.calloutUsd > 0 ? <SummaryRow label="Call-out fee" value={fmtUsd(quote.calloutUsd)} /> : null}
+      <SummaryRow label="Total" value={fmtUsd(quote.totalUsd)} total valueColor="accent" />
+    </SummaryCard>
+  );
+}

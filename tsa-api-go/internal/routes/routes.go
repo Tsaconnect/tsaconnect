@@ -480,6 +480,8 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// Single-service "Pay now" (no cart) for order/booking/contact flows that
 		// carry menu selections / booking slots the cart route can't thread.
 		orderGroup.POST("/service", ch.CreateServiceOrder)
+		// What that service checkout would charge, worked out and rolled back.
+		orderGroup.POST("/service/quote", ch.QuoteServiceOrder)
 		orderGroup.GET("", ch.GetUserOrders)
 		orderGroup.GET("/shipping-estimate", ch.GetShippingEstimate)
 		orderGroup.GET("/:id", ch.GetOrderDetail)

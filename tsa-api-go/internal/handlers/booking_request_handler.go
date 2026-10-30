@@ -203,6 +203,7 @@ func (ch *CheckoutHandler) ListBookingRequests(c *gin.Context) {
 	// Enrich each request with its service name (cheap single lookup per distinct
 	// product) so the list is renderable without an extra client round-trip.
 	names := map[uuid.UUID]string{}
+	orderStatuses := bookingOrderStatuses(requests)
 	out := make([]gin.H, 0, len(requests))
 	for _, r := range requests {
 		name, ok := names[r.ProductID]
@@ -213,7 +214,11 @@ func (ch *CheckoutHandler) ListBookingRequests(c *gin.Context) {
 			}
 			names[r.ProductID] = name
 		}
-		out = append(out, gin.H{"request": r, "serviceName": name})
+		row := gin.H{"request": r, "serviceName": name}
+		if r.OrderID != nil {
+			row["orderStatus"] = orderStatuses[*r.OrderID]
+		}
+		out = append(out, row)
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Booking requests fetched", gin.H{
 		"requests": out,
@@ -223,6 +228,30 @@ func (ch *CheckoutHandler) ListBookingRequests(c *gin.Context) {
 			"total": total,
 		},
 	})
+}
+
+// bookingOrderStatuses maps each converted request's order to its status. A
+// request converts when the buyer starts paying, so only the order says
+// whether the payment went through.
+func bookingOrderStatuses(requests []models.BookingRequest) map[uuid.UUID]string {
+	ids := make([]uuid.UUID, 0, len(requests))
+	for _, r := range requests {
+		if r.OrderID != nil {
+			ids = append(ids, *r.OrderID)
+		}
+	}
+	statuses := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return statuses
+	}
+	var orders []models.Order
+	if err := config.DB.Select("id", "status").Where("id IN ?", ids).Find(&orders).Error; err != nil {
+		return statuses
+	}
+	for _, o := range orders {
+		statuses[o.ID] = o.Status
+	}
+	return statuses
 }
 
 // loadOwnedRequest loads a booking request and enforces that the caller plays

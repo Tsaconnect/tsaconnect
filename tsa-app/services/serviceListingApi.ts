@@ -5,7 +5,7 @@
 // owning merchant's auth token. See the Go backend service_* handlers.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../constants/api/config';
-import type { SchemaFieldType } from '@/utils/schemaFields';
+import type { SchemaField, SchemaFieldType } from '@/utils/schemaFields';
 
 export interface ApiResponse<T = any> {
   success: boolean;
@@ -88,6 +88,8 @@ export interface BookingCatalogField {
   type: BookingFieldType;
   label: string;
   group: string;
+  // A select's choices; copied onto the field when it is switched on.
+  options?: string[];
 }
 
 export interface ServiceMenuItem {
@@ -187,11 +189,33 @@ export async function getBookingFormSchema(
 export interface CategoryListingFields {
   categoryId: string;
   listingFields: (BookingField & { filterable?: boolean })[];
+  // The category's booking form, used by listings that have none of their own.
+  bookingFields?: BookingField[];
   // The category's settings after inheritance; value null = not configured.
   resolvedConfig?: {
     priceUnits?: { value: string[] | null };
     bookingMode?: { value: 'slot' | 'date_range' | 'quantity' | null };
   };
+}
+
+// The whole field catalogue (labels and types by key), fetched once per app
+// session: what a stored answer such as `trip_type` is called on screen.
+let fieldCatalogCache: Promise<Record<string, SchemaField>> | null = null;
+export function getFieldCatalog(): Promise<Record<string, SchemaField>> {
+  if (!fieldCatalogCache) {
+    fieldCatalogCache = fetch(`${API_BASE_URL}/products/category/field-defs`, { method: 'GET' })
+      .then((r) => handleResponse<SchemaField[] | { fields?: SchemaField[] }>(r))
+      .then((res) => {
+        if (!res.success) throw new Error(res.message || 'Failed to load field catalogue');
+        const list = Array.isArray(res.data) ? res.data : res.data?.fields ?? [];
+        return Object.fromEntries(list.map((f) => [f.key, f]));
+      })
+      .catch(() => {
+        fieldCatalogCache = null; // try again next time
+        return {};
+      });
+  }
+  return fieldCatalogCache;
 }
 
 export async function getCategoryListingFields(

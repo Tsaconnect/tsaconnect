@@ -14,6 +14,7 @@ import { View } from 'react-native';
 import { useTheme } from '@/theme';
 import { Button } from '@/components/ui';
 import { SchemaFields } from '@/components/forms/SchemaFields';
+import { toDateString } from '@/utils/dateString';
 import { cleanSchemaAnswers, validateSchemaAnswers } from '@/utils/schemaFields';
 import type { BookingField } from '../../services/serviceListingApi';
 
@@ -25,6 +26,8 @@ interface BookingFormProps {
   /** Hide the internal submit button — the parent renders the CTA in a pinned
    *  sheet footer and submits via the BookingFormHandle ref. */
   hideSubmit?: boolean;
+  /** Called with the raw answers on every change (the sheet prices them live). */
+  onChange?: (answers: Record<string, any>) => void;
 }
 
 export interface BookingFormHandle {
@@ -33,7 +36,7 @@ export interface BookingFormHandle {
 }
 
 const BookingForm = forwardRef<BookingFormHandle, BookingFormProps>(function BookingForm(
-  { fields, submitting, submitLabel = 'Book & Pay', onSubmit, hideSubmit },
+  { fields, submitting, submitLabel = 'Book & Pay', onSubmit, hideSubmit, onChange },
   ref,
 ) {
   const { spacing } = useTheme();
@@ -41,7 +44,9 @@ const BookingForm = forwardRef<BookingFormHandle, BookingFormProps>(function Boo
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const setAnswer = (key: string, value: any) => {
-    setAnswers((prev) => ({ ...prev, [key]: value }));
+    const next = { ...answers, [key]: value };
+    setAnswers(next);
+    onChange?.(next);
     setErrors((prev) => (prev[key] ? { ...prev, [key]: '' } : prev));
   };
 
@@ -57,7 +62,8 @@ const BookingForm = forwardRef<BookingFormHandle, BookingFormProps>(function Boo
 
   return (
     <View style={{ gap: spacing.lg }}>
-      <SchemaFields fields={fields} answers={answers} errors={errors} onChange={setAnswer} />
+      {/* A booking is never for a day already gone. */}
+      <SchemaFields fields={fields} answers={answers} errors={errors} onChange={setAnswer} minDate={toDateString(new Date())} />
       {!hideSubmit && (
         <Button
           title={submitLabel}

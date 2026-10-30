@@ -57,6 +57,17 @@ jest.mock('@/services/bookingRequestApi', () => ({
   approveBookingRequest: jest.fn(),
   rejectBookingRequest: jest.fn(),
 }));
+jest.mock('expo-router', () => {
+  const react = jest.requireActual('react');
+  return {
+    router: { push: jest.fn() },
+    useFocusEffect: (cb: () => void | (() => void)) => react.useEffect(cb, [cb]),
+  };
+});
+jest.mock('@/services/serviceListingApi', () => ({
+  __esModule: true,
+  getFieldCatalog: jest.fn(async () => ({})),
+}));
 jest.mock('@/services/serviceCheckout', () => ({
   __esModule: true,
   payBookingRequestAndEscrow: jest.fn(async () => ({})),

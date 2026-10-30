@@ -13,6 +13,7 @@ import React from 'react';
 import { View, Image, Dimensions } from 'react-native';
 import { useTheme } from '@/theme';
 import { PromoPrice } from '@/components/promotion/PromoPrice';
+import { servicePriceLabel } from '@/utils/priceUnit';
 import {
   Avatar,
   Badge,
@@ -163,8 +164,16 @@ export const SellerCard: React.FC<SellerCardProps> = ({
                   <Badge label={product.condition} size="sm" style={{ marginBottom: spacing.xs }} />
                 )}
                 <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: spacing.xs }}>
-                  <PromoPrice product={product} format={formatPrice} />
-                  {product.type === 'Service' && (
+                  {/* A booking or order is priced by its fares or menu, not
+                      Price (0 there): the API's summary says what it charges. */}
+                  {servicePriceLabel(product.servicePrice, formatPrice) ? (
+                    <Text variant="bodySm" weight="700" color="accent">
+                      {servicePriceLabel(product.servicePrice, formatPrice)}
+                    </Text>
+                  ) : (
+                    <PromoPrice product={product} format={formatPrice} />
+                  )}
+                  {product.type === 'Service' && (product.servicePrice?.serviceType ?? 'contact') === 'contact' && (
                     <Text variant="caption" weight="500" color="danger">
                       0.1$ contact fee
                     </Text>

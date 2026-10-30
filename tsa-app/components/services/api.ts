@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { API_BASE_URL } from '../../constants/api/config';
 import { getAccessToken, refreshSession as refreshSessionShared, setSession } from '../../services/session';
+import type { ServicePriceSummary } from '@/utils/priceUnit';
 
 export interface ApiResponse<T = any> {
   success: boolean;
@@ -266,6 +267,8 @@ export interface Product {
   }>;
   status: 'active' | 'inactive' | 'sold_out' | 'pending_review';
   type: 'Product' | 'Service';
+  // What a service listing charges (from fares / menu / profile); set by the API.
+  servicePrice?: ServicePriceSummary;
   isFeatured?: boolean;
   // Promotion: `price` stays the original; promoPrice is what a buyer pays once
   // they bring promoRequiredReferrals new verified referrals (see PromoStatus).

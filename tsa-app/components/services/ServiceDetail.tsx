@@ -53,6 +53,10 @@ interface ServiceDetailCardProps {
    * behavior; 'order'/'booking' ungate the pricing flow (no contact fee needed).
    */
   serviceType?: 'contact' | 'order' | 'booking';
+  /** What the listing charges ("From $50.00 / night"); shown above the pricing button. */
+  priceLabel?: string | null;
+  /** The booking button's label, by how the listing books ("Book your stay"). */
+  bookingActionLabel?: string;
   /**
    * Whether `serviceType` has been resolved from the product yet. It starts
    * unresolved (default 'contact'), so the contact-fee block is withheld until
@@ -80,6 +84,8 @@ const ServiceDetailCard = ({
   onPricingPress,
   serviceType = 'contact',
   serviceTypeResolved = true,
+  priceLabel,
+  bookingActionLabel = 'Book a slot',
 }: ServiceDetailCardProps) => {
   const { colors, spacing, radius } = useTheme();
   // Order/booking services are not contact-gated — their pricing/booking flow is
@@ -218,6 +224,11 @@ const ServiceDetailCard = ({
         {/* Pricing services — View / PayNow. Pay the service price + call-out
             (or a booking fare) through escrow. Gated behind the contact fee:
             actionable only once contactPaid, otherwise shown locked. */}
+        {priceLabel && serviceType !== 'contact' ? (
+          <Text variant="title3" weight="700" color="accent" style={{ marginBottom: spacing.sm }}>
+            {priceLabel}
+          </Text>
+        ) : null}
         {onPricingPress ? (
           pricingUnlocked ? (
             <Button
@@ -225,7 +236,7 @@ const ServiceDetailCard = ({
                 serviceType === 'order'
                   ? 'View menu & order'
                   : serviceType === 'booking'
-                    ? 'Book a slot'
+                    ? bookingActionLabel
                     : 'Pricing services — View / Pay Now'
               }
               variant="secondary"

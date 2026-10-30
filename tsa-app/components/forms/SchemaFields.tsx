@@ -10,13 +10,24 @@ import { useTheme } from '@/theme';
 import { Chip, CounterControl, Input, PickerSheet, SelectRow, Text, Toggle } from '@/components/ui';
 import type { SchemaAnswers, SchemaField } from '@/utils/schemaFields';
 import { DateField } from './DateField';
+import { addDays } from '@/utils/dateString';
 
 interface SchemaFieldsProps {
   fields: SchemaField[];
   answers: SchemaAnswers;
   errors?: Record<string, string>;
   onChange: (key: string, value: any) => void;
+  /** Earliest pickable date (YYYY-MM-DD) for every date field, e.g. today on a booking form. */
+  minDate?: string;
 }
+
+// An end date is at least the day after the start date the buyer already
+// picked (a stay or rental ending the day it starts is refused).
+const DATE_PAIR_START: Record<string, string> = {
+  checkout: 'checkin',
+  end_date: 'start_date',
+  return_date: 'travel_date',
+};
 
 // A select with more options than this opens a picker sheet instead of chips.
 const MAX_CHIP_OPTIONS = 6;
@@ -34,7 +45,7 @@ const placeholderFor = (type: SchemaField['type']): string | undefined => {
   }
 };
 
-export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaFieldsProps) {
+export function SchemaFields({ fields, answers, errors = {}, onChange, minDate }: SchemaFieldsProps) {
   const { spacing } = useTheme();
   // The long select whose picker sheet is open, if any.
   const [pickerKey, setPickerKey] = useState<string | null>(null);
@@ -128,6 +139,7 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
           label={f.required ? `${f.label} *` : f.label}
           value={answers[f.key] ?? ''}
           error={errors[f.key]}
+          minimumDate={addDays(answers[DATE_PAIR_START[f.key]], 1) || minDate}
           onChange={(v) => onChange(f.key, v)}
         />
       );

@@ -46,6 +46,10 @@ interface SlotPickerProps {
   /** Reports the current selection (null until a time is picked) so an
    *  external CTA can enable/disable and check out. */
   onSelectionChange?: (slot: { slotStart: string; partySize: number } | null) => void;
+  /** The party size when the parent counts it (a seats/tickets counter). The
+   *  picker's own party-size control is then hidden, so the buyer never sees
+   *  two counts of which only one is booked. */
+  partySize?: number;
 }
 
 const DAYS_AHEAD = 14;
@@ -62,6 +66,7 @@ export const SlotPicker: React.FC<SlotPickerProps> = ({
   submitting,
   hideSubmit,
   onSelectionChange,
+  partySize: parentPartySize,
 }) => {
   const { colors, spacing, radius } = useTheme();
 
@@ -72,7 +77,8 @@ export const SlotPicker: React.FC<SlotPickerProps> = ({
 
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [selectedStart, setSelectedStart] = useState<string | null>(null);
-  const [partySize, setPartySize] = useState(1);
+  const [ownPartySize, setPartySize] = useState(1);
+  const partySize = parentPartySize ?? ownPartySize;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -255,7 +261,7 @@ export const SlotPicker: React.FC<SlotPickerProps> = ({
       </View>
 
       {/* Party size */}
-      {selectedStart && (
+      {selectedStart && parentPartySize === undefined && (
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <View style={{ flex: 1 }}>
             <Text variant="bodyMed" weight="600">
