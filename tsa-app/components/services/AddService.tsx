@@ -414,6 +414,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       Alert.alert("One moment", "Exchange rates are still loading. Try again in a moment.");
       return;
     }
+    // A category that restricts price units needs a fixed-price booking to pick
+    // one (the API refuses none: it would charge per seat or night).
+    if (isBooking && pricingMethod === "fixed" && categoryPriceUnits && priceUnitOptions.length > 0 && !priceUnit) {
+      Alert.alert("Missing details", "Choose what the price is for, under Pricing.");
+      return;
+    }
     const listingProblems = validateSchemaAnswers(listingFields, listingValues);
     setListingErrors(listingProblems);
     if (Object.keys(listingProblems).length > 0) {

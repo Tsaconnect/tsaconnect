@@ -117,10 +117,6 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if msg := checkPriceUnit(config.DB, product, derefOr(req.PriceUnit, "")); msg != "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, msg)
-		return
-	}
 	var profile models.ServiceProfile
 	err = config.DB.Where("product_id = ?", productID).First(&profile).Error
 	isNew := err != nil
@@ -185,6 +181,14 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, msg)
 		return
 	}
+	// Checked on the merged values: whether a unit is required depends on the
+	// pricing method, which this body may not carry.
+	if req.PriceUnit != nil {
+		if msg := checkPriceUnit(config.DB, product, profile.PriceUnit, profile.PricingMethod); msg != "" {
+			utils.ErrorResponse(c, http.StatusBadRequest, msg)
+			return
+		}
+	}
 	// Omitting fieldConfig preserves the stored form; sending an empty Fields
 	// list is how a merchant clears it back to the legacy flow.
 	if req.FieldConfig != nil {
@@ -205,24 +209,34 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Profile saved successfully", profile)
 }
 
-// checkPriceUnit says why unit cannot price product, or "" when it can. Empty
-// is always allowed (no unit). A quote is not a unit: price-on-request is the
-// pricing method. A category with no price_units configured accepts any unit.
-func checkPriceUnit(db *gorm.DB, product *models.Product, unit string) string {
-	if unit == "" {
-		return ""
-	}
-	if !models.ValidPriceUnit(unit) || unit == models.PriceUnitOnRequest {
+// checkPriceUnit says why unit cannot price product, or "" when it can. A quote
+// is not a unit: price-on-request is the pricing method, and needs none. A
+// category with no price_units configured accepts any unit, or none. One that
+// restricts them requires a fixed-price listing to pick one: no unit would
+// charge per seat or night even where the category allows only a fixed price.
+func checkPriceUnit(db *gorm.DB, product *models.Product, unit, pricingMethod string) string {
+	if unit != "" && (!models.ValidPriceUnit(unit) || unit == models.PriceUnitOnRequest) {
 		return "Invalid price unit"
+	}
+	if pricingMethod == models.PricingMethodOnRequest {
+		return ""
 	}
 	cfg, ok := serviceCategoryConfig(db, product)
 	if !ok || cfg.PriceUnits.Value == nil {
 		return ""
 	}
+	offered := false
 	for _, u := range cfg.PriceUnits.Value {
 		if u == unit {
 			return ""
 		}
+		offered = offered || u != models.PriceUnitOnRequest
+	}
+	if unit == "" {
+		if offered {
+			return "Choose what the price is for"
+		}
+		return ""
 	}
 	return "This category does not offer that price unit"
 }

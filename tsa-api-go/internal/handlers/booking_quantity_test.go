@@ -150,8 +150,8 @@ func TestUpsertServiceProfile_PriceUnit(t *testing.T) {
 		{models.PriceUnitPerNight, http.StatusBadRequest},  // not offered by the category
 		{models.PriceUnitOnRequest, http.StatusBadRequest}, // a quote is the pricing method
 		{"per_fortnight", http.StatusBadRequest},
+		{"", http.StatusBadRequest}, // the category restricts units: pick one
 		{models.PriceUnitPerSeat, http.StatusOK},
-		{"", http.StatusOK},
 	} {
 		if w := putProfile(t, &Handlers{}, seller, svc.ID, map[string]interface{}{"priceUnit": tc.unit}); w.Code != tc.want {
 			t.Errorf("priceUnit %q: expected %d, got %d: %s", tc.unit, tc.want, w.Code, w.Body.String())
@@ -225,13 +225,17 @@ func TestGetBookingFormSchema_QuantityLimits(t *testing.T) {
 	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
 	cat := quantityCategory(t, db)
 	schemaOf := func(svc uuid.UUID) (bool, int) {
+		t.Helper()
+		w := getFormSchema(t, &Handlers{}, svc)
 		var resp struct {
 			Data struct {
 				ChargesPerUnit bool `json:"chargesPerUnit"`
 				MaxQuantity    int  `json:"maxQuantity"`
 			} `json:"data"`
 		}
-		json.Unmarshal(getFormSchema(t, &Handlers{}, svc).Body.Bytes(), &resp)
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &resp) != nil {
+			t.Fatalf("form schema: %d %s", w.Code, w.Body.String())
+		}
 		return resp.Data.ChargesPerUnit, resp.Data.MaxQuantity
 	}
 
@@ -248,5 +252,17 @@ func TestGetBookingFormSchema_QuantityLimits(t *testing.T) {
 		Updates(map[string]interface{}{"slot_duration_minutes": 60, "max_capacity_per_slot": 8})
 	if _, limit := schemaOf(slotted.ID); limit != 8 {
 		t.Errorf("maxQuantity = %d, want the slot's capacity 8", limit)
+	}
+}
+
+// A quoted listing needs no unit even where the category restricts them.
+func TestUpsertServiceProfile_QuoteNeedsNoUnit(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db, models.PriceUnitFixed)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	body := map[string]interface{}{"bookingType": models.BookingTypeRequest, "pricingMethod": models.PricingMethodOnRequest, "priceUnit": ""}
+	if w := putProfile(t, &Handlers{}, seller, svc.ID, body); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
