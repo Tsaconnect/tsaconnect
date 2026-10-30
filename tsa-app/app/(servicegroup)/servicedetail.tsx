@@ -133,7 +133,8 @@ const TOKEN_SEGMENTS = [
 function providerFeeNote(charge: ContactServiceCharge | null): string | undefined {
   if (!charge) return undefined;
   if (charge.accessFeeUsd > 0) {
-    return `Plus the provider's own fee of $${charge.accessFeeUsd.toFixed(2)}, paid after you contact them.`;
+    const callout = charge.calloutFeeUsd > 0 ? ` and a $${charge.calloutFeeUsd.toFixed(2)} call-out` : '';
+    return `Plus the provider's own fee of $${charge.accessFeeUsd.toFixed(2)}${callout}, paid after you contact them.`;
   }
   return charge.payable ? undefined : 'No other provider fee — this unlocks their contact details.';
 }
@@ -251,9 +252,14 @@ const ServiceDetail = () => {
         }
       }
       if (!cancelled) setServiceType(resolved);
+      // Not awaited: the reveal block must not wait on it. A failed fetch leaves
+      // the charge unknown (no note, Pay Now kept) rather than claiming no fee.
       if (resolved === 'contact') {
-        const prof = await getServiceProfile(serviceId);
-        if (!cancelled) setProviderCharge(contactServiceCharge(res.data as any, prof.success ? prof.data : null));
+        getServiceProfile(serviceId)
+          .then((prof) => {
+            if (!cancelled && prof.success) setProviderCharge(contactServiceCharge(res.data as any, prof.data));
+          })
+          .catch(() => {});
       }
     })()
       .catch(() => {
