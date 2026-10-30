@@ -391,10 +391,8 @@ func GetServiceTierFee(service *models.Product, tier string) float64 {
 // refunded so a cancel/refund frees capacity automatically (design §4/F4).
 func slotBookedCountTx(tx *gorm.DB, productID uuid.UUID, slotStart time.Time) int {
 	var total *int
-	tx.Model(&models.ServiceBooking{}).
-		Joins("JOIN orders ON orders.id = service_bookings.order_id").
-		Where("service_bookings.product_id = ? AND service_bookings.slot_start = ?", productID, slotStart).
-		Where("orders.status NOT IN ?", []string{models.OrderStatusCancelled, models.OrderStatusRefunded}).
+	liveServiceBookings(tx, productID).
+		Where("service_bookings.slot_start = ?", slotStart).
 		Select("COALESCE(SUM(service_bookings.party_size),0)").
 		Scan(&total)
 	if total == nil {

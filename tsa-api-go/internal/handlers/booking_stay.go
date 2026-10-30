@@ -201,11 +201,8 @@ func reserveStay(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profil
 			tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "svcstay:"+product.ID.String())
 		}
 		var held []models.ServiceBooking
-		tx.Model(&models.ServiceBooking{}).
-			Joins("JOIN orders ON orders.id = service_bookings.order_id").
-			Where("service_bookings.product_id = ? AND service_bookings.slot_start < ? AND service_bookings.slot_end > ?",
-				product.ID, stay.checkOut.UTC(), stay.checkIn.UTC()).
-			Where("orders.status NOT IN ?", []string{models.OrderStatusCancelled, models.OrderStatusRefunded}).
+		liveServiceBookings(tx, product.ID).
+			Where("service_bookings.slot_start < ? AND service_bookings.slot_end > ?", stay.checkOut.UTC(), stay.checkIn.UTC()).
 			Select("service_bookings.slot_start, service_bookings.slot_end, service_bookings.party_size").
 			Find(&held)
 		for night := stay.checkIn; night.Before(stay.checkOut); night = night.AddDate(0, 0, 1) {

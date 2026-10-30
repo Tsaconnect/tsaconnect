@@ -11,6 +11,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
 
 // GetServiceAvailability handles GET /api/services/:id/availability — public list
@@ -232,11 +233,8 @@ func bookedBySlot(productID uuid.UUID, from, to time.Time) map[int64]int {
 		Total     int
 	}
 	var rows []row
-	config.DB.
-		Model(&models.ServiceBooking{}).
-		Joins("JOIN orders ON orders.id = service_bookings.order_id").
-		Where("service_bookings.product_id = ? AND service_bookings.slot_start >= ? AND service_bookings.slot_start < ?", productID, from, to).
-		Where("orders.status NOT IN ?", []string{models.OrderStatusCancelled, models.OrderStatusRefunded}).
+	liveServiceBookings(config.DB, productID).
+		Where("service_bookings.slot_start >= ? AND service_bookings.slot_start < ?", from, to).
 		Group("service_bookings.slot_start").
 		Select("service_bookings.slot_start AS slot_start, COALESCE(SUM(service_bookings.party_size),0) AS total").
 		Scan(&rows)
@@ -245,6 +243,17 @@ func bookedBySlot(productID uuid.UUID, from, to time.Time) map[int64]int {
 		m[r.SlotStart.UTC().Unix()] = r.Total
 	}
 	return m
+}
+
+// liveServiceBookings scopes to a listing's bookings that still hold capacity:
+// those whose order is not cancelled or refunded, so a cancel or refund frees
+// the slot or nights without a separate status write (design §4/F4). Slots and
+// stays both count capacity through it.
+func liveServiceBookings(db *gorm.DB, productID uuid.UUID) *gorm.DB {
+	return db.Model(&models.ServiceBooking{}).
+		Joins("JOIN orders ON orders.id = service_bookings.order_id").
+		Where("service_bookings.product_id = ?", productID).
+		Where("orders.status NOT IN ?", []string{models.OrderStatusCancelled, models.OrderStatusRefunded})
 }
 
 // formatSlot is a tiny helper for slot error messages.
