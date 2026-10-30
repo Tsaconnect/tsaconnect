@@ -38,6 +38,8 @@ func chatError(c *gin.Context, err error) {
 		utils.ErrorResponse(c, http.StatusNotFound, err.Error())
 	case errors.Is(err, services.ErrChatNotEntitled):
 		utils.ErrorResponseWithCode(c, http.StatusForbidden, err.Error(), "contact_fee_required")
+	case errors.Is(err, services.ErrChatClosed):
+		utils.ErrorResponseWithCode(c, http.StatusConflict, err.Error(), "chat_closed")
 	case errors.Is(err, services.ErrChatSubjectUnknown):
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 	default:
@@ -77,20 +79,6 @@ func (h *Handlers) ListChatThreads(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Conversations", threads)
-}
-
-// ChatUnreadCount handles GET /api/chat/unread-count.
-func (h *Handlers) ChatUnreadCount(c *gin.Context) {
-	user, svc, ok := h.chatCaller(c)
-	if !ok {
-		return
-	}
-	n, err := svc.UnreadCount(c.Request.Context(), user.ID)
-	if err != nil {
-		chatError(c, err)
-		return
-	}
-	utils.SuccessResponse(c, http.StatusOK, "Unread conversations", gin.H{"count": n})
 }
 
 // GetChatThread handles GET /api/chat/threads/:id.

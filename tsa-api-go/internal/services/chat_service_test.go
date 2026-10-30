@@ -112,19 +112,16 @@ func TestChat_ConversationBetweenTheTwoOnly(t *testing.T) {
 	if err != nil || len(inbox) != 1 || !inbox[0].Unread || inbox[0].Role != "provider" || inbox[0].CounterpartName != "ada" {
 		t.Fatalf("provider inbox = %+v, err %v", inbox, err)
 	}
-	if n, _ := f.svc.UnreadCount(ctx, f.provider); n != 1 {
-		t.Fatalf("provider unread = %d", n)
-	}
-	if n, _ := f.svc.UnreadCount(ctx, f.customer); n != 0 {
-		t.Fatalf("sender's own message counted unread: %d", n)
+	if own, _ := f.svc.Inbox(ctx, f.customer, 0); len(own) != 1 || own[0].Unread {
+		t.Fatalf("sender's own message shown unread: %+v", own)
 	}
 
 	f.tick()
 	if err := f.svc.MarkRead(ctx, th.ID, f.provider); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := f.svc.UnreadCount(ctx, f.provider); n != 0 {
-		t.Fatalf("unread after read = %d", n)
+	if after, _ := f.svc.Inbox(ctx, f.provider, 0); after[0].Unread {
+		t.Fatal("still unread after MarkRead")
 	}
 
 	f.tick()
@@ -138,9 +135,11 @@ func TestChat_ConversationBetweenTheTwoOnly(t *testing.T) {
 	if err != nil || len(msgs) != 2 || msgs[0].Body != "Can you come to Kubwa today?" || msgs[1].Type != models.ChatMessageTypeImage {
 		t.Fatalf("messages = %+v, err %v", msgs, err)
 	}
-	since := msgs[0].CreatedAt
-	if later, _ := f.svc.List(ctx, th.ID, f.provider, MessageFilter{Since: &since}); len(later) != 1 {
-		t.Fatalf("since paging = %d messages", len(later))
+	// since is inclusive: the message at since comes back too (the client
+	// drops ids it holds), so one sharing its timestamp is never skipped.
+	since := msgs[1].CreatedAt
+	if later, _ := f.svc.List(ctx, th.ID, f.provider, MessageFilter{Since: &since}); len(later) != 1 || later[0].ID != msgs[1].ID {
+		t.Fatalf("since paging = %+v", later)
 	}
 
 	// Outsiders see nothing and cannot write.
@@ -183,5 +182,51 @@ func TestPreviewOf(t *testing.T) {
 	}
 	if got := []rune(previewOf(string(long))); len(got) != previewLen || got[len(got)-1] != '…' {
 		t.Fatalf("len %d", len(got))
+	}
+}
+
+func TestChat_OpeningShowsTheNewestPage(t *testing.T) {
+	f := newChatFixture(t)
+	ctx := context.Background()
+	th, err := f.svc.Open(ctx, f.customer, models.ChatSubjectServiceContact, f.service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		f.tick()
+		if _, err := f.svc.SendText(ctx, th.ID, f.customer, string(rune('a'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := f.svc.List(ctx, th.ID, f.provider, MessageFilter{Limit: 2})
+	if err != nil || len(got) != 2 || got[0].Body != "d" || got[1].Body != "e" {
+		t.Fatalf("newest page = %+v, err %v", got, err)
+	}
+}
+
+func TestChat_ModerationClosesTheConversation(t *testing.T) {
+	f := newChatFixture(t)
+	ctx := context.Background()
+	th, err := f.svc.Open(ctx, f.customer, models.ChatSubjectServiceContact, f.service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Model(&models.Product{}).Where("id = ?", f.service).Update("status", models.ProductStatusSuspended).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.SendText(ctx, th.ID, f.customer, "hello?"); !errors.Is(err, ErrChatClosed) {
+		t.Fatalf("send on a suspended listing: %v", err)
+	}
+	if _, err := f.svc.Open(ctx, f.customer, models.ChatSubjectServiceContact, f.service); !errors.Is(err, ErrChatClosed) {
+		t.Fatalf("open on a suspended listing: %v", err)
+	}
+	if _, err := f.svc.List(ctx, th.ID, f.customer, MessageFilter{}); err != nil {
+		t.Fatalf("history should stay readable: %v", err)
+	}
+
+	f.db.Model(&models.Product{}).Where("id = ?", f.service).Update("status", models.ProductStatusActive)
+	f.db.Model(&models.User{}).Where("id = ?", f.provider).Update("account_status", models.AccountStatusSuspended)
+	if _, err := f.svc.SendText(ctx, th.ID, f.customer, "hello?"); !errors.Is(err, ErrChatClosed) {
+		t.Fatalf("send to a suspended provider: %v", err)
 	}
 }

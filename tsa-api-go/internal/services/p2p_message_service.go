@@ -170,17 +170,11 @@ func (m *P2PMessageService) AdminList(ctx context.Context, tradeID uuid.UUID, f 
 // messages after f.Since in the given order. The id tiebreak keeps messages
 // written in the same instant in a stable order across pages.
 func (m *P2PMessageService) queryThread(ctx context.Context, tradeID uuid.UUID, f MessageFilter, order string) ([]models.P2PMessage, error) {
-	limit := f.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-	q := m.db.WithContext(ctx).Model(&models.P2PMessage{}).
-		Where("trade_id = ?", tradeID).
-		Order(order).
-		Limit(limit)
+	q := m.db.WithContext(ctx).Model(&models.P2PMessage{}).Where("trade_id = ?", tradeID)
 	if f.Since != nil {
 		q = q.Where("created_at > ?", *f.Since)
 	}
+	q = messagePage(q, f, order)
 	var out []models.P2PMessage
 	if err := q.Find(&out).Error; err != nil {
 		return nil, err

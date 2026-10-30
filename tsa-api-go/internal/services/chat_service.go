@@ -8,6 +8,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,14 +29,23 @@ var (
 	// ErrChatNotEntitled: the caller may not open a conversation about this
 	// subject (for a service contact: the contact fee is not paid).
 	ErrChatNotEntitled = errors.New("chat: pay the contact fee to chat with this provider")
+	// ErrChatClosed: the listing or its provider is no longer available, so the
+	// conversation takes no new messages.
+	ErrChatClosed = errors.New("chat: this provider is not available right now")
 )
 
 // chatSubject decides who the provider is for a customer asking about a
 // subject, and whether that customer may open the conversation at all.
-type chatSubject func(ctx context.Context, db *gorm.DB, customerID, subjectID uuid.UUID) (providerID uuid.UUID, err error)
+// live reports whether the subject still takes new messages: moderation
+// (a suspended listing or provider) closes the conversation to new writes,
+// while its history stays readable.
+type chatSubject struct {
+	provider func(ctx context.Context, db *gorm.DB, customerID, subjectID uuid.UUID) (providerID uuid.UUID, err error)
+	live     func(ctx context.Context, db *gorm.DB, subjectID, providerID uuid.UUID) error
+}
 
 var chatSubjects = map[string]chatSubject{
-	models.ChatSubjectServiceContact: serviceContactSubject,
+	models.ChatSubjectServiceContact: {provider: serviceContactSubject, live: serviceContactLive},
 }
 
 // serviceContactSubject: only a customer who paid the service's contact fee may
@@ -52,6 +62,25 @@ func serviceContactSubject(ctx context.Context, db *gorm.DB, customerID, service
 		return uuid.Nil, err
 	}
 	return pay.ServiceProviderID, nil
+}
+
+// serviceContactLive: an admin has not suspended the service, and its
+// provider's account is active. A merchant pausing their own listing
+// (inactive, sold out) does not cut off customers who already paid.
+func serviceContactLive(ctx context.Context, db *gorm.DB, serviceID, providerID uuid.UUID) error {
+	var n int64
+	err := db.WithContext(ctx).Model(&models.Product{}).
+		Joins("JOIN users ON users.id = ?", providerID).
+		Where("products.id = ? AND products.status IS DISTINCT FROM ? AND users.account_status = ?",
+			serviceID, models.ProductStatusSuspended, models.AccountStatusActive).
+		Count(&n).Error
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrChatClosed
+	}
+	return nil
 }
 
 // previewLen bounds the inbox preview (runes), inside the column's 140.
@@ -93,12 +122,15 @@ func (s *ChatService) Open(ctx context.Context, customerID uuid.UUID, subjectTyp
 	if !ok {
 		return nil, ErrChatSubjectUnknown
 	}
-	providerID, err := subject(ctx, s.db, customerID, subjectID)
+	providerID, err := subject.provider(ctx, s.db, customerID, subjectID)
 	if err != nil {
 		return nil, err
 	}
 	if providerID == customerID {
 		return nil, ErrChatNotEntitled
+	}
+	if err := subject.live(ctx, s.db, subjectID, providerID); err != nil {
+		return nil, err
 	}
 	thread := models.ChatThread{
 		ID:          uuid.New(),
@@ -157,18 +189,6 @@ func (s *ChatService) Inbox(ctx context.Context, userID uuid.UUID, limit int) ([
 	return s.views(ctx, userID, threads)
 }
 
-// UnreadCount is how many of the caller's conversations have a message from
-// the other side they have not read.
-func (s *ChatService) UnreadCount(ctx context.Context, userID uuid.UUID) (int64, error) {
-	var n int64
-	err := s.db.WithContext(ctx).Model(&models.ChatThread{}).
-		Where("last_message_at IS NOT NULL AND last_sender_id <> ?", userID).
-		Where("(customer_id = ? AND (customer_read_at IS NULL OR customer_read_at < last_message_at)) OR "+
-			"(provider_id = ? AND (provider_read_at IS NULL OR provider_read_at < last_message_at))", userID, userID).
-		Count(&n).Error
-	return n, err
-}
-
 // SendText posts a text message from a participant.
 func (s *ChatService) SendText(ctx context.Context, threadID, senderID uuid.UUID, body string) (*models.ChatMessage, error) {
 	body, err := chatText(body)
@@ -191,6 +211,11 @@ func (s *ChatService) send(ctx context.Context, threadID, senderID uuid.UUID, ms
 	thread, err := s.participantThread(ctx, threadID, senderID)
 	if err != nil {
 		return nil, err
+	}
+	if subject, ok := chatSubjects[thread.SubjectType]; ok {
+		if err := subject.live(ctx, s.db, thread.SubjectID, thread.ProviderID); err != nil {
+			return nil, err
+		}
 	}
 	now := s.clock.Now()
 	msg.ID = uuid.New()
@@ -221,25 +246,24 @@ func (s *ChatService) send(ctx context.Context, threadID, senderID uuid.UUID, ms
 	return &msg, nil
 }
 
-// List returns up to limit messages after since, oldest first, so a poll with
-// since=<last seen> pages forward.
+// List returns a thread's messages oldest first. Without since it is the
+// NEWEST page (what opening a conversation must show); with since it pages
+// forward from there. since is inclusive — a message sharing the last one's
+// timestamp is never skipped; the client drops ids it already holds.
 func (s *ChatService) List(ctx context.Context, threadID, userID uuid.UUID, f MessageFilter) ([]models.ChatMessage, error) {
 	if _, err := s.participantThread(ctx, threadID, userID); err != nil {
 		return nil, err
 	}
-	limit := f.Limit
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-	q := s.db.WithContext(ctx).Where("thread_id = ?", threadID).
-		Order("created_at ASC, id ASC").Limit(limit)
-	if f.Since != nil {
-		q = q.Where("created_at > ?", *f.Since)
-	}
+	q := s.db.WithContext(ctx).Where("thread_id = ?", threadID)
 	var out []models.ChatMessage
-	if err := q.Find(&out).Error; err != nil {
+	if f.Since != nil {
+		err := messagePage(q.Where("created_at >= ?", *f.Since), f, "created_at ASC, id ASC").Find(&out).Error
+		return out, err
+	}
+	if err := messagePage(q, f, "created_at DESC, id DESC").Find(&out).Error; err != nil {
 		return nil, err
 	}
+	slices.Reverse(out)
 	return out, nil
 }
 
@@ -316,7 +340,7 @@ func (s *ChatService) views(ctx context.Context, viewer uuid.UUID, threads []mod
 		productIDs = append(productIDs, t.SubjectID) // every subject today is a product
 	}
 	var users []models.User
-	if err := s.db.WithContext(ctx).Select("id", "name").Where("id IN ?", dedupe(userIDs)).Find(&users).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("id", "name").Where("id IN ?", dedupeUUIDs(userIDs)).Find(&users).Error; err != nil {
 		return nil, err
 	}
 	names := make(map[uuid.UUID]string, len(users))
@@ -324,7 +348,7 @@ func (s *ChatService) views(ctx context.Context, viewer uuid.UUID, threads []mod
 		names[u.ID] = u.Name
 	}
 	var products []models.Product
-	if err := s.db.WithContext(ctx).Select("id", "name", "images").Where("id IN ?", dedupe(productIDs)).Find(&products).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("id", "name", "images").Where("id IN ?", dedupeUUIDs(productIDs)).Find(&products).Error; err != nil {
 		return nil, err
 	}
 	byID := make(map[uuid.UUID]*models.Product, len(products))
@@ -364,8 +388,8 @@ func counterpart(t models.ChatThread, viewer uuid.UUID) uuid.UUID {
 	return t.ProviderID
 }
 
-func dedupe(ids []uuid.UUID) []uuid.UUID {
-	slices.SortFunc(ids, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+func dedupeUUIDs(ids []uuid.UUID) []uuid.UUID {
+	slices.SortFunc(ids, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 	return slices.Compact(ids)
 }
 

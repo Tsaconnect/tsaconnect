@@ -2,8 +2,11 @@ package services
 
 import (
 	"errors"
+
 	"strings"
 	"unicode/utf8"
+
+	"gorm.io/gorm"
 )
 
 // The rules every user-authored chat message follows, P2P trade threads and
@@ -41,4 +44,14 @@ func chatImageURL(raw string) (string, error) {
 		return "", ErrImageURLInvalid
 	}
 	return raw, nil
+}
+
+// messagePage orders a thread's message query and bounds it to f.Limit
+// (default 100, max 200) — one page rule for every chat.
+func messagePage(q *gorm.DB, f MessageFilter, order string) *gorm.DB {
+	limit := f.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	return q.Order(order).Limit(limit)
 }

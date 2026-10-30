@@ -57,7 +57,6 @@ import { PayToCard } from '@/components/p2p/PayToCard';
 import { PaymentProof } from '@/components/p2p/PaymentProof';
 import { payToFromPayee, payToFromPm } from '@/utils/payInto';
 import { useAuth } from '../../../AuthContext/AuthContext';
-import { API_BASE_URL } from '../../../constants/api/config';
 import { MAINNET_CHAINS, TESTNET_CHAINS } from '../../../constants/chains';
 import { useCountdown } from '../../../hooks/useCountdown';
 import { useTradeExpiryReminder } from '../../../hooks/useTradeExpiryReminder';

@@ -713,7 +713,6 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 	{
 		chatSend := middleware.RateLimiterBy(60, time.Minute, perUserRateKey)
 		chat.GET("/threads", h.ListChatThreads)
-		chat.GET("/unread-count", h.ChatUnreadCount)
 		chat.GET("/threads/:id", h.GetChatThread)
 		chat.GET("/threads/:id/messages", h.ListChatMessages)
 		chat.POST("/threads/:id/messages", chatSend, h.SendChatMessage)

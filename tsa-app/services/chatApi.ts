@@ -38,8 +38,6 @@ export const chatApi = {
   threads: (): Promise<ApiResponse<ChatThread[]>> => request<ChatThread[]>('GET', '/chat/threads'),
   thread: (threadId: string): Promise<ApiResponse<ChatThread>> =>
     request<ChatThread>('GET', `/chat/threads/${encodeURIComponent(threadId)}`),
-  unreadCount: (): Promise<ApiResponse<{ count: number }>> =>
-    request<{ count: number }>('GET', '/chat/unread-count'),
   messages: (threadId: string, since?: string): Promise<ApiResponse<ChatMessage[]>> =>
     request<ChatMessage[]>('GET', `/chat/threads/${encodeURIComponent(threadId)}/messages`, undefined, { query: { since } }),
   sendText: (threadId: string, body: string): Promise<ApiResponse<ChatMessage>> =>

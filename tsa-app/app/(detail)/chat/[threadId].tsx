@@ -42,8 +42,14 @@ export default function ChatThreadScreen() {
   const load = useCallback(async () => {
     if (!id) return;
     const [t, m] = await Promise.all([chatApi.thread(id), chatApi.messages(id)]);
-    if (t.success && t.data) setThread(t.data);
-    else setMissing(true);
+    // Only a refusal is "not found"; a network or server error keeps what is
+    // on screen and the next load retries.
+    if (t.success && t.data) {
+      setThread(t.data);
+      setMissing(false);
+    } else if (t.status === 404) {
+      setMissing(true);
+    }
     if (m.success && m.data) setMessages(m.data);
     setLoading(false);
     chatApi.markRead(id);
