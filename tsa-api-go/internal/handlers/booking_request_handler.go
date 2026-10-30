@@ -320,8 +320,10 @@ func (ch *CheckoutHandler) ApproveBookingRequest(c *gin.Context) {
 		r.QuotedAmountUSD = body.AmountUSD
 	}
 
+	now := time.Now()
 	r.Status = models.BookingRequestApproved
-	r.UpdatedAt = time.Now()
+	r.ApprovedAt = &now
+	r.UpdatedAt = now
 	if err := config.DB.Save(r).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve request")
 		return

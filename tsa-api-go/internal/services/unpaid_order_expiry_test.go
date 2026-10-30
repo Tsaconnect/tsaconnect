@@ -38,7 +38,7 @@ func setupUnpaidOrderDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE products (id TEXT PRIMARY KEY, stock INTEGER, handling_days INTEGER DEFAULT 0, deleted_at DATETIME)`,
 		`CREATE TABLE service_bookings (id TEXT PRIMARY KEY, order_id TEXT, slot_end DATETIME)`,
 		`CREATE TABLE users (id TEXT PRIMARY KEY, wallet_address TEXT)`,
-		`CREATE TABLE booking_requests (id TEXT PRIMARY KEY, status TEXT, order_id TEXT, updated_at DATETIME)`,
+		`CREATE TABLE booking_requests (id TEXT PRIMARY KEY, status TEXT, order_id TEXT, approved_at DATETIME, updated_at DATETIME)`,
 	} {
 		if err := db.Exec(ddl).Error; err != nil {
 			t.Fatalf("create table: %v", err)
@@ -151,8 +151,8 @@ func TestExpireUnpaidOrders_ReleasesStockOnlyForIdleUnescrowedOrders(t *testing.
 	serviceOrder := writeOrder(t, db, service, models.OrderKindService, models.OrderStatusPendingPayment, h2, h2)
 	// The booking request the service order was paying for.
 	request := uuid.New()
-	db.Exec(`INSERT INTO booking_requests (id, status, order_id, updated_at) VALUES (?, ?, ?, ?)`,
-		request, models.BookingRequestConverted, serviceOrder, time.Now().Add(-h2))
+	db.Exec(`INSERT INTO booking_requests (id, status, order_id, approved_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		request, models.BookingRequestConverted, serviceOrder, time.Now().Add(-h2), time.Now().Add(-h2))
 
 	bus := events.NewBus()
 	defer bus.Stop()
@@ -466,5 +466,31 @@ func TestExpireUnpaidOrders_UsesTheWalletTheBuyerWasToldToPay(t *testing.T) {
 	db.Raw(`SELECT status FROM orders WHERE id = ?`, id).Scan(&status)
 	if status != models.OrderStatusEscrowed {
 		t.Fatalf("a correct payment to the wallet the buyer was given must be recorded, got %q", status)
+	}
+}
+
+// Reopening never outlives the approval: a request approved longer ago than
+// BookingRequestApprovalTTL is expired instead of made payable again.
+func TestReopenBookingRequest_ExpiresAStaleApproval(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0)
+	cases := map[string]time.Duration{
+		models.BookingRequestApproved: time.Hour,
+		models.BookingRequestExpired:  BookingRequestApprovalTTL + time.Hour,
+	}
+	for want, approvedAgo := range cases {
+		orderID := writeOrder(t, db, product, models.OrderKindService, models.OrderStatusPendingPayment, time.Minute, time.Minute)
+		request := uuid.New()
+		db.Exec(`INSERT INTO booking_requests (id, status, order_id, approved_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+			request, models.BookingRequestConverted, orderID, time.Now().Add(-approvedAgo), time.Now())
+		order := models.Order{ID: orderID, Kind: models.OrderKindService}
+		if err := ReopenBookingRequest(db, &order); err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		var status string
+		db.Raw(`SELECT status FROM booking_requests WHERE id = ?`, request).Scan(&status)
+		if status != want {
+			t.Errorf("approved %v ago: status %q, want %q", approvedAgo, status, want)
+		}
 	}
 }

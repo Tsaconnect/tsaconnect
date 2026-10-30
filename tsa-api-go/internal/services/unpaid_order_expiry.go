@@ -124,18 +124,22 @@ func cancelPending(tx *gorm.DB, order *models.Order, idleBefore *time.Time) (boo
 // ReopenBookingRequest puts the booking request an unpaid order was paying
 // back to approved, so its buyer can pay again: a request converts when payment
 // starts, and would otherwise be stuck behind an order that was never paid.
-// Paying again places a new order, priced and held afresh. Called when the
-// order expires or its buyer cancels it, not when the seller does.
+// Paying again places a new order, priced and held afresh. The approval keeps
+// its own clock (approved_at), so reopening never extends it: one already past
+// BookingRequestApprovalTTL is expired instead. Called when the order expires
+// or its buyer cancels it, not when the seller does.
 func ReopenBookingRequest(tx *gorm.DB, order *models.Order) error {
 	if order.Kind != models.OrderKindService {
 		return nil
 	}
+	now := time.Now()
 	if err := tx.Model(&models.BookingRequest{}).
 		Where("order_id = ? AND status = ?", order.ID, models.BookingRequestConverted).
 		Updates(map[string]interface{}{
-			"status":     models.BookingRequestApproved,
+			"status": gorm.Expr("CASE WHEN "+approvalClock+" >= ? THEN ? ELSE ? END",
+				now.Add(-BookingRequestApprovalTTL), models.BookingRequestApproved, models.BookingRequestExpired),
 			"order_id":   nil,
-			"updated_at": time.Now(),
+			"updated_at": now,
 		}).Error; err != nil {
 		return fmt.Errorf("reopen booking request: %w", err)
 	}

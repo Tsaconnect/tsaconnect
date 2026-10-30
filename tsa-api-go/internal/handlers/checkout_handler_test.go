@@ -357,6 +357,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			quoted_amount_usd REAL,
 			quote_expires_at DATETIME,
 			order_id TEXT,
+			approved_at DATETIME,
 			created_at DATETIME,
 			updated_at DATETIME
 		)`,
