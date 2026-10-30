@@ -38,6 +38,8 @@ export interface BookingRequest {
 export interface BookingRequestRow {
   request: BookingRequest;
   serviceName: string;
+  // The order's status once the request has converted (absent before then).
+  orderStatus?: string;
 }
 
 async function authHeaders(): Promise<Record<string, string>> {

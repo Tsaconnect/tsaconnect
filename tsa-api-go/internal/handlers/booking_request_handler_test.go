@@ -116,6 +116,45 @@ func TestBookingRequestLifecycle(t *testing.T) {
 	if orderCount != 1 {
 		t.Fatalf("expected exactly 1 order after double-pay, got %d", orderCount)
 	}
+
+	// 7. The list reports the order's status: converted means payment started,
+	// not that it went through.
+	if got := listedOrderStatus(t, buyer, ch); got != models.OrderStatusPendingPayment {
+		t.Fatalf("listed orderStatus before escrow = %q, want %q", got, models.OrderStatusPendingPayment)
+	}
+	db.Model(&models.Order{}).Where("id = ?", order.ID).Update("status", models.OrderStatusEscrowed)
+	if got := listedOrderStatus(t, buyer, ch); got != models.OrderStatusEscrowed {
+		t.Fatalf("listed orderStatus after escrow = %q, want %q", got, models.OrderStatusEscrowed)
+	}
+}
+
+// listedOrderStatus lists the buyer's booking requests and returns the one
+// row's orderStatus.
+func listedOrderStatus(t *testing.T, buyer *models.User, ch *CheckoutHandler) string {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set("user", buyer)
+	c.Request, _ = http.NewRequest("GET", "/?role=buyer", nil)
+	ch.ListBookingRequests(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			Requests []struct {
+				OrderStatus string `json:"orderStatus"`
+			} `json:"requests"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(resp.Data.Requests) != 1 {
+		t.Fatalf("expected 1 listed request, got %d", len(resp.Data.Requests))
+	}
+	return resp.Data.Requests[0].OrderStatus
 }
 
 // A slotted booking cannot be set to request/approval mode (the pay step can't

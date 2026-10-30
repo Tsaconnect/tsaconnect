@@ -9,9 +9,10 @@
 // is authorized with the app's PIN/biometric prompt first, as at cart checkout.
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
-import { useFocusEffect } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useTheme } from '@/theme';
 import { formatSchemaAnswer, type SchemaField } from '@/utils/schemaFields';
+import { bookingRequestBadge } from '@/utils/bookingRequestStatus';
 import { Badge, Button, Card, EmptyState, Spinner, Text, useToast } from '@/components/ui';
 import {
   listBookingRequests,
@@ -19,7 +20,6 @@ import {
   rejectBookingRequest,
   type BookingRequest,
   type BookingRequestRow,
-  type BookingRequestStatus,
 } from '@/services/bookingRequestApi';
 import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
 import { getFieldCatalog } from '@/services/serviceListingApi';
@@ -29,18 +29,6 @@ import { LocalAmountInput, PricingCurrencySelect } from '@/components/products/M
 import AuthorizationModal from '@/components/common/AuthorizationModal';
 
 type Tab = 'buyer' | 'seller';
-
-// Map each status to a label + a semantic theme-color token (resolved against
-// the active theme inside the component, so it tracks light/dark).
-type ToneKey = 'warning' | 'success' | 'danger' | 'info' | 'textMuted';
-const STATUS_TONE: Record<BookingRequestStatus, { label: string; tone: ToneKey }> = {
-  requested: { label: 'Pending', tone: 'warning' },
-  approved: { label: 'Approved', tone: 'success' },
-  rejected: { label: 'Declined', tone: 'danger' },
-  expired: { label: 'Expired', tone: 'textMuted' },
-  converted: { label: 'Paid', tone: 'success' },
-  cancelled: { label: 'Cancelled', tone: 'textMuted' },
-};
 
 export default function BookingRequestsScreen() {
   const { colors, spacing } = useTheme();
@@ -183,8 +171,8 @@ export default function BookingRequestsScreen() {
               }
             />
           ) : (
-            rows.map(({ request, serviceName }) => {
-              const tone = STATUS_TONE[request.status] ?? { label: request.status, tone: 'textMuted' as ToneKey };
+            rows.map(({ request, serviceName, orderStatus }) => {
+              const tone = bookingRequestBadge(request.status, orderStatus);
               const toneColor = colors[tone.tone];
               const answers = request.answers || {};
               const answerLines = Object.keys(answers)
@@ -220,6 +208,15 @@ export default function BookingRequestsScreen() {
                     <Text variant="caption" color="danger">
                       Reason: {request.rejectReason}
                     </Text>
+                  ) : null}
+
+                  {request.status === 'converted' && request.orderId ? (
+                    <Button
+                      title="View order"
+                      variant="secondary"
+                      size="sm"
+                      onPress={() => router.push(`/orderdetail?id=${request.orderId}`)}
+                    />
                   ) : null}
 
                   {/* Buyer: pay once approved. Seller: approve/decline while pending. */}
