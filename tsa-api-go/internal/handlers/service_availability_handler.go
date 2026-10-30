@@ -256,6 +256,28 @@ func liveServiceBookings(db *gorm.DB, productID uuid.UUID) *gorm.DB {
 		Where("orders.status NOT IN ?", []string{models.OrderStatusCancelled, models.OrderStatusRefunded})
 }
 
+// lockCapacity serialises the bookings that draw on one pool of capacity
+// (lockKey) until tx ends, so a count-then-hold cannot race another booking
+// into the same places. A Postgres transaction-scoped advisory lock, released
+// at commit or rollback; a no-op on SQLite (tests), a single writer anyway.
+func lockCapacity(tx *gorm.DB, lockKey string) error {
+	if tx.Dialector.Name() != "postgres" {
+		return nil
+	}
+	return tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", lockKey).Error
+}
+
+// bookedUnits sums the places (party sizes) of the live bookings q selects.
+func bookedUnits(q *gorm.DB) (int, error) {
+	var total int64
+	err := q.Select("COALESCE(SUM(service_bookings.party_size),0)").Scan(&total).Error
+	return int(total), err
+}
+
+// capacityUnreadable is what a booking is told when its capacity cannot be
+// checked: every hold fails closed rather than reading as room.
+const capacityUnreadable = "Could not check availability. Please try again."
+
 // formatSlot is a tiny helper for slot error messages.
 func formatSlot(t time.Time) string {
 	return t.Format("2006-01-02 15:04")

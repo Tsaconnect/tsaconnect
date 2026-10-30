@@ -390,15 +390,8 @@ func GetServiceTierFee(service *models.Product, tier string) float64 {
 // within a transaction, counting only bookings whose order is not cancelled or
 // refunded so a cancel/refund frees capacity automatically (design §4/F4).
 func slotBookedCountTx(tx *gorm.DB, productID uuid.UUID, slotStart time.Time) int {
-	var total *int
-	liveServiceBookings(tx, productID).
-		Where("service_bookings.slot_start = ?", slotStart).
-		Select("COALESCE(SUM(service_bookings.party_size),0)").
-		Scan(&total)
-	if total == nil {
-		return 0
-	}
-	return *total
+	total, _ := bookedUnits(liveServiceBookings(tx, productID).Where("service_bookings.slot_start = ?", slotStart))
+	return total
 }
 
 // slotWithinAvailability reports whether [slotStart, slotStart+duration] falls
@@ -523,12 +516,10 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 
 	if profile.MaxCapacityPerSlot > 0 {
 		// Serialize concurrent bookings for the SAME slot so the read-then-write
-		// capacity check can't be raced into overbooking. Postgres transaction-
-		// scoped advisory lock keyed on (product, slot); auto-released at commit/
-		// rollback. No-op on SQLite (tests) — single-writer there anyway.
-		if tx.Dialector.Name() == "postgres" {
-			lockKey := fmt.Sprintf("svcbooking:%s:%d", product.ID.String(), slotStart.Unix())
-			tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", lockKey)
+		// capacity check can't be raced into overbooking.
+		if err := lockCapacity(tx, fmt.Sprintf("svcbooking:%s:%d", product.ID.String(), slotStart.Unix())); err != nil {
+			log.Printf("[booking] slot lock failed for service %s: %v", product.ID, err)
+			return nil, capacityUnreadable
 		}
 		booked := slotBookedCountTx(tx, product.ID, slotStart)
 		if booked+partySize > profile.MaxCapacityPerSlot {

@@ -276,7 +276,7 @@ func stayUnavailable(db *gorm.DB, product *models.Product, profile *models.Servi
 		Select("service_bookings.slot_start, service_bookings.slot_end, service_bookings.party_size").
 		Find(&held).Error; err != nil {
 		log.Printf("[booking] stay availability unreadable for service %s: %v", product.ID, err)
-		return "Could not check availability. Please try again."
+		return capacityUnreadable
 	}
 	for night := stay.checkIn; night.Before(stay.checkOut); night = night.AddDate(0, 0, 1) {
 		taken := 0
@@ -295,12 +295,11 @@ func stayUnavailable(db *gorm.DB, product *models.Product, profile *models.Servi
 // reserveStay holds one unit (room, property, item) for every night of stay,
 // refusing it when any night is full (stayUnavailable).
 func reserveStay(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profile *models.ServiceProfile, stay *stayDates) (*models.ServiceBooking, string) {
-	if profile.MaxCapacityPerSlot > 0 && tx.Dialector.Name() == "postgres" {
-		// Serialise stays of the same listing: the per-night check reads every
-		// overlapping booking and must not race another stay into the same nights.
-		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "svcstay:"+product.ID.String()).Error; err != nil {
+	if profile.MaxCapacityPerSlot > 0 {
+		// The per-night check reads every overlapping booking of the listing.
+		if err := lockCapacity(tx, "svcstay:"+product.ID.String()); err != nil {
 			log.Printf("[booking] stay lock failed for service %s: %v", product.ID, err)
-			return nil, "Could not check availability. Please try again."
+			return nil, capacityUnreadable
 		}
 	}
 	if msg := stayUnavailable(tx, product, profile, stay); msg != "" {
@@ -355,12 +354,12 @@ func seatsUnavailable(db *gorm.DB, product *models.Product, profile *models.Serv
 	} else {
 		held = held.Where("service_bookings.slot_start = ?", start)
 	}
-	var taken int64
-	if err := held.Select("COALESCE(SUM(service_bookings.party_size),0)").Scan(&taken).Error; err != nil {
+	taken, err := bookedUnits(held)
+	if err != nil {
 		log.Printf("[booking] seat availability unreadable for service %s: %v", product.ID, err)
-		return "Could not check availability. Please try again."
+		return capacityUnreadable
 	}
-	if left := profile.MaxCapacityPerSlot - int(taken); max(bk.units, 1) > left {
+	if left := profile.MaxCapacityPerSlot - taken; max(bk.units, 1) > left {
 		on := ""
 		if bk.seatDay != nil {
 			on = " on " + bk.seatDay.Format("2 Jan 2006")
@@ -392,12 +391,9 @@ func reserveSeats(tx *gorm.DB, buyerID uuid.UUID, product *models.Product, profi
 	if profile.MaxCapacityPerSlot <= 0 {
 		return nil, ""
 	}
-	if tx.Dialector.Name() == "postgres" {
-		// The count must not race another booking into the same places.
-		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", "svcseats:"+product.ID.String()).Error; err != nil {
-			log.Printf("[booking] seat lock failed for service %s: %v", product.ID, err)
-			return nil, "Could not check availability. Please try again."
-		}
+	if err := lockCapacity(tx, "svcseats:"+product.ID.String()); err != nil {
+		log.Printf("[booking] seat lock failed for service %s: %v", product.ID, err)
+		return nil, capacityUnreadable
 	}
 	if msg := seatsUnavailable(tx, product, profile, bk); msg != "" {
 		return nil, msg
