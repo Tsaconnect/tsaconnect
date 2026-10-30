@@ -212,6 +212,11 @@ const ServiceDetail = () => {
   useEffect(() => {
     if (!serviceId) return;
     let cancelled = false;
+    setProviderCharge(null);
+    // Fetched alongside the product; applied only once the type resolves to
+    // contact. A failed fetch leaves the charge unknown (no note, Pay Now kept)
+    // rather than claiming the provider charges nothing.
+    const profileFetch = getServiceProfile(serviceId).catch(() => null);
     (async () => {
       const res = await api.getProductById(serviceId);
       if (cancelled) return;
@@ -252,14 +257,11 @@ const ServiceDetail = () => {
         }
       }
       if (!cancelled) setServiceType(resolved);
-      // Not awaited: the reveal block must not wait on it. A failed fetch leaves
-      // the charge unknown (no note, Pay Now kept) rather than claiming no fee.
+      // Not awaited, so the reveal block never waits on the profile.
       if (resolved === 'contact') {
-        getServiceProfile(serviceId)
-          .then((prof) => {
-            if (!cancelled && prof.success) setProviderCharge(contactServiceCharge(res.data as any, prof.data));
-          })
-          .catch(() => {});
+        profileFetch.then((prof) => {
+          if (!cancelled && prof?.success) setProviderCharge(contactServiceCharge(res.data as any, prof.data));
+        });
       }
     })()
       .catch(() => {

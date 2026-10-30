@@ -26,4 +26,12 @@ describe('contactServiceCharge', () => {
     expect(contactServiceCharge({ price: 10 }, {}).payable).toBe(true);
     expect(contactServiceCharge({ shippingSameState: 3 }, {}).payable).toBe(true);
   });
+
+  it('keeps the access-fee branch alone when a price is also set, as checkout does', () => {
+    expect(contactServiceCharge({ price: 20, shippingSameState: 4 }, { accessFeeUsd: 5, calloutFeeUsd: 1 })).toEqual({
+      accessFeeUsd: 5,
+      calloutFeeUsd: 1,
+      payable: true,
+    });
+  });
 });
