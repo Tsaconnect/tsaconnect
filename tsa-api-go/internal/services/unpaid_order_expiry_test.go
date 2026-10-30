@@ -494,3 +494,23 @@ func TestReopenBookingRequest_ExpiresAStaleApproval(t *testing.T) {
 		}
 	}
 }
+
+// A request approved before approved_at existed gets its clock pinned on the
+// first reopen, so later pay-and-cancel cycles cannot keep restarting it.
+func TestReopenBookingRequest_PinsALegacyApprovalClock(t *testing.T) {
+	db := setupUnpaidOrderDB(t)
+	product := writeProduct(t, db, 0)
+	orderID := writeOrder(t, db, product, models.OrderKindService, models.OrderStatusPendingPayment, time.Minute, time.Minute)
+	request, lastChange := uuid.New(), time.Now().Add(-time.Hour)
+	db.Exec(`INSERT INTO booking_requests (id, status, order_id, updated_at) VALUES (?, ?, ?, ?)`,
+		request, models.BookingRequestConverted, orderID, lastChange)
+
+	if err := ReopenBookingRequest(db, &models.Order{ID: orderID, Kind: models.OrderKindService}); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	var r models.BookingRequest
+	db.Raw(`SELECT status, approved_at FROM booking_requests WHERE id = ?`, request).Scan(&r)
+	if r.Status != models.BookingRequestApproved || r.ApprovedAt == nil || r.ApprovedAt.Sub(lastChange).Abs() > time.Second {
+		t.Fatalf("status %q approved_at %v, want approved with approved_at at the old last change %v", r.Status, r.ApprovedAt, lastChange)
+	}
+}

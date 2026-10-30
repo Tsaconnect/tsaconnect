@@ -138,8 +138,11 @@ func ReopenBookingRequest(tx *gorm.DB, order *models.Order) error {
 		Updates(map[string]interface{}{
 			"status": gorm.Expr("CASE WHEN "+approvalClock+" >= ? THEN ? ELSE ? END",
 				now.Add(-BookingRequestApprovalTTL), models.BookingRequestApproved, models.BookingRequestExpired),
-			"order_id":   nil,
-			"updated_at": now,
+			"order_id": nil,
+			// Pins a pre-approved_at row's approval clock before updated_at moves,
+			// so a pay-and-cancel cycle cannot restart it.
+			"approved_at": gorm.Expr(approvalClock),
+			"updated_at":  now,
 		}).Error; err != nil {
 		return fmt.Errorf("reopen booking request: %w", err)
 	}

@@ -557,9 +557,11 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	claim := tx.Model(&models.BookingRequest{}).
 		Where("id = ? AND status = ?", r.ID, models.BookingRequestApproved).
 		Updates(map[string]interface{}{
-			"status":     models.BookingRequestConverted,
-			"order_id":   order.ID,
-			"updated_at": time.Now(),
+			"status":   models.BookingRequestConverted,
+			"order_id": order.ID,
+			// Pins a pre-approved_at row's approval clock before updated_at moves.
+			"approved_at": gorm.Expr("COALESCE(approved_at, updated_at)"),
+			"updated_at":  time.Now(),
 		})
 	if claim.Error != nil {
 		tx.Rollback()
