@@ -43,6 +43,10 @@ type BookingRequest struct {
 	QuotedAmountUSD *float64 `json:"quotedAmountUsd,omitempty"` // set by the provider when approving a price-on-request booking
 	// OrderID is set once the request is paid and converted to an escrowed order.
 	OrderID *uuid.UUID `gorm:"type:uuid" json:"orderId,omitempty"`
+	// ApprovedAt is when the provider approved; the approval expires from it, so
+	// paying and cancelling an order (which reopens the request) cannot extend
+	// it. Nil on rows approved before it existed: their updated_at stands in.
+	ApprovedAt *time.Time `json:"approvedAt,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

@@ -69,7 +69,7 @@ import { SchemaFields } from "@/components/forms/SchemaFields";
 import { useCategoryListingFields } from "@/hooks/useCategoryListingFields";
 import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields";
 import { categoryPathLabels } from "@/utils/categoryTree";
-import { listingPriceUnits, PRICE_UNIT_LABELS, type PriceUnit } from "@/utils/priceUnit";
+import { listingPriceUnits, placesCapacityCopy, PRICE_UNIT_LABELS, type PriceUnit } from "@/utils/priceUnit";
 import BookingConfigBuilder from "./BookingConfigBuilder";
 import { fieldsMissingOptions } from "@/utils/bookingFieldOptions";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
@@ -152,6 +152,13 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   } = useCategoryListingFields(category || null);
   // A date-range category books stays (nights) instead of time slots.
   const isStay = bookingMode === "date_range";
+  // A seat/ticket listing without time slots counts its places per date (when
+  // its form asks one) or in total, not per slot.
+  const isUnslottedPlaces = bookingMode === "quantity" && !(parseFloat(slotDurationMinutes) > 0);
+  const placesCopy = placesCapacityCopy(
+    priceUnit,
+    (bookingFields.length ? bookingFields : categoryBookingFields).some((f) => f.type === "date"),
+  );
   const priceUnitOptions = useMemo(() => listingPriceUnits(categoryPriceUnits), [categoryPriceUnits]);
   const serviceType: ServiceType = selectedCategory?.serviceType ?? "contact";
   const isContact = serviceType === "contact";
@@ -865,14 +872,19 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                           </View>
                           <View style={{ flex: 1 }}>
                             <Input
-                              label="Max per slot"
-                              placeholder="e.g. 1"
+                              label={isUnslottedPlaces ? placesCopy.label : "Max per slot"}
+                              placeholder={isUnslottedPlaces ? "e.g. 50" : "e.g. 1"}
                               keyboardType="number-pad"
                               value={maxCapacityPerSlot}
                               onChangeText={setMaxCapacityPerSlot}
                             />
                           </View>
                         </View>
+                        {isUnslottedPlaces ? (
+                          <Text variant="caption" color="textSecondary">
+                            {placesCopy.helper} Leave the slot duration empty to sell without time slots.
+                          </Text>
+                        ) : null}
                       </Card>
                     </>
                   )}

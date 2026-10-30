@@ -102,11 +102,11 @@ func (ch *CheckoutHandler) CreateBookingRequest(c *gin.Context) {
 		return
 	}
 	// Checked now so the merchant is not asked to approve dates that cannot be
-	// booked or nights already full; re-checked at pay, when the stay is
-	// reserved (another booking may take the nights in between).
+	// booked, or nights or seats already full; re-checked at pay, when they are
+	// reserved (another booking may take them in between).
 	bk, uerr := resolveBooking(config.DB, &product, &profile, serviceType, req.Quantity, answersOrEmpty(req.Answers))
-	if uerr == "" && bk.stay != nil {
-		uerr = stayUnavailable(config.DB, &product, &profile, bk.stay)
+	if uerr == "" {
+		uerr = unslottedUnavailable(config.DB, &product, &profile, bk)
 	}
 	if uerr != "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, uerr)
@@ -320,8 +320,10 @@ func (ch *CheckoutHandler) ApproveBookingRequest(c *gin.Context) {
 		r.QuotedAmountUSD = body.AmountUSD
 	}
 
+	now := time.Now()
 	r.Status = models.BookingRequestApproved
-	r.UpdatedAt = time.Now()
+	r.ApprovedAt = &now
+	r.UpdatedAt = now
 	if err := config.DB.Save(r).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to approve request")
 		return
@@ -555,9 +557,11 @@ func (ch *CheckoutHandler) PayBookingRequest(c *gin.Context) {
 	claim := tx.Model(&models.BookingRequest{}).
 		Where("id = ? AND status = ?", r.ID, models.BookingRequestApproved).
 		Updates(map[string]interface{}{
-			"status":     models.BookingRequestConverted,
-			"order_id":   order.ID,
-			"updated_at": time.Now(),
+			"status":   models.BookingRequestConverted,
+			"order_id": order.ID,
+			// Pins a pre-approved_at row's approval clock before updated_at moves.
+			"approved_at": gorm.Expr("COALESCE(approved_at, updated_at)"),
+			"updated_at":  time.Now(),
 		})
 	if claim.Error != nil {
 		tx.Rollback()

@@ -155,8 +155,8 @@ func (h *Handlers) GetBookingFormSchema(c *gin.Context) {
 		models.ChargesPerUnit(schema.BookingMode, profile.PriceUnit)
 	if schema.BookingMode == models.BookingModeQuantity {
 		schema.MaxQuantity = maxBookingUnits
-		// A slotted listing cannot sell more places than one slot holds.
-		if profile.SlotDurationMinutes > 0 && profile.MaxCapacityPerSlot > 0 {
+		// No booking can take more places than a slot, a day or the event holds.
+		if profile.MaxCapacityPerSlot > 0 {
 			schema.MaxQuantity = min(schema.MaxQuantity, profile.MaxCapacityPerSlot)
 		}
 	}

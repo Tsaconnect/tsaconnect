@@ -7,7 +7,7 @@
 // into an escrowed order via the standard escrow flow — or, for an MCGP
 // request, a Spendable MCGP hold, which moves without a wallet signature and so
 // is authorized with the app's PIN/biometric prompt first, as at cart checkout.
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { useTheme } from '@/theme';
@@ -21,7 +21,7 @@ import {
   type BookingRequest,
   type BookingRequestRow,
 } from '@/services/bookingRequestApi';
-import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
+import { payBookingRequestAndEscrow, resumeOrderPayment, type EscrowProgress } from '@/services/serviceCheckout';
 import { getFieldCatalog } from '@/services/serviceListingApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { useKeyedMessages } from '@/hooks/useKeyedMessages';
@@ -119,10 +119,22 @@ export default function BookingRequestsScreen() {
 
   const isMcgp = (request: BookingRequest) => request.token?.toUpperCase() === 'MCGP';
 
+  // What each request's payment has signed so far this session, so finishing
+  // it resumes instead of signing (and paying gas for) the same steps again.
+  const progressRef = useRef<Record<string, EscrowProgress>>({});
+
   const runPay = (request: BookingRequest) =>
     withBusy(request.id, async () => {
       try {
-        await payBookingRequestAndEscrow(request.id);
+        // A converted request already has its order: finish paying that one.
+        if (request.status === 'converted' && request.orderId) {
+          const progress = (progressRef.current[request.id] ??= {});
+          await resumeOrderPayment(request.orderId, undefined, progress);
+        } else {
+          // A fresh order (a reopened request's included): nothing signed yet.
+          const progress = (progressRef.current[request.id] = {});
+          await payBookingRequestAndEscrow(request.id, undefined, progress);
+        }
         toast.show(isMcgp(request) ? 'Booking paid from your Spendable MCGP' : 'Booking paid & funded via escrow', 'success');
         load();
       } catch (e: any) {
@@ -219,6 +231,15 @@ export default function BookingRequestsScreen() {
                     </Text>
                   ) : null}
 
+                  {tab === 'buyer' && request.status === 'converted' && orderStatus === 'pending_payment' ? (
+                    <Button
+                      title="Finish payment"
+                      leftIcon="shield"
+                      onPress={() => handlePay(request)}
+                      loading={busyId === request.id}
+                      disabled={busyId === request.id}
+                    />
+                  ) : null}
                   {request.status === 'converted' && request.orderId ? (
                     <Button
                       title="View order"

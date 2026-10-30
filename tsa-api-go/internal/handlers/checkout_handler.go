@@ -390,15 +390,8 @@ func GetServiceTierFee(service *models.Product, tier string) float64 {
 // within a transaction, counting only bookings whose order is not cancelled or
 // refunded so a cancel/refund frees capacity automatically (design §4/F4).
 func slotBookedCountTx(tx *gorm.DB, productID uuid.UUID, slotStart time.Time) int {
-	var total *int
-	liveServiceBookings(tx, productID).
-		Where("service_bookings.slot_start = ?", slotStart).
-		Select("COALESCE(SUM(service_bookings.party_size),0)").
-		Scan(&total)
-	if total == nil {
-		return 0
-	}
-	return *total
+	total, _ := bookedUnits(liveServiceBookings(tx, productID).Where("service_bookings.slot_start = ?", slotStart))
+	return total
 }
 
 // slotWithinAvailability reports whether [slotStart, slotStart+duration] falls
@@ -523,12 +516,10 @@ func (ch *CheckoutHandler) reserveBookingSlot(tx *gorm.DB, buyerID uuid.UUID, pr
 
 	if profile.MaxCapacityPerSlot > 0 {
 		// Serialize concurrent bookings for the SAME slot so the read-then-write
-		// capacity check can't be raced into overbooking. Postgres transaction-
-		// scoped advisory lock keyed on (product, slot); auto-released at commit/
-		// rollback. No-op on SQLite (tests) — single-writer there anyway.
-		if tx.Dialector.Name() == "postgres" {
-			lockKey := fmt.Sprintf("svcbooking:%s:%d", product.ID.String(), slotStart.Unix())
-			tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", lockKey)
+		// capacity check can't be raced into overbooking.
+		if err := lockCapacity(tx, fmt.Sprintf("svcbooking:%s:%d", product.ID.String(), slotStart.Unix())); err != nil {
+			log.Printf("[booking] slot lock failed for service %s: %v", product.ID, err)
+			return nil, capacityUnreadable
 		}
 		booked := slotBookedCountTx(tx, product.ID, slotStart)
 		if booked+partySize > profile.MaxCapacityPerSlot {
@@ -616,13 +607,7 @@ func (ch *CheckoutHandler) resolveServicePricing(
 		}
 		priceUSD = fee + profile.AccessFeeUSD
 		calloutUSD = profile.CalloutFeeUSD
-		if bk.stay != nil {
-			b, berr := reserveStay(tx, buyerID, product, profile, bk.stay)
-			if berr != "" {
-				return 0, 0, zone, nil, nil, berr
-			}
-			booking = b
-		} else if profile.SlotDurationMinutes > 0 {
+		if profile.SlotDurationMinutes > 0 && bk.stay == nil {
 			if slotReq == nil || slotReq.SlotStart.IsZero() {
 				return 0, 0, zone, nil, nil, fmt.Sprintf("Pick a time slot for %s", product.Name)
 			}
@@ -631,6 +616,12 @@ func (ch *CheckoutHandler) resolveServicePricing(
 				slot.PartySize = bk.units
 			}
 			b, berr := ch.reserveBookingSlot(tx, buyerID, product, profile, slot)
+			if berr != "" {
+				return 0, 0, zone, nil, nil, berr
+			}
+			booking = b
+		} else {
+			b, berr := reserveUnslotted(tx, buyerID, product, profile, bk)
 			if berr != "" {
 				return 0, 0, zone, nil, nil, berr
 			}
@@ -1844,17 +1835,15 @@ func (ch *CheckoutHandler) placeServiceOrder(
 	if priceOverrideUSD != nil {
 		// Provider-quoted price (price-on-request): the quote is the all-in
 		// service price for every unit; no tier call-out is added and there's no
-		// slot to reserve. A stay is still held: the quote prices the nights, it
-		// does not make room for them.
+		// slot to reserve. A stay's nights and seats/tickets are still held: the
+		// quote prices them, it does not make room for them.
 		priceUSD = *priceOverrideUSD
 		zone = detectedZone
-		if bk.stay != nil {
-			b, berr := reserveStay(tx, buyer.ID, product, profile, bk.stay)
-			if berr != "" {
-				return nil, berr, http.StatusBadRequest
-			}
-			booking = b
+		b, berr := reserveUnslotted(tx, buyer.ID, product, profile, bk)
+		if berr != "" {
+			return nil, berr, http.StatusBadRequest
 		}
+		booking = b
 	} else {
 		var perr string
 		priceUSD, calloutUSD, zone, menuSel, booking, perr = ch.resolveServicePricing(
@@ -3384,6 +3373,19 @@ func (ch *CheckoutHandler) CancelOrder(c *gin.Context) {
 			tx.Rollback()
 			utils.ErrorResponse(c, http.StatusConflict, "This order is no longer awaiting payment")
 			return
+		}
+		// A buyer who drops an unpaid booking can still pay its request later
+		// (until the approval expires); a seller's cancel leaves it closed. Only
+		// when no escrow was ever prepared: one that was may have been funded
+		// without being reported, and reopening would invite a second payment
+		// (the unpaid sweep reads the escrow before it reopens).
+		if isBuyer && !isSeller && order.EscrowOrderKey == "" {
+			if err := services.ReopenBookingRequest(tx, &order); err != nil {
+				tx.Rollback()
+				log.Printf("CancelOrder error for order %s: %v", order.ID, err)
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to cancel order")
+				return
+			}
 		}
 		if err := tx.Commit().Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to commit transaction")

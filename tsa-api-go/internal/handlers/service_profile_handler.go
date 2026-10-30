@@ -199,9 +199,20 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	if err != nil {
 		// Not found → create.
 		profile.ID = uuid.New()
+		unlimited := profile.MaxCapacityPerSlot == 0
 		if err := config.DB.Create(&profile).Error; err != nil {
 			utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to save profile")
 			return
+		}
+		// The column defaults to 1, and Create leaves a zero out so the default
+		// applies: an asked-for 0 ("unlimited") is written explicitly, or a new
+		// ticket listing would sell exactly one place.
+		if unlimited {
+			if err := config.DB.Model(&profile).UpdateColumn("max_capacity_per_slot", 0).Error; err != nil {
+				utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to save profile")
+				return
+			}
+			profile.MaxCapacityPerSlot = 0
 		}
 	} else if err := config.DB.Save(&profile).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to save profile")

@@ -21,6 +21,10 @@ const (
 	BookingRequestApprovalTTL = 48 * time.Hour
 )
 
+// approvalClock is when an approval was given: approved_at, or updated_at on
+// rows approved before approved_at existed.
+const approvalClock = "COALESCE(approved_at, updated_at)"
+
 // BookingRequestService owns the off-chain booking-request lifecycle work that
 // no user action drives.
 type BookingRequestService struct {
@@ -44,16 +48,17 @@ func (s *BookingRequestService) ExpireStaleBookingRequests(ctx context.Context) 
 
 	sweeps := []struct {
 		from   string
+		since  string // when the status's clock started
 		cutoff time.Time
 	}{
-		{models.BookingRequestRequested, now.Add(-BookingRequestTTL)},
-		{models.BookingRequestApproved, now.Add(-BookingRequestApprovalTTL)},
+		{models.BookingRequestRequested, "updated_at", now.Add(-BookingRequestTTL)},
+		{models.BookingRequestApproved, approvalClock, now.Add(-BookingRequestApprovalTTL)},
 	}
 
 	for _, sweep := range sweeps {
 		res := s.db.WithContext(ctx).
 			Model(&models.BookingRequest{}).
-			Where("status = ? AND updated_at < ?", sweep.from, sweep.cutoff).
+			Where("status = ? AND "+sweep.since+" < ?", sweep.from, sweep.cutoff).
 			Updates(map[string]interface{}{
 				"status":     models.BookingRequestExpired,
 				"updated_at": now,

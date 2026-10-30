@@ -37,6 +37,7 @@ func setupBookingRequestDB(t *testing.T) *gorm.DB {
 		reject_reason TEXT,
 		quoted_amount_usd REAL,
 		order_id TEXT,
+		approved_at DATETIME,
 		created_at DATETIME,
 		updated_at DATETIME
 	)`).Error; err != nil {
@@ -140,5 +141,26 @@ func TestExpireStaleBookingRequestsIsIdempotent(t *testing.T) {
 	}
 	if second != 0 {
 		t.Errorf("second sweep: want 0, got %d", second)
+	}
+}
+
+// An approval expires from when it was given, not from the request's last
+// change: paying and cancelling (which reopens a request) cannot extend it.
+func TestExpireStaleBookingRequests_ApprovalRunsFromApprovedAt(t *testing.T) {
+	db := setupBookingRequestDB(t)
+	stale := writeRequest(t, db, models.BookingRequestApproved, time.Minute) // touched just now
+	db.Model(&models.BookingRequest{}).Where("id = ?", stale).
+		Update("approved_at", time.Now().Add(-BookingRequestApprovalTTL-time.Hour))
+	fresh := writeRequest(t, db, models.BookingRequestApproved, BookingRequestApprovalTTL+time.Hour) // old row, recent approval
+	db.Model(&models.BookingRequest{}).Where("id = ?", fresh).Update("approved_at", time.Now().Add(-time.Hour))
+
+	if _, err := NewBookingRequestService(db).ExpireStaleBookingRequests(context.Background()); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if got := statusOf(t, db, stale); got != models.BookingRequestExpired {
+		t.Errorf("approval given long ago: %q, want expired", got)
+	}
+	if got := statusOf(t, db, fresh); got != models.BookingRequestApproved {
+		t.Errorf("recent approval: %q, want approved", got)
 	}
 }

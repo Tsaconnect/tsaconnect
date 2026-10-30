@@ -28,6 +28,15 @@ func quantityCategory(t *testing.T, db *gorm.DB, units ...string) *models.Catego
 	return cat
 }
 
+// unlimitedPlaces lifts a listing's capacity (the column defaults to one), for
+// tests about pricing rather than availability.
+func unlimitedPlaces(t *testing.T, db *gorm.DB, productID uuid.UUID) {
+	t.Helper()
+	if err := db.Model(&models.ServiceProfile{}).Where("product_id = ?", productID).Update("max_capacity_per_slot", 0).Error; err != nil {
+		t.Fatalf("failed to lift capacity: %v", err)
+	}
+}
+
 func writePricedProfile(t *testing.T, db *gorm.DB, productID uuid.UUID, bookingType, priceUnit string) {
 	t.Helper()
 	profile := models.ServiceProfile{
@@ -73,6 +82,7 @@ func TestCreateServiceOrder_QuantityPricing(t *testing.T) {
 			}
 			svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5) // same-city fare 5
 			writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, tc.unit)
+			unlimitedPlaces(t, db, svc.ID)
 
 			w := postServiceOrder(t, ch, buyer, map[string]interface{}{"productId": svc.ID.String(), "quantity": tc.requested})
 			if w.Code != http.StatusCreated {
@@ -113,6 +123,7 @@ func TestBookingRequest_QuantityChargedAtPay(t *testing.T) {
 	cat := quantityCategory(t, db)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
 	writePricedProfile(t, db, svc.ID, models.BookingTypeRequest, models.PriceUnitPerSeat)
+	unlimitedPlaces(t, db, svc.ID)
 
 	idParams := gin.Params{{Key: "id", Value: svc.ID.String()}}
 	if w := postJSON(t, buyer, idParams, map[string]interface{}{"token": "USDC", "quantity": 3}, ch.CreateBookingRequest); w.Code != http.StatusCreated {
@@ -175,6 +186,7 @@ func TestGetBookingFormSchema_QuantityMode(t *testing.T) {
 	cat := quantityCategory(t, db)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
 	writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, models.PriceUnitPerSeat)
+	unlimitedPlaces(t, db, svc.ID)
 
 	w := getFormSchema(t, &Handlers{}, svc.ID)
 	if w.Code != http.StatusOK {
@@ -204,6 +216,7 @@ func TestCreateOrderFromCart_QuantityBooking(t *testing.T) {
 	cat := quantityCategory(t, db)
 	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
 	writePricedProfile(t, db, svc.ID, models.BookingTypeInstant, models.PriceUnitPerSeat)
+	unlimitedPlaces(t, db, svc.ID)
 	createTestCart(t, db, buyer.ID, []models.CartItem{{ID: uuid.New(), Product: svc.ID, Seller: seller.ID, Quantity: 2, AddedAt: time.Now()}})
 
 	w := postServiceCheckout(t, ch, buyer, nil)

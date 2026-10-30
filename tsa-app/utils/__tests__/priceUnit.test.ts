@@ -1,6 +1,7 @@
 import {
   bookingActionLabel,
   listingPriceUnits,
+  placesCapacityCopy,
   priceUnitSuffix,
   quantityLabel,
   servicePriceLabel,
@@ -70,5 +71,12 @@ describe('priceUnit', () => {
     expect(bookingActionLabel(booking({ bookingMode: 'slot' }))).toBe('Book a slot');
     expect(bookingActionLabel(booking({ bookingType: 'request', bookingMode: 'date_range' }))).toBe('Request booking');
     expect(bookingActionLabel(undefined)).toBe('Book a slot');
+  });
+
+  it('names a slotless listing\'s capacity by date or in total', () => {
+    expect(placesCapacityCopy('per_ticket', false).label).toBe('Tickets available');
+    expect(placesCapacityCopy('per_seat', true).label).toBe('Seats per date');
+    expect(placesCapacityCopy('', false).label).toBe('Places available');
+    expect(placesCapacityCopy(null, true).helper).toContain('same date');
   });
 });
