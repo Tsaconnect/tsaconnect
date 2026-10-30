@@ -617,7 +617,12 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
              whenever slotDurationMinutes > 0). The live quote follows. */
           <>
             {slottedForm ? (
-              <SlotPicker productId={productIdOf()} hideSubmit onSelectionChange={setSlotSelection} />
+              <SlotPicker
+                productId={productIdOf()}
+                hideSubmit
+                onSelectionChange={setSlotSelection}
+                partySize={quantitySpec ? quantity : undefined}
+              />
             ) : null}
             <BookingForm
               ref={bookingFormRef}
@@ -643,6 +648,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
               productId={productIdOf()}
               hideSubmit
               onSelectionChange={setSlotSelection}
+              partySize={quantitySpec ? quantity : undefined}
             />
             {(profile?.cancellationPolicy ||
               profile?.reschedulePolicy ||
