@@ -19,6 +19,11 @@ describe('routeForNotification', () => {
     expect(routeForNotification({ type: 'p2p.message.new', tradeId: 'xyz' })).toBe('/p2p/trade/xyz');
   });
 
+  it('opens the conversation for a chat message', () => {
+    expect(routeForNotification({ type: 'chat.message.new', threadId: 't1' })).toBe('/chat/t1');
+    expect(routeForNotification({ type: 'chat.message.new' })).toBe('/messages');
+  });
+
   it('falls back to the trades list when tradeId is missing', () => {
     expect(routeForNotification({ type: 'p2p.trade.paid' })).toBe('/p2p/my-trades');
   });

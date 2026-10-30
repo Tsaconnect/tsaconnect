@@ -55,6 +55,10 @@ export default function DetailLayout() {
       <Stack.Screen name="multiswap" options={{ title: 'Multi-Asset Swap' }} />
       <Stack.Screen name="transfer" options={{ title: 'Transfer' }} />
 
+      {/* A customer–provider conversation; the screen sets the other person's
+          name as its title. */}
+      <Stack.Screen name="chat/[threadId]" options={{ title: 'Chat' }} />
+
       {/* TSA Pay by code — the wallet tab's TSA Pay tile. */}
       <Stack.Screen name="pay-code" options={{ title: 'TSA Pay' }} />
 
