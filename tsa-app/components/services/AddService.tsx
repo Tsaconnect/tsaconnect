@@ -169,15 +169,15 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     }
   }, [pricingMethod, bookingType]);
 
-  // A unit the (new) category does not offer would be refused on save; fall
-  // back to the category's first one, or none when it does not restrict units.
+  // A unit the (new) category does not offer would be refused on save, so it is
+  // cleared. Never pick one for the merchant: no unit prices per unit in
+  // quantity and stay categories, and preselecting "fixed" would silently sell
+  // many seats or nights for the price of one.
   useEffect(() => {
     if (priceUnit && !priceUnitOptions.includes(priceUnit as PriceUnit)) {
-      setPriceUnit(categoryPriceUnits ? priceUnitOptions[0] ?? "" : "");
-    } else if (!priceUnit && categoryPriceUnits && priceUnitOptions.length) {
-      setPriceUnit(priceUnitOptions[0]);
+      setPriceUnit("");
     }
-  }, [priceUnit, priceUnitOptions, categoryPriceUnits]);
+  }, [priceUnit, priceUnitOptions]);
 
   useEffect(() => {
     const fetchCategories = async () => {
@@ -896,8 +896,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                               key={u}
                               label={PRICE_UNIT_LABELS[u]}
                               selected={priceUnit === u}
-                              // Tapping the chosen unit clears it unless the category requires one.
-                              onPress={() => setPriceUnit(priceUnit === u && !categoryPriceUnits ? "" : u)}
+                              // Tapping the chosen unit again clears it.
+                              onPress={() => setPriceUnit(priceUnit === u ? "" : u)}
                             />
                           ))}
                         </View>
