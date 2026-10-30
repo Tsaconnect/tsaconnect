@@ -37,13 +37,14 @@ const (
 	PriceUnitPerMonth   = "per_month"
 	PriceUnitPerSession = "per_session"
 	PriceUnitPerSeat    = "per_seat"
+	PriceUnitPerTicket  = "per_ticket"
 	PriceUnitOnRequest  = "on_request"
 )
 
 // PriceUnits lists every price unit in display order.
 var PriceUnits = []string{
 	PriceUnitFixed, PriceUnitPerHour, PriceUnitPerDay, PriceUnitPerNight, PriceUnitPerMonth,
-	PriceUnitPerSession, PriceUnitPerSeat, PriceUnitOnRequest,
+	PriceUnitPerSession, PriceUnitPerSeat, PriceUnitPerTicket, PriceUnitOnRequest,
 }
 
 // ValidPriceUnit reports whether s is a known price unit.

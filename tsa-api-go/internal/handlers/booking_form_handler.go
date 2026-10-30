@@ -3,6 +3,7 @@ package handlers
 import (
 	"log"
 	"net/http"
+	"sort"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -168,12 +169,51 @@ func (h *Handlers) GetBookingFormSchema(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Form schema fetched successfully", schema)
 }
 
-// GetBookingCatalog handles GET /api/services/booking-catalog — the static
-// catalog of known booking fields plus the per-example presets, used by the
-// merchant field-config builder to render toggles.
+// bookingCatalogField is one field the merchant form builder can switch on.
+type bookingCatalogField struct {
+	Key     string   `json:"key"`
+	Type    string   `json:"type"`
+	Label   string   `json:"label"`
+	Group   string   `json:"group"`
+	Options []string `json:"options,omitempty"`
+}
+
+// GetBookingCatalog handles GET /api/services/booking-catalog — the fields the
+// merchant form builder renders as toggles: every active field_defs entry a
+// booking form may use (built-in ones in their usual order, then the admin's
+// own by group and label), with the catalogue's options so a switched-on
+// select can be saved. Plus the per-example presets.
 func (h *Handlers) GetBookingCatalog(c *gin.Context) {
+	live := loadFieldCatalog(config.DB)
+	var out []bookingCatalogField
+	seen := map[string]bool{}
+	add := func(def models.FieldDef) {
+		if seen[def.Key] || !def.Scope.Allows(models.FieldUsageBooking) {
+			return
+		}
+		seen[def.Key] = true
+		out = append(out, bookingCatalogField{Key: def.Key, Type: def.Type, Label: def.Label, Group: def.Group, Options: def.Options})
+	}
+	for _, f := range models.BookingFieldCatalog {
+		if def, ok := live[f.Key]; ok {
+			add(def)
+		}
+	}
+	rest := make([]models.FieldDef, 0, len(live))
+	for _, def := range live {
+		rest = append(rest, def)
+	}
+	sort.Slice(rest, func(i, j int) bool {
+		if rest[i].Group != rest[j].Group {
+			return rest[i].Group < rest[j].Group
+		}
+		return rest[i].Label < rest[j].Label
+	})
+	for _, def := range rest {
+		add(def)
+	}
 	utils.SuccessResponse(c, http.StatusOK, "Catalog fetched successfully", gin.H{
-		"catalog": models.BookingFieldCatalog,
+		"catalog": out,
 		"presets": models.BookingFieldPresets,
 	})
 }
