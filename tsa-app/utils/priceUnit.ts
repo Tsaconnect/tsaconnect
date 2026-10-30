@@ -43,16 +43,29 @@ export interface ServicePriceSummary {
   chargesPerUnit?: boolean;
 }
 
+/** What one unit of a per-unit price is ("seat"), or undefined for fixed/unset. */
+function unitNoun(unit?: string | null): string | undefined {
+  return unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
+}
+
+/** "Seats" from "seat". */
+const pluralTitle = (noun: string) => `${noun[0].toUpperCase()}${noun.slice(1)}s`;
+
+/** n of something, in the right number: "1 night", "3 nights", "2 people". */
+export function countOf(n: number, singular: string, plural = `${singular}s`): string {
+  return `${n} ${n === 1 ? singular : plural}`;
+}
+
 /** "/ seat" for a per-unit price, "" for a fixed or unset one. */
 export function priceUnitSuffix(unit?: string | null): string {
-  const noun = unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
+  const noun = unitNoun(unit);
   return noun ? ` / ${noun}` : '';
 }
 
 /** What the buyer counts in a quantity booking: "Tickets", "Seats", … */
 export function quantityLabel(unit?: string | null): string {
-  const noun = unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
-  return noun ? `${noun[0].toUpperCase()}${noun.slice(1)}s` : 'Number of people';
+  const noun = unitNoun(unit);
+  return noun ? pluralTitle(noun) : 'Number of people';
 }
 
 /**
@@ -60,8 +73,8 @@ export function quantityLabel(unit?: string | null): string {
  * are counted per date when the booking form asks for one, else in total.
  */
 export function placesCapacityCopy(unit: string | null | undefined, dated: boolean): { label: string; helper: string } {
-  const noun = unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
-  const places = noun ? `${noun[0].toUpperCase()}${noun.slice(1)}s` : 'Places';
+  const noun = unitNoun(unit);
+  const places = noun ? pluralTitle(noun) : 'Places';
   return dated
     ? { label: `${places} per date`, helper: 'How many can be booked for the same date. 0 means no limit.' }
     : { label: `${places} available`, helper: 'How many can be booked in total. 0 means no limit.' };
@@ -69,9 +82,8 @@ export function placesCapacityCopy(unit: string | null | undefined, dated: boole
 
 /** A count of a quantity booking's units: "1 seat", "3 tickets", "2 people". */
 export function quantityCount(unit: string | null | undefined, n: number): string {
-  const noun = unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
-  if (!noun) return `${n} ${n === 1 ? 'person' : 'people'}`;
-  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+  const noun = unitNoun(unit);
+  return noun ? countOf(n, noun) : countOf(n, 'person', 'people');
 }
 
 /** The units a merchant may pick, from the category's allowed list. */

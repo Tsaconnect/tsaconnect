@@ -62,7 +62,7 @@ import { createBookingRequest } from '../../services/bookingRequestApi';
 import MenuPicker from './MenuPicker';
 import SlotPicker from './SlotPicker';
 import BookingForm, { type BookingFormHandle } from './BookingForm';
-import { priceUnitSuffix, quantityCount, quantityLabel, stayUnitNoun } from '@/utils/priceUnit';
+import { countOf, priceUnitSuffix, quantityCount, quantityLabel, stayUnitNoun } from '@/utils/priceUnit';
 import { bookingQuoteRefusal } from '@/utils/bookingQuoteRefusal';
 
 type FeeMode = 'standard' | 'booking';
@@ -817,7 +817,7 @@ function BookingQuote({ quote }: { quote: ServiceQuote }) {
   const units = quote.units;
   const unitCount =
     quote.bookingMode === 'date_range'
-      ? `${units} ${stayUnitNoun(quote.priceUnit)}${units === 1 ? '' : 's'}`
+      ? countOf(units, stayUnitNoun(quote.priceUnit))
       : quantityCount(quote.priceUnit, units);
   const perUnit = quote.chargesPerUnit && quote.unitPriceUsd ? quote.unitPriceUsd : 0;
   const extra = quote.priceUsd - perUnit * units; // an access fee on top of the units
