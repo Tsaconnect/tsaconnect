@@ -67,6 +67,13 @@ export function placesCapacityCopy(unit: string | null | undefined, dated: boole
     : { label: `${places} available`, helper: 'How many can be booked in total. 0 means no limit.' };
 }
 
+/** A count of a quantity booking's units: "1 seat", "3 tickets", "2 people". */
+export function quantityCount(unit: string | null | undefined, n: number): string {
+  const noun = unit ? UNIT_NOUN[unit as keyof typeof UNIT_NOUN] : undefined;
+  if (!noun) return `${n} ${n === 1 ? 'person' : 'people'}`;
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
 /** The units a merchant may pick, from the category's allowed list. */
 export function listingPriceUnits(categoryUnits?: string[] | null): PriceUnit[] {
   const all = Object.keys(PRICE_UNIT_LABELS) as PriceUnit[];

@@ -62,7 +62,8 @@ import { createBookingRequest } from '../../services/bookingRequestApi';
 import MenuPicker from './MenuPicker';
 import SlotPicker from './SlotPicker';
 import BookingForm, { type BookingFormHandle } from './BookingForm';
-import { priceUnitSuffix, quantityLabel, stayUnitNoun } from '@/utils/priceUnit';
+import { priceUnitSuffix, quantityCount, quantityLabel, stayUnitNoun } from '@/utils/priceUnit';
+import { bookingQuoteRefusal } from '@/utils/bookingQuoteRefusal';
 
 type FeeMode = 'standard' | 'booking';
 // The three marketplace service types drive which buyer flow the sheet shows.
@@ -116,6 +117,8 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   // (the server's quote; null while not priceable yet).
   const [formAnswers, setFormAnswers] = useState<Record<string, any>>({});
   const [quote, setQuote] = useState<ServiceQuote | null>(null);
+  // Why a filled-in booking cannot be priced (sold out, too few places left).
+  const [quoteRefusal, setQuoteRefusal] = useState<string | null>(null);
   // Set when the category books stays: the form asks for the dates, and the
   // price is per night/day/month of the stay unless it is a fixed total.
   const [stayPricing, setStayPricing] = useState<{ perUnit: boolean; unit?: string } | null>(null);
@@ -467,6 +470,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
   useEffect(() => {
     if (!visible || loading || !usesBookingForm) {
       setQuote(null);
+      setQuoteRefusal(null);
       return;
     }
     let live = true;
@@ -481,7 +485,11 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
         bookingSlot: slottedForm ? slotSelection ?? undefined : undefined,
         answers: formAnswers,
       });
-      if (live) setQuote(res.success && res.data ? res.data : null);
+      if (!live) return;
+      setQuote(res.success && res.data ? res.data : null);
+      setQuoteRefusal(
+        bookingQuoteRefusal(res, { fields: customFields, answers: formAnswers, slotMissing: slottedForm && !slotSelection }),
+      );
     }, 350);
     return () => {
       live = false;
@@ -649,7 +657,7 @@ export const ServicePricingSheet: React.FC<ServicePricingSheetProps> = ({
               onSubmit={handleBookingSubmit}
               onChange={setFormAnswers}
             />
-            {quote ? <BookingQuote quote={quote} /> : null}
+            {quote ? <BookingQuote quote={quote} /> : <InlineMessage tone="warning" message={quoteRefusal} />}
           </>
         ) : serviceType === 'order' ? (
           /* ORDER — menu picker; the pinned footer checks out menuSelections. */
@@ -809,16 +817,16 @@ function BookingQuote({ quote }: { quote: ServiceQuote }) {
     );
   }
   const units = quote.units;
-  const unitNoun =
+  const unitCount =
     quote.bookingMode === 'date_range'
-      ? `${stayUnitNoun(quote.priceUnit)}${units === 1 ? '' : 's'}`
-      : quantityLabel(quote.priceUnit).toLowerCase();
+      ? `${units} ${stayUnitNoun(quote.priceUnit)}${units === 1 ? '' : 's'}`
+      : quantityCount(quote.priceUnit, units);
   const perUnit = quote.chargesPerUnit && quote.unitPriceUsd ? quote.unitPriceUsd : 0;
   const extra = quote.priceUsd - perUnit * units; // an access fee on top of the units
   return (
     <SummaryCard dividerBeforeLast>
       {perUnit ? (
-        <SummaryRow label={`${fmtUsd(perUnit)} × ${units} ${unitNoun}`} value={fmtUsd(perUnit * units)} />
+        <SummaryRow label={`${fmtUsd(perUnit)} × ${unitCount}`} value={fmtUsd(perUnit * units)} />
       ) : (
         <SummaryRow label="Price" value={fmtUsd(quote.priceUsd)} />
       )}

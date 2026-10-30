@@ -2,6 +2,7 @@ import {
   bookingActionLabel,
   listingPriceUnits,
   placesCapacityCopy,
+  quantityCount,
   priceUnitSuffix,
   quantityLabel,
   servicePriceLabel,
@@ -78,5 +79,12 @@ describe('priceUnit', () => {
     expect(placesCapacityCopy('per_seat', true).label).toBe('Seats per date');
     expect(placesCapacityCopy('', false).label).toBe('Places available');
     expect(placesCapacityCopy(null, true).helper).toContain('same date');
+  });
+
+  it('counts a quantity booking in the right number', () => {
+    expect(quantityCount('per_seat', 1)).toBe('1 seat');
+    expect(quantityCount('per_ticket', 3)).toBe('3 tickets');
+    expect(quantityCount('', 1)).toBe('1 person');
+    expect(quantityCount(undefined, 2)).toBe('2 people');
   });
 });
