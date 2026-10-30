@@ -147,3 +147,59 @@ func TestPopulateServicePrices(t *testing.T) {
 		t.Errorf("contact: %+v", s)
 	}
 }
+
+// quoteCode is the code a refused quote carries ("" when none).
+func quoteCode(w *httptest.ResponseRecorder) string {
+	var resp struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	return resp.Code
+}
+
+// Once a booking is filled in, every refusal is news the sheet shows (coded);
+// while it is not, the refusal is the form being filled in (uncoded).
+func TestQuoteServiceOrder_RefusalOfACompleteBookingIsCoded(t *testing.T) {
+	pinBookingNow(t, stayNow)
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer, _, stay := stayListing(t, db, models.BookingTypeInstant, models.PriceUnitPerNight)
+
+	cases := []struct {
+		name    string
+		answers map[string]interface{}
+		code    string
+		says    string
+	}{
+		{"check-out not given yet", map[string]interface{}{"checkin": "2026-11-10"}, "", "Check-out"},
+		{"instant stay ends too late", map[string]interface{}{"checkin": "2026-11-10", "checkout": "2027-02-20"}, bookingRefusedCode, "must end within"},
+		{"check-out before check-in", map[string]interface{}{"checkin": "2026-11-10", "checkout": "2026-11-08"}, bookingRefusedCode, "must be after"},
+	}
+	for _, tc := range cases {
+		w, _ := postQuote(t, ch, buyer, map[string]interface{}{"productId": stay.ID.String(), "answers": tc.answers})
+		if w.Code != http.StatusBadRequest || quoteCode(w) != tc.code || !strings.Contains(w.Body.String(), tc.says) {
+			t.Errorf("%s: expected 400 code %q saying %q, got %d: %s", tc.name, tc.code, tc.says, w.Code, w.Body.String())
+		}
+	}
+
+	// A slot already full is refused for the booking (coded); no slot yet is not.
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	slotted := setupBookingService(t, db, seller.ID, 1)
+	slot := nextWeekdaySlot(10)
+	first := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	createTestCart(t, db, first.ID, []models.CartItem{{ID: uuid.New(), Product: slotted.ID, Seller: seller.ID, Quantity: 1, AddedAt: time.Now()}})
+	if w := postCheckout(t, ch, first, map[string]interface{}{
+		"bookingSlots": map[string]interface{}{slotted.ID.String(): map[string]interface{}{"slotStart": slot.Format(time.RFC3339), "partySize": 1}},
+	}); w.Code != http.StatusCreated {
+		t.Fatalf("first booking: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	w, _ := postQuote(t, ch, buyer, map[string]interface{}{"productId": slotted.ID.String(),
+		"bookingSlot": map[string]interface{}{"slotStart": slot.Format(time.RFC3339), "partySize": 1}})
+	if w.Code != http.StatusBadRequest || quoteCode(w) != bookingRefusedCode || !strings.Contains(w.Body.String(), "is full") {
+		t.Errorf("full slot: expected 400 %s, got %d: %s", bookingRefusedCode, w.Code, w.Body.String())
+	}
+	w, _ = postQuote(t, ch, buyer, map[string]interface{}{"productId": slotted.ID.String()})
+	if w.Code != http.StatusBadRequest || quoteCode(w) != "" {
+		t.Errorf("no slot yet: expected an uncoded 400, got %d: %s", w.Code, w.Body.String())
+	}
+}

@@ -2,17 +2,20 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
 
-// bookingUnavailableCode marks a quote refused because the booking's nights or
-// places are already taken, as opposed to a form not yet filled in.
-const bookingUnavailableCode = "booking_unavailable"
+// bookingRefusedCode marks a quote refused for a reason about the booking
+// itself — taken nights or places, a full slot, dates the listing does not
+// take — as opposed to a form still being filled in. The sheet shows it.
+const bookingRefusedCode = "booking_refused"
 
 // serviceQuote is the price of a service booking as checkout would charge it
 // in USD, before the escrow's flat fee and any payout costs.
@@ -32,10 +35,9 @@ type serviceQuote struct {
 // CreateServiceOrder would charge for this booking, worked out by the same
 // pricing (resolveBooking + resolveServicePricing) inside a transaction that
 // is rolled back, so nothing is created or held. The booking sheet calls it as
-// the buyer fills the form; a 400 means the booking is not priceable yet
-// (missing dates, no slot) and carries the reason. One whose nights or places
-// are taken carries code booking_unavailable: that one is news to the buyer
-// (the sheet shows it), the rest is a form still being filled in.
+// the buyer fills the form; a 400 carries the reason it is not priceable. While
+// the form lacks something (quoteIncomplete) that is expected and uncoded; once
+// it is complete, any refusal is about the booking and carries bookingRefusedCode.
 func (ch *CheckoutHandler) QuoteServiceOrder(c *gin.Context) {
 	user := getUserFromContext(c)
 	if user == nil {
@@ -72,17 +74,25 @@ func (ch *CheckoutHandler) QuoteServiceOrder(c *gin.Context) {
 	}
 
 	serviceType, profile := resolveServiceTypeAndProfile(tx, &product)
+	refuse := func(msg string) {
+		switch {
+		case msg == capacityUnreadable:
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, msg)
+		case serviceType == models.ServiceTypeBooking && quoteIncomplete(tx, &product, &profile, answersOrEmpty(req.Answers), req.BookingSlot):
+			utils.ErrorResponse(c, http.StatusBadRequest, msg)
+		default:
+			utils.ErrorResponseWithCode(c, http.StatusBadRequest, msg, bookingRefusedCode)
+		}
+	}
 	bk, msg := resolveBooking(tx, &product, &profile, serviceType, req.Quantity, answersOrEmpty(req.Answers))
 	if msg != "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, msg)
+		refuse(msg)
 		return
 	}
+	// Checked here as well as in the pricing below: a price-on-request listing
+	// returns before pricing, and its request is refused when full too.
 	if msg := unslottedUnavailable(tx, &product, &profile, bk); msg != "" {
-		if msg == capacityUnreadable {
-			utils.ErrorResponse(c, http.StatusServiceUnavailable, msg)
-		} else {
-			utils.ErrorResponseWithCode(c, http.StatusBadRequest, msg, bookingUnavailableCode)
-		}
+		refuse(msg)
 		return
 	}
 	q := serviceQuote{BookingMode: bk.mode, PriceUnit: profile.PriceUnit, Units: max(bk.units, 1)}
@@ -102,7 +112,7 @@ func (ch *CheckoutHandler) QuoteServiceOrder(c *gin.Context) {
 		tx, user.ID, &product, serviceType, &profile, zone, req.ServiceTier, req.MenuSelections, req.BookingSlot, bk,
 	)
 	if perr != "" {
-		utils.ErrorResponse(c, http.StatusBadRequest, perr)
+		refuse(perr)
 		return
 	}
 	q.ChargesPerUnit = bk.units > 0 && models.ChargesPerUnit(bk.mode, profile.PriceUnit)
@@ -111,4 +121,28 @@ func (ch *CheckoutHandler) QuoteServiceOrder(c *gin.Context) {
 	}
 	q.PriceUSD, q.CalloutUSD, q.TotalUSD = price, callout, price+callout
 	utils.SuccessResponse(c, http.StatusOK, "Quote", q)
+}
+
+// quoteIncomplete reports whether a booking still lacks something the buyer has
+// yet to give: a required answer, the date its places are counted by (needed
+// even when the form marks it optional), or a slot. A refusal then is the form
+// being filled in, not news about the booking.
+func quoteIncomplete(db *gorm.DB, product *models.Product, profile *models.ServiceProfile, answers map[string]interface{}, slot *bookingSlotRequest) bool {
+	form, _ := serviceBookingForm(db, product, profile)
+	if models.ValidateAnswers(form, answers) != nil {
+		return true
+	}
+	mode := serviceBookingMode(db, product)
+	switch {
+	case mode == models.BookingModeDateRange:
+		return false // its dates are required fields of the form
+	case profile.SlotDurationMinutes > 0:
+		return slot == nil || slot.SlotStart.IsZero()
+	case mode == models.BookingModeQuantity && profile.MaxCapacityPerSlot > 0:
+		if key := seatDateKey(form); key != "" {
+			s, _ := answers[key].(string)
+			return strings.TrimSpace(s) == ""
+		}
+	}
+	return false
 }

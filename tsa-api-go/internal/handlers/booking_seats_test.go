@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -164,21 +163,14 @@ func TestQuoteServiceOrder_SoldOutIsCoded(t *testing.T) {
 	if w := bookSeats(t, ch, b[0], svc, 2, "2026-11-10"); w.Code != http.StatusCreated {
 		t.Fatalf("first booking: expected 201, got %d: %s", w.Code, w.Body.String())
 	}
-	codeOf := func(w *httptest.ResponseRecorder) string {
-		var resp struct {
-			Code string `json:"code"`
-		}
-		json.Unmarshal(w.Body.Bytes(), &resp)
-		return resp.Code
-	}
 
 	w, _ := postQuote(t, ch, b[1], map[string]interface{}{"productId": svc.ID.String(), "quantity": 1,
 		"answers": map[string]interface{}{"travel_date": "2026-11-10"}})
-	if w.Code != http.StatusBadRequest || codeOf(w) != bookingUnavailableCode || !strings.Contains(w.Body.String(), "sold out on 10 Nov 2026") {
-		t.Fatalf("sold out: expected 400 %s, got %d: %s", bookingUnavailableCode, w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest || quoteCode(w) != bookingRefusedCode || !strings.Contains(w.Body.String(), "sold out on 10 Nov 2026") {
+		t.Fatalf("sold out: expected 400 %s, got %d: %s", bookingRefusedCode, w.Code, w.Body.String())
 	}
 	w, _ = postQuote(t, ch, b[1], map[string]interface{}{"productId": svc.ID.String(), "quantity": 1})
-	if w.Code != http.StatusBadRequest || codeOf(w) != "" {
+	if w.Code != http.StatusBadRequest || quoteCode(w) != "" {
 		t.Fatalf("no date yet: expected an uncoded 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
