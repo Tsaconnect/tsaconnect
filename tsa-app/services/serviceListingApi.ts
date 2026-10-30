@@ -206,6 +206,7 @@ export function getFieldCatalog(): Promise<Record<string, SchemaField>> {
     fieldCatalogCache = fetch(`${API_BASE_URL}/products/category/field-defs`, { method: 'GET' })
       .then((r) => handleResponse<SchemaField[] | { fields?: SchemaField[] }>(r))
       .then((res) => {
+        if (!res.success) throw new Error(res.message || 'Failed to load field catalogue');
         const list = Array.isArray(res.data) ? res.data : res.data?.fields ?? [];
         return Object.fromEntries(list.map((f) => [f.key, f]));
       })
