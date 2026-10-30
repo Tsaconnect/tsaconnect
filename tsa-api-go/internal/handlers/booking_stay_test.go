@@ -293,3 +293,23 @@ func TestBookingRequest_QuotedStayReservesNights(t *testing.T) {
 		t.Fatalf("second pay: expected 400 fully booked, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// A request for nights that are already full is refused when it is made, not
+// after the merchant has approved it.
+func TestBookingRequest_FullNightsRefusedAtRequest(t *testing.T) {
+	pinBookingNow(t, stayNow)
+	db := setupCheckoutTestDB(t)
+	ch := setupCheckoutHandler(t)
+	buyer, _, svc := stayListing(t, db, models.BookingTypeInstant, models.PriceUnitPerNight) // capacity 1
+	if w := bookStay(t, ch, buyer, svc, "2026-11-03", "2026-11-05"); w.Code != http.StatusCreated {
+		t.Fatalf("first stay: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	db.Model(&models.ServiceProfile{}).Where("product_id = ?", svc.ID).Update("booking_type", models.BookingTypeRequest)
+
+	other := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	body := map[string]interface{}{"token": "USDC", "answers": map[string]interface{}{"checkin": "2026-11-04", "checkout": "2026-11-06"}}
+	w := postJSON(t, other, gin.Params{{Key: "id", Value: svc.ID.String()}}, body, ch.CreateBookingRequest)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "fully booked on 4 Nov 2026") {
+		t.Fatalf("expected 400 fully booked on 4 Nov, got %d: %s", w.Code, w.Body.String())
+	}
+}

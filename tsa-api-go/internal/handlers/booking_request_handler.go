@@ -102,8 +102,12 @@ func (ch *CheckoutHandler) CreateBookingRequest(c *gin.Context) {
 		return
 	}
 	// Checked now so the merchant is not asked to approve dates that cannot be
-	// booked; re-checked at pay, when the stay is reserved.
+	// booked or nights already full; re-checked at pay, when the stay is
+	// reserved (another booking may take the nights in between).
 	bk, uerr := resolveBooking(config.DB, &product, &profile, serviceType, req.Quantity, answersOrEmpty(req.Answers))
+	if uerr == "" && bk.stay != nil {
+		uerr = stayUnavailable(config.DB, &product, &profile, bk.stay)
+	}
 	if uerr != "" {
 		utils.ErrorResponse(c, http.StatusBadRequest, uerr)
 		return
