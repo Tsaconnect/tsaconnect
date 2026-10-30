@@ -181,9 +181,10 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, msg)
 		return
 	}
-	// Checked on the merged values: whether a unit is required depends on the
-	// pricing method, which this body may not carry.
-	if req.PriceUnit != nil {
+	// Checked on the merged values whenever either side changes: whether a unit
+	// is required depends on the pricing method, which this body may not carry,
+	// and a switch to a fixed price must not keep a unit the category refuses.
+	if req.PriceUnit != nil || req.PricingMethod != nil {
 		if msg := checkPriceUnit(config.DB, product, profile.PriceUnit, profile.PricingMethod); msg != "" {
 			utils.ErrorResponse(c, http.StatusBadRequest, msg)
 			return
@@ -209,17 +210,15 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	utils.SuccessResponse(c, http.StatusOK, "Profile saved successfully", profile)
 }
 
-// checkPriceUnit says why unit cannot price product, or "" when it can. A quote
-// is not a unit: price-on-request is the pricing method, and needs none. A
+// checkPriceUnit says why unit cannot price product, or "" when it can. A
 // category with no price_units configured accepts any unit, or none. One that
-// restricts them requires a fixed-price listing to pick one: no unit would
-// charge per seat or night even where the category allows only a fixed price.
+// restricts them accepts only its own, and requires a fixed-price listing to
+// pick one: no unit would charge per seat or night even where the category
+// allows only a fixed price. A quote is not a unit, so price-on-request needs
+// none, but any unit it keeps must still be one the category offers.
 func checkPriceUnit(db *gorm.DB, product *models.Product, unit, pricingMethod string) string {
 	if unit != "" && (!models.ValidPriceUnit(unit) || unit == models.PriceUnitOnRequest) {
 		return "Invalid price unit"
-	}
-	if pricingMethod == models.PricingMethodOnRequest {
-		return ""
 	}
 	cfg, ok := serviceCategoryConfig(db, product)
 	if !ok || cfg.PriceUnits.Value == nil {
@@ -232,11 +231,11 @@ func checkPriceUnit(db *gorm.DB, product *models.Product, unit, pricingMethod st
 		}
 		offered = offered || u != models.PriceUnitOnRequest
 	}
-	if unit == "" {
-		if offered {
-			return "Choose what the price is for"
-		}
-		return ""
+	switch {
+	case unit != "":
+		return "This category does not offer that price unit"
+	case offered && pricingMethod != models.PricingMethodOnRequest:
+		return "Choose what the price is for"
 	}
-	return "This category does not offer that price unit"
+	return ""
 }

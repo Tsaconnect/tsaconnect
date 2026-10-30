@@ -266,3 +266,31 @@ func TestUpsertServiceProfile_QuoteNeedsNoUnit(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// Switching to a fixed price re-checks the stored unit, and a quote keeps no
+// unit the category refuses.
+func TestUpsertServiceProfile_PriceUnitFollowsPricingMethod(t *testing.T) {
+	db := setupCheckoutTestDB(t)
+	seller := createTestUserWithLocation(t, db, "Lagos", "Lagos", "Nigeria")
+	cat := quantityCategory(t, db, models.PriceUnitPerSeat)
+	svc := createTestService(t, db, seller.ID, &cat.ID, 0, 5)
+	quote := map[string]interface{}{"bookingType": models.BookingTypeRequest, "pricingMethod": models.PricingMethodOnRequest}
+
+	if w := putProfile(t, &Handlers{}, seller, svc.ID, withField(quote, "priceUnit", models.PriceUnitPerNight)); w.Code != http.StatusBadRequest {
+		t.Fatalf("quote with a refused unit: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if w := putProfile(t, &Handlers{}, seller, svc.ID, withField(quote, "priceUnit", "")); w.Code != http.StatusOK {
+		t.Fatalf("quote with no unit: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w := putProfile(t, &Handlers{}, seller, svc.ID, map[string]interface{}{"pricingMethod": models.PricingMethodFixed}); w.Code != http.StatusBadRequest {
+		t.Fatalf("fixed price with no unit: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func withField(m map[string]interface{}, k string, v interface{}) map[string]interface{} {
+	out := map[string]interface{}{k: v}
+	for kk, vv := range m {
+		out[kk] = vv
+	}
+	return out
+}
