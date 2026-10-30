@@ -555,9 +555,13 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
         <LocalAmountInput
           pricing={pricing}
           amountKey="accessFeeUsd"
-          label="Access Fee"
-          required={isContact}
-          helper="Charged to unlock/contact or start a booking."
+          label="Access Fee — optional"
+          placeholder="Leave blank if none"
+          helper={
+            isContact
+              ? "Your own fee, on top of the platform's $0.10 contact fee. Leave blank to charge only the $0.10."
+              : "Charged to start a booking."
+          }
         />
         <LocalAmountInput
           pricing={pricing}

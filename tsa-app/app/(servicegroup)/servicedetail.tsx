@@ -35,6 +35,8 @@ import {
   Spinner,
 } from '@/components/ui';
 import { ListingDetails } from '@/components/forms/ListingDetails';
+import { getServiceProfile } from '../../services/serviceListingApi';
+import { contactServiceCharge, type ContactServiceCharge } from '@/utils/contactServiceCharge';
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
@@ -128,6 +130,14 @@ const TOKEN_SEGMENTS = [
   { key: 'USDT' as const, label: 'USDT' },
 ];
 
+function providerFeeNote(charge: ContactServiceCharge | null): string | undefined {
+  if (!charge) return undefined;
+  if (charge.accessFeeUsd > 0) {
+    return `Plus the provider's own fee of $${charge.accessFeeUsd.toFixed(2)}, paid after you contact them.`;
+  }
+  return charge.payable ? undefined : 'No other provider fee — this unlocks their contact details.';
+}
+
 const ServiceDetail = () => {
   const { colors, spacing, radius } = useTheme();
   const { token, currentUser } = useAuth();
@@ -163,6 +173,9 @@ const ServiceDetail = () => {
   // it's known we must not render the contact-fee block, or an order/booking
   // listing would briefly flash "Reveal Contact — $fee" before hiding it.
   const [serviceTypeResolved, setServiceTypeResolved] = useState(false);
+  // What a contact provider charges on top of the contact fee. Null until known;
+  // a provider who charges nothing has no checkout, so no Pay Now to dead-end on.
+  const [providerCharge, setProviderCharge] = useState<ContactServiceCharge | null>(null);
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -238,6 +251,10 @@ const ServiceDetail = () => {
         }
       }
       if (!cancelled) setServiceType(resolved);
+      if (resolved === 'contact') {
+        const prof = await getServiceProfile(serviceId);
+        if (!cancelled) setProviderCharge(contactServiceCharge(res.data as any, prof.success ? prof.data : null));
+      }
     })()
       .catch(() => {
         // Network failure — keep the default 'contact' type (legacy behavior).
@@ -391,7 +408,12 @@ const ServiceDetail = () => {
           onRevealPress={handleRevealPress}
           onCopyPress={handleCopy}
           onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
-          onPricingPress={() => setShowPricing(true)}
+          onPricingPress={
+            serviceType === 'contact' && providerCharge && !providerCharge.payable
+              ? undefined
+              : () => setShowPricing(true)
+          }
+          providerFeeNote={serviceType === 'contact' ? providerFeeNote(providerCharge) : undefined}
           serviceType={serviceType}
           serviceTypeResolved={serviceTypeResolved}
         />
