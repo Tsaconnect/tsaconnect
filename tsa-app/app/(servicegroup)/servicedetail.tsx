@@ -35,6 +35,8 @@ import {
   Spinner,
 } from '@/components/ui';
 import { ListingDetails } from '@/components/forms/ListingDetails';
+import { getServiceProfile } from '../../services/serviceListingApi';
+import { contactServiceCharge, type ContactServiceCharge } from '@/utils/contactServiceCharge';
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
@@ -128,6 +130,15 @@ const TOKEN_SEGMENTS = [
   { key: 'USDT' as const, label: 'USDT' },
 ];
 
+function providerFeeNote(charge: ContactServiceCharge | null): string | undefined {
+  if (!charge) return undefined;
+  if (charge.accessFeeUsd > 0) {
+    const callout = charge.calloutFeeUsd > 0 ? ` and a $${charge.calloutFeeUsd.toFixed(2)} call-out` : '';
+    return `Plus the provider's own fee of $${charge.accessFeeUsd.toFixed(2)}${callout}, paid after you contact them.`;
+  }
+  return charge.payable ? undefined : 'No other provider fee — this unlocks their contact details.';
+}
+
 const ServiceDetail = () => {
   const { colors, spacing, radius } = useTheme();
   const { token, currentUser } = useAuth();
@@ -163,6 +174,9 @@ const ServiceDetail = () => {
   // it's known we must not render the contact-fee block, or an order/booking
   // listing would briefly flash "Reveal Contact — $fee" before hiding it.
   const [serviceTypeResolved, setServiceTypeResolved] = useState(false);
+  // What a contact provider charges on top of the contact fee. Null until known;
+  // a provider who charges nothing has no checkout, so no Pay Now to dead-end on.
+  const [providerCharge, setProviderCharge] = useState<ContactServiceCharge | null>(null);
 
   const checkContactStatus = useCallback(async () => {
     if (!serviceId) return;
@@ -198,6 +212,11 @@ const ServiceDetail = () => {
   useEffect(() => {
     if (!serviceId) return;
     let cancelled = false;
+    setProviderCharge(null);
+    // Fetched alongside the product; applied only once the type resolves to
+    // contact. A failed fetch leaves the charge unknown (no note, Pay Now kept)
+    // rather than claiming the provider charges nothing.
+    const profileFetch = getServiceProfile(serviceId).catch(() => null);
     (async () => {
       const res = await api.getProductById(serviceId);
       if (cancelled) return;
@@ -238,6 +257,12 @@ const ServiceDetail = () => {
         }
       }
       if (!cancelled) setServiceType(resolved);
+      // Not awaited, so the reveal block never waits on the profile.
+      if (resolved === 'contact') {
+        profileFetch.then((prof) => {
+          if (!cancelled && prof?.success) setProviderCharge(contactServiceCharge(res.data as any, prof.data));
+        });
+      }
     })()
       .catch(() => {
         // Network failure — keep the default 'contact' type (legacy behavior).
@@ -391,7 +416,12 @@ const ServiceDetail = () => {
           onRevealPress={handleRevealPress}
           onCopyPress={handleCopy}
           onCataloguePress={catalogueImages.length > 0 ? () => setShowCatalogue(true) : undefined}
-          onPricingPress={() => setShowPricing(true)}
+          onPricingPress={
+            serviceType === 'contact' && providerCharge && !providerCharge.payable
+              ? undefined
+              : () => setShowPricing(true)
+          }
+          providerFeeNote={serviceType === 'contact' ? providerFeeNote(providerCharge) : undefined}
           serviceType={serviceType}
           serviceTypeResolved={serviceTypeResolved}
         />

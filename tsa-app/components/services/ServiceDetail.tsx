@@ -27,6 +27,8 @@ interface ServiceDetailCardProps {
   contactPaid: boolean;
   contact?: ContactInfo | null;
   feeDisplay?: string;
+  /** One line on what the provider charges beyond the contact fee, if known. */
+  providerFeeNote?: string;
   loading?: boolean;
   onRevealPress?: () => void;
   onCopyPress?: (value: string) => void;
@@ -65,6 +67,7 @@ const ServiceDetailCard = ({
   contactPaid,
   contact,
   feeDisplay = '$0.10',
+  providerFeeNote,
   loading,
   onRevealPress,
   onCopyPress,
@@ -181,6 +184,11 @@ const ServiceDetailCard = ({
               </Text>
               <Badge label={feeDisplay} background={colors.accent} color={colors.onAccent} size="sm" />
             </View>
+            {providerFeeNote ? (
+              <Text variant="caption" color="textMuted" style={{ marginBottom: spacing.sm }}>
+                {providerFeeNote}
+              </Text>
+            ) : null}
             <Button
               title={`Reveal Contact — ${feeDisplay}`}
               onPress={onRevealPress}
