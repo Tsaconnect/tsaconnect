@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -31,6 +32,7 @@ func ValidBookingMode(s string) bool {
 const (
 	PriceUnitFixed      = "fixed"
 	PriceUnitPerHour    = "per_hour"
+	PriceUnitPerDay     = "per_day"
 	PriceUnitPerNight   = "per_night"
 	PriceUnitPerMonth   = "per_month"
 	PriceUnitPerSession = "per_session"
@@ -40,8 +42,49 @@ const (
 
 // PriceUnits lists every price unit in display order.
 var PriceUnits = []string{
-	PriceUnitFixed, PriceUnitPerHour, PriceUnitPerNight, PriceUnitPerMonth,
+	PriceUnitFixed, PriceUnitPerHour, PriceUnitPerDay, PriceUnitPerNight, PriceUnitPerMonth,
 	PriceUnitPerSession, PriceUnitPerSeat, PriceUnitOnRequest,
+}
+
+// ValidPriceUnit reports whether s is a known price unit.
+func ValidPriceUnit(s string) bool { return containsString(PriceUnits, s) }
+
+// ChargesPerUnit reports whether a listing priced in unit is charged once per
+// booked unit in a category of booking mode: per seat/ticket/session in quantity
+// mode, per night/day/month of the stay in date_range mode. Slot mode charges
+// once. A listing that never chose a unit is per-unit in both modes, so one set
+// up before price units existed does not sell three tickets or three nights for
+// the price of one. Fixed and on-request prices are a total.
+func ChargesPerUnit(mode, unit string) bool {
+	switch mode {
+	case BookingModeQuantity:
+		return unit != PriceUnitFixed && unit != PriceUnitOnRequest
+	case BookingModeDateRange:
+		return unit == "" || unit == PriceUnitPerNight || unit == PriceUnitPerDay || unit == PriceUnitPerMonth
+	}
+	return false
+}
+
+// StayUnits is how many units a stay from checkIn to checkOut (both local
+// midnights, checkOut exclusive) is charged for: started calendar months for a
+// monthly price, otherwise nights (a day rental returned the next day is one day).
+func StayUnits(unit string, checkIn, checkOut time.Time) int {
+	if unit == PriceUnitPerMonth {
+		months := 0
+		for checkIn.AddDate(0, months, 0).Before(checkOut) {
+			months++
+		}
+		return months
+	}
+	return StayNights(checkIn, checkOut)
+}
+
+// StayNights counts the calendar days from checkIn to checkOut. Days are counted
+// by date, not by 24h, so a daylight-saving change cannot add or drop one.
+func StayNights(checkIn, checkOut time.Time) int {
+	a := time.Date(checkIn.Year(), checkIn.Month(), checkIn.Day(), 0, 0, 0, 0, time.UTC)
+	b := time.Date(checkOut.Year(), checkOut.Month(), checkOut.Day(), 0, 0, 0, 0, time.UTC)
+	return int(b.Sub(a).Hours() / 24)
 }
 
 // ValidatePriceUnits checks a category's allowed price units: known, no repeats.

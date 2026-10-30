@@ -21,7 +21,7 @@ import {
   KeyboardAvoidingView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../../AuthContext/AuthContext";
 import axios from "axios";
@@ -32,6 +32,7 @@ import { useTheme } from "@/theme";
 import {
   Button,
   Card,
+  Chip,
   Icon,
   Input,
   PickerSheet,
@@ -68,6 +69,7 @@ import { SchemaFields } from "@/components/forms/SchemaFields";
 import { useCategoryListingFields } from "@/hooks/useCategoryListingFields";
 import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields";
 import { categoryPathLabels } from "@/utils/categoryTree";
+import { listingPriceUnits, PRICE_UNIT_LABELS, type PriceUnit } from "@/utils/priceUnit";
 import BookingConfigBuilder from "./BookingConfigBuilder";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
@@ -127,6 +129,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   // Pricing: fixed (set up front) vs on_request (merchant names the price when
   // approving each request). on_request implies bookingType "request".
   const [pricingMethod, setPricingMethod] = useState<PricingMethod>("fixed");
+  // What the price buys (per seat, per night, …), from the category's units.
+  const [priceUnit, setPriceUnit] = useState<string>("");
 
   // Menu (order) + availability (order/booking).
   const [menuItems, setMenuItems] = useState<MenuDraft[]>([emptyMenuDraft()]);
@@ -139,7 +143,14 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
   // The chosen category's serviceType drives the whole form shape.
   const selectedCategory = categories.find((c) => c.id === category);
-  const { fields: listingFields } = useCategoryListingFields(category || null);
+  const {
+    fields: listingFields,
+    priceUnits: categoryPriceUnits,
+    bookingMode,
+  } = useCategoryListingFields(category || null);
+  // A date-range category books stays (nights) instead of time slots.
+  const isStay = bookingMode === "date_range";
+  const priceUnitOptions = useMemo(() => listingPriceUnits(categoryPriceUnits), [categoryPriceUnits]);
   const serviceType: ServiceType = selectedCategory?.serviceType ?? "contact";
   const isContact = serviceType === "contact";
   const isOrder = serviceType === "order";
@@ -157,6 +168,16 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       setBookingType("request");
     }
   }, [pricingMethod, bookingType]);
+
+  // A unit the (new) category does not offer would be refused on save, so it is
+  // cleared. Never pick one for the merchant: no unit prices per unit in
+  // quantity and stay categories, and preselecting "fixed" would silently sell
+  // many seats or nights for the price of one.
+  useEffect(() => {
+    if (priceUnit && !priceUnitOptions.includes(priceUnit as PriceUnit)) {
+      setPriceUnit("");
+    }
+  }, [priceUnit, priceUnitOptions]);
 
   useEffect(() => {
     const fetchCategories = async () => {
@@ -240,6 +261,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           if (prof.fieldConfig?.fields?.length) setBookingFields(prof.fieldConfig.fields);
           if (prof.bookingType) setBookingType(prof.bookingType);
           if (prof.pricingMethod) setPricingMethod(prof.pricingMethod);
+          setPriceUnit(prof.priceUnit ?? "");
         }
 
         // Menu.
@@ -318,7 +340,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       profile.calloutFeeUsd = pricing.usdFor("calloutFeeUsd") ?? 0;
     }
     if (isBooking) {
-      profile.slotDurationMinutes = num(slotDurationMinutes);
+      profile.slotDurationMinutes = isStay ? 0 : num(slotDurationMinutes);
       profile.maxCapacityPerSlot = num(maxCapacityPerSlot);
       profile.cancellationPolicy = policies.cancellationPolicy;
       profile.reschedulePolicy = policies.reschedulePolicy;
@@ -330,6 +352,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       profile.fieldConfig = bookingFields.length ? { fields: bookingFields } : null;
       profile.bookingType = bookingType;
       profile.pricingMethod = pricingMethod;
+      // A quoted price is a total, so it carries no unit.
+      profile.priceUnit = pricingMethod === "fixed" ? priceUnit : "";
     }
     if (serviceAddress) profile.serviceAddress = serviceAddress;
     if (coverageArea) profile.coverageArea = coverageArea;
@@ -388,6 +412,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     }
     if (!pricing.ready) {
       Alert.alert("One moment", "Exchange rates are still loading. Try again in a moment.");
+      return;
+    }
+    // A category that restricts price units needs a fixed-price booking to pick
+    // one (the API refuses none: it would charge per seat or night).
+    if (isBooking && pricingMethod === "fixed" && categoryPriceUnits && priceUnitOptions.length > 0 && !priceUnit) {
+      Alert.alert("Missing details", "Choose what the price is for, under Pricing.");
       return;
     }
     const listingProblems = validateSchemaAnswers(listingFields, listingValues);
@@ -793,32 +823,52 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
                   {renderAccessFees()}
 
-                  {sectionTitle("Availability")}
-                  <AvailabilityEditor windows={availability} onChange={setAvailability} />
-
-                  {sectionTitle("Slot configuration")}
-                  <Card padding="lg" style={{ gap: spacing.lg }}>
-                    <View style={{ flexDirection: 'row', gap: spacing.md }}>
-                      <View style={{ flex: 1 }}>
+                  {isStay ? (
+                    <>
+                      {sectionTitle("Availability")}
+                      <Card padding="lg" style={{ gap: spacing.sm }}>
                         <Input
-                          label="Slot duration (min)"
-                          placeholder="e.g. 60"
-                          keyboardType="number-pad"
-                          value={slotDurationMinutes}
-                          onChangeText={setSlotDurationMinutes}
-                        />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Input
-                          label="Max per slot"
+                          label="Available per night"
                           placeholder="e.g. 1"
                           keyboardType="number-pad"
                           value={maxCapacityPerSlot}
                           onChangeText={setMaxCapacityPerSlot}
                         />
-                      </View>
-                    </View>
-                  </Card>
+                        <Text variant="caption" color="textSecondary">
+                          How many rooms or units guests can book for the same night. 0 means no limit.
+                        </Text>
+                      </Card>
+                    </>
+                  ) : (
+                    <>
+                      {sectionTitle("Availability")}
+                      <AvailabilityEditor windows={availability} onChange={setAvailability} />
+
+                      {sectionTitle("Slot configuration")}
+                      <Card padding="lg" style={{ gap: spacing.lg }}>
+                        <View style={{ flexDirection: 'row', gap: spacing.md }}>
+                          <View style={{ flex: 1 }}>
+                            <Input
+                              label="Slot duration (min)"
+                              placeholder="e.g. 60"
+                              keyboardType="number-pad"
+                              value={slotDurationMinutes}
+                              onChangeText={setSlotDurationMinutes}
+                            />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Input
+                              label="Max per slot"
+                              placeholder="e.g. 1"
+                              keyboardType="number-pad"
+                              value={maxCapacityPerSlot}
+                              onChangeText={setMaxCapacityPerSlot}
+                            />
+                          </View>
+                        </View>
+                      </Card>
+                    </>
+                  )}
 
                   {sectionTitle("Policies")}
                   <PolicyFields
@@ -841,6 +891,24 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                         ? "You set the price up front."
                         : "You name the price when you approve each request."}
                     </Text>
+                    {pricingMethod === "fixed" && priceUnitOptions.length > 0 && (
+                      <View style={{ gap: spacing.xs, marginTop: spacing.sm }}>
+                        <Text variant="bodyMed" weight="600">
+                          The price is
+                        </Text>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.xs }}>
+                          {priceUnitOptions.map((u) => (
+                            <Chip
+                              key={u}
+                              label={PRICE_UNIT_LABELS[u]}
+                              selected={priceUnit === u}
+                              // Tapping the chosen unit again clears it.
+                              onPress={() => setPriceUnit(priceUnit === u ? "" : u)}
+                            />
+                          ))}
+                        </View>
+                      </View>
+                    )}
                   </Card>
 
                   {sectionTitle("Booking workflow")}

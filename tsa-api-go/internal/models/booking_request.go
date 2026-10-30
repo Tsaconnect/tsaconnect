@@ -31,6 +31,10 @@ type BookingRequest struct {
 	BuyerState   string `json:"buyerState,omitempty"`
 	BuyerCountry string `json:"buyerCountry,omitempty"`
 
+	// Quantity is the units (seats, tickets) asked for in a quantity-mode
+	// category; 0 elsewhere.
+	Quantity int `gorm:"not null;default:0" json:"quantity"`
+
 	// Answers is the submitted booking-form payload (keyed by FieldConfig keys).
 	Answers datatypes.JSON `gorm:"type:jsonb" json:"answers,omitempty"`
 

@@ -35,6 +35,8 @@ export { Button } from './Button';
 export type { ButtonProps, ButtonVariant, ButtonSize } from './Button';
 export { IconButton } from './IconButton';
 export type { IconButtonProps } from './IconButton';
+export { CounterControl } from './CounterControl';
+export type { CounterControlProps } from './CounterControl';
 export { ScreenHeader } from './ScreenHeader';
 export type { ScreenHeaderProps } from './ScreenHeader';
 export { Input } from './Input';

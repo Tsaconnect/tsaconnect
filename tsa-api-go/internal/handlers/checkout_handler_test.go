@@ -302,6 +302,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			payment_timing TEXT DEFAULT 'pay_before',
 			deposit_percent INTEGER DEFAULT 0,
 			booking_fee_usd REAL DEFAULT 0,
+			price_unit TEXT NOT NULL DEFAULT '',
 			field_config TEXT,
 			created_at DATETIME,
 			updated_at DATETIME
@@ -349,6 +350,7 @@ func setupCheckoutTestDB(t *testing.T) *gorm.DB {
 			buyer_city TEXT,
 			buyer_state TEXT,
 			buyer_country TEXT,
+			quantity INTEGER NOT NULL DEFAULT 0,
 			answers TEXT,
 			status TEXT DEFAULT 'requested',
 			reject_reason TEXT,

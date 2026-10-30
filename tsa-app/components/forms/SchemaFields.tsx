@@ -7,8 +7,9 @@
 import React, { useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
-import { Chip, IconButton, Input, PickerSheet, SelectRow, Text, Toggle } from '@/components/ui';
+import { Chip, CounterControl, Input, PickerSheet, SelectRow, Text, Toggle } from '@/components/ui';
 import type { SchemaAnswers, SchemaField } from '@/utils/schemaFields';
+import { DateField } from './DateField';
 
 interface SchemaFieldsProps {
   fields: SchemaField[];
@@ -22,8 +23,6 @@ const MAX_CHIP_OPTIONS = 6;
 
 const placeholderFor = (type: SchemaField['type']): string | undefined => {
   switch (type) {
-    case 'date':
-      return 'YYYY-MM-DD';
     case 'time':
       return 'HH:MM';
     case 'datetime':
@@ -119,29 +118,22 @@ export function SchemaFields({ fields, answers, errors = {}, onChange }: SchemaF
 
     if (f.type === 'counter') {
       const val = typeof answers[f.key] === 'number' ? answers[f.key] : 0;
-      return labelled(
-        f,
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-          <IconButton
-            icon="minus"
-            variant="surface"
-            onPress={() => onChange(f.key, Math.max(0, val - 1))}
-            accessibilityLabel={`Decrease ${f.label}`}
-          />
-          <Text variant="title3" weight="700" style={{ minWidth: 32, textAlign: 'center' }}>
-            {val}
-          </Text>
-          <IconButton
-            icon="plus"
-            variant="surface"
-            onPress={() => onChange(f.key, val + 1)}
-            accessibilityLabel={`Increase ${f.label}`}
-          />
-        </View>,
+      return labelled(f, <CounterControl value={val} onChange={(n) => onChange(f.key, n)} label={f.label} />);
+    }
+
+    if (f.type === 'date') {
+      return (
+        <DateField
+          key={f.key}
+          label={f.required ? `${f.label} *` : f.label}
+          value={answers[f.key] ?? ''}
+          error={errors[f.key]}
+          onChange={(v) => onChange(f.key, v)}
+        />
       );
     }
 
-    // text | textarea | number | date | time | datetime | location → Input.
+    // text | textarea | number | time | datetime | location → Input.
     // A number stays as typed text; utils/schemaFields converts it on submit.
     const numeric = f.type === 'number';
     return (

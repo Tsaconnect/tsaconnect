@@ -48,6 +48,8 @@ export interface ServiceCheckoutParams {
   serviceTier?: string;
   menuSelections?: { itemId: string; quantity: number }[];
   bookingSlot?: { slotStart: string; partySize: number };
+  // Seats/tickets in a quantity-mode booking category; ignored elsewhere.
+  quantity?: number;
   // Auto-generated booking-form answers (unified booking engine), keyed by the
   // service's FieldConfig field keys.
   answers?: Record<string, any>;
@@ -96,6 +98,7 @@ export async function runServiceCheckout(
     serviceTier: params.serviceTier,
     menuSelections: params.menuSelections?.length ? params.menuSelections : undefined,
     bookingSlot: params.bookingSlot,
+    quantity: params.quantity,
     answers: params.answers && Object.keys(params.answers).length ? params.answers : undefined,
   });
   if (!createResult.success || !createResult.data?.orders?.length) {

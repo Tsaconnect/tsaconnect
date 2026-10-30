@@ -8,6 +8,7 @@ import (
 	"github.com/ojimcy/tsa-api-go/internal/config"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/utils"
+	"gorm.io/gorm"
 )
 
 // GetServiceProfile handles GET /api/services/:id/profile — public read of a
@@ -64,6 +65,8 @@ type serviceProfileRequest struct {
 	PricingMethod *string                    `json:"pricingMethod"`
 	BookingFeeUSD *float64                   `json:"bookingFeeUsd"`
 	FieldConfig   *models.BookingFieldConfig `json:"fieldConfig"`
+	// PriceUnit must be one of the category's price_units; "" clears it.
+	PriceUnit *string `json:"priceUnit"`
 }
 
 // derefOr returns the pointed-to value, or fallback when the field was omitted.
@@ -82,7 +85,8 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, "Invalid service ID")
 		return
 	}
-	if ownedServiceProduct(c, productID) == nil {
+	product := ownedServiceProduct(c, productID)
+	if product == nil {
 		return
 	}
 	var req serviceProfileRequest
@@ -131,6 +135,7 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 	profile.BookingRules = derefOr(req.BookingRules, profile.BookingRules)
 	profile.BookingFeeUSD = derefOr(req.BookingFeeUSD, profile.BookingFeeUSD)
 	profile.Timezone = derefOr(req.Timezone, profile.Timezone)
+	profile.PriceUnit = derefOr(req.PriceUnit, profile.PriceUnit)
 	if bt := derefOr(req.BookingType, ""); bt != "" {
 		profile.BookingType = bt
 	}
@@ -176,6 +181,15 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, msg)
 		return
 	}
+	// Checked on the merged values whenever either side changes: whether a unit
+	// is required depends on the pricing method, which this body may not carry,
+	// and a switch to a fixed price must not keep a unit the category refuses.
+	if req.PriceUnit != nil || req.PricingMethod != nil {
+		if msg := checkPriceUnit(config.DB, product, profile.PriceUnit, profile.PricingMethod); msg != "" {
+			utils.ErrorResponse(c, http.StatusBadRequest, msg)
+			return
+		}
+	}
 	// Omitting fieldConfig preserves the stored form; sending an empty Fields
 	// list is how a merchant clears it back to the legacy flow.
 	if req.FieldConfig != nil {
@@ -194,4 +208,34 @@ func (h *Handlers) UpsertServiceProfile(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Profile saved successfully", profile)
+}
+
+// checkPriceUnit says why unit cannot price product, or "" when it can. A
+// category with no price_units configured accepts any unit, or none. One that
+// restricts them accepts only its own, and requires a fixed-price listing to
+// pick one: no unit would charge per seat or night even where the category
+// allows only a fixed price. A quote is not a unit, so price-on-request needs
+// none, but any unit it keeps must still be one the category offers.
+func checkPriceUnit(db *gorm.DB, product *models.Product, unit, pricingMethod string) string {
+	if unit != "" && (!models.ValidPriceUnit(unit) || unit == models.PriceUnitOnRequest) {
+		return "Invalid price unit"
+	}
+	cfg, ok := serviceCategoryConfig(db, product)
+	if !ok || cfg.PriceUnits.Value == nil {
+		return ""
+	}
+	offered := false
+	for _, u := range cfg.PriceUnits.Value {
+		if u == unit {
+			return ""
+		}
+		offered = offered || u != models.PriceUnitOnRequest
+	}
+	switch {
+	case unit != "":
+		return "This category does not offer that price unit"
+	case offered && pricingMethod != models.PricingMethodOnRequest:
+		return "Choose what the price is for"
+	}
+	return ""
 }

@@ -32,6 +32,7 @@ import {
   WEEKDAY_LABELS,
   type OpenSlot,
 } from '../../services/serviceListingApi';
+import { toDateString } from '@/utils/dateString';
 
 interface SlotPickerProps {
   productId: string;
@@ -49,12 +50,8 @@ interface SlotPickerProps {
 
 const DAYS_AHEAD = 14;
 
-// Local YYYY-MM-DD for a Date (getServiceSlots takes a date range).
-const ymd = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
 // Group open slots by their local calendar day (YYYY-MM-DD of slot.start).
-const dayKeyOf = (iso: string) => ymd(new Date(iso));
+const dayKeyOf = (iso: string) => toDateString(new Date(iso));
 
 const timeLabel = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -84,7 +81,7 @@ export const SlotPicker: React.FC<SlotPickerProps> = ({
       const now = new Date();
       const to = new Date();
       to.setDate(now.getDate() + DAYS_AHEAD);
-      const res = await getServiceSlots(productId, ymd(now), ymd(to));
+      const res = await getServiceSlots(productId, toDateString(now), toDateString(to));
       if (!res.success || !res.data) {
         throw new Error(res.message || 'Failed to load availability');
       }

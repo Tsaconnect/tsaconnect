@@ -65,6 +65,7 @@ export async function createBookingRequest(
     buyerCity?: string;
     buyerState?: string;
     buyerCountry?: string;
+    quantity?: number;
     answers?: Record<string, any>;
   }
 ): Promise<ApiResponse<BookingRequest>> {
