@@ -276,22 +276,25 @@ export function payOrder(
 export async function resumeOrderPayment(
   orderId: string,
   onPhase?: (phase: ServiceCheckoutPhase) => void,
+  progress: EscrowProgress = {},
 ): Promise<Order> {
   const res = await getOrderById(orderId);
   if (!res.success || !res.data) throw new Error(res.message || 'Could not load the order. Try again.');
   if (res.data.status !== 'pending_payment') {
     throw new OrderNotPayableError('This order is no longer awaiting payment.');
   }
-  return payOrder(res.data, onPhase);
+  return payOrder(res.data, onPhase, progress);
 }
 
 /**
  * Pay an approved booking request: the server creates the order, then the
- * buyer funds it (payOrder).
+ * buyer funds it (payOrder). progress carries what this attempt signs, so a
+ * resumeOrderPayment of the same order picks up where it stopped.
  */
 export async function payBookingRequestAndEscrow(
   reqId: string,
   onPhase?: (phase: ServiceCheckoutPhase) => void,
+  progress: EscrowProgress = {},
 ): Promise<Order> {
   const { payBookingRequest } = await import('./bookingRequestApi');
   onPhase?.('creating_order');
@@ -299,5 +302,5 @@ export async function payBookingRequestAndEscrow(
   if (!payResult.success || !payResult.data?.orders?.length) {
     throw new Error(payResult.message || 'Failed to start payment');
   }
-  return payOrder(payResult.data.orders[0], onPhase);
+  return payOrder(payResult.data.orders[0], onPhase, progress);
 }

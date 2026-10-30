@@ -122,7 +122,7 @@ it('an MCGP booking is not paid until the buyer authorizes it', async () => {
 
   await act(async () => { mockAuthorization.props.onAuthorized(); });
   await flush();
-  expect(pay).toHaveBeenCalledWith('r1');
+  expect(pay).toHaveBeenCalledWith('r1', undefined, {});
 });
 
 it('a cancelled prompt pays nothing', async () => {
@@ -140,7 +140,7 @@ it('a stablecoin booking goes straight to the wallet-signed escrow', async () =>
   const tree = await render();
   await pressPay(tree);
   await flush();
-  expect(pay).toHaveBeenCalledWith('r3');
+  expect(pay).toHaveBeenCalledWith('r3', undefined, {});
   expect(mockAuthorization.props.visible).toBe(false);
 });
 
@@ -149,7 +149,7 @@ it('an unpaid booking order is finished, not placed again', async () => {
   const tree = await render();
   await act(async () => { finishButtons(tree)[0].props.onPress(); });
   await flush();
-  expect(resume).toHaveBeenCalledWith('order-r4');
+  expect(resume).toHaveBeenCalledWith('order-r4', undefined, {});
   expect(pay).not.toHaveBeenCalled();
 });
 
@@ -160,11 +160,26 @@ it('finishing an MCGP booking still asks the buyer to authorize', async () => {
   expect(resume).not.toHaveBeenCalled();
   await act(async () => { mockAuthorization.props.onAuthorized(); });
   await flush();
-  expect(resume).toHaveBeenCalledWith('order-r5');
+  expect(resume).toHaveBeenCalledWith('order-r5', undefined, {});
 });
 
 it('a paid booking offers no payment', async () => {
   mockRows.rows = [{ ...unpaidRow('r6', 'USDC'), orderStatus: 'escrowed' }];
   const tree = await render();
   expect(finishButtons(tree)).toHaveLength(0);
+});
+
+it('a second try resumes the steps the first one signed', async () => {
+  mockRows.rows = [unpaidRow('r7', 'USDC')];
+  resume.mockImplementationOnce(async (_id: string, _phase: unknown, progress: any) => {
+    progress.approve = { hash: '0xapprove', confirmed: true };
+    throw new Error('wallet closed');
+  });
+  const tree = await render();
+  await act(async () => { finishButtons(tree)[0].props.onPress(); });
+  await flush();
+  await act(async () => { finishButtons(tree)[0].props.onPress(); });
+  await flush();
+  expect(resume).toHaveBeenCalledTimes(2);
+  expect(resume.mock.calls[1][2]).toEqual({ approve: { hash: '0xapprove', confirmed: true } });
 });
