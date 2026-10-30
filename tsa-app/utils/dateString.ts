@@ -14,3 +14,11 @@ export function fromDateString(s?: string): Date | undefined {
   const m = s ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(s) : null;
   return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : undefined;
 }
+
+/** The YYYY-MM-DD day n days after s, or undefined when s is not a date. */
+export function addDays(s: string | undefined, n: number): string | undefined {
+  const d = fromDateString(s);
+  if (!d) return undefined;
+  d.setDate(d.getDate() + n);
+  return toDateString(d);
+}

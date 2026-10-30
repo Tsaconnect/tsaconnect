@@ -39,6 +39,8 @@ import { getServiceProfile } from '../../services/serviceListingApi';
 import { chatApi } from '@/services/chatApi';
 import { p2pErrorMessage } from '@/services/p2pErrors';
 import { contactServiceCharge, type ContactServiceCharge } from '@/utils/contactServiceCharge';
+import { bookingActionLabel, servicePriceLabel, type ServicePriceSummary } from '@/utils/priceUnit';
+import { formatUSD } from '@/utils/formatPrice';
 
 type PaymentStep = 'idle' | 'approving' | 'paying' | 'revealing' | 'done';
 
@@ -176,6 +178,8 @@ const ServiceDetail = () => {
   // it's known we must not render the contact-fee block, or an order/booking
   // listing would briefly flash "Reveal Contact — $fee" before hiding it.
   const [serviceTypeResolved, setServiceTypeResolved] = useState(false);
+  // What the listing charges and how it books, summarised by the API.
+  const [servicePrice, setServicePrice] = useState<ServicePriceSummary | undefined>(undefined);
   // What a contact provider charges on top of the contact fee. Null until known;
   // a provider who charges nothing has no checkout, so no Pay Now to dead-end on.
   const [providerCharge, setProviderCharge] = useState<ContactServiceCharge | null>(null);
@@ -232,6 +236,7 @@ const ServiceDetail = () => {
     (async () => {
       const res = await api.getProductById(serviceId);
       if (cancelled) return;
+      setServicePrice(res.data?.servicePrice);
       const imgs = res.data?.images;
       if (Array.isArray(imgs)) {
         const urls = imgs
@@ -438,6 +443,8 @@ const ServiceDetail = () => {
           providerFeeNote={serviceType === 'contact' ? providerFeeNote(providerCharge) : undefined}
           serviceType={serviceType}
           serviceTypeResolved={serviceTypeResolved}
+          priceLabel={servicePriceLabel(servicePrice, (usd) => formatUSD(usd))}
+          bookingActionLabel={bookingActionLabel(servicePrice)}
         />
         <ListingDetails
           categoryId={listing.categoryId}

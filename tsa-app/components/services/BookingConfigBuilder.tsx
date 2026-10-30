@@ -58,7 +58,7 @@ const BookingConfigBuilder: React.FC<BookingConfigBuilderProps> = ({ value, onCh
     if (on) {
       onChange([
         ...value,
-        { key: cat.key, type: cat.type, label: cat.label, group: cat.group, required: false },
+        { key: cat.key, type: cat.type, label: cat.label, group: cat.group, options: cat.options, required: false },
       ]);
     } else {
       onChange(value.filter((f) => f.key !== cat.key));

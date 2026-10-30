@@ -9,7 +9,9 @@
 // is authorized with the app's PIN/biometric prompt first, as at cart checkout.
 import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { useTheme } from '@/theme';
+import { formatSchemaAnswer, type SchemaField } from '@/utils/schemaFields';
 import { Badge, Button, Card, EmptyState, Spinner, Text, useToast } from '@/components/ui';
 import {
   listBookingRequests,
@@ -20,6 +22,7 @@ import {
   type BookingRequestStatus,
 } from '@/services/bookingRequestApi';
 import { payBookingRequestAndEscrow } from '@/services/serviceCheckout';
+import { getFieldCatalog } from '@/services/serviceListingApi';
 import { useCurrency } from '@/contexts/CurrencyContext';
 import { parseAmount, useMerchantPricing } from '@/hooks/useMerchantPricing';
 import { LocalAmountInput, PricingCurrencySelect } from '@/components/products/MerchantPricingFields';
@@ -61,10 +64,24 @@ export default function BookingRequestsScreen() {
     setRefreshing(false);
   }, [tab]);
 
+  // A tab switch shows the spinner until its list arrives.
   useEffect(() => {
     setLoading(true);
-    load();
-  }, [load]);
+  }, [tab]);
+
+  // Loads on open, on a tab switch, and on every return to the screen (e.g.
+  // after the provider approved) — not the list as it was when first opened.
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load]),
+  );
+
+  // Labels for the stored answer keys ("trip_type" → "Trip").
+  const [fieldCatalog, setFieldCatalog] = useState<Record<string, SchemaField>>({});
+  useEffect(() => {
+    getFieldCatalog().then(setFieldCatalog);
+  }, []);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -170,7 +187,16 @@ export default function BookingRequestsScreen() {
               const tone = STATUS_TONE[request.status] ?? { label: request.status, tone: 'textMuted' as ToneKey };
               const toneColor = colors[tone.tone];
               const answers = request.answers || {};
-              const answerKeys = Object.keys(answers);
+              const answerLines = Object.keys(answers)
+                .map((k) => {
+                  const field = fieldCatalog[k] ?? { key: k, type: 'text' as const, label: k };
+                  const value = formatSchemaAnswer(field, answers[k]);
+                  return value ? { key: k, label: field.label, value } : null;
+                })
+                .filter((l): l is { key: string; label: string; value: string } => l !== null);
+              if (request.quantity) {
+                answerLines.unshift({ key: '_quantity', label: 'Quantity', value: String(request.quantity) });
+              }
               return (
                 <Card key={request.id} padding="lg" style={{ gap: spacing.sm }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
@@ -180,11 +206,11 @@ export default function BookingRequestsScreen() {
                     <Badge label={tone.label} background={toneColor} color={colors.onAccent} size="sm" />
                   </View>
 
-                  {answerKeys.length > 0 ? (
+                  {answerLines.length > 0 ? (
                     <View style={{ gap: 2 }}>
-                      {answerKeys.slice(0, 4).map((k) => (
-                        <Text key={k} variant="caption" color="textSecondary">
-                          {k}: {String(answers[k])}
+                      {answerLines.map((l) => (
+                        <Text key={l.key} variant="caption" color="textSecondary">
+                          {l.label}: {l.value}
                         </Text>
                       ))}
                     </View>

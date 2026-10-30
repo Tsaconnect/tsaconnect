@@ -24,6 +24,8 @@ export interface BookingRequest {
   token: string;
   serviceTier?: string;
   answers?: Record<string, any>;
+  // Seats/tickets asked for in a quantity-mode category; 0 elsewhere.
+  quantity?: number;
   status: BookingRequestStatus;
   rejectReason?: string;
   orderId?: string;
