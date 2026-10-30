@@ -96,8 +96,14 @@ func TestPopulateServicePrices(t *testing.T) {
 	stay := createTestService(t, db, seller.ID, &stayCat.ID, 0, 50)
 	db.Model(stay).Update("shipping_same_state", 40) // the cheapest area
 	writePricedProfile(t, db, stay.ID, models.BookingTypeInstant, models.PriceUnitPerNight)
+	// Charged once per booking, so not part of the "/ night" price.
+	db.Model(&models.ServiceProfile{}).Where("product_id = ?", stay.ID).Update("access_fee_usd", 10)
 
 	quoteCat := quantityCategory(t, db)
+	// A whole-booking price does include it.
+	fixed := createTestService(t, db, seller.ID, &quoteCat.ID, 0, 25)
+	writePricedProfile(t, db, fixed.ID, models.BookingTypeInstant, models.PriceUnitFixed)
+	db.Model(&models.ServiceProfile{}).Where("product_id = ?", fixed.ID).Update("access_fee_usd", 10)
 	quoted := createTestService(t, db, seller.ID, &quoteCat.ID, 0, 5)
 	writePricedProfile(t, db, quoted.ID, models.BookingTypeRequest, "")
 	db.Model(&models.ServiceProfile{}).Where("product_id = ?", quoted.ID).Update("pricing_method", models.PricingMethodOnRequest)
@@ -116,7 +122,7 @@ func TestPopulateServicePrices(t *testing.T) {
 	contact := createTestService(t, db, seller.ID, &contactCat.ID, 12, 0)
 
 	var products []models.Product
-	db.Where("id IN ?", []uuid.UUID{stay.ID, quoted.ID, menu.ID, contact.ID}).Find(&products)
+	db.Where("id IN ?", []uuid.UUID{stay.ID, fixed.ID, quoted.ID, menu.ID, contact.ID}).Find(&products)
 	populateServicePrices(db, products)
 	got := map[uuid.UUID]*models.ServicePriceSummary{}
 	for i := range products {
@@ -125,6 +131,9 @@ func TestPopulateServicePrices(t *testing.T) {
 
 	if s := got[stay.ID]; s == nil || s.FromUSD != 40 || s.BookingMode != models.BookingModeDateRange || !s.ChargesPerUnit || s.PriceUnit != models.PriceUnitPerNight {
 		t.Errorf("stay: %+v", s)
+	}
+	if s := got[fixed.ID]; s == nil || s.FromUSD != 35 || s.ChargesPerUnit {
+		t.Errorf("fixed: %+v", s)
 	}
 	if s := got[quoted.ID]; s == nil || !s.OnRequest || s.FromUSD != 0 || s.BookingType != models.BookingTypeRequest {
 		t.Errorf("quoted: %+v", s)

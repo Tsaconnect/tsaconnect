@@ -100,10 +100,15 @@ func populateServicePrices(db *gorm.DB, products []models.Product) {
 			if fare <= 0 {
 				fare = cat.legacyFare
 			}
-			if fare > 0 {
-				s.FromUSD = fare + prof.AccessFeeUSD
-			}
 			s.ChargesPerUnit = models.ChargesPerUnit(s.BookingMode, prof.PriceUnit)
+			// A per-unit price is shown as "/ night" or "/ seat", so it is the fare
+			// alone: the access fee is charged once per booking, not per unit.
+			if fare > 0 {
+				s.FromUSD = fare
+				if !s.ChargesPerUnit {
+					s.FromUSD += prof.AccessFeeUSD
+				}
+			}
 		case models.ServiceTypeOrder:
 			s.FromUSD = menuFrom[p.ID]
 		default:
