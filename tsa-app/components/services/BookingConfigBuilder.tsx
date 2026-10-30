@@ -5,16 +5,18 @@
 // field adds it to the service's FieldConfig, and a per-field "Required" toggle
 // marks it mandatory. The resulting BookingField[] is lifted to the parent
 // (AddService) and persisted on the ServiceProfile. The marketplace then
-// auto-generates the customer form from exactly these fields.
+// auto-generates the customer form from exactly these fields. A dropdown the
+// catalogue ships without choices takes the merchant's own, typed in here.
 import React, { useEffect, useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
-import { Card, Divider, Spinner, Text, Toggle } from '@/components/ui';
+import { Card, Divider, Input, Spinner, Text, Toggle } from '@/components/ui';
 import {
   getBookingCatalog,
   type BookingCatalogField,
   type BookingField,
 } from '@/services/serviceListingApi';
+import { fieldTakesOptions, parseOptionList } from '@/utils/bookingFieldOptions';
 
 interface BookingConfigBuilderProps {
   value: BookingField[];
@@ -33,6 +35,8 @@ const BookingConfigBuilder: React.FC<BookingConfigBuilderProps> = ({ value, onCh
   const { spacing } = useTheme();
   const [catalog, setCatalog] = useState<BookingCatalogField[]>([]);
   const [loading, setLoading] = useState(true);
+  // Raw text per field while typing, so a trailing comma is not parsed away.
+  const [optionText, setOptionText] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -67,6 +71,12 @@ const BookingConfigBuilder: React.FC<BookingConfigBuilderProps> = ({ value, onCh
 
   const setRequired = (key: string, required: boolean) => {
     onChange(value.map((f) => (f.key === key ? { ...f, required } : f)));
+  };
+
+  const setOptions = (key: string, text: string) => {
+    setOptionText((prev) => ({ ...prev, [key]: text }));
+    const options = parseOptionList(text);
+    onChange(value.map((f) => (f.key === key ? { ...f, options } : f)));
   };
 
   const grouped = useMemo(() => {
@@ -110,6 +120,7 @@ const BookingConfigBuilder: React.FC<BookingConfigBuilderProps> = ({ value, onCh
           </Text>
           {items.map((cat, i) => {
             const sel = selected[cat.key];
+            const needsOwnOptions = !!sel && fieldTakesOptions(cat) && !cat.options?.length;
             return (
               <View key={cat.key} style={{ gap: spacing.xs }}>
                 {i > 0 ? <Divider /> : null}
@@ -134,6 +145,17 @@ const BookingConfigBuilder: React.FC<BookingConfigBuilderProps> = ({ value, onCh
                       accessibilityLabel={`Make ${cat.label} required`}
                     />
                   </View>
+                ) : null}
+                {needsOwnOptions ? (
+                  <Input
+                    label="Choices"
+                    placeholder="e.g. Saloon, SUV, Bus"
+                    helper="Separate choices with commas."
+                    value={optionText[cat.key] ?? (sel.options ?? []).join(', ')}
+                    onChangeText={(text) => setOptions(cat.key, text)}
+                    error={sel.options?.length ? undefined : 'Add at least one choice.'}
+                    autoCapitalize="words"
+                  />
                 ) : null}
               </View>
             );

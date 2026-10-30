@@ -71,6 +71,7 @@ import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields"
 import { categoryPathLabels } from "@/utils/categoryTree";
 import { listingPriceUnits, PRICE_UNIT_LABELS, type PriceUnit } from "@/utils/priceUnit";
 import BookingConfigBuilder from "./BookingConfigBuilder";
+import { fieldsMissingOptions } from "@/utils/bookingFieldOptions";
 import PolicyFields, { PolicyValues, emptyPolicyValues } from "./PolicyFields";
 
 type ServiceType = "contact" | "order" | "booking";
@@ -419,6 +420,11 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     // one (the API refuses none: it would charge per seat or night).
     if (isBooking && pricingMethod === "fixed" && categoryPriceUnits && priceUnitOptions.length > 0 && !priceUnit) {
       Alert.alert("Missing details", "Choose what the price is for, under Pricing.");
+      return;
+    }
+    const choiceless = isBooking ? fieldsMissingOptions(bookingFields) : [];
+    if (choiceless.length > 0) {
+      Alert.alert("Missing details", `Add the choices customers pick from for: ${choiceless.join(", ")}.`);
       return;
     }
     const listingProblems = validateSchemaAnswers(listingFields, listingValues);
