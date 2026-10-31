@@ -178,7 +178,8 @@ var payoutStages = map[string]string{
 // bank payout the order carries.
 type orderDetailView struct {
 	orderPreview
-	Payout *sellerPayoutStatus `json:"payout,omitempty"`
+	Payout  *sellerPayoutStatus  `json:"payout,omitempty"`
+	Booking *orderBookingDetails `json:"booking,omitempty"`
 }
 
 // payoutStatusFor is the payout status to show user on order, or nil when the

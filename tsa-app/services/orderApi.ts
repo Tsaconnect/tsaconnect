@@ -16,6 +16,18 @@ export interface UnsignedTx {
   chainId: string;
 }
 
+/** One line of a booking order: "Seats: 2", "From: Lagos". */
+export interface OrderBookingLine {
+  key: string;
+  label: string;
+  value: string;
+}
+
+export interface OrderBooking {
+  mode: 'slot' | 'date_range' | 'quantity' | string;
+  lines: OrderBookingLine[];
+}
+
 export interface Order {
   id: string;
   buyerId: string;
@@ -78,6 +90,8 @@ export interface Order {
   deliverBy?: string;
   confirmBy?: string;
   resolveBy?: string;
+  /** What a booking order booked, as the server labels it: slot, units, then the buyer's answers. */
+  booking?: OrderBooking;
   notes?: string;
   // Buyer's chosen product specs (colour/size/other) for a product order, so the
   // merchant knows how to arrange the purchase. Carried from the cart at checkout.
