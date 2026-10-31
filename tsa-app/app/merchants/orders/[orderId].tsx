@@ -664,6 +664,28 @@ const MerchantOrderDetail = () => {
           </View>
         </Card>
 
+        {/* What the buyer booked — slot, units, booking-form answers (service orders) */}
+        {order.booking && order.booking.lines.length > 0 && (
+          <Card style={{ marginBottom: spacing.md }}>
+            {CARD_LABEL('BOOKING DETAILS')}
+            <View style={{ marginTop: spacing.xs }}>
+              {order.booking.lines.map((l) => (
+                <View
+                  key={l.key}
+                  style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: spacing.md, paddingVertical: spacing.xs }}
+                >
+                  <Text variant="bodySm" color="textSecondary">
+                    {l.label}
+                  </Text>
+                  <Text variant="bodySm" weight="600" align="right" style={{ flex: 1 }}>
+                    {l.value}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </Card>
+        )}
+
         {/* Buyer's arrangement — selected specs + purchase note (product orders) */}
         {((order.selectedAttributes && order.selectedAttributes.length > 0) || order.purchaseNote) && (
           <Card style={{ marginBottom: spacing.md }}>

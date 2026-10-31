@@ -3678,6 +3678,7 @@ func (ch *CheckoutHandler) GetOrderDetail(c *gin.Context) {
 	enriched := enrichOrdersWithPreview([]models.Order{order})
 	utils.SuccessResponse(c, http.StatusOK, "Order retrieved", orderDetailView{
 		orderPreview: enriched[0], Payout: payoutStatusFor(c.Request.Context(), config.DB, &order, user),
+		Booking: bookingDetailsFor(config.DB, &order),
 	})
 }
 

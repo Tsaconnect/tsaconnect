@@ -350,6 +350,18 @@ const OrderDetailScreen = () => {
           <InfoRow label="Shipping Zone" value={formatStatus(order.shippingZone || 'N/A')} />
         </Card>
 
+        {/* What a booking booked (service orders) */}
+        {order.booking && order.booking.lines.length > 0 && (
+          <Card style={{ marginBottom: spacing.lg }}>
+            <Text variant="bodyMed" weight="700" style={{ marginBottom: spacing.sm }}>
+              Booking details
+            </Text>
+            {order.booking.lines.map((l) => (
+              <InfoRow key={l.key} label={l.label} value={l.value} />
+            ))}
+          </Card>
+        )}
+
         {/* Selected specs + purchase note (product orders) */}
         {((order.selectedAttributes && order.selectedAttributes.length > 0) || order.purchaseNote) && (
           <Card style={{ marginBottom: spacing.lg }}>
