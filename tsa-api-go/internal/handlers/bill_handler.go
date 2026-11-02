@@ -2,10 +2,14 @@ package handlers
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,17 +47,89 @@ type billService interface {
 	AdminReversePayment(ctx context.Context, orderID uuid.UUID) (*models.BillOrder, error)
 	AdminSettlePayment(ctx context.Context, orderID uuid.UUID) (*models.BillOrder, error)
 	ListStuckPayments(ctx context.Context, olderThan time.Duration, limit int) ([]services.BillStuckPayment, error)
+	ResolveFromCallback(ctx context.Context, requestID, vendorOrderID string) error
 }
 
 // BillHandler serves /api/bills/* — utility bills (airtime/data/electricity/
 // cable/betting/exam e-PINs) paid with spendable MCGP and vended via
 // ClubKonnect. Registered only when the bill service is fully wired.
 type BillHandler struct {
-	bills billService
+	bills          billService
+	callbackSecret string
 }
 
 func NewBillHandler(bills billService) *BillHandler {
 	return &BillHandler{bills: bills}
+}
+
+// SetCallbackSecret arms the vendor callback: the path segment that must match
+// for a request to be taken as ClubKonnect's. Empty leaves it dormant.
+func (h *BillHandler) SetCallbackSecret(secret string) { h.callbackSecret = secret }
+
+// CallbackEnabled reports whether the vendor callback route should be mounted.
+func (h *BillHandler) CallbackEnabled() bool { return h != nil && h.callbackSecret != "" }
+
+// ANY /api/bills/clubkonnect/callback/:secret — ClubKonnect's order-status ping.
+//
+// Its payload format is not published, so this reads the order reference from
+// the query, a form body or a JSON body, under any of the usual key spellings,
+// and uses it for nothing but choosing which order to ask the vendor about:
+// the outcome always comes from QueryOrder, never from the callback. The URL
+// secret keeps strangers from making us query the vendor on demand. Always
+// answers 200 once authenticated so the vendor does not retry-storm us.
+func (h *BillHandler) VendorCallback(c *gin.Context) {
+	if subtle.ConstantTimeCompare([]byte(c.Param("secret")), []byte(h.callbackSecret)) != 1 {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	fields := callbackFields(c)
+	if err := h.bills.ResolveFromCallback(c.Request.Context(),
+		fields["requestid"], fields["orderid"]); err != nil {
+		// Logged, not surfaced: the reconciler is the backstop.
+		log.Printf("[bills] vendor callback: %v", err)
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// callbackFields flattens every place the callback may carry its fields into
+// one lower-cased map, with the order references normalised to "requestid" and
+// "orderid" whatever separator the vendor used.
+func callbackFields(c *gin.Context) map[string]string {
+	out := map[string]string{}
+	put := func(k, v string) {
+		k = strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(k))
+		if k == "requestid" || k == "orderid" {
+			if _, set := out[k]; !set {
+				out[k] = strings.TrimSpace(v)
+			}
+		}
+	}
+	// URL query plus a urlencoded or multipart form body (ParseForm alone
+	// skips multipart).
+	_ = c.Request.ParseMultipartForm(64 << 10)
+	_ = c.Request.ParseForm()
+	for k, vs := range c.Request.Form {
+		if len(vs) > 0 {
+			put(k, vs[0])
+		}
+	}
+	// A form body was consumed above; any other body is tried as JSON whatever
+	// its declared type (the vendor's payload format is unpublished).
+	if ct := strings.ToLower(c.GetHeader("Content-Type")); !strings.Contains(ct, "form-urlencoded") && !strings.Contains(ct, "multipart/form-data") {
+		var body map[string]any
+		raw, _ := io.ReadAll(io.LimitReader(c.Request.Body, 64<<10))
+		if json.Unmarshal(raw, &body) == nil {
+			for k, v := range body {
+				switch t := v.(type) {
+				case string:
+					put(k, t)
+				case float64:
+					put(k, strconv.FormatFloat(t, 'f', -1, 64))
+				}
+			}
+		}
+	}
+	return out
 }
 
 // GET /api/bills/catalog/:category — operators for a category.

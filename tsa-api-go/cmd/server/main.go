@@ -575,6 +575,10 @@ func main() {
 			services.NewP2PFxProvider(p2pService), cfg.BillsDataMarkupBps, cfg.BillsQuoteTTL,
 		)
 		billHandler = handlers.NewBillHandler(billService)
+		billHandler.SetCallbackSecret(cfg.ClubkonnectCallbackSecret)
+		if cfg.ClubkonnectCallbackSecret == "" { // config clears URL and secret together
+			log.Printf("[config] ClubKonnect callback dormant (CLUBKONNECT_CALLBACK_URL / _SECRET not armed)")
+		}
 		log.Printf("[config] utility bills enabled (ClubKonnect)")
 	} else if clubkonnect.IsEnabled() {
 		log.Printf("[config] bills dormant: ClubKonnect configured but no MCGP operator signer")

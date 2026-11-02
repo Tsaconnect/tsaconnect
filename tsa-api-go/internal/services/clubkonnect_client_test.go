@@ -375,3 +375,52 @@ func TestVerifyElectricityNameExtraction(t *testing.T) {
 		t.Fatal("INVALID marker must be treated as not-found")
 	}
 }
+
+func TestVendCarriesCallbackURLWhenConfigured(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(`{"orderid":"1","statuscode":"100","status":"ORDER_RECEIVED"}`))
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &config.Config{
+		ClubkonnectBaseURL: srv.URL, ClubkonnectUserID: "CK101", ClubkonnectAPIKey: "KEY",
+		ClubkonnectCallbackURL: "https://api.example.com/api/bills/clubkonnect/callback", ClubkonnectCallbackSecret: "s3cret",
+	}
+	if _, err := NewClubkonnectClient(cfg).VendAirtime(context.Background(), "01", "08012345678", 100, "req-1"); err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://api.example.com/api/bills/clubkonnect/callback/s3cret"; got.Get("CallBackURL") != want {
+		t.Fatalf("CallBackURL = %q, want %q", got.Get("CallBackURL"), want)
+	}
+
+	// Either half missing leaves the vend exactly as it was.
+	got = nil
+	cfg.ClubkonnectCallbackSecret = ""
+	if _, err := NewClubkonnectClient(cfg).VendAirtime(context.Background(), "01", "08012345678", 100, "req-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := got["CallBackURL"]; set {
+		t.Fatal("callback URL sent without a secret")
+	}
+}
+
+// The callback secret rides only on purchases, never on status queries.
+func TestQueryOrderNeverCarriesCallbackURL(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(`{"orderid":"1","statuscode":"200","status":"ORDER_COMPLETED"}`))
+	}))
+	t.Cleanup(srv.Close)
+	cfg := &config.Config{
+		ClubkonnectBaseURL: srv.URL, ClubkonnectUserID: "CK101", ClubkonnectAPIKey: "KEY",
+		ClubkonnectCallbackURL: "https://api.example.com/cb", ClubkonnectCallbackSecret: "s3cret",
+	}
+	if _, err := NewClubkonnectClient(cfg).QueryOrder(context.Background(), "req-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := got["CallBackURL"]; set {
+		t.Fatal("QueryOrder sent the callback URL (and its secret)")
+	}
+}

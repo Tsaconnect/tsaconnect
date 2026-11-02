@@ -1389,6 +1389,14 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 			bills.GET("/orders/:id/report", bh.GetOrderReport)
 		}
 
+		// ClubKonnect's order-status ping: unauthenticated by design (the vendor
+		// holds no user token), so it is gated by the secret in its path and
+		// only ever prompts a vendor query. Dormant until CLUBKONNECT_CALLBACK_*
+		// are set. Outside the user-auth group above.
+		if bh.CallbackEnabled() {
+			api.Any("/bills/clubkonnect/callback/:secret", middleware.RateLimiter(120, time.Minute), bh.VendorCallback)
+		}
+
 		// Admin review of user-reported bill orders. Inside the same gate:
 		// reports can only exist where the bill stack is wired.
 		adminBills := api.Group("/admin/bills")

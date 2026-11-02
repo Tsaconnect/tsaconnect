@@ -856,3 +856,84 @@ func TestGetOrderRefreshesVendingFromVendor(t *testing.T) {
 		t.Fatalf("status=%s settles=%d, want delivered/1", o.Status, r.payer.settles)
 	}
 }
+
+func TestResolveFromCallbackSettlesVendingOrder(t *testing.T) {
+	r := newBillServiceRig(t)
+	r.vendor.vendResult = BillVendResult{OrderID: "906", StatusCode: 100, Status: "ORDER_RECEIVED"}
+	q := r.airtimeQuote(t)
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The callback says nothing about the outcome; only the vendor's answer counts.
+	r.vendor.queryResult = BillVendResult{OrderID: "906", StatusCode: 200, Status: "ORDER_COMPLETED"}
+	if err := r.svc.ResolveFromCallback(context.Background(), q.Order.ID.String(), ""); err != nil {
+		t.Fatal(err)
+	}
+	var o models.BillOrder
+	r.db.First(&o, "id = ?", q.Order.ID)
+	if o.Status != models.BillStatusDelivered || r.payer.settles != 1 {
+		t.Fatalf("status=%s settles=%d, want delivered/1", o.Status, r.payer.settles)
+	}
+}
+
+func TestResolveFromCallbackByVendorOrderID(t *testing.T) {
+	r := newBillServiceRig(t)
+	r.vendor.vendResult = BillVendResult{OrderID: "907", StatusCode: 100, Status: "ORDER_RECEIVED"}
+	q := r.airtimeQuote(t)
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.vendor.queryResult = BillVendResult{OrderID: "907", StatusCode: 200, Status: "ORDER_COMPLETED"}
+	if err := r.svc.ResolveFromCallback(context.Background(), "", "907"); err != nil {
+		t.Fatal(err)
+	}
+	var o models.BillOrder
+	r.db.First(&o, "id = ?", q.Order.ID)
+	if o.Status != models.BillStatusDelivered {
+		t.Fatalf("status=%s, want delivered", o.Status)
+	}
+}
+
+func TestResolveFromCallbackIgnoresUnknownAndResolvedOrders(t *testing.T) {
+	r := newBillServiceRig(t)
+	r.vendor.vendResult = BillVendResult{OrderID: "908", StatusCode: 200, Status: "ORDER_COMPLETED"}
+	q := r.airtimeQuote(t)
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range [][2]string{{uuid.NewString(), ""}, {"", "nope"}, {"", ""}, {q.Order.ID.String(), ""}} {
+		if err := r.svc.ResolveFromCallback(context.Background(), c[0], c[1]); err != nil {
+			t.Fatalf("callback %v: %v", c, err)
+		}
+	}
+	if r.vendor.queryCalls != 0 {
+		t.Fatalf("queried the vendor %d times for orders that need nothing", r.vendor.queryCalls)
+	}
+}
+
+// A vending order is only waiting on the vendor, so the reconciler must not
+// make it sit out the full grace that protects an in-flight Pay.
+func TestReconcileVendingUsesShortGrace(t *testing.T) {
+	r := newBillServiceRig(t)
+	r.vendor.vendResult = BillVendResult{OrderID: "909", StatusCode: 100, Status: "ORDER_RECEIVED"}
+	q := r.airtimeQuote(t)
+	if _, err := r.svc.Pay(context.Background(), r.userID, billWallet, q.Order.ID); err != nil {
+		t.Fatal(err)
+	}
+	r.vendor.queryResult = BillVendResult{OrderID: "909", StatusCode: 200, Status: "ORDER_COMPLETED"}
+
+	// Just answered: left alone.
+	if n, _ := r.svc.Reconcile(context.Background(), 5*time.Minute); n != 0 || r.vendor.queryCalls != 0 {
+		t.Fatalf("fresh vending order: n=%d queries=%d, want 0/0", n, r.vendor.queryCalls)
+	}
+	// A minute old — inside the 5-minute grace, outside the vending grace.
+	backdate(t, r.db, q.Order.ID, models.BillStatusVending, time.Minute)
+	if n, err := r.svc.Reconcile(context.Background(), 5*time.Minute); err != nil || n != 1 {
+		t.Fatalf("reconcile: n=%d err=%v, want 1", n, err)
+	}
+	var o models.BillOrder
+	r.db.First(&o, "id = ?", q.Order.ID)
+	if o.Status != models.BillStatusDelivered {
+		t.Fatalf("status=%s, want delivered", o.Status)
+	}
+}

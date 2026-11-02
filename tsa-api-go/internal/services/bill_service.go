@@ -65,6 +65,10 @@ const billLateDebitScanWindow = 48 * time.Hour
 // 1 hour, so anything older is genuinely stuck.
 const billEscalateAfter = 24 * time.Hour
 
+// billVendingGrace is how long the reconciler leaves a vending order alone
+// after the vendor last answered about it.
+const billVendingGrace = 30 * time.Second
+
 // billVendor is the ClubKonnect surface the service needs.
 // *ClubkonnectClient satisfies it.
 type billVendor interface {
@@ -826,10 +830,15 @@ func (s *BillService) Reconcile(ctx context.Context, grace time.Duration) (int, 
 
 	// Scans are cursor-paged: orders the reconciler can only alert on never
 	// change, and an ordered LIMIT would otherwise refill every page with them.
+	// A vending order is only waiting on the vendor — the grace for paying/paid
+	// guards a Pay call still in flight, which a vending order no longer has —
+	// so it is asked again soon after the vendor last answered.
+	vendingCutoff := now.Add(-min(grace, billVendingGrace))
 	var orders []models.BillOrder
 	if err := s.scan.page("orders", "", s.db.WithContext(ctx).Model(&models.BillOrder{}).
-		Where("status IN ? AND updated_at < ?",
-			[]string{models.BillStatusPaying, models.BillStatusPaid, models.BillStatusVending}, cutoff),
+		Where("(status IN ? AND updated_at < ?) OR (status = ? AND updated_at < ?)",
+			[]string{models.BillStatusPaying, models.BillStatusPaid}, cutoff,
+			models.BillStatusVending, vendingCutoff),
 		billScanLimit).Find(&orders).Error; err != nil {
 		return changed, err
 	}
@@ -1219,14 +1228,20 @@ const vendRefreshAfter = 2 * time.Second
 
 // refreshVending asks ClubKonnect where a vending order stands when the user
 // looks at it. ClubKonnect usually answers a vend "received" (100) and delivers
-// seconds later; without this the order waits for the reconciler's grace
-// window, so a customer who already has their airtime keeps seeing Processing.
-// Best-effort: a failed query leaves the stored status, and adoptVendResult is
-// the same guarded path the reconciler uses, so a race with it is harmless.
+// seconds later; without this the order waits for the reconciler, so a customer
+// who already has their airtime keeps seeing Processing. Best-effort: a failed
+// query leaves the stored status.
 func (s *BillService) refreshVending(ctx context.Context, o *models.BillOrder) {
 	if o.Status != models.BillStatusVending || !s.IsEnabled() || time.Since(o.UpdatedAt) < vendRefreshAfter {
 		return
 	}
+	s.syncFromVendor(ctx, o)
+}
+
+// syncFromVendor queries the vendor for a vending order and adopts the answer
+// through the same guarded path the reconciler uses, so a race with it, with a
+// callback or with a user refresh is harmless. o is reloaded afterwards.
+func (s *BillService) syncFromVendor(ctx context.Context, o *models.BillOrder) {
 	qctx, cancel := context.WithTimeout(ctx, ckReadTimeout)
 	defer cancel()
 	res, err := s.vendor.QueryOrder(qctx, o.ID.String())
@@ -1234,9 +1249,39 @@ func (s *BillService) refreshVending(ctx context.Context, o *models.BillOrder) {
 		return
 	}
 	if aerr := s.adoptVendResult(qctx, o, res); aerr != nil {
-		log.Printf("[bills] order=%s refresh on read: %v", o.ID, aerr)
+		log.Printf("[bills] order=%s sync from vendor: %v", o.ID, aerr)
 	}
 	_ = s.db.WithContext(ctx).First(o, "id = ?", o.ID).Error
+}
+
+// ResolveFromCallback is the vendor-callback entry point. The callback itself
+// is unauthenticated and its payload untrusted (see ClubkonnectClient.QueryOrder),
+// so it is only a prompt to ask the vendor: nothing in it decides an outcome.
+// requestID is our order id (the RequestID sent with the vend); vendorOrderID
+// is ClubKonnect's, used when the payload carries only that. An unknown or
+// already-resolved order is not an error — the vendor must not retry it.
+func (s *BillService) ResolveFromCallback(ctx context.Context, requestID, vendorOrderID string) error {
+	if !s.IsEnabled() {
+		return ErrBillsDisabled
+	}
+	q := s.db.WithContext(ctx).Where("status = ?", models.BillStatusVending)
+	switch id, err := uuid.Parse(strings.TrimSpace(requestID)); {
+	case err == nil:
+		q = q.Where("id = ?", id)
+	case strings.TrimSpace(vendorOrderID) != "":
+		q = q.Where("vendor_order_id = ?", strings.TrimSpace(vendorOrderID))
+	default:
+		return nil
+	}
+	var o models.BillOrder
+	if err := q.First(&o).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	s.syncFromVendor(ctx, &o)
+	return nil
 }
 
 func (s *BillService) ListOrders(ctx context.Context, userID uuid.UUID, limit int) ([]models.BillOrder, error) {

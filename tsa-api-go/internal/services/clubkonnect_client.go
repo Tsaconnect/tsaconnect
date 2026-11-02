@@ -48,8 +48,8 @@ var (
 // vendTimeout covers ClubKonnect's up-to-60s network wait before it parks an
 // order as 201; catalogTimeout is for the cheap public reads.
 const (
-	ckVendTimeout    = 75 * time.Second
-	ckReadTimeout    = 20 * time.Second
+	ckVendTimeout     = 75 * time.Second
+	ckReadTimeout     = 20 * time.Second
 	ckCatalogCacheTTL = time.Hour
 )
 
@@ -102,7 +102,11 @@ type ClubkonnectClient struct {
 	userID        string
 	apiKey        string
 	dataplanField string
-	httpc         *http.Client
+	// callbackURL, when set, rides on every vend so ClubKonnect pings us the
+	// moment an order resolves instead of us waiting for the next poll.
+	callbackURL    string
+	callbackSecret string // redacted from errors like the credentials
+	httpc          *http.Client
 
 	mu    sync.Mutex
 	cache map[string]ckCacheEntry
@@ -114,13 +118,20 @@ type ckCacheEntry struct {
 }
 
 func NewClubkonnectClient(cfg *config.Config) *ClubkonnectClient {
+	callbackURL, callbackSecret := "", ""
+	if cfg.ClubkonnectCallbackURL != "" && cfg.ClubkonnectCallbackSecret != "" {
+		callbackSecret = cfg.ClubkonnectCallbackSecret
+		callbackURL = cfg.ClubkonnectCallbackURL + "/" + url.PathEscape(callbackSecret)
+	}
 	return &ClubkonnectClient{
-		baseURL:       strings.TrimRight(cfg.ClubkonnectBaseURL, "/"),
-		userID:        cfg.ClubkonnectUserID,
-		apiKey:        cfg.ClubkonnectAPIKey,
-		dataplanField: cfg.ClubkonnectDataplanField,
-		httpc:         &http.Client{Timeout: ckVendTimeout},
-		cache:         map[string]ckCacheEntry{},
+		callbackURL:    callbackURL,
+		callbackSecret: callbackSecret,
+		baseURL:        strings.TrimRight(cfg.ClubkonnectBaseURL, "/"),
+		userID:         cfg.ClubkonnectUserID,
+		apiKey:         cfg.ClubkonnectAPIKey,
+		dataplanField:  cfg.ClubkonnectDataplanField,
+		httpc:          &http.Client{Timeout: ckVendTimeout},
+		cache:          map[string]ckCacheEntry{},
 	}
 }
 
@@ -134,7 +145,7 @@ func (c *ClubkonnectClient) IsEnabled() bool {
 // credential pair) raw and URL-encoded.
 func (c *ClubkonnectClient) redact(s string) string {
 	s = RedactURLQueries(s)
-	for _, secret := range []string{c.apiKey, c.userID} {
+	for _, secret := range []string{c.apiKey, c.userID, c.callbackSecret} {
 		if secret == "" {
 			continue
 		}
@@ -249,7 +260,16 @@ func anyToString(v any) string {
 	}
 }
 
+// vend places a purchase; only purchases carry the CallBackURL.
 func (c *ClubkonnectClient) vend(ctx context.Context, path string, params url.Values) (BillVendResult, error) {
+	if c.callbackURL != "" {
+		params.Set("CallBackURL", c.callbackURL)
+	}
+	return c.callOrder(ctx, path, params)
+}
+
+// callOrder performs an authed order call and parses the vend-shaped answer.
+func (c *ClubkonnectClient) callOrder(ctx context.Context, path string, params url.Values) (BillVendResult, error) {
 	body, err := c.get(ctx, path, params, true)
 	if err != nil {
 		return BillVendResult{}, err
@@ -340,7 +360,7 @@ func (c *ClubkonnectClient) VendEpin(ctx context.Context, provider, examType, ph
 func (c *ClubkonnectClient) QueryOrder(ctx context.Context, requestID string) (BillVendResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, ckReadTimeout)
 	defer cancel()
-	return c.vend(ctx, "APIQueryV1.asp", url.Values{"RequestID": {requestID}})
+	return c.callOrder(ctx, "APIQueryV1.asp", url.Values{"RequestID": {requestID}})
 }
 
 // CancelOrder asks ClubKonnect to cancel/refund an order (their wallet, not the

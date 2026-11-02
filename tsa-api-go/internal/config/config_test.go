@@ -651,3 +651,35 @@ func TestConvertedFeeCapFromEnv_ZeroSaysTheRoutesAreOff(t *testing.T) {
 		t.Fatalf("logs %q do not say the default chains' routes are off", logs.String())
 	}
 }
+
+func TestArmClubkonnectCallbackKeepsOnlyAUsablePair(t *testing.T) {
+	good := strings.Repeat("ab12_-", 6) // 36 URL-safe chars
+	cases := []struct {
+		name, url, secret string
+		armed             bool
+	}{
+		{"both set", "https://api.example.com/cb", good, true},
+		{"neither set", "", "", false},
+		{"secret only", "", good, false},
+		{"url only", "https://api.example.com/cb", "", false},
+		{"too short", "https://api.example.com/cb", "short", false},
+		{"slash in secret", "https://api.example.com/cb", good + "/x", false},
+		{"http url", "http://api.example.com/cb", good, false},
+		{"url without scheme", "api.example.com/cb", good, false},
+		{"url with query", "https://api.example.com/cb?t=1", good, false},
+		{"percent in secret", "https://api.example.com/cb", good + "%2F", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{ClubkonnectCallbackURL: tc.url, ClubkonnectCallbackSecret: tc.secret}
+			armClubkonnectCallback(cfg)
+			armed := cfg.ClubkonnectCallbackURL != "" && cfg.ClubkonnectCallbackSecret != ""
+			if armed != tc.armed {
+				t.Fatalf("armed=%v, want %v", armed, tc.armed)
+			}
+			if !armed && (cfg.ClubkonnectCallbackURL != "" || cfg.ClubkonnectCallbackSecret != "") {
+				t.Fatal("an unarmed callback must clear both halves so the route and the vend agree")
+			}
+		})
+	}
+}

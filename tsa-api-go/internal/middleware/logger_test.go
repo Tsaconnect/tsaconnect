@@ -49,3 +49,26 @@ func TestRequestLogger_LogsThePathNeverTheQuery(t *testing.T) {
 		}
 	}
 }
+
+// A route that authenticates by a secret in its path must not log that secret.
+func TestRequestLogger_MasksASecretPathSegment(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logs := captureLog(t)
+	r := gin.New()
+	r.Use(RequestLogger())
+	r.Any("/api/bills/clubkonnect/callback/:secret", func(c *gin.Context) { c.Status(http.StatusOK) })
+	r.GET("/api/bills/orders/:id", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/bills/clubkonnect/callback/TOPSECRETVALUE", nil))
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/bills/orders/abc-123", nil))
+
+	out := logs.String()
+	if strings.Contains(out, "TOPSECRETVALUE") {
+		t.Errorf("log %q: the path secret leaked", out)
+	}
+	for _, want := range []string{"/api/bills/clubkonnect/callback/:secret 200", "/api/bills/orders/abc-123 200"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log %q: want a line with %q", out, want)
+		}
+	}
+}

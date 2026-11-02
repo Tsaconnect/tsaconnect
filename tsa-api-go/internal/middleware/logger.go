@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,9 +25,20 @@ func RequestLogger() gin.HandlerFunc {
 		log.Printf("[%s] %s %s %d %v",
 			start.Format(time.RFC3339),
 			c.Request.Method,
-			c.Request.URL.Path,
+			loggedPath(c),
 			status,
 			latency,
 		)
 	}
+}
+
+// loggedPath is the request path, except on a route that carries a credential
+// in its path (a ":secret" segment, e.g. a vendor callback that cannot send a
+// header): there it is the route template, so the credential never reaches the
+// log sink. Other paths stay literal — an order id in a path is useful to see.
+func loggedPath(c *gin.Context) string {
+	if route := c.FullPath(); strings.Contains(route, "/:secret") {
+		return route
+	}
+	return c.Request.URL.Path
 }

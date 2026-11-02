@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,15 @@ type fakeBillSvc struct {
 	paymentAction string // "reverse" | "settle" — which admin payment action ran
 	paymentOrder  uuid.UUID
 	stuck         []services.BillStuckPayment
+
+	cbRequestID, cbVendorID string // last ResolveFromCallback arguments
+	cbCalls                 int
+}
+
+func (f *fakeBillSvc) ResolveFromCallback(_ context.Context, requestID, vendorOrderID string) error {
+	f.cbCalls++
+	f.cbRequestID, f.cbVendorID = requestID, vendorOrderID
+	return f.err
 }
 
 func (f *fakeBillSvc) AdminReversePayment(_ context.Context, orderID uuid.UUID) (*models.BillOrder, error) {
@@ -376,5 +387,70 @@ func TestBillHandlerListStuckPayments(t *testing.T) {
 	data, _ := out["data"].(map[string]any)
 	if rows, _ := data["stuck"].([]any); len(rows) != 1 || data["thresholdMinutes"] != float64(60) {
 		t.Fatalf("payload: %v", out["data"])
+	}
+}
+
+func callbackRouter(svc billService, secret string) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	h := NewBillHandler(svc)
+	h.SetCallbackSecret(secret)
+	r.Any("/cb/:secret", h.VendorCallback)
+	return r
+}
+
+func TestVendorCallbackWrongSecretIsNotFoundAndDoesNothing(t *testing.T) {
+	svc := &fakeBillSvc{}
+	r := callbackRouter(svc, "s3cret")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/cb/wrong?orderid=1&requestid=x", nil))
+	if w.Code != http.StatusNotFound || svc.cbCalls != 0 {
+		t.Fatalf("code=%d calls=%d, want 404/0", w.Code, svc.cbCalls)
+	}
+}
+
+func TestVendorCallbackReadsReferencesFromQueryFormAndJSON(t *testing.T) {
+	cases := []struct {
+		name, method, path, ctype, body string
+		wantReq, wantVendor             string
+	}{
+		{"query", http.MethodGet, "/cb/s3cret?RequestID=abc&OrderID=77", "", "", "abc", "77"},
+		{"snake case", http.MethodGet, "/cb/s3cret?request_id=abc&order_id=77", "", "", "abc", "77"},
+		{"form", http.MethodPost, "/cb/s3cret", "application/x-www-form-urlencoded", "orderid=77&requestid=abc", "abc", "77"},
+		{"json", http.MethodPost, "/cb/s3cret", "application/json", `{"orderid":77,"requestid":"abc","statuscode":"200"}`, "abc", "77"},
+		{"multipart", http.MethodPost, "/cb/s3cret", "multipart/form-data; boundary=XX", "--XX\r\nContent-Disposition: form-data; name=\"orderid\"\r\n\r\n77\r\n--XX\r\nContent-Disposition: form-data; name=\"requestid\"\r\n\r\nabc\r\n--XX--\r\n", "abc", "77"},
+		{"json as text/plain", http.MethodPost, "/cb/s3cret", "text/plain", `{"orderid":"77","requestid":"abc"}`, "abc", "77"},
+		{"json without type", http.MethodPost, "/cb/s3cret", "", `{"orderid":"77","requestid":"abc"}`, "abc", "77"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeBillSvc{}
+			r := callbackRouter(svc, "s3cret")
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			if tc.ctype != "" {
+				req.Header.Set("Content-Type", tc.ctype)
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusOK || svc.cbRequestID != tc.wantReq || svc.cbVendorID != tc.wantVendor {
+				t.Fatalf("code=%d req=%q vendor=%q, want 200/%q/%q", w.Code, svc.cbRequestID, svc.cbVendorID, tc.wantReq, tc.wantVendor)
+			}
+		})
+	}
+}
+
+func TestVendorCallbackAnswers200EvenWhenResolveFails(t *testing.T) {
+	svc := &fakeBillSvc{err: errors.New("db down")}
+	r := callbackRouter(svc, "s3cret")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/cb/s3cret?requestid=abc", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d, want 200 so the vendor does not retry-storm", w.Code)
+	}
+}
+
+func TestVendorCallbackDormantWithoutSecret(t *testing.T) {
+	if NewBillHandler(&fakeBillSvc{}).CallbackEnabled() {
+		t.Fatal("callback must be dormant until a secret is set")
 	}
 }

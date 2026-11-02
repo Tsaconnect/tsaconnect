@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -585,6 +587,12 @@ type Config struct {
 	ClubkonnectUserID  string
 	ClubkonnectAPIKey  string
 	ClubkonnectBaseURL string
+	// ClubkonnectCallbackURL is the public URL of POST|GET /api/bills/clubkonnect/callback
+	// and ClubkonnectCallbackSecret the path segment that authenticates it. Both
+	// must be set for the vend to carry a CallBackURL; either unset leaves the
+	// callback dormant and the reconciler as the only way a vend resolves unseen.
+	ClubkonnectCallbackURL    string
+	ClubkonnectCallbackSecret string
 	// ClubkonnectDataplanField picks which catalog field is sent as the vend's
 	// DataPlan param: "code" (PRODUCT_CODE) or "id" (PRODUCT_ID). The gated API
 	// docs don't say which; the default is validated by the live smoke test and
@@ -954,6 +962,34 @@ const (
 	DefaultP2PGasTopUpsPerDay          = 6
 )
 
+// callbackSecretPattern keeps the callback's only credential unguessable and a
+// single path segment: a '/' (base64) or '%' would split or re-encode it so
+// ClubKonnect's calls never match the route, silently.
+var callbackSecretPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,}$`)
+
+// armClubkonnectCallback leaves the callback URL and secret set only as a usable
+// pair — an https URL with a host and no query or fragment (the secret is
+// appended as a path segment), and a secret matching callbackSecretPattern.
+// Anything less clears both, so the route and the vend's CallBackURL agree.
+func armClubkonnectCallback(cfg *Config) {
+	raw, secret := cfg.ClubkonnectCallbackURL, cfg.ClubkonnectCallbackSecret
+	if raw == "" && secret == "" {
+		return
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case raw == "" || secret == "":
+		log.Printf("[config] ClubKonnect callback NOT armed: set both CLUBKONNECT_CALLBACK_URL and _SECRET")
+	case err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "":
+		log.Printf("[config] ClubKonnect callback NOT armed: CLUBKONNECT_CALLBACK_URL must be an https URL with no query or fragment")
+	case !callbackSecretPattern.MatchString(secret):
+		log.Printf("[config] ClubKonnect callback NOT armed: CLUBKONNECT_CALLBACK_SECRET must be at least 32 chars of [A-Za-z0-9_-] (e.g. openssl rand -hex 32)")
+	default:
+		return
+	}
+	cfg.ClubkonnectCallbackURL, cfg.ClubkonnectCallbackSecret = "", ""
+}
+
 func Load() *Config {
 	// Pick the Sonic deployment preset first; individual env vars layered on
 	// top can override any single field. Default is "mainnet" so a production
@@ -1248,6 +1284,9 @@ func Load() *Config {
 	cfg.ClubkonnectAPIKey = strings.TrimSpace(getEnv("CLUBKONNECT_API_KEY", ""))
 	cfg.ClubkonnectBaseURL = strings.TrimSpace(getEnv("CLUBKONNECT_BASE_URL", "https://www.nellobytesystems.com"))
 	cfg.ClubkonnectDataplanField = strings.TrimSpace(getEnv("CLUBKONNECT_DATAPLAN_FIELD", "code"))
+	cfg.ClubkonnectCallbackURL = strings.TrimRight(strings.TrimSpace(getEnv("CLUBKONNECT_CALLBACK_URL", "")), "/")
+	cfg.ClubkonnectCallbackSecret = strings.TrimSpace(getEnv("CLUBKONNECT_CALLBACK_SECRET", ""))
+	armClubkonnectCallback(cfg)
 	cfg.BillsDataMarkupBps = int(getEnvInt64("BILLS_DATA_MARKUP_BPS", 300))
 	cfg.BillsQuoteTTL = time.Duration(getEnvInt64("BILLS_QUOTE_TTL_SECONDS", 300)) * time.Second
 	cfg.BillsFloatAlertNgn = getEnvInt64("BILLS_FLOAT_ALERT_NGN", 100000)
