@@ -634,6 +634,14 @@ func (s *BillService) callVendor(ctx context.Context, o *models.BillOrder) (Bill
 	}
 }
 
+// vendAnswerChangesOrder reports whether a vendor answer carries anything the
+// order does not already record (the same fields adoptVendResult writes).
+func vendAnswerChangesOrder(o *models.BillOrder, res BillVendResult) bool {
+	return (res.OrderID != "" && res.OrderID != o.VendorOrderID) ||
+		(res.StatusCode != 0 && res.StatusCode != o.VendorStatusCode) ||
+		(res.Delivery != "" && truncate512(res.Delivery) != o.DeliveryPayload)
+}
+
 // adoptVendResult moves an order (and its payment) to wherever a vend/query
 // response says it is. Shared by the inline vend, the reconciler and the admin
 // actions. Every order write is guarded on the order still being paid/vending,
@@ -702,6 +710,12 @@ func (s *BillService) adoptVendResult(ctx context.Context, o *models.BillOrder, 
 		s.moveOrder(ctx, o, []string{models.BillStatusVendFail}, map[string]any{"status": models.BillStatusRefunded})
 		return nil
 	default: // pending
+		if o.Status == models.BillStatusVending && !vendAnswerChangesOrder(o, res) {
+			// Nothing new: writing would bump updated_at, and the reconciler
+			// re-asks a vending order every tick, so the order would always look
+			// "just changed" and the admin in-flight grace would refuse it forever.
+			return nil
+		}
 		updates["status"] = models.BillStatusVending
 		if !s.moveOrder(ctx, o, open, updates) {
 			return errBillOrderChanged

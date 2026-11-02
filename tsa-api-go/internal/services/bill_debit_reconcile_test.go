@@ -577,3 +577,33 @@ func TestB3_QuoteTransitionsBumpTheClaimVersion(t *testing.T) {
 		t.Fatalf("claim_seq = %d, want the bulk expire to bump it past %d", got, expiredBefore)
 	}
 }
+
+// A vendor answer that changes nothing must not count as the order changing:
+// the reconciler re-asks a vending order every tick, so a bump on each answer
+// would keep the admin in-flight grace refusing a stuck order forever.
+func TestReconcileNoOpAnswerKeepsVendingOrderReversible(t *testing.T) {
+	r := newBillServiceRig(t)
+	id := r.seedOrder(t, models.BillStatusVending, models.BillPayStatusDebited, time.Hour)
+	before := r.order(t, id).UpdatedAt
+
+	r.vendor.queryResult = BillVendResult{StatusCode: 0, Status: "ORDER_NOT_FOUND"} // pending, nothing new
+	for i := 0; i < 2; i++ {
+		if _, err := r.svc.Reconcile(context.Background(), 5*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.vendor.queryCalls == 0 {
+		t.Fatal("the reconciler never asked the vendor")
+	}
+	if got := r.order(t, id).UpdatedAt; !got.Equal(before) {
+		t.Fatalf("updated_at moved %v → %v on an answer that changed nothing", before, got)
+	}
+
+	r.vendor.queryResult = BillVendResult{OrderID: "931", StatusCode: 510, Status: "ORDER_CANCELLED"}
+	if _, err := r.svc.AdminReversePayment(context.Background(), id); err != nil {
+		t.Fatalf("admin reverse of a long-stuck vending order: %v", err)
+	}
+	if r.payer.reverses != 1 {
+		t.Fatalf("reverses = %d, want 1", r.payer.reverses)
+	}
+}
