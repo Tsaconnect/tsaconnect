@@ -6,7 +6,7 @@
 // replaceServiceAvailability once the product exists.
 //
 // TSA Signature design system only (@/theme + @/components/ui).
-import React from 'react';
+import React, { useState } from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
 import { Button, Card, IconButton, Input, Text, Toggle } from '@/components/ui';
@@ -19,10 +19,34 @@ interface AvailabilityEditorProps {
 
 const DEFAULT_WINDOW = { startTime: '09:00', endTime: '17:00' };
 
+/** Every day of the week, 09:00–17:00: the starting hours of a new listing. */
+export const everyDayWindows = (): AvailabilityWindow[] =>
+  WEEKDAY_LABELS.map((_, day) => ({ dayOfWeek: day, ...DEFAULT_WINDOW }));
+
 const AvailabilityEditor: React.FC<AvailabilityEditorProps> = ({ windows, onChange }) => {
   const { colors, spacing } = useTheme();
 
   const dayActive = (day: number) => windows.some((w) => w.dayOfWeek === day);
+  const allDaysActive = WEEKDAY_LABELS.every((_, day) => dayActive(day));
+
+  // Open every day with the same single window: shown as one row of hours
+  // instead of seven identical day cards, until the merchant asks for per-day.
+  const [perDay, setPerDay] = useState(false);
+  const sameHoursEveryDay =
+    allDaysActive &&
+    windows.length === WEEKDAY_LABELS.length &&
+    windows.every((w) => w.startTime === windows[0].startTime && w.endTime === windows[0].endTime);
+  const compact = sameHoursEveryDay && !perDay;
+  const setAllHours = (patch: Partial<AvailabilityWindow>) => onChange(windows.map((w) => ({ ...w, ...patch })));
+
+  // Switching every day on keeps the hours of days already open.
+  const toggleEveryDay = (on: boolean) => {
+    if (!on) {
+      onChange([]);
+      return;
+    }
+    onChange([...windows, ...everyDayWindows().filter((w) => !dayActive(w.dayOfWeek))]);
+  };
 
   const toggleDay = (day: number, on: boolean) => {
     if (on) {
@@ -61,7 +85,38 @@ const AvailabilityEditor: React.FC<AvailabilityEditorProps> = ({ windows, onChan
 
   return (
     <View style={{ gap: spacing.md }}>
-      {WEEKDAY_LABELS.map((label, day) => {
+      <Card padding="lg">
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text variant="bodyMed" weight="700">
+            Every day
+          </Text>
+          <Toggle value={allDaysActive} onValueChange={toggleEveryDay} accessibilityLabel="Toggle every day" />
+        </View>
+        {compact && (
+          <View style={{ gap: spacing.sm, marginTop: spacing.md }}>
+            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+              <View style={{ flex: 1 }}>
+                <Input
+                  label="From"
+                  value={windows[0].startTime}
+                  onChangeText={(t) => setAllHours({ startTime: t })}
+                  placeholder="09:00"
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Input
+                  label="To"
+                  value={windows[0].endTime}
+                  onChangeText={(t) => setAllHours({ endTime: t })}
+                  placeholder="17:00"
+                />
+              </View>
+            </View>
+            <Button title="Set different hours per day" variant="ghost" size="sm" onPress={() => setPerDay(true)} />
+          </View>
+        )}
+      </Card>
+      {!compact && WEEKDAY_LABELS.map((label, day) => {
         const active = dayActive(day);
         const dayWindows = windows.filter((w) => w.dayOfWeek === day);
         return (

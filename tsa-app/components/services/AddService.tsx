@@ -8,8 +8,8 @@
 // The form branches on the chosen category's `serviceType`:
 //   - contact : portfolio images + basic info + Access/Call-Out fee + coverage
 //   - order   : basic info + menu builder + delivery-fee tiers + availability + coverage
-//   - booking : basic info + booking-fee tiers + access/call-out + availability +
-//               slot config + policies + address/coverage/operating company
+//   - booking : basic info + price tiers + fixed/quote + extra fees + availability +
+//               time slots + workflow + booking form + policies + coverage/operating company
 //
 // TSA Signature design system only (@/theme + @/components/ui).
 import {
@@ -64,7 +64,7 @@ import {
   ShippingRatesFields,
   UsdStorageNote,
 } from "@/components/products/MerchantPricingFields";
-import AvailabilityEditor from "./AvailabilityEditor";
+import AvailabilityEditor, { everyDayWindows } from "./AvailabilityEditor";
 import { SchemaFields } from "@/components/forms/SchemaFields";
 import { useCategoryListingFields } from "@/hooks/useCategoryListingFields";
 import { cleanSchemaAnswers, validateSchemaAnswers } from "@/utils/schemaFields";
@@ -82,7 +82,7 @@ interface AddServiceProps {
 }
 
 const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => {
-  const { token } = useAuth();
+  const { token, currentUser } = useAuth();
   const { colors, spacing, radius } = useTheme();
   const isEdit = !!editProductId;
   // Every fee below is typed in the merchant's currency and submitted in USD.
@@ -133,9 +133,16 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   // What the price buys (per seat, per night, …), from the category's units.
   const [priceUnit, setPriceUnit] = useState<string>("");
 
-  // Menu (order) + availability (order/booking).
+  // Menu (order) + availability (contact/order/booking).
   const [menuItems, setMenuItems] = useState<MenuDraft[]>([emptyMenuDraft()]);
-  const [availability, setAvailability] = useState<AvailabilityWindow[]>([]);
+  // A new listing starts open every day; an edit loads its saved hours.
+  const [availability, setAvailability] = useState<AvailabilityWindow[]>(() =>
+    editProductId ? [] : everyDayWindows()
+  );
+
+  // Whether an edit loaded the saved hours. Only then may a save replace them
+  // with an empty list (all days closed); a failed load must not wipe them.
+  const availabilityLoaded = useRef(false);
 
   // Ids of menu items loaded on edit-prefetch, used to reconcile deletes on save.
   const originalMenuIds = useRef<string[]>([]);
@@ -212,6 +219,23 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     };
     if (token) fetchCategories();
   }, [token]);
+
+  // A new listing starts with the merchant's own contact details. Each field
+  // fills once, when the profile first has it: a later refresh must not refill
+  // a field the merchant cleared, and a partial first profile must not block it.
+  const contactPrefilled = useRef({ phone: false, email: false });
+  useEffect(() => {
+    if (isEdit || !currentUser) return;
+    const done = contactPrefilled.current;
+    if (!done.phone && currentUser.phoneNumber) {
+      done.phone = true;
+      setPhoneNumber((prev) => prev || currentUser.phoneNumber);
+    }
+    if (!done.email && currentUser.email) {
+      done.email = true;
+      setEmail((prev) => prev || currentUser.email);
+    }
+  }, [isEdit, currentUser]);
 
   // On edit, prefetch the product + service config and populate the form.
   useEffect(() => {
@@ -290,14 +314,21 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
             Object.fromEntries(items.map((it, i) => [menuPriceKey(drafts[i]), it.priceUsd]))
           );
         }
-
-        // Availability.
-        const availRes = await getServiceAvailability(editProductId);
-        if (Array.isArray(availRes.data?.windows)) {
-          setAvailability(availRes.data!.windows);
-        }
       } catch {
         // Best-effort prefetch — leave blanks the merchant can fill in.
+      }
+
+      // Hours load on their own, so a failed menu or profile call cannot leave
+      // the editor showing every day closed over hours that are really saved.
+      // The API sends null for a listing with no hours: that is a load of none.
+      try {
+        const availRes = await getServiceAvailability(editProductId);
+        if (availRes.success) {
+          setAvailability(availRes.data?.windows ?? []);
+          availabilityLoaded.current = true;
+        }
+      } catch {
+        // Not loaded: a save then leaves the saved hours alone.
       } finally {
         setPrefetching(false);
       }
@@ -399,9 +430,15 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
       }
     }
 
-    // Availability windows (contact + order + booking).
-    if (availability.length > 0) {
-      await replaceServiceAvailability(productId, availability);
+    // Availability windows (contact + order + booking). A stay has no hours
+    // editor, so it keeps none: not the every-day default a new form starts
+    // with, nor the hours of a category it was moved from. An edit saves an
+    // empty list too, so closing every day sticks.
+    const windows = isBooking && isStay ? [] : availability;
+    if (windows.length > 0 || availabilityLoaded.current) {
+      const saved = await replaceServiceAvailability(productId, windows);
+      // The client reports failure in the result rather than throwing.
+      if (!saved.success) throw new Error(saved.message || "Could not save opening hours");
     }
   };
 
@@ -426,7 +463,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     // A category that restricts price units needs a fixed-price booking to pick
     // one (the API refuses none: it would charge per seat or night).
     if (isBooking && pricingMethod === "fixed" && categoryPriceUnits && priceUnitOptions.length > 0 && !priceUnit) {
-      Alert.alert("Missing details", "Choose what the price is for, under Pricing.");
+      Alert.alert("Missing details", "Choose what the price covers, under Fixed price or quote.");
       return;
     }
     const choiceless = isBooking ? fieldsMissingOptions(bookingFields) : [];
@@ -539,12 +576,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   };
 
   const resetForm = () => {
-    setPhoneNumber("");
+    setPhoneNumber(currentUser?.phoneNumber || "");
     setCategory("");
     setListingValues({});
     setListingErrors({});
     setDescription("");
-    setEmail("");
+    setEmail(currentUser?.email || "");
     setLocation({ country: '', state: '', city: '' });
     setArea('');
     setProductImages([]);
@@ -559,7 +596,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
     setOperatingCompany("");
     setPolicies(emptyPolicyValues());
     setMenuItems([emptyMenuDraft()]);
-    setAvailability([]);
+    setAvailability(everyDayWindows());
   };
 
   const selectedCategoryTitle = categories.find((c) => c.id === category)?.title;
@@ -571,7 +608,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   );
 
   // The per-zone distance-fee editor, relabelled per type.
-  const renderDistanceTiers = (heading: string, sub: string) => (
+  const renderDistanceTiers = (heading: string, sub: string, showPresets: boolean) => (
     <>
       <Text variant="title3" weight="600" style={{ marginTop: spacing['2xl'], marginBottom: spacing.xs }}>
         {heading}
@@ -586,6 +623,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           onCard
           residentialPriceable={residentialPriceable}
           presetLabel="Quick-select base fee"
+          showPresets={showPresets}
         />
       </Card>
     </>
@@ -594,7 +632,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
   // Access + optional call-out flat fees (contact + booking).
   const renderAccessFees = () => (
     <>
-      {sectionTitle(isContact ? "Pricing" : "Access & call-out fees")}
+      {sectionTitle(isContact ? "Pricing" : "Extra fees (optional)")}
       <Card padding="lg" style={{ gap: spacing.lg }}>
         <LocalAmountInput
           pricing={pricing}
@@ -651,19 +689,25 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Header */}
-          <Text variant="title1" weight="700">
-            {isEdit ? "Edit Service" : "Add Service"}
-          </Text>
-          <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
-            Fill in the details to list your service
-          </Text>
 
           {prefetching && (
             <View style={{ marginTop: spacing.lg }}>
               <Spinner label="Loading…" />
             </View>
           )}
+
+          {/* Category first: it decides which sections the rest of the form shows. */}
+          <Text variant="title3" weight="600" style={{ marginBottom: spacing.md }}>
+            What service do you offer?
+          </Text>
+          <Card padding="lg">
+            <SelectRow
+              label="Category *"
+              value={selectedCategoryTitle}
+              placeholder="Select a category"
+              onPress={() => setCategorySheetVisible(true)}
+            />
+          </Card>
 
           {/* Image Upload */}
           <Text variant="title3" weight="600" style={{ marginTop: spacing['2xl'], marginBottom: spacing.md }}>
@@ -749,13 +793,6 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
               placeholder="e.g. Plumbing & Pipe Repair"
             />
 
-            <SelectRow
-              label="Category *"
-              value={selectedCategoryTitle}
-              placeholder="Select a category"
-              onPress={() => setCategorySheetVisible(true)}
-            />
-
             <Input
               label="Description *"
               placeholder="Describe your service, expertise, and what clients can expect..."
@@ -799,7 +836,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                   {renderAccessFees()}
                   {renderDistanceTiers(
                     `Call-out fee (${pricing.selectedCurrency.symbol})`,
-                    "Mobilisation/transport by buyer area. All optional — blank = free."
+                    "Mobilisation/transport by buyer area. All optional — blank = free.",
+                    false
                   )}
 
                   {sectionTitle("Available days & hours")}
@@ -817,7 +855,8 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
 
                   {renderDistanceTiers(
                     `Delivery fee (${pricing.selectedCurrency.symbol})`,
-                    "Per-area delivery cost, including same residential area."
+                    "Per-area delivery cost, including same residential area.",
+                    true
                   )}
 
                   {sectionTitle("Operating days & hours")}
@@ -827,13 +866,50 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                 </>
               )}
 
-              {/* BOOKING: fee tiers + access/call-out + availability + slots + policies */}
+              {/* BOOKING: price (+ what it is per) and extra fees first, then
+                  hours and slots, then how bookings work and the fine print. */}
               {isBooking && (
                 <>
                   {renderDistanceTiers(
-                    `Booking fee (${pricing.selectedCurrency.symbol})`,
-                    "Per-area fee, including same residential area."
+                    `Price (${pricing.selectedCurrency.symbol})`,
+                    "Same Residential Area is your main price. The other areas apply when the customer is farther away.",
+                    false
                   )}
+
+                  {sectionTitle("Fixed price or quote")}
+                  <Card padding="lg" style={{ gap: spacing.sm }}>
+                    <SegmentedControl
+                      segments={[
+                        { key: "fixed", label: "Fixed price" },
+                        { key: "on_request", label: "Price on request" },
+                      ]}
+                      value={pricingMethod}
+                      onChange={(k) => setPricingMethod(k as PricingMethod)}
+                    />
+                    <Text variant="caption" color="textSecondary">
+                      {pricingMethod === "fixed"
+                        ? "You set the price up front."
+                        : "You name the price when you approve each request."}
+                    </Text>
+                    {pricingMethod === "fixed" && priceUnitOptions.length > 0 && (
+                      <View style={{ gap: spacing.xs, marginTop: spacing.sm }}>
+                        <Text variant="bodyMed" weight="600">
+                          What the price covers
+                        </Text>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.xs }}>
+                          {priceUnitOptions.map((u) => (
+                            <Chip
+                              key={u}
+                              label={PRICE_UNIT_LABELS[u]}
+                              selected={priceUnit === u}
+                              // Tapping the chosen unit again clears it.
+                              onPress={() => setPriceUnit(priceUnit === u ? "" : u)}
+                            />
+                          ))}
+                        </View>
+                      </View>
+                    )}
+                  </Card>
 
                   {renderAccessFees()}
 
@@ -858,12 +934,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                       {sectionTitle("Availability")}
                       <AvailabilityEditor windows={availability} onChange={setAvailability} />
 
-                      {sectionTitle("Slot configuration")}
+                      {sectionTitle("Time slots")}
                       <Card padding="lg" style={{ gap: spacing.lg }}>
                         <View style={{ flexDirection: 'row', gap: spacing.md }}>
                           <View style={{ flex: 1 }}>
                             <Input
-                              label="Slot duration (min)"
+                              label="Minutes per booking"
                               placeholder="e.g. 60"
                               keyboardType="number-pad"
                               value={slotDurationMinutes}
@@ -872,7 +948,7 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                           </View>
                           <View style={{ flex: 1 }}>
                             <Input
-                              label={isUnslottedPlaces ? placesCopy.label : "Max per slot"}
+                              label={isUnslottedPlaces ? placesCopy.label : "Bookings per time slot"}
                               placeholder={isUnslottedPlaces ? "e.g. 50" : "e.g. 1"}
                               keyboardType="number-pad"
                               value={maxCapacityPerSlot}
@@ -882,53 +958,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                         </View>
                         {isUnslottedPlaces ? (
                           <Text variant="caption" color="textSecondary">
-                            {placesCopy.helper} Leave the slot duration empty to sell without time slots.
+                            {placesCopy.helper} Leave minutes per booking empty to sell without time slots.
                           </Text>
                         ) : null}
                       </Card>
                     </>
                   )}
-
-                  {sectionTitle("Policies")}
-                  <PolicyFields
-                    value={policies}
-                    onChange={(patch) => setPolicies((prev) => ({ ...prev, ...patch }))}
-                  />
-
-                  {sectionTitle("Pricing")}
-                  <Card padding="lg" style={{ gap: spacing.sm }}>
-                    <SegmentedControl
-                      segments={[
-                        { key: "fixed", label: "Fixed price" },
-                        { key: "on_request", label: "Price on request" },
-                      ]}
-                      value={pricingMethod}
-                      onChange={(k) => setPricingMethod(k as PricingMethod)}
-                    />
-                    <Text variant="caption" color="textSecondary">
-                      {pricingMethod === "fixed"
-                        ? "You set the price up front."
-                        : "You name the price when you approve each request."}
-                    </Text>
-                    {pricingMethod === "fixed" && priceUnitOptions.length > 0 && (
-                      <View style={{ gap: spacing.xs, marginTop: spacing.sm }}>
-                        <Text variant="bodyMed" weight="600">
-                          The price is
-                        </Text>
-                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: spacing.xs }}>
-                          {priceUnitOptions.map((u) => (
-                            <Chip
-                              key={u}
-                              label={PRICE_UNIT_LABELS[u]}
-                              selected={priceUnit === u}
-                              // Tapping the chosen unit again clears it.
-                              onPress={() => setPriceUnit(priceUnit === u ? "" : u)}
-                            />
-                          ))}
-                        </View>
-                      </View>
-                    )}
-                  </Card>
 
                   {sectionTitle("Booking workflow")}
                   <Card padding="lg" style={{ gap: spacing.sm }}>
@@ -982,6 +1017,12 @@ const AddService: React.FC<AddServiceProps> = ({ productId: editProductId }) => 
                       ) : null}
                     </>
                   )}
+
+                  {sectionTitle("Policies")}
+                  <PolicyFields
+                    value={policies}
+                    onChange={(patch) => setPolicies((prev) => ({ ...prev, ...patch }))}
+                  />
 
                   {renderCoverage(true)}
 

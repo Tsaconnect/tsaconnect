@@ -108,11 +108,14 @@ export const ShippingRatesFields = ({
   onCard,
   residentialPriceable,
   presetLabel = 'Package size (optional quick-select)',
+  showPresets = true,
 }: {
   pricing: MerchantPricing;
   onCard?: boolean;
   residentialPriceable?: boolean;
   presetLabel?: string;
+  // Package sizes only mean something for shipped goods and deliveries.
+  showPresets?: boolean;
 }) => {
   const { colors, spacing, radius } = useTheme();
   const { selectedCurrency, isUsd } = pricing;
@@ -120,41 +123,44 @@ export const ShippingRatesFields = ({
 
   return (
     <View style={{ gap: spacing.md }}>
-      <Text variant="bodySm" weight="600" color="textSecondary">
-        {presetLabel}
-      </Text>
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-        {PACKAGE_SIZE_PRESETS.map((preset) => {
-          const localPreset = pricing.toLocal(preset.baseFee);
-          return (
-            <PressableScale
-              key={preset.key}
-              onPress={() => pricing.applyPackagePreset(preset.baseFee)}
-              disabled={!pricing.ready}
-              style={{
-                flex: 1,
-                minWidth: 90,
-                paddingVertical: spacing.sm,
-                paddingHorizontal: spacing.sm,
-                borderRadius: radius.md,
-                borderWidth: 1,
-                borderColor: colors.border,
-                backgroundColor: onCard ? colors.surfaceAlt : colors.surface,
-                alignItems: 'center',
-                gap: 2,
-              }}
-            >
-              <Text variant="caption" weight="700" align="center">
-                {preset.label}
-              </Text>
-              <Text variant="caption" weight="600" color="accent">
-                ${preset.baseFee}
-                {!isUsd && localPreset ? ` · ${selectedCurrency.symbol}${localPreset}` : ''}
-              </Text>
-            </PressableScale>
-          );
-        })}
-      </View>
+      {showPresets && (
+        <>
+          <Text variant="bodySm" weight="600" color="textSecondary">
+            {presetLabel}
+          </Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
+            {PACKAGE_SIZE_PRESETS.map((preset) => {
+              const localPreset = pricing.toLocal(preset.baseFee);
+              return (
+                <PressableScale
+                  key={preset.key}
+                  onPress={() => pricing.applyPackagePreset(preset.baseFee)}
+                  disabled={!pricing.ready}
+                  style={{
+                    flex: 1,
+                    minWidth: 90,
+                    paddingVertical: spacing.sm,
+                    paddingHorizontal: spacing.sm,
+                    borderRadius: radius.md,
+                    borderWidth: 1,
+                    borderColor: colors.border,
+                    backgroundColor: onCard ? colors.surfaceAlt : colors.surface,
+                    alignItems: 'center',
+                    gap: 2,
+                  }}
+                >
+                  <Text variant="caption" weight="700" align="center">
+                    {preset.label}
+                  </Text>
+                  <Text variant="caption" weight="600" color="accent">
+                    {!isUsd && localPreset ? `${selectedCurrency.symbol}${localPreset}` : `$${preset.baseFee}`}
+                  </Text>
+                </PressableScale>
+              );
+            })}
+          </View>
+        </>
+      )}
 
       <Input
         label={`Base fee (${selectedCurrency.symbol})`}
