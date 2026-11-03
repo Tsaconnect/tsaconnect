@@ -272,3 +272,58 @@ describe('IT sell — step 2 re-quote vs. going back', () => {
     expect(text(tree)).not.toContain('PIN-PROMPT');
   });
 });
+
+describe('IT sell — step 2 payout currency change', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    getITSellQuote.mockReset();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const pickCurrency = (tree: ReactTestRenderer, id: string) => {
+    const sheet = tree.root.findAll((n) => n.props.title === 'Payout currency' && typeof n.props.onSelect === 'function')[0];
+    return act(async () => {
+      sheet.props.onSelect({ id });
+    });
+  };
+
+  it('shows the converted amount once the new currency is priced', async () => {
+    const tree = await mountAtPayout('100', quote('100', '284700'));
+    const usdQuote = quote('100', '280000');
+    getITSellQuote.mockResolvedValueOnce({
+      ...usdQuote,
+      data: { ...usdQuote.data, currency: 'USD', destinationAmount: '1.95' },
+    });
+    await pickCurrency(tree, 'USD');
+    await flush();
+    expect(text(tree)).toContain('You receive: ≈ 1.95 USD');
+    expect(text(tree)).toContain('[Sell]');
+  });
+
+  it('re-prices for the new currency, holds Sell meanwhile, and drops a stale answer', async () => {
+    const tree = await mountAtPayout('100', quote('100', '284700'));
+
+    const usd = deferred<unknown>();
+    getITSellQuote.mockReturnValueOnce(usd.promise);
+    await pickCurrency(tree, 'USD');
+    expect(getITSellQuote).toHaveBeenLastCalledWith({ mcgpAmount: '100000000000000000000' }, 'USD');
+    // Until the USD price lands the summary shows no naira figures as USD.
+    expect(text(tree)).toContain('You receive: …');
+    expect(text(tree)).toContain('[Sell:disabled]');
+
+    // Back to NGN before the USD answer arrives: the USD answer must not land.
+    getITSellQuote.mockResolvedValueOnce(quote('100', '284700'));
+    await pickCurrency(tree, 'NGN');
+    await flush();
+    const usdQuote = quote('100', '284700');
+    await act(async () => {
+      usd.resolve({ ...usdQuote, data: { ...usdQuote.data, currency: 'USD', destinationAmount: '2.00' } });
+    });
+    await flush();
+    expect(text(tree)).not.toContain('≈');
+    expect(text(tree)).not.toContain('You receive: …');
+    expect(text(tree)).toContain('[Sell]');
+  });
+});

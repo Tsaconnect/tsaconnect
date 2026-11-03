@@ -376,10 +376,17 @@ export default function ITSell() {
     : dest.accountName;
   const accountTail = (isCorridor ? details.accountNumber ?? '' : dest.accountNumber).replace(/\s/g, '');
   const maskedAccount = accountTail.length > 4 ? `••••${accountTail.slice(-4)}` : accountTail;
-  const receiveText = (q: ITSellQuote) =>
-    payoutCurrency !== 'NGN' && q.destinationAmount
-      ? `≈ ${Number(q.destinationAmount).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${payoutCurrency}`
-      : formatKobo(q.netKobo);
+  // The agreed quote answers for the currency on screen only once its
+  // re-price has landed; until then the summary shows no figures and Sell
+  // waits.
+  const priced = !!agreed && agreed.currency === payoutCurrency;
+  const receiveText = (q: ITSellQuote) => {
+    if (q.currency !== payoutCurrency) return '…';
+    if (payoutCurrency !== 'NGN' && q.destinationAmount) {
+      return `≈ ${Number(q.destinationAmount).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${payoutCurrency}`;
+    }
+    return formatKobo(q.netKobo);
+  };
 
   const onAssetChange = (next: string) => {
     if (next === 'USDC' || next === 'USDT') {
@@ -417,41 +424,54 @@ export default function ITSell() {
     setStep('payout');
   };
 
-  // Refresh the agreed quote right before the PIN. The sell re-prices at
-  // submit; a move is shown for a second look, never applied silently.
-  const onSell = async () => {
+  // Re-price the agreed amount for `currency` on step 2. A currency change
+  // calls it straight away (fees and the converted amount differ per
+  // corridor) and Sell calls it right before the PIN. Every call takes a new
+  // sequence number, so only the latest answer lands; a move is shown for a
+  // second look, never applied silently.
+  const requote = async (currency: string, thenAuthorize: boolean) => {
     const params = agreedRequest ? quoteParams(agreedRequest) : null;
     if (!agreed || !params) return;
-    if (!payoutReady) {
-      setPayoutError(isCorridor ? 'Fill in every payout detail' : 'Select a bank and enter a valid account number');
-      return;
-    }
+    const previous = agreed;
     setPayoutError('');
     setPayoutRetry(null);
     setChecking(true);
     const seq = ++sellCheckSeq.current;
-    const r = await getITSellQuote(params, payoutCurrency);
+    const r = await getITSellQuote(params, currency);
     if (seq !== sellCheckSeq.current) return;
     setChecking(false);
     if (!r.success || !r.data) {
       if (isRetryable(r)) setPayoutRetry(retryMessage(r));
-      else setPayoutError(r.message || 'Could not price this sale');
+      else if (thenAuthorize) setPayoutError(r.message || 'Could not price this sale');
+      // A currency change that failed for good still needs a way forward:
+      // Retry re-prices (and the picker stays open to another currency).
+      else setPayoutRetry(r.message || 'Could not price a payout in this currency.');
       return;
     }
     const fresh = r.data;
+    setAgreed(fresh);
     if (spendable == null || exceedsSpendable(fresh.mcgpAmount, spendable)) {
-      setAgreed(fresh);
+      setMovedNote(null);
       setPayoutError('More than your spendable balance at the current rate — go back and lower the amount.');
       return;
     }
-    const moved = sellQuoteMoved(agreed, fresh);
-    setAgreed(fresh);
+    // Same currency: a price that moved is shown, never applied silently.
+    // A new currency is a new summary, which the user reads before Sell.
+    const moved = previous.currency === fresh.currency ? sellQuoteMoved(previous, fresh) : null;
     if (moved) {
       setMovedNote(`${moved} Check the summary and tap Sell again.`);
       return;
     }
     setMovedNote(null);
-    setShowAuth(true);
+    if (thenAuthorize) setShowAuth(true);
+  };
+
+  const onSell = () => {
+    if (!payoutReady) {
+      setPayoutError(isCorridor ? 'Fill in every payout detail' : 'Select a bank and enter a valid account number');
+      return;
+    }
+    void requote(payoutCurrency, true);
   };
 
   const submitSell = async () => {
@@ -608,9 +628,9 @@ export default function ITSell() {
           <Card>
             <SummaryCard>
               <SummaryRow label="You sell" value={`${formatMcgp(agreed.mcgpAmount)} MCGP`} />
-              <SummaryRow label="Fees" value={`−${formatKobo(agreed.feeKobo)}`} />
+              <SummaryRow label="Fees" value={priced ? `−${formatKobo(agreed.feeKobo)}` : '…'} />
               <SummaryRow label="You receive" value={receiveText(agreed)} total />
-              {payoutCurrency !== 'NGN' && agreed.destinationAmount ? (
+              {priced && payoutCurrency !== 'NGN' && agreed.destinationAmount ? (
                 <Text variant="caption" color="textMuted">
                   {formatKobo(agreed.netKobo)} converted at Flutterwave&apos;s rate when the payout is sent.
                 </Text>
@@ -634,7 +654,13 @@ export default function ITSell() {
               <Text variant="bodySm" color="textSecondary">{movedNote}</Text>
             </View>
           ) : null}
-          {payoutRetry ? <RetryNotice message={payoutRetry} onRetry={onSell} busy={checking} /> : null}
+          {payoutRetry ? (
+            <RetryNotice
+              message={payoutRetry}
+              onRetry={() => (priced ? onSell() : void requote(payoutCurrency, false))}
+              busy={checking}
+            />
+          ) : null}
           {payoutError ? (
             <Text variant="bodySm" style={{ color: colors.danger }}>{payoutError}</Text>
           ) : null}
@@ -643,7 +669,7 @@ export default function ITSell() {
             title="Sell"
             onPress={onSell}
             loading={checking}
-            disabled={!payoutReady || checking}
+            disabled={!payoutReady || checking || !priced}
           />
           <Button title="Back" variant="ghost" leftIcon="chevronLeft" onPress={backToAmount} />
         </ScrollView>
@@ -655,7 +681,12 @@ export default function ITSell() {
           items={currencyOptions}
           selectedId={payoutCurrency}
           onSelect={(item) => {
+            if (item.id === payoutCurrency) {
+              setShowCurrencyPicker(false);
+              return;
+            }
             setPayoutCurrency(item.id);
+            void requote(item.id, false);
             setCountry(countryFor(item.id));
             // Another corridor asks for other fields; never carry a routing
             // number or IBAN across.
