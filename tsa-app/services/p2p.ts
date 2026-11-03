@@ -420,6 +420,8 @@ export const chainsApi = {
 export interface NgBank {
   code: string;
   name: string;
+  /** Provider bank id (Flutterwave directories only), for branch lookups. */
+  id?: string;
 }
 
 export interface AccountResolveResult {
@@ -438,6 +440,10 @@ export const banksApi = {
    */
   listIn: (country: string) =>
     request<NgBank[]>('GET', `/p2p/banks?country=${encodeURIComponent(country)}`),
+
+  /** Branches of one bank (by its provider id), for corridors that pay to a branch (Ghana). */
+  branches: (bankId: string) =>
+    request<NgBank[]>('GET', `/p2p/banks/branches?bankId=${encodeURIComponent(bankId)}`),
 
   /**
    * NUBAN name enquiry. Resolves the account holder name for a 10-digit

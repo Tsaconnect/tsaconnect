@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -34,6 +35,14 @@ func NewNombaHTTPGateway(client *NombaClient) *NombaHTTPGateway {
 // per-PM sub-account routing is gone — corporate PMs are virtual accounts, not
 // sub-accounts).
 func (g *NombaHTTPGateway) InitiatePayout(ctx context.Context, req PayoutRequest) (string, error) {
+	// A foreign corridor's recipient lives only in Details (the account
+	// number on the request is a masked tail). Nomba pays naira only, so
+	// refusing before any request is the honest answer: no transfer exists.
+	dest := strings.ToUpper(strings.TrimSpace(req.DestinationCurrency))
+	rail := strings.ToLower(strings.TrimSpace(req.RailType))
+	if len(req.Details) > 0 || (dest != "" && dest != "NGN") || (rail != "" && rail != "bank") {
+		return "", &ProviderRejectedError{Err: errors.New("nomba payout: only naira bank payouts are supported")}
+	}
 	amount, err := strconv.ParseFloat(strings.TrimSpace(req.AmountNGN), 64)
 	if err != nil {
 		return "", fmt.Errorf("bad payout amount %q: %w", req.AmountNGN, err)

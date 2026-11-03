@@ -366,7 +366,7 @@ func (h *ITHandler) SellQuote(c *gin.Context) {
 		utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	utils.SuccessResponse(c, http.StatusOK, "Sell quote", gin.H{
+	resp := gin.H{
 		"mode":       mode,
 		"currency":   currency,
 		"mcgpAmount": price.McgpWei.String(),
@@ -377,7 +377,19 @@ func (h *ITHandler) SellQuote(c *gin.Context) {
 		// Same shape as GET /api/it/quote's `quote`, so the app renders the
 		// itemized lines with the code it already has.
 		"feeQuote": price.Fees.Lines,
-	})
+	}
+	// A foreign payout shows what actually lands in the recipient's account:
+	// the net converted at Flutterwave's rate (its FX spread included). It is
+	// an estimate here — the payout converts at the rate of the moment.
+	if currency != "NGN" {
+		if netMajor, cErr := strconv.ParseFloat(price.Fees.Net.String(), 64); cErr == nil {
+			if dest, rate, qErr := h.it.QuoteWithdrawal(c.Request.Context(), netMajor/100, currency); qErr == nil {
+				resp["destinationAmount"] = strconv.FormatFloat(dest, 'f', 2, 64)
+				resp["ngnPerDestinationUnit"] = strconv.FormatFloat(rate, 'f', 4, 64)
+			}
+		}
+	}
+	utils.SuccessResponse(c, http.StatusOK, "Sell quote", resp)
 }
 
 // GET /api/it/withdraw/destinations — the product catalog of currency/rail
@@ -762,6 +774,10 @@ type itSellReq struct {
 	MobileNetwork       string `json:"mobileNetwork"`
 	MobileCountry       string `json:"mobileCountry"`
 	MobileMsisdn        string `json:"mobileMsisdn"`
+
+	// Details is the recipient detail a foreign corridor asks for (its
+	// catalog `fields`), keyed by field key. Ignored for NGN.
+	Details map[string]string `json:"details"`
 }
 
 // POST /api/it/sell — debit spendable premium (credited first, then bought) and open the NGN payout.
@@ -792,11 +808,32 @@ func (h *ITHandler) Sell(c *gin.Context) {
 	// than creating an intent the payout leg can't complete. Empty rail AND
 	// currency ⇒ legacy NGN bank, which needs no catalog check (it predates
 	// the catalog and isn't itself catalog-gated here).
+	var details map[string]string
 	if req.RailType != "" || req.DestinationCurrency != "" {
-		if !services.IsSupportedWithdrawalDestination(req.DestinationCurrency, req.RailType, req.MobileNetwork) {
+		dest, ok := services.LookupWithdrawalDestination(req.DestinationCurrency, req.RailType, req.MobileNetwork)
+		if !ok {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Unsupported withdrawal destination for this currency/rail combination")
 			return
 		}
+		// A corridor's recipient detail is checked BEFORE the debit: the
+		// provider would refuse an incomplete one too, but only after the
+		// user's MCGP is gone.
+		clean, err := services.ValidatePayoutDetails(dest, req.Details)
+		if err != nil {
+			var de *services.PayoutDetailsError
+			if errors.As(err, &de) {
+				utils.ErrorResponseWithCodeData(c, http.StatusBadRequest, "Check the highlighted payout details",
+					"payout_details_invalid", gin.H{"fields": de.Fields})
+				return
+			}
+			utils.ErrorResponse(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		if clean != nil && h.it.HasAutoPayout() && !h.it.PaysForeignCorridors() {
+			utils.ErrorResponse(c, http.StatusServiceUnavailable, "Payouts to this currency are not available right now")
+			return
+		}
+		details = clean
 	}
 	rail := strings.ToLower(strings.TrimSpace(req.RailType))
 	// When auto-payout is wired, the destination is mandatory — a sell with no
@@ -805,8 +842,10 @@ func (h *ITHandler) Sell(c *gin.Context) {
 	// or a catalog bank currency like GHS); mobile_money's required fields are
 	// enforced by the service layer (validateSellBank).
 	var bank *services.ITSellBank
-	switch rail {
-	case "", "bank":
+	switch {
+	case details != nil:
+		bank = &services.ITSellBank{Details: details}
+	case rail == "" || rail == "bank":
 		if req.BankCode != "" || req.AccountNumber != "" {
 			// The 10-digit NUBAN rule is NGN-specific — a non-NGN bank rail
 			// (e.g. GHS) has a different account-number format, so only
@@ -827,7 +866,7 @@ func (h *ITHandler) Sell(c *gin.Context) {
 			utils.ErrorResponse(c, http.StatusBadRequest, "Select a payout bank account")
 			return
 		}
-	default:
+	default: // mobile_money
 		bank = &services.ITSellBank{
 			MobileNetwork: req.MobileNetwork,
 			MobileCountry: req.MobileCountry,
@@ -1332,6 +1371,16 @@ func (h *ITHandler) AdminListIntents(c *gin.Context) {
 	rows := make([]gin.H, 0, len(intents))
 	for i := range intents {
 		row := gin.H{"intent": intents[i]}
+		// A foreign corridor's recipient (IBAN, routing number, address) is
+		// what an operator needs to pay a sell by hand, so it is shown only
+		// while the sell can still need that; the intent never serialises it.
+		if in := &intents[i]; in.PayoutDetails != "" && sellMayNeedManualPayout(in.Status) {
+			if d, err := services.SellPayoutDetails(in); err == nil {
+				row["payoutDetails"] = d
+			} else {
+				log.Printf("[it] admin list intent=%s: %v", in.ID, err)
+			}
+		}
 		if acc, ok := accounts[intents[i].UserID]; ok {
 			row["account"] = acc
 		}
@@ -2017,4 +2066,10 @@ func (h *ITHandler) GetStableBuyChains(c *gin.Context) {
 		return
 	}
 	utils.SuccessResponse(c, http.StatusOK, "Chains", gin.H{"chains": chains})
+}
+
+// sellMayNeedManualPayout: a sell whose payout is still open — debited and
+// waiting, or parked for an operator.
+func sellMayNeedManualPayout(status string) bool {
+	return status == models.ITStatusDebited || status == models.ITStatusNeedsReview
 }

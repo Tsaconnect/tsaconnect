@@ -76,7 +76,7 @@ func (d flutterwaveBankDirectory) ListBanksIn(ctx context.Context, country strin
 	}
 	out := make([]NombaBank, 0, len(banks))
 	for _, b := range banks {
-		out = append(out, NombaBank{Code: b.Code, Name: b.Name})
+		out = append(out, NombaBank{Code: b.Code, Name: b.Name, ID: b.ID.String()})
 	}
 	return out, nil
 }
@@ -102,4 +102,22 @@ func (d flutterwaveBankDirectory) ResolveIn(ctx context.Context, currency, bankC
 		return NombaLookupResult{}, err
 	}
 	return NombaLookupResult{AccountNumber: accountNumber, AccountName: name}, nil
+}
+
+// BankBranchLister is the optional directory capability behind corridors that
+// pay to a branch (Ghana, francophone West Africa).
+type BankBranchLister interface {
+	ListBranches(ctx context.Context, bankID string) ([]NombaBank, error)
+}
+
+func (d flutterwaveBankDirectory) ListBranches(ctx context.Context, bankID string) ([]NombaBank, error) {
+	branches, err := d.c.ListBankBranches(ctx, bankID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]NombaBank, 0, len(branches))
+	for _, b := range branches {
+		out = append(out, NombaBank{Code: b.Code, Name: b.Name, ID: b.ID.String()})
+	}
+	return out, nil
 }

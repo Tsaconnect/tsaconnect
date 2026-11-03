@@ -271,14 +271,27 @@ export const getITVA = () =>
 export const activateITVA = (idType: 'BVN' | 'NIN', idNumber: string) =>
   req<{ va: ITVA; payTo: ITPayTo }>('POST', '/it/va/activate', { idType, idNumber });
 
+// One input of a foreign corridor's payout form. The server decides which
+// fields a corridor needs and validates the same list before the debit, so a
+// new corridor (or a new required field) needs no app release.
+export interface PayoutField {
+  key: string;
+  label: string;
+  kind: 'text' | 'email' | 'phone' | 'country' | 'select' | 'bank' | 'branch' | string;
+  options?: string[];
+  hint?: string;
+}
+
 // One entry from GET /it/withdraw/destinations — product catalog of
 // currency/rail (and, for mobile_money, network) combinations IT withdrawal
-// supports. Currently NGN/bank only until multi-currency sell is re-enabled.
+// supports. `fields` empty ⇒ the legacy NGN bank form (name enquiry).
 export interface WithdrawDestination {
   currency: string;
   rail: 'bank' | 'mobile_money' | string;
   network?: string; // mobile_money only, e.g. "wave"
   label: string;
+  country?: string; // ISO-2 whose bank list a "bank" field loads
+  fields?: PayoutField[];
 }
 
 // GET /api/it/withdraw/destinations — product catalog (NGN/bank only until
@@ -365,6 +378,9 @@ export interface ITSellQuote {
   feeKobo: string;
   netKobo: string; // what lands in the bank — exact, not an estimate
   feeQuote: ITFeeQuote;
+  // Foreign payout only: the net converted at the provider's rate of the
+  // moment (an estimate — the payout converts when it is sent).
+  destinationAmount?: string;
 }
 
 // Exactly one of mcgpAmount (wei: "what does selling this pay?") or
@@ -392,6 +408,8 @@ export interface ITSellOptions {
   mobileNetwork?: string; // mobile_money only, from the selected catalog entry
   mobileCountry?: string; // mobile_money only, ISO-2 e.g. "SN"
   mobileMsisdn?: string; // mobile_money only
+  // Foreign corridor recipient detail, keyed by the corridor's field keys.
+  details?: Record<string, string>;
 }
 
 // mcgpAmount is base-unit wei (string) — semantics unchanged. `opts` carries

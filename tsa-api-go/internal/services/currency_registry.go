@@ -127,6 +127,9 @@ func DefaultCurrencies() []models.Currency {
 		{Code: "USD", Exponent: 2, PayoutEnabled: true},
 		{Code: "EUR", Exponent: 2, PayoutEnabled: true},
 		{Code: "GBP", Exponent: 2, PayoutEnabled: true},
+		// ZAR: payout-only via Flutterwave bank transfer, paid from the NGN
+		// balance (cross-currency direct transfer, 2026-11-03).
+		{Code: "ZAR", Exponent: 2, PayoutEnabled: true},
 	}
 }
 

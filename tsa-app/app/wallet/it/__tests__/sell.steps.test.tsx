@@ -98,6 +98,15 @@ jest.mock('@/components/it/BankDestination', () => {
   };
 });
 
+// The foreign-corridor form loads bank lists over the network; these tests
+// cover the NGN flow, so it only has to exist.
+jest.mock('@/components/it/PayoutDetailsForm', () => ({
+  __esModule: true,
+  default: () => null,
+  payoutDetailsComplete: (fields: { key: string }[], values: Record<string, string>) =>
+    fields.every((f) => (values[f.key] ?? '').trim() !== ''),
+}));
+
 jest.mock('@/services/itApi', () => ({
   __esModule: true,
   IT_AGREEMENT_REQUIRED: 'it_agreement_required',

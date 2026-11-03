@@ -294,6 +294,56 @@ func fwIdempotencyKey(ref string) string {
 
 // ─── Banks + name enquiry ──────────────────────────────────────────────────
 
+// ListBankBranches returns a bank's branches (GET /banks/{id}/branches,
+// live-verified 2026-11-03 for Ghana), cached like the bank list. bankID is
+// Flutterwave's numeric bank id, not its code.
+func (c *FlutterwaveClient) ListBankBranches(ctx context.Context, bankID string) ([]FWBank, error) {
+	if !c.IsEnabled() {
+		return nil, ErrFlutterwaveDisabled
+	}
+	bankID = strings.TrimSpace(bankID)
+	if bankID == "" {
+		return nil, errors.New("flutterwave branches: bank id required")
+	}
+	key := "branches:" + bankID
+	c.banksMu.Lock()
+	if entry, ok := c.banks[key]; ok && time.Since(entry.at) < fwBanksTTL {
+		out := make([]FWBank, len(entry.banks))
+		copy(out, entry.banks)
+		c.banksMu.Unlock()
+		return out, nil
+	}
+	c.banksMu.Unlock()
+
+	resp, raw, err := c.authedRequest(ctx, http.MethodGet, "/banks/"+url.PathEscape(bankID)+"/branches", nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("flutterwave branches: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fwError("branches", resp.StatusCode, raw)
+	}
+	var env fwEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("flutterwave branches decode: %w", err)
+	}
+	var branches []FWBank
+	if err := json.Unmarshal(env.Data, &branches); err != nil {
+		return nil, fmt.Errorf("flutterwave branches decode data: %w", err)
+	}
+	filtered := branches[:0]
+	for _, b := range branches {
+		if b.Code != "" && b.Name != "" {
+			filtered = append(filtered, b)
+		}
+	}
+	c.banksMu.Lock()
+	c.banks[key] = fwBanksEntry{at: time.Now(), banks: filtered}
+	c.banksMu.Unlock()
+	out := make([]FWBank, len(filtered))
+	copy(out, filtered)
+	return out, nil
+}
+
 // ListBanks returns Flutterwave's supported banks for an ISO-2 country
 // (default NG), cached 24h per country. Callers get a copy.
 func (c *FlutterwaveClient) ListBanks(ctx context.Context, country string) ([]FWBank, error) {
@@ -604,11 +654,40 @@ type FWTransferRecipient struct {
 	Wallet      *FWRecipientWallet      `json:"wallet,omitempty"`
 	Crypto      *FWRecipientCrypto      `json:"crypto,omitempty"`
 	Name        *FWRecipientName        `json:"name,omitempty"`
+	// Contact and address: required by the non-African bank corridors
+	// (bank_usd, bank_gbp, bank_eur, bank_zar), absent otherwise.
+	Email   string              `json:"email,omitempty"`
+	Phone   *FWRecipientPhone   `json:"phone,omitempty"`
+	Address *FWRecipientAddress `json:"address,omitempty"`
 }
 
+// FWRecipientBank is the bank branch of a recipient. Which identifiers a
+// corridor needs is the provider's (live-probed 2026-11-03): USD code +
+// routing_number + swift_code + account_type; GBP sort_code + name +
+// account_type; EUR swift_code + name (IBAN in account_number); GHS/XOF
+// code + branch; NGN/KES/ZAR code.
 type FWRecipientBank struct {
-	Code          string `json:"code"`
+	Code          string `json:"code,omitempty"`
 	AccountNumber string `json:"account_number"`
+	RoutingNumber string `json:"routing_number,omitempty"`
+	SwiftCode     string `json:"swift_code,omitempty"`
+	SortCode      string `json:"sort_code,omitempty"`
+	Name          string `json:"name,omitempty"`
+	AccountType   string `json:"account_type,omitempty"`
+	Branch        string `json:"branch,omitempty"`
+}
+
+type FWRecipientPhone struct {
+	CountryCode string `json:"country_code"`
+	Number      string `json:"number"`
+}
+
+type FWRecipientAddress struct {
+	Line1      string `json:"line1"`
+	City       string `json:"city"`
+	State      string `json:"state"`
+	PostalCode string `json:"postal_code"`
+	Country    string `json:"country"`
 }
 
 type FWRecipientMobileMoney struct {

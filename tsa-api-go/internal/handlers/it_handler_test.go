@@ -170,7 +170,7 @@ func TestSell_UnsupportedDestination_Returns400NoIntent(t *testing.T) {
 	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
 
 	cases := []map[string]any{
-		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "KES", "railType": "bank",
+		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "CAD", "railType": "bank",
 			"bankCode": "044", "accountNumber": "0123456789"},
 		{"mcgpAmount": "1000000000000000000", "destinationCurrency": "GHS", "railType": "mobile_money",
 			"mobileNetwork": "wave", "mobileCountry": "GH", "mobileMsisdn": "233241234567"},
@@ -301,7 +301,7 @@ func TestSell_NonNGNBank_RejectedByCatalog(t *testing.T) {
 
 	w := doITSell(h, user, map[string]any{
 		"mcgpAmount":          "1000000000000000000",
-		"destinationCurrency": "KES",
+		"destinationCurrency": "CAD",
 		"railType":            "bank",
 		"bankCode":            "044",
 		"accountNumber":       "1234567",
@@ -678,5 +678,47 @@ func TestCurrencies_NonPaycrestProviderIsNotLookedUpInPaycrestsBook(t *testing.T
 	if rows["GHS"].RampBuy || rows["GHS"].RampSell {
 		t.Errorf("GHS = %+v, want no legs until Flutterwave has a leg source of its own",
 			rows["GHS"])
+	}
+}
+
+// A foreign corridor's recipient detail is checked before anything moves: an
+// incomplete USD sell is a 400 naming every missing field, and no intent (so
+// no debit) exists.
+func TestSell_ForeignCorridor_MissingDetails_400NamesFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, db := newITTestHandler(t)
+	user := &models.User{ID: uuid.New(), WalletAddress: "0xWALLET"}
+
+	w := doITSell(h, user, map[string]any{
+		"mcgpAmount":          "1000000000000000000",
+		"destinationCurrency": "USD",
+		"railType":            "bank",
+		"details":             map[string]string{"firstName": "Ada", "lastName": "Obi", "routingNumber": "123"},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+	}
+	resp := decodeITResponse(t, w)
+	if resp["code"] != "payout_details_invalid" {
+		t.Fatalf("code = %v, want payout_details_invalid (body=%s)", resp["code"], w.Body.String())
+	}
+	data, _ := resp["data"].(map[string]any)
+	fields, _ := data["fields"].([]any)
+	got := map[string]bool{}
+	for _, f := range fields {
+		got[f.(string)] = true
+	}
+	for _, want := range []string{"routingNumber", "accountNumber", "swiftCode", "email", "addressLine1"} {
+		if !got[want] {
+			t.Errorf("fields %v missing %q", fields, want)
+		}
+	}
+	if got["firstName"] {
+		t.Error("a valid field was reported as bad")
+	}
+	var n int64
+	db.Model(&models.ITIntent{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("no intent should be created, got %d", n)
 	}
 }

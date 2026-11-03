@@ -153,7 +153,7 @@ func TestQuoteWithdrawal_UnsupportedCurrency(t *testing.T) {
 	svc := NewITService(nil, nil, nil)
 	svc.SetRateQuoter(c)
 
-	for _, currency := range []string{"KES", "ZAR", "XOF"} {
+	for _, currency := range []string{"XOF", "UGX", "CAD"} {
 		if _, _, err := svc.QuoteWithdrawal(context.Background(), 15000, currency); err != ErrUnsupportedWithdrawalCurrency {
 			t.Fatalf("%s: err = %v, want ErrUnsupportedWithdrawalCurrency", currency, err)
 		}

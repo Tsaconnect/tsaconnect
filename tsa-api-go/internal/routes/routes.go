@@ -854,6 +854,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		banksGroup.Use(auth)
 		{
 			banksGroup.GET("", p2p.ListNigerianBanks)
+			banksGroup.GET("/branches", p2p.ListBankBranches)
 			banksGroup.GET("/resolve", p2p.ResolveAccountName)
 		}
 	}

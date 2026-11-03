@@ -321,6 +321,13 @@ type ITIntent struct {
 	MobileNetwork       string `gorm:"size:32" json:"mobileNetwork,omitempty"`
 	MobileCountry       string `gorm:"size:2" json:"mobileCountry,omitempty"`
 	MobileMsisdn        string `gorm:"size:20" json:"mobileMsisdn,omitempty"`
+	// PayoutDetails is a foreign corridor's recipient detail (name, bank
+	// identifiers, contact, address) as a JSON string map — which fields exist
+	// is the corridor's, not the schema's (services.WithdrawalDestinationCatalog).
+	// Recipient PII: never serialised, never logged. Empty for NGN and for
+	// intents from before 2026-11. For these intents AccountNumber holds only a
+	// masked tail (an IBAN does not fit its column, and it is display-only).
+	PayoutDetails string `gorm:"type:text" json:"-"`
 	// PayoutID is the fiat provider's transfer id for the sell payout leg; the
 	// transfer.disburse webhook closes the intent against it.
 	PayoutID string `gorm:"size:64;index" json:"payoutId,omitempty"`

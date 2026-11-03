@@ -394,6 +394,31 @@ func (h *P2PHandler) DeletePaymentMethod(c *gin.Context) {
 
 // ─── Bank directory & name enquiry (Nomba-backed) ──────────────────────────
 
+// GET /api/p2p/banks/branches?bankId= — a bank's branches, for payout
+// corridors that need one (Ghana). bankId is the id from the bank list.
+func (h *P2PHandler) ListBankBranches(c *gin.Context) {
+	if _, ok := h.require(c); !ok {
+		return
+	}
+	lister, ok := h.banks.(services.BankBranchLister)
+	if !h.HasNomba() || !ok {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "Branch directory is unavailable"})
+		return
+	}
+	bankID := strings.TrimSpace(c.Query("bankId"))
+	if bankID == "" || len(bankID) > 12 || strings.Trim(bankID, "0123456789") != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "bankId must be the numeric id from the bank list"})
+		return
+	}
+	branches, err := lister.ListBranches(c.Request.Context(), bankID)
+	if err != nil {
+		log.Printf("[p2p] bank branches bank=%s: %v", bankID, err)
+		c.JSON(http.StatusBadGateway, gin.H{"success": false, "message": "Could not load branches. Try again."})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Branches", "data": branches})
+}
+
 // ListNigerianBanks returns the Nomba-supported Nigerian bank directory.
 // The frontend uses this to populate the bank dropdown on the add-payment
 // form. Results are cached server-side; clients should additionally

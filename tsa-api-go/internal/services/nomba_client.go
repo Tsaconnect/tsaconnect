@@ -49,6 +49,9 @@ type NombaClient struct {
 type NombaBank struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
+	// ID is the provider's own bank id (Flutterwave), needed to list a
+	// bank's branches. Empty for Nomba.
+	ID string `json:"id,omitempty"`
 }
 
 type lookupEntry struct {

@@ -53,8 +53,10 @@ import {
   type ITFeeQuote,
   type ITSellQuote,
   getWithdrawDestinations,
+  type WithdrawDestination,
 } from '@/services/itApi';
 import { BankDestination, type BankDestinationValue } from '@/components/it/BankDestination';
+import PayoutDetailsForm, { payoutDetailsComplete } from '@/components/it/PayoutDetailsForm';
 import {
   exceedsSpendable,
   formatKobo,
@@ -79,6 +81,8 @@ const CURRENCY_META: Record<string, { label: string; country: string }> = {
   USD: { label: 'USD · US Dollar', country: 'US' },
   EUR: { label: 'EUR · Euro', country: '' },
   GBP: { label: 'GBP · Pound Sterling', country: 'GB' },
+  KES: { label: 'KES · Kenyan Shilling', country: 'KE' },
+  ZAR: { label: 'ZAR · South African Rand', country: 'ZA' },
 };
 
 function currencyLabelFor(code: string): string {
@@ -229,6 +233,10 @@ export default function ITSell() {
     { id: 'NGN', label: currencyLabelFor('NGN'), icon: 'wallet' },
   ]);
   const [showMethodPicker, setShowMethodPicker] = useState(false);
+  // Full catalog entries: a foreign corridor's `fields` decide its form.
+  const [destinations, setDestinations] = useState<WithdrawDestination[]>([]);
+  const [details, setDetails] = useState<Record<string, string>>({});
+  const [invalidFields, setInvalidFields] = useState<string[]>([]);
 
   // The quote the user agreed to on Continue — frozen, so a late step-1
   // response can never change what step 2 submits. Refreshed (and the change
@@ -293,10 +301,11 @@ export default function ITSell() {
       if (cancelled || !res.success || !res.data?.destinations?.length) return;
       const banksOnly = res.data.destinations.filter((d) => d.rail === 'bank');
       if (banksOnly.length === 0) return;
+      setDestinations(banksOnly);
       setCurrencyOptions(
         banksOnly.map((d) => ({
           id: d.currency,
-          label: currencyLabelFor(d.currency),
+          label: CURRENCY_META[d.currency] ? currencyLabelFor(d.currency) : `${d.currency} · ${d.label}`,
           icon: 'wallet' as const,
         }))
       );
@@ -356,6 +365,22 @@ export default function ITSell() {
     METHOD_OPTIONS.find((o) => o.id === transferMethod)?.label ?? transferMethod;
   const countryLabel = country || '—';
 
+  // A foreign corridor collects its own recipient fields; NGN keeps the bank
+  // form with name enquiry.
+  const corridor = destinations.find((d) => d.currency === payoutCurrency && d.rail === 'bank');
+  const corridorFields = corridor?.fields ?? [];
+  const isCorridor = corridorFields.length > 0;
+  const payoutReady = isCorridor ? payoutDetailsComplete(corridorFields, details) : dest.ready;
+  const recipientLabel = isCorridor
+    ? `${details.firstName ?? ''} ${details.lastName ?? ''}`.trim()
+    : dest.accountName;
+  const accountTail = (isCorridor ? details.accountNumber ?? '' : dest.accountNumber).replace(/\s/g, '');
+  const maskedAccount = accountTail.length > 4 ? `••••${accountTail.slice(-4)}` : accountTail;
+  const receiveText = (q: ITSellQuote) =>
+    payoutCurrency !== 'NGN' && q.destinationAmount
+      ? `≈ ${Number(q.destinationAmount).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${payoutCurrency}`
+      : formatKobo(q.netKobo);
+
   const onAssetChange = (next: string) => {
     if (next === 'USDC' || next === 'USDT') {
       // NGN stablecoin trades route through Paycrest, not Flutterwave: ~0.24-1.1%
@@ -397,8 +422,8 @@ export default function ITSell() {
   const onSell = async () => {
     const params = agreedRequest ? quoteParams(agreedRequest) : null;
     if (!agreed || !params) return;
-    if (!dest.ready) {
-      setPayoutError('Select a bank and enter a valid account number');
+    if (!payoutReady) {
+      setPayoutError(isCorridor ? 'Fill in every payout detail' : 'Select a bank and enter a valid account number');
       return;
     }
     setPayoutError('');
@@ -436,13 +461,26 @@ export default function ITSell() {
     setError('');
     setStep('submitting');
 
-    const r = await itSell(quoted.mcgpAmount, {
-      destinationCurrency: payoutCurrency,
-      railType: transferMethod,
-      bankCode: dest.bankCode.trim(),
-      accountNumber: dest.accountNumber.trim(),
-      accountName: dest.accountName.trim(),
-    });
+    const r = await itSell(
+      quoted.mcgpAmount,
+      isCorridor
+        ? { destinationCurrency: payoutCurrency, railType: 'bank', details }
+        : {
+            destinationCurrency: payoutCurrency,
+            railType: transferMethod,
+            bankCode: dest.bankCode.trim(),
+            accountNumber: dest.accountNumber.trim(),
+            accountName: dest.accountName.trim(),
+          },
+    );
+    if (r.code === 'payout_details_invalid') {
+      // Refused before any debit: mark the fields and go back to them.
+      const bad = (r.errorData as { fields?: unknown } | undefined)?.fields;
+      setInvalidFields(Array.isArray(bad) ? bad.filter((f): f is string => typeof f === 'string') : []);
+      setPayoutError(r.message || 'Check the highlighted payout details');
+      setStep('payout');
+      return;
+    }
     if (r.code === IT_AGREEMENT_REQUIRED) {
       // Reached here without accepting (deep link / stale state) — the hub owns
       // the agreement gate; send them there.
@@ -551,20 +589,41 @@ export default function ITSell() {
               on-chain debit. Read-only keeps them impossible to desync. */}
           <SummaryRow label="Country / region" value={countryLabel} />
 
-          <BankDestination currency={payoutCurrency} value={dest} onChange={handleDestChange} />
+          {isCorridor ? (
+            <PayoutDetailsForm
+              fields={corridorFields}
+              country={corridor?.country}
+              values={details}
+              invalid={invalidFields}
+              onChange={(next) => {
+                setDetails(next);
+                setInvalidFields([]);
+                setPayoutError('');
+              }}
+            />
+          ) : (
+            <BankDestination currency={payoutCurrency} value={dest} onChange={handleDestChange} />
+          )}
 
           <Card>
             <SummaryCard>
               <SummaryRow label="You sell" value={`${formatMcgp(agreed.mcgpAmount)} MCGP`} />
               <SummaryRow label="Fees" value={`−${formatKobo(agreed.feeKobo)}`} />
-              <SummaryRow label="You receive" value={formatKobo(agreed.netKobo)} total />
+              <SummaryRow label="You receive" value={receiveText(agreed)} total />
+              {payoutCurrency !== 'NGN' && agreed.destinationAmount ? (
+                <Text variant="caption" color="textMuted">
+                  {formatKobo(agreed.netKobo)} converted at Flutterwave&apos;s rate when the payout is sent.
+                </Text>
+              ) : null}
               <Divider spacing="xs" />
               <SummaryRow
                 label="To account"
                 value={
-                  dest.ready
-                    ? `${dest.bankName || dest.bankCode} · ${dest.accountNumber}\n${dest.accountName}`
-                    : '—'
+                  !payoutReady
+                    ? '—'
+                    : isCorridor
+                      ? `${maskedAccount}\n${recipientLabel}`
+                      : `${dest.bankName || dest.bankCode} · ${dest.accountNumber}\n${dest.accountName}`
                 }
               />
             </SummaryCard>
@@ -584,7 +643,7 @@ export default function ITSell() {
             title="Sell"
             onPress={onSell}
             loading={checking}
-            disabled={!dest.ready || checking}
+            disabled={!payoutReady || checking}
           />
           <Button title="Back" variant="ghost" leftIcon="chevronLeft" onPress={backToAmount} />
         </ScrollView>
@@ -598,6 +657,10 @@ export default function ITSell() {
           onSelect={(item) => {
             setPayoutCurrency(item.id);
             setCountry(countryFor(item.id));
+            // Another corridor asks for other fields; never carry a routing
+            // number or IBAN across.
+            setDetails({});
+            setInvalidFields([]);
             setShowCurrencyPicker(false);
           }}
         />
@@ -615,7 +678,7 @@ export default function ITSell() {
         <AuthorizationModal
           visible={showAuth}
           title="Authorize sell"
-          description={`Sell ${formatMcgp(agreed.mcgpAmount)} MCGP for ${formatKobo(agreed.netKobo)} to ${dest.accountName} (${dest.accountNumber})`}
+          description={`Sell ${formatMcgp(agreed.mcgpAmount)} MCGP for ${receiveText(agreed)} to ${recipientLabel} (${maskedAccount})`}
           onAuthorized={submitSell}
           onCancel={() => setShowAuth(false)}
         />

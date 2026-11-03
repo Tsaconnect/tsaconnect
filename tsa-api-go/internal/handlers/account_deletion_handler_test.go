@@ -80,7 +80,7 @@ func setupDeletionTestDB(t *testing.T) *gorm.DB {
 
 	// The ramp tables come from their models, so the blocker and erasure
 	// queries are tested against the real column names.
-	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.PaycrestOrderRecord{}, &models.PayMerchant{}, &models.PayPayment{}, &models.WebTrustedBrowser{}); err != nil {
+	if err := db.AutoMigrate(&models.RampSellIntent{}, &models.ITIntent{}, &models.PaycrestOrderRecord{}, &models.PayMerchant{}, &models.PayPayment{}, &models.WebTrustedBrowser{}); err != nil {
 		t.Fatalf("migrate ramp tables: %v", err)
 	}
 

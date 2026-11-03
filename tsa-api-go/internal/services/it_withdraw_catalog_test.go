@@ -2,7 +2,7 @@ package services
 
 import "testing"
 
-// TestWithdrawalDestinationCatalog pins the product catalog: the five payout
+// TestWithdrawalDestinationCatalog pins the product catalog: the seven payout
 // currencies on bank rails.
 //
 // Mobile money is deliberately absent even though the gateway supports it —
@@ -11,7 +11,7 @@ import "testing"
 // debit has already left the user's premium in limbo.
 func TestWithdrawalDestinationCatalog(t *testing.T) {
 	want := map[string]string{
-		"NGN": "bank", "GHS": "bank", "USD": "bank", "EUR": "bank", "GBP": "bank",
+		"NGN": "bank", "GHS": "bank", "KES": "bank", "ZAR": "bank", "USD": "bank", "EUR": "bank", "GBP": "bank",
 	}
 	if len(WithdrawalDestinationCatalog) != len(want) {
 		t.Fatalf("catalog has %d entries, want %d: %+v", len(WithdrawalDestinationCatalog), len(want), WithdrawalDestinationCatalog)

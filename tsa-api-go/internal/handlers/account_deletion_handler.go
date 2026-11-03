@@ -402,6 +402,14 @@ func (h *Handlers) CompleteAccountDeletionRequest(c *gin.Context) {
 			Updates(models.WithBankDetailsCleared(map[string]any{})).Error; err != nil {
 			return err
 		}
+		// Foreign-corridor recipient detail (name, account, contact, address)
+		// on finished IT sells.
+		if err := tx.Model(&models.ITIntent{}).
+			Where("user_id = ? AND status IN ? AND COALESCE(payout_details, '') <> ''", req.UserID,
+				[]string{models.ITStatusSettled, models.ITStatusReversed, models.ITStatusFailed, models.ITStatusCancelled}).
+			Updates(map[string]any{"payout_details": "", "account_name": "", "bank_code": "", "account_number": ""}).Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&models.PaycrestOrderRecord{}).
 			Where("user_id = ? AND status IN ?", req.UserID, models.PaycrestResolvedStatuses()).
 			Updates(models.WithPayoutDetailsCleared(map[string]any{})).Error; err != nil {

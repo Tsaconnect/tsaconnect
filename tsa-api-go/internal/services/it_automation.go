@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -86,6 +87,10 @@ type ITSellBank struct {
 	MobileNetwork       string // mobile_money only, e.g. "wave"
 	MobileCountry       string // mobile_money only, ISO-2, e.g. "SN"
 	MobileMsisdn        string // mobile_money only
+
+	// Details is a foreign corridor's recipient detail, already validated
+	// against the corridor (ValidatePayoutDetails). Nil for NGN.
+	Details map[string]string
 }
 
 // validateSellBank fails fast (before any chain call) on a malformed sell
@@ -125,6 +130,36 @@ func applySellBank(intent *models.ITIntent, bank *ITSellBank) {
 	intent.MobileNetwork = strings.TrimSpace(bank.MobileNetwork)
 	intent.MobileCountry = strings.ToUpper(strings.TrimSpace(bank.MobileCountry))
 	intent.MobileMsisdn = strings.TrimSpace(bank.MobileMsisdn)
+	if len(bank.Details) > 0 {
+		raw, _ := json.Marshal(bank.Details)
+		intent.PayoutDetails = string(raw)
+		intent.BankCode = strings.TrimSpace(bank.Details[PayoutFieldBank])
+		intent.AccountNumber = maskAccountTail(bank.Details[PayoutFieldAccountNumber])
+		intent.AccountName = strings.TrimSpace(bank.Details[PayoutFieldFirstName] + " " + bank.Details[PayoutFieldLastName])
+	}
+}
+
+// maskAccountTail keeps the last four characters of an account number or IBAN
+// for display; the full value lives only in PayoutDetails.
+func maskAccountTail(acct string) string {
+	acct = strings.ReplaceAll(strings.TrimSpace(acct), " ", "")
+	if len(acct) <= 4 {
+		return acct
+	}
+	return "****" + acct[len(acct)-4:]
+}
+
+// sellPayoutDetails decodes an intent's corridor recipient detail; nil when
+// it has none (NGN and older intents).
+func SellPayoutDetails(intent *models.ITIntent) (map[string]string, error) {
+	if strings.TrimSpace(intent.PayoutDetails) == "" {
+		return nil, nil
+	}
+	var d map[string]string
+	if err := json.Unmarshal([]byte(intent.PayoutDetails), &d); err != nil {
+		return nil, fmt.Errorf("it payout: unreadable payout details: %w", err)
+	}
+	return d, nil
 }
 
 // sellIntentHasPayoutDestination reports whether the intent carries a payout
@@ -134,6 +169,9 @@ func applySellBank(intent *models.ITIntent, bank *ITSellBank) {
 func sellIntentHasPayoutDestination(intent *models.ITIntent) bool {
 	switch strings.ToLower(strings.TrimSpace(intent.RailType)) {
 	case "", "bank":
+		if strings.TrimSpace(intent.PayoutDetails) != "" {
+			return intent.AccountNumber != ""
+		}
 		return intent.BankCode != "" && intent.AccountNumber != ""
 	case "mobile_money":
 		return intent.MobileNetwork != "" && intent.MobileCountry != "" && intent.MobileMsisdn != ""
@@ -155,6 +193,17 @@ func (s *ITService) SetVAProvisioner(v ITVAProvisioner) { s.va = v }
 
 // HasAutoPayout reports whether sell payouts fire automatically.
 func (s *ITService) HasAutoPayout() bool { return s != nil && s.payout != nil }
+
+// PaysForeignCorridors reports whether the wired payout gateway can pay a
+// foreign corridor (recipient in Details, converted from naira). Only
+// Flutterwave can; Sell refuses a corridor otherwise, before any debit.
+func (s *ITService) PaysForeignCorridors() bool {
+	if s == nil {
+		return false
+	}
+	_, ok := s.payout.(*FlutterwaveGateway)
+	return ok
+}
 
 // HasVAProvisioning reports whether buys get per-intent virtual accounts.
 func (s *ITService) HasVAProvisioning() bool { return s != nil && s.va != nil }
@@ -506,7 +555,13 @@ func (s *ITService) buildSellPayoutRequest(ctx context.Context, intent *models.I
 		payoutAmount = strconv.FormatFloat(destMajor, 'f', 2, 64)
 	}
 
+	details, err := SellPayoutDetails(intent)
+	if err != nil {
+		return PayoutRequest{}, err
+	}
+
 	return PayoutRequest{
+		Details:       details,
 		BankCode:      intent.BankCode,
 		AccountNumber: intent.AccountNumber,
 		AccountName:   intent.AccountName,

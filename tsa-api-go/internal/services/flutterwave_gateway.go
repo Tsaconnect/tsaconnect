@@ -100,6 +100,10 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 			Name: &FWRecipientName{Full: req.AccountName},
 		}
 	default: // "bank"
+		if len(req.Details) > 0 {
+			pi.Recipient = payoutRecipientFromDetails(req.Details)
+			break
+		}
 		pi.Recipient = FWTransferRecipient{
 			Bank: &FWRecipientBank{
 				Code:          req.BankCode,
@@ -131,4 +135,38 @@ func (g *FlutterwaveGateway) InitiatePayout(ctx context.Context, req PayoutReque
 		}
 	}
 	return transfer.ID, nil
+}
+
+// payoutRecipientFromDetails maps a corridor's recipient detail (keys from
+// it_withdraw_catalog.go) onto the v4 recipient. Only what the corridor
+// collected is set; everything else is omitted, so one mapper serves every
+// corridor and Flutterwave's own validation stays the last word.
+func payoutRecipientFromDetails(d map[string]string) FWTransferRecipient {
+	r := FWTransferRecipient{
+		Bank: &FWRecipientBank{
+			Code:          d[PayoutFieldBank],
+			AccountNumber: d[PayoutFieldAccountNumber],
+			RoutingNumber: d[PayoutFieldRoutingNumber],
+			SwiftCode:     d[PayoutFieldSwiftCode],
+			SortCode:      d[PayoutFieldSortCode],
+			Name:          d[PayoutFieldBankName],
+			AccountType:   d[PayoutFieldAccountType],
+			Branch:        d[PayoutFieldBranch],
+		},
+		Name:  &FWRecipientName{First: d[PayoutFieldFirstName], Last: d[PayoutFieldLastName]},
+		Email: d[PayoutFieldEmail],
+	}
+	if d[PayoutFieldPhoneNumber] != "" {
+		r.Phone = &FWRecipientPhone{CountryCode: d[PayoutFieldPhoneCode], Number: d[PayoutFieldPhoneNumber]}
+	}
+	if d[PayoutFieldAddressLine1] != "" {
+		r.Address = &FWRecipientAddress{
+			Line1:      d[PayoutFieldAddressLine1],
+			City:       d[PayoutFieldCity],
+			State:      d[PayoutFieldState],
+			PostalCode: d[PayoutFieldPostalCode],
+			Country:    d[PayoutFieldAddressCountry],
+		}
+	}
+	return r
 }

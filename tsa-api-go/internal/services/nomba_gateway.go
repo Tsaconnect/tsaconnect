@@ -36,9 +36,9 @@ type PayoutRequest struct {
 	// SourceCurrency is the balance the payout draws FROM. Empty means NGN.
 	// It does not describe Amount; see above.
 	SourceCurrency string
-	Reference     string // our trade reference (idempotency)
-	AccountName   string // recipient account name (used by live gateway)
-	SenderName    string // sender display name (used by live gateway)
+	Reference      string // our trade reference (idempotency)
+	AccountName    string // recipient account name (used by live gateway)
+	SenderName     string // sender display name (used by live gateway)
 	// Deprecated: SubAccountID is UNUSED under the VA-only corporate model — all
 	// payouts (sell + withdrawal) come from TSA's single parent Nomba account via
 	// client.Transfer. The field is retained so existing call sites compile, but
@@ -51,6 +51,12 @@ type PayoutRequest struct {
 	MobileNetwork       string // mobile_money only, e.g. "wave"
 	MobileCountry       string // mobile_money only, ISO-2, e.g. "SN"
 	MobileMsisdn        string // mobile_money only
+
+	// Details is a foreign corridor's recipient detail keyed by the
+	// PayoutField* names (it_withdraw_catalog.go). Nil ⇒ the legacy body,
+	// unchanged. When set it supplies the bank identifiers, name, contact and
+	// address; BankCode/AccountNumber above are ignored.
+	Details map[string]string
 }
 
 // InboundPayment is a normalized inbound naira credit (buy flow). The webhook
