@@ -191,6 +191,15 @@ type Provider interface {
 	Cancel(ctx context.Context, userID uuid.UUID, nativeID string) (*Order, error)
 }
 
+// LegCapper is a provider that knows the most it could ever offer: the sides
+// that would open if it had stock, a rate and a working read. When it cannot
+// answer RampLegs (an error, or no answer by the deadline), the router counts
+// those sides as open: a side it never offers stays closed, and a side it might
+// offer is not hidden because a read failed.
+type LegCapper interface {
+	MaxLegs() map[string]services.RampLegs
+}
+
 // ConvertedQuoter is a provider that also reaches a requested asset through a
 // settlement leg it delivers to the conversion treasury (spec §15).
 type ConvertedQuoter interface {

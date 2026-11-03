@@ -68,6 +68,11 @@ func (p *TreasuryProvider) Name() string { return ProviderTreasury }
 
 // RampLegs: Buy open while some offered token covers the smallest order and
 // its lane can pay gas; a market-rate failure reads as closed (D58).
+// MaxLegs: the company wallet only ever sells stablecoins for naira (a buy).
+func (p *TreasuryProvider) MaxLegs() map[string]services.RampLegs {
+	return map[string]services.RampLegs{treasuryFiat: {Buy: true}}
+}
+
 func (p *TreasuryProvider) RampLegs(ctx context.Context) (map[string]services.RampLegs, error) {
 	open := false
 	if market, err := p.market.BuyRate(ctx, treasuryFiat); err == nil {

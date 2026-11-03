@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,48 +86,35 @@ func (r *Router) Quote(ctx context.Context, req Request) (*QuoteResult, error) {
 // fails over through all of them and applies the rule itself).
 func (r *Router) quote(ctx context.Context, req Request, rule bool) (*QuoteResult, error) {
 	req = normalise(req)
-	type answer struct {
-		q   *ProviderQuote
-		err error
-	}
-	answers := make([]answer, len(r.providers))
-	var wg sync.WaitGroup
-	for i, p := range r.providers {
-		wg.Add(1)
-		go func(i int, p Provider) {
-			defer wg.Done()
-			pctx, cancel := context.WithTimeout(ctx, r.cfg.ProviderTimeout)
-			defer cancel()
-			q, err := p.Quote(pctx, req)
-			if err == nil && q == nil {
-				err = ErrNoVenue
-			}
-			if req.Want != nil {
-				if cq, ok := p.(ConvertedQuoter); ok {
-					conv, cerr := cq.QuoteConverted(pctx, req)
-					if cerr != nil {
-						log.Printf("[ramp] METRIC ramp_provider_converted_quote_failed provider=%s err=%s",
-							p.Name(), services.RedactAlertText(cerr.Error()))
+	answers := fanOut(ctx, r.providers, r.cfg.ProviderTimeout, func(pctx context.Context, p Provider) (*ProviderQuote, error) {
+		q, err := p.Quote(pctx, req)
+		if err == nil && q == nil {
+			err = ErrNoVenue
+		}
+		if req.Want != nil {
+			if cq, ok := p.(ConvertedQuoter); ok {
+				conv, cerr := cq.QuoteConverted(pctx, req)
+				if cerr != nil {
+					log.Printf("[ramp] METRIC ramp_provider_converted_quote_failed provider=%s err=%s",
+						p.Name(), services.RedactAlertText(cerr.Error()))
+				}
+				if len(conv) > 0 {
+					merged := &ProviderQuote{}
+					if err == nil {
+						merged.MarketRate = q.MarketRate
+						merged.Venues = append(merged.Venues, q.Venues...)
 					}
-					if len(conv) > 0 {
-						merged := &ProviderQuote{}
-						if err == nil {
-							merged.MarketRate = q.MarketRate
-							merged.Venues = append(merged.Venues, q.Venues...)
-						}
-						merged.Venues = append(merged.Venues, conv...)
-						q, err = merged, nil
-					}
+					merged.Venues = append(merged.Venues, conv...)
+					q, err = merged, nil
 				}
 			}
-			if err != nil {
-				log.Printf("[ramp] METRIC ramp_provider_quote_failed provider=%s side=%s fiat=%q err=%v",
-					p.Name(), req.Side, req.FiatCode, err)
-			}
-			answers[i] = answer{q, err}
-		}(i, p)
-	}
-	wg.Wait()
+		}
+		if err != nil {
+			log.Printf("[ramp] METRIC ramp_provider_quote_failed provider=%s side=%s fiat=%q err=%v",
+				p.Name(), req.Side, req.FiatCode, err)
+		}
+		return q, err
+	})
 
 	res := &QuoteResult{FiatCode: req.FiatCode, FiatAmount: req.FiatAmount, Side: string(req.Side), QuotedAt: time.Now()}
 	var errs []error
@@ -138,9 +124,9 @@ func (r *Router) quote(ctx context.Context, req Request, rule bool) (*QuoteResul
 			continue
 		}
 		if res.MarketRate == 0 {
-			res.MarketRate = a.q.MarketRate
+			res.MarketRate = a.val.MarketRate
 		}
-		for _, v := range a.q.Venues {
+		for _, v := range a.val.Venues {
 			// Uniform JSON: every venue carries both rates and a fee list (§14).
 			if strings.TrimSpace(v.EffectiveRate) == "" {
 				v.EffectiveRate = v.Rate
@@ -453,32 +439,120 @@ func quoteError(errs []error) error {
 	}
 }
 
-// RampLegs ORs the providers that answered. An error only when every
-// provider failed — the IT handler then applies its own fallback, so a
-// failed provider never contributes an optimistic "open".
+// RampLegs ORs every provider's legs. Providers are asked at once (fanOut):
+// asked in turn, the pool and treasury's on-chain reads used up the currency
+// list's 2 s and Paycrest — the only NGN sell venue — was asked after the
+// deadline, so NGN sell read as closed while Paycrest was quoting it (prod
+// 2026-11-03).
+//
+// A provider that answers is believed, closed sides included. One that fails
+// or misses the deadline contributes its MaxLegs (LegCapper): what it does
+// not know is not reported closed, and what it never offers is not reported
+// open. A failed provider without MaxLegs contributes nothing. An error only
+// when no provider answered and none could say what it offers — the IT
+// handler then applies its own fallback.
 func (r *Router) RampLegs(ctx context.Context) (map[string]services.RampLegs, error) {
+	asked := fanOut(ctx, r.providers, r.cfg.ProviderTimeout, func(pctx context.Context, p Provider) (map[string]services.RampLegs, error) {
+		return p.RampLegs(pctx)
+	})
 	out := map[string]services.RampLegs{}
-	var lastErr error
-	answered := 0
-	for _, p := range r.providers {
-		legs, err := p.RampLegs(ctx)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		answered++
+	merge := func(legs map[string]services.RampLegs) {
 		for fiat, l := range legs {
 			cur := out[fiat]
 			out[fiat] = services.RampLegs{Buy: cur.Buy || l.Buy, Sell: cur.Sell || l.Sell}
 		}
 	}
-	if answered == 0 {
-		if lastErr == nil {
-			lastErr = ErrUnavailable
+	var errs []error
+	known := 0
+	for i, a := range asked {
+		p := r.providers[i]
+		if a.err == nil {
+			known++
+			merge(a.val)
+			continue
 		}
-		return nil, lastErr
+		errs = append(errs, a.err)
+		if capper, ok := p.(LegCapper); ok {
+			log.Printf("[ramp] METRIC ramp_legs_provider_failed provider=%s err=%v — counting its possible sides as open", p.Name(), a.err)
+			known++
+			merge(capper.MaxLegs())
+			continue
+		}
+		log.Printf("[ramp] METRIC ramp_legs_provider_failed provider=%s err=%v", p.Name(), a.err)
+	}
+	if known == 0 {
+		if len(errs) == 0 {
+			return nil, ErrUnavailable
+		}
+		return nil, errors.Join(errs...)
 	}
 	return out, nil
+}
+
+// fanAnswer is one provider's answer to fanOut.
+type fanAnswer[T any] struct {
+	val T
+	err error
+}
+
+// fanOut asks every provider at once, each under timeout (when positive) and
+// the caller's deadline, and returns the answers in provider order — the
+// order callers use as a tie-break. A provider still running when ctx ends
+// answers an error rather than holding the caller past its deadline, and a
+// panicking provider answers an error instead of taking the process down
+// (gin's recovery does not cover these goroutines).
+func fanOut[T any](ctx context.Context, providers []Provider, timeout time.Duration,
+	ask func(context.Context, Provider) (T, error)) []fanAnswer[T] {
+	out := make([]fanAnswer[T], len(providers))
+	type done struct {
+		i int
+		a fanAnswer[T]
+	}
+	ch := make(chan done, len(providers))
+	for i, p := range providers {
+		go func(i int, p Provider) {
+			var a fanAnswer[T]
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[ramp] ALERT ramp_provider_panic provider=%s: %v", p.Name(), rec)
+					a = fanAnswer[T]{err: fmt.Errorf("%s: provider panicked: %v", p.Name(), rec)}
+				}
+				ch <- done{i, a}
+			}()
+			pctx := ctx
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				pctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			a.val, a.err = ask(pctx, p)
+		}(i, p)
+	}
+	answered := make([]bool, len(providers))
+	for n := 0; n < len(providers); n++ {
+		select {
+		case d := <-ch:
+			out[d.i], answered[d.i] = d.a, true
+		case <-ctx.Done():
+			// An answer already sent counts, even when the deadline is ready
+			// too: select picks among ready cases at random.
+			for drained := false; !drained; {
+				select {
+				case d := <-ch:
+					out[d.i], answered[d.i] = d.a, true
+				default:
+					drained = true
+				}
+			}
+			for i := range out {
+				if !answered[i] {
+					out[i].err = fmt.Errorf("%s: no answer before the deadline: %w", providers[i].Name(), ctx.Err())
+				}
+			}
+			return out
+		}
+	}
+	return out
 }
 
 // order runs fn at the provider holding id. "<provider>:<native>" goes

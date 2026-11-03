@@ -207,6 +207,96 @@ func TestRouterRampLegs_ORAcrossAnsweringProviders(t *testing.T) {
 	}
 }
 
+// Providers are asked at once and the caller's deadline is honoured: a slow
+// provider (the pool's on-chain reads, 2026-11-03) neither starves the fast
+// one nor holds the caller; it counts as not having answered.
+func TestRouterRampLegs_SlowProviderDoesNotStarveOthers(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	slow := &blockingLegs{fakeProvider: fakeProvider{name: "pool", legs: map[string]services.RampLegs{"NGN": {Buy: true}}}, release: release}
+	fast := &fakeProvider{name: "paycrest", legs: map[string]services.RampLegs{"NGN": {Sell: true}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	legs, err := testRouter(slow, fast).RampLegs(ctx)
+	if err != nil || legs["NGN"] != (services.RampLegs{Sell: true}) {
+		t.Fatalf("%+v %v", legs, err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("held the caller %s past its deadline", took)
+	}
+}
+
+func TestRouterRampLegs_PanickingProviderIsAFailure(t *testing.T) {
+	boom := &panicLegs{fakeProvider: fakeProvider{name: "boom"}}
+	fine := &fakeProvider{name: "paycrest", legs: map[string]services.RampLegs{"NGN": {Sell: true}}}
+	legs, err := testRouter(boom, fine).RampLegs(context.Background())
+	if err != nil || !legs["NGN"].Sell {
+		t.Fatalf("%+v %v", legs, err)
+	}
+}
+
+// A provider that cannot answer counts as open only on the sides it could
+// ever offer; one that answered is believed. Paycrest failing must not read
+// NGN sell as closed (2026-11-03), a slow pool must not lose NGN buy, and an
+// out-of-stock pool that answered keeps NGN buy closed.
+func TestRouterRampLegs_FailedProviderCountsItsPossibleSides(t *testing.T) {
+	poolAnswered := &fakeProvider{name: "pool", legs: map[string]services.RampLegs{"NGN": {Buy: false}}}
+	paycrestDown := &cappedLegs{
+		fakeProvider: fakeProvider{name: "paycrest", legsErr: errors.New("book unavailable")},
+		max:          map[string]services.RampLegs{"NGN": {Sell: true}, "UGX": {Sell: true}},
+	}
+	legs, err := testRouter(poolAnswered, paycrestDown).RampLegs(context.Background())
+	if err != nil || legs["NGN"] != (services.RampLegs{Sell: true}) || legs["UGX"] != (services.RampLegs{Sell: true}) {
+		t.Fatalf("%+v %v", legs, err)
+	}
+
+	release := make(chan struct{})
+	defer close(release)
+	slowPool := &cappedBlocking{
+		blockingLegs: blockingLegs{fakeProvider: fakeProvider{name: "pool"}, release: release},
+		max:          map[string]services.RampLegs{"NGN": {Buy: true}},
+	}
+	paycrest := &fakeProvider{name: "paycrest", legs: map[string]services.RampLegs{"NGN": {Sell: true}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	legs, err = testRouter(slowPool, paycrest).RampLegs(ctx)
+	if err != nil || legs["NGN"] != (services.RampLegs{Buy: true, Sell: true}) {
+		t.Fatalf("slow pool: %+v %v", legs, err)
+	}
+}
+
+type cappedLegs struct {
+	fakeProvider
+	max map[string]services.RampLegs
+}
+
+func (c *cappedLegs) MaxLegs() map[string]services.RampLegs { return c.max }
+
+type cappedBlocking struct {
+	blockingLegs
+	max map[string]services.RampLegs
+}
+
+func (c *cappedBlocking) MaxLegs() map[string]services.RampLegs { return c.max }
+
+// blockingLegs ignores its context and answers only when released.
+type blockingLegs struct {
+	fakeProvider
+	release chan struct{}
+}
+
+func (b *blockingLegs) RampLegs(context.Context) (map[string]services.RampLegs, error) {
+	<-b.release
+	return b.legs, nil
+}
+
+type panicLegs struct{ fakeProvider }
+
+func (p *panicLegs) RampLegs(context.Context) (map[string]services.RampLegs, error) {
+	panic("nil market")
+}
+
 func TestRouterReads_ResolveIDs(t *testing.T) {
 	id := uuid.NewString()
 	rec := &models.PaycrestOrderRecord{}

@@ -54,6 +54,11 @@ func newPoolProvider(it poolIT, market services.TreasuryRateSource, openCap time
 func (p *PoolProvider) Name() string   { return ProviderPool }
 func (p *PoolProvider) BandBps() int64 { return p.it.PoolBandBps() }
 
+// MaxLegs: the pool only ever sells USDT for naira (a buy).
+func (p *PoolProvider) MaxLegs() map[string]services.RampLegs {
+	return map[string]services.RampLegs{poolFiat: {Buy: true}}
+}
+
 func (p *PoolProvider) RampLegs(ctx context.Context) (map[string]services.RampLegs, error) {
 	set := p.it.PoolSettingsNow()
 	open := p.it.PoolLegOpen(ctx) && p.it.PoolCanFill(ctx, set.MinSliceUnits, set)

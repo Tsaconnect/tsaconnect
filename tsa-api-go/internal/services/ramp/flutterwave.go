@@ -77,6 +77,17 @@ func newFlutterwaveProvider(it flutterwaveIT) *FlutterwaveProvider {
 
 func (p *FlutterwaveProvider) Name() string { return ProviderFlutterwave }
 
+// MaxLegs: Flutterwave buys only, and only while the stable-buy rail is wired.
+func (p *FlutterwaveProvider) MaxLegs() map[string]services.RampLegs {
+	out := map[string]services.RampLegs{}
+	if p.it.HasStableBuy() {
+		for fiat := range flutterwaveFiats {
+			out[fiat] = services.RampLegs{Buy: true}
+		}
+	}
+	return out
+}
+
 func (p *FlutterwaveProvider) RampLegs(context.Context) (map[string]services.RampLegs, error) {
 	out := map[string]services.RampLegs{}
 	if p.it.HasStableBuy() {

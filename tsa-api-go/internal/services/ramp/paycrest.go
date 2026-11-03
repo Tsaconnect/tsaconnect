@@ -31,7 +31,10 @@ type paycrestQuotes interface {
 	RampLegs(ctx context.Context) (map[string]services.RampLegs, error)
 }
 
-type providerRegistry interface{ RampProvider(code string) string }
+type providerRegistry interface {
+	RampProvider(code string) string
+	All() []models.Currency
+}
 
 // PaycrestProvider adapts the existing Paycrest services. No logic lives
 // here beyond mapping shapes and classifying errors.
@@ -55,6 +58,22 @@ func NewPaycrestProvider(orders *services.PaycrestOrderService, quotes *services
 }
 
 func (p *PaycrestProvider) Name() string { return ProviderPaycrest }
+
+// MaxLegs: both sides of every currency the registry routes to Paycrest, less
+// buys while they are switched off. Nil without a registry (nothing to say).
+func (p *PaycrestProvider) MaxLegs() map[string]services.RampLegs {
+	if p.reg == nil {
+		return nil
+	}
+	out := map[string]services.RampLegs{}
+	for _, cur := range p.reg.All() {
+		code := strings.ToUpper(cur.Code)
+		if p.reg.RampProvider(code) == services.RampProviderPaycrest {
+			out[code] = services.RampLegs{Buy: !services.PaycrestBuysOff, Sell: true}
+		}
+	}
+	return out
+}
 
 func (p *PaycrestProvider) RampLegs(ctx context.Context) (map[string]services.RampLegs, error) {
 	legs, err := p.quotes.RampLegs(ctx)

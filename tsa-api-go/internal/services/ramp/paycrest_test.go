@@ -68,6 +68,14 @@ type fakeReg map[string]string
 
 func (f fakeReg) RampProvider(code string) string { return f[code] }
 
+func (f fakeReg) All() []models.Currency {
+	out := make([]models.Currency, 0, len(f))
+	for code := range f {
+		out = append(out, models.Currency{Code: code})
+	}
+	return out
+}
+
 func newTestPaycrest(o *fakePcOrders, q *fakePcQuotes, reg providerRegistry) *PaycrestProvider {
 	return &PaycrestProvider{orders: o, quotes: q, reg: reg}
 }
@@ -214,5 +222,19 @@ func TestPaycrestCheckNoOpenOrder_KeepsItsOwnRefusal(t *testing.T) {
 	}
 	if err := newTestPaycrest(&fakePcOrders{}, &fakePcQuotes{}, nil).CheckNoOpenOrder(context.Background(), uuid.New(), Buy); err != nil {
 		t.Fatalf("nothing open: %v", err)
+	}
+}
+
+// MaxLegs is both sides of every Paycrest-routed currency, buys only while
+// they are not switched off.
+func TestPaycrestMaxLegs(t *testing.T) {
+	p := newTestPaycrest(&fakePcOrders{}, &fakePcQuotes{}, fakeReg{"NGN": services.RampProviderPaycrest, "GHS": "none"})
+	got := p.MaxLegs()
+	want := services.RampLegs{Buy: !services.PaycrestBuysOff, Sell: true}
+	if got["NGN"] != want {
+		t.Fatalf("NGN = %+v, want %+v", got["NGN"], want)
+	}
+	if _, ok := got["GHS"]; ok {
+		t.Fatal("a currency not routed to Paycrest must not appear")
 	}
 }
