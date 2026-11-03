@@ -266,6 +266,55 @@ type FeeQuoteConfig struct {
 	LifiRouteBps int64
 	// StableDepositConvBps is the conversion fee on stablecoin deposits.
 	StableDepositConvBps int64
+	// PayoutFees prices Flutterwave's fee on a FOREIGN payout (an NGN-valued
+	// sell paid out in another currency), keyed by payout currency. Set per
+	// corridor from the fee a real payout was charged
+	// (FEE_PAYOUT_<CUR>_BPS / FEE_PAYOUT_<CUR>_FLAT_NGN). A corridor with no
+	// entry keeps the ProviderFallbackBps estimate.
+	PayoutFees map[string]PayoutFee
+}
+
+// PayoutFee is one corridor's measured payout fee: a percentage of the naira
+// paid out plus a flat naira amount, both applied to the NGN-valued sell.
+type PayoutFee struct {
+	Bps     int64
+	FlatNGN int64
+}
+
+// payoutFeesFromEnv reads FEE_PAYOUT_<CUR>_BPS and FEE_PAYOUT_<CUR>_FLAT_NGN
+// for every currency that sets either. A malformed or negative value drops the
+// corridor (it keeps the fallback estimate) with a boot line, never a crash.
+func payoutFeesFromEnv(environ []string) map[string]PayoutFee {
+	out := map[string]PayoutFee{}
+	bad := map[string]bool{}
+	for _, kv := range environ {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(key, "FEE_PAYOUT_") {
+			continue
+		}
+		rest := strings.TrimPrefix(key, "FEE_PAYOUT_")
+		cur, field, ok := strings.Cut(rest, "_")
+		if !ok || len(cur) != 3 || cur == "NGN" || (field != "BPS" && field != "FLAT_NGN") {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+		if err != nil || n < 0 {
+			log.Printf("[config] WARNING %s=%q is not a non-negative integer; %s payouts keep the fallback fee estimate", key, val, cur)
+			bad[cur] = true
+			continue
+		}
+		fee := out[cur]
+		if field == "BPS" {
+			fee.Bps = n
+		} else {
+			fee.FlatNGN = n
+		}
+		out[cur] = fee
+	}
+	for cur := range bad {
+		delete(out, cur)
+	}
+	return out
 }
 
 type Config struct {
@@ -1470,6 +1519,7 @@ func Load() *Config {
 		McgpSwapBps:          getEnvInt64("FEE_MCGP_SWAP_BPS", 200),
 		LifiRouteBps:         getEnvInt64("FEE_LIFI_ROUTE_BPS", 300),
 		StableDepositConvBps: getEnvInt64("FEE_STABLE_DEPOSIT_CONV_BPS", 200),
+		PayoutFees:           payoutFeesFromEnv(os.Environ()),
 	}
 
 	// Fee/TP overhaul (SP3). TP minting rate defaults to 1 TP = $1 of pool

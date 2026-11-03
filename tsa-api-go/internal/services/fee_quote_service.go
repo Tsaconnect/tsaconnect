@@ -139,7 +139,8 @@ type FeeTaxQuote struct {
 // FeeProviderQuote is the provider-fee line with its provenance.
 type FeeProviderQuote struct {
 	Fee FeeLine `json:"fee"`
-	// Source is "live" (provider GetFees) or "fallback" (config percentage).
+	// Source is "live" (provider GetFees), "configured" (a foreign payout
+	// corridor's measured fee) or "fallback" (config percentage).
 	Source string `json:"source"`
 	// FallbackBps is the percentage used when Source is "fallback"; 0 on live.
 	FallbackBps int64 `json:"fallbackBps,omitempty"`
@@ -311,13 +312,22 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 	}
 
 	// Provider fee — live passthrough when a quoter is wired and answers,
-	// else the config fallback percentage of the gross amount.
+	// else the config fallback percentage of the gross amount. A foreign
+	// payout is priced from its corridor's measured fee instead: the live
+	// quote can only price a naira transfer, which is not what Flutterwave
+	// charges to pay a dollar or cedi account.
 	provider := FeeProviderQuote{Source: "fallback", FallbackBps: s.cfg.ProviderFallbackBps}
 	providerMinor := bpsShare(amount, s.cfg.ProviderFallbackBps)
-	if live, ok := s.liveProviderFee(ctx, flow, amount, currency); ok {
-		providerMinor = live
-		provider.Source = "live"
+	if fee, ok := s.foreignPayoutFee(flow, amount, currency, payCurrency); ok {
+		providerMinor = fee
+		provider.Source = "configured"
 		provider.FallbackBps = 0
+	} else if payCurrency == currency {
+		if live, ok := s.liveProviderFee(ctx, flow, amount, currency); ok {
+			providerMinor = live
+			provider.Source = "live"
+			provider.FallbackBps = 0
+		}
 	}
 	provider.Fee = feeLine(providerMinor)
 
@@ -372,6 +382,21 @@ func (s *FeeQuoteService) Quote(ctx context.Context, in FeeQuoteInput) (*FeeQuot
 		NetAmount:   feeLine(net),
 		Viable:      viable,
 	}, nil
+}
+
+// foreignPayoutFee prices a withdrawal paid out in a currency other than the
+// one it is valued in, from that corridor's configured fee. ok=false when the
+// leg is not a foreign payout or the corridor has no measured fee yet.
+func (s *FeeQuoteService) foreignPayoutFee(flow FeeFlow, amount *big.Int, currency, payCurrency string) (*big.Int, bool) {
+	if flow != FeeFlowWithdraw || currency != "NGN" || payCurrency == currency {
+		return nil, false
+	}
+	fee, ok := s.cfg.PayoutFees[payCurrency]
+	if !ok {
+		return nil, false
+	}
+	minor := bpsShare(amount, fee.Bps)
+	return minor.Add(minor, new(big.Int).Mul(big.NewInt(fee.FlatNGN), big.NewInt(100))), true
 }
 
 // platformBps is the platform's cut for a payment currency: the NGN tier for

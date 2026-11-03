@@ -101,6 +101,32 @@ describe('PayoutDetailsForm', () => {
     expect(host(tree, (p) => p.label === 'Branch')[0].props.disabled).toBe(false);
   });
 
+  it('picks the branch when the bank has only one', async () => {
+    const onChange = jest.fn();
+    await act(async () => {
+      TestRenderer.create(
+        <PayoutDetailsForm fields={GHS_FIELDS} country="GH" values={{ bank: '11319374', bankId: '400' }} onChange={onChange} />,
+      );
+    });
+    expect(onChange).toHaveBeenLastCalledWith({ bank: '11319374', bankId: '400', branch: '18120517JZ' });
+  });
+
+  it('lets the user type a branch code when the bank lists none', async () => {
+    (banksApi.branches as jest.Mock).mockResolvedValueOnce({ success: true, data: [] });
+    const onChange = jest.fn();
+    let tree!: ReactTestRenderer;
+    await act(async () => {
+      tree = TestRenderer.create(
+        <PayoutDetailsForm fields={GHS_FIELDS} country="GH" values={{ bank: '11319374', bankId: '401' }} onChange={onChange} />,
+      );
+    });
+    const branch = host(tree, (p) => p.label === 'Branch')[0];
+    expect(typeof branch.props.onChangeText).toBe('function');
+    expect(branch.props.disabled).toBeUndefined();
+    await act(async () => branch.props.onChangeText('GH123'));
+    expect(onChange).toHaveBeenLastCalledWith({ bank: '11319374', bankId: '401', branch: 'GH123' });
+  });
+
   it('marks the fields the server refused', async () => {
     let tree!: ReactTestRenderer;
     await act(async () => {

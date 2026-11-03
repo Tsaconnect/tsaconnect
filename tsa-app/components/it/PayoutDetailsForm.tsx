@@ -57,6 +57,9 @@ export default function PayoutDetailsForm({ fields, country, values, onChange, i
   const [banksLoading, setBanksLoading] = useState(false);
   const [branches, setBranches] = useState<NgBank[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(false);
+  // The bank whose branch list is in `branches`, so an empty list is only read
+  // as "this bank has none" once it has actually loaded.
+  const [branchesFor, setBranchesFor] = useState('');
   const [openPicker, setOpenPicker] = useState<string | null>(null);
 
   const needsBank = fields.some((f) => f.kind === 'bank');
@@ -82,6 +85,7 @@ export default function PayoutDetailsForm({ fields, country, values, onChange, i
   useEffect(() => {
     if (!needsBranch || !bankId) {
       setBranches([]);
+      setBranchesFor('');
       return;
     }
     let cancelled = false;
@@ -90,6 +94,7 @@ export default function PayoutDetailsForm({ fields, country, values, onChange, i
       const res = await banksApi.branches(bankId);
       if (!cancelled) {
         setBranches(res.success && res.data ? [...res.data].sort((a, b) => a.name.localeCompare(b.name)) : []);
+        setBranchesFor(bankId);
         setBranchesLoading(false);
       }
     })();
@@ -99,6 +104,18 @@ export default function PayoutDetailsForm({ fields, country, values, onChange, i
   }, [needsBranch, bankId]);
 
   const set = (patch: Record<string, string>) => onChange({ ...values, ...patch });
+
+  // Flutterwave lists no branches for some Ghanaian banks (or the lookup
+  // fails). The branch is still required, so the user types the code their
+  // bank gives them instead of facing an empty picker.
+  const typeBranch = needsBranch && !!bankId && branchesFor === bankId && branches.length === 0;
+  const branchKey = fields.find((f) => f.kind === 'branch')?.key;
+  const onlyBranch = branchesFor === bankId && branches.length === 1 ? branches[0].code : '';
+
+  // A bank with a single branch needs no choice.
+  useEffect(() => {
+    if (branchKey && onlyBranch && !values[branchKey]) onChange({ ...values, [branchKey]: onlyBranch });
+  }, [branchKey, onlyBranch, values, onChange]);
   const errorFor = (key: string) => (invalid.includes(key) ? 'Check this field' : undefined);
 
   const pickerItems = (field: PayoutField): PickerItem[] => {
@@ -124,6 +141,21 @@ export default function PayoutDetailsForm({ fields, country, values, onChange, i
   return (
     <View style={{ gap: spacing.md }}>
       {fields.map((field) => {
+        if (field.kind === 'branch' && typeBranch) {
+          return (
+            <Input
+              key={field.key}
+              label={field.label}
+              placeholder="Branch code from your bank"
+              value={values[field.key] ?? ''}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              maxLength={40}
+              error={errorFor(field.key)}
+              onChangeText={(v) => set({ [field.key]: v })}
+            />
+          );
+        }
         if (field.kind === 'bank' || field.kind === 'branch' || field.kind === 'select') {
           const loading = field.kind === 'bank' ? banksLoading : field.kind === 'branch' ? branchesLoading : false;
           const blocked = field.kind === 'branch' && !bankId;
