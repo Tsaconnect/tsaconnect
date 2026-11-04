@@ -41,6 +41,8 @@ jest.mock('@/components/ui', () => {
       react.createElement(View, { accessibilityLabel: `button:${props.title}`, onPress: props.onPress, disabled: props.disabled },
         label(props.title)),
     Icon: () => null,
+    InlineMessage: () => null,
+    useCopy: () => ({ copy: jest.fn(), copyError: null, clearCopyError: jest.fn() }),
     InfoTip: (props: any) => react.createElement(RNText, null, props.label),
     Spinner: () => null,
     Card: box,

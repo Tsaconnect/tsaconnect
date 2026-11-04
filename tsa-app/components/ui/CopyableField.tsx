@@ -21,18 +21,12 @@ export interface CopyableFieldProps {
   style?: ViewStyle;
 }
 
-export const CopyableField: React.FC<CopyableFieldProps> = ({
-  value,
-  label,
-  display,
-  toastMessage = 'Copied',
-  style,
-}) => {
-  const { colors, radius, spacing } = useTheme();
+/** Copies a value with the field's toast, keeping a failure inline for the
+ *  caller to show (InlineMessage), so the user knows to enter it by hand. */
+export function useCopy(toastMessage = 'Copied') {
   const toast = useToast();
   const [copyError, setCopyError] = useState<string | null>(null);
-
-  const onCopy = async () => {
+  const copy = async (value: string) => {
     setCopyError(null);
     try {
       await Clipboard.setStringAsync(value);
@@ -41,6 +35,19 @@ export const CopyableField: React.FC<CopyableFieldProps> = ({
       setCopyError('Could not copy. Enter it by hand instead.');
     }
   };
+  return { copy, copyError, clearCopyError: () => setCopyError(null) };
+}
+
+export const CopyableField: React.FC<CopyableFieldProps> = ({
+  value,
+  label,
+  display,
+  toastMessage = 'Copied',
+  style,
+}) => {
+  const { colors, radius, spacing } = useTheme();
+  const { copy, copyError, clearCopyError } = useCopy(toastMessage);
+  const onCopy = () => copy(value);
 
   return (
     <View style={[{ gap: spacing.sm }, style]}>
@@ -69,7 +76,7 @@ export const CopyableField: React.FC<CopyableFieldProps> = ({
         </View>
         <Icon name="copy" size={18} color={colors.accent} />
       </PressableScale>
-      <InlineMessage message={copyError} onDismiss={() => setCopyError(null)} />
+      <InlineMessage message={copyError} onDismiss={clearCopyError} />
     </View>
   );
 };

@@ -35,7 +35,7 @@ describe('FeeLines', () => {
         symbol="₦"
         fees={[
           { label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2474.80' },
-          { label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2538.85' },
+          { kind: 'network', label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2538.85' },
         ]}
       />,
     );
@@ -45,7 +45,8 @@ describe('FeeLines', () => {
     expect(out).not.toMatch(/Flutterwave|LiFi/);
     expect(out.match(/via provider/g)?.length).toBe(1);
     expect(out).toContain('−1.46216 USDC | ≈ ₦2,474.80');
-    expect(out).toContain('−1.5 USDC | ≈ ₦2,538.85');
+    expect(out).toContain('−1.5 USDC');
+    expect(out).not.toContain('₦2,538.85'); // a network fee is shown in the token alone
   });
 
   it('rewrites a provider name in a label stored before the rule', () => {

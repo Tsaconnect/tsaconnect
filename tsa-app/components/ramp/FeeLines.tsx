@@ -17,6 +17,8 @@ export function fiatText(value: string, symbol: string): string {
 }
 
 export interface FeeLine {
+  /** "network" | "conversion" | "funding" — the API's fee kind. */
+  kind?: string;
   label: string;
   /** Who charges it — kept for attribution, never shown by name. */
   provider?: string;
@@ -86,7 +88,9 @@ export const FeeLines: React.FC<FeeLinesProps> = ({ fees, token, symbol }) => {
               <Text variant="caption" weight="600" style={{ color: colors.textPrimary }}>
                 {`−${f.token} ${token}`}
               </Text>
-              {f.ngn ? (
+              {/* A network fee reads in the token alone: it is a token cost,
+                  and a naira figure beside it only adds noise. */}
+              {f.ngn && f.kind !== 'network' ? (
                 <Text variant="caption" style={{ color: colors.textMuted }}>
                   {`≈ ${fiatText(f.ngn, symbol)}`}
                 </Text>

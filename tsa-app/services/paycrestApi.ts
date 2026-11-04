@@ -640,17 +640,10 @@ export function paycrestConversionHops(status: PaycrestStatus, holder?: string):
 /** Shared with gasSponsorship.ts, which lives under the same /paycrest routes. */
 export { request as paycrestRequest };
 
-/** A small buy's network fee as shown: "0.02 USDC (₦27.73)", or null when
- *  she paid none. */
-export function networkFeeText(
-  order: Pick<PaycrestOrder, 'networkFee' | 'token' | 'rate'>,
-  symbol = '₦',
-): string | null {
+/** A small buy's network fee as shown: "0.02 USDC" — in the token alone. Null
+ *  when she paid none. */
+export function networkFeeText(order: Pick<PaycrestOrder, 'networkFee' | 'token'>): string | null {
   const fee = Number(order.networkFee);
   if (!order.networkFee || !(fee > 0)) return null;
-  const rate = Number(order.rate);
-  const fiat = rate > 0
-    ? ` (${symbol}${(fee * rate).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`
-    : '';
-  return `${order.networkFee} ${order.token}${fiat}`;
+  return `${order.networkFee} ${order.token}`;
 }

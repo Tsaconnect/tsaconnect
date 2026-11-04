@@ -25,6 +25,7 @@ export function intentFeeLines(fees: ITIntentFee[] | null | undefined): FeeLine[
   return fees
     .filter((f) => f && typeof f.label === 'string' && typeof f.units === 'string' && /^\d+$/.test(f.units))
     .map((f) => ({
+      kind: f.kind,
       label: f.label,
       provider: f.provider || undefined,
       token: formatAssetUnits(f.units),

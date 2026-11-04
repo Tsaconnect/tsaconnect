@@ -8,8 +8,9 @@ describe('intentFeeLines', () => {
       { kind: 'conversion', label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', units: '1462160', ngnMinor: '247480' },
       { kind: 'network', label: 'Network fee', provider: 'Flutterwave', units: '1500000', ngnMinor: '253885' },
     ])).toEqual([
-      { label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2,474.80' },
-      { label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2,538.85' },
+      { kind: 'conversion', label: 'Provider conversion fee (1.5%)', provider: 'Flutterwave', token: '1.46216', ngn: '2,474.80' },
+      // kind carries through, so FeeLines shows a network fee in the token alone.
+      { kind: 'network', label: 'Network fee', provider: 'Flutterwave', token: '1.5', ngn: '2,538.85' },
     ]);
   });
 

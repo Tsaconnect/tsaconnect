@@ -41,6 +41,7 @@ import {
   CopyableField,
   Icon,
   InfoTip,
+  InlineMessage,
   Input,
   PickerSheet,
   SelectRow,
@@ -48,6 +49,7 @@ import {
   SummaryCard,
   SummaryRow,
   Text,
+  useCopy,
 } from '@/components/ui';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSignableWallet } from '@/hooks/useSignableWallet';
@@ -502,6 +504,7 @@ export default function PaycrestBuyScreen() {
   }, [amount, currencyCode, want, poolBuy.pool]);
 
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
+  const { copy: copyAmount, copyError: amountCopyError, clearCopyError: clearAmountCopyError } = useCopy('Amount copied');
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
 
   // Sends the BVN/NIN saved on this phone whenever there is one, so Paycrest
@@ -684,9 +687,25 @@ export default function PaycrestBuyScreen() {
                 </View>
               )}
             </View>
-            <Text variant="display" weight="700" style={{ color: expired ? colors.textMuted : colors.textPrimary }}>
-              {currencyCode === 'NGN' ? formatNaira(order.payAmount) : `${symbol}${order.payAmount}`}
-            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md }}>
+              <Text
+                variant="display"
+                weight="700"
+                style={{ flexShrink: 1, color: expired ? colors.textMuted : colors.textPrimary }}
+              >
+                {currencyCode === 'NGN' ? formatNaira(order.payAmount) : `${symbol}${order.payAmount}`}
+              </Text>
+              {expired || !order.payAmount ? null : (
+                // The bare figure ("1000.00"): what a banking app's amount field takes.
+                <Button
+                  title="Copy"
+                  variant="secondary"
+                  size="sm"
+                  onPress={() => copyAmount(order.payAmount ?? '')}
+                />
+              )}
+            </View>
+            <InlineMessage message={amountCopyError} onDismiss={clearAmountCopyError} />
             {expired ? (
               <Text variant="bodySm" weight="600" color="danger">
                 This order has expired. Do not send money to this account. If you already did, open the order and
@@ -743,10 +762,10 @@ export default function PaycrestBuyScreen() {
             ) : (
               <>
                 <SummaryRow label="You receive" value={`${order.tokenAmount} ${order.token}`} />
-                {networkFeeText(order, symbol) ? (
+                {networkFeeText(order) ? (
                   <SummaryRow
                     label="Network fee"
-                    value={networkFeeText(order, symbol)!}
+                    value={networkFeeText(order)!}
                     tip="The provider's cost to deliver on-chain, already taken out of what you receive. On larger buys our fee covers it instead."
                   />
                 ) : null}
@@ -755,8 +774,15 @@ export default function PaycrestBuyScreen() {
             )}
             <SummaryRow label="Rate" value={`${symbol}${order.rate} / ${order.token}`} />
             {/* Full address, never truncated — the user is entitled to verify
-                where their crypto is going. */}
-            <CopyableField label="Delivered to" value={order.walletAddress} />
+                where their crypto is going. Hers already: nothing to copy. */}
+            <View style={{ paddingVertical: spacing.sm, gap: 2 }}>
+              <Text variant="bodySm" color="textSecondary">
+                Delivered to
+              </Text>
+              <Text variant="bodySm" weight="600" numeric selectable>
+                {order.walletAddress}
+              </Text>
+            </View>
           </SummaryCard>
 
           <Button
