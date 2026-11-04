@@ -27,21 +27,22 @@ export interface BuyerIdSheetProps {
   onSubmit: (id: BuyerId) => void;
 }
 
+// NIN first and by default: more people have one than a BVN.
 const SEGMENTS: { key: BuyerIdType; label: string }[] = [
-  { key: 'bvn', label: 'BVN' },
   { key: 'nin', label: 'NIN' },
+  { key: 'bvn', label: 'BVN' },
 ];
 
 export default function BuyerIdSheet({ visible, initial, notice, onClose, onSubmit }: BuyerIdSheetProps) {
   const { spacing } = useTheme();
-  const [type, setType] = useState<BuyerIdType>('bvn');
+  const [type, setType] = useState<BuyerIdType>('nin');
   const [number, setNumber] = useState('');
   const [birthDate, setBirthDate] = useState('');
   const [error, setError] = useState<{ field: BuyerIdField; message: string } | null>(null);
 
   useEffect(() => {
     if (!visible) return;
-    setType(initial?.type ?? 'bvn');
+    setType(initial?.type ?? 'nin');
     setNumber(initial?.number ?? '');
     setBirthDate(initial ? birthDateForInput(initial.birthDate) : '');
     setError(null);
@@ -67,9 +68,9 @@ export default function BuyerIdSheet({ visible, initial, notice, onClose, onSubm
       scrollable
       footer={<Button title="Save and continue" onPress={submit} fullWidth />}
     >
-      <View style={{ gap: spacing.md }}>
+      <View style={{ paddingHorizontal: spacing.lg, paddingBottom: spacing.lg, gap: spacing.md }}>
         <Text variant="bodySm" color="textSecondary">
-          Our bank-transfer partner needs your BVN or NIN and date of birth for each purchase. We keep them only on
+          Our bank-transfer partner needs your NIN or BVN and date of birth for each purchase. We keep them only on
           this phone, so you enter them once. Pay from an account in your own name.
         </Text>
         {notice ? (

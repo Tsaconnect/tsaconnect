@@ -33,6 +33,8 @@ jest.mock('@/components/ui', () => {
     Button: (props: any) =>
       react.createElement(View, { accessibilityLabel: `button:${props.title}`, onPress: props.onPress, disabled: props.disabled },
         label(props.title)),
+    Icon: () => null,
+    InfoTip: (props: any) => react.createElement(RNText, null, props.label),
     Spinner: () => null,
     Card: box,
     SummaryCard: box,

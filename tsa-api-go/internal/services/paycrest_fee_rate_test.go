@@ -65,17 +65,48 @@ func TestPaycrestQuote_SenderFeeIsPricedIntoTheBuyRate(t *testing.T) {
 	s := NewPaycrestQuoteService(q, []string{"USDC"}, []string{"base"})
 	s.SetSenderFeePercent("0.5")
 
+	// ₦8,000: 0.5% of the ~5.7 USDC is more than Paycrest's network fee, so
+	// our take is the charge and Paycrest's fee comes out of it.
+	res, err := s.Quote(context.Background(), "buy", "NGN", "8000")
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if res.Best.Rate != "1397.59" || len(res.Best.Fees) != 0 {
+		t.Errorf("venue = %+v, want rate 1397.59 (1390.64 plus 0.5%%) and no fee line", res.Best)
+	}
+	// Must agree with what the order will deliver once CreateBuy grosses the
+	// naira down: 7960.20 / 1390.64.
+	if delivered := 7960.20 / 1390.64; math.Abs(res.Best.TokenAmount-delivered) > 1e-5 {
+		t.Errorf("tokenAmount = %v, but the order delivers %v", res.Best.TokenAmount, delivered)
+	}
+}
+
+// Live 2026-11-04 (PCB-14a0c0e46450-981b954d07): a ₦1,500 buy was asked for
+// ₦1,512.88. On a small buy Paycrest's network fee (0.02 USDC) outweighs our
+// take and is charged instead. She still pays what she entered, at the
+// provider's own rate, and receives that less the fee, shown as a line.
+func TestPaycrestQuote_SmallBuyChargesTheNetworkFeeAsALine(t *testing.T) {
+	q := &stubQuoter{market: 1370.68, rates: map[string]*PaycrestRates{"base|USDC": buy("1390.64")}}
+	s := NewPaycrestQuoteService(q, []string{"USDC"}, []string{"base"})
+	s.SetSenderFeePercent("0.5")
+
 	res, err := s.Quote(context.Background(), "buy", "NGN", "800")
 	if err != nil {
 		t.Fatalf("Quote: %v", err)
 	}
-	if res.Best.Rate != "1397.59" {
-		t.Errorf("rate = %s, want 1397.59 (1390.64 plus 0.5%%)", res.Best.Rate)
+	v := res.Best
+	if want := 800/1390.64 - 0.02; v.Rate != "1390.64" || math.Abs(v.TokenAmount-want) > 1e-6 {
+		t.Fatalf("venue = %+v, want the provider's 1390.64 and %.6f USDC", v, want)
 	}
-	// Must agree with what the order will deliver once CreateBuy grosses the
-	// naira down: 796.02 / 1390.64.
-	if delivered := 796.02 / 1390.64; math.Abs(res.Best.TokenAmount-delivered) > 1e-5 {
-		t.Errorf("tokenAmount = %v, but the order delivers %v", res.Best.TokenAmount, delivered)
+	if len(v.Fees) != 1 || v.Fees[0].Kind != FeeKindNetwork || v.Fees[0].Label != "Network fee" ||
+		v.Fees[0].Token != "0.02" || v.Fees[0].Ngn != "27.81" {
+		t.Fatalf("fees = %+v, want one 0.02 USDC (₦27.81) network fee line", v.Fees)
+	}
+	if eff, _ := strconv.ParseFloat(v.EffectiveRate, 64); math.Abs(eff-800/v.TokenAmount) > 0.02 { // rounded up to the kobo
+		t.Errorf("effective rate %s, want ₦800 ÷ %.6f", v.EffectiveRate, v.TokenAmount)
+	}
+	if want := (800/v.TokenAmount/1370.68 - 1) * 100; math.Abs(v.SpreadPercent-want) > 1e-3 {
+		t.Errorf("spread %.4f%%, want %.4f%% — her whole cost, fee included", v.SpreadPercent, want)
 	}
 }
 
@@ -110,8 +141,9 @@ func TestPaycrestVenueFor_BindsTheFeeInclusiveRate(t *testing.T) {
 }
 
 // capturingOrderer records each create request and answers the way Paycrest
-// did on the live orders: the rate it quoted, the fee rounded to 4 places of
-// token, and the fee percent it applied.
+// does: the rate it quoted, the fee rounded to 4 places of token, and the fee
+// percent it applied. On a buy it charges max(sender fee, network fee) on top
+// and pays us the sender fee less the network fee (live 2026-11-04).
 type capturingOrderer struct {
 	stubPaycrestOrderer
 	rate       string
@@ -125,18 +157,20 @@ func (c *capturingOrderer) CreateOnrampOrder(_ context.Context, req PaycrestOnra
 	fiat, _ := strconv.ParseFloat(req.AmountNGN, 64)
 	rate, _ := strconv.ParseFloat(c.rate, 64)
 	pct, _ := strconv.ParseFloat(c.feePercent, 64)
-	amount := fiat / rate
+	amount := math.Round(fiat/rate*1e6) / 1e6
 	fee := math.Round(amount*pct/100*1e4) / 1e4
+	const network = 0.02
 	return &PaycrestOrder{
 		ID:               "pc-buy",
 		Amount:           strconv.FormatFloat(amount, 'f', 6, 64),
 		Rate:             c.rate,
-		SenderFee:        strconv.FormatFloat(fee, 'f', 4, 64),
+		SenderFee:        strconv.FormatFloat(math.Max(fee-network, 0), 'f', 4, 64),
 		SenderFeePercent: c.feePercent,
+		TransactionFee:   "0.02",
 		ProviderAccount: &PaycrestProviderAccount{
 			Institution:       "OPAYNGPC",
 			AccountIdentifier: "0000000000",
-			AmountToTransfer:  strconv.FormatFloat((amount+fee)*rate, 'f', 2, 64),
+			AmountToTransfer:  strconv.FormatFloat((amount+math.Max(fee, network))*rate, 'f', 2, 64),
 			ValidUntil:        "2026-09-14T01:33:24Z",
 		},
 	}, nil
@@ -247,7 +281,7 @@ func TestPaycrestOrderService_CreateBuy_StoresTheFeeInclusiveRate(t *testing.T) 
 		UserID:            seedVerifiedUser(t, svc.db),
 		WalletAddress:     "0xabc",
 		FiatCode:          "NGN",
-		FiatAmount:        "800",
+		FiatAmount:        "8000",
 		ChainKey:          "base",
 		Token:             "USDC",
 		RefundBankCode:    "044",
@@ -257,8 +291,8 @@ func TestPaycrestOrderService_CreateBuy_StoresTheFeeInclusiveRate(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateBuy: %v", err)
 	}
-	if pc.onramp.AmountNGN != "796.02" {
-		t.Errorf("submitted ₦%s, want the grossed-down 796.02", pc.onramp.AmountNGN)
+	if pc.onramp.AmountNGN != "7960.20" {
+		t.Errorf("submitted ₦%s, want the grossed-down 7960.20", pc.onramp.AmountNGN)
 	}
 	if row.Rate != "1397.59" {
 		t.Errorf("stored rate = %s, want the fee-inclusive 1397.59", row.Rate)
@@ -268,11 +302,38 @@ func TestPaycrestOrderService_CreateBuy_StoresTheFeeInclusiveRate(t *testing.T) 
 	}
 	// Two cross-checks of one story: the user transfers what they typed, and
 	// that transfer at the stored rate buys the tokens delivered.
-	if pay, _ := strconv.ParseFloat(row.PayAmount, 64); math.Abs(pay-800) > 0.10 {
-		t.Errorf("user told to transfer ₦%s, want ₦800", row.PayAmount)
+	if pay, _ := strconv.ParseFloat(row.PayAmount, 64); math.Abs(pay-8000) > 0.10 {
+		t.Errorf("user told to transfer ₦%s, want ₦8000", row.PayAmount)
 	}
-	if tokens, _ := strconv.ParseFloat(row.TokenAmount, 64); math.Abs(tokens*1397.5932-800) > 0.01 {
-		t.Errorf("%s tokens at the stored rate is ₦%.4f, want ₦800", row.TokenAmount, tokens*1397.5932)
+	if tokens, _ := strconv.ParseFloat(row.TokenAmount, 64); math.Abs(tokens*1397.5932-8000) > 0.01 {
+		t.Errorf("%s tokens at the stored rate is ₦%.4f, want ₦8000", row.TokenAmount, tokens*1397.5932)
+	}
+}
+
+// The live case: on a small buy she still transfers exactly what she entered,
+// receives it at the provider's rate less Paycrest's network fee, and the row
+// says so.
+func TestPaycrestOrderService_CreateBuy_SmallBuyPaysTheAmountEntered(t *testing.T) {
+	pc := &capturingOrderer{rate: "1390.64", feePercent: "0.5"}
+	svc := newFeeTestService(t, "0.5", pc, "buy", "1390.64")
+	logs := captureLog(t)
+
+	row, err := svc.CreateBuy(context.Background(), PaycrestBuyRequest{
+		BuyerID: testBuyerID(), UserID: seedVerifiedUser(t, svc.db), WalletAddress: "0xabc",
+		FiatCode: "NGN", FiatAmount: "800", ChainKey: "base", Token: "USDC",
+		RefundBankCode: "044", RefundAccount: "0123456789", RefundAccountName: "Test User",
+	})
+	if err != nil {
+		t.Fatalf("CreateBuy: %v", err)
+	}
+	if pay, _ := strconv.ParseFloat(row.PayAmount, 64); math.Abs(pay-800) > 0.01 {
+		t.Errorf("told to transfer ₦%s, want ₦800", row.PayAmount)
+	}
+	if row.NetworkFee != "0.02" || row.Rate != "1390.64" {
+		t.Errorf("row network fee %q rate %s, want 0.02 and the provider's 1390.64", row.NetworkFee, row.Rate)
+	}
+	if strings.Contains(logs.String(), "ALARM") || strings.Contains(logs.String(), "drift") {
+		t.Errorf("unexpected alarm or drift: %s", logs.String())
 	}
 }
 

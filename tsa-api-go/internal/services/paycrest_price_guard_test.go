@@ -95,7 +95,8 @@ func TestPriceGuard_WithinToleranceCreates(t *testing.T) {
 	pc := &capturingOrderer{rate: "1390.64", feePercent: "0.5"}
 	svc := newSeamService(t, pc, "buy", "1390.64")
 	req := seamBuyRequest(seedVerifiedUser(t, svc.db))
-	req.MaxRate, req.PriceGuard = "1400.00", PriceGuardEnforce
+	// ₦8,000: our take is the charge, so the all-in rate is 1397.59.
+	req.FiatAmount, req.MaxRate, req.PriceGuard = "8000", "1400.00", PriceGuardEnforce
 	if row, err := svc.CreateBuy(context.Background(), req); err != nil || row == nil {
 		t.Fatalf("within tolerance: row=%v err=%v", row, err)
 	}
@@ -110,5 +111,21 @@ func TestPriceGuard_EmptyLimitIsTodaysBehaviour(t *testing.T) {
 	svc := newSeamService(t, pc, "buy", "1390.64")
 	if _, err := svc.CreateBuy(context.Background(), seamBuyRequest(seedVerifiedUser(t, svc.db))); err != nil {
 		t.Fatalf("no guard fields: %v", err)
+	}
+}
+
+// A small buy guards on its all-in rate, network fee included, as every other
+// venue does: ₦800 at 1390.64 less 0.02 USDC costs ~₦1,440.74 a token.
+func TestPriceGuard_SmallBuyGuardsOnTheAllInRate(t *testing.T) {
+	pc := &capturingOrderer{rate: "1390.64", feePercent: "0.5"}
+	svc := newSeamService(t, pc, "buy", "1390.64")
+	req := seamBuyRequest(seedVerifiedUser(t, svc.db))
+	req.FiatAmount, req.MaxRate, req.PriceGuard = "800", "1400.00", PriceGuardEnforce
+	if _, err := svc.CreateBuy(context.Background(), req); !errors.Is(err, ErrPriceMovedPastQuote) {
+		t.Fatalf("err = %v, want refused: the provider rate is within 1400 but what she pays per token is not", err)
+	}
+	req.MaxRate = "1445.00"
+	if row, err := svc.CreateBuy(context.Background(), req); err != nil || row == nil {
+		t.Fatalf("within the all-in limit: row=%v err=%v", row, err)
 	}
 }

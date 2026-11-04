@@ -44,6 +44,8 @@ export type { InputProps } from './Input';
 export { AmountInput } from './AmountInput';
 export type { AmountInputProps } from './AmountInput';
 export { SummaryRow, SummaryCard } from './SummaryRow';
+export { InfoTip } from './InfoTip';
+export type { InfoTipProps } from './InfoTip';
 export type { SummaryRowProps } from './SummaryRow';
 export { BottomActionBar } from './BottomActionBar';
 export type { BottomActionBarProps } from './BottomActionBar';

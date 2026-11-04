@@ -43,6 +43,7 @@ import {
   isTerminal,
   statusLabel,
   formatPromisedAmount,
+  networkFeeText,
   paycrestConversionHops,
   PaycrestError,
   type PaycrestOrder,
@@ -233,6 +234,8 @@ export default function PaycrestOrderScreen() {
   const unmatched = order.status === 'unmatched';
   const settled = order.status === 'settled';
   const converted = isConvertedOrder(order);
+  // The fee's fiat value in the order's own currency (a code where we have no symbol).
+  const feeSymbol = order.currency === 'NGN' ? '₦' : `${order.currency} `;
   const refunded = order.status === 'refunded';
   const refunding = order.status === 'refunding';
   const conversionHops = converted ? paycrestConversionHops(order.status, order.holder) : [];
@@ -478,6 +481,13 @@ export default function PaycrestOrderScreen() {
             ) : (
               <SummaryRow label="Network" value={chainLabel(order.chain)} />
             )}
+            {order.direction === 'buy' && networkFeeText(order, feeSymbol) ? (
+              <SummaryRow
+                label="Network fee"
+                value={networkFeeText(order, feeSymbol)!}
+                tip="The provider's cost to deliver on-chain, taken out of what you receive. On larger buys our fee covers it instead."
+              />
+            ) : null}
             {order.rate ? <SummaryRow label="Rate" value={`${formatNaira(order.rate)} per ${order.token}`} /> : null}
             <SummaryRow label="Opened" value={when(order.createdAt)} />
             {order.settledAt ? <SummaryRow label="Completed" value={when(order.settledAt)} /> : null}

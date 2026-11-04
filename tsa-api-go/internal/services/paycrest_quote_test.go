@@ -142,12 +142,14 @@ func TestPaycrestQuote_BuyRanksCheapestFirst(t *testing.T) {
 	if res.Venues[2].Rate != "1393.23" {
 		t.Errorf("worst venue should sort last, got %s", res.Venues[2].Rate)
 	}
-	// Spread is what the app shows as the real cost.
-	if got := res.Best.SpreadPercent; got < 0.2 || got > 0.3 {
-		t.Errorf("spread %.3f%% does not match 1381.22 against mid 1377.91", got)
+	// Spread is what the app shows as the real cost: on a buy this small,
+	// Paycrest's network fee included.
+	if want := (800/res.Best.TokenAmount/1377.91 - 1) * 100; res.Best.SpreadPercent < want-0.01 || res.Best.SpreadPercent > want+0.01 {
+		t.Errorf("spread %.3f%%, want %.3f%% (all-in cost against mid 1377.91)", res.Best.SpreadPercent, want)
 	}
-	// The user gets the token amount at the quoted rate, not at mid.
-	if want := 800 / 1381.22; res.Best.TokenAmount < want-1e-9 || res.Best.TokenAmount > want+1e-9 {
+	// The user gets the token amount at the quoted rate, not at mid — less
+	// Paycrest's network fee, which with no take of ours is always charged.
+	if want := 800/1381.22 - paycrestOnrampNetworkFee; res.Best.TokenAmount < want-1e-9 || res.Best.TokenAmount > want+1e-9 {
 		t.Errorf("tokenAmount %.6f, want %.6f", res.Best.TokenAmount, want)
 	}
 }

@@ -129,6 +129,77 @@ type PaycrestVenue struct {
 	// whose only charge is the take inside Rate.
 	EffectiveRate string     `json:"effectiveRate,omitempty"`
 	Fees          []VenueFee `json:"fees,omitempty"`
+	// OnrampNetworkFee is set (in tokens) on a direct buy priced by
+	// chargeOnrampNetworkFee: Paycrest's network fee, not our take, is what
+	// she pays, and CreateBuy submits TokenAmount at RawRate so her transfer
+	// is exactly what she entered.
+	OnrampNetworkFee float64 `json:"-"`
+}
+
+// allInRate is what the venue costs her per token: EffectiveRate when a fee
+// line sits outside Rate, else Rate.
+func (v PaycrestVenue) allInRate() string {
+	if v.EffectiveRate != "" {
+		return v.EffectiveRate
+	}
+	return v.Rate
+}
+
+// paycrestOnrampNetworkFee is Paycrest's on-ramp transaction fee, in tokens.
+// /v2/rates does not return it; measured live 2026-11-04 (0.02 USDC, Base).
+// A buy is charged max(our sender fee, this fee) on top of the amount, and
+// the sender fee Paycrest pays us is reduced by it (Paycrest sender API
+// docs). CreateBuy alarms when an order reports a different fee.
+const paycrestOnrampNetworkFee = 0.02
+
+// chargeOnrampNetworkFee prices a direct buy of fiatAmount the way Paycrest
+// charges it when its network fee outweighs our take (small buys): she still
+// transfers exactly what she entered and receives that at the provider's
+// rate less the fee, shown as its own line. A buy where our take is the
+// larger charge is left as priced; Paycrest's fee then comes out of our take.
+func (s *PaycrestQuoteService) chargeOnrampNetworkFee(v *PaycrestVenue, fiatAmount string, feePercent float64) {
+	amt, ok1 := parsePositiveDecimal(fiatAmount)
+	raw, ok2 := parsePositiveDecimal(v.RawRate)
+	if !ok1 || !ok2 {
+		return
+	}
+	byTake := amt / (raw * (1 + feePercent/100))
+	byFee := amt/raw - paycrestOnrampNetworkFee
+	if byFee >= byTake || byFee <= 0 {
+		return
+	}
+	// The registry sizes base units; without one the amounts are still
+	// exact to the 6 places a stablecoin is shown in, and base units stay
+	// unset as baseUnitsFor leaves them.
+	decimals, sized := 6, false
+	if id := s.chainID(v.ChainKey); id != 0 {
+		decimals, sized = tokenDecimalsFor(id, v.Token), true
+	}
+	scale := math.Pow10(decimals)
+	units := new(big.Int)
+	new(big.Float).SetFloat64(math.Floor(byFee * scale)).Int(units)
+	feeUnits := new(big.Int)
+	new(big.Float).SetFloat64(math.Round(paycrestOnrampNetworkFee * scale)).Int(feeUnits)
+	fiat, okF := new(big.Rat).SetString(strings.TrimSpace(fiatAmount))
+	rate, okR := new(big.Rat).SetString(strings.TrimSpace(v.RawRate))
+	if !okF || !okR || units.Sign() <= 0 {
+		return
+	}
+	if marked, ok := parsePositiveDecimal(v.Rate); ok && v.SpreadPercent > -100 {
+		// The spread is her whole cost against the market: re-based on what
+		// each token now costs her, fee included.
+		market := marked / (1 + v.SpreadPercent/100)
+		v.SpreadPercent = (amt/byFee/market - 1) * 100
+	}
+	v.Rate = strings.TrimSpace(v.RawRate)
+	v.TokenAmount = byFee
+	v.TokenAmountBaseUnits = ""
+	if sized {
+		v.TokenAmountBaseUnits = units.String()
+	}
+	v.EffectiveRate = allInRate(fiat, units, decimals)
+	v.Fees = []VenueFee{tokenFeeLine(FeeKindNetwork, "Network fee", feeUnits, decimals, rate)}
+	v.OnrampNetworkFee = paycrestOnrampNetworkFee
 }
 
 // VenueFee is one third-party cost inside a venue (spec §14): Token is the fee
@@ -528,6 +599,12 @@ func (s *PaycrestQuoteService) SetConversionMinimums(mins map[string]float64, de
 // side is "buy" for an onramp (user spends fiat) or "sell" for an offramp
 // (user receives fiat). fiatAmount is in major units ("1000" naira).
 func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAmount string) (*PaycrestQuoteResult, error) {
+	return s.quote(ctx, side, fiatCode, fiatAmount, true)
+}
+
+// quote is Quote; chargeNetworkFee=false leaves direct buys priced at our
+// take alone, for converted venues, whose leg CreateBuy opens that way.
+func (s *PaycrestQuoteService) quote(ctx context.Context, side, fiatCode, fiatAmount string, chargeNetworkFee bool) (*PaycrestQuoteResult, error) {
 	if s == nil {
 		return nil, ErrPaycrestDisabled
 	}
@@ -640,6 +717,9 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 			TokenAmountBaseUnits: s.baseUnitsFor(k.chainKey, k.token, fiatAmount, rateStr),
 			Kind:                 models.RouteKindDirect,
 		})
+		if side == "buy" && chargeNetworkFee {
+			s.chargeOnrampNetworkFee(&res.Venues[len(res.Venues)-1], fiatAmount, s.senderFeePercent)
+		}
 	}
 
 	if len(res.Venues) == 0 {
@@ -649,8 +729,8 @@ func (s *PaycrestQuoteService) Quote(ctx context.Context, side, fiatCode, fiatAm
 	// Cheapest for the user first: on a buy that is the lowest fiat-per-token;
 	// on a sell it is the highest.
 	sort.SliceStable(res.Venues, func(i, j int) bool {
-		a, _ := strconv.ParseFloat(res.Venues[i].Rate, 64)
-		b, _ := strconv.ParseFloat(res.Venues[j].Rate, 64)
+		a, _ := strconv.ParseFloat(res.Venues[i].allInRate(), 64)
+		b, _ := strconv.ParseFloat(res.Venues[j].allInRate(), 64)
 		if a != b {
 			if side == "buy" {
 				return a < b // fewer naira per token is better on a buy
@@ -854,6 +934,10 @@ func (s *PaycrestQuoteService) VenueForFee(ctx context.Context, side, fiatCode, 
 	if len(q.ProviderIDs) > 0 {
 		bound.ProviderIDs = q.ProviderIDs
 	}
+	bound.EffectiveRate, bound.Fees, bound.OnrampNetworkFee = "", nil, 0 // re-priced below at this fee
+	if side == "buy" && bound.Kind != models.RouteKindConverted {
+		s.chargeOnrampNetworkFee(&bound, fiatAmount, feePercent)
+	}
 	return &bound, nil
 }
 
@@ -960,7 +1044,7 @@ func (s *PaycrestQuoteService) ConvertedVenues(ctx context.Context, side, fiatCo
 	if !strings.EqualFold(side, models.PaycrestDirectionBuy) {
 		return nil, nil
 	}
-	base, err := s.Quote(ctx, side, fiatCode, fiatAmount)
+	base, err := s.quote(ctx, side, fiatCode, fiatAmount, false)
 	if err != nil {
 		return nil, err
 	}

@@ -1,9 +1,10 @@
 // Label ↔ value rows for fee breakdowns, order summaries, onboarding deposits.
-import React from 'react';
-import { View } from 'react-native';
+import React, { useState } from 'react';
+import { Pressable, View } from 'react-native';
 import { ColorTokens, useTheme } from '@/theme';
 import { Text } from './Text';
 import { Divider } from './Divider';
+import { Icon } from './Icon';
 
 export interface SummaryRowProps {
   label: string;
@@ -12,22 +13,43 @@ export interface SummaryRowProps {
   total?: boolean;
   valueColor?: keyof ColorTokens;
   hint?: string;
+  /** Shown under the row when its (i) is tapped: detail kept off the screen
+   *  until asked for. */
+  tip?: string;
 }
 
-export const SummaryRow: React.FC<SummaryRowProps> = ({ label, value, total, valueColor, hint }) => {
-  const { spacing } = useTheme();
+export const SummaryRow: React.FC<SummaryRowProps> = ({ label, value, total, valueColor, hint, tip }) => {
+  const { colors, spacing } = useTheme();
+  const [tipOpen, setTipOpen] = useState(false);
+  const labelText = (
+    <Text
+      variant={total ? 'bodyMed' : 'bodySm'}
+      color={total ? 'textPrimary' : 'textSecondary'}
+      weight={total ? '700' : '400'}
+      style={tip ? { flexShrink: 1 } : { flexShrink: 1, maxWidth: '50%' }}
+    >
+      {label}
+    </Text>
+  );
   return (
     <View style={{ paddingVertical: spacing.sm }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md }}>
-        <Text
-          variant={total ? 'bodyMed' : 'bodySm'}
-          color={total ? 'textPrimary' : 'textSecondary'}
-          weight={total ? '700' : '400'}
+        {tip ? (
+          <Pressable
+            onPress={() => setTipOpen((o) => !o)}
+            accessibilityRole="button"
+            accessibilityLabel={`${label}. More information`}
+            accessibilityState={{ expanded: tipOpen }}
+            hitSlop={8}
+            style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, flexShrink: 1, maxWidth: '50%' }}
+          >
+            {labelText}
+            <Icon name="info" size={14} color={colors.textMuted} />
+          </Pressable>
+        ) : (
           // Labels wrap before they crowd the value out; the value keeps at least half the row.
-          style={{ flexShrink: 1, maxWidth: '50%' }}
-        >
-          {label}
-        </Text>
+          labelText
+        )}
         {typeof value === 'string' ? (
           <Text
             variant={total ? 'title3' : 'bodyMed'}
@@ -48,6 +70,11 @@ export const SummaryRow: React.FC<SummaryRowProps> = ({ label, value, total, val
           {hint}
         </Text>
       )}
+      {tip && tipOpen ? (
+        <Text variant="caption" color="textMuted" style={{ marginTop: 2 }}>
+          {tip}
+        </Text>
+      ) : null}
     </View>
   );
 };

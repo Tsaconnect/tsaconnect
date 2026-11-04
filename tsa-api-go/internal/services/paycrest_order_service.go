@@ -511,6 +511,15 @@ func grossDownForSenderFee(requested, feePercent string) (string, bool) {
 	return strconv.FormatFloat(amt/(1+pct/100), 'f', 2, 64), true
 }
 
+// buyRowRate is the rate a buy row shows: the provider's own rate when she
+// paid Paycrest's network fee instead of our take, else userRate.
+func buyRowRate(providerRate, feePercent, networkFee string) string {
+	if networkFee != "" {
+		return providerRate
+	}
+	return userRate("buy", providerRate, feePercent)
+}
+
 // userRate is the rate stored on the order and shown to the user: the
 // provider's rate with the fee Paycrest charged priced in, so the provider's
 // own rate stays recoverable from the row's SenderFeePercent.
@@ -724,7 +733,9 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 			return nil, nothingSent(s.explainMissingVenue(ctx, "buy", fiat, verr))
 		}
 		// Before anything is sent: a refusal here leaves no order anywhere.
-		if err := checkPriceGuard("buy", v.Rate, req.MaxRate, req.PriceGuard); err != nil {
+		// The all-in rate, as every other venue guards on: a small buy's Rate
+		// is the provider's own, with the network fee outside it.
+		if err := checkPriceGuard("buy", v.allInRate(), req.MaxRate, req.PriceGuard); err != nil {
 			return nil, err
 		}
 		venue = v
@@ -733,6 +744,13 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 	// Submit the grossed-down figure so the provider asks the user for exactly
 	// the amount they entered. FiatAmount on the row stays the user's number.
 	submitAmount, grossedDown := grossDownForSenderFee(req.FiatAmount, feeForOrder)
+	if venue.OnrampNetworkFee > 0 {
+		// Paycrest's network fee is the larger charge (a small buy): she pays
+		// amount + fee at the provider's rate, so submit what she receives.
+		if raw, ok := parsePositiveDecimal(venue.RawRate); ok {
+			submitAmount, grossedDown = strconv.FormatFloat(venue.TokenAmount*raw, 'f', 2, 64), true
+		}
+	}
 
 	ref := paycrestReference("PCB", req.UserID)
 	order, err := s.pc.CreateOnrampOrder(ctx, PaycrestOnrampRequest{
@@ -761,6 +779,14 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 	}
 
 	feePercent := s.chargedFeePercent(order, ref, feeForOrder)
+	networkFee := ""
+	if venue.OnrampNetworkFee > 0 {
+		networkFee = strings.TrimSpace(order.TransactionFee)
+		if got, ok := parsePositiveDecimal(networkFee); !ok || math.Abs(got-venue.OnrampNetworkFee) > 1e-9 {
+			log.Printf("[paycrest] ALARM onramp network fee moved ref=%s priced=%g paycrest=%q — small buys are mispriced",
+				ref, venue.OnrampNetworkFee, order.TransactionFee)
+		}
+	}
 	row := &models.PaycrestOrderRecord{
 		UserID:           req.UserID,
 		Direction:        models.PaycrestDirectionBuy,
@@ -772,7 +798,8 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		Token:            venue.Token,
 		ChainKey:         venue.ChainKey,
 		Network:          venue.Network,
-		Rate:             userRate("buy", order.Rate, feePercent),
+		Rate:             buyRowRate(order.Rate, feePercent, networkFee),
+		NetworkFee:       networkFee,
 		TokenAmount:      order.Amount,
 		ProviderID:       paycrestProviderOf(order, venue),
 		SenderFee:        order.SenderFee,

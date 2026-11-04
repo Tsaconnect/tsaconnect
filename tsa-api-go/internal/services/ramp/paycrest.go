@@ -118,14 +118,30 @@ func (p *PaycrestProvider) Quote(ctx context.Context, r Request) (*ProviderQuote
 			ChainKey:      v.ChainKey,
 			Token:         v.Token,
 			Rate:          v.Rate,
-			EffectiveRate: v.Rate, // Paycrest's rate is already all-in (§14)
-			Fees:          []VenueFee{},
+			EffectiveRate: paycrestAllIn(v),
+			Fees:          paycrestFees(v),
 			SpreadPercent: v.SpreadPercent,
 			TokenAmount:   v.TokenAmount,
 			Kind:          models.RouteKindDirect,
 		})
 	}
 	return out, nil
+}
+
+// paycrestAllIn is the venue's rate with every charge in: Rate, unless a
+// network fee line sits outside it (a small buy, chargeOnrampNetworkFee).
+func paycrestAllIn(v services.PaycrestVenue) string {
+	if v.EffectiveRate != "" {
+		return v.EffectiveRate
+	}
+	return v.Rate // the take is already inside Rate (§14)
+}
+
+func paycrestFees(v services.PaycrestVenue) []VenueFee {
+	if len(v.Fees) == 0 {
+		return []VenueFee{} // never "fees": null
+	}
+	return v.Fees
 }
 
 func (p *PaycrestProvider) Open(ctx context.Context, k VenueKey, r Request, in OrderInput) (*Order, error) {

@@ -39,6 +39,8 @@ import {
   Button,
   Card,
   CopyableField,
+  Icon,
+  InfoTip,
   Input,
   PickerSheet,
   SelectRow,
@@ -71,6 +73,7 @@ import {
   formatPromisedAmount,
   formatEstimate,
   formatEta,
+  networkFeeText,
   PaycrestError,
   type PayoutInstitution,
   type PaycrestOrder,
@@ -78,6 +81,7 @@ import {
   type PaycrestVenue,
   type RequestedAsset,
 } from '@/services/paycrestApi';
+import { formatNaira } from '@/utils/stableSellQuote';
 import {
   cancelRampOrder,
   claimRampPayment,
@@ -666,74 +670,46 @@ export default function PaycrestBuyScreen() {
       <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={['bottom']}>
         <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
           <Card>
-            <Text variant="bodySm" style={{ color: colors.textSecondary }}>
-              Transfer exactly
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md }}>
+              <InfoTip
+                label="Transfer exactly"
+                tip="Send this exact amount in one transfer, from an account in your own name. A different amount can hold up your order."
+              />
+              {expired ? null : (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs }}>
+                  <Icon name="clock" size={14} color={expiringSoon ? colors.warning : colors.textMuted} />
+                  <Text variant="bodySm" weight="600" numeric color={expiringSoon ? 'warning' : 'textSecondary'}>
+                    {countdown}
+                  </Text>
+                </View>
+              )}
+            </View>
+            <Text variant="display" weight="700" style={{ color: expired ? colors.textMuted : colors.textPrimary }}>
+              {currencyCode === 'NGN' ? formatNaira(order.payAmount) : `${symbol}${order.payAmount}`}
             </Text>
-            <Text variant="display" weight="700" style={{ color: colors.textPrimary }}>
-              {symbol}{order.payAmount}
-            </Text>
-            <Text variant="caption" style={{ color: colors.textMuted }}>
-              The service fee is already priced into your rate, so this is exactly the amount
-              you entered.
-            </Text>
-          </Card>
-
-          <Card
-            style={{
-              borderWidth: 1,
-              borderColor: expired
-                ? colors.danger
-                : expiringSoon
-                  ? colors.warning
-                  : colors.border,
-            }}
-          >
             {expired ? (
-              <>
-                <Text variant="bodyMed" weight="700" style={{ color: colors.danger }}>
-                  This order has expired
-                </Text>
-                <Text variant="caption" style={{ color: colors.textMuted }}>
-                  Do not send money to this account. If you already sent it, open the order and
-                  tap Get help — we will trace it for you.
-                </Text>
-              </>
+              <Text variant="bodySm" weight="600" color="danger">
+                This order has expired. Do not send money to this account. If you already did, open the order and
+                tap Get help.
+              </Text>
             ) : (
-              <>
-                <Text
-                  variant="bodySm"
-                  style={{ color: expiringSoon ? colors.warning : colors.textSecondary }}
-                >
-                  Time left to pay
-                </Text>
-                <Text
-                  variant="title1"
-                  weight="700"
-                  style={{ color: expiringSoon ? colors.warning : colors.textPrimary }}
-                >
-                  {countdown}
-                </Text>
-                <Text variant="caption" style={{ color: colors.textMuted }}>
-                  Send the transfer now. Paying after this runs out can leave your money with the
-                  provider, and it will not arrive automatically.
-                </Text>
-              </>
+              <Text variant="caption" color={expiringSoon ? 'warning' : 'textMuted'}>
+                Pay before the timer runs out — a late transfer will not arrive on its own.
+              </Text>
             )}
           </Card>
 
           <Card>
-            <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
-              Pay into
-            </Text>
+            <InfoTip
+              label="Pay into"
+              weight="600"
+              tip="This account belongs to the liquidity provider filling your order, not to TSA. Use it for this order only."
+            />
             {/* Copyable, because a mistyped account number on a live transfer
                 is not something we can undo. */}
             <CopyableField label="Bank" value={order.payInstitution ?? ''} />
             <CopyableField label="Account number" value={order.payAccountNumber ?? ''} />
             <CopyableField label="Account name" value={order.payAccountName ?? ''} />
-            <Text variant="caption" style={{ color: colors.textMuted, marginTop: spacing.sm }}>
-              This account belongs to the liquidity provider filling your order, not to TSA. It is
-              valid for this order only — never reuse it.
-            </Text>
           </Card>
 
           <SummaryCard>
@@ -767,20 +743,21 @@ export default function PaycrestBuyScreen() {
             ) : (
               <>
                 <SummaryRow label="You receive" value={`${order.tokenAmount} ${order.token}`} />
+                {networkFeeText(order, symbol) ? (
+                  <SummaryRow
+                    label="Network fee"
+                    value={networkFeeText(order, symbol)!}
+                    tip="The provider's cost to deliver on-chain, already taken out of what you receive. On larger buys our fee covers it instead."
+                  />
+                ) : null}
                 <SummaryRow label="Network" value={chainLabel(order.chain)} />
               </>
             )}
             <SummaryRow label="Rate" value={`${symbol}${order.rate} / ${order.token}`} />
-          </SummaryCard>
-
-          <Card>
-            <Text variant="bodySm" weight="600" style={{ color: colors.textSecondary }}>
-              Delivered to your wallet
-            </Text>
             {/* Full address, never truncated — the user is entitled to verify
                 where their crypto is going. */}
-            <CopyableField value={order.walletAddress} />
-          </Card>
+            <CopyableField label="Delivered to" value={order.walletAddress} />
+          </SummaryCard>
 
           <Button
             title="I've sent the money"

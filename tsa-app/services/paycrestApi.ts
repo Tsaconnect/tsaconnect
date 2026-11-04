@@ -119,6 +119,10 @@ export interface PaycrestOrder {
   rate?: string;
   tokenAmount?: string;
   senderFee?: string;
+  /** Paycrest's network fee (tokens) on a small buy, where it, not our fee,
+   *  was charged: tokenAmount is already net of it and rate is the
+   *  provider's own. Absent when our fee was charged and covered it. */
+  networkFee?: string;
   walletAddress: string;
 
   // ── Conversion (Phase 2). Empty/'direct' on every pre-Phase-2 order. ──
@@ -635,3 +639,18 @@ export function paycrestConversionHops(status: PaycrestStatus, holder?: string):
 
 /** Shared with gasSponsorship.ts, which lives under the same /paycrest routes. */
 export { request as paycrestRequest };
+
+/** A small buy's network fee as shown: "0.02 USDC (₦27.73)", or null when
+ *  she paid none. */
+export function networkFeeText(
+  order: Pick<PaycrestOrder, 'networkFee' | 'token' | 'rate'>,
+  symbol = '₦',
+): string | null {
+  const fee = Number(order.networkFee);
+  if (!order.networkFee || !(fee > 0)) return null;
+  const rate = Number(order.rate);
+  const fiat = rate > 0
+    ? ` (${symbol}${(fee * rate).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`
+    : '';
+  return `${order.networkFee} ${order.token}${fiat}`;
+}

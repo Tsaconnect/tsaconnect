@@ -170,6 +170,11 @@ type PaycrestOrderRecord struct {
 	// SenderFee is our margin as reported by Paycrest, settled on-chain.
 	SenderFee        string `gorm:"size:32" json:"senderFee,omitempty"`
 	SenderFeePercent string `gorm:"size:16" json:"senderFeePercent,omitempty"`
+	// NetworkFee is Paycrest's on-ramp network fee (tokens) when she paid it
+	// instead of our take: a small buy, where it is the larger charge. Empty
+	// when our take was charged and the fee came out of it. TokenAmount is
+	// already net of it; Rate is then the provider's own rate.
+	NetworkFee string `gorm:"size:32" json:"networkFee,omitempty"`
 
 	// ── Conversion (Phase 2). RouteKind is direct for every pre-Phase-2 row,
 	// which is what the zero value must mean, so reads treat "" as direct.
