@@ -143,8 +143,9 @@ func TestPaycrestCreateBuy_FallsBackToTheVerifiedLegalName(t *testing.T) {
 		if pc.onramp.KYC == nil || pc.onramp.KYC.FullName != "Ada Okafor" {
 			t.Fatal("kyc not filed under the verified legal name")
 		}
-		if pc.onramp.RefundAccount.AccountName != "Test User" {
-			t.Fatalf("refund name %q, want the one the app sent", pc.onramp.RefundAccount.AccountName)
+		// The app's own name for the account ("Test User") is never trusted.
+		if pc.onramp.RefundAccount.AccountName != "Ada Okafor" {
+			t.Fatalf("refund name %q, want the verified legal name", pc.onramp.RefundAccount.AccountName)
 		}
 	}
 }

@@ -1663,7 +1663,8 @@ type paycrestAccountVerifier interface {
 // under that person's identity. When Paycrest resolves the bank's name it must
 // match her verified legal name (ErrRefundAccountNotBuyers otherwise), and the
 // bank's spelling is then used for both, so Paycrest's own comparison agrees.
-// With no name from Paycrest the verified legal name is the KYC name.
+// With no name from Paycrest both are the verified legal name: the name the
+// app sends for the account is never used.
 func (s *PaycrestOrderService) buyerNames(ctx context.Context, req PaycrestBuyRequest, refundInst string) (refundName, kycName string, err error) {
 	_, legal, err := verifiedIdentity(ctx, s.db, req.UserID)
 	if err != nil {
@@ -1692,9 +1693,10 @@ func (s *PaycrestOrderService) buyerNames(ctx context.Context, req PaycrestBuyRe
 			return bank, legal, nil
 		}
 	}
-	refundName = strings.TrimSpace(req.RefundAccountName)
-	if refundName == "" {
-		refundName = legal
-	}
-	return refundName, legal, nil
+	// Ownership unproven (lookup down, or no name lookup for that bank): the
+	// client's name for the account is never trusted. Both names are her
+	// verified one, and Paycrest's own check refuses an account in another
+	// name wherever it can resolve one.
+	log.Printf("[paycrest] refund account owner unverified user=%s: filed under the verified legal name", req.UserID)
+	return legal, legal, nil
 }
