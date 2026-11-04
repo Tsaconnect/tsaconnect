@@ -2,8 +2,8 @@
 //
 // The buyer's BVN or NIN and date of birth, which Paycrest requires on every
 // bank-transfer purchase (source.kyc). Asked for once, then kept ONLY on this
-// phone, in the secure store (Keychain / Keystore), per wallet. Each Paycrest
-// buy sends it; the server passes it to Paycrest and never stores it. Each
+// phone, in the secure store (Keychain / Keystore), per wallet. Every buy
+// sends it; the server passes it only to Paycrest and never stores it. Each
 // entry records the account it belongs to: another account signed in on the
 // same phone and wallet reads it as none and is asked for its own.
 

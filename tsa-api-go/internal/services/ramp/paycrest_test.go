@@ -147,10 +147,11 @@ func TestPaycrestOpen_Classification(t *testing.T) {
 		"no refund":      {services.ErrBuyNeedsRefundAccount, ErrRefusedForUser},
 		"no payout":      {services.ErrSellNeedsPayoutAccount, ErrRefusedForUser},
 		"account shape":  {services.ErrPaycrestAccountShape, ErrRefusedForUser},
-		// Hers to fix: another provider must not be tried in her place.
-		"no buyer id":      {services.ErrBuyerIDRequired, ErrRefusedForUser},
-		"bad buyer id":     {services.ErrBuyerIDInvalid, ErrRefusedForUser},
-		"buyer id refused": {fmt.Errorf("%w: %w", services.ErrBuyerIDRejected, errors.New("HTTP 400")), ErrRefusedForUser},
+		// Only Paycrest needs her BVN/NIN: another venue may fill without it.
+		"no buyer id":      {services.ErrBuyerIDRequired, ErrVenueUnavailable},
+		"bad buyer id":     {services.ErrBuyerIDInvalid, ErrVenueUnavailable},
+		"buyer id refused": {fmt.Errorf("%w: %w", services.ErrBuyerIDRejected, errors.New("HTTP 400")), ErrVenueUnavailable},
+		"refund not hers":  {services.ErrRefundAccountNotBuyers, ErrVenueUnavailable},
 		"no legal name":    {services.ErrKYCLegalNameMissing, ErrRefusedForUser},
 		"request sent":     {fmt.Errorf("%w: %w", services.ErrOrderRequestSent, errors.New("timeout")), ErrOutcomeUnknown},
 		"nothing sent":     {fmt.Errorf("%w: %w", services.ErrPaycrestNothingSent, errors.New("rates timeout")), ErrVenueUnavailable},

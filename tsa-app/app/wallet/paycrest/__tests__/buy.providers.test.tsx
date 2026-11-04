@@ -322,9 +322,10 @@ it('a missing IT agreement sends her to the hub to accept it', async () => {
   expect(router.replace).toHaveBeenCalledWith('/wallet/it');
 });
 
-// Paycrest needs her BVN/NIN on every purchase. Never sent up front (another
-// provider may fill the buy); asked once when this phone has none, kept on the
-// phone for this account, and the purchase goes ahead with it.
+// Paycrest needs her BVN/NIN on every purchase; other venues do not. With
+// none on the phone she is asked only when no venue could fill the buy
+// without it; then it is kept on the phone for this account and the purchase
+// goes ahead with it.
 it('asks for the BVN/NIN once, keeps it on the phone, and retries the purchase with it', async () => {
   const id = { type: 'bvn' as const, number: '22212345678', birthDate: '1990-04-15' };
   ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
@@ -349,27 +350,15 @@ it('asks for the BVN/NIN once, keeps it on the phone, and retries the purchase w
   expect(text(tree)).toContain('Transfer exactly');
 });
 
-it('never sends a saved BVN/NIN with a purchase another provider fills', async () => {
-  buyerIds.readBuyerId.mockResolvedValue({ type: 'nin', number: '12345678901', birthDate: '1988-01-02' });
-  ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
-  ramp.createRampBuy.mockResolvedValueOnce({ ...order, id: 't1', provider: 'treasury' } as any);
-  await quoteAndConfirm('100', '1,382.60');
-  expect(ramp.createRampBuy).toHaveBeenCalledTimes(1);
-  expect(ramp.createRampBuy.mock.calls[0][0]).not.toHaveProperty('buyerId');
-});
-
-it('sends the BVN/NIN already on the phone without asking when Paycrest needs it', async () => {
+it('sends the BVN/NIN already on the phone up front, so Paycrest can compete', async () => {
   const id = { type: 'nin' as const, number: '12345678901', birthDate: '1988-01-02' };
   buyerIds.readBuyerId.mockResolvedValue(id);
   ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
-  ramp.createRampBuy
-    .mockRejectedValueOnce(new RampApi.RampError('Add your BVN', 400, 'buyer_id_required',
-      { success: false, code: 'buyer_id_required' }))
-    .mockResolvedValueOnce({ ...order, payAmount: '100' } as any);
+  ramp.createRampBuy.mockResolvedValueOnce({ ...order, payAmount: '100' } as any);
   const tree = await quoteAndConfirm('100', '1,382.60');
   expect(buyerIds.readBuyerId).toHaveBeenCalledWith('0xUser', 'user-1');
-  expect(ramp.createRampBuy).toHaveBeenCalledTimes(2);
-  expect(ramp.createRampBuy.mock.calls[1][0]).toEqual(expect.objectContaining({ buyerId: id }));
+  expect(ramp.createRampBuy).toHaveBeenCalledTimes(1);
+  expect(ramp.createRampBuy.mock.calls[0][0]).toEqual(expect.objectContaining({ buyerId: id }));
   expect(() => byLabel(tree, 'buyer-id-sheet')).toThrow();
 });
 
@@ -378,11 +367,8 @@ it('reopens the saved BVN/NIN with the reason when the provider refuses it', asy
   buyerIds.readBuyerId.mockResolvedValue(id);
   ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
   const why = "Your BVN or NIN and date of birth weren't accepted.";
-  ramp.createRampBuy
-    .mockRejectedValueOnce(new RampApi.RampError('Add your BVN', 400, 'buyer_id_required',
-      { success: false, code: 'buyer_id_required' }))
-    .mockRejectedValueOnce(new RampApi.RampError(why, 400, 'buyer_id_rejected',
-      { success: false, code: 'buyer_id_rejected' }));
+  ramp.createRampBuy.mockRejectedValueOnce(new RampApi.RampError(why, 400, 'buyer_id_rejected',
+    { success: false, code: 'buyer_id_rejected' }));
   const tree = await quoteAndConfirm('100', '1,382.60');
   const sheet = byLabel(tree, 'buyer-id-sheet');
   expect(sheet.props.initial).toEqual(id);

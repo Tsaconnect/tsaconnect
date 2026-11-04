@@ -97,3 +97,20 @@ func TestRampError_PoolDailyCapCopy(t *testing.T) {
 	}
 	assertNoVendorName(t, "pool daily cap", w.Body.String())
 }
+
+// No venue filled the buy without her BVN/NIN: the app gets the code that
+// opens the form, not a generic outage.
+func TestRampError_BuyerIDCodesWhenNoVenueFilled(t *testing.T) {
+	for cause, code := range map[error]string{
+		services.ErrBuyerIDRequired:        "buyer_id_required",
+		services.ErrBuyerIDRejected:        "buyer_id_rejected",
+		services.ErrRefundAccountNotBuyers: "refund_account_not_yours",
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		rampError(c, ramp.WrapClass(ramp.ErrUnavailable, ramp.WrapClass(ramp.ErrVenueUnavailable, cause)))
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), code) {
+			t.Fatalf("%s: status=%d body=%s", code, w.Code, w.Body)
+		}
+	}
+}

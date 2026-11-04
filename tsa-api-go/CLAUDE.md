@@ -505,13 +505,14 @@ Paycrest buys need the buyer's identity (`services/paycrest_buyer_id.go`, 2026-1
   Paycrest and **never stores or logs it**: `BuyerID`/`PaycrestPersonKYC` print as `[redacted]`, Paycrest error text has
   9+-digit runs and this buyer's number/DOB blanked, the buy routes' idempotency fingerprint ignores `buyerId`, and stored
   Paycrest webhooks drop any `kyc` object (`ScrubPaycrestKYC`). Keep it that way — no column, no audit row, no log line.
-  The app sends it only on a retry after `buyer_id_required`, and binds the saved copy to the account that entered it.
+  The app sends the saved copy up front on every buy (so Paycrest can compete), and binds it to the account that entered it.
 - The order is always filed under the Didit-verified user: the bank's name on the refund account (`POST /v2/verify-account`,
   cached 30 min) must match her verified legal name (`MatchAccountName`), else 400 `refund_account_not_yours`; when it
   matches, the bank's spelling is the KYC `fullName` so Paycrest's own comparison agrees. No name from Paycrest: the
   verified legal name.
 - Codes: `buyer_id_required` (app opens the form), `buyer_id_invalid` / `buyer_id_rejected` (form reopened with the reason),
-  `refund_account_not_yours`. All are the buyer's to fix, so the router never fails over on them.
+  `refund_account_not_yours`. Only Paycrest needs the ID, so these are `ErrVenueUnavailable`: the router fails over to a
+  venue that needs none, and returns the code (`ramp.IsBuyerIDCause`) only when no venue opened.
 
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me

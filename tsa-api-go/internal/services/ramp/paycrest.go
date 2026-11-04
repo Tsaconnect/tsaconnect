@@ -172,10 +172,6 @@ func classifyOpenErr(err error) error {
 		errors.Is(err, services.ErrPaycrestPayOrderOpen),
 		errors.Is(err, services.ErrBuyNeedsWallet),
 		errors.Is(err, services.ErrBuyNeedsRefundAccount),
-		errors.Is(err, services.ErrBuyerIDRequired),
-		errors.Is(err, services.ErrBuyerIDInvalid),
-		errors.Is(err, services.ErrBuyerIDRejected),
-		errors.Is(err, services.ErrRefundAccountNotBuyers),
 		errors.Is(err, services.ErrKYCLegalNameMissing),
 		errors.Is(err, services.ErrSellNeedsWallet),
 		errors.Is(err, services.ErrSellNeedsPayoutAccount),
@@ -190,12 +186,25 @@ func classifyOpenErr(err error) error {
 		errors.Is(err, services.ErrPaycrestBankUnsupported),
 		errors.Is(err, services.ErrPaycrestOrderRejected): // a 400/422: nothing opened
 		return WrapClass(ErrVenueUnavailable, err)
+	case IsBuyerIDCause(err):
+		// Paycrest alone needs her BVN/NIN: another venue may still fill the
+		// buy without it. The router surfaces this only when none did.
+		return WrapClass(ErrVenueUnavailable, err)
 	default:
 		// Infrastructure with no "nothing sent" mark (e.g. the KYC read
 		// failing): not classified, so the router stops rather than risk a
 		// second provider over an order whose fate it cannot tell.
 		return err
 	}
+}
+
+// IsBuyerIDCause reports a Paycrest refusal she can fix by giving, or
+// correcting, her BVN/NIN (or a refund account in her own name).
+func IsBuyerIDCause(err error) bool {
+	return errors.Is(err, services.ErrBuyerIDRequired) ||
+		errors.Is(err, services.ErrBuyerIDInvalid) ||
+		errors.Is(err, services.ErrBuyerIDRejected) ||
+		errors.Is(err, services.ErrRefundAccountNotBuyers)
 }
 
 func (p *PaycrestProvider) CheckNoOpenOrder(ctx context.Context, userID uuid.UUID, side Side) error {

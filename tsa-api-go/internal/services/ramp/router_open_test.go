@@ -288,3 +288,41 @@ func captureRampLog(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { log.SetOutput(prev) })
 	return &b
 }
+
+func TestRouterOpen_BuyerIDFailsOverToAVenueThatNeedsNone(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, services.ErrBuyerIDRequired)}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1405")}},
+		openResults: []openResult{{order: okOrder}}}
+	o, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if err != nil || o != okOrder || len(b.opened) != 1 {
+		t.Fatalf("o=%v err=%v b=%v", o, err, b.opened)
+	}
+}
+
+// When nothing opened, she is asked for what would have let a venue fill it,
+// even when a later venue failed for an unrelated reason.
+func TestRouterOpen_NoneOpenedAsksForTheBuyerID(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, services.ErrBuyerIDRequired)}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1405")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, errors.New("502"))}}}
+	_, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if !errors.Is(err, ErrUnavailable) || !errors.Is(err, services.ErrBuyerIDRequired) || len(b.opened) != 1 {
+		t.Fatalf("err = %v, b opened %v", err, b.opened)
+	}
+}
+
+// Asking for the ID wins over price_moved: the re-quote would show the venue
+// that needs it again, and she would confirm into the same refusal forever.
+func TestRouterOpen_BuyerIDOutranksPriceMoved(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, services.ErrBuyerIDRequired)}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1405")}},
+		openResults: []openResult{{err: services.ErrPriceMovedPastQuote}}}
+	_, err := testRouter(a, b).Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	var moved *PriceMovedError
+	if errors.As(err, &moved) || !errors.Is(err, services.ErrBuyerIDRequired) || len(b.opened) != 1 {
+		t.Fatalf("err = %v, b opened %v", err, b.opened)
+	}
+}

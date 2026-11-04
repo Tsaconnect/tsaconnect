@@ -735,6 +735,12 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 // noneOpened is step 4 of an open that opened nothing (Open and OpenConverted).
 func (r *Router) noneOpened(st *openState, fresh *QuoteResult, qerr error, pinned VenueKey, q Request, logOutcome func(string)) error {
 	switch {
+	case st.buyerIDCause != nil:
+		// A venue needed her BVN/NIN and none other opened: ask for it. Ahead
+		// of price_moved, whose re-quote would show that venue again and loop
+		// her on "the rate changed" without ever asking.
+		logOutcome("buyer_id")
+		return WrapClass(ErrUnavailable, st.buyerIDCause)
 	case st.sawPriceMoved || st.outsideTolerance:
 		logOutcome("price_moved")
 		if fresh == nil {
@@ -889,6 +895,7 @@ type openState struct {
 	sawPriceMoved    bool
 	outsideTolerance bool
 	lastCause        error       // the last ErrVenueUnavailable, for the final message
+	buyerIDCause     error       // a venue that needs her BVN/NIN: what she can fix when none opened
 	bound            []boundRate // what each guard refusal bound at, in attempt order
 }
 
@@ -927,6 +934,9 @@ func (r *Router) attempt(ctx, budget context.Context, p Provider, side Side, use
 		}
 	case errors.Is(err, ErrVenueUnavailable):
 		st.lastCause = err
+		if IsBuyerIDCause(err) {
+			st.buyerIDCause = err
+		}
 	default:
 		// Infrastructure, or a provider error not classified as "nothing
 		// sent" (v1 deliberately does not fail over on these — spec §4.3).

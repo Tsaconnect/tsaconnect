@@ -483,6 +483,9 @@ func rampError(c *gin.Context, err error) {
 	case errors.Is(err, services.ErrPoolCannotFill):
 		// §19: the pool was the last venue to refuse; never names a provider.
 		utils.ErrorResponseWithCode(c, http.StatusConflict, poolCannotFillMessage, poolCannotFillCode)
+	case ramp.IsBuyerIDCause(err):
+		// No venue filled it without her BVN/NIN: the app asks for it.
+		paycrestError(c, err)
 	case errors.Is(err, ramp.ErrUnavailable):
 		utils.ErrorResponseWithCode(c, http.StatusServiceUnavailable,
 			"Bank transfers are temporarily unavailable. Please try again shortly.", "ramp_unavailable")

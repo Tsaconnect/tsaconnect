@@ -500,15 +500,16 @@ export default function PaycrestBuyScreen() {
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
 
-  // withBuyerId: send the BVN/NIN saved on this phone. Only after the server
-  // asked for it (buyer_id_required), so it never travels with a purchase
-  // another provider fills.
+  // Sends the BVN/NIN saved on this phone whenever there is one, so Paycrest
+  // can compete for the buy; the server passes it only to Paycrest and never
+  // stores it. Without one, another venue fills the buy, and she is asked
+  // only when none could.
   // entered: the ID she just typed, sent even if it could not be saved.
-  const openBuy = useCallback(async (withBuyerId: boolean, entered?: BuyerId) => {
+  const openBuy = useCallback(async (entered?: BuyerId) => {
     if (!venue || !address || !refundBank || !want.chain || !want.address) return;
     setCreating(true);
     try {
-      const saved = entered ?? (withBuyerId ? await readBuyerId(address, account) : null);
+      const saved = entered ?? await readBuyerId(address, account);
       const buyerId = saved ? { buyerId: saved } : {};
       // A direct venue, or a converted one the router priced (it carries a
       // handle), goes through the ramp router, held to the rate she saw.
@@ -619,13 +620,9 @@ export default function PaycrestBuyScreen() {
         router.replace('/wallet/it' as never);
         return;
       }
-      // Paycrest needs her BVN/NIN: send the one saved on this phone, or ask
-      // once; let her fix one the provider refused. Saving retries.
+      // Only Paycrest could fill it, and it needs her BVN/NIN: ask once; let
+      // her fix one the provider refused. Saving retries.
       if (e instanceof PaycrestError && e.code === BUYER_ID_REQUIRED) {
-        if (!withBuyerId && (await readBuyerId(address, account))) {
-          await openBuy(true);
-          return;
-        }
         setBuyerIdPrompt({ initial: null });
         return;
       }
@@ -644,7 +641,7 @@ export default function PaycrestBuyScreen() {
       setCreating(false);
     }
   }, [venue, address, amount, refundBank, refundAccount, currencyCode, want, poolBuy.pool, account]);
-  const onConfirm = useCallback(() => openBuy(false), [openBuy]);
+  const onConfirm = useCallback(() => openBuy(), [openBuy]);
 
   // The explicit alternative offered when nothing can fill the exact pair the
   // user asked for, even with a conversion — never auto-selected, only
@@ -1116,7 +1113,7 @@ export default function PaycrestBuyScreen() {
           // Saved for next time when it can be; this purchase goes ahead either way.
           saveBuyerId(address, account, id)
             .catch(() => {})
-            .then(() => openBuy(true, id));
+            .then(() => openBuy(id));
         }}
       />
     </SafeAreaView>
