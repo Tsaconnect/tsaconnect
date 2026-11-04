@@ -7,7 +7,7 @@
 // The market list shows PLATFORM-LISTED TOKENS with price and 24h change (PM
 // spec) — not the user's holdings, which live on the Wallet tab. The balance
 // fetch below survives only to feed BalanceCard's portfolio total.
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { View, ScrollView, RefreshControl } from 'react-native';
 import { api } from '@/components/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -97,38 +97,41 @@ const Dashboard: React.FC = () => {
   }, [isLoading]);
 
   // ── Fetch data ──
+  // The total waits on every chain, so a slow earlier load can finish after a
+  // newer pull-to-refresh: only the latest load may write the total.
+  const fetchSeq = useRef(0);
   const fetchData = useCallback(async (refreshing = false) => {
     if (!authToken) { setIsLoading(false); return; }
+    const seq = ++fetchSeq.current;
     try {
       if (refreshing) setIsRefreshing(true); else setIsLoading(true);
       setError(null);
 
+      // The total reads every chain, so TP and cashback load alongside it
+      // rather than waiting behind the slowest one.
+      const tpRead = api.getTPBalance().then((res) => {
+        if (res.success && res.data) setTpBalance(res.data.tpBalance || 0);
+      }).catch(() => {});
+      const cashbackRead = api.getCashbackBalance().then((res) => {
+        if (res.success && res.data) setCashbackBalance(res.data.cashbackBalance || 0);
+      }).catch(() => {});
+
       // Unknown keeps the last total on screen and says so, rather than
       // showing a holder $0.00.
       const total = await readPortfolioUsd();
+      if (seq !== fetchSeq.current) return;
       if (total === null) setError("We couldn't load your balance.");
       else setTotalUsdValue(total);
-
-      // Fetch TP and cashback balances
-      try {
-        const tpRes = await api.getTPBalance();
-        if (tpRes.success && tpRes.data) {
-          setTpBalance(tpRes.data.tpBalance || 0);
-        }
-      } catch {}
-      try {
-        const cbRes = await api.getCashbackBalance();
-        if (cbRes.success && cbRes.data) {
-          setCashbackBalance(cbRes.data.cashbackBalance || 0);
-        }
-      } catch {}
+      await Promise.all([tpRead, cashbackRead]);
 
     } catch (err: any) {
       console.error('Dashboard fetch error:', err);
       setError(err.message || 'Failed to load dashboard');
     } finally {
-      setIsLoading(false);
-      setIsRefreshing(false);
+      if (seq === fetchSeq.current) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
     }
   }, [authToken, network]);
 
