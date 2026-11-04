@@ -281,7 +281,7 @@ const MarketplaceScreen: React.FC = () => {
         >
           <Input
             containerStyle={{ flex: 1 }}
-            placeholder="Search products or services..."
+            placeholder="Search marketplace"
             value={searchQuery}
             onChangeText={setSearchQuery}
             onSubmitEditing={handleSearch}

@@ -1,10 +1,10 @@
 // components/wallet/QuickActions.tsx
 //
-// The wallet balance card's row of actions. Five tiles share the row equally
+// The wallet balance card's row of actions. The tiles share the row equally
 // (flex: 1, no minimum width) and a label may wrap to two lines, so the row fits
 // a 320 pt screen: 320 − 2×16 (screen gutter) − 2×20 (card padding) = 248 pt,
-// 49.6 pt a tile, room for the 44 pt icon circle. The old fixed minWidth of 56
-// needed 280 pt and pushed the fifth tile off the card.
+// 62 pt a tile with four, room for the 44 pt icon circle. Swap has no tile here:
+// it opens the same screen as the Easyswap tab.
 import React from 'react';
 import { View } from 'react-native';
 import { useTheme } from '@/theme';
@@ -12,7 +12,6 @@ import { Icon, PressableScale, Text, type IconName } from '@/components/ui';
 
 export const WALLET_QUICK_ACTIONS = [
   { key: 'fund', label: 'Deposit', icon: 'bank' },
-  { key: 'swap', label: 'Swap', icon: 'swap' },
   { key: 'send', label: 'Withdraw', icon: 'send' },
   { key: 'instant-pay', label: 'Instant Pay', icon: 'bolt' },
   { key: 'pay-code', label: 'TSA Pay', icon: 'storefront' },

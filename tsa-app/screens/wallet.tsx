@@ -155,8 +155,8 @@ const WalletBalanceCard: React.FC<{
           ) : null}
         </View>
         <IconButton
-          icon={isValuesHidden ? 'lock' : 'wallet'}
-          size={18}
+          icon={isValuesHidden ? 'eyeOff' : 'eye'}
+          size={20}
           color={colors.textMuted}
           accessibilityLabel={isValuesHidden ? 'Show balance' : 'Hide balance'}
           onPress={onToggleVisibility}
@@ -980,7 +980,6 @@ const WalletScreen: React.FC = () => {
     if (action === 'fund') setShowFundModal(true);
     else if (action === 'send') setShowSendModal(true);
     else if (action === 'instant-pay') router.push('/wallet/instant-pay' as any);
-    else if (action === 'swap') router.push('/easyswap' as any);
     else router.push(`/${action}` as any);
   };
 

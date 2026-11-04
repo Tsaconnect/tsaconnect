@@ -22,13 +22,13 @@ import { Drawer } from "expo-router/drawer";
 import { DrawerContentScrollView, DrawerItem } from "@react-navigation/drawer";
 import { CommonActions, DrawerActions } from "@react-navigation/native";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
-import { router } from "expo-router";
+import { router, useSegments } from "expo-router";
 import api from "@/components/services/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NotificationBell from "../../components/NotificationBell";
 import { useTheme, fontFamily } from "@/theme";
 import { Avatar, Divider, Text } from "@/components/ui";
-import { isHomeTab, showDrawerHeader, type NestedNavState } from "@/utils/navHeader";
+import { HOME_TAB_ROUTE, showDrawerHeader, type NestedNavState } from "@/utils/navHeader";
 import CartIconBadge from "@/components/common/CartIconBadge";
 import { useIsPaymentMerchant } from "@/hooks/useIsPaymentMerchant";
 import { lpCta } from "@/utils/lpCta";
@@ -42,6 +42,16 @@ interface UserProfile {
   profilePicture?: string;
   phoneNumber?: string;
 }
+
+// Home only: the marketplace draws its own cart on the page. This reads the URL
+// segments itself, because the header's options (and route.state) are not
+// re-evaluated on a tab change, which left the cart showing on every tab. Before
+// any segment names a tab, Home (the first tab) is assumed.
+const HomeOnlyCart: React.FC<{ color: string }> = ({ color }) => {
+  const segments = useSegments() as string[];
+  const onHome = !segments.includes("(tabs)") || segments.includes(HOME_TAB_ROUTE);
+  return onHome ? <CartIconBadge color={color} size={24} /> : null;
+};
 
 const Layout = () => {
   const { colors, spacing, radius, type } = useTheme();
@@ -378,10 +388,7 @@ const Layout = () => {
             ({ navigation, route }) => ({
               headerRight: () => (
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                {/* Home only: the marketplace draws its own cart on the page. */}
-                {isHomeTab((route as { state?: NestedNavState }).state) && (
-                  <CartIconBadge color={colors.textPrimary} size={24} />
-                )}
+                <HomeOnlyCart color={colors.textPrimary} />
                 <NotificationBell />
                 <Pressable
                   onPress={() => handleAvatarPress(navigation)}
@@ -415,12 +422,12 @@ const Layout = () => {
                   ) : currentUser && currentUser.name ? (
                     // User has name but no profile picture
                     <View style={{ marginRight: spacing.sm }}>
-                      <Avatar name={currentUser.name} size={36} />
+                      <Avatar name={currentUser.name} size={36} tone="accent" />
                     </View>
                   ) : (
                     // No user data yet: the same button, a placeholder face.
                     <View style={{ marginRight: spacing.sm }}>
-                      <Avatar name="?" size={36} />
+                      <Avatar name="?" size={36} tone="accent" />
                     </View>
                   )}
                 </Pressable>

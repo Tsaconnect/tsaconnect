@@ -61,8 +61,9 @@ interface CurrencyContextType {
   formatPrice: (usdAmount: number) => string;
   /**
    * Dual-line price: primary is always USD with `$` prefix; secondary is the
-   * same value in the selected currency, with the ISO code prefix when on USD
-   * (so the two lines are visually distinct: "$20.00" / "USD 20.00").
+   * same value in the selected currency. When the user is already on USD (or
+   * rates have not loaded) there is nothing new to show, so secondary is an
+   * empty string and callers should not render the second line.
    */
   formatDualPrice: (usdAmount: number) => { primary: string; secondary: string };
 }
@@ -79,7 +80,7 @@ const CurrencyContext = createContext<CurrencyContextType>({
   setCurrency: async () => {},
   refreshRates: async () => {},
   formatPrice: () => "$0.00",
-  formatDualPrice: () => ({ primary: "$0.00", secondary: "USD 0.00" }),
+  formatDualPrice: () => ({ primary: "$0.00", secondary: "" }),
 });
 
 interface CurrencyProviderProps {
@@ -342,19 +343,10 @@ export function CurrencyProvider({ children }: CurrencyProviderProps) {
     (usdAmount: number): { primary: string; secondary: string } => {
       const primary = formatUSD(usdAmount);
 
-      // When the user is on USD (or rates aren't loaded yet) we prefix the
-      // secondary line with the ISO code so the two lines stay visually
-      // distinct: "$20.00" / "USD 20.00".
+      // On USD (or before rates load) a second line would only repeat the
+      // first ("$20.00" / "USD 20.00"), so return none and let callers skip it.
       if (currency.code === "USD" || rate === null) {
-        const secondary = `USD ${
-          isMicroPrice(usdAmount)
-            ? formatMicroPrice(usdAmount)
-            : usdAmount.toLocaleString("en-US", {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })
-        }`;
-        return { primary, secondary };
+        return { primary, secondary: "" };
       }
 
       // Non-USD: reuse formatPrice for the local-symbol line. It already

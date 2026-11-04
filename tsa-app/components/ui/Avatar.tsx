@@ -9,6 +9,8 @@ export interface AvatarProps {
   uri?: string;
   size?: number;
   online?: boolean;
+  /** 'auto' varies the tint per name (sellers); 'accent' is the brand tint, for the signed-in user. */
+  tone?: 'auto' | 'accent';
 }
 
 function initials(name?: string): string {
@@ -24,11 +26,11 @@ function tintIndex(name = '', n: number): number {
   return h % n;
 }
 
-export const Avatar: React.FC<AvatarProps> = ({ name, uri, size = 40, online }) => {
+export const Avatar: React.FC<AvatarProps> = ({ name, uri, size = 40, online, tone = 'auto' }) => {
   const { colors } = useTheme();
   const tints = [colors.accentMuted, colors.infoBg, colors.successBg, colors.escrowBg, colors.warningBg];
   const fgs = [colors.accent, colors.info, colors.success, colors.escrow, colors.warning];
-  const idx = tintIndex(name, tints.length);
+  const idx = tone === 'accent' ? 0 : tintIndex(name, tints.length);
   const dot = Math.max(8, Math.round(size * 0.28));
 
   return (

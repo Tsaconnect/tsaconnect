@@ -32,24 +32,24 @@ const tiles = () => tree.root.findAll((n) => n.props.testID === 'tile' && typeof
 
 afterEach(() => act(() => tree?.unmount()));
 
-it('has TSA Pay as the fifth action', () => {
-  expect(WALLET_QUICK_ACTIONS.map((a) => a.key)).toEqual(['fund', 'swap', 'send', 'instant-pay', 'pay-code']);
-  expect(WALLET_QUICK_ACTIONS[4].label).toBe('TSA Pay');
+it('has TSA Pay as the last action and no Swap tile', () => {
+  expect(WALLET_QUICK_ACTIONS.map((a) => a.key)).toEqual(['fund', 'send', 'instant-pay', 'pay-code']);
+  expect(WALLET_QUICK_ACTIONS[3].label).toBe('TSA Pay');
 });
 
-// 320 − 2×16 (screen gutter) − 2×20 (card padding) = 248 pt across five tiles:
-// 49.6 pt each, room for the 44 pt icon. A fixed minWidth of 56 needs 280 pt.
+// 320 − 2×16 (screen gutter) − 2×20 (card padding) = 248 pt across four tiles:
+// 62 pt each, room for the 44 pt icon.
 it('shares the row equally with no minimum width, and lets a label wrap', () => {
   const onPress = jest.fn();
   act(() => { tree = TestRenderer.create(<QuickActions onPress={onPress} />); });
-  expect(tiles()).toHaveLength(5);
+  expect(tiles()).toHaveLength(4);
   for (const tile of tiles()) {
     expect(tile.props.style).toMatchObject({ flex: 1 });
     expect(tile.props.style.minWidth).toBeUndefined();
   }
   const labels = tree.root.findAll((n) => typeof (n as { type?: unknown }).type === 'string' && n.props.numberOfLines !== undefined);
-  expect(labels).toHaveLength(5);
+  expect(labels).toHaveLength(4);
   expect(labels.every((l) => l.props.numberOfLines === 2)).toBe(true);
-  act(() => { tiles()[4].props.onPress(); });
+  act(() => { tiles()[3].props.onPress(); });
   expect(onPress).toHaveBeenCalledWith('pay-code');
 });

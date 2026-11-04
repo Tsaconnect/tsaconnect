@@ -75,7 +75,7 @@ const SERVICE_ITEMS: ServiceItem[] = [
     key: 'pay-bills',
     title: 'Pay Bills',
     description: 'Airtime, data, electricity & more — paid with MCGP',
-    icon: 'bolt',
+    icon: 'mobile',
     tone: 'warning',
     route: '/bills',
   },
@@ -91,7 +91,7 @@ const SERVICE_ITEMS: ServiceItem[] = [
     key: 'marketplace',
     title: 'Marketplace',
     description: 'Browse products by category',
-    icon: 'storefront',
+    icon: 'cart',
     tone: 'success',
     route: '/products',
   },
@@ -187,8 +187,9 @@ const ServicesScreen: React.FC = () => {
                 {/* No height:'100%' — a percentage height resolves against the
                     ScrollView's unbounded measuring height and blows the card up
                     to full-screen. The row's default alignItems:'stretch' already
-                    equalizes the two cells; tiles size to their (uniform) content. */}
-                <Card padding="lg">
+                    equalizes the two cells; flex:1 makes the card fill its cell so
+                    tiles with longer descriptions don't leave shorter neighbours. */}
+                <Card padding="lg" style={{ flex: 1 }}>
                   <View
                     style={{
                       width: 48,
@@ -210,7 +211,7 @@ const ServicesScreen: React.FC = () => {
                   <Text
                     variant="caption"
                     color="textMuted"
-                    numberOfLines={2}
+                    numberOfLines={3}
                     style={{ marginTop: spacing.xs }}
                   >
                     {item.description}

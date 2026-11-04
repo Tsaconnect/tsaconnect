@@ -90,9 +90,11 @@ export const BalanceCard: React.FC<BalanceCardProps> = ({
       <Text variant="display" weight="700" numeric>
         {isValuesHidden ? '••••••' : dualBalance.primary}
       </Text>
-      <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
-        {isValuesHidden ? '••••' : dualBalance.secondary}
-      </Text>
+      {dualBalance.secondary !== '' && (
+        <Text variant="bodySm" color="textSecondary" style={{ marginTop: spacing.xs }}>
+          {isValuesHidden ? '••••' : dualBalance.secondary}
+        </Text>
+      )}
 
       {dailyChange !== 0 && (
         <View

@@ -121,7 +121,7 @@ const TokenRow = ({
         <Text variant="bodySm" weight="700" numeric>
           {formatUsd(token.price)}
         </Text>
-        {token.price != null && (
+        {token.price != null && formatDualPrice(token.price).secondary !== '' && (
           <Text variant="caption" color="textMuted" numeric>
             {formatDualPrice(token.price).secondary}
           </Text>

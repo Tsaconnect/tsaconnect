@@ -244,9 +244,11 @@ const Dashboard: React.FC = () => {
                 <Text variant="bodyMed" weight="700" numeric>
                   {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).primary}
                 </Text>
-                <Text variant="caption" color="textSecondary">
-                  {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
-                </Text>
+                {formatDualPrice(cashbackBalance).secondary !== '' && (
+                  <Text variant="caption" color="textSecondary">
+                    {isValuesHidden ? '••••' : formatDualPrice(cashbackBalance).secondary}
+                  </Text>
+                )}
                 <Text variant="caption" color="textMuted">
                   Cashback
                 </Text>

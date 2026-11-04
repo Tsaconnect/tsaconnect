@@ -42,7 +42,7 @@ const DashLayout = () => {
       <Tabs.Screen
         name="(home)"
         options={{
-          title: "Tsa Connect",
+          title: "Home",
           tabBarIcon: ({ color, focused }) => (
             <Image
               source={require("../../../assets/icons/tsa.png")}

@@ -45,8 +45,9 @@ const NotificationBell: React.FC = () => {
           pointerEvents="none"
           style={{
             position: 'absolute',
-            top: spacing.sm,
-            right: spacing.sm,
+            // On the bell's top-right corner, not over its centre.
+            top: 0,
+            right: 0,
             minWidth: 18,
             height: 18,
             paddingHorizontal: spacing.xs,
