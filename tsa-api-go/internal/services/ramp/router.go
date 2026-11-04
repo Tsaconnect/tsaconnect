@@ -708,8 +708,15 @@ func (r *Router) Open(ctx context.Context, req OpenRequest) (*Order, error) {
 			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
 				continue
 			}
+			// After a venue needed her BVN/NIN (here or earlier in this
+			// loop), the rest only open at the rate she was shown, whatever
+			// the guard mode: a worse fill is never the price of not giving
+			// it. Outside tolerance, she is asked for the ID instead.
+			if st.buyerIDCause != nil {
+				in.Guard = services.PriceGuardEnforce
+			}
 			if !Acceptable(q.Side, v.RankRate(), limit) {
-				if enforce {
+				if enforce || st.buyerIDCause != nil {
 					st.outsideTolerance = true
 					continue
 				}
@@ -858,8 +865,15 @@ func (r *Router) OpenConverted(ctx context.Context, req OpenRequest) (*Order, er
 			if st.tried[v.Provider] || companyWalletUntried(v, fresh.Venues, &st) {
 				continue
 			}
+			// After a venue needed her BVN/NIN (here or earlier in this
+			// loop), the rest only open at the rate she was shown, whatever
+			// the guard mode: a worse fill is never the price of not giving
+			// it. Outside tolerance, she is asked for the ID instead.
+			if st.buyerIDCause != nil {
+				in.Guard = services.PriceGuardEnforce
+			}
 			if !Acceptable(q.Side, v.RankRate(), limit) {
-				if enforce {
+				if enforce || st.buyerIDCause != nil {
 					st.outsideTolerance = true
 					continue
 				}

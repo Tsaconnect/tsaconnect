@@ -326,3 +326,48 @@ func TestRouterOpen_BuyerIDOutranksPriceMoved(t *testing.T) {
 		t.Fatalf("err = %v, b opened %v", err, b.opened)
 	}
 }
+
+// Live 2026-11-04: Paycrest quoted 1400, needed the ID, and the pool filled at
+// 1509 because the guard only logs. A buyer-ID failover never fills outside
+// tolerance; she is asked for the ID instead.
+func TestRouterOpen_BuyerIDFailoverStaysWithinTolerance(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, services.ErrBuyerIDRequired)}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1509")}},
+		openResults: []openResult{{order: okOrder}}}
+	r := testRouter(a, b)
+	r.cfg.Guard = services.PriceGuardLog
+	_, err := r.Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if !errors.Is(err, services.ErrBuyerIDRequired) || len(b.opened) != 0 {
+		t.Fatalf("err = %v, b opened %v", err, b.opened)
+	}
+}
+
+// Within tolerance it still fails over, and the venue binds under enforce.
+func TestRouterOpen_BuyerIDFailoverBindsUnderEnforce(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, services.ErrBuyerIDRequired)}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1403")}},
+		openResults: []openResult{{order: okOrder}}}
+	r := testRouter(a, b)
+	r.cfg.Guard = services.PriceGuardLog
+	o, err := r.Open(context.Background(), openReq(EncodeHandle("a", VenueKey{"base", "USDC"}), "1400"))
+	if err != nil || o != okOrder || len(b.openInputs) != 1 || b.openInputs[0].Guard != services.PriceGuardEnforce {
+		t.Fatalf("o=%v err=%v inputs=%v", o, err, b.openInputs)
+	}
+}
+
+// No handle: Paycrest is tried best-first inside the failover loop, and the
+// worse venue after it is held to the shown rate all the same.
+func TestRouterOpen_BuyerIDMidLoopStaysWithinTolerance(t *testing.T) {
+	a := &fakeProvider{name: "a", quote: &ProviderQuote{Venues: []Venue{venue("a", "base", "USDC", "1400")}},
+		openResults: []openResult{{err: WrapClass(ErrVenueUnavailable, services.ErrBuyerIDRequired)}}}
+	b := &fakeProvider{name: "b", quote: &ProviderQuote{Venues: []Venue{venue("b", "base", "USDC", "1509")}},
+		openResults: []openResult{{order: okOrder}}}
+	r := testRouter(a, b)
+	r.cfg.Guard = services.PriceGuardLog
+	_, err := r.Open(context.Background(), openReq("", "1400"))
+	if !errors.Is(err, services.ErrBuyerIDRequired) || len(a.opened) != 1 || len(b.opened) != 0 {
+		t.Fatalf("err = %v, a opened %v, b opened %v", err, a.opened, b.opened)
+	}
+}
