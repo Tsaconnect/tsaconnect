@@ -59,7 +59,8 @@ func newSeamService(t *testing.T, pc PaycrestOrderer, side, rate string) *Paycre
 
 func seamBuyRequest(user uuid.UUID) PaycrestBuyRequest {
 	return PaycrestBuyRequest{
-		UserID: user, WalletAddress: "0xabc", FiatCode: "NGN", FiatAmount: "800",
+		BuyerID: testBuyerID(),
+		UserID:  user, WalletAddress: "0xabc", FiatCode: "NGN", FiatAmount: "800",
 		ChainKey: "base", Token: "USDC",
 		RefundBankCode: "044", RefundAccount: "0123456789", RefundAccountName: "Test User",
 	}

@@ -82,7 +82,8 @@ func (h *PaycrestWebhookHandler) Handle(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	rec, dup, err := h.store.Record(ctx, ev.DedupeKey, body, sig)
+	// Stored without any echoed buyer KYC; the signature was checked on the raw body.
+	rec, dup, err := h.store.Record(ctx, ev.DedupeKey, services.ScrubPaycrestKYC(body), sig)
 	if err != nil {
 		log.Printf("[paycrest webhook] record %s: %v", ev.DedupeKey, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to record event"})

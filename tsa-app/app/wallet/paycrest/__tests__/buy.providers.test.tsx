@@ -63,6 +63,7 @@ jest.mock('@/components/assets/AssetPicker', () => {
   };
 });
 jest.mock('@/components/wallet/TokenAvatar', () => ({ __esModule: true, default: () => null }));
+jest.mock('@/AuthContext/AuthContext', () => ({ __esModule: true, useAuth: () => ({ currentUser: { id: 'user-1' } }) }));
 jest.mock('@/hooks/useSignableWallet', () => ({ __esModule: true, useSignableWallet: () => ({ address: '0xUser', ready: true }) }));
 jest.mock('@/hooks/useCountdown', () => ({ __esModule: true, useCountdown: () => ({ label: '10:00', expired: false, secs: 600 }) }));
 jest.mock('@/hooks/useRampCurrency', () => {
@@ -117,6 +118,25 @@ jest.mock('@/services/walletApi', () => ({
   getAuthHeaders: jest.fn(async () => ({})),
 }));
 jest.mock('@/services/wallet', () => ({ __esModule: true }));
+jest.mock('@/services/buyerId', () => ({
+  ...jest.requireActual('@/services/buyerId'),
+  readBuyerId: jest.fn(async () => null),
+  saveBuyerId: jest.fn(async () => {}),
+}));
+// The sheet, reachable: rendered only while open, with its submit exposed.
+jest.mock('@/components/paycrest/BuyerIdSheet', () => {
+  const react = jest.requireActual('react');
+  const { View } = jest.requireActual('react-native');
+  return {
+    __esModule: true,
+    default: (props: any) =>
+      props.visible
+        ? react.createElement(View, {
+          accessibilityLabel: 'buyer-id-sheet', onSubmit: props.onSubmit, initial: props.initial, notice: props.notice,
+        })
+        : null,
+  };
+});
 
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
@@ -127,9 +147,11 @@ import BuyScreen from '../buy';
 import * as PaycrestApi from '@/services/paycrestApi';
 import * as RampApi from '@/services/rampApi';
 import type { PaycrestOrder } from '@/services/paycrestApi';
+import * as BuyerIdStore from '@/services/buyerId';
 
 const ramp = jest.mocked(RampApi);
 const api = jest.mocked(PaycrestApi);
+const buyerIds = jest.mocked(BuyerIdStore);
 jest.setTimeout(30_000);
 
 function textNodes(node: any, out: string[] = []): string[] {
@@ -298,4 +320,71 @@ it('a missing IT agreement sends her to the hub to accept it', async () => {
     { success: false, code: 'it_agreement_required' }));
   await quoteAndConfirm('165025', '1,692.57', true);
   expect(router.replace).toHaveBeenCalledWith('/wallet/it');
+});
+
+// Paycrest needs her BVN/NIN on every purchase. Never sent up front (another
+// provider may fill the buy); asked once when this phone has none, kept on the
+// phone for this account, and the purchase goes ahead with it.
+it('asks for the BVN/NIN once, keeps it on the phone, and retries the purchase with it', async () => {
+  const id = { type: 'bvn' as const, number: '22212345678', birthDate: '1990-04-15' };
+  ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
+  ramp.createRampBuy
+    .mockRejectedValueOnce(new RampApi.RampError(
+      'Add your BVN or NIN and date of birth to buy with a bank transfer.', 400, 'buyer_id_required',
+      { success: false, code: 'buyer_id_required' }))
+    .mockResolvedValueOnce({ ...order, payAmount: '100' } as any);
+  const tree = await quoteAndConfirm('100', '1,382.60');
+
+  expect(ramp.createRampBuy).toHaveBeenCalledTimes(1);
+  expect(ramp.createRampBuy.mock.calls[0][0]).not.toHaveProperty('buyerId');
+  const sheet = byLabel(tree, 'buyer-id-sheet');
+  expect(sheet.props.initial).toBeNull();
+
+  buyerIds.readBuyerId.mockResolvedValue(id);
+  await act(async () => { sheet.props.onSubmit(id); });
+  await flush();
+  expect(buyerIds.saveBuyerId).toHaveBeenCalledWith('0xUser', 'user-1', id);
+  expect(ramp.createRampBuy).toHaveBeenCalledTimes(2);
+  expect(ramp.createRampBuy.mock.calls[1][0]).toEqual(expect.objectContaining({ buyerId: id }));
+  expect(text(tree)).toContain('Transfer exactly');
+});
+
+it('never sends a saved BVN/NIN with a purchase another provider fills', async () => {
+  buyerIds.readBuyerId.mockResolvedValue({ type: 'nin', number: '12345678901', birthDate: '1988-01-02' });
+  ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
+  ramp.createRampBuy.mockResolvedValueOnce({ ...order, id: 't1', provider: 'treasury' } as any);
+  await quoteAndConfirm('100', '1,382.60');
+  expect(ramp.createRampBuy).toHaveBeenCalledTimes(1);
+  expect(ramp.createRampBuy.mock.calls[0][0]).not.toHaveProperty('buyerId');
+});
+
+it('sends the BVN/NIN already on the phone without asking when Paycrest needs it', async () => {
+  const id = { type: 'nin' as const, number: '12345678901', birthDate: '1988-01-02' };
+  buyerIds.readBuyerId.mockResolvedValue(id);
+  ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
+  ramp.createRampBuy
+    .mockRejectedValueOnce(new RampApi.RampError('Add your BVN', 400, 'buyer_id_required',
+      { success: false, code: 'buyer_id_required' }))
+    .mockResolvedValueOnce({ ...order, payAmount: '100' } as any);
+  const tree = await quoteAndConfirm('100', '1,382.60');
+  expect(buyerIds.readBuyerId).toHaveBeenCalledWith('0xUser', 'user-1');
+  expect(ramp.createRampBuy).toHaveBeenCalledTimes(2);
+  expect(ramp.createRampBuy.mock.calls[1][0]).toEqual(expect.objectContaining({ buyerId: id }));
+  expect(() => byLabel(tree, 'buyer-id-sheet')).toThrow();
+});
+
+it('reopens the saved BVN/NIN with the reason when the provider refuses it', async () => {
+  const id = { type: 'bvn' as const, number: '22212345678', birthDate: '1990-04-15' };
+  buyerIds.readBuyerId.mockResolvedValue(id);
+  ramp.getRampQuote.mockResolvedValue(rampQuote('100', [walletVenue]) as any);
+  const why = "Your BVN or NIN and date of birth weren't accepted.";
+  ramp.createRampBuy
+    .mockRejectedValueOnce(new RampApi.RampError('Add your BVN', 400, 'buyer_id_required',
+      { success: false, code: 'buyer_id_required' }))
+    .mockRejectedValueOnce(new RampApi.RampError(why, 400, 'buyer_id_rejected',
+      { success: false, code: 'buyer_id_rejected' }));
+  const tree = await quoteAndConfirm('100', '1,382.60');
+  const sheet = byLabel(tree, 'buyer-id-sheet');
+  expect(sheet.props.initial).toEqual(id);
+  expect(sheet.props.notice).toBe(why);
 });

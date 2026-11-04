@@ -127,9 +127,12 @@ type OrderInput struct {
 	RefundBankCode    string
 	RefundAccount     string
 	RefundAccountName string
-	BankCode          string
-	AccountNo         string
-	AccountName       string
+	// BuyerID is the buyer's BVN/NIN and birth date for a Paycrest buy; other
+	// providers ignore it. Never stored.
+	BuyerID     *services.BuyerID
+	BankCode    string
+	AccountNo   string
+	AccountName string
 }
 
 // Order is one provider's order, carried as the provider's own record so the

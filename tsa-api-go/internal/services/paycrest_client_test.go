@@ -154,6 +154,7 @@ func TestPaycrestOnramp_SendsExpectedPayload(t *testing.T) {
 			AccountIdentifier: "8068157741",
 			AccountName:       "EMMANUEL ADEMU",
 		},
+		KYC: &PaycrestPersonKYC{FullName: "EMMANUEL ADEMU", ID: BuyerID{Type: "bvn", Number: "22212345678", BirthDate: "1990-04-12"}},
 	})
 	if err != nil {
 		t.Fatalf("CreateOnrampOrder: %v", err)
@@ -162,7 +163,9 @@ func TestPaycrestOnramp_SendsExpectedPayload(t *testing.T) {
 		t.Fatalf("API-Key header not sent, got %q", authHeader)
 	}
 	sent := string(body)
-	for _, want := range []string{`"amountIn":"fiat"`, `"refundAccount"`, `"OPAYNGPC"`, `"reference":"ref-1"`} {
+	for _, want := range []string{`"amountIn":"fiat"`, `"refundAccount"`, `"OPAYNGPC"`, `"reference":"ref-1"`,
+		// source.kyc, exactly as Paycrest's v2 on-ramp names it.
+		`"kyc":{"entityType":"person","personDetails":{"birthDate":"1990-04-12","fullName":"EMMANUEL ADEMU","idDocument":{"issuerCountry":"NG","number":"22212345678","type":"BVN"}}}`} {
 		if !strings.Contains(sent, want) {
 			t.Errorf("payload missing %s\ngot: %s", want, sent)
 		}
@@ -286,5 +289,35 @@ func TestLive_PaycrestPublicEndpoints(t *testing.T) {
 		if r.Sell != nil {
 			t.Logf("sell %s (providers %v)", r.Sell.Rate, r.Sell.ProviderIDs)
 		}
+	}
+}
+
+// A bank account's holder is asked once, not on every buy.
+func TestPaycrestVerifyAccount_CachesTheName(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/v2/verify-account" || r.Method != http.MethodPost {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"status":"success","message":"Account name was fetched successfully","data":"ADA OKAFOR"}`))
+	}))
+	defer srv.Close()
+	c := NewPaycrestClient(srv.URL, "k")
+	for i := 0; i < 3; i++ {
+		name, err := c.VerifyAccount(context.Background(), "GTBINGLA", "0123456789")
+		if err != nil || name != "ADA OKAFOR" {
+			t.Fatalf("VerifyAccount = %q, %v", name, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("%d calls, want 1", calls)
+	}
+}
+
+func TestPaycrestVerifyAccount_OKMeansNoName(t *testing.T) {
+	c, _ := paycrestStub(t, 200, `{"status":"success","message":"ok","data":"OK"}`)
+	if name, err := c.VerifyAccount(context.Background(), "ABCDPC", "1"); err != nil || name != "" {
+		t.Fatalf("VerifyAccount = %q, %v; want no name", name, err)
 	}
 }

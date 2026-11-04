@@ -147,18 +147,23 @@ func TestPaycrestOpen_Classification(t *testing.T) {
 		"no refund":      {services.ErrBuyNeedsRefundAccount, ErrRefusedForUser},
 		"no payout":      {services.ErrSellNeedsPayoutAccount, ErrRefusedForUser},
 		"account shape":  {services.ErrPaycrestAccountShape, ErrRefusedForUser},
-		"request sent":   {fmt.Errorf("%w: %w", services.ErrOrderRequestSent, errors.New("timeout")), ErrOutcomeUnknown},
-		"nothing sent":   {fmt.Errorf("%w: %w", services.ErrPaycrestNothingSent, errors.New("rates timeout")), ErrVenueUnavailable},
-		"rejected 4xx":   {fmt.Errorf("%w: %w", services.ErrPaycrestOrderRejected, errors.New("HTTP 422")), ErrVenueUnavailable},
-		"buy persist":    {services.ErrBuyAttemptMayExist, ErrOutcomeUnknown},
-		"sell persist":   {services.ErrSellAttemptMayExist, ErrOutcomeUnknown},
-		"disabled":       {services.ErrPaycrestDisabled, ErrVenueUnavailable},
-		"below minimum":  {services.ErrPaycrestBelowMinimum, ErrVenueUnavailable},
-		"leg closed":     {services.ErrPaycrestLegClosed, ErrVenueUnavailable},
-		"no venue":       {services.ErrPaycrestNoVenue, ErrVenueUnavailable},
-		"bank":           {services.ErrPaycrestBankUnsupported, ErrVenueUnavailable},
-		"price moved":    {services.ErrPriceMovedPastQuote, services.ErrPriceMovedPastQuote},
-		"db down":        {errors.New("db connection refused"), nil},
+		// Hers to fix: another provider must not be tried in her place.
+		"no buyer id":      {services.ErrBuyerIDRequired, ErrRefusedForUser},
+		"bad buyer id":     {services.ErrBuyerIDInvalid, ErrRefusedForUser},
+		"buyer id refused": {fmt.Errorf("%w: %w", services.ErrBuyerIDRejected, errors.New("HTTP 400")), ErrRefusedForUser},
+		"no legal name":    {services.ErrKYCLegalNameMissing, ErrRefusedForUser},
+		"request sent":     {fmt.Errorf("%w: %w", services.ErrOrderRequestSent, errors.New("timeout")), ErrOutcomeUnknown},
+		"nothing sent":     {fmt.Errorf("%w: %w", services.ErrPaycrestNothingSent, errors.New("rates timeout")), ErrVenueUnavailable},
+		"rejected 4xx":     {fmt.Errorf("%w: %w", services.ErrPaycrestOrderRejected, errors.New("HTTP 422")), ErrVenueUnavailable},
+		"buy persist":      {services.ErrBuyAttemptMayExist, ErrOutcomeUnknown},
+		"sell persist":     {services.ErrSellAttemptMayExist, ErrOutcomeUnknown},
+		"disabled":         {services.ErrPaycrestDisabled, ErrVenueUnavailable},
+		"below minimum":    {services.ErrPaycrestBelowMinimum, ErrVenueUnavailable},
+		"leg closed":       {services.ErrPaycrestLegClosed, ErrVenueUnavailable},
+		"no venue":         {services.ErrPaycrestNoVenue, ErrVenueUnavailable},
+		"bank":             {services.ErrPaycrestBankUnsupported, ErrVenueUnavailable},
+		"price moved":      {services.ErrPriceMovedPastQuote, services.ErrPriceMovedPastQuote},
+		"db down":          {errors.New("db connection refused"), nil},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -230,7 +235,7 @@ func TestPaycrestCheckNoOpenOrder_KeepsItsOwnRefusal(t *testing.T) {
 func TestPaycrestMaxLegs(t *testing.T) {
 	p := newTestPaycrest(&fakePcOrders{}, &fakePcQuotes{}, fakeReg{"NGN": services.RampProviderPaycrest, "GHS": "none"})
 	got := p.MaxLegs()
-	want := services.RampLegs{Buy: !services.PaycrestBuysOff, Sell: true}
+	want := services.RampLegs{Buy: true, Sell: true}
 	if got["NGN"] != want {
 		t.Fatalf("NGN = %+v, want %+v", got["NGN"], want)
 	}

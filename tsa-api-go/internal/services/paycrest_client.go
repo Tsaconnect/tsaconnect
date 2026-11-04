@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,6 +56,9 @@ type PaycrestClient struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+	// verifiedNames caches verify-account answers (institution|account →
+	// verifiedName) for verifiedNameTTL.
+	verifiedNames sync.Map
 }
 
 const (
@@ -161,12 +165,15 @@ func paycrestError(op string, status int, body []byte) error {
 		msg = msg + " (" + d + ")"
 	}
 	if msg == "" {
-		msg = strings.TrimSpace(string(body))
+		// Redacted BEFORE the cut, so a number split by it is still caught.
+		msg = redactIDNumbers(strings.TrimSpace(string(body)))
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
 	}
-	return &PaycrestRequestError{Op: op, Status: status, Msg: msg}
+	// An on-ramp carries the buyer's BVN/NIN; never let an echo of it reach a
+	// log or an error the user reads.
+	return &PaycrestRequestError{Op: op, Status: status, Msg: redactIDNumbers(msg)}
 }
 
 // do issues a request. authed=false is used for the public rate, markets and
@@ -395,6 +402,9 @@ type PaycrestOnrampRequest struct {
 	// Empty falls back to the dashboard profile default.
 	SenderFeePercent string
 	SenderFeeAddress string
+	// KYC is source.kyc, required by Paycrest on every on-ramp order. Never
+	// logged: it prints as [redacted].
+	KYC *PaycrestPersonKYC
 }
 
 // PaycrestOfframpRequest sells stablecoin for fiat.
@@ -511,6 +521,8 @@ func (c *PaycrestClient) CreateOnrampOrder(ctx context.Context, req PaycrestOnra
 		// missing refund account with the opaque "Refund institution not
 		// supported".
 		return nil, errors.New("paycrest onramp: refund account is required")
+	case req.KYC == nil:
+		return nil, ErrBuyerIDRequired
 	}
 	fiat := req.FiatCode
 	if fiat == "" {
@@ -523,6 +535,7 @@ func (c *PaycrestClient) CreateOnrampOrder(ctx context.Context, req PaycrestOnra
 			"type":          "fiat",
 			"currency":      strings.ToUpper(fiat),
 			"refundAccount": req.RefundAccount,
+			"kyc":           req.KYC.payload(),
 		},
 		"destination": map[string]any{
 			"type":     "crypto",
@@ -536,6 +549,75 @@ func (c *PaycrestClient) CreateOnrampOrder(ctx context.Context, req PaycrestOnra
 	}
 	applyPaycrestSenderFee(payload, req.SenderFeePercent, req.SenderFeeAddress)
 	return c.postOrder(ctx, "onramp", payload)
+}
+
+// VerifyAccount asks Paycrest for the bank's name on an account (POST
+// /v2/verify-account, unauthenticated). "" with no error means Paycrest
+// confirmed the account but has no name lookup for that bank ("OK").
+func (c *PaycrestClient) VerifyAccount(ctx context.Context, institution, accountIdentifier string) (string, error) {
+	if !c.IsEnabled() {
+		return "", ErrPaycrestDisabled
+	}
+	// A bank account's holder does not change between buys: answered from a
+	// short cache so a buy does not wait on this call every time.
+	key := institution + "|" + accountIdentifier
+	if v, ok := c.verifiedNames.Load(key); ok {
+		if e := v.(verifiedName); time.Since(e.at) < verifiedNameTTL {
+			return e.name, nil
+		}
+	}
+	name, err := c.verifyAccount(ctx, institution, accountIdentifier)
+	if err == nil {
+		now := time.Now()
+		c.verifiedNames.Store(key, verifiedName{name: name, at: now})
+		// Expired entries are dropped as new ones arrive, so the cache holds
+		// roughly one TTL's worth of accounts, never every one ever seen.
+		c.verifiedNames.Range(func(k, v any) bool {
+			if now.Sub(v.(verifiedName).at) >= verifiedNameTTL {
+				c.verifiedNames.Delete(k)
+			}
+			return true
+		})
+	}
+	return name, err
+}
+
+// verifiedNameTTL bounds how long a verify-account answer is reused.
+const verifiedNameTTL = 30 * time.Minute
+
+type verifiedName struct {
+	name string
+	at   time.Time
+}
+
+func (c *PaycrestClient) verifyAccount(ctx context.Context, institution, accountIdentifier string) (string, error) {
+	raw, err := json.Marshal(map[string]string{"institution": institution, "accountIdentifier": accountIdentifier})
+	if err != nil {
+		return "", err
+	}
+	resp, body, err := c.do(ctx, http.MethodPost, "/v2/verify-account", raw, false)
+	if err != nil {
+		return "", fmt.Errorf("paycrest verify-account: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", paycrestError("verify-account", resp.StatusCode, body)
+	}
+	var env struct {
+		Status string          `json:"status"`
+		Data   json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return "", fmt.Errorf("paycrest verify-account decode: %w", err)
+	}
+	var name string
+	if err := json.Unmarshal(env.Data, &name); err != nil {
+		return "", fmt.Errorf("paycrest verify-account decode data: %w", err)
+	}
+	name = strings.TrimSpace(name)
+	if strings.EqualFold(name, "OK") {
+		return "", nil
+	}
+	return name, nil
 }
 
 // CreateOfframpOrder returns the address to send stablecoin to. The provider
@@ -609,7 +691,7 @@ func (c *PaycrestClient) postOrder(ctx context.Context, op string, payload map[s
 		return nil, fmt.Errorf("paycrest %s decode: %w", op, err)
 	}
 	if env.failed() {
-		return nil, fmt.Errorf("paycrest %s failed: %s", op, env.Message)
+		return nil, fmt.Errorf("paycrest %s failed: %s", op, redactIDNumbers(env.Message))
 	}
 	var out PaycrestOrder
 	if err := json.Unmarshal(env.Data, &out); err != nil {

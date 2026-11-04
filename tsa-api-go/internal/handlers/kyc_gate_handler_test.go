@@ -5,14 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
+	"github.com/ojimcy/tsa-api-go/internal/services/ramp"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -313,6 +317,7 @@ func doPaycrestBuy(t *testing.T, h *PaycrestHandler, user *models.User) *httptes
 	return doPaycrest(t, h.Buy, "/api/paycrest/buy", user, map[string]any{
 		"amount": "800", "currency": "NGN", "chain": "base", "token": "USDC",
 		"refundBankCode": "044", "refundAccount": "0123456789",
+		"buyerId": map[string]any{"type": "bvn", "number": "22212345678", "birthDate": "1990-04-12"},
 	})
 }
 
@@ -411,6 +416,36 @@ func TestPaycrestError_KYCRefusalIs403WithTheCode(t *testing.T) {
 		}
 		if code := decodeITResponse(t, w)["code"]; code != want {
 			t.Fatalf("%v: code = %v, want %s (body=%s)", err, code, want, w.Body.String())
+		}
+	}
+}
+
+// The buyer-ID refusals carry the codes the app routes on: ask for the ID,
+// or reopen it for editing with the reason shown.
+func TestPaycrestError_BuyerIDRefusalsCarryTheirCodes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_, invalid := services.BuyerID{Type: "bvn", Number: "1", BirthDate: "1990-01-01"}.Normalized(time.Now())
+	for _, tc := range []struct {
+		err  error
+		code string
+		msg  string
+	}{
+		{services.ErrBuyerIDRequired, services.BuyerIDRequiredCode, "Add your BVN or NIN"},
+		{invalid, services.BuyerIDInvalidCode, "Your BVN is 11 digits."},
+		{fmt.Errorf("%w: %w", services.ErrBuyerIDRejected, errors.New("paycrest 400")), services.BuyerIDRejectedCode, "weren't accepted"},
+		{services.ErrRefundAccountNotBuyers, services.RefundNotBuyersCode, "in your own name"},
+		// Wrapped by the ramp router's outcome class, as it reaches rampError.
+		{ramp.WrapClass(ramp.ErrRefusedForUser, services.ErrBuyerIDRequired), services.BuyerIDRequiredCode, "Add your BVN or NIN"},
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		rampError(c, tc.err)
+		body := decodeITResponse(t, w)
+		if w.Code != http.StatusBadRequest || body["code"] != tc.code {
+			t.Fatalf("%v: HTTP %d code %v, want 400 %s", tc.err, w.Code, body["code"], tc.code)
+		}
+		if msg, _ := body["message"].(string); !strings.Contains(msg, tc.msg) {
+			t.Fatalf("%v: message %q, want it to contain %q", tc.err, msg, tc.msg)
 		}
 	}
 }

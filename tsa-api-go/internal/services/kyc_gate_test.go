@@ -459,6 +459,7 @@ func TestActivateFiatVA_CentralRetirementOutranksTheGate(t *testing.T) {
 
 func paycrestGateBuyRequest(userID uuid.UUID) PaycrestBuyRequest {
 	return PaycrestBuyRequest{
+		BuyerID:           testBuyerID(),
 		UserID:            userID,
 		WalletAddress:     "0xabc",
 		FiatCode:          "NGN",

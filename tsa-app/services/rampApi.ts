@@ -9,6 +9,7 @@
 // plain-text 404, so no JSON body) is retried once on /api/paycrest/*, minus
 // the ramp-only fields. A JSON 404 ("Order not found") is a real answer and
 // is never retried. Remove the fallback one release after the API ships.
+import type { BuyerId } from './buyerId';
 import { createApiRequest } from '@/services/apiRequest';
 import {
   PaycrestError,
@@ -218,6 +219,8 @@ export interface CreateRampBuyInput {
   /** Opened from the pinned TSA Connect card: the order is the pool's or
    *  none, never another provider's (review I-3). Absent on every other buy. */
   pool?: true;
+  /** The buyer's BVN/NIN and birth date, for a Paycrest-filled buy. */
+  buyerId?: BuyerId;
 }
 
 export function createRampBuy(input: CreateRampBuyInput): Promise<RampOrder> {

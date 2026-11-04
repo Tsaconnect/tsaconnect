@@ -14,6 +14,7 @@
 //      hardcoded list: ask for a quote at the amount the user actually typed
 //      and show only what comes back.
 
+import type { BuyerId } from './buyerId';
 import { ethers } from 'ethers';
 import { createApiRequest } from '@/services/apiRequest';
 import { getChain, type ChainKey } from '@/constants/chains';
@@ -318,6 +319,9 @@ export interface CreateBuyInput {
    *  (409) if the route's fee has risen past it since, rather than opening
    *  it at a rate she never saw. */
   quotedMarkupBps?: number;
+  /** The buyer's BVN/NIN and birth date (kept on this phone, see
+   *  services/buyerId.ts). Paycrest refuses a purchase without it. */
+  buyerId?: BuyerId;
 }
 
 /** Opens an onramp. The returned order carries the provider account to pay. */

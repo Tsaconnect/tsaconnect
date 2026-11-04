@@ -97,6 +97,16 @@ import { IT_AGREEMENT_REQUIRED } from '@/services/itApi';
 import { FeeLines, fiatText } from '@/components/ramp/FeeLines';
 import { formatTokenAmount } from '@/services/p2p';
 import { promptKycRefusal } from '@/utils/kycRefusal';
+import BuyerIdSheet from '@/components/paycrest/BuyerIdSheet';
+import { useAuth } from '@/AuthContext/AuthContext';
+import {
+  BUYER_ID_INVALID,
+  BUYER_ID_REJECTED,
+  BUYER_ID_REQUIRED,
+  readBuyerId,
+  saveBuyerId,
+  type BuyerId,
+} from '@/services/buyerId';
 // The destination token AND chain picker — reused verbatim from the swap
 // flow rather than built again here. Its callback is already
 // `(token: LiFiToken, chainId: number)`, exactly the shape a "what do you
@@ -315,6 +325,12 @@ export default function PaycrestBuyScreen() {
 
   const [order, setOrder] = useState<PaycrestOrder | null>(null);
   const [creating, setCreating] = useState(false);
+  // The signed-in account: a saved BVN/NIN is only ever this account's.
+  const { currentUser } = useAuth();
+  const account: string = currentUser?.id ?? '';
+  // Open while Paycrest's BVN/NIN is being asked for (none saved on this
+  // phone, or the saved one was refused).
+  const [buyerIdPrompt, setBuyerIdPrompt] = useState<{ initial: BuyerId | null; notice?: string } | null>(null);
 
   // Guards a late quote response from overwriting a newer one — the user types
   // faster than the network answers, and a stale route list would let them
@@ -484,10 +500,16 @@ export default function PaycrestBuyScreen() {
   const { label: countdown, expired, secs } = useCountdown(order?.validUntil);
   const expiringSoon = !expired && secs > 0 && secs <= EXPIRY_WARNING_SECONDS;
 
-  const onConfirm = useCallback(async () => {
+  // withBuyerId: send the BVN/NIN saved on this phone. Only after the server
+  // asked for it (buyer_id_required), so it never travels with a purchase
+  // another provider fills.
+  // entered: the ID she just typed, sent even if it could not be saved.
+  const openBuy = useCallback(async (withBuyerId: boolean, entered?: BuyerId) => {
     if (!venue || !address || !refundBank || !want.chain || !want.address) return;
     setCreating(true);
     try {
+      const saved = entered ?? (withBuyerId ? await readBuyerId(address, account) : null);
+      const buyerId = saved ? { buyerId: saved } : {};
       // A direct venue, or a converted one the router priced (it carries a
       // handle), goes through the ramp router, held to the rate she saw.
       // Paycrest's own converted venue (no handle) keeps its route — except
@@ -517,6 +539,7 @@ export default function PaycrestBuyScreen() {
           refundBankCode: refundBank.code,
           refundAccount,
           currency: currencyCode,
+          ...buyerId,
         })
         : await createRampBuy({
             amount: amount.trim(),
@@ -526,6 +549,7 @@ export default function PaycrestBuyScreen() {
             refundBankCode: refundBank.code,
             refundAccount,
             currency: currencyCode,
+            ...buyerId,
             // Held to the all-in rate she was shown (spec §14); try the
             // provider she was shown first — the router falls back.
             quotedRate: quotedRateOf(venue as RampVenue),
@@ -595,6 +619,20 @@ export default function PaycrestBuyScreen() {
         router.replace('/wallet/it' as never);
         return;
       }
+      // Paycrest needs her BVN/NIN: send the one saved on this phone, or ask
+      // once; let her fix one the provider refused. Saving retries.
+      if (e instanceof PaycrestError && e.code === BUYER_ID_REQUIRED) {
+        if (!withBuyerId && (await readBuyerId(address, account))) {
+          await openBuy(true);
+          return;
+        }
+        setBuyerIdPrompt({ initial: null });
+        return;
+      }
+      if (e instanceof PaycrestError && (e.code === BUYER_ID_INVALID || e.code === BUYER_ID_REJECTED)) {
+        setBuyerIdPrompt({ initial: await readBuyerId(address, account), notice: e.message });
+        return;
+      }
       // Not verified (or verified with no legal name): offer the next step
       // instead of a dead-end "could not start" alert.
       if (e instanceof PaycrestError && promptKycRefusal(e.code, e.message)) return;
@@ -605,7 +643,8 @@ export default function PaycrestBuyScreen() {
     } finally {
       setCreating(false);
     }
-  }, [venue, address, amount, refundBank, refundAccount, currencyCode, want, poolBuy.pool]);
+  }, [venue, address, amount, refundBank, refundAccount, currencyCode, want, poolBuy.pool, account]);
+  const onConfirm = useCallback(() => openBuy(false), [openBuy]);
 
   // The explicit alternative offered when nothing can fill the exact pair the
   // user asked for, even with a conversion — never auto-selected, only
@@ -1065,6 +1104,20 @@ export default function PaycrestBuyScreen() {
           setRefundOpen(false);
         }}
         emptyText="No banks available."
+      />
+      <BuyerIdSheet
+        visible={!!buyerIdPrompt}
+        initial={buyerIdPrompt?.initial}
+        notice={buyerIdPrompt?.notice}
+        onClose={() => setBuyerIdPrompt(null)}
+        onSubmit={(id) => {
+          if (!address) return;
+          setBuyerIdPrompt(null);
+          // Saved for next time when it can be; this purchase goes ahead either way.
+          saveBuyerId(address, account, id)
+            .catch(() => {})
+            .then(() => openBuy(true, id));
+        }}
       />
     </SafeAreaView>
   );

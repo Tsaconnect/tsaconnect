@@ -103,6 +103,7 @@ func TestPaycrestOrderService_NilRegistryIsNoGate(t *testing.T) {
 		}
 	}()
 	_, _ = svc.CreateBuy(context.Background(), PaycrestBuyRequest{
+		BuyerID:       testBuyerID(),
 		UserID:        buyer,
 		WalletAddress: "0xabc",
 		FiatCode:      "KES",
@@ -132,6 +133,7 @@ func TestPaycrestOrderService_CreateBuy_RefusesWhenNotPaycrest(t *testing.T) {
 	}
 
 	_, err := svc.CreateBuy(context.Background(), PaycrestBuyRequest{
+		BuyerID:           testBuyerID(),
 		UserID:            uuid.New(),
 		WalletAddress:     "0xabc",
 		FiatCode:          "GHS",
@@ -186,6 +188,7 @@ func TestPaycrestOrderService_CreateBuy_AllowsWhenPaycrest(t *testing.T) {
 		}
 	}()
 	_, _ = svc.CreateBuy(context.Background(), PaycrestBuyRequest{
+		BuyerID:           testBuyerID(),
 		UserID:            buyer,
 		WalletAddress:     "0xabc",
 		FiatCode:          "NGN",

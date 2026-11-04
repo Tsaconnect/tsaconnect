@@ -176,7 +176,8 @@ func (h *RampHandler) Buy(c *gin.Context) {
 			Token: body.Token, ChainKey: body.Chain, PoolOnly: body.Pool},
 		Handle: body.Handle, QuotedRate: body.QuotedRate,
 		Input: ramp.OrderInput{UserID: user.ID, WalletAddress: wallet,
-			RefundBankCode: body.RefundBankCode, RefundAccount: body.RefundAccount, RefundAccountName: body.RefundAccountName},
+			RefundBankCode: body.RefundBankCode, RefundAccount: body.RefundAccount, RefundAccountName: body.RefundAccountName,
+			BuyerID: body.BuyerID.toService()},
 	})
 	if err != nil {
 		rampError(c, err)
@@ -206,7 +207,8 @@ func (h *RampHandler) buyConverted(c *gin.Context, user *models.User, body rampB
 				Destination: strings.TrimSpace(body.DestinationAddress), Recipient: wallet}},
 		Handle: body.Handle, QuotedRate: body.QuotedRate,
 		Input: ramp.OrderInput{UserID: user.ID, WalletAddress: wallet,
-			RefundBankCode: body.RefundBankCode, RefundAccount: body.RefundAccount, RefundAccountName: body.RefundAccountName},
+			RefundBankCode: body.RefundBankCode, RefundAccount: body.RefundAccount, RefundAccountName: body.RefundAccountName,
+			BuyerID: body.BuyerID.toService()},
 	})
 	if err != nil {
 		rampError(c, err)

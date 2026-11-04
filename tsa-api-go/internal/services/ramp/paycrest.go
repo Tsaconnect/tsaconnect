@@ -59,8 +59,8 @@ func NewPaycrestProvider(orders *services.PaycrestOrderService, quotes *services
 
 func (p *PaycrestProvider) Name() string { return ProviderPaycrest }
 
-// MaxLegs: both sides of every currency the registry routes to Paycrest, less
-// buys while they are switched off. Nil without a registry (nothing to say).
+// MaxLegs: both sides of every currency the registry routes to Paycrest. Nil
+// without a registry (nothing to say).
 func (p *PaycrestProvider) MaxLegs() map[string]services.RampLegs {
 	if p.reg == nil {
 		return nil
@@ -69,7 +69,7 @@ func (p *PaycrestProvider) MaxLegs() map[string]services.RampLegs {
 	for _, cur := range p.reg.All() {
 		code := strings.ToUpper(cur.Code)
 		if p.reg.RampProvider(code) == services.RampProviderPaycrest {
-			out[code] = services.RampLegs{Buy: !services.PaycrestBuysOff, Sell: true}
+			out[code] = services.RampLegs{Buy: true, Sell: true}
 		}
 	}
 	return out
@@ -83,9 +83,6 @@ func (p *PaycrestProvider) RampLegs(ctx context.Context) (map[string]services.Ra
 	out := make(map[string]services.RampLegs, len(legs))
 	for fiat, l := range legs {
 		if p.reg.RampProvider(strings.ToUpper(fiat)) == services.RampProviderPaycrest {
-			if services.PaycrestBuysOff {
-				l.Buy = false // see services.PaycrestBuysOff
-			}
 			out[fiat] = l
 		}
 	}
@@ -93,11 +90,6 @@ func (p *PaycrestProvider) RampLegs(ctx context.Context) (map[string]services.Ra
 }
 
 func (p *PaycrestProvider) Quote(ctx context.Context, r Request) (*ProviderQuote, error) {
-	// Never quote a buy we will not open (services.PaycrestBuysOff): the router
-	// would pick Paycrest's rate, fail the open, and only then fail over.
-	if r.Side == Buy && services.PaycrestBuysOff {
-		return nil, fmt.Errorf("%w: paycrest buys are off", ErrLegClosed)
-	}
 	if err := p.orders.RequirePaycrestEnabled(r.FiatCode); err != nil {
 		return nil, fmt.Errorf("paycrest disabled for %q: %w", r.FiatCode, err)
 	}
@@ -153,6 +145,7 @@ func (p *PaycrestProvider) Open(ctx context.Context, k VenueKey, r Request, in O
 			// A direct buy: what she gets is exactly what Paycrest fills.
 			RequestedChain: k.ChainKey, RequestedToken: k.Token,
 			RefundBankCode: in.RefundBankCode, RefundAccount: in.RefundAccount, RefundAccountName: in.RefundAccountName,
+			BuyerID: in.BuyerID,
 			MaxRate: in.LimitRate, PriceGuard: in.Guard,
 		})
 	}
@@ -179,6 +172,11 @@ func classifyOpenErr(err error) error {
 		errors.Is(err, services.ErrPaycrestPayOrderOpen),
 		errors.Is(err, services.ErrBuyNeedsWallet),
 		errors.Is(err, services.ErrBuyNeedsRefundAccount),
+		errors.Is(err, services.ErrBuyerIDRequired),
+		errors.Is(err, services.ErrBuyerIDInvalid),
+		errors.Is(err, services.ErrBuyerIDRejected),
+		errors.Is(err, services.ErrRefundAccountNotBuyers),
+		errors.Is(err, services.ErrKYCLegalNameMissing),
 		errors.Is(err, services.ErrSellNeedsWallet),
 		errors.Is(err, services.ErrSellNeedsPayoutAccount),
 		errors.Is(err, services.ErrPaycrestAccountShape):

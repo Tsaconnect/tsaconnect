@@ -468,6 +468,10 @@ type PaycrestBuyRequest struct {
 	// ignored on every EVM destination. A refund still goes to WalletAddress:
 	// this names where the ASSET lands, never where money comes back to.
 	DestinationAddress string
+	// BuyerID is the buyer's BVN/NIN and birth date, sent to Paycrest as
+	// source.kyc and never stored. Required: Paycrest refuses an on-ramp
+	// without it.
+	BuyerID *BuyerID
 	// QuotedMarkupBps is the route cost B′ (the venue's markupBps) of the
 	// converted quote she accepted. The order refuses a cost risen more than
 	// quotedFeeToleranceBps past it; zero (an older app) skips the check.
@@ -592,19 +596,9 @@ func requestedAssetLabel(req PaycrestBuyRequest) string {
 // testing, so a venue chosen even a minute ago may no longer be fillable at
 // this size. Binding the order to a price we just confirmed is the only way to
 // avoid showing a rate the order will not carry.
-// PaycrestBuysOff: Paycrest on-ramp orders now require the customer's KYC
-// (full name, date of birth, BVN/NIN) in source.kyc, and the owner decided on
-// 2026-10-16 not to share users' identity data — BVN above all — with a third
-// party. Buys therefore never go to Paycrest; sells are unaffected. A var only
-// so the buy path's own tests can still exercise the code kept for later.
-var PaycrestBuysOff = true
-
 func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyRequest) (*models.PaycrestOrderRecord, error) {
 	if s == nil {
 		return nil, ErrPaycrestDisabled
-	}
-	if PaycrestBuysOff {
-		return nil, ErrPaycrestLegClosed
 	}
 	if strings.TrimSpace(req.WalletAddress) == "" {
 		return nil, ErrBuyNeedsWallet
@@ -636,6 +630,15 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		}
 		return nil, err
 	}
+	// Paycrest opens no on-ramp without the payer's identity (source.kyc).
+	// Checked before any provider call, so the app can ask for it and retry.
+	if req.BuyerID == nil {
+		return nil, ErrBuyerIDRequired
+	}
+	buyerID, err := req.BuyerID.Normalized(time.Now())
+	if err != nil {
+		return nil, err
+	}
 	// Destination first, then price. Resolving the refund account is cheap and
 	// cached, while VenueFor spends the slow, concurrency-throttled /v2/rates
 	// call — no reason to spend it on a request a malformed destination is
@@ -646,6 +649,10 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		return nil, err
 	}
 	if err := validatePayoutIdentifier(refundKind, fiat, req.RefundAccount); err != nil {
+		return nil, err
+	}
+	refundName, kycName, err := s.buyerNames(ctx, req, refundInst)
+	if err != nil {
 		return nil, err
 	}
 
@@ -737,13 +744,19 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		RefundAccount: PaycrestBankAccount{
 			Institution:       refundInst,
 			AccountIdentifier: req.RefundAccount,
-			AccountName:       req.RefundAccountName,
+			AccountName:       refundName,
 		},
 		Reference:        ref,
 		SenderFeePercent: feeForOrder,
 		SenderFeeAddress: s.senderFeeAddress,
+		KYC:              &PaycrestPersonKYC{FullName: kycName, ID: buyerID},
 	})
 	if err != nil {
+		err = redactBuyerID(err, buyerID)
+		if paycrestKYCRefusal(err) {
+			// A 400: nothing was opened. Hers to fix, so never failed over.
+			return nil, fmt.Errorf("%w: %w", ErrBuyerIDRejected, err)
+		}
 		return nil, markCreateErr(err)
 	}
 
@@ -773,7 +786,7 @@ func (s *PaycrestOrderService) CreateBuy(ctx context.Context, req PaycrestBuyReq
 		PayoutBankCode:    req.RefundBankCode,
 		PayoutInstitution: refundInst,
 		PayoutAccount:     req.RefundAccount,
-		PayoutAccountName: req.RefundAccountName,
+		PayoutAccountName: refundName,
 	}
 	if converting {
 		row.RouteKind = models.RouteKindConverted
@@ -1635,4 +1648,53 @@ func (s *PaycrestOrderService) HandleWebhook(ctx context.Context, ev *PaycrestWe
 
 	_, err = s.Sync(ctx, &row)
 	return err
+}
+
+// paycrestAccountVerifier is the optional name lookup on the Paycrest client;
+// a test fake without it falls back to the names it was given.
+type paycrestAccountVerifier interface {
+	VerifyAccount(ctx context.Context, institution, accountIdentifier string) (string, error)
+}
+
+// buyerNames returns the refund account's name and the name the buy's KYC is
+// filed under. The KYC is always the verified user's: Paycrest refuses an
+// on-ramp whose fullName differs from the bank's name on the refund account,
+// so a refund account in someone else's name would otherwise file the order
+// under that person's identity. When Paycrest resolves the bank's name it must
+// match her verified legal name (ErrRefundAccountNotBuyers otherwise), and the
+// bank's spelling is then used for both, so Paycrest's own comparison agrees.
+// With no name from Paycrest the verified legal name is the KYC name.
+func (s *PaycrestOrderService) buyerNames(ctx context.Context, req PaycrestBuyRequest, refundInst string) (refundName, kycName string, err error) {
+	_, legal, err := verifiedIdentity(ctx, s.db, req.UserID)
+	if err != nil {
+		return "", "", err
+	}
+	if legal == "" {
+		return "", "", ErrKYCLegalNameMissing
+	}
+	if v, ok := s.pc.(paycrestAccountVerifier); ok {
+		bank, verr := v.VerifyAccount(ctx, refundInst, req.RefundAccount)
+		switch {
+		case verr != nil:
+			log.Printf("[paycrest] verify refund account user=%s: %v", req.UserID, verr)
+		case bank != "":
+			match := MatchAccountName(legal, bank)
+			if !match.IsMatch() {
+				return "", "", ErrRefundAccountNotBuyers
+			}
+			// Only an exact match (same names, any order) proves the bank's
+			// spelling names her. A partial one (a shared surname, a relative's
+			// account) keeps her verified name on the KYC and lets Paycrest's
+			// own comparison decide.
+			if match == NameMatchExact {
+				return bank, bank, nil
+			}
+			return bank, legal, nil
+		}
+	}
+	refundName = strings.TrimSpace(req.RefundAccountName)
+	if refundName == "" {
+		refundName = legal
+	}
+	return refundName, legal, nil
 }

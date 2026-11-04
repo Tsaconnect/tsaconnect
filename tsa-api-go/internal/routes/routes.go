@@ -1103,6 +1103,9 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 		// create must not mint a second one. Follows the same wiring as the
 		// P2P group above.
 		itIdem := middleware.Idempotency(config.DB)
+		// The buy bodies carry the buyer's BVN/NIN and birth date: kept out of
+		// the stored request fingerprint, which is an unsalted hash.
+		buyIdem := middleware.Idempotency(config.DB, middleware.IdempotencyIgnoringFields("buyerId"))
 
 		// Paycrest ramp — dormant unless the API key is configured, so a missing
 		// credential leaves the routes unregistered rather than 500ing.
@@ -1141,7 +1144,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 				// provider quota for everyone. Ten a minute is far above any
 				// real user's pace. Mirrors the dispute and bill write limits.
 				paycrestWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
-				pc.POST("/buy", itIdem, paycrestWriteLimit, pch.Buy)
+				pc.POST("/buy", buyIdem, paycrestWriteLimit, pch.Buy)
 				pc.POST("/sell", itIdem, paycrestWriteLimit, pch.Sell)
 				pc.GET("/orders", pch.ListOrders)
 				pc.GET("/orders/:id", pch.GetOrder)
@@ -1197,7 +1200,7 @@ func SetupRoutes(router *gin.Engine, cfg *config.Config, h *handlers.Handlers, c
 					// to trigger (spec §15.8).
 					rg.GET("/converted-quote", middleware.RateLimiterBy(30, time.Minute, perUserRateKey), rh.ConvertedQuote)
 					rampWriteLimit := middleware.RateLimiterBy(10, time.Minute, perUserRateKey)
-					rg.POST("/buy", itIdem, rampWriteLimit, rh.Buy)
+					rg.POST("/buy", buyIdem, rampWriteLimit, rh.Buy)
 					rg.POST("/sell", itIdem, rampWriteLimit, rh.Sell)
 					rg.GET("/orders", rh.ListOrders)
 					rg.GET("/orders/:id", rh.GetOrder)

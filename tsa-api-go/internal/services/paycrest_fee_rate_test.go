@@ -243,6 +243,7 @@ func TestPaycrestOrderService_CreateBuy_StoresTheFeeInclusiveRate(t *testing.T) 
 	svc := newFeeTestService(t, "0.5", pc, "buy", "1390.64")
 
 	row, err := svc.CreateBuy(context.Background(), PaycrestBuyRequest{
+		BuyerID:           testBuyerID(),
 		UserID:            seedVerifiedUser(t, svc.db),
 		WalletAddress:     "0xabc",
 		FiatCode:          "NGN",

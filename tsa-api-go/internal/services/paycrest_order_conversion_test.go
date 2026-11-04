@@ -262,7 +262,8 @@ const orderTestUserWallet = "0x00000000000000000000000000000000000a11ce"
 // fields, so each test only has to state what it is actually varying.
 func (r *orderConversionRig) buyRequest(userID uuid.UUID, chainKey, token, requestedChain, requestedToken string) PaycrestBuyRequest {
 	return PaycrestBuyRequest{
-		UserID: userID, WalletAddress: orderTestUserWallet, FiatCode: "NGN", FiatAmount: "150000",
+		BuyerID: testBuyerID(),
+		UserID:  userID, WalletAddress: orderTestUserWallet, FiatCode: "NGN", FiatAmount: "150000",
 		ChainKey: chainKey, Token: token,
 		RequestedChain: requestedChain, RequestedToken: requestedToken,
 		RefundBankCode: "044", RefundAccount: "0123456789", RefundAccountName: "Test User",

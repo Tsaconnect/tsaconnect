@@ -498,6 +498,21 @@ Seller bank payouts (`services/seller_payout_*.go`, `seller_escrow_calls.go`, wo
 - The treasury is built by `buildRampTreasury` independent of `RAMP_CONVERSION_BUY`; payout gas is reserved on its lanes and
   payout exposure counts toward the per-chain cap.
 
+Paycrest buys need the buyer's identity (`services/paycrest_buyer_id.go`, 2026-11-04):
+- Paycrest's v2 on-ramp refuses an order without `source.kyc` (full name, date of birth 18+, an 11-digit BVN or NIN).
+  The app asks once, keeps it ONLY in the phone's secure store per wallet (`tsa-app/services/buyerId.ts`), and sends
+  `buyerId {type, number, birthDate}` on every buy (`/api/ramp/buy`, `/api/paycrest/buy`). The server passes it to
+  Paycrest and **never stores or logs it**: `BuyerID`/`PaycrestPersonKYC` print as `[redacted]`, Paycrest error text has
+  9+-digit runs and this buyer's number/DOB blanked, the buy routes' idempotency fingerprint ignores `buyerId`, and stored
+  Paycrest webhooks drop any `kyc` object (`ScrubPaycrestKYC`). Keep it that way — no column, no audit row, no log line.
+  The app sends it only on a retry after `buyer_id_required`, and binds the saved copy to the account that entered it.
+- The order is always filed under the Didit-verified user: the bank's name on the refund account (`POST /v2/verify-account`,
+  cached 30 min) must match her verified legal name (`MatchAccountName`), else 400 `refund_account_not_yours`; when it
+  matches, the bank's spelling is the KYC `fullName` so Paycrest's own comparison agrees. No name from Paycrest: the
+  verified legal name.
+- Codes: `buyer_id_required` (app opens the form), `buyer_id_invalid` / `buyer_id_rejected` (form reopened with the reason),
+  `refund_account_not_yours`. All are the buyer's to fix, so the router never fails over on them.
+
 Didit KYC (dormant if unset — `/api/kyc/session` returns 503):
 - `DIDIT_API_KEY` - Application API key from https://business.didit.me
 - `DIDIT_WORKFLOW_ID` - Published KYC workflow UUID

@@ -13,6 +13,7 @@ import { MIN_SWAP_RESERVE_WEI, swapGasReserve } from './gasReserve';
 import { forgetSolanaDerivation } from './chains/solanaWallet';
 import { forgetNonEvmAddresses } from './chains/nonEvmAddresses';
 import { forgetWalletSnapshots } from './walletSnapshot';
+import { forgetBuyerId } from './buyerId';
 
 const WALLET_LIST_KEY = 'tsa-wallet-list';
 const ACTIVE_WALLET_KEY = 'tsa-active-wallet';
@@ -110,6 +111,8 @@ export async function removeWallet(address: string): Promise<void> {
   await forgetSolanaDerivation(address);
   await forgetNonEvmAddresses(address);
   await forgetWalletSnapshots(address);
+  // The BVN/NIN kept for this wallet's purchases leaves with it.
+  await forgetBuyerId(address);
   let list = await getWalletList();
   list = list.filter(w => w.address !== address);
   await AsyncStorage.setItem(WALLET_LIST_KEY, JSON.stringify(list));

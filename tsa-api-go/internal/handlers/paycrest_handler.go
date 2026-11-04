@@ -64,7 +64,21 @@ func (h *PaycrestHandler) Enabled() bool {
 // can act on is a 4xx with the sentinel's own wording — these strings are
 // written to be shown, not logged.
 func paycrestError(c *gin.Context, err error) {
+	var badID *services.BuyerIDInvalidError
 	switch {
+	case errors.Is(err, services.ErrBuyerIDRequired):
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"Add your BVN or NIN and date of birth to buy with a bank transfer.", services.BuyerIDRequiredCode)
+	case errors.As(err, &badID):
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest, badID.Reason, services.BuyerIDInvalidCode)
+	case errors.Is(err, services.ErrBuyerIDRejected):
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"Your BVN or NIN and date of birth weren't accepted. Check them, and that the refund account is in your own name.",
+			services.BuyerIDRejectedCode)
+	case errors.Is(err, services.ErrRefundAccountNotBuyers):
+		utils.ErrorResponseWithCode(c, http.StatusBadRequest,
+			"Use a refund account in your own name. Bank-transfer purchases are made in your name.",
+			services.RefundNotBuyersCode)
 	case errors.Is(err, services.ErrKYCVerificationRequired):
 		// Buy only (money in). The machine code is what the app routes on:
 		// verify now, or contact support for a verified user with no legal name.
@@ -294,6 +308,23 @@ type paycrestBuyBody struct {
 	RefundBankCode    string `json:"refundBankCode" binding:"required"`
 	RefundAccount     string `json:"refundAccount" binding:"required"`
 	RefundAccountName string `json:"refundAccountName"`
+	// BuyerID is the buyer's BVN/NIN and birth date, kept on her phone and
+	// sent with each buy. Paycrest requires it; nothing here stores or logs it.
+	BuyerID *buyerIDBody `json:"buyerId"`
+}
+
+// buyerIDBody is the wire shape of services.BuyerID.
+type buyerIDBody struct {
+	Type      string `json:"type"`
+	Number    string `json:"number"`
+	BirthDate string `json:"birthDate"`
+}
+
+func (b *buyerIDBody) toService() *services.BuyerID {
+	if b == nil {
+		return nil
+	}
+	return &services.BuyerID{Type: b.Type, Number: b.Number, BirthDate: b.BirthDate}
 }
 
 // POST /api/paycrest/buy — opens an onramp and returns the provider's bank
@@ -343,6 +374,7 @@ func (h *PaycrestHandler) Buy(c *gin.Context) {
 		RefundBankCode:        body.RefundBankCode,
 		RefundAccount:         body.RefundAccount,
 		RefundAccountName:     body.RefundAccountName,
+		BuyerID:               body.BuyerID.toService(),
 	})
 	if err != nil {
 		paycrestError(c, err)
