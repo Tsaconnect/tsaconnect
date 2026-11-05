@@ -1,6 +1,7 @@
 // hooks/useSubcategoryProducts.ts
 import { useState, useEffect, useCallback } from 'react';
 import api, { Product } from '@/components/services/api';
+import { serverSort, sortProducts, type NearPlace, type ProductSort } from '@/services/productSort';
 
 export interface SellerData {
     sellerId: string;
@@ -29,7 +30,9 @@ interface UseSubcategoryProductsProps {
     location?: string;
     minPrice?: number;
     maxPrice?: number;
-    sort?: 'recent' | 'popular' | 'price_low' | 'price_high' | 'rating';
+    sort?: ProductSort;
+    /** The user's place, for sort 'nearest'. */
+    near?: NearPlace | null;
     /** Listing type of the section being browsed. Passed to the API so a
      *  "Both" category never leaks services into the product marketplace
      *  (or vice-versa). */
@@ -46,6 +49,7 @@ export function useSubcategoryProducts({
     minPrice,
     maxPrice,
     sort = 'recent',
+    near,
     type,
 }: UseSubcategoryProductsProps) {
     const [products, setProducts] = useState<Product[]>([]);
@@ -121,12 +125,10 @@ export function useSubcategoryProducts({
                     type,
                     minPrice,
                     maxPrice,
-                    sortBy: sort === 'recent' ? 'createdAt' :
-                        sort === 'popular' ? 'sales' :
-                            sort === 'price_low' ? 'price' :
-                                sort === 'price_high' ? 'price' :
-                                    sort === 'rating' ? 'rating.average' : 'createdAt',
-                    sortOrder: sort === 'price_high' ? 'desc' : 'asc',
+                    ...serverSort(sort),
+                    ...(sort === 'nearest' && near
+                        ? { nearCountry: near.country, nearState: near.state, nearCity: near.city }
+                        : {}),
                     status: 'active',
                 });
             }
@@ -142,13 +144,15 @@ export function useSubcategoryProducts({
                             allProducts.push(...items);
                         });
                     }
-                    setProducts(allProducts);
+                    // Flattening the per-subcategory groups loses the API's order: sort here as the API would.
+                    const sorted = sortProducts(allProducts, sort, near);
+                    setProducts(sorted);
                     setCategoryInfo(data.mainCategory);
                     setTotalProducts(allProducts.length);
                     setHasMore(false);
 
                     // Group products by seller
-                    const groupedSellers = groupProductsBySeller(allProducts);
+                    const groupedSellers = groupProductsBySeller(sorted);
                     setSellers(groupedSellers);
                 } else {
                     const data = response.data as any;
@@ -175,7 +179,7 @@ export function useSubcategoryProducts({
             setLoading(false);
             setRefreshing(false);
         }
-    }, [subcategoryId, categoryId, searchQuery, page, limit, location, minPrice, maxPrice, sort, type, groupProductsBySeller]);
+    }, [subcategoryId, categoryId, searchQuery, page, limit, location, minPrice, maxPrice, sort, near?.country, near?.state, near?.city, type, groupProductsBySeller]);
 
     useEffect(() => {
         fetchProducts();

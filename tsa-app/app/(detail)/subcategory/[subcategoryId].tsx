@@ -12,11 +12,21 @@ import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { SearchBar } from '@/components/common/SearchBar';
 import { useSubcategoryProducts } from '@/hooks/useSubcategoryProducts';
+import { useAuth } from '@/AuthContext/AuthContext';
+import {
+  PRODUCT_SORTS,
+  hasPlace,
+  locationKey,
+  productSortLabel,
+  type NearPlace,
+  type ProductSort,
+} from '@/services/productSort';
 import { SellerCard } from '@/components/marketplace/SellerCard';
 import { useTheme } from '@/theme';
 import {
   Card,
-  Chip,
+  PickerSheet,
+  SelectRow,
   Divider,
   EmptyState,
   ErrorState,
@@ -26,23 +36,16 @@ import {
   Text,
 } from '@/components/ui';
 
-const SORT_OPTIONS = [
-  'recent',
-  'popular',
-  'price_low',
-  'price_high',
-  'rating',
-] as const;
-
-type SortOption = typeof SORT_OPTIONS[number];
-
-const SORT_LABELS: Record<SortOption, string> = {
-  recent: 'Recent',
-  popular: 'Popular',
-  price_low: 'Price: Low to High',
-  price_high: 'Price: High to Low',
-  rating: 'Rating',
-};
+/** What "Nearest to me" will rank by, from the parts of the profile's place it has. */
+function nearestHint(near: NearPlace | null): string {
+  const has = (v?: string) => !!locationKey(v);
+  const parts = [has(near?.city) && 'city', has(near?.state) && 'state', has(near?.country) && 'country'].filter(
+    Boolean,
+  ) as string[];
+  if (!parts.length) return 'Needs your location in your profile';
+  const [first, ...rest] = parts;
+  return rest.length ? `Your ${first} first, then your ${rest.join(' and ')}` : `Your ${first} first`;
+}
 
 /* ---------------------------------- */
 /* Component */
@@ -67,7 +70,14 @@ export default function SubcategorySellersScreen() {
   const router = useRouter();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [sortOption, setSortOption] = useState<SortOption>('recent');
+  const [sortOption, setSortOption] = useState<ProductSort>('recent');
+  const [sortOpen, setSortOpen] = useState(false);
+  // "Nearest to me" ranks listings against the place on her profile.
+  const { currentUser } = useAuth();
+  const near: NearPlace | null = currentUser
+    ? { country: (currentUser as any).country, state: (currentUser as any).state, city: (currentUser as any).city }
+    : null;
+  const canSortNearest = hasPlace(near);
 
   const {
     sellers,
@@ -83,6 +93,7 @@ export default function SubcategorySellersScreen() {
     categoryId,
     searchQuery,
     sort: sortOption,
+    near,
     limit: 20,
     // Filter to the section being browsed so a "Both" category doesn't leak
     // services into the product list (or vice-versa).
@@ -189,22 +200,18 @@ export default function SubcategorySellersScreen() {
           debounceDelay={400}
         />
 
-        {/* Sort */}
-        <View style={{ gap: spacing.sm }}>
-          <Text variant="bodySm" weight="600">
-            Sort by:
+        {/* Sort: one row and a sheet, so the list can grow without taking the screen. */}
+        <SelectRow
+          label="Sort by"
+          value={productSortLabel(sortOption)}
+          leftIcon="swap"
+          onPress={() => setSortOpen(true)}
+        />
+        {sortOption === 'nearest' && !canSortNearest ? (
+          <Text variant="caption" color="textMuted">
+            Add your state and city in your profile to see listings near you first.
           </Text>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-            {SORT_OPTIONS.map((option) => (
-              <Chip
-                key={option}
-                label={SORT_LABELS[option]}
-                selected={sortOption === option}
-                onPress={() => setSortOption(option)}
-              />
-            ))}
-          </View>
-        </View>
+        ) : null}
 
         {/* Results */}
         {!loading && (
@@ -220,6 +227,7 @@ export default function SubcategorySellersScreen() {
       subcategoryName,
       searchQuery,
       sortOption,
+      canSortNearest,
       totalProducts,
       showingProducts,
       loading,
@@ -355,6 +363,24 @@ export default function SubcategorySellersScreen() {
         initialNumToRender={5}
         maxToRenderPerBatch={10}
         windowSize={10}
+      />
+      <PickerSheet
+        visible={sortOpen}
+        onClose={() => setSortOpen(false)}
+        title="Sort by"
+        items={PRODUCT_SORTS.map((o) => ({
+          id: o.id,
+          label: o.label,
+          ...(o.id === 'nearest'
+            ? { sublabel: nearestHint(near) }
+            : {}),
+        }))}
+        selectedId={sortOption}
+        searchable={false}
+        onSelect={(item) => {
+          setSortOption(item.id as ProductSort);
+          setSortOpen(false);
+        }}
       />
     </SafeAreaView>
   );

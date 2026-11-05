@@ -57,8 +57,8 @@ import type { IconName } from '@/components/ui';
 type TabKey = 'orders' | 'products' | 'contact' | 'ordering' | 'booking';
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: 'orders', label: 'Orders' },
   { key: 'products', label: 'Products' },
+  { key: 'orders', label: 'Orders' },
   { key: 'contact', label: 'Contact' },
   { key: 'ordering', label: 'Ordering' },
   { key: 'booking', label: 'Booking' },
@@ -273,7 +273,7 @@ interface RWMWidgetProps {
 export const RWMWidget: React.FC<RWMWidgetProps> = ({ isValuesHidden, refreshSignal }) => {
   const { colors, radius, spacing } = useTheme();
   const { formatPrice } = useCurrency();
-  const [active, setActive] = useState<TabKey>('orders');
+  const [active, setActive] = useState<TabKey>('products');
   const [tabs, setTabs] = useState<Record<TabKey, TabState>>(freshTabs);
   const mounted = useRef(true);
 

@@ -158,3 +158,31 @@ func TestBackfillListingLocations_FillsOnlyUnsetParseableRows(t *testing.T) {
 		t.Errorf("picked area rewritten: %+v", picked)
 	}
 }
+
+// Nearest first: same city (within the state), same state, same country, then
+// the rest. A same-named city in another state is not "same city".
+func TestGetProductsByCategory_SortsNearestFirst(t *testing.T) {
+	_, cat, user := setupListingValuesDB(t)
+	createListingAt(t, cat, user, "douala", url.Values{"location": {"Douala, Littoral, Cameroon"}})
+	createListingAt(t, cat, user, "kubwa", url.Values{"location": {"Kubwa extension, Federal Capital Territory, Nigeria"}})
+	createListingAt(t, cat, user, "enugu-east", url.Values{"location": {"Enugu East, Enugu State, Nigeria"}})
+	createListingAt(t, cat, user, "nsukka", url.Values{"country": {"Nigeria"}, "state": {"Enugu State"}, "city": {"Nsukka"}})
+	createListingAt(t, cat, user, "other-nsukka", url.Values{"country": {"Nigeria"}, "state": {"Kogi"}, "city": {"Nsukka"}})
+
+	inOrder := func(ps []models.Product) string {
+		out := make([]string, len(ps))
+		for i, p := range ps {
+			out[i] = p.Name
+		}
+		return strings.Join(out, ",")
+	}
+	code, products := listByCategory(t, cat, "sortBy=nearest&nearCountry=Nigeria&nearState=Enugu&nearCity=nsukka")
+	// Within a rank, newest first: kubwa (older) after other-nsukka (newer).
+	if want := "nsukka,enugu-east,other-nsukka,kubwa,douala"; code != http.StatusOK || inOrder(products) != want {
+		t.Fatalf("%d %q, want %q", code, inOrder(products), want)
+	}
+	// No place given: newest first.
+	if _, products := listByCategory(t, cat, "sortBy=nearest"); inOrder(products) != "other-nsukka,nsukka,enugu-east,kubwa,douala" {
+		t.Fatalf("no place: %q", inOrder(products))
+	}
+}

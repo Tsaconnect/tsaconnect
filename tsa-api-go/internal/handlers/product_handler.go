@@ -332,6 +332,10 @@ func productOrderClause(sortBy, sortOrder string) string {
 	if strings.EqualFold(strings.TrimSpace(sortOrder), "asc") {
 		direction = "ASC"
 	}
+	if column == productSortColumns["rating.average"] {
+		// Unrated listings have no average: last either way, never "top rated".
+		return column + " " + direction + " NULLS LAST"
+	}
 	return column + " " + direction
 }
 
@@ -1172,11 +1176,14 @@ func (h *Handlers) GetProductsByCategory(c *gin.Context) {
 	var total int64
 	query.Count(&total)
 
-	orderClause := productOrderClause(sortBy, sortOrder)
 	offset := (page - 1) * limit
+	var order interface{} = productOrderClause(sortBy, sortOrder)
+	if sortBy == sortNearest {
+		order = nearestFirst(c)
+	}
 
 	var products []models.Product
-	if err := query.Order(orderClause).Offset(offset).Limit(limit).Find(&products).Error; err != nil {
+	if err := query.Order(order).Offset(offset).Limit(limit).Find(&products).Error; err != nil {
 		utils.ErrorResponse(c, http.StatusInternalServerError, "Failed to fetch products by category")
 		return
 	}
@@ -1463,7 +1470,7 @@ func (h *Handlers) GetMarketplaceProducts(c *gin.Context) {
 		"popular":    "views DESC, sales DESC",
 		"price_low":  "price ASC",
 		"price_high": "price DESC",
-		"rating":     "rating->>'average' DESC",
+		"rating":     "rating->>'average' DESC NULLS LAST",
 	}
 
 	sortClause, ok := sortOptions[sortParam]

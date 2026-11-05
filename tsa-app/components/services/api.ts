@@ -1325,6 +1325,10 @@ class APIService {
     city?: string;
     /** A substring of the listing's area or location text. */
     area?: string;
+    /** With sortBy 'nearest': the caller's place, listings closest to it first. */
+    nearCountry?: string;
+    nearState?: string;
+    nearCity?: string;
   }): Promise<ApiResponse<{ products: Product[]; category: any; pagination: any; filters: any }>> {
     try {
       const queryParams = new URLSearchParams();

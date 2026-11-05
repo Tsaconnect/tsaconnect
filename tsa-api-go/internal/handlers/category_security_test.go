@@ -64,7 +64,7 @@ func TestProductOrderClause_AllowListsColumnAndDirection(t *testing.T) {
 	cases := []struct{ by, order, want string }{
 		{"createdAt", "asc", "created_at ASC"},
 		{"price", "ASC", "price ASC"},
-		{"rating.average", "desc", "rating->>'average' DESC"},
+		{"rating.average", "desc", "rating->>'average' DESC NULLS LAST"},
 		{"name", "", "name DESC"},
 		{"id; DROP TABLE users", "asc", "created_at ASC"},
 		{"price", "desc; DROP TABLE x", "price DESC"},

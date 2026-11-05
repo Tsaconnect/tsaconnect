@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/ojimcy/tsa-api-go/internal/models"
 	"github.com/ojimcy/tsa-api-go/internal/services"
@@ -47,4 +48,48 @@ func applyLocationFilter(c *gin.Context, query *gorm.DB) *gorm.DB {
 		query = query.Where(`(LOWER(area) LIKE ? ESCAPE '\' OR LOWER(location) LIKE ? ESCAPE '\')`, pattern, pattern)
 	}
 	return query
+}
+
+// sortNearest is the sortBy that orders listings by closeness to the caller.
+const sortNearest = "nearest"
+
+// nearestFirst orders listings by closeness to the place in ?nearCountry,
+// ?nearState and ?nearCity (the caller's own; matched on LocationKey): same
+// city, then same state, then same country, then the rest — newest first in
+// each (id breaks ties, so pages are stable). Given a state, a city counts only
+// within it, since city names repeat across states; a city with no state is
+// matched on its own. Given no place it is simply newest first.
+func nearestFirst(c *gin.Context) clause.OrderBy {
+	country := models.LocationKey(c.Query("nearCountry"))
+	state := models.LocationKey(c.Query("nearState"))
+	city := models.LocationKey(c.Query("nearCity"))
+
+	var when []string
+	var vars []interface{}
+	rank := 0
+	add := func(cond string, v ...interface{}) {
+		when = append(when, "WHEN "+cond+" THEN "+string(rune('0'+rank)))
+		vars = append(vars, v...)
+		rank++
+	}
+	switch {
+	case city != "" && state != "":
+		add("city_key = ? AND state_key = ?", city, state)
+	case city != "":
+		add("city_key = ?", city)
+	}
+	if state != "" {
+		add("state_key = ?", state)
+	}
+	if country != "" {
+		add("country_key = ?", country)
+	}
+	if len(when) == 0 {
+		return clause.OrderBy{Columns: []clause.OrderByColumn{
+			{Column: clause.Column{Name: "created_at"}, Desc: true},
+			{Column: clause.Column{Name: "id"}, Desc: true},
+		}}
+	}
+	sql := "CASE " + strings.Join(when, " ") + " ELSE " + string(rune('0'+rank)) + " END, created_at DESC, id DESC"
+	return clause.OrderBy{Expression: clause.Expr{SQL: sql, Vars: vars, WithoutParentheses: true}}
 }
